@@ -1,0 +1,187 @@
+# Logistaas Ads Intelligence System — Master Configuration
+# Edit this file to update thresholds, markets, and OCT values
+# No code changes needed — all modules read from here
+
+# ─────────────────────────────────────────────
+# GEOGRAPHIC TIER ASSIGNMENTS
+# ─────────────────────────────────────────────
+geo_tiers:
+  tier_1:
+    label: "High-Value / High-Cost"
+    strategy: "Max impression share on high-intent terms. High CPA tolerance."
+    bidding: "Manual CPC → tCPA once 30+ qualified conversions/month"
+    countries:
+      - UAE
+      - "Saudi Arabia"
+      - Singapore
+      - USA
+      - UK
+      - Germany
+      - Netherlands
+
+  tier_2:
+    label: "Growth / Volume"
+    strategy: "Balance volume with quality. Monitor CPQL closely."
+    bidding: "tCPA with strict qualified lead definition"
+    countries:
+      - Mexico
+      - Brazil
+      - Vietnam
+      - Thailand
+      - Malaysia
+      - Turkey
+      - Egypt
+      - India
+      - Pakistan
+      - Indonesia
+      - Philippines
+      - Morocco
+      - Kenya
+
+  tier_3:
+    label: "Discovery / Testing"
+    strategy: "Strict budget caps. Qualify before scaling. Manual CPC only."
+    bidding: "Manual CPC with tight negative keyword lists"
+    countries:
+      - Colombia
+      - Peru
+      - Chile
+      - Argentina
+      - Nigeria
+      - Ghana
+      - Tanzania
+      - "Sri Lanka"
+      - Bangladesh
+      - Jordan
+      - Lebanon
+      - Tunisia
+      - Algeria
+      - Azerbaijan
+      - Kazakhstan
+      - Ukraine
+      - Poland
+
+# ─────────────────────────────────────────────
+# CPQL TARGETS (Cost Per Qualified Lead)
+# ─────────────────────────────────────────────
+cpql_targets:
+  tier_1: 800    # USD — acceptable cost per qualified lead
+  tier_2: 400
+  tier_3: 200
+
+# ─────────────────────────────────────────────
+# OCT DEAL STAGE → CONVERSION VALUE MAPPING
+# HubSpot deal stage IDs → Google Ads conversion events
+# ─────────────────────────────────────────────
+oct_mapping:
+  - hubspot_stage_id: "qualifiedtobuy"
+    hubspot_stage_label: "Proposal / Implementation Plan"
+    google_conversion_action: "logistaas_proposal"
+    value_usd: 300
+    rationale: "Genuine buying intent confirmed"
+
+  - hubspot_stage_id: "334269159"
+    hubspot_stage_label: "In Trials"
+    google_conversion_action: "logistaas_trial"
+    value_usd: 1000
+    rationale: "Active product evaluation — high intent"
+
+  - hubspot_stage_id: "326093513"
+    hubspot_stage_label: "Pricing Acceptance"
+    google_conversion_action: "logistaas_pricing_accepted"
+    value_usd: 2500
+    rationale: "Budget confirmed — near close"
+
+  - hubspot_stage_id: "326093515"
+    hubspot_stage_label: "Invoice Agreement Sent"
+    google_conversion_action: "logistaas_invoice_sent"
+    value_usd: 4000
+    rationale: "Contract stage — very high confidence"
+
+  - hubspot_stage_id: "326093516"
+    hubspot_stage_label: "Deal Won / Payment Received"
+    google_conversion_action: "logistaas_closed_won"
+    value_usd: "actual_deal_amount"  # Uses real ACV from HubSpot deal
+    rationale: "Closed revenue — primary signal"
+
+# ─────────────────────────────────────────────
+# DOCTRINE THRESHOLDS
+# ─────────────────────────────────────────────
+doctrine_thresholds:
+  # Minimum conversions per month before HOLD exits
+  min_conversions_to_exit_hold: 15
+  # Minimum days before a campaign can be classified
+  min_campaign_age_days: 21
+  # Days with zero SQLs before CUT is triggered
+  zero_sql_days_for_cut: 60
+  # Spend spike alert threshold vs 7-day average
+  daily_spend_spike_pct: 30
+  # Max GCLID coverage gap before flagging
+  min_gclid_coverage_pct: 70
+  # Brand traffic % above which non-brand signal is considered poisoned
+  brand_traffic_poison_threshold_pct: 40
+  # Max budget increase per week when SCALING
+  max_weekly_budget_increase_pct: 20
+
+# ─────────────────────────────────────────────
+# BRAND KEYWORDS (separate from non-brand)
+# Add all Logistaas brand variants here
+# ─────────────────────────────────────────────
+brand_keywords:
+  - logistaas
+  - "logistass"        # common misspelling
+  - "logistaas tms"
+  - "logistaas software"
+  - "logistaas freight"
+
+# ─────────────────────────────────────────────
+# COMPETITOR GROUPS
+# ─────────────────────────────────────────────
+competitors:
+  target:  # Bid on these — forwarder-centric
+    - cargowise
+    - "cargo wise"
+    - magaya
+    - riege
+    - gofreight
+    - "go freight"
+    - logisys
+    - "descartes transport"
+    - "shipx"
+
+  exclude:  # Never bid on these — shipper-intent
+    - project44
+    - fourkites
+    - "four kites"
+    - "supply chain visibility"
+    - "shipper tms"
+    - "shippers tms"
+
+# ─────────────────────────────────────────────
+# CAMPAIGN STRUCTURE EXPECTATIONS
+# Used by signal_check.py to validate structure
+# ─────────────────────────────────────────────
+expected_campaign_types:
+  - "brand"
+  - "competitor_conquesting"
+  - "category_high_intent"
+  - "feature_specific"
+  - "compliance_markets"
+  - "emerging_markets"
+
+# ─────────────────────────────────────────────
+# REPORT DELIVERY
+# ─────────────────────────────────────────────
+reporting:
+  email:
+    enabled: true
+    recipients:
+      - "your-email@logistaas.com"  # UPDATE THIS
+  slack:
+    enabled: false
+    webhook_url: ""  # Set in environment variables
+  timezone: "GMT"
+  daily_run_hour: 6     # 6am GMT
+  weekly_run_day: "monday"
+  weekly_run_hour: 7    # 7am GMT Monday
+  monthly_run_day: 1    # 1st of month
