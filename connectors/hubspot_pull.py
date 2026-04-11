@@ -8,6 +8,7 @@ import logging
 import os
 import json
 import time
+import functools
 from datetime import datetime, timedelta
 import hubspot
 from hubspot.crm.contacts import ApiException
@@ -73,7 +74,6 @@ def get_client():
 
 def _retry_on_rate_limit(func):
     """Decorator: retry with exponential backoff on HubSpot 429 errors."""
-    import functools
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -90,7 +90,6 @@ def _retry_on_rate_limit(func):
                     time.sleep(wait)
                 else:
                     raise
-        return None  # should not reach here
     return wrapper
 
 

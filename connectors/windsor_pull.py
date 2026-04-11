@@ -255,9 +255,9 @@ if __name__ == "__main__":
 
     summary = get_account_summary(campaigns)
     logger.info("Account summary:")
-    logger.info("  Total spend: $%s", f"{summary['total_spend']:,.2f}")
+    logger.info("  Total spend: $%.2f", summary["total_spend"])
     logger.info("  Total conversions: %s", summary["total_conversions"])
-    logger.info("  Avg CPL: $%s", f"{summary['avg_cpl']:,.2f}")
+    logger.info("  Avg CPL: $%.2f", summary["avg_cpl"])
     logger.info("  Campaigns: %s", summary["campaign_count"])
 
     save_output(campaigns, search_terms, keywords, geos)

@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import yaml
+from connectors.hubspot_pull import DEAL_STAGE_MAP
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -105,7 +106,6 @@ def _build_contact_gclid_index(contacts: list) -> dict:
 
 def _build_deal_index_by_contact(deals: list) -> dict:
     """Build a lookup: contact_id → best deal info (most advanced stage)."""
-    from connectors.hubspot_pull import DEAL_STAGE_MAP
 
     # Stage progression order (higher index = further along)
     stage_order = [
@@ -246,8 +246,10 @@ def run_gclid_match() -> dict:
         coverage_pct,
     )
     if coverage_alert:
-        logger.warning("GCLID coverage BELOW threshold: %.1f%% < %d%%",
-                        coverage_pct, min_coverage_pct)
+        logger.warning(
+            "GCLID coverage BELOW threshold: %.1f%% < %d%%",
+            coverage_pct, min_coverage_pct,
+        )
 
     return {"matched": matched_records, "coverage": coverage_stats}
 
