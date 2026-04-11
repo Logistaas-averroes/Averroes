@@ -36,8 +36,9 @@ Google Ads is counting job seekers and wrong-industry companies as "conversions"
 - `requirements.txt` — all Python dependencies
 - `render.yaml` — Render.com deployment with 3 cron jobs
 - `.gitignore`
-- `connectors/hubspot_pull.py` — HubSpot connector (complete)
-- `connectors/windsor_pull.py` — Windsor.ai connector (complete)
+- `connectors/hubspot_pull.py` — HubSpot connector (✅ hardened — retry, 429 handling, logging)
+- `connectors/windsor_pull.py` — Windsor.ai connector (✅ hardened — retry, 429/401 handling, logging)
+- `connectors/gclid_match.py` — GCLID match engine (✅ built — PR-ADS-001)
 - `doctrine/advisor.py` — Claude API integration (complete)
 - `scheduler/daily.py` — daily pulse orchestrator (complete)
 
@@ -46,10 +47,10 @@ Google Ads is counting job seekers and wrong-industry companies as "conversions"
 ## WHAT NEEDS TO BE BUILT (in order)
 
 ### Phase 1 (complete first)
-- [ ] `connectors/gclid_match.py` — join Windsor clicks + HubSpot contacts via GCLID
+- [x] `connectors/gclid_match.py` — join Windsor clicks + HubSpot contacts via GCLID
 - [ ] `connectors/oct_uploader.py` — push HubSpot deal stage changes to Google Ads OCT
-- [ ] Test `connectors/hubspot_pull.py` with real API key
-- [ ] Test `connectors/windsor_pull.py` with real API key
+- [x] Harden `connectors/hubspot_pull.py` — retry logic, 429 handling, structured logging
+- [x] Harden `connectors/windsor_pull.py` — retry logic, 429/401 handling, structured logging
 
 ### Phase 2
 - [ ] `engine/signal_check.py` — brand vs non-brand split, Ads vs CRM delta
