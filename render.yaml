@@ -1,0 +1,82 @@
+# Render.com Deployment Configuration
+# Docs: https://render.com/docs/render-yaml-reference
+
+services:
+  # Main web service (FastAPI — on-demand triggers)
+  - type: web
+    name: logistaas-ads-intelligence
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: ANTHROPIC_API_KEY
+        sync: false   # Set in Render dashboard
+      - key: HUBSPOT_API_KEY
+        sync: false
+      - key: WINDSOR_API_KEY
+        sync: false
+      - key: WINDSOR_ACCOUNT_ID
+        sync: false
+      - key: GOOGLE_ADS_DEVELOPER_TOKEN
+        sync: false
+      - key: GOOGLE_ADS_CLIENT_ID
+        sync: false
+      - key: GOOGLE_ADS_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_ADS_REFRESH_TOKEN
+        sync: false
+      - key: GOOGLE_ADS_CUSTOMER_ID
+        sync: false
+      - key: REPORT_EMAIL
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+
+  # Daily pulse — 6am GMT every day
+  - type: cron
+    name: logistaas-daily-pulse
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    schedule: "0 6 * * *"
+    startCommand: python scheduler/daily.py
+    envVars:
+      - fromService:
+          name: logistaas-ads-intelligence
+          type: web
+          envVarKey: ANTHROPIC_API_KEY
+      - fromService:
+          name: logistaas-ads-intelligence
+          type: web
+          envVarKey: HUBSPOT_API_KEY
+      - fromService:
+          name: logistaas-ads-intelligence
+          type: web
+          envVarKey: WINDSOR_API_KEY
+
+  # Weekly report — 7am GMT every Monday
+  - type: cron
+    name: logistaas-weekly-report
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    schedule: "0 7 * * 1"
+    startCommand: python scheduler/weekly.py
+    envVars:
+      - fromService:
+          name: logistaas-ads-intelligence
+          type: web
+          envVarKey: ANTHROPIC_API_KEY
+
+  # Monthly strategy — 7am GMT on the 1st of every month
+  - type: cron
+    name: logistaas-monthly-strategy
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    schedule: "0 7 1 * *"
+    startCommand: python scheduler/monthly.py
+    envVars:
+      - fromService:
+          name: logistaas-ads-intelligence
+          type: web
+          envVarKey: ANTHROPIC_API_KEY

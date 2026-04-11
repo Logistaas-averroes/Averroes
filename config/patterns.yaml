@@ -1,0 +1,150 @@
+# Intent Mismatch Pattern Library
+# Used by ngram_analysis.py to classify search terms
+# Add new patterns here without touching code
+
+patterns:
+  job_seeker:
+    description: "People looking for employment, not software"
+    weight: 10  # High waste priority
+    terms:
+      - job
+      - jobs
+      - salary
+      - salaries
+      - career
+      - careers
+      - hiring
+      - vacancy
+      - vacancies
+      - recruitment
+      - recruiter
+      - "job description"
+      - "job opening"
+      - resume
+      - cv
+      - internship
+      - "work from home"
+      - employment
+      - "entry level"
+
+  student:
+    description: "Students and learners, not buyers"
+    weight: 9
+    terms:
+      - tutorial
+      - tutorials
+      - course
+      - courses
+      - certification
+      - certifications
+      - exam
+      - training
+      - learn
+      - learning
+      - beginner
+      - beginner's
+      - guide
+      - "how to use"
+      - university
+      - college
+      - student
+      - lecture
+      - textbook
+      - assignment
+
+  free_intent:
+    description: "Users seeking free or open-source alternatives"
+    weight: 10
+    terms:
+      - free
+      - "free trial"
+      - "free version"
+      - "open source"
+      - opensource
+      - crack
+      - cracked
+      - keygen
+      - torrent
+      - "free download"
+      - freeware
+      - gratis
+      - cheap
+      - cheapest
+      - budget
+      - "low cost"
+      - "no cost"
+      - community
+      - "community edition"
+
+  shipper_intent:
+    description: "Shippers and retailers — wrong persona entirely"
+    weight: 10
+    terms:
+      - shipper
+      - shippers
+      - retailer
+      - retailers
+      - manufacturer
+      - manufacturers
+      - "supply chain visibility"
+      - project44
+      - fourkites
+      - "four kites"
+      - e-commerce
+      - ecommerce
+      - shopify
+      - amazon
+      - walmart
+      - "last mile"
+      - consumer
+
+  informational:
+    description: "Research/informational queries with no purchase intent"
+    weight: 6
+    terms:
+      - what
+      - "what is"
+      - definition
+      - meaning
+      - example
+      - examples
+      - overview
+      - introduction
+      - wiki
+      - wikipedia
+      - history
+      - comparison
+      - compare
+      - "vs"
+      - versus
+      - review
+      - reviews
+      - rating
+      - ratings
+
+  technical_support:
+    description: "Existing users seeking support — not new buyers"
+    weight: 5
+    terms:
+      - support
+      - error
+      - bug
+      - issue
+      - problem
+      - fix
+      - "not working"
+      - crash
+      - login
+      - password
+      - reset
+      - help
+      - "how to"
+      - troubleshoot
+      - documentation
+      - docs
+      - api
+
+  wrong_geography:
+    description: "Geo signals that suggest non-commercial intent"
+    weight: 4
+    terms: []  # Handled by geo_tier logic in campaign_classifier.py
