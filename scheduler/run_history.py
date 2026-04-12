@@ -35,8 +35,8 @@ _LOG_FILE = os.path.join(_LOG_DIR, "run_history.jsonl")
 
 
 def _utc_now() -> str:
-    """Return current UTC time as an ISO-8601 string."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Return current UTC time as an ISO-8601 string with microsecond precision."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
 def start_run(run_type: str) -> dict:

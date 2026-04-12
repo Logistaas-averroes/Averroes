@@ -61,8 +61,8 @@ def run_daily_pulse():
             run_record,
             status="success",
             report_path=f"outputs/daily_{datetime.utcnow().strftime('%Y-%m-%d')}.json",
-            delivery_attempted=True,
-            delivery_success=result.get("status") != "clean",
+            delivery_attempted=result.get("status") != "clean",
+            delivery_success=None,  # daily deliver_report has no return value yet (Phase 3)
         )
         return result
 
