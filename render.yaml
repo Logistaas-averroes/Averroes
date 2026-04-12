@@ -1,40 +1,17 @@
 # Render.com Deployment Configuration
 # Docs: https://render.com/docs/render-yaml-reference
+#
+# Phase 1 deployment: three cron jobs only.
+# FastAPI web service is deferred to Phase 4 (api/server.py not yet built).
+# All secrets are marked sync: false — set them in the Render dashboard under
+# each service's "Environment" tab. Never commit real values here.
 
 services:
-  # Main web service (FastAPI — on-demand triggers)
-  - type: web
-    name: logistaas-ads-intelligence
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api.server:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: ENVIRONMENT
-        value: production
-      - key: ANTHROPIC_API_KEY
-        sync: false   # Set in Render dashboard
-      - key: HUBSPOT_API_KEY
-        sync: false
-      - key: WINDSOR_API_KEY
-        sync: false
-      - key: WINDSOR_ACCOUNT_ID
-        sync: false
-      - key: GOOGLE_ADS_DEVELOPER_TOKEN
-        sync: false
-      - key: GOOGLE_ADS_CLIENT_ID
-        sync: false
-      - key: GOOGLE_ADS_CLIENT_SECRET
-        sync: false
-      - key: GOOGLE_ADS_REFRESH_TOKEN
-        sync: false
-      - key: GOOGLE_ADS_CUSTOMER_ID
-        sync: false
-      - key: REPORT_EMAIL
-        sync: false
-      - key: SLACK_WEBHOOK_URL
-        sync: false
-
-  # Daily pulse — 6am GMT every day
+  # ─────────────────────────────────────────────────────────
+  # Daily pulse — 6 am GMT every day
+  # Runs: scheduler/daily.py
+  # Detects spend anomalies, junk terms, CRM delta
+  # ─────────────────────────────────────────────────────────
   - type: cron
     name: logistaas-daily-pulse
     runtime: python
@@ -42,20 +19,22 @@ services:
     schedule: "0 6 * * *"
     startCommand: python scheduler/daily.py
     envVars:
-      - fromService:
-          name: logistaas-ads-intelligence
-          type: web
-          envVarKey: ANTHROPIC_API_KEY
-      - fromService:
-          name: logistaas-ads-intelligence
-          type: web
-          envVarKey: HUBSPOT_API_KEY
-      - fromService:
-          name: logistaas-ads-intelligence
-          type: web
-          envVarKey: WINDSOR_API_KEY
+      - key: ENVIRONMENT
+        value: production
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: HUBSPOT_API_KEY
+        sync: false
+      - key: WINDSOR_API_KEY
+        sync: false
+      - key: WINDSOR_ACCOUNT_ID
+        sync: false
 
-  # Weekly report — 7am GMT every Monday
+  # ─────────────────────────────────────────────────────────
+  # Weekly report — 7 am GMT every Monday
+  # Runs: scheduler/weekly.py
+  # Full pipeline: pull → analyse → report → email delivery
+  # ─────────────────────────────────────────────────────────
   - type: cron
     name: logistaas-weekly-report
     runtime: python
@@ -63,12 +42,28 @@ services:
     schedule: "0 7 * * 1"
     startCommand: python scheduler/weekly.py
     envVars:
-      - fromService:
-          name: logistaas-ads-intelligence
-          type: web
-          envVarKey: ANTHROPIC_API_KEY
+      - key: ENVIRONMENT
+        value: production
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: HUBSPOT_API_KEY
+        sync: false
+      - key: WINDSOR_API_KEY
+        sync: false
+      - key: WINDSOR_ACCOUNT_ID
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: REPORT_SENDER_EMAIL
+        sync: false
+      - key: REPORT_RECIPIENT_EMAIL
+        sync: false
 
-  # Monthly strategy — 7am GMT on the 1st of every month
+  # ─────────────────────────────────────────────────────────
+  # Monthly strategy — 7 am GMT on the 1st of every month
+  # Runs: scheduler/monthly.py
+  # Full pipeline: pull → analyse → report → email delivery
+  # ─────────────────────────────────────────────────────────
   - type: cron
     name: logistaas-monthly-strategy
     runtime: python
@@ -76,7 +71,19 @@ services:
     schedule: "0 7 1 * *"
     startCommand: python scheduler/monthly.py
     envVars:
-      - fromService:
-          name: logistaas-ads-intelligence
-          type: web
-          envVarKey: ANTHROPIC_API_KEY
+      - key: ENVIRONMENT
+        value: production
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: HUBSPOT_API_KEY
+        sync: false
+      - key: WINDSOR_API_KEY
+        sync: false
+      - key: WINDSOR_ACCOUNT_ID
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: REPORT_SENDER_EMAIL
+        sync: false
+      - key: REPORT_RECIPIENT_EMAIL
+        sync: false
