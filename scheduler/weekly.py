@@ -27,7 +27,7 @@ def run_weekly_report():
         save_output as windsor_save,
     )
     campaigns = pull_campaign_performance(days_back=30)
-    search_terms = pull_search_terms(days_back=14)
+    search_terms = pull_search_terms(days_back=14)  # 14-day window: Windsor search term data is unreliable beyond 14 days
     keywords = pull_keyword_performance(days_back=30)
     geos = pull_geo_performance(days_back=30)
     windsor_save(campaigns, search_terms, keywords, geos)
@@ -50,17 +50,17 @@ def run_weekly_report():
     # Step 3: Waste detection
     print("Step 3/6: Running waste detection...")
     from analysis.core import run_waste_detection
-    waste = run_waste_detection()
+    run_waste_detection()
 
     # Step 4: Lead quality analysis
     print("Step 4/6: Running lead quality analysis...")
     from analysis.core import run_lead_quality
-    lead_quality = run_lead_quality()
+    run_lead_quality()
 
     # Step 5: Campaign truth table
     print("Step 5/6: Building campaign truth table...")
     from analysis.core import run_campaign_truth
-    campaign_truth = run_campaign_truth()
+    run_campaign_truth()
 
     # Step 6: Generate weekly report via Claude API
     print("Step 6/6: Generating weekly report via Claude API...")
