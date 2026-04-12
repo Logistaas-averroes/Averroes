@@ -142,5 +142,71 @@ Do not recommend actions not directly supported by the numbers.
     return report_path
 
 
+def generate_monthly_report():
+    """
+    Loads analysis outputs, calls Claude with DOCTRINE.md as system prompt,
+    and saves the strategic monthly report to outputs/monthly_report_YYYY-MM.md.
+    Returns the report file path on success, or None if analysis data is missing.
+    """
+    os.makedirs("outputs", exist_ok=True)
+
+    # Load all analysis outputs
+    waste = load_json("outputs/waste_report.json")
+    lead_quality = load_json("outputs/lead_quality.json")
+    campaign_truth = load_json("outputs/campaign_truth.json")
+
+    if not any([waste, lead_quality, campaign_truth]):
+        print("No analysis outputs found. Run analysis scripts first.")
+        return None
+
+    # Load doctrine
+    system_prompt = DOCTRINE_PATH.read_text()
+
+    # Build clean data summary
+    data_summary = build_data_summary(waste, lead_quality, campaign_truth)
+
+    # Call Claude
+    user_message = f"""
+Here are the findings from this month's data analysis for Logistaas Google Ads.
+
+DATA:
+{json.dumps(data_summary, indent=2)}
+
+Please produce the monthly strategic report following the structure in your instructions:
+1. Monthly Summary (what the data shows this month overall)
+2. Waste this month
+3. Lead quality by campaign
+4. Campaign verdicts
+5. Strategic recommendations for next month
+
+Base everything on the data provided. If data is missing or uncertain, say so clearly.
+Do not recommend actions not directly supported by the numbers.
+"""
+
+    print("Calling Claude API for monthly report...")
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=4096,
+        temperature=0,  # Deterministic — same data should produce same report
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}]
+    )
+
+    report_text = response.content[0].text
+    month_str = datetime.utcnow().strftime("%Y-%m")
+
+    # Save report
+    report_path = f"outputs/monthly_report_{month_str}.md"
+    with open(report_path, "w") as f:
+        f.write(f"# Logistaas Monthly Ads Intelligence Report\n")
+        f.write(f"**Generated:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n\n")
+        f.write(report_text)
+
+    print(f"Monthly report saved: {report_path}")
+    print(f"Tokens used: {response.usage.input_tokens} in, {response.usage.output_tokens} out")
+
+    return report_path
+
+
 if __name__ == "__main__":
     generate_weekly_report()
