@@ -4,8 +4,11 @@ Pulls contacts (paid search source), deals, and pipeline data.
 Confirmed field names from live account audit — April 2026.
 """
 
+import logging
 import os
 import json
+import time
+import functools
 from datetime import datetime, timedelta
 import hubspot
 from hubspot.crm.contacts import ApiException
@@ -13,7 +16,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
+
+MAX_RETRIES = 3
+INITIAL_BACKOFF_SECONDS = 2
 
 # Fields confirmed live from Logistaas HubSpot account
 CONTACT_PROPERTIES = [
@@ -59,9 +67,33 @@ LOST_DEAL_STAGES = ["379124201", "379124202", "379124203", "379260140"]
 
 
 def get_client():
+    if not HUBSPOT_API_KEY:
+        raise RuntimeError("HUBSPOT_API_KEY is not set")
     return hubspot.Client.create(access_token=HUBSPOT_API_KEY)
 
 
+def _retry_on_rate_limit(func):
+    """Decorator: retry with exponential backoff on HubSpot 429 errors."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                return func(*args, **kwargs)
+            except ApiException as exc:
+                if exc.status == 429 and attempt < MAX_RETRIES:
+                    wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    logger.warning(
+                        "HubSpot rate limited (429) — retry %d/%d in %ds",
+                        attempt, MAX_RETRIES, wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    raise
+    return wrapper
+
+
+@_retry_on_rate_limit
 def pull_paid_search_contacts(days_back: int = 90) -> list:
     """
     Pull all contacts with source = PAID_SEARCH from the last N days.
@@ -107,11 +139,18 @@ def pull_paid_search_contacts(days_back: int = 90) -> list:
             else:
                 break
 
-        except ApiException as e:
-            print(f"HubSpot API error: {e}")
+        except ApiException as exc:
+            if exc.status == 429:
+                wait = INITIAL_BACKOFF_SECONDS * 2
+                logger.warning(
+                    "HubSpot rate limited during pagination — waiting %ds", wait
+                )
+                time.sleep(wait)
+                continue
+            logger.error("HubSpot API error: %s", exc)
             break
 
-    print(f"Pulled {len(contacts)} paid search contacts (last {days_back} days)")
+    logger.info("Pulled %d paid search contacts (last %d days)", len(contacts), days_back)
     return contacts
 
 
@@ -131,32 +170,46 @@ def pull_deals_with_gclid(contacts: list) -> list:
         contact_id = contact["id"]
         gclid = contact["properties"]["hs_google_click_id"]
 
-        try:
-            assoc = client.crm.contacts.associations_api.get_all(
-                contact_id=contact_id,
-                to_object_type="deals"
-            )
-
-            for deal_ref in assoc.results:
-                deal_id = deal_ref.id
-                deal = client.crm.deals.basic_api.get_by_id(
-                    deal_id=deal_id,
-                    properties=["dealname", "dealstage", "amount",
-                               "closedate", "createdate", "pipeline",
-                               "hs_deal_stage_probability"]
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                assoc = client.crm.contacts.associations_api.get_all(
+                    contact_id=contact_id,
+                    to_object_type="deals"
                 )
-                deal_dict = deal.to_dict()
-                deal_dict["gclid"] = gclid
-                deal_dict["contact_id"] = contact_id
-                deal_dict["stage_label"] = DEAL_STAGE_MAP.get(
-                    deal_dict.get("properties", {}).get("dealstage", ""), "Unknown"
-                )
-                deals.append(deal_dict)
 
-        except ApiException:
-            continue
+                for deal_ref in assoc.results:
+                    deal_id = deal_ref.id
+                    deal = client.crm.deals.basic_api.get_by_id(
+                        deal_id=deal_id,
+                        properties=["dealname", "dealstage", "amount",
+                                   "closedate", "createdate", "pipeline",
+                                   "hs_deal_stage_probability"]
+                    )
+                    deal_dict = deal.to_dict()
+                    deal_dict["gclid"] = gclid
+                    deal_dict["contact_id"] = contact_id
+                    deal_dict["stage_label"] = DEAL_STAGE_MAP.get(
+                        deal_dict.get("properties", {}).get("dealstage", ""), "Unknown"
+                    )
+                    deals.append(deal_dict)
+                break  # success — exit retry loop
 
-    print(f"Found {len(deals)} deals linked to GCLID contacts")
+            except ApiException as exc:
+                if exc.status == 429 and attempt < MAX_RETRIES:
+                    wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    logger.warning(
+                        "HubSpot rate limited on deal fetch — retry %d/%d in %ds",
+                        attempt, MAX_RETRIES, wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.warning(
+                        "Failed to fetch deals for contact %s: %s",
+                        contact_id, exc,
+                    )
+                    break
+
+    logger.info("Found %d deals linked to GCLID contacts", len(deals))
     return deals
 
 
@@ -224,17 +277,21 @@ def save_output(contacts: list, deals: list, summary: dict):
     with open("data/crm_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
 
-    print(f"Saved {len(contacts)} contacts, {len(deals)} deals to data/")
+    logger.info("Saved %d contacts, %d deals to data/", len(contacts), len(deals))
 
 
 if __name__ == "__main__":
-    print("Pulling HubSpot CRM data...")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    logger.info("Pulling HubSpot CRM data...")
     contacts = pull_paid_search_contacts(days_back=90)
     deals = pull_deals_with_gclid(contacts)
     summary = get_lead_quality_summary(contacts)
 
-    print(f"\nGCLID coverage: {summary['gclid_coverage_pct']}%")
-    print(f"MQL status breakdown: {summary['mql_status_breakdown']}")
-    print(f"Junk indicators found: {len(summary['junk_indicators'])}")
+    logger.info("GCLID coverage: %s%%", summary["gclid_coverage_pct"])
+    logger.info("MQL status breakdown: %s", summary["mql_status_breakdown"])
+    logger.info("Junk indicators found: %d", len(summary["junk_indicators"]))
 
     save_output(contacts, deals, summary)

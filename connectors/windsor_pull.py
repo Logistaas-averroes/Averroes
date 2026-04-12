@@ -4,23 +4,82 @@ Pulls campaign performance, search terms, and keyword data.
 Requires Windsor.ai Basic plan or above for search term data.
 """
 
+import logging
 import os
 import json
+import time
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 WINDSOR_API_KEY = os.getenv("WINDSOR_API_KEY")
 WINDSOR_ACCOUNT_ID = os.getenv("WINDSOR_ACCOUNT_ID")
 WINDSOR_BASE_URL = "https://connectors.windsor.ai/all"
+
+MAX_RETRIES = 3
+INITIAL_BACKOFF_SECONDS = 2
 
 
 def get_date_range(days_back: int = 30) -> tuple:
     end = datetime.utcnow().date()
     start = end - timedelta(days=days_back)
     return str(start), str(end)
+
+
+def _request_with_retry(params: dict, description: str) -> list:
+    """
+    Make a Windsor.ai API request with exponential backoff retry.
+    Handles 429 (rate limit) and 401 (auth failure) explicitly.
+    Returns the data list or an empty list on failure.
+    """
+    if not WINDSOR_API_KEY:
+        logger.error("WINDSOR_API_KEY is not set — cannot pull data")
+        return []
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.get(WINDSOR_BASE_URL, params=params, timeout=60)
+
+            if response.status_code == 401:
+                logger.error("Windsor.ai auth failure (401) — check WINDSOR_API_KEY")
+                return []
+
+            if response.status_code == 429:
+                wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                logger.warning(
+                    "Windsor.ai rate limited (429) — retry %d/%d in %ds",
+                    attempt, MAX_RETRIES, wait,
+                )
+                time.sleep(wait)
+                continue
+
+            response.raise_for_status()
+            data = response.json()
+            records = data.get("data", [])
+            logger.info("Pulled %d %s rows", len(records), description)
+            return records
+
+        except requests.exceptions.Timeout:
+            logger.warning(
+                "Windsor.ai timeout — retry %d/%d", attempt, MAX_RETRIES
+            )
+            time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+
+        except requests.exceptions.RequestException as exc:
+            logger.error("Windsor.ai request error (%s): %s", description, exc)
+            if attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+            else:
+                return []
+
+    logger.error(
+        "Windsor.ai request failed after %d retries (%s)", MAX_RETRIES, description
+    )
+    return []
 
 
 def pull_campaign_performance(days_back: int = 30) -> list:
@@ -51,13 +110,7 @@ def pull_campaign_performance(days_back: int = 30) -> list:
         "account_id": WINDSOR_ACCOUNT_ID,
     }
 
-    response = requests.get(WINDSOR_BASE_URL, params=params, timeout=60)
-    response.raise_for_status()
-    data = response.json()
-
-    records = data.get("data", [])
-    print(f"Pulled {len(records)} campaign rows (last {days_back} days)")
-    return records
+    return _request_with_retry(params, "campaign")
 
 
 def pull_search_terms(days_back: int = 14) -> list:
@@ -90,13 +143,7 @@ def pull_search_terms(days_back: int = 14) -> list:
         "segment": "search_term",
     }
 
-    response = requests.get(WINDSOR_BASE_URL, params=params, timeout=60)
-    response.raise_for_status()
-    data = response.json()
-
-    records = data.get("data", [])
-    print(f"Pulled {len(records)} search term rows (last {days_back} days)")
-    return records
+    return _request_with_retry(params, "search term")
 
 
 def pull_keyword_performance(days_back: int = 30) -> list:
@@ -129,13 +176,7 @@ def pull_keyword_performance(days_back: int = 30) -> list:
         "segment": "keyword",
     }
 
-    response = requests.get(WINDSOR_BASE_URL, params=params, timeout=60)
-    response.raise_for_status()
-    data = response.json()
-
-    records = data.get("data", [])
-    print(f"Pulled {len(records)} keyword rows (last {days_back} days)")
-    return records
+    return _request_with_retry(params, "keyword")
 
 
 def pull_geo_performance(days_back: int = 30) -> list:
@@ -163,13 +204,7 @@ def pull_geo_performance(days_back: int = 30) -> list:
         "segment": "geo",
     }
 
-    response = requests.get(WINDSOR_BASE_URL, params=params, timeout=60)
-    response.raise_for_status()
-    data = response.json()
-
-    records = data.get("data", [])
-    print(f"Pulled {len(records)} geo rows (last {days_back} days)")
-    return records
+    return _request_with_retry(params, "geo")
 
 
 def get_account_summary(campaigns: list) -> dict:
@@ -204,21 +239,25 @@ def save_output(campaigns: list, search_terms: list, keywords: list, geos: list)
     with open("data/ads_geos.json", "w") as f:
         json.dump(geos, f, indent=2)
 
-    print("Saved all Windsor.ai data to data/")
+    logger.info("Saved all Windsor.ai data to data/")
 
 
 if __name__ == "__main__":
-    print("Pulling Google Ads data via Windsor.ai...")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    logger.info("Pulling Google Ads data via Windsor.ai...")
     campaigns = pull_campaign_performance(days_back=30)
     search_terms = pull_search_terms(days_back=14)
     keywords = pull_keyword_performance(days_back=30)
     geos = pull_geo_performance(days_back=30)
 
     summary = get_account_summary(campaigns)
-    print(f"\nAccount summary:")
-    print(f"  Total spend: ${summary['total_spend']:,.2f}")
-    print(f"  Total conversions: {summary['total_conversions']}")
-    print(f"  Avg CPL: ${summary['avg_cpl']:,.2f}")
-    print(f"  Campaigns: {summary['campaign_count']}")
+    logger.info("Account summary:")
+    logger.info("  Total spend: $%.2f", summary["total_spend"])
+    logger.info("  Total conversions: %s", summary["total_conversions"])
+    logger.info("  Avg CPL: $%.2f", summary["avg_cpl"])
+    logger.info("  Campaigns: %s", summary["campaign_count"])
 
     save_output(campaigns, search_terms, keywords, geos)
