@@ -7,6 +7,9 @@ data/
 # Report outputs (written by schedulers — never commit)
 outputs/
 
+# Scheduler run history logs (written at runtime — never commit)
+runtime_logs/
+
 # Python
 __pycache__/
 *.py[cod]

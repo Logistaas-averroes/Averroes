@@ -89,23 +89,23 @@ qualifiedtobuy → Proposal/Implementation Plan  → OCT value: $300
 ```
 logistaas-ads-intelligence/
 ├── connectors/
-│   ├── windsor_pull.py       ✅ EXISTS — test and harden
-│   ├── hubspot_pull.py       ✅ EXISTS — test and harden
-│   ├── gclid_match.py        ⬜ BUILD THIS (PR-ADS-002)
-│   └── oct_uploader.py       ⬜ BUILD THIS (PR-ADS-003)
-├── engine/
-│   ├── signal_check.py       ⬜ BUILD (PR-ADS-004)
-│   ├── ngram_analysis.py     ⬜ BUILD (PR-ADS-005)
-│   ├── campaign_classifier.py ⬜ BUILD (PR-ADS-006)
-│   └── lead_quality.py       ⬜ BUILD (PR-ADS-007)
-├── doctrine/
-│   └── advisor.py            ✅ EXISTS — test and harden
+│   ├── windsor_pull.py       ✅ Built — PR-ADS-001
+│   ├── hubspot_pull.py       ✅ Built — PR-ADS-001
+│   ├── gclid_match.py        ✅ Built — PR-ADS-001
+│   └── oct_uploader.py       ⬜ BUILD THIS (Phase 2 — PR-ADS-008)
+├── analysis/
+│   ├── core.py               ✅ Built — Phase 1 rebuild
+│   └── advisor.py            ✅ Built — Phase 1 rebuild
 ├── scheduler/
-│   ├── daily.py              ✅ EXISTS — complete after engines built
-│   ├── weekly.py             ⬜ BUILD (PR-ADS-008)
-│   └── monthly.py            ⬜ BUILD (PR-ADS-009)
+│   ├── daily.py              ✅ Built — PR-ADS-002
+│   ├── weekly.py             ✅ Built — PR-ADS-002
+│   ├── monthly.py            ✅ Built — PR-ADS-003
+│   ├── delivery.py           ✅ Built — PR-ADS-003
+│   └── run_history.py        ✅ Built — PR-ADS-012
+├── scripts/
+│   └── healthcheck.py        ✅ Built — PR-ADS-013
 ├── api/
-│   └── server.py             ⬜ BUILD (PR-ADS-010)
+│   └── server.py             ⬜ BUILD THIS (Phase 4 — PR-ADS-011)
 ├── config/
 │   ├── logistaas_config.yaml ✅ EXISTS — source of truth for all thresholds
 │   └── patterns.yaml         ✅ EXISTS — junk detection patterns
@@ -113,6 +113,7 @@ logistaas-ads-intelligence/
 │   ├── DOCTRINE.md           ✅ EXISTS — Claude system prompt source
 │   ├── PR_TEMPLATE.md        ✅ EXISTS — use for every PR
 │   └── GITHUB_AGENT_BRIEFING.md ← you are here
+├── Makefile                   ✅ Built — PR-ADS-015
 ├── .env.example              ✅ EXISTS
 ├── requirements.txt          ✅ EXISTS
 └── render.yaml               ✅ EXISTS
@@ -120,35 +121,40 @@ logistaas-ads-intelligence/
 
 ---
 
-## Build Order (Follow This Exactly)
+## Build Order (Current Phase 1 Status)
 
-### Phase 1 — Foundation (build first, nothing else works without these)
+### Completed
+| PR ID | Module | Status |
+|-------|--------|--------|
+| PR-ADS-001 | Connectors + GCLID match | ✅ Complete |
+| PR-ADS-002 | Daily + weekly schedulers | ✅ Complete |
+| PR-ADS-003 | Monthly scheduler + delivery | ✅ Complete |
+| PR-ADS-004 | Analysis core + advisor | ✅ Complete |
+| PR-ADS-012 | Run history / persistent logs | ✅ Complete |
+| PR-ADS-013 | Healthcheck / environment validation | ✅ Complete |
+| PR-ADS-014 | Roadmap / PR status sync cleanup | ✅ Complete |
+| PR-ADS-015 | Manual ops runner / Makefile | ✅ Complete |
+
+### Queued (Phase 1 remaining)
 | PR ID | Module | What it does |
 |-------|--------|-------------|
-| PR-ADS-001 | Test existing connectors | Run `hubspot_pull.py` and `windsor_pull.py`, fix any errors, confirm data files write correctly |
-| PR-ADS-002 | `connectors/gclid_match.py` | Join Windsor click data + HubSpot contacts via `hs_google_click_id` |
-| PR-ADS-003 | `connectors/oct_uploader.py` | Read HubSpot deal stage changes → upload to Google Ads OCT API |
+| PR-ADS-005 | Config + pattern hardening | Validate all YAML config keys; update patterns.yaml |
+| PR-ADS-006 | End-to-end test + first real report | Run full weekly pipeline on live env, verify report |
+| PR-ADS-007 | Render deployment | Deploy to Render, register all 3 cron jobs |
 
-### Phase 2 — Intelligence Engines
+### Phase 2 (after Phase 1 validated)
 | PR ID | Module | What it does |
 |-------|--------|-------------|
-| PR-ADS-004 | `engine/signal_check.py` | Brand vs non-brand split, Ads vs CRM delta |
-| PR-ADS-005 | `engine/ngram_analysis.py` | Decompose search terms, score waste, output negative candidates |
-| PR-ADS-006 | `engine/campaign_classifier.py` | FIX/HOLD/SCALE/CUT per campaign |
-| PR-ADS-007 | `engine/lead_quality.py` | Score each lead 0–100, flag junk |
+| PR-ADS-008 | `connectors/oct_uploader.py` (dry-run) | Read HubSpot deal stage changes → OCT upload dry-run |
+| PR-ADS-009 | OCT live activation | First live OCT conversion upload after human approval |
 
-### Phase 3 — Reports
+### Phase 3+
 | PR ID | Module | What it does |
 |-------|--------|-------------|
-| PR-ADS-008 | `scheduler/weekly.py` | Full weekly report orchestration |
-| PR-ADS-009 | `scheduler/monthly.py` | Monthly strategy orchestration |
-| PR-ADS-010 | Report delivery | Email via SendGrid / Slack webhook |
-
-### Phase 4 — Production
-| PR ID | Module | What it does |
-|-------|--------|-------------|
+| PR-ADS-010 | Negative keyword push | System-generated negatives, human approval gate |
 | PR-ADS-011 | `api/server.py` | FastAPI on-demand endpoints |
-| PR-ADS-012 | Render deployment | Deploy, verify all 3 cron jobs register |
+| PR-ADS-016 | Frontend dashboard | War room Next.js dashboard |
+| PR-ADS-017 | Meta Ads integration | Windsor.ai Meta connector |
 
 ---
 
