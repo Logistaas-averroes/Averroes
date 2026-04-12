@@ -143,6 +143,11 @@ Do not recommend actions not directly supported by the numbers.
 
 
 def generate_monthly_report():
+    """
+    Loads analysis outputs, calls Claude with DOCTRINE.md as system prompt,
+    and saves the strategic monthly report to outputs/monthly_report_YYYY-MM.md.
+    Returns the report file path on success, or None if analysis data is missing.
+    """
     os.makedirs("outputs", exist_ok=True)
 
     # Load all analysis outputs
