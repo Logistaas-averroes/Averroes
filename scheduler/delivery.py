@@ -16,6 +16,7 @@ Required environment variables:
   REPORT_RECIPIENT_EMAIL — Recipient address for delivered reports
 """
 
+import base64
 import logging
 import os
 from pathlib import Path
@@ -85,7 +86,6 @@ def deliver_report(report_path: str) -> bool:
         subject = f"Logistaas Ads Intelligence Report — {path.name}"
 
     # Build email with report as plain-text body and .md file attachment
-    import base64
     encoded_content = base64.b64encode(report_content.encode("utf-8")).decode()
 
     message = Mail(

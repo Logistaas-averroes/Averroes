@@ -8,6 +8,7 @@ No business logic lives here. This module only sequences the steps.
 import os
 from datetime import datetime
 from dotenv import load_dotenv
+from scheduler.delivery import deliver_report
 
 load_dotenv()
 
@@ -72,7 +73,6 @@ def run_weekly_report():
     if report_path:
         print(f"Report saved: {report_path}")
         # Deliver report to configured recipient
-        from scheduler.delivery import deliver_report
         deliver_report(report_path)
     print(f"{'='*60}\n")
 
