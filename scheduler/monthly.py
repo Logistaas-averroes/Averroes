@@ -139,6 +139,10 @@ def run_monthly_report():
     log.info(f"Report saved: {report_path}")
     log.info("=" * 60)
 
+    # Deliver report to configured recipient
+    from scheduler.delivery import deliver_report
+    deliver_report(report_path)
+
     return report_path
 
 

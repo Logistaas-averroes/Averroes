@@ -71,6 +71,9 @@ def run_weekly_report():
     print(f"Weekly report complete — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     if report_path:
         print(f"Report saved: {report_path}")
+        # Deliver report to configured recipient
+        from scheduler.delivery import deliver_report
+        deliver_report(report_path)
     print(f"{'='*60}\n")
 
     return report_path
