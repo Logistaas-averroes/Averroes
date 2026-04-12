@@ -10,6 +10,7 @@ import os
 from datetime import datetime
 from dotenv import load_dotenv
 from scheduler.delivery import deliver_report
+from scheduler.run_history import start_run, finish_run
 
 load_dotenv()
 
@@ -32,6 +33,10 @@ def run_monthly_report():
     log.info(f"LOGISTAAS MONTHLY REPORT — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     log.info("=" * 60)
 
+    run_record = start_run("monthly")
+    delivery_attempted = False
+    delivery_ok = None
+
     # Step 1: Pull Google Ads data (30-day window)
     log.info("Step 1/6 START: Pulling Google Ads data via Windsor.ai (30 days)...")
     try:
@@ -53,6 +58,12 @@ def run_monthly_report():
         )
     except Exception as e:
         log.error(f"Step 1/6 FAILED: Windsor pull error — {e}")
+        finish_run(
+            run_record,
+            status="failed",
+            failed_step="Step 1/6: Windsor pull",
+            error_message=str(e),
+        )
         return None
 
     # Step 2: Pull HubSpot CRM data (30-day window)
@@ -74,6 +85,12 @@ def run_monthly_report():
         )
     except Exception as e:
         log.error(f"Step 2/6 FAILED: HubSpot pull error — {e}")
+        finish_run(
+            run_record,
+            status="failed",
+            failed_step="Step 2/6: HubSpot pull",
+            error_message=str(e),
+        )
         return None
 
     # Validate required data files exist before running analysis
@@ -82,6 +99,12 @@ def run_monthly_report():
         for f in missing:
             log.error(f"Required data file missing after connector pull: {f}")
         log.error("Aborting monthly report — required data files not found")
+        finish_run(
+            run_record,
+            status="failed",
+            failed_step="pre-analysis data validation",
+            error_message=f"Missing files: {', '.join(missing)}",
+        )
         return None
 
     # Step 3: Waste detection
@@ -92,6 +115,12 @@ def run_monthly_report():
         log.info("Step 3/6 END: Waste detection complete")
     except Exception as e:
         log.error(f"Step 3/6 FAILED: Waste detection error — {e}")
+        finish_run(
+            run_record,
+            status="failed",
+            failed_step="Step 3/6: Waste detection",
+            error_message=str(e),
+        )
         return None
 
     # Step 4: Lead quality analysis
@@ -102,6 +131,12 @@ def run_monthly_report():
         log.info("Step 4/6 END: Lead quality analysis complete")
     except Exception as e:
         log.error(f"Step 4/6 FAILED: Lead quality error — {e}")
+        finish_run(
+            run_record,
+            status="failed",
+            failed_step="Step 4/6: Lead quality",
+            error_message=str(e),
+        )
         return None
 
     # Step 5: Campaign truth table
@@ -112,6 +147,12 @@ def run_monthly_report():
         log.info("Step 5/6 END: Campaign truth table complete")
     except Exception as e:
         log.error(f"Step 5/6 FAILED: Campaign truth error — {e}")
+        finish_run(
+            run_record,
+            status="failed",
+            failed_step="Step 5/6: Campaign truth",
+            error_message=str(e),
+        )
         return None
 
     # Step 6: Generate monthly report via Claude API
@@ -121,16 +162,34 @@ def run_monthly_report():
         report_path = generate_monthly_report()
     except Exception as e:
         log.error(f"Step 6/6 FAILED: Advisor error — {e}")
+        finish_run(
+            run_record,
+            status="failed",
+            failed_step="Step 6/6: Advisor",
+            error_message=str(e),
+        )
         return None
 
     # Validate advisor returned a valid report path
     if not report_path:
         log.error("Step 6/6 FAILED: Advisor returned no report path")
+        finish_run(
+            run_record,
+            status="failed",
+            failed_step="Step 6/6: Advisor",
+            error_message="Advisor returned no report path",
+        )
         return None
 
     # Validate report file exists on disk
     if not os.path.exists(report_path):
         log.error(f"Step 6/6 FAILED: Report file not found at {report_path}")
+        finish_run(
+            run_record,
+            status="failed",
+            failed_step="Step 6/6: Report file missing",
+            error_message=f"Report file not found at {report_path}",
+        )
         return None
 
     log.info(f"Step 6/6 END: Monthly report generated — {report_path}")
@@ -141,8 +200,16 @@ def run_monthly_report():
     log.info("=" * 60)
 
     # Deliver report to configured recipient
-    deliver_report(report_path)
+    delivery_attempted = True
+    delivery_ok = deliver_report(report_path)
 
+    finish_run(
+        run_record,
+        status="success",
+        report_path=report_path,
+        delivery_attempted=delivery_attempted,
+        delivery_success=delivery_ok,
+    )
     return report_path
 
 

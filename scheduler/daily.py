@@ -8,6 +8,7 @@ import os
 import json
 from datetime import datetime
 from dotenv import load_dotenv
+from scheduler.run_history import start_run, finish_run
 
 load_dotenv()
 
@@ -17,42 +18,62 @@ def run_daily_pulse():
     print(f"LOGISTAAS DAILY PULSE — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"{'='*60}\n")
 
-    # 1. Pull fresh data
-    from connectors.windsor_pull import pull_campaign_performance
-    from connectors.hubspot_pull import pull_paid_search_contacts, get_lead_quality_summary
+    run_record = start_run("daily")
 
-    print("Step 1/5: Pulling Google Ads data (last 2 days)...")
-    campaigns = pull_campaign_performance(days_back=2)
+    try:
+        # 1. Pull fresh data
+        from connectors.windsor_pull import pull_campaign_performance
+        from connectors.hubspot_pull import pull_paid_search_contacts, get_lead_quality_summary
 
-    print("Step 2/5: Pulling HubSpot contacts (last 2 days)...")
-    contacts = pull_paid_search_contacts(days_back=2)
-    crm_summary = get_lead_quality_summary(contacts)
+        print("Step 1/5: Pulling Google Ads data (last 2 days)...")
+        campaigns = pull_campaign_performance(days_back=2)
 
-    # 2. Detect anomalies
-    print("Step 3/5: Running anomaly detection...")
-    anomalies = detect_anomalies(campaigns)
+        print("Step 2/5: Pulling HubSpot contacts (last 2 days)...")
+        contacts = pull_paid_search_contacts(days_back=2)
+        crm_summary = get_lead_quality_summary(contacts)
 
-    # 3. Check for new junk terms (quick pattern match)
-    print("Step 4/5: Checking for new junk search terms...")
-    from connectors.windsor_pull import pull_search_terms
-    search_terms = pull_search_terms(days_back=1)
-    new_junk = detect_junk_terms(search_terms)
+        # 2. Detect anomalies
+        print("Step 3/5: Running anomaly detection...")
+        anomalies = detect_anomalies(campaigns)
 
-    # 4. CRM delta check
-    crm_delta = check_crm_delta(campaigns, crm_summary)
+        # 3. Check for new junk terms (quick pattern match)
+        print("Step 4/5: Checking for new junk search terms...")
+        from connectors.windsor_pull import pull_search_terms
+        search_terms = pull_search_terms(days_back=1)
+        new_junk = detect_junk_terms(search_terms)
 
-    # 5. Run doctrine analysis (only if issues found)
-    print("Step 5/5: Running doctrine analysis...")
-    from doctrine.advisor import run_daily_analysis
-    budget_pacing = check_budget_pacing(campaigns)
-    result = run_daily_analysis(anomalies, crm_delta, new_junk, budget_pacing)
+        # 4. CRM delta check
+        crm_delta = check_crm_delta(campaigns, crm_summary)
 
-    # 6. Save and deliver
-    save_daily_report(result)
-    deliver_report(result)
+        # 5. Run doctrine analysis (only if issues found)
+        print("Step 5/5: Running doctrine analysis...")
+        from doctrine.advisor import run_daily_analysis
+        budget_pacing = check_budget_pacing(campaigns)
+        result = run_daily_analysis(anomalies, crm_delta, new_junk, budget_pacing)
 
-    print(f"\nDaily pulse complete. Status: {result.get('status', 'unknown')}")
-    return result
+        # 6. Save and deliver
+        save_daily_report(result)
+        deliver_report(result)
+
+        print(f"\nDaily pulse complete. Status: {result.get('status', 'unknown')}")
+
+        finish_run(
+            run_record,
+            status="success",
+            report_path=f"outputs/daily_{datetime.utcnow().strftime('%Y-%m-%d')}.json",
+            delivery_attempted=result.get("status") != "clean",
+            delivery_success=None,  # daily deliver_report has no return value yet (Phase 3)
+        )
+        return result
+
+    except Exception as exc:
+        finish_run(
+            run_record,
+            status="failed",
+            failed_step=getattr(exc, "_step", None),
+            error_message=str(exc),
+        )
+        raise
 
 
 def detect_anomalies(campaigns: list) -> list:

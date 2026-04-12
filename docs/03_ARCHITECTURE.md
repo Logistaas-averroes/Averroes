@@ -135,8 +135,11 @@ logistaas-ads-intelligence/
 │   └── advisor.py             ✅ Built — Phase 1 rebuild
 │
 ├── scheduler/                  ← Orchestration
-│   ├── weekly.py              🔨 Building — PR-ADS-002
-│   └── daily.py               🔨 Building — PR-ADS-002
+│   ├── daily.py               ✅ Built — PR-ADS-002
+│   ├── weekly.py              ✅ Built — PR-ADS-002
+│   ├── monthly.py             ✅ Built — PR-ADS-003
+│   ├── delivery.py            ✅ Built — PR-ADS-003
+│   └── run_history.py         ✅ Built — PR-ADS-012
 │
 ├── docs/                       ← All project documents (this folder)
 │   ├── 01_PROJECT_MASTER.md
@@ -154,6 +157,10 @@ logistaas-ads-intelligence/
 │
 ├── data/                       ← Runtime data (gitignored)
 ├── outputs/                    ← Generated reports (gitignored)
+├── runtime_logs/               ← Scheduler run history / persistent logs (gitignored)
+├── scripts/
+│   └── healthcheck.py         ✅ Built — PR-ADS-013
+├── Makefile                    ✅ Built — PR-ADS-015
 ├── .env.example
 ├── requirements.txt
 ├── render.yaml

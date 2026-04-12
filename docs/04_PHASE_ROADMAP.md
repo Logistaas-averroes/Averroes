@@ -23,7 +23,12 @@ The guiding principle: **earn the right to automate through proven accuracy.**
 - Lead quality breakdown ✅ Complete
 - Campaign truth table ✅ Complete
 - Weekly report via Claude API ✅ Complete
-- Scheduler (weekly + daily lightweight) 🔨 In progress
+- Scheduler (daily + weekly + monthly) ✅ Complete
+- Report delivery (SendGrid email) ✅ Complete
+- Run history / persistent logs ✅ Complete
+- Healthcheck / environment validation ✅ Complete
+- Manual ops runner (Makefile) ✅ Complete
+- Scheduler (weekly + daily lightweight) 🔨 End-to-end testing in progress
 
 ### What it outputs
 Every Monday morning:
@@ -145,17 +150,22 @@ Negative keywords are permanent decisions. Adding the wrong negative can kill re
 | PR | Module | Status | Phase |
 |----|--------|--------|-------|
 | PR-ADS-001 | Connectors + GCLID match | ✅ Merged | 1 |
-| PR-ADS-002 | Scheduler (weekly + daily) | 🔨 In progress | 1 |
-| PR-ADS-003 | Config validation + pattern update | ⬜ Queued | 1 |
-| PR-ADS-004 | End-to-end test + first real report | ⬜ Queued | 1 |
-| PR-ADS-005 | OCT uploader (dry-run only) | ⬜ Queued | 1/2 |
-| PR-ADS-006 | Render deployment | ⬜ Queued | 1 |
-| PR-ADS-007 | OCT live activation | ⬜ Phase 2 gate | 2 |
-| PR-ADS-008 | Negative keyword push | ⬜ Phase 3 gate | 3 |
-| PR-ADS-009 | FastAPI server | ⬜ Phase 4 | 4 |
-| PR-ADS-010 | Frontend dashboard | ⬜ Phase 4 | 4 |
-| PR-ADS-011 | Meta Ads integration | ⬜ Phase 4 | 4 |
-| PR-ADS-012 | Gamma report integration | ⬜ Phase 4 | 4 |
+| PR-ADS-002 | Scheduler (weekly + daily) | ✅ Merged | 1 |
+| PR-ADS-003 | Monthly scheduler + delivery | ✅ Merged | 1 |
+| PR-ADS-004 | Analysis core + advisor | ✅ Merged | 1 |
+| PR-ADS-005 | Config + pattern hardening | ⬜ Queued | 1 |
+| PR-ADS-006 | End-to-end test + first real report | ⬜ Queued | 1 |
+| PR-ADS-007 | Render deployment | ⬜ Queued | 1 |
+| PR-ADS-008 | OCT uploader (dry-run only) | ⬜ Phase 2 gate | 2 |
+| PR-ADS-009 | OCT live activation | ⬜ Phase 2 gate | 2 |
+| PR-ADS-010 | Negative keyword push | ⬜ Phase 3 gate | 3 |
+| PR-ADS-011 | FastAPI server | ⬜ Phase 4 | 4 |
+| PR-ADS-012 | Run History / Persistent Logs | ✅ Merged | 1 |
+| PR-ADS-013 | Healthcheck / Environment Validation | ✅ Merged | 1 |
+| PR-ADS-014 | Roadmap / PR Status Sync Cleanup | ✅ Merged | 1 |
+| PR-ADS-015 | Manual Ops Runner / Makefile Commands | ✅ Merged | 1 |
+| PR-ADS-016 | Frontend dashboard | ⬜ Phase 4 | 4 |
+| PR-ADS-017 | Meta Ads integration | ⬜ Phase 4 | 4 |
 
 ---
 

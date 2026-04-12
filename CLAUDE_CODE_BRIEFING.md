@@ -39,33 +39,36 @@ Google Ads is counting job seekers and wrong-industry companies as "conversions"
 - `connectors/hubspot_pull.py` — HubSpot connector (✅ hardened — retry, 429 handling, logging)
 - `connectors/windsor_pull.py` — Windsor.ai connector (✅ hardened — retry, 429/401 handling, logging)
 - `connectors/gclid_match.py` — GCLID match engine (✅ built — PR-ADS-001)
-- `doctrine/advisor.py` — Claude API integration (complete)
-- `scheduler/daily.py` — daily pulse orchestrator (complete)
+- `analysis/advisor.py` — Claude API integration (✅ complete)
+- `analysis/core.py` — waste detection, lead quality, campaign truth (✅ complete)
+- `scheduler/daily.py` — daily pulse orchestrator (✅ complete)
+- `scheduler/weekly.py` — weekly report orchestrator (✅ complete)
+- `scheduler/monthly.py` — monthly report orchestrator (✅ complete)
+- `scheduler/delivery.py` — SendGrid email delivery (✅ complete)
+- `scheduler/run_history.py` — persistent JSONL run history (✅ complete — PR-ADS-012)
+- `scripts/healthcheck.py` — preflight env + import validation (✅ complete — PR-ADS-013)
+- `Makefile` — manual ops runner (✅ complete — PR-ADS-015)
 
 ---
 
 ## WHAT NEEDS TO BE BUILT (in order)
 
-### Phase 1 (complete first)
-- [x] `connectors/gclid_match.py` — join Windsor clicks + HubSpot contacts via GCLID
-- [ ] `connectors/oct_uploader.py` — push HubSpot deal stage changes to Google Ads OCT
-- [x] Harden `connectors/hubspot_pull.py` — retry logic, 429 handling, structured logging
-- [x] Harden `connectors/windsor_pull.py` — retry logic, 429/401 handling, structured logging
+### Phase 1 — Remaining
+- [ ] Config + pattern hardening (PR-ADS-005)
+- [ ] End-to-end test on live environment + first real report (PR-ADS-006)
+- [ ] Render deployment — register all 3 cron jobs (PR-ADS-007)
+- [ ] `connectors/oct_uploader.py` dry-run (PR-ADS-008, Phase 2 gate)
 
 ### Phase 2
-- [ ] `engine/signal_check.py` — brand vs non-brand split, Ads vs CRM delta
-- [ ] `engine/ngram_analysis.py` — decompose search terms, score waste
-- [ ] `engine/campaign_classifier.py` — FIX/HOLD/SCALE/CUT classification
-- [ ] `engine/lead_quality.py` — MQL vs SQL vs junk scoring
+- [ ] OCT live activation (PR-ADS-009)
 
 ### Phase 3
-- [ ] `scheduler/weekly.py` — orchestrate full weekly report
-- [ ] `scheduler/monthly.py` — orchestrate monthly strategy
-- [ ] Report delivery (email via SendGrid or Slack webhook)
+- [ ] `connectors/negative_pusher.py` — human-approved negative keyword push (PR-ADS-010)
 
 ### Phase 4
-- [ ] `api/server.py` — FastAPI for on-demand triggers
-- [ ] Deploy to Render.com
+- [ ] `api/server.py` — FastAPI for on-demand triggers (PR-ADS-011)
+- [ ] Frontend dashboard (PR-ADS-016)
+- [ ] Meta Ads integration (PR-ADS-017)
 
 ---
 
