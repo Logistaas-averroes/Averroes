@@ -9,6 +9,7 @@ import logging
 import os
 from datetime import datetime
 from dotenv import load_dotenv
+from scheduler.delivery import deliver_report
 
 load_dotenv()
 
@@ -138,6 +139,9 @@ def run_monthly_report():
     log.info(f"Monthly report complete — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     log.info(f"Report saved: {report_path}")
     log.info("=" * 60)
+
+    # Deliver report to configured recipient
+    deliver_report(report_path)
 
     return report_path
 
