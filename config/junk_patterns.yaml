@@ -1,0 +1,169 @@
+# Junk Pattern Library
+# Used by waste_detection.py to classify search term waste
+# Add patterns here — no code changes needed
+
+# RULE: Patterns are matched as substrings (case-insensitive)
+# Each pattern includes: the term, why it's junk, and its weight (1-10, 10 = highest confidence waste)
+
+job_seeker:
+  description: "People looking for employment, not buying software"
+  weight: 10
+  terms:
+    - job
+    - jobs
+    - salary
+    - salaries
+    - career
+    - careers
+    - hiring
+    - vacancy
+    - vacancies
+    - recruitment
+    - recruiter
+    - resume
+    - cv
+    - internship
+    - employment
+    - "job description"
+    - "job opening"
+    - "entry level"
+    - vagas       # Portuguese: jobs
+    - empleo      # Spanish: job
+    - trabajo     # Spanish: work/job
+    - reclutamiento  # Spanish: recruitment
+
+student:
+  description: "Students and learners, not buyers"
+  weight: 9
+  terms:
+    - tutorial
+    - tutorials
+    - course
+    - courses
+    - certification
+    - certifications
+    - exam
+    - training
+    - beginner
+    - university
+    - college
+    - student
+    - "how to use"
+    - learn
+    - learning
+    - curso       # Spanish: course
+    - formacion   # Spanish: training
+    - capacitacion  # Spanish: training
+
+free_intent_english:
+  description: "Users seeking free or zero-cost solutions"
+  weight: 10
+  terms:
+    - " free"       # space before to avoid matching "freight"
+    - "free trial"
+    - "free version"
+    - "open source"
+    - crack
+    - cracked
+    - "free download"
+    - freeware
+    - cheap
+    - cheapest
+    - "no cost"
+    - "community edition"
+
+free_intent_spanish:
+  description: "Spanish-language free-intent — confirmed active in live data"
+  weight: 10
+  terms:
+    - gratis         # Confirmed: "software logistica gratis" — Ricardo, Colombia
+    - gratuito
+    - gratuita
+    - "sin costo"
+    - "sin pago"
+    - libre          # Free/libre in Spanish context
+    - "de forma gratuita"
+    - "programa gratis"
+
+free_intent_arabic:
+  description: "Arabic-language free-intent — confirmed active in live data"
+  weight: 10
+  terms:
+    - "مجاني"        # Free — confirmed: Zahraa (Iraq) searched "سيستم شركات الشحن مجاني"
+    - "مجانية"       # Free (feminine form)
+    - "مجانا"        # Free (another form)
+
+shipper_intent:
+  description: "Shippers and retailers — wrong persona for Logistaas"
+  weight: 10
+  terms:
+    - shipper
+    - shippers
+    - retailer
+    - retailers
+    - manufacturer
+    - "supply chain visibility"
+    - project44
+    - fourkites
+    - "four kites"
+    - "last mile"
+    - e-commerce
+    - ecommerce
+
+fraud_indicators:
+  description: "Fraud and bot signals — confirmed in live account data"
+  weight: 10
+  terms:
+    # These are email-level patterns, checked against contact email
+    # Not search term patterns — handled separately in lead quality
+    - wellsfargo    # Confirmed fraud: wellsfargobankc09@gmail.com
+    - elonmusk     # Confirmed fraud: elonmusks445588@gmail.com
+    - applyfunds   # Confirmed fraud: applyfunds3@gmail.com
+    - kisscomp     # Confirmed: kisscomp109@gmail.com
+    - palettarosina  # Confirmed: palettarosina27@gmail.com
+
+informational:
+  description: "Research queries with no purchase intent"
+  weight: 5
+  terms:
+    - "what is"
+    - definition
+    - wikipedia
+    - wiki
+    - comparison
+    - compare
+    - review
+    - reviews
+    - "vs"
+    - versus
+    - history
+    - ejemplo      # Spanish: example
+    - "que es"     # Spanish: what is
+    - "como funciona"  # Spanish: how does it work
+
+# NOTE: "digital freight forwarder" appeared in live data as a DICARDED contact
+# This is a category term, not a product search — users searching this
+# may be researching the industry, not buying TMS software
+informational_industry:
+  description: "Industry category research, not product purchase intent"
+  weight: 4
+  terms:
+    - "digital freight forwarder"
+    - "freight forwarding industry"
+    - "what is freight forwarding"
+    - "logistics industry"
+
+# Patterns NOT to flag — add here to prevent false positives
+safe_terms:
+  description: "Terms that look like they could be junk but are legitimate"
+  terms:
+    - freight        # Core product category
+    - "freight software"  # Direct product search
+    - "freight forwarding software"  # Direct product search
+    - "tms software"  # Direct product search
+    - "logistics software"  # Product search (some junk, but also legitimate)
+    - cargowise      # Competitor — legitimate
+    - gofreight      # Competitor — legitimate
+    - logisys        # Competitor — legitimate
+    - magaya         # Competitor — legitimate
+    - riege          # Competitor — legitimate

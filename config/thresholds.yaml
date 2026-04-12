@@ -1,0 +1,71 @@
+# Decision Thresholds
+# All classification thresholds live here — not in Python code
+
+campaign_verdicts:
+  scale:
+    min_confirmed_sqls_30d: 1
+    max_junk_pct: 15
+    # Both conditions must be true
+
+  fix:
+    min_junk_pct: 25
+    # OR
+    zero_sqls_with_intent_mismatch: true
+    # Intent mismatch = confirmed junk search terms present in this campaign's data
+
+  cut:
+    min_zero_sql_days: 60
+    requires_confirmed_wrong_market: true
+    # Both must be true — CUT is a serious verdict
+    # Currently confirmed: venezuela
+
+  hold:
+    default: true
+    # Anything not meeting SCALE or FIX or CUT criteria
+
+lead_quality:
+  junk_rate_denominator: "verdicted_contacts_only"
+  # Exclude OPEN - Connecting from junk rate calculation
+  # Only count contacts that MDR has made a verdict on
+
+  small_sample_warning_threshold: 5
+  # Campaigns with fewer than 5 contacts — flag as insufficient sample
+
+  early_lead_grace_days: 7
+  # Contacts created within 7 days — exclude from junk rate (MDR not had time to reach)
+
+waste_detection:
+  min_spend_to_flag: 5
+  # Don't flag terms spending less than $5 total — not worth attention
+
+  missing_search_terms_threshold: 60
+  # If search term coverage is below 60% of expected volume, flag uncertainty
+
+  min_contacts_to_validate_waste: 1
+  # A term must have at least 1 HubSpot contact to be confirmed as waste
+  # (otherwise it's suspected waste, not confirmed)
+
+data_quality:
+  ads_crm_delta_alert_pct: 20
+  # If Google Ads conversions exceed HubSpot paid contacts by more than 20%,
+  # flag as possible tracking issue or spam form fills
+
+  gclid_coverage_warning_pct: 70
+  # If fewer than 70% of paid contacts have a GCLID, flag the gap
+
+reporting:
+  analysis_window_days: 30
+  daily_check_window_days: 2
+  junk_spike_alert_threshold_pct: 20
+  # Alert if junk rate in last 2 days is 20% above 7-day average
+
+accounts:
+  hubspot_id: "142257138"
+  google_ads_id: "3059734490"
+  report_email: "youssef.awwad@logistaas.com"
+  timezone: "Asia/Amman"
+
+# Venezuela is the only confirmed CUT market
+# Do not add countries here without 60+ days of confirmed zero SQL data
+confirmed_cut_markets:
+  - venezuela
