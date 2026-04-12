@@ -35,7 +35,7 @@ Set each variable in the Render dashboard under **Service → Environment** for 
 | `REPORT_SENDER_EMAIL` | weekly, monthly | Verified SendGrid sender address |
 | `REPORT_RECIPIENT_EMAIL` | weekly, monthly | Report delivery recipient |
 
-> **Note:** `GOOGLE_ADS_*` variables are reserved for `connectors/oct_uploader.py` (Phase 1, not yet deployed). Do not configure them until that module is built.
+> **Note:** `GOOGLE_ADS_*` variables are reserved for `connectors/oct_uploader.py` (not yet built). Do not configure them until that module is available.
 
 ---
 
