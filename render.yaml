@@ -1,13 +1,46 @@
 # Render.com Deployment Configuration
 # Docs: https://render.com/docs/render-yaml-reference
 #
-# Phase 1 deployment: three cron jobs only.
-# FastAPI web service is deferred to Phase 4 (api/server.py not yet built).
+# PR-ADS-016: FastAPI Web Service added (api/server.py now built).
+# Cron jobs retained — they operate independently of the web service.
 # All secrets are marked sync: false — set them in the Render dashboard under
 # each service's "Environment" tab. Never commit real values here.
 
 services:
   # ─────────────────────────────────────────────────────────
+  # Web Service — FastAPI read-only API
+  # Handles: health checks, readiness, report/run endpoints
+  # Start: python -m uvicorn api.server:app --host 0.0.0.0 --port $PORT
+  # Health check: /health
+  # ─────────────────────────────────────────────────────────
+  - type: web
+    name: logistaas-ads-intelligence
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn api.server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: HUBSPOT_API_KEY
+        sync: false
+      - key: WINDSOR_API_KEY
+        sync: false
+      - key: WINDSOR_ACCOUNT_ID
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: REPORT_SENDER_EMAIL
+        sync: false
+      - key: REPORT_RECIPIENT_EMAIL
+        sync: false
+  # ─────────────────────────────────────────────────────────
+  # Cron jobs — retained alongside the Web Service.
+  # These run independently; the web service does not trigger them.
+  # ─────────────────────────────────────────────────────────
+
   # Daily pulse — 6 am GMT every day
   # Runs: scheduler/daily.py
   # Detects spend anomalies, junk terms, CRM delta
