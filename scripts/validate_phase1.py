@@ -19,7 +19,7 @@ Usage:
   python scripts/validate_phase1.py
 """
 
-import glob as _glob
+import glob
 import os
 import py_compile
 import re
@@ -64,7 +64,7 @@ def validate_syntax(failures: list) -> None:
     ]
     files = []
     for pattern in patterns:
-        files.extend(sorted(_glob.glob(pattern)))
+        files.extend(sorted(glob.glob(pattern)))
 
     for path in files:
         try:
@@ -153,7 +153,7 @@ def validate_no_stale_refs(failures: list) -> None:
 
     files = []
     for pattern in _SCAN_PATTERNS:
-        files.extend(sorted(_glob.glob(pattern)))
+        files.extend(sorted(glob.glob(pattern)))
 
     this_file = os.path.abspath(__file__)
     files = [f for f in files if os.path.abspath(f) != this_file]
@@ -161,7 +161,8 @@ def validate_no_stale_refs(failures: list) -> None:
     any_stale = False
     for path in files:
         try:
-            content = open(path).read()
+            with open(path) as fh:
+                content = fh.read()
         except OSError:
             continue
         for regex, description in _STALE_REFERENCES:

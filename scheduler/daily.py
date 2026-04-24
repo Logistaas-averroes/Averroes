@@ -35,14 +35,16 @@ def run_daily_pulse():
         # 2. Detect anomalies
         print("Step 3/5: Running anomaly detection...")
         anomalies = detect_anomalies(campaigns)
-        print(f"  → {len(anomalies)} anomaly/anomalies found.")
+        label = "anomaly" if len(anomalies) == 1 else "anomalies"
+        print(f"  → {len(anomalies)} {label} found.")
 
         # 3. Check for new junk terms (quick pattern match)
         print("Step 4/5: Checking for new junk search terms...")
         from connectors.windsor_pull import pull_search_terms
         search_terms = pull_search_terms(days_back=1)
         new_junk = detect_junk_terms(search_terms)
-        print(f"  → {len(new_junk)} new junk/fraud signal(s) found.")
+        label = "junk term" if len(new_junk) == 1 else "junk terms"
+        print(f"  → {len(new_junk)} new {label} found.")
 
         # 4. CRM delta check + budget pacing
         print("Step 5/5: Checking CRM delta and budget pacing...")
