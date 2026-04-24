@@ -9,6 +9,7 @@ Responsibility:
   - Expose health and readiness endpoints for Render Web Service.
   - Expose read-only endpoints for latest run history and reports.
   - Expose protected manual run endpoints for Phase 1 schedulers.
+  - Start the in-app APScheduler on startup and stop it on shutdown.
   - NO writes to Google Ads, HubSpot, or any external service.
   - NO business logic or analysis execution.
   - NO secrets or PII in responses.
@@ -20,6 +21,7 @@ Endpoints:
   GET  /runs/latest         — Latest record from runtime_logs/run_history.jsonl.
   GET  /reports/latest      — Metadata for the latest report file in outputs/.
   GET  /reports/latest/raw  — Raw markdown content of the latest report.
+  GET  /scheduler/status    — In-app scheduler state and next run times (read-only).
   POST /run/daily           — Trigger daily scheduler (requires Bearer token).
   POST /run/weekly          — Trigger weekly scheduler (requires Bearer token).
   POST /run/monthly         — Trigger monthly scheduler (requires Bearer token).
@@ -30,7 +32,7 @@ import importlib
 import json
 import logging
 import os
-import threading
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+from api.scheduler import (
+    _job_state,
+    _run_lock,
+    get_scheduler_status,
+    start_scheduler,
+    stop_scheduler,
+)
+
 log = logging.getLogger(__name__)
 
 # Read APP_ENV for context (e.g. "development" vs "production").
@@ -46,18 +56,22 @@ log = logging.getLogger(__name__)
 APP_ENV = os.getenv("APP_ENV", "production")
 
 # ---------------------------------------------------------------------------
-# In-memory concurrency guards — one lock per job type.
-# Prevents double-runs within a single process.
+# Lifespan handler — starts and stops the in-app APScheduler.
 # ---------------------------------------------------------------------------
-_daily_running = False
-_weekly_running = False
-_monthly_running = False
-_run_lock = threading.Lock()
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Start the in-app scheduler on startup; stop it cleanly on shutdown."""
+    start_scheduler()
+    yield
+    stop_scheduler()
+
 
 app = FastAPI(
     title="Logistaas Ads Intelligence",
-    description="Phase 1 read-only API — health, readiness, and report endpoints.",
+    description="Phase 1 read-only API — health, readiness, report, and scheduler endpoints.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
@@ -261,6 +275,16 @@ def reports_latest_raw() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Scheduler status endpoint — read-only.
+# ---------------------------------------------------------------------------
+
+@app.get("/scheduler/status")
+def scheduler_status() -> dict[str, Any]:
+    """Return the in-app scheduler state and next run times for all jobs."""
+    return get_scheduler_status()
+
+
+# ---------------------------------------------------------------------------
 # Auth helper — shared by all /run/* endpoints.
 # ---------------------------------------------------------------------------
 
@@ -292,14 +316,12 @@ def _require_admin_token(request: Request) -> None:
 @app.post("/run/daily")
 def run_daily(request: Request) -> dict[str, Any]:
     """Trigger the daily pulse scheduler. Requires Bearer token."""
-    global _daily_running
-
     _require_admin_token(request)
 
     with _run_lock:
-        if _daily_running:
+        if _job_state["daily"]:
             raise HTTPException(status_code=409, detail="job already running")
-        _daily_running = True
+        _job_state["daily"] = True
 
     started_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     log.info("[run/daily] started at %s", started_at)
@@ -332,20 +354,18 @@ def run_daily(request: Request) -> dict[str, Any]:
         }
     finally:
         with _run_lock:
-            _daily_running = False
+            _job_state["daily"] = False
 
 
 @app.post("/run/weekly")
 def run_weekly(request: Request) -> dict[str, Any]:
     """Trigger the weekly report scheduler. Requires Bearer token."""
-    global _weekly_running
-
     _require_admin_token(request)
 
     with _run_lock:
-        if _weekly_running:
+        if _job_state["weekly"]:
             raise HTTPException(status_code=409, detail="job already running")
-        _weekly_running = True
+        _job_state["weekly"] = True
 
     started_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     log.info("[run/weekly] started at %s", started_at)
@@ -374,20 +394,18 @@ def run_weekly(request: Request) -> dict[str, Any]:
         }
     finally:
         with _run_lock:
-            _weekly_running = False
+            _job_state["weekly"] = False
 
 
 @app.post("/run/monthly")
 def run_monthly(request: Request) -> dict[str, Any]:
     """Trigger the monthly report scheduler. Requires Bearer token."""
-    global _monthly_running
-
     _require_admin_token(request)
 
     with _run_lock:
-        if _monthly_running:
+        if _job_state["monthly"]:
             raise HTTPException(status_code=409, detail="job already running")
-        _monthly_running = True
+        _job_state["monthly"] = True
 
     started_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     log.info("[run/monthly] started at %s", started_at)
@@ -416,4 +434,4 @@ def run_monthly(request: Request) -> dict[str, Any]:
         }
     finally:
         with _run_lock:
-            _monthly_running = False
+            _job_state["monthly"] = False

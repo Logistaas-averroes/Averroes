@@ -187,7 +187,48 @@ async function loadRawReport() {
   }
 }
 
-// ── Token storage (sessionStorage only) ────────────────────────────────────
+// ── Scheduler status card + panel ──────────────────────────────────────────
+
+async function loadSchedulerStatus() {
+  const cardEl = document.getElementById("card-scheduler");
+  const bodyEl = document.getElementById("scheduler-panel-body");
+
+  try {
+    const data = await fetchJSON("/scheduler/status");
+    const isRunning = data.status === "running";
+    const badgeCls = isRunning ? "badge--ok" : "badge--neutral";
+    const label = isRunning ? "running" : (data.status || "unknown");
+
+    if (cardEl) {
+      cardEl.querySelector(".card__value").innerHTML =
+        `<span class="badge ${badgeCls}"><span class="dot"></span>${escapeHtml(label)}</span>`;
+    }
+
+    if (bodyEl) {
+      const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+      if (jobs.length === 0) {
+        bodyEl.innerHTML = `<p class="empty-state">No scheduler jobs found.</p>`;
+        return;
+      }
+
+      const rows = jobs.map(j => `
+        <dt>${escapeHtml(j.job)}</dt>
+        <dd>
+          <span style="font-size:.85rem;color:var(--text-muted);">${escapeHtml(j.schedule || "—")}</span>
+          &nbsp;·&nbsp; next run: <strong>${fmt(j.next_run)}</strong>
+        </dd>`).join("");
+
+      bodyEl.innerHTML = `<dl class="kv-list">${rows}</dl>`;
+    }
+  } catch (e) {
+    if (cardEl) {
+      cardEl.querySelector(".card__value").innerHTML = statusBadge("error", STATUS_MAP);
+    }
+    if (bodyEl) {
+      bodyEl.innerHTML = `<p class="empty-state">Could not load scheduler status.</p>`;
+    }
+  }
+}
 
 function getToken() {
   const inputEl = document.getElementById("admin-token-input");
@@ -264,6 +305,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadReadiness();
   loadLatestRun();
   loadLatestReport();
+  loadSchedulerStatus();
 
   // Restore token from sessionStorage (page reload within same tab).
   const saved = sessionStorage.getItem("_adm_tok");

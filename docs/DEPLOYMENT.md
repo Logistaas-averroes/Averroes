@@ -4,7 +4,14 @@
 
 This document covers the Render.com deployment for the Logistaas Ads Intelligence System.
 
-Phase 1 deploys a **FastAPI Web Service** plus three cron jobs.
+Phase 1 deploys a **single Render Web Service** that hosts the UI, API, manual run
+endpoints, and all Phase 1 scheduled jobs (daily, weekly, monthly).
+
+> ⚠️ **Warning:** Do NOT enable both Render cron jobs and the in-app scheduler at
+> the same time. Duplicate runs will generate duplicate reports and emails.
+> The Render cron jobs (`logistaas-daily-pulse`, `logistaas-weekly-report`,
+> `logistaas-monthly-strategy`) are **decommissioned** and must not be re-enabled
+> while the in-app scheduler is active.
 
 ---
 
@@ -12,17 +19,30 @@ Phase 1 deploys a **FastAPI Web Service** plus three cron jobs.
 
 ```
 Render.com
- ├── logistaas-ads-intelligence  (web service)   → python -m uvicorn api.server:app
- ├── logistaas-daily-pulse       (cron: 0 6 * * *)   → python scheduler/daily.py
- ├── logistaas-weekly-report     (cron: 0 7 * * 1)   → python scheduler/weekly.py
- └── logistaas-monthly-strategy  (cron: 0 7 1 * *)   → python scheduler/monthly.py
+ └── logistaas-ads-intelligence  (web service)
+       python -m uvicorn api.server:app --host 0.0.0.0 --port $PORT
+       ├── GET  /                    — Dashboard UI
+       ├── GET  /health              — Liveness check
+       ├── GET  /readiness           — Structured readiness check
+       ├── GET  /scheduler/status    — In-app scheduler state (read-only)
+       ├── GET  /runs/latest         — Latest run history record
+       ├── GET  /reports/latest      — Latest report metadata
+       ├── GET  /reports/latest/raw  — Raw report content
+       ├── POST /run/daily           — Trigger daily pulse (Bearer token)
+       ├── POST /run/weekly          — Trigger weekly report (Bearer token)
+       └── POST /run/monthly         — Trigger monthly report (Bearer token)
+
+In-app scheduler (APScheduler, runs inside the web service process):
+  Daily pulse      — every day at 06:00 Asia/Amman (03:00 UTC)
+  Weekly report    — every Monday at 07:00 Asia/Amman (04:00 UTC)
+  Monthly strategy — 1st of month at 08:00 Asia/Amman (05:00 UTC)
 ```
 
 All services are defined in `render.yaml` at the repo root.
 
 ---
 
-## Web Service Deployment (PR-ADS-016 / PR-ADS-017)
+## Web Service Deployment (PR-ADS-016 / PR-ADS-017 / PR-ADS-019)
 
 ### Render settings
 
@@ -39,6 +59,9 @@ All services are defined in `render.yaml` at the repo root.
 
 > **Note:** The Free instance type is acceptable for initial testing only.
 > Switch to a paid Starter instance once validation and reporting workflows begin.
+> The in-app scheduler requires the process to stay alive between runs — use a
+> Starter or higher instance in production to prevent Render from spinning down
+> the service.
 
 ### Available endpoints
 
@@ -46,6 +69,7 @@ All services are defined in `render.yaml` at the repo root.
 |----------|------|-------------|
 | `GET /health` | None | Liveness check — returns `{"status": "ok"}` |
 | `GET /readiness` | None | Structured check — dirs, config files, docs, core imports |
+| `GET /scheduler/status` | None | In-app scheduler state and next run times (read-only) |
 | `GET /runs/latest` | None | Latest record from `runtime_logs/run_history.jsonl` |
 | `GET /reports/latest` | None | Metadata for the most recent file in `outputs/` |
 | `GET /reports/latest/raw` | None | Raw markdown content of the latest report |
@@ -60,6 +84,7 @@ Read-only GET endpoints are public. Run endpoints require `Authorization: Bearer
 ```bash
 # Syntax check
 python -m py_compile api/server.py
+python -m py_compile api/scheduler.py
 
 # Start locally
 export ADMIN_API_TOKEN=test-token
@@ -68,6 +93,7 @@ python -m uvicorn api.server:app --host 0.0.0.0 --port 8000
 # Test read-only endpoints (no auth required)
 curl http://localhost:8000/health
 curl http://localhost:8000/readiness
+curl http://localhost:8000/scheduler/status
 curl http://localhost:8000/runs/latest
 curl http://localhost:8000/reports/latest
 
@@ -87,7 +113,7 @@ curl -X POST http://localhost:8000/run/daily
 
 ## Required Environment Variables
 
-Set each variable in the Render dashboard under **Service → Environment** for every cron service that requires it.
+Set each variable in the Render dashboard under **Service → Environment** for the web service.
 
 | Variable | Required by | Description |
 |----------|-------------|-------------|
@@ -112,20 +138,45 @@ Set each variable in the Render dashboard under **Service → Environment** for 
 
 1. Log into [render.com](https://render.com) → **New** → **Blueprint**.
 2. Connect the `Logistaas-averroes/Averroes` GitHub repository.
-3. Render will detect `render.yaml` and preview the three cron services.
+3. Render will detect `render.yaml` and preview **one web service**.
 4. Click **Apply**.
 
 ### 2. Set environment variables
 
-For each of the three cron services (`logistaas-daily-pulse`, `logistaas-weekly-report`, `logistaas-monthly-strategy`):
-
-1. Open the service → **Environment** tab.
-2. Add each variable from the table above that applies to that service.
-3. Click **Save Changes**.
+Open the web service (`logistaas-ads-intelligence`) → **Environment** tab.
+Add each variable from the table above.
+Click **Save Changes**.
 
 Refer to `.env.example` for the full variable reference.
 
-### 3. Trigger a manual run via API (PR-ADS-017)
+> ⚠️ If you previously deployed the three Render cron services
+> (`logistaas-daily-pulse`, `logistaas-weekly-report`, `logistaas-monthly-strategy`),
+> **delete or suspend them** before deploying this version.
+> Running both cron services and the in-app scheduler simultaneously will cause
+> duplicate reports and duplicate email delivery.
+
+### 3. Verify the in-app scheduler
+
+After deploy, confirm the scheduler started:
+
+```bash
+curl https://<service>.onrender.com/scheduler/status
+```
+
+Expected response:
+
+```json
+{
+  "status": "running",
+  "jobs": [
+    {"job": "daily",   "schedule": "06:00 Asia/Amman (03:00 UTC)",            "next_run": "..."},
+    {"job": "weekly",  "schedule": "Monday 07:00 Asia/Amman (04:00 UTC)",     "next_run": "..."},
+    {"job": "monthly", "schedule": "1st of month 08:00 Asia/Amman (05:00 UTC)", "next_run": "..."}
+  ]
+}
+```
+
+### 4. Trigger a manual run via API
 
 With `ADMIN_API_TOKEN` set on the web service, you can trigger jobs remotely:
 
@@ -143,52 +194,44 @@ curl -X POST https://<service>.onrender.com/run/monthly \
   -H "Authorization: Bearer $ADMIN_API_TOKEN"
 ```
 
-> ⚠️ **Warning:** Run endpoints are protected but still powerful. Do not expose the token. Do not call repeatedly.
-
-### 4. Trigger a manual run via Render dashboard (optional verification)
-
-In the Render dashboard, open any cron service and click **Trigger Run**. Watch the **Logs** tab for output.
-
-Expected daily pulse output:
-```
-============================================================
-LOGISTAAS DAILY PULSE — YYYY-MM-DD HH:MM UTC
-============================================================
-Step 1/5: Pulling Google Ads data (last 2 days)...
-Step 2/5: Pulling HubSpot contacts (last 2 days)...
-Step 3/5: Running anomaly detection...
-Step 4/5: Checking for new junk search terms...
-Step 5/5: Running doctrine analysis...
-Report saved: outputs/daily_YYYY-MM-DD.json
-Daily pulse complete. Status: ...
-```
+> ⚠️ **Warning:** Manual run endpoints and the in-app scheduler share the same in-memory
+> lock. A manual run while the scheduler is executing (or vice versa) will return HTTP 409
+> for the second caller. This is by design to prevent duplicate runs.
 
 ---
 
-## Cron Schedule Reference
+## In-App Scheduler Reference
 
-| Service | Schedule | Runs |
-|---------|----------|------|
-| `logistaas-daily-pulse` | `0 6 * * *` | Every day at 06:00 UTC |
-| `logistaas-weekly-report` | `0 7 * * 1` | Every Monday at 07:00 UTC |
-| `logistaas-monthly-strategy` | `0 7 1 * *` | 1st of each month at 07:00 UTC |
+| Job | Schedule (Asia/Amman) | UTC Equivalent |
+|-----|-----------------------|----------------|
+| Daily pulse | Every day at 06:00 | 03:00 UTC |
+| Weekly report | Every Monday at 07:00 | Monday 04:00 UTC |
+| Monthly strategy | 1st of month at 08:00 | 1st of month 05:00 UTC |
 
-All times are UTC. Render cron jobs run in UTC by default.
+**Timezone note:** Asia/Amman = UTC+3 year-round. Jordan suspended daylight saving
+time in 2022, so no DST offset applies.
+
+**Overlap prevention:** The in-app scheduler and manual `/run/*` endpoints share the
+same in-memory lock per job type. If a job is already running (scheduled or manual),
+a second trigger is rejected (HTTP 409 for manual; silent skip with a log warning
+for scheduled).
+
+**Misfire grace window:** 1 hour. If the process restarts within 1 hour of a missed
+scheduled run time, the job will execute immediately on startup.
 
 ---
 
 ## Post-Merge Verification Checklist
 
-After deploying, confirm the following in the Render dashboard:
+After deploying, confirm the following:
 
 - [ ] **Healthcheck passes** — run `make healthcheck`; all critical checks show PASS
 - [ ] **Phase 1 validation passes** — run `make validate`; no stale references reported
-- [ ] **Daily job registered** — `logistaas-daily-pulse` visible under Cron Jobs with schedule `0 6 * * *`
-- [ ] **Weekly job registered** — `logistaas-weekly-report` visible with schedule `0 7 * * 1`
-- [ ] **Monthly job registered** — `logistaas-monthly-strategy` visible with schedule `0 7 1 * *`
-- [ ] **First successful run confirmed** — trigger a manual run; logs show no errors and exit code 0
-- [ ] **Report file created** — `outputs/daily_YYYY-MM-DD.json` (or weekly/monthly `.md`) visible in logs or attached storage
-- [ ] **Delivery attempted** — for weekly/monthly, logs show `[DELIVERY SUCCESS]` or a documented failure reason
+- [ ] **Scheduler running** — `GET /scheduler/status` returns `"status": "running"` with all three jobs and non-null `next_run` values
+- [ ] **UI loads scheduler status** — dashboard shows scheduler card with "running" badge and next run times
+- [ ] **Old cron jobs not active** — confirm `logistaas-daily-pulse`, `logistaas-weekly-report`, `logistaas-monthly-strategy` are deleted or suspended in Render dashboard
+- [ ] **Manual run endpoints still work** — trigger a run via UI or curl; returns 200 or 409 (if scheduler is executing)
+- [ ] **Lock prevents overlap** — triggering a run while scheduler is active returns HTTP 409
 
 ---
 
@@ -221,14 +264,15 @@ All failures are logged to stdout, which Render captures and displays in the **L
 
 ## Rollback
 
-To roll back the deployment:
+To roll back to Render cron jobs:
 
-1. In the Render dashboard, navigate to a cron service → **Deploys**.
-2. Select the previous successful deploy and click **Redeploy**.
+1. Disable the in-app scheduler: set `DISABLE_SCHEDULER=true` environment variable
+   (not yet implemented — rollback requires reverting this PR).
+2. Revert this commit in Render → **Deploys** → select a previous deploy → **Redeploy**.
+3. Re-enable the three cron services in the Render dashboard.
 
-`render.yaml` changes are reversible: reverting the commit and redeploying via Blueprint restores the previous configuration.
-
-**Rollback risk level: Low** — cron jobs are stateless; reverting does not affect data already written to `data/` or `outputs/`.
+**Rollback risk level: Medium** — the in-app scheduler changes operational scheduling
+behavior. Reverting does not affect data already written to `data/` or `outputs/`.
 
 ---
 
@@ -314,5 +358,5 @@ python -m uvicorn api.server:app --host 0.0.0.0 --port 8000
 - No Slack delivery
 - No retry queue
 - No OCT uploads (requires `connectors/oct_uploader.py`)
-- No in-app scheduler (PR-ADS-019)
-- No manual run endpoints via API — built in PR-ADS-017
+- No background queue or database scheduler
+- No separate Render cron jobs (decommissioned by PR-ADS-019)

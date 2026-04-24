@@ -1,17 +1,28 @@
 # Render.com Deployment Configuration
 # Docs: https://render.com/docs/render-yaml-reference
 #
-# PR-ADS-016: FastAPI Web Service added (api/server.py now built).
-# Cron jobs retained — they operate independently of the web service.
+# PR-ADS-019: In-app APScheduler added (api/scheduler.py).
+# Render cron jobs decommissioned — scheduling is now handled inside the web
+# service process. The three former cron services (logistaas-daily-pulse,
+# logistaas-weekly-report, logistaas-monthly-strategy) must NOT be re-enabled
+# while the in-app scheduler is active — duplicate runs will generate
+# duplicate reports and emails.
+#
+# Single-service architecture (Phase 1):
+#   One Render Web Service handles: UI, API, manual run endpoints,
+#   and all three scheduled Phase 1 jobs (daily / weekly / monthly).
+#
 # All secrets are marked sync: false — set them in the Render dashboard under
-# each service's "Environment" tab. Never commit real values here.
+# the web service's "Environment" tab. Never commit real values here.
 
 services:
   # ─────────────────────────────────────────────────────────
-  # Web Service — FastAPI read-only API
-  # Handles: health checks, readiness, report/run endpoints
+  # Web Service — FastAPI read-only API + in-app scheduler
+  # Handles: health checks, readiness, report/run endpoints,
+  #          scheduled daily/weekly/monthly Phase 1 jobs
   # Start: python -m uvicorn api.server:app --host 0.0.0.0 --port $PORT
   # Health check: /health
+  # Scheduler status: /scheduler/status
   # ─────────────────────────────────────────────────────────
   - type: web
     name: logistaas-ads-intelligence
@@ -22,90 +33,8 @@ services:
     envVars:
       - key: APP_ENV
         value: production
-      - key: ANTHROPIC_API_KEY
+      - key: ADMIN_API_TOKEN
         sync: false
-      - key: HUBSPOT_API_KEY
-        sync: false
-      - key: WINDSOR_API_KEY
-        sync: false
-      - key: WINDSOR_ACCOUNT_ID
-        sync: false
-      - key: SENDGRID_API_KEY
-        sync: false
-      - key: REPORT_SENDER_EMAIL
-        sync: false
-      - key: REPORT_RECIPIENT_EMAIL
-        sync: false
-  # ─────────────────────────────────────────────────────────
-  # Cron jobs — retained alongside the Web Service.
-  # These run independently; the web service does not trigger them.
-  # ─────────────────────────────────────────────────────────
-
-  # Daily pulse — 6 am GMT every day
-  # Runs: scheduler/daily.py
-  # Detects spend anomalies, junk terms, CRM delta
-  # ─────────────────────────────────────────────────────────
-  - type: cron
-    name: logistaas-daily-pulse
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    schedule: "0 6 * * *"
-    startCommand: python scheduler/daily.py
-    envVars:
-      - key: ENVIRONMENT
-        value: production
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: HUBSPOT_API_KEY
-        sync: false
-      - key: WINDSOR_API_KEY
-        sync: false
-      - key: WINDSOR_ACCOUNT_ID
-        sync: false
-
-  # ─────────────────────────────────────────────────────────
-  # Weekly report — 7 am GMT every Monday
-  # Runs: scheduler/weekly.py
-  # Full pipeline: pull → analyse → report → email delivery
-  # ─────────────────────────────────────────────────────────
-  - type: cron
-    name: logistaas-weekly-report
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    schedule: "0 7 * * 1"
-    startCommand: python scheduler/weekly.py
-    envVars:
-      - key: ENVIRONMENT
-        value: production
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: HUBSPOT_API_KEY
-        sync: false
-      - key: WINDSOR_API_KEY
-        sync: false
-      - key: WINDSOR_ACCOUNT_ID
-        sync: false
-      - key: SENDGRID_API_KEY
-        sync: false
-      - key: REPORT_SENDER_EMAIL
-        sync: false
-      - key: REPORT_RECIPIENT_EMAIL
-        sync: false
-
-  # ─────────────────────────────────────────────────────────
-  # Monthly strategy — 7 am GMT on the 1st of every month
-  # Runs: scheduler/monthly.py
-  # Full pipeline: pull → analyse → report → email delivery
-  # ─────────────────────────────────────────────────────────
-  - type: cron
-    name: logistaas-monthly-strategy
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    schedule: "0 7 1 * *"
-    startCommand: python scheduler/monthly.py
-    envVars:
-      - key: ENVIRONMENT
-        value: production
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: HUBSPOT_API_KEY
