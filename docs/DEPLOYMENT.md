@@ -2,9 +2,9 @@
 
 ## Overview
 
-This document covers the Render.com deployment for Phase 1 of the Logistaas Ads Intelligence System.
+This document covers the Render.com deployment for the Logistaas Ads Intelligence System.
 
-Phase 1 deploys **three cron jobs only**. No web service is included — FastAPI (`api/server.py`) is a Phase 4 deliverable.
+Phase 1 deploys a **FastAPI Web Service** plus three cron jobs.
 
 ---
 
@@ -12,12 +12,61 @@ Phase 1 deploys **three cron jobs only**. No web service is included — FastAPI
 
 ```
 Render.com
- ├── logistaas-daily-pulse    (cron: 0 6 * * *)   → python scheduler/daily.py
- ├── logistaas-weekly-report  (cron: 0 7 * * 1)   → python scheduler/weekly.py
- └── logistaas-monthly-strategy (cron: 0 7 1 * *) → python scheduler/monthly.py
+ ├── logistaas-ads-intelligence  (web service)   → python -m uvicorn api.server:app
+ ├── logistaas-daily-pulse       (cron: 0 6 * * *)   → python scheduler/daily.py
+ ├── logistaas-weekly-report     (cron: 0 7 * * 1)   → python scheduler/weekly.py
+ └── logistaas-monthly-strategy  (cron: 0 7 1 * *)   → python scheduler/monthly.py
 ```
 
 All services are defined in `render.yaml` at the repo root.
+
+---
+
+## Web Service Deployment (PR-ADS-016)
+
+### Render settings
+
+| Field | Value |
+|-------|-------|
+| **Name** | `logistaas-ads-intelligence` |
+| **Runtime** | Python 3 |
+| **Build Command** | `pip install -r requirements.txt` |
+| **Start Command** | `python -m uvicorn api.server:app --host 0.0.0.0 --port $PORT` |
+| **Health Check Path** | `/health` |
+| **Root Directory** | *(empty — repo root)* |
+| **Auto Deploy** | On Commit |
+| **Instance** | Free for testing; Starter recommended once validation starts |
+
+> **Note:** The Free instance type is acceptable for initial testing only.
+> Switch to a paid Starter instance once validation and reporting workflows begin.
+
+### Available endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Liveness check — returns `{"status": "ok"}` |
+| `GET /readiness` | Structured check — dirs, config files, docs, core imports |
+| `GET /runs/latest` | Latest record from `runtime_logs/run_history.jsonl` |
+| `GET /reports/latest` | Metadata for the most recent file in `outputs/` |
+| `GET /reports/latest/raw` | Raw markdown content of the latest report |
+
+All endpoints are **read-only**. No external API calls are made from `/health` or `/readiness`.
+
+### Local verification
+
+```bash
+# Syntax check
+python -m py_compile api/server.py
+
+# Start locally
+python -m uvicorn api.server:app --host 0.0.0.0 --port 8000
+
+# Test endpoints
+curl http://localhost:8000/health
+curl http://localhost:8000/readiness
+curl http://localhost:8000/runs/latest
+curl http://localhost:8000/reports/latest
+```
 
 ---
 
@@ -199,8 +248,8 @@ python -m py_compile scheduler/monthly.py
 
 ## Non-Goals (Phase 1)
 
-- No FastAPI web service (`api/server.py` is Phase 4)
 - No Slack delivery
 - No retry queue
 - No OCT uploads (requires `connectors/oct_uploader.py`)
 - No dashboard
+- No manual run endpoints via API (PR-ADS-017)
