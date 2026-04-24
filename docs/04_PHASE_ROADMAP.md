@@ -13,8 +13,8 @@ The guiding principle: **earn the right to automate through proven accuracy.**
 
 ## Phase 1 — Signal Intelligence
 ### "Where am I losing money right now?"
-**Status:** Built, entering stabilization
-**Duration:** 4–8 weeks minimum before advancing
+**Status:** Build complete — entering 4-week validation period
+**Duration:** 4 consecutive weeks minimum before advancing
 
 ### What it builds
 - Data connectors (Windsor.ai + HubSpot) ✅ Complete
@@ -29,11 +29,26 @@ The guiding principle: **earn the right to automate through proven accuracy.**
 - Healthcheck / environment validation ✅ Complete
 - Manual ops runner (Makefile) ✅ Complete
 - Repository reality sync + broken reference docs ✅ Complete (PR-ADS-012)
+- Phase 1 end-to-end validation script ✅ Complete (PR-ADS-014)
+- Phase 1 production readiness audit ✅ Complete (PR-ADS-015)
 
-### Current State: Stabilization & Validation
-- All Phase 1 modules are written and committed
-- System is **not yet validated** — no end-to-end run confirmed against live data
-- No automation is active or permitted until validation passes
+### Phase 1 Validation Period
+
+The system has passed its build gate and is entering the **4-week validation period**.
+No Phase 2 PRs may begin until all of the following are true:
+
+- System runs for 4 consecutive weeks without data errors
+- Weekly reports are manually verified against actual account performance each week
+- At least 3 specific recommendations have been applied by hand and the outcome verified
+- Youssef explicitly approves Phase 2
+
+**OCT (`connectors/oct_uploader.py`) and negative push (`connectors/negative_pusher.py`)
+remain deferred — not missing, not broken, intentionally excluded from Phase 1.**
+
+### Current State: 4-Week Validation Period
+- All Phase 1 modules are written, committed, and passing readiness audit
+- System is entering the **4-week validation period** — scheduled runs enabled
+- No Phase 2 work may begin until validation criteria are met (see above)
 - See `docs/09_REPO_STATE.md` for exact state of each file (built / broken / missing)
 
 ### What it outputs
@@ -153,7 +168,7 @@ Negative keywords are permanent decisions. Adding the wrong negative can kill re
 
 ## PR Roadmap (Current Build Status)
 
-> **Source of truth:** This table reflects the actual repository state as of PR-ADS-012.
+> **Source of truth:** This table reflects the actual repository state as of PR-ADS-015.
 > Do NOT infer roadmap from memory. Always read this file directly.
 
 ### Completed PRs
@@ -167,25 +182,20 @@ Negative keywords are permanent decisions. Adding the wrong negative can kill re
 | (unnumbered) | Run history / persistent logs (`scheduler/run_history.py`) | ✅ Built | 1 |
 | (unnumbered) | Healthcheck / environment validation (`scripts/healthcheck.py`) | ✅ Built | 1 |
 | (unnumbered) | Manual ops runner / Makefile | ✅ Built | 1 |
+| PR-ADS-012 | Repository reality sync + docs | ✅ Complete | 1 |
+| PR-ADS-013 | Broken reference fix (`scheduler/daily.py`) | ✅ Complete | 1 |
+| PR-ADS-014 | Phase 1 Operational Readiness Pack | ✅ Complete | 1 |
+| PR-ADS-015 | Phase 1 Production Readiness Audit (this PR) | ✅ Complete | 1 |
 
-> Prior stale roadmap docs assigned PR-ADS-012–015 to the above unnumbered items.
-> Those assignments are superseded. PR numbering restarts at PR-ADS-012 from this PR forward.
+### Phase 1 Completion Gate — ✅ PASSED
 
-### Active — Phase 1 Stabilization
-
-| PR | Module | Description | Status |
-|----|--------|-------------|--------|
-| PR-ADS-012 | `docs/` + `config/` | Repository reality sync — this PR | 🔨 Active |
-| PR-ADS-013 | `scheduler/daily.py` + `config/` | Broken reference fix (doctrine import, patterns.yaml path, logistaas_config.yaml) | ⬜ Next |
-| PR-ADS-014 | `scheduler/daily.py` | Daily scheduler rebuild — correct imports + config alignment | ⬜ Queued |
-
-### Phase 1 Completion Gate (all must pass before Phase 2)
+All Phase 1 build PRs are complete.  The system is in the **4-week validation period**.
 
 | PR | Module | Description | Status |
 |----|--------|-------------|--------|
-| PR-ADS-005 | `config/` | Config + pattern hardening (validate all YAML keys, create missing config files) | ⬜ Queued |
-| PR-ADS-006 | System-wide | End-to-end test + first real report on live environment | ⬜ Queued |
-| PR-ADS-007 | Render | Deploy to Render, verify all 3 cron jobs registered and running | ⬜ Queued |
+| PR-ADS-005 | `config/` | Config + pattern hardening (validate all YAML keys, create missing config files) | ⬜ Post-validation |
+| PR-ADS-006 | System-wide | End-to-end test + first real report on live environment | ⬜ Post-validation |
+| PR-ADS-007 | Render | Deploy to Render, verify all 3 cron jobs registered and running | ⬜ Post-validation |
 
 ### Phase 2 — Signal Correction (after Phase 1 validated)
 
