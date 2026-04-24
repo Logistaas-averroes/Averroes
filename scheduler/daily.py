@@ -33,11 +33,11 @@ def run_daily_pulse():
         crm_summary = get_lead_quality_summary(contacts)
 
         # 2. Detect anomalies
-        print("Step 3/5: Running anomaly detection...")
+        print("Step 3/4: Running anomaly detection...")
         anomalies = detect_anomalies(campaigns)
 
         # 3. Check for new junk terms (quick pattern match)
-        print("Step 4/5: Checking for new junk search terms...")
+        print("Step 4/4: Checking for new junk search terms...")
         from connectors.windsor_pull import pull_search_terms
         search_terms = pull_search_terms(days_back=1)
         new_junk = detect_junk_terms(search_terms)
@@ -45,13 +45,20 @@ def run_daily_pulse():
         # 4. CRM delta check
         crm_delta = check_crm_delta(campaigns, crm_summary)
 
-        # 5. Run doctrine analysis (only if issues found)
-        print("Step 5/5: Running doctrine analysis...")
-        from doctrine.advisor import run_daily_analysis
         budget_pacing = check_budget_pacing(campaigns)
-        result = run_daily_analysis(anomalies, crm_delta, new_junk, budget_pacing)
 
-        # 6. Save and deliver
+        # Build result from collected signals
+        has_issues = bool(anomalies) or bool(new_junk) or crm_delta.get("alert", False)
+        result = {
+            "status": "flagged" if has_issues else "clean",
+            "date": datetime.utcnow().strftime("%Y-%m-%d"),
+            "anomalies": anomalies,
+            "new_junk_terms": new_junk,
+            "crm_delta": crm_delta,
+            "budget_pacing": budget_pacing,
+        }
+
+        # 5. Save and deliver
         save_daily_report(result)
         deliver_report(result)
 
@@ -77,11 +84,15 @@ def run_daily_pulse():
 
 
 def detect_anomalies(campaigns: list) -> list:
-    """Detect spend spikes vs 7-day average."""
+    """Detect spend spikes vs 7-day average.
+
+    Requires historical data from connectors to compute baselines.
+    Returns an empty list if no historical data is available.
+    """
     anomalies = []
 
-    # Load 7-day historical for comparison
-    hist_path = "data/ads_campaigns_7d.json"
+    # Load 7-day historical from connector output
+    hist_path = "data/ads_campaigns.json"
     if not os.path.exists(hist_path):
         return anomalies
 
@@ -124,7 +135,7 @@ def detect_junk_terms(search_terms: list) -> list:
     """Quick pattern match for new junk search terms."""
     import yaml
 
-    with open("config/patterns.yaml") as f:
+    with open("config/junk_patterns.yaml") as f:
         patterns = yaml.safe_load(f)
 
     all_junk_words = []
