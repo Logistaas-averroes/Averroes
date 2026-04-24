@@ -23,16 +23,16 @@ Schedules (Asia/Amman = UTC+3, no DST since Jordan suspended DST in 2022):
 import logging
 import threading
 from datetime import timezone
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-import pytz
 
 log = logging.getLogger(__name__)
 
 # Timezone for all scheduled jobs.
 # Asia/Amman = UTC+3 year-round (Jordan suspended daylight saving time in 2022).
-_TZ = pytz.timezone("Asia/Amman")
+_TZ = ZoneInfo("Asia/Amman")
 
 # ---------------------------------------------------------------------------
 # Shared in-memory concurrency guards.
