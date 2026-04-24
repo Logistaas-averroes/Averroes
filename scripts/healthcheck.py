@@ -159,14 +159,34 @@ def check_directories(failures: list) -> None:
             failures.append(f"directory:{d}")
 
 
+def check_config_files(failures: list) -> None:
+    _header("Config and Docs Files")
+    required = [
+        "config/thresholds.yaml",
+        "config/junk_patterns.yaml",
+        "docs/DOCTRINE.md",
+    ]
+    for path in required:
+        if os.path.isfile(path):
+            _pass(path, "exists")
+        else:
+            _fail(path, "file not found")
+            failures.append(f"file:{path}")
+
+
 def check_imports(failures: list) -> None:
-    _header("Python Module Imports  [scheduler entry points]")
+    _header("Python Module Imports  [connectors / analysis / scheduler]")
     modules = [
-        ("scheduler.daily",    "scheduler/daily.py"),
-        ("scheduler.weekly",   "scheduler/weekly.py"),
-        ("scheduler.monthly",  "scheduler/monthly.py"),
-        ("scheduler.delivery", "scheduler/delivery.py"),
-        ("scheduler.run_history", "scheduler/run_history.py"),
+        ("connectors.hubspot_pull",  "connectors/hubspot_pull.py"),
+        ("connectors.windsor_pull",  "connectors/windsor_pull.py"),
+        ("connectors.gclid_match",   "connectors/gclid_match.py"),
+        ("analysis.core",            "analysis/core.py"),
+        ("analysis.advisor",         "analysis/advisor.py"),
+        ("scheduler.daily",          "scheduler/daily.py"),
+        ("scheduler.weekly",         "scheduler/weekly.py"),
+        ("scheduler.monthly",        "scheduler/monthly.py"),
+        ("scheduler.delivery",       "scheduler/delivery.py"),
+        ("scheduler.run_history",    "scheduler/run_history.py"),
     ]
     for mod, label in modules:
         if not _check_import(mod, label):
@@ -188,6 +208,7 @@ def main() -> int:
     check_sendgrid(critical_failures)
     check_google_ads(critical_failures)   # optional — no failures added
     check_directories(critical_failures)
+    check_config_files(critical_failures)
     check_imports(critical_failures)
 
     # ── Summary ───────────────────────────────────────────────────────────────
