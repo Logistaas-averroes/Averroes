@@ -35,8 +35,8 @@ Full rules in: `docs/DOCTRINE.md`
 - Brand and non-brand data must NEVER be mixed.
 - Never optimise for CPL. Always CPQL (Cost Per Qualified Lead).
 - Every campaign must be classified: FIX / HOLD / SCALE / CUT.
-- Junk patterns sourced from `config/patterns.yaml` — never hardcoded.
-- Thresholds from `config/logistaas_config.yaml` — never hardcoded.
+- Junk patterns sourced from `config/junk_patterns.yaml` — never hardcoded.
+- Thresholds from `config/thresholds.yaml` — never hardcoded (`config/logistaas_config.yaml` does not yet exist; tracked in PR-ADS-005).
 
 ---
 
@@ -107,8 +107,9 @@ logistaas-ads-intelligence/
 ├── api/
 │   └── server.py             ⬜ BUILD THIS (Phase 4 — PR-ADS-011)
 ├── config/
-│   ├── logistaas_config.yaml ✅ EXISTS — source of truth for all thresholds
-│   └── patterns.yaml         ✅ EXISTS — junk detection patterns
+│   ├── logistaas_config.yaml ⬜ MISSING — tracked in PR-ADS-005 (gclid_match.py falls back to defaults)
+│   ├── patterns.yaml         ⬜ MISSING — scheduler/daily.py references this; actual file is junk_patterns.yaml
+│   └── junk_patterns.yaml    ✅ EXISTS — junk detection patterns
 ├── docs/
 │   ├── DOCTRINE.md           ✅ EXISTS — Claude system prompt source
 │   ├── PR_TEMPLATE.md        ✅ EXISTS — use for every PR
@@ -196,8 +197,8 @@ api/        → ONLY exposes scheduler triggers as HTTP endpoints
 - Never commit data files
 
 ### Config rules
-- All thresholds → `config/logistaas_config.yaml`
-- All junk patterns → `config/patterns.yaml`
+- All thresholds → `config/thresholds.yaml`
+- All junk patterns → `config/junk_patterns.yaml`
 - All secrets → environment variables (never in code)
 
 ---
@@ -223,10 +224,10 @@ SLACK_WEBHOOK_URL         # optional
 ## How to Start Each Session
 
 1. Read this file
-2. Read `docs/DOCTRINE.md`
-3. Check which modules are `✅ EXISTS` vs `⬜ BUILD`
-4. Pick the next `⬜ BUILD` in phase order
-5. Build it, test it locally, open PR using `docs/PR_TEMPLATE.md`
+2. Read `docs/04_PHASE_ROADMAP.md` — identifies the current active PR
+3. Read `docs/09_REPO_STATE.md` — identifies what is built, broken, and missing
+4. Read `docs/DOCTRINE.md`
+5. Build only what the current PR description specifies
 
 ---
 
@@ -247,4 +248,6 @@ If you can't answer yes to all of these, the PR is not ready.
 
 **Project owner:** Youssef Awwad — youssef.awwad@logistaas.com
 **Doctrine authority:** `docs/DOCTRINE.md` (this is the final word on all ad strategy decisions)
-**Config authority:** `config/logistaas_config.yaml` (this is the final word on all thresholds)
+**Config authority:** `config/thresholds.yaml` (decision thresholds) and `config/junk_patterns.yaml` (junk patterns)
+**Roadmap authority:** `docs/04_PHASE_ROADMAP.md` — always read this before starting a session
+**Repo state authority:** `docs/09_REPO_STATE.md` — single source of truth for what is built, broken, or missing

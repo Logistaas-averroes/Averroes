@@ -158,6 +158,15 @@ Depends On:
 Blocks:
 ```
 
+**Every PR must also declare which lifecycle stage it belongs to:**
+```
+PR Stage:   stabilization | feature-expansion | phase-transition
+```
+
+- `stabilization` — fixing broken references, aligning docs to reality, hardening existing Phase 1 modules
+- `feature-expansion` — adding new capability within the current phase
+- `phase-transition` — gate PR that advances from one phase to the next (requires explicit approval)
+
 ---
 
 ## 0.4 Scope Control Rule

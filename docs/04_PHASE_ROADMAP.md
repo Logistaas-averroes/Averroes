@@ -13,7 +13,7 @@ The guiding principle: **earn the right to automate through proven accuracy.**
 
 ## Phase 1 — Signal Intelligence
 ### "Where am I losing money right now?"
-**Status:** Building now
+**Status:** Built, entering stabilization
 **Duration:** 4–8 weeks minimum before advancing
 
 ### What it builds
@@ -28,7 +28,13 @@ The guiding principle: **earn the right to automate through proven accuracy.**
 - Run history / persistent logs ✅ Complete
 - Healthcheck / environment validation ✅ Complete
 - Manual ops runner (Makefile) ✅ Complete
-- Scheduler (weekly + daily lightweight) 🔨 End-to-end testing in progress
+- Repository reality sync + broken reference docs ✅ Complete (PR-ADS-012)
+
+### Current State: Stabilization & Validation
+- All Phase 1 modules are written and committed
+- System is **not yet validated** — no end-to-end run confirmed against live data
+- No automation is active or permitted until validation passes
+- See `docs/09_REPO_STATE.md` for exact state of each file (built / broken / missing)
 
 ### What it outputs
 Every Monday morning:
@@ -147,25 +153,53 @@ Negative keywords are permanent decisions. Adding the wrong negative can kill re
 
 ## PR Roadmap (Current Build Status)
 
+> **Source of truth:** This table reflects the actual repository state as of PR-ADS-012.
+> Do NOT infer roadmap from memory. Always read this file directly.
+
+### Completed PRs
+
 | PR | Module | Status | Phase |
 |----|--------|--------|-------|
 | PR-ADS-001 | Connectors + GCLID match | ✅ Merged | 1 |
 | PR-ADS-002 | Scheduler (weekly + daily) | ✅ Merged | 1 |
 | PR-ADS-003 | Monthly scheduler + delivery | ✅ Merged | 1 |
 | PR-ADS-004 | Analysis core + advisor | ✅ Merged | 1 |
-| PR-ADS-005 | Config + pattern hardening | ⬜ Queued | 1 |
-| PR-ADS-006 | End-to-end test + first real report | ⬜ Queued | 1 |
-| PR-ADS-007 | Render deployment | ⬜ Queued | 1 |
-| PR-ADS-008 | OCT uploader (dry-run only) | ⬜ Phase 2 gate | 2 |
-| PR-ADS-009 | OCT live activation | ⬜ Phase 2 gate | 2 |
-| PR-ADS-010 | Negative keyword push | ⬜ Phase 3 gate | 3 |
-| PR-ADS-011 | FastAPI server | ⬜ Phase 4 | 4 |
-| PR-ADS-012 | Run History / Persistent Logs | ✅ Merged | 1 |
-| PR-ADS-013 | Healthcheck / Environment Validation | ✅ Merged | 1 |
-| PR-ADS-014 | Roadmap / PR Status Sync Cleanup | ✅ Merged | 1 |
-| PR-ADS-015 | Manual Ops Runner / Makefile Commands | ✅ Merged | 1 |
-| PR-ADS-016 | Frontend dashboard | ⬜ Phase 4 | 4 |
-| PR-ADS-017 | Meta Ads integration | ⬜ Phase 4 | 4 |
+| PR-ADS-012 | Run history / persistent logs | ✅ Merged | 1 |
+| PR-ADS-013 | Healthcheck / environment validation | ✅ Merged | 1 |
+| PR-ADS-014 | Roadmap / PR status sync cleanup | ✅ Merged | 1 |
+| PR-ADS-015 | Manual ops runner / Makefile | ✅ Merged | 1 |
+
+### Active — Phase 1 Stabilization
+
+| PR | Module | Description | Status |
+|----|--------|-------------|--------|
+| PR-ADS-012 | `docs/` + `config/` | Repository reality sync — this PR | 🔨 Active |
+| PR-ADS-013 | `scheduler/daily.py` + `config/` | Broken reference fix (doctrine import, patterns.yaml path, logistaas_config.yaml) | ⬜ Next |
+| PR-ADS-014 | `scheduler/daily.py` | Daily scheduler rebuild — correct imports + config alignment | ⬜ Queued |
+
+### Phase 1 Completion Gate (all must pass before Phase 2)
+
+| PR | Module | Description | Status |
+|----|--------|-------------|--------|
+| PR-ADS-005 | `config/` | Config + pattern hardening (validate all YAML keys, create missing config files) | ⬜ Queued |
+| PR-ADS-006 | System-wide | End-to-end test + first real report on live environment | ⬜ Queued |
+| PR-ADS-007 | Render | Deploy to Render, verify all 3 cron jobs registered and running | ⬜ Queued |
+
+### Phase 2 — Signal Correction (after Phase 1 validated)
+
+| PR | Module | Description | Status |
+|----|--------|-------------|--------|
+| PR-ADS-008 | `connectors/oct_uploader.py` | OCT uploader — dry-run only, no live Google Ads writes | ⬜ Phase 2 gate |
+| PR-ADS-009 | OCT live activation | First live OCT upload after explicit human approval | ⬜ Phase 2 gate |
+
+### Phase 3+ (future)
+
+| PR | Module | Description | Status |
+|----|--------|-------------|--------|
+| PR-ADS-010 | `connectors/negative_pusher.py` | Negative keyword push with human approval gate | ⬜ Phase 3 |
+| PR-ADS-011 | `api/server.py` | FastAPI on-demand endpoints | ⬜ Phase 4 |
+| PR-ADS-016 | Frontend | Next.js war room dashboard | ⬜ Phase 4 |
+| PR-ADS-017 | Meta Ads | Windsor.ai Meta connector + unified analysis | ⬜ Phase 4 |
 
 ---
 
