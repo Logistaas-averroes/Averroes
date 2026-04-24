@@ -109,23 +109,31 @@ Timezone:           Asia/Amman (UTC+3)
 
 ## Current Task (Update This Each Session)
 
-**Currently building:** PR-ADS-002 — Scheduler (weekly.py + daily.py)
+> **Do NOT assume the roadmap from memory.**
+> Always read `docs/04_PHASE_ROADMAP.md` directly to identify the current active PR.
 
-`scheduler/weekly.py` should:
-1. Call `windsor_pull.pull_campaign_performance()` and `windsor_pull.pull_search_terms()`
-2. Call `hubspot_pull.pull_paid_search_contacts()` and `hubspot_pull.pull_deals_with_gclid()`
-3. Call `gclid_match.run_gclid_match()`
-4. Call `core.run_waste_detection()`, `core.run_lead_quality()`, `core.run_campaign_truth()`
-5. Call `advisor.generate_weekly_report()`
-6. Send output by email to `REPORT_EMAIL` env var
-7. Log completion
+**Currently building:** PR-ADS-012 — Repository Reality Sync & Roadmap Correction
 
-`scheduler/daily.py` should:
-1. Pull last 2 days of HubSpot contacts only
-2. Check for fraud patterns against `config/junk_patterns.yaml`
-3. If new fraud contacts spike >20% above 7-day baseline → send alert email
-4. Otherwise → log "clean" and exit
-5. Must complete in under 2 minutes
+This PR:
+- Updates roadmap in `docs/04_PHASE_ROADMAP.md` to reflect actual repo state
+- Updates this file to remove stale PR-ADS-002 instructions
+- Updates `docs/01_PROJECT_MASTER.md` Phase 1 status to stabilization
+- Adds PR classification requirements to `docs/PR_TEMPLATE.md`
+- Creates `docs/09_REPO_STATE.md` as single source of truth for actual repo state
+
+---
+
+## Known Broken References (as of PR-ADS-012)
+
+The following exist in code but are **not yet fixed** (tracked in PR-ADS-013):
+
+| Reference | Location | Issue |
+|-----------|----------|-------|
+| `from doctrine.advisor import run_daily_analysis` | `scheduler/daily.py:51` | `doctrine/` directory does not exist |
+| `config/patterns.yaml` | `scheduler/daily.py:127` | File is `config/junk_patterns.yaml`, not `patterns.yaml` |
+| `config/logistaas_config.yaml` | `connectors/gclid_match.py:53` | File does not exist; code falls back to default |
+
+Do not attempt to use `scheduler/daily.py` until PR-ADS-013 is merged.
 
 ---
 

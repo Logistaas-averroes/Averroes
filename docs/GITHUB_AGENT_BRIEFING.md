@@ -35,8 +35,8 @@ Full rules in: `docs/DOCTRINE.md`
 - Brand and non-brand data must NEVER be mixed.
 - Never optimise for CPL. Always CPQL (Cost Per Qualified Lead).
 - Every campaign must be classified: FIX / HOLD / SCALE / CUT.
-- Junk patterns sourced from `config/patterns.yaml` — never hardcoded.
-- Thresholds from `config/logistaas_config.yaml` — never hardcoded.
+- Junk patterns sourced from `config/junk_patterns.yaml` — never hardcoded.
+- Thresholds from `config/thresholds.yaml` — never hardcoded (`config/logistaas_config.yaml` does not yet exist; tracked in PR-ADS-005).
 
 ---
 
@@ -107,8 +107,9 @@ logistaas-ads-intelligence/
 ├── api/
 │   └── server.py             ⬜ BUILD THIS (Phase 4 — PR-ADS-011)
 ├── config/
-│   ├── logistaas_config.yaml ✅ EXISTS — source of truth for all thresholds
-│   └── patterns.yaml         ✅ EXISTS — junk detection patterns
+│   ├── logistaas_config.yaml ⬜ MISSING — tracked in PR-ADS-005 (gclid_match.py falls back to defaults)
+│   ├── patterns.yaml         ⬜ MISSING — scheduler/daily.py references this; actual file is junk_patterns.yaml
+│   └── junk_patterns.yaml    ✅ EXISTS — junk detection patterns
 ├── docs/
 │   ├── DOCTRINE.md           ✅ EXISTS — Claude system prompt source
 │   ├── PR_TEMPLATE.md        ✅ EXISTS — use for every PR
@@ -130,17 +131,19 @@ logistaas-ads-intelligence/
 | PR-ADS-002 | Daily + weekly schedulers | ✅ Complete |
 | PR-ADS-003 | Monthly scheduler + delivery | ✅ Complete |
 | PR-ADS-004 | Analysis core + advisor | ✅ Complete |
-| PR-ADS-012 | Run history / persistent logs | ✅ Complete |
-| PR-ADS-013 | Healthcheck / environment validation | ✅ Complete |
-| PR-ADS-014 | Roadmap / PR status sync cleanup | ✅ Complete |
-| PR-ADS-015 | Manual ops runner / Makefile | ✅ Complete |
+| (unnumbered) | Run history (`scheduler/run_history.py`) | ✅ Complete |
+| (unnumbered) | Healthcheck (`scripts/healthcheck.py`) | ✅ Complete |
+| (unnumbered) | Makefile / manual ops runner | ✅ Complete |
+| PR-ADS-012 | Repository reality sync + docs | ✅ Complete |
 
-### Queued (Phase 1 remaining)
+### Queued (Phase 1 stabilization — next in order)
 | PR ID | Module | What it does |
 |-------|--------|-------------|
-| PR-ADS-005 | Config + pattern hardening | Validate all YAML config keys; update patterns.yaml |
-| PR-ADS-006 | End-to-end test + first real report | Run full weekly pipeline on live env, verify report |
-| PR-ADS-007 | Render deployment | Deploy to Render, register all 3 cron jobs |
+| PR-ADS-013 | `scheduler/daily.py` + `config/` | Broken reference fix (doctrine import, patterns.yaml path, logistaas_config.yaml) |
+| PR-ADS-014 | `scheduler/daily.py` | Daily scheduler rebuild — correct imports + config alignment |
+| PR-ADS-005 | `config/` | Config hardening — create missing config files, validate all YAML keys |
+| PR-ADS-006 | System-wide | End-to-end test + first real report on live environment |
+| PR-ADS-007 | Render | Deploy to Render, verify all 3 cron jobs active |
 
 ### Phase 2 (after Phase 1 validated)
 | PR ID | Module | What it does |
@@ -196,8 +199,8 @@ api/        → ONLY exposes scheduler triggers as HTTP endpoints
 - Never commit data files
 
 ### Config rules
-- All thresholds → `config/logistaas_config.yaml`
-- All junk patterns → `config/patterns.yaml`
+- All thresholds → `config/thresholds.yaml`
+- All junk patterns → `config/junk_patterns.yaml`
 - All secrets → environment variables (never in code)
 
 ---
@@ -223,10 +226,10 @@ SLACK_WEBHOOK_URL         # optional
 ## How to Start Each Session
 
 1. Read this file
-2. Read `docs/DOCTRINE.md`
-3. Check which modules are `✅ EXISTS` vs `⬜ BUILD`
-4. Pick the next `⬜ BUILD` in phase order
-5. Build it, test it locally, open PR using `docs/PR_TEMPLATE.md`
+2. Read `docs/04_PHASE_ROADMAP.md` — identifies the current active PR
+3. Read `docs/09_REPO_STATE.md` — identifies what is built, broken, and missing
+4. Read `docs/DOCTRINE.md`
+5. Build only what the current PR description specifies
 
 ---
 
@@ -247,4 +250,6 @@ If you can't answer yes to all of these, the PR is not ready.
 
 **Project owner:** Youssef Awwad — youssef.awwad@logistaas.com
 **Doctrine authority:** `docs/DOCTRINE.md` (this is the final word on all ad strategy decisions)
-**Config authority:** `config/logistaas_config.yaml` (this is the final word on all thresholds)
+**Config authority:** `config/thresholds.yaml` (decision thresholds) and `config/junk_patterns.yaml` (junk patterns)
+**Roadmap authority:** `docs/04_PHASE_ROADMAP.md` — always read this before starting a session
+**Repo state authority:** `docs/09_REPO_STATE.md` — single source of truth for what is built, broken, or missing

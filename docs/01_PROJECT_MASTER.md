@@ -64,8 +64,13 @@ Logistaas has confirmed this pattern in live data:
 ### Phase 1 — Signal Intelligence (Current)
 **Duration:** 4–8 weeks minimum before advancing
 **What it does:** Reads data, finds waste, reports findings. Nothing more.
+**Current State: Built, entering stabilization**
 **Outputs:** Weekly report answering "where am I losing money?"
 **No write-back to Google Ads. No automation. Human decides everything.**
+
+> **Note:** All Phase 1 modules are written. The system is not yet validated end-to-end.
+> No automation is active or permitted until validation is confirmed.
+> See `docs/09_REPO_STATE.md` for current file-level status.
 
 ### Phase 2 — Signal Correction
 **Prerequisite:** Phase 1 validated for 4+ weeks. At least 3 recommendations verified correct.
