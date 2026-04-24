@@ -221,10 +221,45 @@ scheduled run time, the job will execute immediately on startup.
 
 ---
 
+## Live Deployment Verification
+
+After deploying to Render, verify the live service from the outside:
+
+```bash
+SERVICE_URL=https://your-service.onrender.com python scripts/verify_live_deployment.py
+```
+
+Optional daily trigger (only if you want to test the authenticated run endpoint):
+
+```bash
+SERVICE_URL=https://your-service.onrender.com ADMIN_API_TOKEN=xxx python scripts/verify_live_deployment.py --trigger-daily
+```
+
+Or via Makefile:
+
+```bash
+SERVICE_URL=https://your-service.onrender.com make verify-live
+```
+
+**Live deployment checklist:**
+
+- [ ] Render Web Service deploys successfully
+- [ ] `/health` returns OK
+- [ ] `/readiness` returns structured status
+- [ ] `/scheduler/status` returns jobs
+- [ ] dashboard loads at `/`
+- [ ] protected run endpoints reject missing/wrong tokens
+- [ ] manual daily trigger works with valid token
+- [ ] no separate Render cron services are active
+- [ ] first report delivery checked via logs/email
+
+---
+
 ## Post-Merge Verification Checklist
 
 After deploying, confirm the following:
 
+- [ ] **Live verification passes** — run `make verify-live`; all checks show PASS
 - [ ] **Healthcheck passes** — run `make healthcheck`; all critical checks show PASS
 - [ ] **Phase 1 validation passes** — run `make validate`; no stale references reported
 - [ ] **Scheduler running** — `GET /scheduler/status` returns `"status": "running"` with all three jobs and non-null `next_run` values
