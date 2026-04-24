@@ -94,6 +94,8 @@ All times are UTC. Render cron jobs run in UTC by default.
 
 After deploying, confirm the following in the Render dashboard:
 
+- [ ] **Healthcheck passes** — run `make healthcheck`; all critical checks show PASS
+- [ ] **Phase 1 validation passes** — run `make validate`; no stale references reported
 - [ ] **Daily job registered** — `logistaas-daily-pulse` visible under Cron Jobs with schedule `0 6 * * *`
 - [ ] **Weekly job registered** — `logistaas-weekly-report` visible with schedule `0 7 * * 1`
 - [ ] **Monthly job registered** — `logistaas-monthly-strategy` visible with schedule `0 7 1 * *`
@@ -155,11 +157,36 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with real credentials
 
-# 3. Run each scheduler manually
+# 3. Run the preflight healthcheck
+make healthcheck
+# or directly:
+python scripts/healthcheck.py
+
+# 4. Run Phase 1 end-to-end validation (syntax, YAML, docs, stale refs)
+make validate
+# or directly:
+python scripts/validate_phase1.py
+
+# 5. Run each scheduler manually
+make daily
+make weekly
+make monthly
+# or directly:
 python scheduler/daily.py
 python scheduler/weekly.py
 python scheduler/monthly.py
 ```
+
+### Makefile command reference
+
+| Command | Runs | Purpose |
+|---------|------|---------|
+| `make healthcheck` | `python scripts/healthcheck.py` | Validate env vars, dirs, imports |
+| `make daily` | `python -m scheduler.daily` | Run the daily pulse |
+| `make weekly` | `python -m scheduler.weekly` | Run the weekly report |
+| `make monthly` | `python -m scheduler.monthly` | Run the monthly report |
+| `make validate` | `python scripts/validate_phase1.py` | Phase 1 read-only validation |
+| `make runs` | `tail runtime_logs/run_history.jsonl` | Show last 20 run records |
 
 To syntax-check without running:
 ```bash

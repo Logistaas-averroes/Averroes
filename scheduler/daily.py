@@ -33,17 +33,23 @@ def run_daily_pulse():
         crm_summary = get_lead_quality_summary(contacts)
 
         # 2. Detect anomalies
-        print("Step 3/4: Running anomaly detection...")
+        print("Step 3/5: Running anomaly detection...")
         anomalies = detect_anomalies(campaigns)
+        label = "anomaly" if len(anomalies) == 1 else "anomalies"
+        print(f"  → {len(anomalies)} {label} found.")
 
         # 3. Check for new junk terms (quick pattern match)
-        print("Step 4/4: Checking for new junk search terms...")
+        print("Step 4/5: Checking for new junk search terms...")
         from connectors.windsor_pull import pull_search_terms
         search_terms = pull_search_terms(days_back=1)
         new_junk = detect_junk_terms(search_terms)
+        label = "junk term" if len(new_junk) == 1 else "junk terms"
+        print(f"  → {len(new_junk)} new {label} found.")
 
-        # 4. CRM delta check
+        # 4. CRM delta check + budget pacing
+        print("Step 5/5: Checking CRM delta and budget pacing...")
         crm_delta = check_crm_delta(campaigns, crm_summary)
+        print(f"  → CRM delta alert: {crm_delta.get('alert', False)} ({crm_delta.get('message', '')})")
 
         budget_pacing = check_budget_pacing(campaigns)
 
