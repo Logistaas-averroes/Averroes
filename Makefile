@@ -14,7 +14,7 @@
 #   - No hardcoded secrets or paths.
 #   - Commands fail clearly when required env vars are missing.
 
-.PHONY: healthcheck daily weekly monthly validate runs help
+.PHONY: healthcheck daily weekly monthly validate readiness runs help
 
 # Default target
 help:
@@ -26,6 +26,7 @@ help:
 	@echo "  make weekly        Run the weekly report scheduler"
 	@echo "  make monthly       Run the monthly report scheduler"
 	@echo "  make validate      Run Phase 1 end-to-end validation"
+	@echo "  make readiness     Run Phase 1 production readiness audit"
 	@echo "  make runs          Show recent run history (last 20 records)"
 	@echo ""
 
@@ -43,6 +44,9 @@ monthly:
 
 validate:
 	python scripts/validate_phase1.py
+
+readiness:
+	python scripts/phase1_readiness.py
 
 runs:
 	@if [ -f runtime_logs/run_history.jsonl ]; then \

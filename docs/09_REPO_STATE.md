@@ -1,7 +1,7 @@
 # Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-014 — Phase 1 Operational Readiness Pack (April 2026)
+**Last updated:** PR-ADS-015 — Phase 1 Production Readiness Audit (April 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -29,6 +29,8 @@
 | `Makefile` | Manual ops runner | `healthcheck`, `daily`, `weekly`, `monthly`, `validate`, `runs` targets |
 | `scheduler/daily.py` | Daily pulse orchestrator | Step counter fixed; structured logging per step; result saved to `outputs/daily_YYYY-MM-DD.json` |
 | `scripts/validate_phase1.py` | Phase 1 read-only validation | Syntax, YAML, docs, and stale-reference checks |
+| `scripts/phase1_readiness.py` | Phase 1 production readiness audit | Env vars, files, Makefile targets, render.yaml, forbidden modules, delegates to healthcheck + validate |
+| `docs/PHASE1_PRODUCTION_READINESS.md` | Go/no-go checklist | Official Phase 1 production readiness gate |
 | `.env.example` | Environment variable reference | All required vars documented |
 | `requirements.txt` | Python dependencies | All runtime deps present |
 
@@ -61,19 +63,23 @@ No files are currently in a broken state.
 
 ---
 
-## Current PR Index (from PR-ADS-014)
+## Current PR Index (from PR-ADS-015)
 
 | PR | Description | Status |
 |----|-------------|--------|
 | PR-ADS-012 | Repository reality sync + docs | ✅ Complete |
 | PR-ADS-013 | Broken reference fix (`scheduler/daily.py`, `config/patterns.yaml`) | ✅ Complete |
-| PR-ADS-014 | Phase 1 Operational Readiness Pack (healthcheck, validate, Makefile, daily hardening, docs) | 🔨 This PR |
-| PR-ADS-015 | Phase 1 Production Readiness Audit | ⬜ Next — unblocked by this PR |
-| PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Queued |
+| PR-ADS-014 | Phase 1 Operational Readiness Pack (healthcheck, validate, Makefile, daily hardening, docs) | ✅ Complete |
+| PR-ADS-015 | Phase 1 Production Readiness Audit (readiness script, go/no-go checklist, Makefile target, docs) | ✅ This PR |
+| **Next state** | **4-week Phase 1 validation period** | 🟢 Active |
+| PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 
 ---
 
 ## What Is Intentionally Not Built (Phase 2+)
+
+> These items are **deferred by design**, not missing or broken.
+> OCT and negative push require Phase 1 to be proven accurate before activation.
 
 - `connectors/oct_uploader.py` — Phase 2 gate, requires Phase 1 validated
 - `connectors/negative_pusher.py` — Phase 3
