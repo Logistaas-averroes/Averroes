@@ -1,7 +1,7 @@
 # Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-018 — Modern UI Dashboard Foundation (April 2026)
+**Last updated:** PR-ADS-019 — In-App Scheduler + Render Cron Decommission (April 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -25,7 +25,7 @@
 | `scripts/healthcheck.py` | Pre-flight environment check | Validates env vars, dirs, imports; exits non-zero on failure |
 | `config/thresholds.yaml` | Decision thresholds | FIX/HOLD/SCALE/CUT rules; lead quality; waste detection |
 | `config/junk_patterns.yaml` | Junk pattern library | Intent mismatch patterns; safe-terms whitelist |
-| `render.yaml` | Render.com deployment | Web service (uvicorn) + 3 cron jobs: daily (6am), weekly (Mon 7am), monthly (1st 7am) |
+| `render.yaml` | Render.com deployment | **Single web service** (uvicorn); Render cron jobs decommissioned by PR-ADS-019; in-app APScheduler handles all scheduled jobs |
 | `Makefile` | Manual ops runner | `healthcheck`, `daily`, `weekly`, `monthly`, `validate`, `runs` targets |
 | `scheduler/daily.py` | Daily pulse orchestrator | Step counter fixed; structured logging per step; result saved to `outputs/daily_YYYY-MM-DD.json` |
 | `scripts/validate_phase1.py` | Phase 1 read-only validation | Syntax, YAML, docs, and stale-reference checks |
@@ -34,9 +34,10 @@
 | `.env.example` | Environment variable reference | All required vars documented |
 | `requirements.txt` | Python dependencies | All runtime deps present |
 | `api/__init__.py` | API package declaration | Declares `api/` as a Python package |
-| `api/server.py` | FastAPI web entry point | Phase 1 endpoints: `/health`, `/readiness`, `/runs/latest`, `/reports/latest`, `/reports/latest/raw`; protected run endpoints: `POST /run/daily`, `/run/weekly`, `/run/monthly`; `GET /` serves dashboard |
-| `static/index.html` | Dashboard UI | System status cards, latest run/report panels, manual run controls, doctrine reminder |
-| `static/app.js` | Dashboard frontend logic | Fetches all API endpoints; triggers runs with Bearer token; stores token in sessionStorage only |
+| `api/server.py` | FastAPI web entry point | Phase 1 endpoints: `/health`, `/readiness`, `/runs/latest`, `/reports/latest`, `/reports/latest/raw`, `/scheduler/status`; protected run endpoints: `POST /run/daily`, `/run/weekly`, `/run/monthly`; `GET /` serves dashboard; starts/stops in-app scheduler via lifespan handler |
+| `api/scheduler.py` | In-app APScheduler | Schedules daily (06:00), weekly (Mon 07:00), monthly (1st 08:00) Phase 1 jobs in Asia/Amman timezone; exposes shared lock state and `get_scheduler_status()` |
+| `static/index.html` | Dashboard UI | System status cards (health, readiness, run, report, scheduler), latest run/report panels, scheduler status panel, manual run controls, doctrine reminder |
+| `static/app.js` | Dashboard frontend logic | Fetches all API endpoints including `/scheduler/status`; triggers runs with Bearer token; stores token in sessionStorage only |
 | `static/styles.css` | Dashboard styles | Modern neutral SaaS style; responsive cards and panels |
 
 ---
@@ -77,8 +78,9 @@ No files are currently in a broken state.
 | PR-ADS-015 | Phase 1 Production Readiness Audit (readiness script, go/no-go checklist, Makefile target, docs) | ✅ Complete |
 | PR-ADS-016 | Single Web Service Foundation (`api/server.py`, FastAPI, Render web service) | ✅ Complete |
 | PR-ADS-017 | Protected Manual Run Endpoints (`POST /run/daily`, `/run/weekly`, `/run/monthly`) | ✅ Complete |
-| PR-ADS-018 | Modern UI Dashboard Foundation (`static/index.html`, `app.js`, `styles.css`, `GET /`) | ✅ This PR |
-| **Next state** | **PR-ADS-019 — In-App Scheduler** | 🟢 Next |
+| PR-ADS-018 | Modern UI Dashboard Foundation (`static/index.html`, `app.js`, `styles.css`, `GET /`) | ✅ Complete |
+| PR-ADS-019 | In-App Scheduler + Render Cron Decommission (`api/scheduler.py`, `GET /scheduler/status`, single-service `render.yaml`) | ✅ This PR |
+| **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 
 ---
@@ -92,5 +94,5 @@ No files are currently in a broken state.
 - `connectors/negative_pusher.py` — Phase 3
 - Manual run API endpoints — built in PR-ADS-017 (requires `ADMIN_API_TOKEN`)
 - Frontend dashboard — built in PR-ADS-018
-- In-app scheduler — PR-ADS-019 (not yet built)
+- In-app scheduler — built in PR-ADS-019 (APScheduler, runs inside web service process)
 - Meta Ads connector — Phase 4

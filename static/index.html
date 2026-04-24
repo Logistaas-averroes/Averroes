@@ -56,6 +56,13 @@
         </div>
       </div>
 
+      <div class="card" id="card-scheduler">
+        <div class="card__label">Scheduler</div>
+        <div class="card__value">
+          <span class="badge badge--loading"><span class="dot"></span>loading…</span>
+        </div>
+      </div>
+
     </div>
 
     <!-- Latest Run + Latest Report panels -->
@@ -86,6 +93,15 @@
         </div>
       </div>
 
+    </div>
+
+    <!-- Scheduler Status -->
+    <p class="section-title">Scheduler</p>
+    <div class="panel">
+      <div class="panel__header">In-App Scheduler Status</div>
+      <div class="panel__body" id="scheduler-panel-body">
+        <p class="empty-state">Loading scheduler status…</p>
+      </div>
     </div>
 
     <!-- Manual Run Controls -->
@@ -132,7 +148,7 @@
         <li>AI explains, humans decide. All recommendations require human review.</li>
         <li>No write-back to Google Ads. No write-back to HubSpot.</li>
         <li>Manual run buttons only trigger existing Phase 1 schedulers — no additional logic.</li>
-        <li>In-app scheduler not yet available (PR-ADS-019).</li>
+        <li>In-app scheduler runs daily (06:00), weekly (Mon 07:00), and monthly (1st 08:00) in Asia/Amman timezone.</li>
       </ul>
     </div>
 
