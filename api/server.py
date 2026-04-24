@@ -290,7 +290,10 @@ def run_daily(request: Request) -> dict[str, Any]:
         from scheduler.daily import run_daily_pulse  # noqa: PLC0415
         result = run_daily_pulse()
         finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        report_path = f"outputs/daily_{datetime.utcnow().strftime('%Y-%m-%d')}.json"
+        report_path = result.get(
+            "report_path",
+            f"outputs/daily_{datetime.now(tz=timezone.utc).strftime('%Y-%m-%d')}.json",
+        ) if isinstance(result, dict) else f"outputs/daily_{datetime.now(tz=timezone.utc).strftime('%Y-%m-%d')}.json"
         log.info("[run/daily] succeeded, finished at %s", finished_at)
         return {
             "status": "success",
@@ -301,13 +304,13 @@ def run_daily(request: Request) -> dict[str, Any]:
         }
     except Exception as exc:  # noqa: BLE001
         finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        log.error("[run/daily] failed: %s", exc)
+        log.error("[run/daily] failed: %s", exc, exc_info=True)
         return {
             "status": "failed",
             "job": "daily",
             "started_at": started_at,
             "finished_at": finished_at,
-            "error": str(exc),
+            "error": f"{type(exc).__name__}: scheduler execution failed",
         }
     finally:
         with _run_lock:
@@ -343,13 +346,13 @@ def run_weekly(request: Request) -> dict[str, Any]:
         }
     except Exception as exc:  # noqa: BLE001
         finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        log.error("[run/weekly] failed: %s", exc)
+        log.error("[run/weekly] failed: %s", exc, exc_info=True)
         return {
             "status": "failed",
             "job": "weekly",
             "started_at": started_at,
             "finished_at": finished_at,
-            "error": str(exc),
+            "error": f"{type(exc).__name__}: scheduler execution failed",
         }
     finally:
         with _run_lock:
@@ -385,13 +388,13 @@ def run_monthly(request: Request) -> dict[str, Any]:
         }
     except Exception as exc:  # noqa: BLE001
         finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        log.error("[run/monthly] failed: %s", exc)
+        log.error("[run/monthly] failed: %s", exc, exc_info=True)
         return {
             "status": "failed",
             "job": "monthly",
             "started_at": started_at,
             "finished_at": finished_at,
-            "error": str(exc),
+            "error": f"{type(exc).__name__}: scheduler execution failed",
         }
     finally:
         with _run_lock:
