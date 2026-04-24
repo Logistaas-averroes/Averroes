@@ -30,6 +30,10 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 
+# Read APP_ENV for context (e.g. "development" vs "production").
+# Not currently used in routing logic but available for future conditional behaviour.
+APP_ENV = os.getenv("APP_ENV", "production")
+
 app = FastAPI(
     title="Logistaas Ads Intelligence",
     description="Phase 1 read-only API — health, readiness, and report endpoints.",
@@ -211,7 +215,7 @@ def reports_latest_raw() -> str:
     """Return the raw content of the latest markdown report as text/plain."""
     report_path = _latest_report_path()
 
-    if report_path is None or not report_path.suffix == ".md":
+    if report_path is None or report_path.suffix != ".md":
         raise HTTPException(status_code=404, detail="No markdown report found")
 
     try:
