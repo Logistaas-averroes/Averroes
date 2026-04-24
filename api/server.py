@@ -14,6 +14,7 @@ Responsibility:
   - NO secrets or PII in responses.
 
 Endpoints:
+  GET  /                    — Dashboard UI (serves static/index.html).
   GET  /health              — Simple liveness check.
   GET  /readiness           — Structured readiness check (dirs, config, imports).
   GET  /runs/latest         — Latest record from runtime_logs/run_history.jsonl.
@@ -35,7 +36,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +59,13 @@ app = FastAPI(
     description="Phase 1 read-only API — health, readiness, and report endpoints.",
     version="1.0.0",
 )
+
+# ---------------------------------------------------------------------------
+# Static assets — served at /static/
+# ---------------------------------------------------------------------------
+_STATIC_DIR = Path(__file__).parent.parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 # ---------------------------------------------------------------------------
 # Path constants — relative to the repo root (CWD when uvicorn starts).
@@ -105,6 +114,15 @@ def _latest_report_path() -> Path | None:
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def dashboard() -> str:
+    """Serve the main dashboard page."""
+    html_file = _STATIC_DIR / "index.html"
+    if not html_file.is_file():
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+    return html_file.read_text(encoding="utf-8")
+
 
 @app.get("/health")
 def health() -> dict[str, str]:

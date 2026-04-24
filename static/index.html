@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Logistaas Ads Intelligence — Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header class="site-header">
+    <div class="site-header__brand">
+      <div class="site-header__title">Logistaas Ads Intelligence</div>
+    </div>
+    <div class="site-header__meta">
+      <span id="header-health-badge" class="badge badge--loading">
+        <span class="dot"></span>loading…
+      </span>
+      <span class="badge badge--phase">Phase 1 — Read Only</span>
+    </div>
+  </header>
+
+  <!-- ── Page content ───────────────────────────────────────────────────── -->
+  <main class="page-content">
+
+    <!-- System status cards -->
+    <p class="section-title">System Status</p>
+    <div class="cards-grid">
+
+      <div class="card" id="card-health">
+        <div class="card__label">Health</div>
+        <div class="card__value">
+          <span class="badge badge--loading"><span class="dot"></span>loading…</span>
+        </div>
+      </div>
+
+      <div class="card" id="card-readiness">
+        <div class="card__label">Readiness</div>
+        <div class="card__value">
+          <span class="badge badge--loading"><span class="dot"></span>loading…</span>
+        </div>
+      </div>
+
+      <div class="card" id="card-run">
+        <div class="card__label">Latest Run</div>
+        <div class="card__value">
+          <span class="badge badge--loading"><span class="dot"></span>loading…</span>
+        </div>
+      </div>
+
+      <div class="card" id="card-report">
+        <div class="card__label">Latest Report</div>
+        <div class="card__value">
+          <span class="badge badge--loading"><span class="dot"></span>loading…</span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Latest Run + Latest Report panels -->
+    <p class="section-title">Details</p>
+    <div class="panels-grid">
+
+      <!-- Latest Run Panel -->
+      <div class="panel">
+        <div class="panel__header">Latest Run</div>
+        <div class="panel__body" id="run-panel-body">
+          <p class="empty-state">Loading run data…</p>
+        </div>
+      </div>
+
+      <!-- Latest Report Panel -->
+      <div class="panel">
+        <div class="panel__header">
+          Latest Report
+          <button class="btn btn--secondary" id="btn-view-raw" style="text-transform:none;font-size:.8rem;padding:.3rem .7rem;">
+            View Raw Report
+          </button>
+        </div>
+        <div class="panel__body" id="report-panel-body">
+          <p class="empty-state">Loading report data…</p>
+        </div>
+        <div class="panel__body" style="padding-top:0;">
+          <pre class="report-viewer" id="report-raw-viewer"></pre>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Manual Run Controls -->
+    <p class="section-title">Manual Run Controls</p>
+    <div class="panel">
+      <div class="panel__header">Trigger a Scheduler Run</div>
+      <div class="panel__body">
+        <div class="run-controls">
+
+          <div class="token-field">
+            <label for="admin-token-input">ADMIN_API_TOKEN</label>
+            <input
+              type="password"
+              id="admin-token-input"
+              placeholder="Paste your ADMIN_API_TOKEN here"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <span style="font-size:.78rem;color:var(--text-muted);">
+              Token is stored in session memory only — cleared when the tab closes.
+              Do not share or expose this token.
+            </span>
+          </div>
+
+          <div class="run-buttons">
+            <button class="btn btn--primary" id="btn-run-daily">▶ Run Daily</button>
+            <button class="btn btn--primary" id="btn-run-weekly">▶ Run Weekly</button>
+            <button class="btn btn--primary" id="btn-run-monthly">▶ Run Monthly</button>
+            <button class="btn btn--secondary" id="btn-clear-token">Clear Token</button>
+          </div>
+
+          <div class="run-feedback" id="run-feedback"></div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- Doctrine Reminder -->
+    <p class="section-title">Doctrine</p>
+    <div class="doctrine-box">
+      <div class="doctrine-box__title">⚖️ Phase 1 — Read Only</div>
+      <ul>
+        <li>This system is in read-only Phase 1. No actions are taken automatically.</li>
+        <li>AI explains, humans decide. All recommendations require human review.</li>
+        <li>No write-back to Google Ads. No write-back to HubSpot.</li>
+        <li>Manual run buttons only trigger existing Phase 1 schedulers — no additional logic.</li>
+        <li>In-app scheduler not yet available (PR-ADS-019).</li>
+      </ul>
+    </div>
+
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -284,10 +284,35 @@ python -m py_compile scheduler/monthly.py
 
 ---
 
+## Web UI Dashboard (PR-ADS-018)
+
+The dashboard is served at `/` and provides:
+
+- **System status cards** — health, readiness, latest run, latest report.
+- **Latest Run panel** — reads from `/runs/latest`.
+- **Latest Report panel** — reads from `/reports/latest`; raw report viewer calls `/reports/latest/raw`.
+- **Manual Run Controls** — buttons for Daily, Weekly, Monthly. Require `ADMIN_API_TOKEN`.
+- **Doctrine reminder** — Phase 1 read-only status always visible.
+
+### Token security
+
+- `ADMIN_API_TOKEN` is **only required for manual run buttons**. Health and readiness are public.
+- The token is stored in `sessionStorage` only (cleared when the tab closes). It is never persisted to `localStorage` or cookies.
+- Do **not** expose `ADMIN_API_TOKEN` publicly or commit it to source control.
+
+### Local verification
+
+```bash
+python -m uvicorn api.server:app --host 0.0.0.0 --port 8000
+# Open http://localhost:8000/
+```
+
+---
+
 ## Non-Goals (Phase 1)
 
 - No Slack delivery
 - No retry queue
 - No OCT uploads (requires `connectors/oct_uploader.py`)
-- No dashboard
+- No in-app scheduler (PR-ADS-019)
 - No manual run endpoints via API — built in PR-ADS-017
