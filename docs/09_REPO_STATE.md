@@ -1,7 +1,7 @@
 # Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-016 — Single Web Service Foundation (April 2026)
+**Last updated:** PR-ADS-017 — Protected Manual Run Endpoints (April 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -34,7 +34,7 @@
 | `.env.example` | Environment variable reference | All required vars documented |
 | `requirements.txt` | Python dependencies | All runtime deps present |
 | `api/__init__.py` | API package declaration | Declares `api/` as a Python package |
-| `api/server.py` | FastAPI web entry point | Phase 1 read-only endpoints: `/health`, `/readiness`, `/runs/latest`, `/reports/latest`, `/reports/latest/raw` |
+| `api/server.py` | FastAPI web entry point | Phase 1 endpoints: `/health`, `/readiness`, `/runs/latest`, `/reports/latest`, `/reports/latest/raw`; protected run endpoints: `POST /run/daily`, `/run/weekly`, `/run/monthly` |
 
 ---
 
@@ -72,8 +72,9 @@ No files are currently in a broken state.
 | PR-ADS-013 | Broken reference fix (`scheduler/daily.py`, `config/patterns.yaml`) | ✅ Complete |
 | PR-ADS-014 | Phase 1 Operational Readiness Pack (healthcheck, validate, Makefile, daily hardening, docs) | ✅ Complete |
 | PR-ADS-015 | Phase 1 Production Readiness Audit (readiness script, go/no-go checklist, Makefile target, docs) | ✅ Complete |
-| PR-ADS-016 | Single Web Service Foundation (`api/server.py`, FastAPI, Render web service) | ✅ This PR |
-| **Next state** | **PR-ADS-017 — Protected Manual Run Endpoints** | 🟢 Next |
+| PR-ADS-016 | Single Web Service Foundation (`api/server.py`, FastAPI, Render web service) | ✅ Complete |
+| PR-ADS-017 | Protected Manual Run Endpoints (`POST /run/daily`, `/run/weekly`, `/run/monthly`) | ✅ This PR |
+| **Next state** | **PR-ADS-018 — UI Dashboard** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 
 ---
@@ -85,6 +86,6 @@ No files are currently in a broken state.
 
 - `connectors/oct_uploader.py` — Phase 2 gate, requires Phase 1 validated
 - `connectors/negative_pusher.py` — Phase 3
-- Manual run API endpoints — PR-ADS-017 (requires auth/protection)
-- Frontend dashboard — Phase 4
+- Manual run API endpoints — built in PR-ADS-017 (requires `ADMIN_API_TOKEN`)
+- Frontend dashboard — Phase 4 (PR-ADS-018)
 - Meta Ads connector — Phase 4

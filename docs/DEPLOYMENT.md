@@ -22,7 +22,7 @@ All services are defined in `render.yaml` at the repo root.
 
 ---
 
-## Web Service Deployment (PR-ADS-016)
+## Web Service Deployment (PR-ADS-016 / PR-ADS-017)
 
 ### Render settings
 
@@ -42,15 +42,18 @@ All services are defined in `render.yaml` at the repo root.
 
 ### Available endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /health` | Liveness check — returns `{"status": "ok"}` |
-| `GET /readiness` | Structured check — dirs, config files, docs, core imports |
-| `GET /runs/latest` | Latest record from `runtime_logs/run_history.jsonl` |
-| `GET /reports/latest` | Metadata for the most recent file in `outputs/` |
-| `GET /reports/latest/raw` | Raw markdown content of the latest report |
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `GET /health` | None | Liveness check — returns `{"status": "ok"}` |
+| `GET /readiness` | None | Structured check — dirs, config files, docs, core imports |
+| `GET /runs/latest` | None | Latest record from `runtime_logs/run_history.jsonl` |
+| `GET /reports/latest` | None | Metadata for the most recent file in `outputs/` |
+| `GET /reports/latest/raw` | None | Raw markdown content of the latest report |
+| `POST /run/daily` | Bearer | Trigger daily pulse scheduler |
+| `POST /run/weekly` | Bearer | Trigger weekly report scheduler |
+| `POST /run/monthly` | Bearer | Trigger monthly report scheduler |
 
-All endpoints are **read-only**. No external API calls are made from `/health` or `/readiness`.
+Read-only GET endpoints are public. Run endpoints require `Authorization: Bearer <ADMIN_API_TOKEN>`.
 
 ### Local verification
 
@@ -59,13 +62,25 @@ All endpoints are **read-only**. No external API calls are made from `/health` o
 python -m py_compile api/server.py
 
 # Start locally
+export ADMIN_API_TOKEN=test-token
 python -m uvicorn api.server:app --host 0.0.0.0 --port 8000
 
-# Test endpoints
+# Test read-only endpoints (no auth required)
 curl http://localhost:8000/health
 curl http://localhost:8000/readiness
 curl http://localhost:8000/runs/latest
 curl http://localhost:8000/reports/latest
+
+# Test authorized run (returns structured JSON)
+curl -X POST http://localhost:8000/run/daily \
+  -H "Authorization: Bearer $ADMIN_API_TOKEN"
+
+# Test unauthorized run (returns 401)
+curl -X POST http://localhost:8000/run/daily
+
+# Test missing token env (unset ADMIN_API_TOKEN, returns 503)
+unset ADMIN_API_TOKEN
+curl -X POST http://localhost:8000/run/daily
 ```
 
 ---
@@ -76,6 +91,7 @@ Set each variable in the Render dashboard under **Service → Environment** for 
 
 | Variable | Required by | Description |
 |----------|-------------|-------------|
+| `ADMIN_API_TOKEN` | web service | Long random token protecting `/run/*` endpoints — generate with `openssl rand -hex 32` |
 | `ANTHROPIC_API_KEY` | all schedulers | Claude API key for doctrine analysis |
 | `HUBSPOT_API_KEY` | all schedulers | HubSpot private app token |
 | `WINDSOR_API_KEY` | all schedulers | Windsor.ai API key |
@@ -83,6 +99,8 @@ Set each variable in the Render dashboard under **Service → Environment** for 
 | `SENDGRID_API_KEY` | weekly, monthly | SendGrid API key for email delivery |
 | `REPORT_SENDER_EMAIL` | weekly, monthly | Verified SendGrid sender address |
 | `REPORT_RECIPIENT_EMAIL` | weekly, monthly | Report delivery recipient |
+
+> **Security warning:** Run endpoints are protected but powerful. Do not expose `ADMIN_API_TOKEN` in logs or responses. Do not call run endpoints repeatedly in quick succession — schedulers are heavyweight and designed to run at most once per day/week/month.
 
 > **Note:** `GOOGLE_ADS_*` variables are reserved for `connectors/oct_uploader.py` (not yet built). Do not configure them until that module is available.
 
@@ -107,7 +125,27 @@ For each of the three cron services (`logistaas-daily-pulse`, `logistaas-weekly-
 
 Refer to `.env.example` for the full variable reference.
 
-### 3. Trigger a manual run (optional verification)
+### 3. Trigger a manual run via API (PR-ADS-017)
+
+With `ADMIN_API_TOKEN` set on the web service, you can trigger jobs remotely:
+
+```bash
+# Weekly report
+curl -X POST https://<service>.onrender.com/run/weekly \
+  -H "Authorization: Bearer $ADMIN_API_TOKEN"
+
+# Daily pulse
+curl -X POST https://<service>.onrender.com/run/daily \
+  -H "Authorization: Bearer $ADMIN_API_TOKEN"
+
+# Monthly strategy
+curl -X POST https://<service>.onrender.com/run/monthly \
+  -H "Authorization: Bearer $ADMIN_API_TOKEN"
+```
+
+> ⚠️ **Warning:** Run endpoints are protected but still powerful. Do not expose the token. Do not call repeatedly.
+
+### 4. Trigger a manual run via Render dashboard (optional verification)
 
 In the Render dashboard, open any cron service and click **Trigger Run**. Watch the **Logs** tab for output.
 
@@ -252,4 +290,4 @@ python -m py_compile scheduler/monthly.py
 - No retry queue
 - No OCT uploads (requires `connectors/oct_uploader.py`)
 - No dashboard
-- No manual run endpoints via API (PR-ADS-017)
+- No manual run endpoints via API — built in PR-ADS-017
