@@ -289,7 +289,7 @@ document.addEventListener("DOMContentLoaded", () => {
     .addEventListener("click", () => {
       clearToken();
       const feedbackEl = document.getElementById("run-feedback");
-      showFeedback(feedbackEl, "loading", "Token cleared from session.");
+      showFeedback(feedbackEl, "success", "Token cleared from session.");
       setTimeout(() => { feedbackEl.className = "run-feedback"; }, 2000);
     });
 });
