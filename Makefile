@@ -14,7 +14,7 @@
 #   - No hardcoded secrets or paths.
 #   - Commands fail clearly when required env vars are missing.
 
-.PHONY: healthcheck daily weekly monthly validate readiness runs help
+.PHONY: healthcheck daily weekly monthly validate readiness runs verify-live help
 
 # Default target
 help:
@@ -28,6 +28,8 @@ help:
 	@echo "  make validate      Run Phase 1 end-to-end validation"
 	@echo "  make readiness     Run Phase 1 production readiness audit"
 	@echo "  make runs          Show recent run history (last 20 records)"
+	@echo "  make verify-live   Verify the live Render deployment"
+	@echo "                     (set SERVICE_URL=https://... before running)"
 	@echo ""
 
 healthcheck:
@@ -58,3 +60,6 @@ runs:
 	else \
 		echo "No run history found at runtime_logs/run_history.jsonl"; \
 	fi
+
+verify-live:
+	python scripts/verify_live_deployment.py

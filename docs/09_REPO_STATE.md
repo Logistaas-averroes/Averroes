@@ -1,7 +1,7 @@
 # Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-019 — In-App Scheduler + Render Cron Decommission (April 2026)
+**Last updated:** PR-ADS-020 — Live Deployment Verification Pack (April 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -39,6 +39,8 @@
 | `static/index.html` | Dashboard UI | System status cards (health, readiness, run, report, scheduler), latest run/report panels, scheduler status panel, manual run controls, doctrine reminder |
 | `static/app.js` | Dashboard frontend logic | Fetches all API endpoints including `/scheduler/status`; triggers runs with Bearer token; stores token in sessionStorage only |
 | `static/styles.css` | Dashboard styles | Modern neutral SaaS style; responsive cards and panels |
+| `scripts/verify_live_deployment.py` | Live deployment verifier | External HTTP checks against the deployed Render URL; read-only; never writes data |
+| `docs/LIVE_VALIDATION_LOG.md` | Phase 1 validation log | Official 4-week validation tracking template |
 
 ---
 
@@ -79,9 +81,12 @@ No files are currently in a broken state.
 | PR-ADS-016 | Single Web Service Foundation (`api/server.py`, FastAPI, Render web service) | ✅ Complete |
 | PR-ADS-017 | Protected Manual Run Endpoints (`POST /run/daily`, `/run/weekly`, `/run/monthly`) | ✅ Complete |
 | PR-ADS-018 | Modern UI Dashboard Foundation (`static/index.html`, `app.js`, `styles.css`, `GET /`) | ✅ Complete |
-| PR-ADS-019 | In-App Scheduler + Render Cron Decommission (`api/scheduler.py`, `GET /scheduler/status`, single-service `render.yaml`) | ✅ This PR |
+| PR-ADS-019 | In-App Scheduler + Render Cron Decommission (`api/scheduler.py`, `GET /scheduler/status`, single-service `render.yaml`) | ✅ Complete |
+| PR-ADS-020 | Live Deployment Verification Pack (`scripts/verify_live_deployment.py`, `docs/LIVE_VALIDATION_LOG.md`, deployment docs) | ✅ This PR |
 | **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
+
+> **Phase 2 / OCT is blocked** until the 4-week Phase 1 validation period is complete and Youssef approves Phase 2.
 
 ---
 
