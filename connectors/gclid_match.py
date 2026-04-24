@@ -7,7 +7,7 @@ Reads:
   - data/ads_search_terms.json  (Windsor output)
   - data/crm_contacts.json      (HubSpot output)
   - data/crm_deals.json         (HubSpot deals with GCLID)
-  - config/logistaas_config.yaml (coverage threshold)
+  - config/thresholds.yaml (coverage threshold)
 
 Writes:
   - data/matched_gclid.json     (matched click → contact → deal records)
@@ -29,7 +29,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 DATA_DIR = "data"
-CONFIG_PATH = "config/logistaas_config.yaml"
+CONFIG_PATH = "config/thresholds.yaml"
 
 
 def _load_json(filename: str) -> list:
@@ -180,7 +180,7 @@ def run_gclid_match() -> dict:
     # Load config for coverage threshold
     config = _load_config()
     min_coverage_pct = (
-        config.get("doctrine_thresholds", {}).get("min_gclid_coverage_pct", 70)
+        config.get("data_quality", {}).get("gclid_coverage_warning_pct", 70)
     )
 
     # Build indexes
