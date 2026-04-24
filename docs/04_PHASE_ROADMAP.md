@@ -164,10 +164,12 @@ Negative keywords are permanent decisions. Adding the wrong negative can kill re
 | PR-ADS-002 | Scheduler (weekly + daily) | ✅ Merged | 1 |
 | PR-ADS-003 | Monthly scheduler + delivery | ✅ Merged | 1 |
 | PR-ADS-004 | Analysis core + advisor | ✅ Merged | 1 |
-| PR-ADS-012 | Run history / persistent logs | ✅ Merged | 1 |
-| PR-ADS-013 | Healthcheck / environment validation | ✅ Merged | 1 |
-| PR-ADS-014 | Roadmap / PR status sync cleanup | ✅ Merged | 1 |
-| PR-ADS-015 | Manual ops runner / Makefile | ✅ Merged | 1 |
+| (unnumbered) | Run history / persistent logs (`scheduler/run_history.py`) | ✅ Built | 1 |
+| (unnumbered) | Healthcheck / environment validation (`scripts/healthcheck.py`) | ✅ Built | 1 |
+| (unnumbered) | Manual ops runner / Makefile | ✅ Built | 1 |
+
+> Prior stale roadmap docs assigned PR-ADS-012–015 to the above unnumbered items.
+> Those assignments are superseded. PR numbering restarts at PR-ADS-012 from this PR forward.
 
 ### Active — Phase 1 Stabilization
 

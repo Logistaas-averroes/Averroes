@@ -131,17 +131,19 @@ logistaas-ads-intelligence/
 | PR-ADS-002 | Daily + weekly schedulers | ✅ Complete |
 | PR-ADS-003 | Monthly scheduler + delivery | ✅ Complete |
 | PR-ADS-004 | Analysis core + advisor | ✅ Complete |
-| PR-ADS-012 | Run history / persistent logs | ✅ Complete |
-| PR-ADS-013 | Healthcheck / environment validation | ✅ Complete |
-| PR-ADS-014 | Roadmap / PR status sync cleanup | ✅ Complete |
-| PR-ADS-015 | Manual ops runner / Makefile | ✅ Complete |
+| (unnumbered) | Run history (`scheduler/run_history.py`) | ✅ Complete |
+| (unnumbered) | Healthcheck (`scripts/healthcheck.py`) | ✅ Complete |
+| (unnumbered) | Makefile / manual ops runner | ✅ Complete |
+| PR-ADS-012 | Repository reality sync + docs | ✅ Complete |
 
-### Queued (Phase 1 remaining)
+### Queued (Phase 1 stabilization — next in order)
 | PR ID | Module | What it does |
 |-------|--------|-------------|
-| PR-ADS-005 | Config + pattern hardening | Validate all YAML config keys; update patterns.yaml |
-| PR-ADS-006 | End-to-end test + first real report | Run full weekly pipeline on live env, verify report |
-| PR-ADS-007 | Render deployment | Deploy to Render, register all 3 cron jobs |
+| PR-ADS-013 | `scheduler/daily.py` + `config/` | Broken reference fix (doctrine import, patterns.yaml path, logistaas_config.yaml) |
+| PR-ADS-014 | `scheduler/daily.py` | Daily scheduler rebuild — correct imports + config alignment |
+| PR-ADS-005 | `config/` | Config hardening — create missing config files, validate all YAML keys |
+| PR-ADS-006 | System-wide | End-to-end test + first real report on live environment |
+| PR-ADS-007 | Render | Deploy to Render, verify all 3 cron jobs active |
 
 ### Phase 2 (after Phase 1 validated)
 | PR ID | Module | What it does |
