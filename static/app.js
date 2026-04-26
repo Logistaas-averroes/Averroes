@@ -225,9 +225,9 @@ async function loadHealth() {
 async function loadReadiness() {
   const el = document.getElementById("card-readiness");
   if (!el) return;
-  // Only admins can see readiness details; others get a neutral badge
+  // Only admins can see readiness details; hide card for other roles
   if (!_currentUser || _currentUser.role !== "admin") {
-    el.querySelector(".card__value").innerHTML = statusBadge("n/a", { "n/a": "badge--neutral" });
+    el.style.display = "none";
     return;
   }
   try {

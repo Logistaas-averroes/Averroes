@@ -109,7 +109,7 @@ def verify_password(password: str, hash_str: str) -> bool:
             iters,
         )
         return hmac.compare_digest(dk.hex(), stored_dk_hex)
-    except Exception:  # noqa: BLE001
+    except (ValueError, AttributeError, UnicodeDecodeError, OverflowError):
         return False
 
 

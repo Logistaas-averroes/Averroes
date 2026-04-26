@@ -139,6 +139,10 @@ Set each variable in the Render dashboard under **Service → Environment** for 
 > **Security warning:** `APP_SECRET_KEY` must be a long random secret (at least 32 bytes).
 > Never commit it to source control. Rotating this key will invalidate all active sessions.
 
+> **Local development:** Set `APP_ENV=development` in your local `.env` file.
+> This disables the `Secure` flag on session cookies, allowing them to work over HTTP.
+> On Render (HTTPS), always use `APP_ENV=production`.
+
 > **Note:** `GOOGLE_ADS_*` variables are reserved for Phase 2+. Do not configure until available.
 
 ---

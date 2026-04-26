@@ -20,6 +20,10 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+# Deterministic advisor — imported at module level so it is always available
+# without requiring ANTHROPIC_API_KEY.
+from analysis.rule_advisor import generate_deterministic_report
+
 
 def _get_advisor_mode() -> str:
     return os.getenv("ADVISOR_MODE", "deterministic").lower().strip()
@@ -185,8 +189,6 @@ def generate_weekly_report() -> str | None:
     mode = _get_advisor_mode()
     if mode == "claude":
         return _claude_report("weekly")
-    # deterministic (default)
-    from analysis.rule_advisor import generate_deterministic_report  # noqa: PLC0415
     return generate_deterministic_report("weekly")
 
 
@@ -202,8 +204,6 @@ def generate_monthly_report() -> str | None:
     mode = _get_advisor_mode()
     if mode == "claude":
         return _claude_report("monthly")
-    # deterministic (default)
-    from analysis.rule_advisor import generate_deterministic_report  # noqa: PLC0415
     return generate_deterministic_report("monthly")
 
 
