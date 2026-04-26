@@ -52,11 +52,10 @@ from pydantic import BaseModel
 from api.auth import (
     check_admin_or_token,
     clear_session,
+    authenticate_user,
     get_current_user,
-    get_user,
     require_auth,
     set_session,
-    verify_password,
 )
 from api.scheduler import (
     _job_state,
@@ -183,8 +182,8 @@ def auth_login(body: LoginRequest, response: Response) -> dict[str, Any]:
     Sets an HTTP-only signed session cookie on success.
     Returns 401 for invalid credentials.
     """
-    user = get_user(body.username)
-    if not user or not verify_password(body.password, user.get("password_hash", "")):
+    user = authenticate_user(body.username, body.password)
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
     role = user.get("role", "viewer")
     set_session(response, user["username"], role)

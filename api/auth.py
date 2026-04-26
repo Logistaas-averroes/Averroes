@@ -8,7 +8,8 @@ Uses only Render environment variables — no external auth provider, no databas
 
 Environment variables:
   APP_SECRET_KEY   — long random secret used to sign session cookies
-  AUTH_USERS_JSON  — JSON array of user objects with username, password_hash, role
+  AUTH_USERS_JSON  — JSON array of user objects with username, password_hash (or
+                     password for temporary plain-text mode), and role
 
 User roles:
   admin   — full access including manual run triggers
@@ -20,10 +21,17 @@ Session cookies:
   - No external session store required
   - Expire after SESSION_MAX_AGE_SECONDS
 
-Password hashing:
-  - PBKDF2-HMAC-SHA256 with random 16-byte salt
-  - 260,000 iterations (NIST-recommended as of 2023)
-  - Constant-time comparison via hmac.compare_digest
+Password modes (AUTH_USERS_JSON):
+  Secure mode  — {"username": "...", "password_hash": "pbkdf2_sha256$...", "role": "..."}
+                 Uses PBKDF2-HMAC-SHA256 with random 16-byte salt and 260,000
+                 iterations (NIST-recommended as of 2023).
+  Fallback mode — {"username": "...", "password": "...", "role": "..."}
+                 Plain-text comparison via hmac.compare_digest.
+                 ⚠️ Temporary internal use only — restore hashed passwords when a
+                 hash-generation path becomes available.
+
+Constant-time comparison is used in both modes to prevent timing attacks.
+Passwords and hashes are never logged or returned in API responses.
 """
 
 import base64
@@ -144,6 +152,35 @@ def get_user(username: str) -> dict[str, Any] | None:
     for user in load_users():
         if isinstance(user, dict) and user.get("username", "").lower() == username_lower:
             return user
+    return None
+
+
+def authenticate_user(username: str, password: str) -> dict[str, Any] | None:
+    """
+    Authenticate a user by username and password.
+
+    Supports two modes (checked in order):
+      1. Hashed mode  — user has "password_hash"; verified with PBKDF2 + hmac.compare_digest.
+      2. Fallback mode — user has "password"; compared with hmac.compare_digest.
+         ⚠️ Plain-text passwords are a temporary measure for environments where hash
+         generation is unavailable. Replace with hashed passwords when possible.
+
+    Returns the user dict on success, or None on failure.
+    Never logs or exposes the supplied password.
+    """
+    user = get_user(username)
+    if not user:
+        return None
+
+    if "password_hash" in user:
+        if verify_password(password, user["password_hash"]):
+            return user
+    elif "password" in user:
+        stored = user["password"]
+        # Use constant-time comparison to prevent timing attacks even for plain text.
+        if isinstance(stored, str) and hmac.compare_digest(password, stored):
+            return user
+
     return None
 
 
