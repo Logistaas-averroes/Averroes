@@ -11,8 +11,12 @@
   <!-- ── Login screen ───────────────────────────────────────────────────── -->
   <div id="login-screen" class="login-screen" style="display:none;">
     <div class="login-card">
-      <div class="login-card__title">Logistaas Ads Intelligence</div>
-      <div class="login-card__subtitle">Sign in to continue</div>
+      <div class="login-card__brand">
+        <div class="login-card__product">Logistaas</div>
+        <div class="login-card__title">Ads Intelligence</div>
+        <div class="login-card__subtitle">Sign in to continue</div>
+      </div>
+      <div class="login-card__body">
       <form id="login-form" class="login-form">
         <div class="login-field">
           <label for="login-username">Username</label>
@@ -45,6 +49,7 @@
       <div class="login-phase-badge">
         <span class="badge badge--phase">Phase 1 — Read Only</span>
       </div>
+      </div>
     </div>
   </div>
 
@@ -54,7 +59,10 @@
     <!-- ── Header ─────────────────────────────────────────────────────── -->
     <header class="site-header">
       <div class="site-header__brand">
-        <div class="site-header__title">Logistaas Ads Intelligence</div>
+        <div>
+          <div class="site-header__eyebrow">Logistaas</div>
+          <div class="site-header__title">Ads Intelligence</div>
+        </div>
       </div>
       <div class="site-header__meta">
         <span id="header-health-badge" class="badge badge--loading">
@@ -75,7 +83,7 @@
     <main class="page-content">
 
       <!-- System status cards -->
-      <p class="section-title">System Status</p>
+      <p class="section-title">⬡ System Status</p>
       <div class="cards-grid">
 
         <div class="card" id="card-health">
@@ -116,7 +124,7 @@
       </div>
 
       <!-- Latest Run + Latest Report panels -->
-      <p class="section-title">Details</p>
+      <p class="section-title">◎ Details</p>
       <div class="panels-grid">
 
         <!-- Latest Run Panel -->
@@ -146,7 +154,7 @@
       </div>
 
       <!-- Scheduler Status -->
-      <p class="section-title">Scheduler</p>
+      <p class="section-title">⏱ Scheduler</p>
       <div class="panel">
         <div class="panel__header">In-App Scheduler Status</div>
         <div class="panel__body" id="scheduler-panel-body">
@@ -156,7 +164,7 @@
 
       <!-- Manual Run Controls — admin only -->
       <div id="run-controls-section" style="display:none;">
-        <p class="section-title">Manual Run Controls</p>
+        <p class="section-title">▶ Manual Run Controls</p>
         <div class="panel">
           <div class="panel__header">Trigger a Scheduler Run</div>
           <div class="panel__body">
@@ -173,7 +181,7 @@
       </div>
 
       <!-- Doctrine Reminder -->
-      <p class="section-title">Doctrine</p>
+      <p class="section-title">⚖ Doctrine</p>
       <div class="doctrine-box">
         <div class="doctrine-box__title">⚖️ Phase 1 — Read Only</div>
         <ul>

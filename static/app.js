@@ -37,13 +37,17 @@ function fmt(value) {
 // ── Status badge maps ──────────────────────────────────────────────────────
 
 const STATUS_MAP = {
-  ok:      "badge--ok",
-  pass:    "badge--pass",
-  success: "badge--success",
-  fail:    "badge--fail",
-  failed:  "badge--failed",
-  error:   "badge--error",
-  empty:   "badge--empty",
+  ok:        "badge--ok",
+  pass:      "badge--pass",
+  success:   "badge--success",
+  available: "badge--available",
+  running:   "badge--running",
+  fail:      "badge--fail",
+  failed:    "badge--failed",
+  error:     "badge--error",
+  empty:     "badge--empty",
+  warning:   "badge--warning",
+  pending:   "badge--pending",
 };
 
 // ── Current session state ──────────────────────────────────────────────────
@@ -352,7 +356,7 @@ async function loadSchedulerStatus() {
   try {
     const data = await fetchJSON("/scheduler/status");
     const isRunning = data.status === "running";
-    const badgeCls = isRunning ? "badge--ok" : "badge--neutral";
+    const badgeCls = isRunning ? "badge--running" : "badge--neutral";
     const label = isRunning ? "running" : (data.status || "unknown");
 
     if (cardEl) {
