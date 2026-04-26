@@ -9,7 +9,11 @@ All checks are read-only.  No business data is written.
 Required environment variables:
     SERVICE_URL       — base URL of the deployed service, e.g.
                         https://your-service.onrender.com
-    ADMIN_API_TOKEN   — optional; needed only when --trigger-daily is used
+
+Optional environment variables:
+    ADMIN_API_TOKEN   — needed only when --trigger-daily is used
+    TEST_USERNAME     — optional login test username
+    TEST_PASSWORD     — optional login test password (never printed in logs)
 
 CLI flags:
     --trigger-daily   — trigger POST /run/daily with a valid token (only when
@@ -23,6 +27,7 @@ Exit codes:
 
 Security:
     - ADMIN_API_TOKEN is never printed.
+    - TEST_PASSWORD is never printed.
     - Authorization headers are redacted in any log output.
     - Full tracebacks are only shown in --debug mode.
 
@@ -109,7 +114,7 @@ def _post(
 # ── Individual checks ──────────────────────────────────────────────────────────
 
 def check_health(base: str, timeout: int, debug: bool) -> None:
-    label = "/health"
+    label = "GET /health (public)"
     resp = _get(f"{base}/health", timeout, debug)
     if resp is None:
         _fail(label, "no response")
@@ -128,112 +133,79 @@ def check_health(base: str, timeout: int, debug: bool) -> None:
     _pass(label)
 
 
-def check_readiness(base: str, timeout: int, debug: bool) -> None:
-    label = "/readiness"
-    resp = _get(f"{base}/readiness", timeout, debug)
+def check_protected_endpoints_require_auth(base: str, timeout: int, debug: bool) -> None:
+    """Verify that protected endpoints return 401 when unauthenticated."""
+    protected = [
+        "/runs/latest",
+        "/reports/latest",
+        "/reports/latest/raw",
+        "/scheduler/status",
+        "/readiness",
+    ]
+    for endpoint in protected:
+        label = f"{endpoint} returns 401 when unauthenticated"
+        resp = _get(f"{base}{endpoint}", timeout, debug)
+        if resp is None:
+            _fail(label, "no response")
+            continue
+        if resp.status_code == 401:
+            _pass(label, "HTTP 401")
+        else:
+            _fail(label, f"expected 401, got HTTP {resp.status_code}")
+
+
+def check_auth_me_unauthenticated(base: str, timeout: int, debug: bool) -> None:
+    label = "GET /auth/me returns 401 when unauthenticated"
+    resp = _get(f"{base}/auth/me", timeout, debug)
     if resp is None:
         _fail(label, "no response")
         return
-    if resp.status_code != 200:
-        _fail(label, f"HTTP {resp.status_code}")
-        return
-    try:
-        body = resp.json()
-    except Exception:
-        _fail(label, "non-JSON response")
-        return
-    if not isinstance(body, dict):
-        _fail(label, "response is not a JSON object")
-        return
-    _pass(label)
-
-
-def check_scheduler_status(base: str, timeout: int, debug: bool) -> None:
-    label = "/scheduler/status"
-    resp = _get(f"{base}/scheduler/status", timeout, debug)
-    if resp is None:
-        _fail(label, "no response")
-        return
-    if resp.status_code != 200:
-        _fail(label, f"HTTP {resp.status_code}")
-        return
-    try:
-        body = resp.json()
-    except Exception:
-        _fail(label, "non-JSON response")
-        return
-    if not isinstance(body, dict):
-        _fail(label, "response is not a JSON object")
-        return
-    jobs = body.get("jobs")
-    if not jobs:
-        _fail(label, "no jobs listed in scheduler status")
-        return
-    # Verify daily/weekly/monthly are present
-    job_names = {j.get("job") for j in jobs if isinstance(j, dict)}
-    missing = {"daily", "weekly", "monthly"} - job_names
-    if missing:
-        _fail(label, f"missing jobs: {', '.join(sorted(missing))}")
-        return
-    _pass(label)
-
-
-def check_runs_latest(base: str, timeout: int, debug: bool) -> None:
-    label = "/runs/latest"
-    resp = _get(f"{base}/runs/latest", timeout, debug)
-    if resp is None:
-        _fail(label, "no response")
-        return
-    if resp.status_code not in (200, 404):
-        _fail(label, f"HTTP {resp.status_code}")
-        return
-    try:
-        resp.json()
-    except Exception:
-        _fail(label, "non-JSON response")
-        return
-    _pass(label)
-
-
-def check_reports_latest(base: str, timeout: int, debug: bool) -> None:
-    label = "/reports/latest"
-    resp = _get(f"{base}/reports/latest", timeout, debug)
-    if resp is None:
-        _fail(label, "no response")
-        return
-    if resp.status_code not in (200, 404):
-        _fail(label, f"HTTP {resp.status_code} (expected 200 or 404)")
-        return
-    try:
-        resp.json()
-    except Exception:
-        _fail(label, "non-JSON response")
-        return
-    _pass(label)
-
-
-def check_missing_token(base: str, timeout: int, debug: bool) -> None:
-    label = "/run/daily rejects missing token"
-    resp = _post(f"{base}/run/daily", timeout, debug, token=None)
-    if resp is None:
-        _fail(label, "no response")
-        return
-    if resp.status_code in (401, 503):
-        _pass(label, f"HTTP {resp.status_code}")
+    if resp.status_code == 401:
+        _pass(label, "HTTP 401")
     else:
-        _fail(label, f"expected 401 or 503, got HTTP {resp.status_code}")
+        _fail(label, f"expected 401, got HTTP {resp.status_code}")
 
 
-def check_wrong_token(base: str, timeout: int, debug: bool) -> None:
-    label = "/run/daily rejects wrong token"
-    resp = _post(f"{base}/run/daily", timeout, debug, token="definitely_wrong_token")
-    if resp is None:
-        _fail(label, "no response")
+def check_login_test(
+    base: str,
+    timeout: int,
+    debug: bool,
+    username: str,
+    password: str,
+) -> None:
+    """
+    Optional login test.  PASSWORD IS NEVER PRINTED.
+    Tests that /auth/login returns a session cookie and /auth/me works.
+    """
+    label = "POST /auth/login (login test)"
+    try:
+        session = requests.Session()
+        resp = session.post(
+            f"{base}/auth/login",
+            json={"username": username, "password": password},
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        if debug:
+            import traceback
+            traceback.print_exc()
+        _fail(label, f"{type(exc).__name__}: {exc}")
         return
-    if resp.status_code in (401, 503):
-        _pass(label, f"HTTP {resp.status_code}")
+
+    if resp.status_code == 200:
+        _pass(label, f"HTTP 200, role={resp.json().get('role', '?')}")
+        # Also test /auth/me with the session cookie
+        me_resp = session.get(f"{base}/auth/me", timeout=timeout)
+        if me_resp.status_code == 200:
+            _pass("GET /auth/me after login", f"HTTP 200, user={me_resp.json().get('username', '?')}")
+        else:
+            _fail("GET /auth/me after login", f"HTTP {me_resp.status_code}")
+        # Logout
+        session.post(f"{base}/auth/logout", timeout=timeout)
+    elif resp.status_code == 401:
+        _fail(label, "HTTP 401 — invalid credentials (check TEST_USERNAME/TEST_PASSWORD)")
     else:
-        _fail(label, f"expected 401 or 503, got HTTP {resp.status_code}")
+        _fail(label, f"HTTP {resp.status_code}")
 
 
 def check_valid_token_trigger(
@@ -292,25 +264,41 @@ def main() -> int:
 
     base = _normalize_url(service_url_raw)
     admin_token = os.environ.get("ADMIN_API_TOKEN", "").strip() or None
+    test_username = os.environ.get("TEST_USERNAME", "").strip() or None
+    # Never print password
+    test_password = os.environ.get("TEST_PASSWORD", "") or None
 
     print()
     print("Logistaas Ads Intelligence — Live Deployment Verification")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print(f"  Service URL : {base}")
-    print(f"  Token set   : {'yes (redacted)' if admin_token else 'no'}")
-    print(f"  Timeout     : {args.timeout}s")
+    print(f"  Service URL   : {base}")
+    print(f"  Token set     : {'yes (redacted)' if admin_token else 'no'}")
+    print(f"  Login test    : {'yes (password redacted)' if (test_username and test_password) else 'no'}")
+    print(f"  Timeout       : {args.timeout}s")
     print()
 
     # Required checks
     check_health(base, args.timeout, args.debug)
-    check_readiness(base, args.timeout, args.debug)
-    check_scheduler_status(base, args.timeout, args.debug)
-    check_runs_latest(base, args.timeout, args.debug)
-    check_reports_latest(base, args.timeout, args.debug)
-    check_missing_token(base, args.timeout, args.debug)
-    check_wrong_token(base, args.timeout, args.debug)
+    check_auth_me_unauthenticated(base, args.timeout, args.debug)
+    check_protected_endpoints_require_auth(base, args.timeout, args.debug)
 
-    # Optional daily trigger
+    # Run endpoint rejection checks (unauthenticated)
+    label = "/run/daily rejects unauthenticated requests"
+    resp = _post(f"{base}/run/daily", args.timeout, args.debug, token=None)
+    if resp is None:
+        _fail(label, "no response")
+    elif resp.status_code == 401:
+        _pass(label, "HTTP 401")
+    else:
+        _fail(label, f"expected 401, got HTTP {resp.status_code}")
+
+    # Optional: login test
+    if test_username and test_password:
+        check_login_test(base, args.timeout, args.debug, test_username, test_password)
+    else:
+        _skip("POST /auth/login (login test)", "TEST_USERNAME or TEST_PASSWORD not set")
+
+    # Optional daily trigger (using bearer token or cookie auth)
     if args.trigger_daily:
         if admin_token:
             check_valid_token_trigger(base, args.timeout, args.debug, admin_token)

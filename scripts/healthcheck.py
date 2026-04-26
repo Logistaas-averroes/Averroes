@@ -125,10 +125,28 @@ def check_hubspot(failures: list) -> None:
         failures.append("HUBSPOT_API_KEY")
 
 
-def check_claude(failures: list) -> None:
-    _header("Anthropic Claude API  [required for weekly / monthly]")
-    if not _check_env_var("ANTHROPIC_API_KEY"):
-        failures.append("ANTHROPIC_API_KEY")
+def check_advisor_mode(failures: list) -> None:
+    _header("Advisor Mode  [ADVISOR_MODE + ANTHROPIC_API_KEY]")
+    mode = os.environ.get("ADVISOR_MODE", "deterministic").strip().lower()
+    _pass("ADVISOR_MODE", f"value: {mode or 'deterministic (default)'}")
+
+    if mode == "claude":
+        # Claude mode requires ANTHROPIC_API_KEY
+        if not _check_env_var("ANTHROPIC_API_KEY"):
+            failures.append("ANTHROPIC_API_KEY (required when ADVISOR_MODE=claude)")
+    else:
+        # Deterministic mode — ANTHROPIC_API_KEY is optional
+        _check_env_var("ANTHROPIC_API_KEY", required=False)
+        if mode not in ("deterministic", ""):
+            _warn("ADVISOR_MODE", f"unknown value {mode!r} — defaulting to deterministic")
+
+
+def check_auth(failures: list) -> None:
+    _header("Internal Auth  [APP_SECRET_KEY + AUTH_USERS_JSON]")
+    if not _check_env_var("APP_SECRET_KEY"):
+        failures.append("APP_SECRET_KEY")
+    if not _check_env_var("AUTH_USERS_JSON"):
+        failures.append("AUTH_USERS_JSON")
 
 
 def check_sendgrid(failures: list) -> None:
@@ -182,6 +200,8 @@ def check_imports(failures: list) -> None:
         ("connectors.gclid_match",   "connectors/gclid_match.py"),
         ("analysis.core",            "analysis/core.py"),
         ("analysis.advisor",         "analysis/advisor.py"),
+        ("analysis.rule_advisor",    "analysis/rule_advisor.py"),
+        ("api.auth",                 "api/auth.py"),
         ("scheduler.daily",          "scheduler/daily.py"),
         ("scheduler.weekly",         "scheduler/weekly.py"),
         ("scheduler.monthly",        "scheduler/monthly.py"),
@@ -204,7 +224,8 @@ def main() -> int:
 
     check_windsor(critical_failures)
     check_hubspot(critical_failures)
-    check_claude(critical_failures)
+    check_advisor_mode(critical_failures)
+    check_auth(critical_failures)
     check_sendgrid(critical_failures)
     check_google_ads(critical_failures)   # optional — no failures added
     check_directories(critical_failures)

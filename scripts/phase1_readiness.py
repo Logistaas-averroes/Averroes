@@ -74,13 +74,19 @@ def _header(title: str) -> None:
 # ── 1. Required environment variables ────────────────────────────────────────
 
 _REQUIRED_ENV_VARS = [
-    "ANTHROPIC_API_KEY",
     "HUBSPOT_API_KEY",
     "WINDSOR_API_KEY",
     "WINDSOR_ACCOUNT_ID",
-    "SENDGRID_API_KEY",
-    "REPORT_SENDER_EMAIL",
-    "REPORT_RECIPIENT_EMAIL",
+    "APP_SECRET_KEY",
+    "AUTH_USERS_JSON",
+]
+
+_OPTIONAL_ENV_VARS = [
+    ("ANTHROPIC_API_KEY", "optional — only required when ADVISOR_MODE=claude"),
+    ("ADMIN_API_TOKEN",   "optional — for API-only manual run triggers"),
+    ("SENDGRID_API_KEY",  "optional — for report email delivery"),
+    ("REPORT_SENDER_EMAIL",    "optional — for report email delivery"),
+    ("REPORT_RECIPIENT_EMAIL", "optional — for report email delivery"),
 ]
 
 
@@ -93,6 +99,14 @@ def check_env_vars(failures: list) -> None:
         else:
             _fail(name, "not set or empty")
             failures.append(f"env:{name}")
+
+    _header("Optional Environment Variables")
+    for name, description in _OPTIONAL_ENV_VARS:
+        value = os.environ.get(name, "").strip()
+        if value:
+            _pass(name)
+        else:
+            _warn(name, description)
 
 
 # ── 2. Required configuration files ──────────────────────────────────────────
@@ -226,11 +240,19 @@ _REQUIRED_CONNECTOR_FILES = [
 _REQUIRED_ANALYSIS_FILES = [
     "analysis/core.py",
     "analysis/advisor.py",
+    "analysis/rule_advisor.py",
+]
+
+_REQUIRED_API_FILES = [
+    "api/server.py",
+    "api/auth.py",
+    "api/scheduler.py",
 ]
 
 _REQUIRED_SCRIPT_FILES = [
     "scripts/healthcheck.py",
     "scripts/validate_phase1.py",
+    "scripts/create_user_hash.py",
 ]
 
 
@@ -240,6 +262,7 @@ def check_source_files(failures: list) -> None:
         ("Scheduler",  _REQUIRED_SCHEDULER_FILES),
         ("Connectors", _REQUIRED_CONNECTOR_FILES),
         ("Analysis",   _REQUIRED_ANALYSIS_FILES),
+        ("API",        _REQUIRED_API_FILES),
         ("Scripts",    _REQUIRED_SCRIPT_FILES),
     ]
     for _group, paths in groups:
@@ -251,12 +274,28 @@ def check_source_files(failures: list) -> None:
                 failures.append(f"file:{path}")
 
 
-# ── 7. Forbidden write-back modules (Phase 2+) ───────────────────────────────
+def check_deterministic_advisor(failures: list) -> None:
+    _header("Deterministic Advisor  [analysis/rule_advisor.py]")
+    if os.path.isfile("analysis/rule_advisor.py"):
+        _pass("analysis/rule_advisor.py", "exists")
+    else:
+        _fail("analysis/rule_advisor.py", "deterministic advisor not found")
+        failures.append("file:analysis/rule_advisor.py")
+
+    advisor_mode = os.environ.get("ADVISOR_MODE", "deterministic").strip().lower()
+    if advisor_mode in ("deterministic", ""):
+        _pass("ADVISOR_MODE", "deterministic (no Claude API required)")
+    elif advisor_mode == "claude":
+        _warn("ADVISOR_MODE", "claude — ANTHROPIC_API_KEY is required")
+        if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            _fail("ANTHROPIC_API_KEY", "required when ADVISOR_MODE=claude")
+            failures.append("env:ANTHROPIC_API_KEY")
+    else:
+        _warn("ADVISOR_MODE", f"unknown value {advisor_mode!r} — will default to deterministic")
 
 _FORBIDDEN_PHASE1_MODULES = [
     ("connectors/oct_uploader.py",    "OCT uploader — Phase 2, must not be active"),
     ("connectors/negative_pusher.py", "Negative pusher — Phase 3, must not be active"),
-    ("api/server.py",                 "FastAPI server — Phase 4, must not be active"),
 ]
 
 
@@ -322,6 +361,7 @@ def main() -> int:
     critical_failures: list = []
 
     check_env_vars(critical_failures)
+    check_deterministic_advisor(critical_failures)
     check_config_files(critical_failures)
     check_docs(critical_failures)
     check_makefile_targets(critical_failures)

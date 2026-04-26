@@ -3,6 +3,9 @@ Monthly Report Scheduler
 Runs on the 1st of each month at 7am GMT via Render cron.
 Orchestrates: windsor_pull → hubspot_pull → waste_detection → lead_quality → campaign_truth → advisor
 No business logic lives here. This module only sequences the steps.
+
+Report generation uses the deterministic advisor by default (ADVISOR_MODE=deterministic).
+Set ADVISOR_MODE=claude to use Claude API (requires ANTHROPIC_API_KEY).
 """
 
 import logging
@@ -155,8 +158,8 @@ def run_monthly_report():
         )
         return None
 
-    # Step 6: Generate monthly report via Claude API
-    log.info("Step 6/6 START: Generating monthly report via Claude API...")
+    # Step 6: Generate monthly report via advisor (deterministic by default)
+    log.info("Step 6/6 START: Generating monthly report (deterministic advisor)...")
     try:
         from analysis.advisor import generate_monthly_report
         report_path = generate_monthly_report()
