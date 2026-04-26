@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-021B — Plain-Text Password Fallback Hotfix (April 2026)
+**Last updated:** PR-ADS-022 — Premium Dashboard Visual Upgrade (April 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -39,9 +39,9 @@
 | `api/auth.py` | Internal auth module | Updated in PR-ADS-021B: `authenticate_user()` added — supports both `password_hash` (PBKDF2) and `password` (plain-text fallback via `hmac.compare_digest`); passwords never logged or exposed in API responses |
 | `api/server.py` | FastAPI web entry point | Updated in PR-ADS-021B: `/auth/login` now uses `authenticate_user()` for dual-mode credential verification |
 | `api/scheduler.py` | In-app APScheduler | Schedules daily (06:00), weekly (Mon 07:00), monthly (1st 08:00) Phase 1 jobs in Asia/Amman timezone; exposes shared lock state and `get_scheduler_status()` |
-| `static/index.html` | Dashboard UI | Updated in PR-ADS-021: login screen + user badge + role badge + logout button; manual run controls visible to admin only |
-| `static/app.js` | Dashboard frontend logic | Updated in PR-ADS-021: checks `/auth/me` on load; shows login form if unauthenticated; submits via `/auth/login`; hides run controls unless admin; handles 401 by returning to login |
-| `static/styles.css` | Dashboard styles | Updated in PR-ADS-021: login card + user badge + role badge + logout button styles |
+| `static/index.html` | Dashboard UI | Updated in PR-ADS-022: polished header with eyebrow, improved section headings with icons and rule separators, login card split into brand/body sections |
+| `static/app.js` | Dashboard frontend logic | Updated in PR-ADS-022: STATUS_MAP extended with running/available/warning/pending classes; scheduler badge uses badge--running |
+| `static/styles.css` | Dashboard styles | Updated in PR-ADS-022: premium SaaS design — dark gradient login screen, sticky header with eyebrow, card hover accents, richer badge borders, doctrine box accent border, responsive mobile breakpoints |
 | `scripts/verify_live_deployment.py` | Live deployment verifier | Updated in PR-ADS-021: checks `/health` is public; checks protected endpoints return 401 when unauthenticated; optional login test via `TEST_USERNAME`/`TEST_PASSWORD` |
 | `docs/LIVE_VALIDATION_LOG.md` | Phase 1 validation log | Official 4-week validation tracking template |
 
@@ -88,7 +88,8 @@ No files are currently in a broken state.
 | PR-ADS-018 | Modern UI Dashboard Foundation (`static/index.html`, `app.js`, `styles.css`, `GET /`) | ✅ Complete |
 | PR-ADS-019 | In-App Scheduler + Render Cron Decommission (`api/scheduler.py`, `GET /scheduler/status`, single-service `render.yaml`) | ✅ Complete |
 | PR-ADS-021 | Deterministic Advisor + Internal User Permissions (PBKDF2 auth, roles, login UI) | ✅ Complete |
-| PR-ADS-021B | Plain-text password fallback hotfix — `authenticate_user()` dual-mode, unblocks login | ✅ This PR |
+| PR-ADS-021B | Plain-text password fallback hotfix — `authenticate_user()` dual-mode, unblocks login | ✅ Complete |
+| PR-ADS-022  | Premium Dashboard Visual Upgrade — CSS/HTML/JS polish, no backend changes | ✅ This PR |
 | **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 
