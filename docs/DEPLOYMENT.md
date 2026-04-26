@@ -178,7 +178,47 @@ Users and roles are configured entirely via `AUTH_USERS_JSON` on Render.
 | `viewer` | Read-only — dashboard, reports, run history, scheduler status |
 | `mdr` | Limited read-only — dashboard, reports only |
 
-### Creating users
+### Temporary Auth Mode (Render-only / PR-ADS-021B)
+
+When `scripts/create_user_hash.py` cannot be run (e.g., no Render shell, no local
+Python environment), users may be configured with a plain-text `password` field
+instead of `password_hash`.
+
+> ⚠️ Plain password mode is for **temporary internal use only**.
+> Do not use in production long-term. Restore hashed passwords once a hash-generation
+> path becomes available.
+
+**When to use:**
+- Render shell is unavailable and you cannot generate PBKDF2 hashes
+- Initial unblock / stabilisation only
+
+**How to structure the JSON:**
+
+```json
+[
+  {"username":"youssef","password":"Ypor@youssef123?","role":"admin"},
+  {"username":"kareem","password":"Kareem@123","role":"viewer"},
+  {"username":"mdr","password":"MDR@123","role":"mdr"}
+]
+```
+
+Set this as `AUTH_USERS_JSON` in the Render environment (single-line, no spaces).
+
+The authentication system checks for `password_hash` first; if absent, it falls
+back to `password` using `hmac.compare_digest` (constant-time comparison).
+
+**Restore hashed auth when possible:**
+
+```bash
+python scripts/create_user_hash.py
+```
+
+Replace each `password` field with the generated `password_hash` in
+`AUTH_USERS_JSON` and redeploy.
+
+---
+
+### Creating users (hashed mode)
 
 Generate a password hash for each user:
 
