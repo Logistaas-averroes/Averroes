@@ -1,7 +1,7 @@
-# Repository State — Single Source of Truth
+## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-020 — Live Deployment Verification Pack (April 2026)
+**Last updated:** PR-ADS-021 — Deterministic Advisor + Internal User Permissions (April 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -17,30 +17,35 @@
 | `connectors/windsor_pull.py` | Windsor.ai connector | Pulls campaigns, search terms, keywords, geo |
 | `connectors/gclid_match.py` | GCLID reconciliation | Joins Windsor + HubSpot via GCLID; falls back if `logistaas_config.yaml` missing |
 | `analysis/core.py` | Waste detection + lead quality + campaign truth | All three functions in one file; `load_json` defined at line 471 |
-| `analysis/advisor.py` | Claude API report generator | `generate_weekly_report()` and `generate_monthly_report()` |
-| `scheduler/weekly.py` | Weekly report orchestrator | Full pipeline: pull → analyse → report → deliver |
-| `scheduler/monthly.py` | Monthly report orchestrator | Full pipeline: pull → analyse → report → deliver; per-step error handling |
+| `analysis/rule_advisor.py` | Deterministic report generator | **NEW in PR-ADS-021** — `generate_deterministic_report(report_type)` generates markdown from structured JSON outputs; no external API; replaces Claude as default |
+| `analysis/advisor.py` | Report generation dispatcher | `generate_weekly_report()` and `generate_monthly_report()` — now defaults to `rule_advisor`; Claude optional via `ADVISOR_MODE=claude`; importing does not require `ANTHROPIC_API_KEY` |
+| `scheduler/weekly.py` | Weekly report orchestrator | Full pipeline: pull → analyse → report → deliver; uses deterministic advisor by default |
+| `scheduler/monthly.py` | Monthly report orchestrator | Full pipeline: pull → analyse → report → deliver; per-step error handling; uses deterministic advisor by default |
 | `scheduler/delivery.py` | SendGrid email delivery | Delivers weekly and monthly report files; returns bool |
 | `scheduler/run_history.py` | Persistent run log | Writes JSONL to `runtime_logs/run_history.jsonl` |
-| `scripts/healthcheck.py` | Pre-flight environment check | Validates env vars, dirs, imports; exits non-zero on failure |
+| `scripts/healthcheck.py` | Pre-flight environment check | Validates env vars, dirs, imports; `ANTHROPIC_API_KEY` optional unless `ADVISOR_MODE=claude`; `APP_SECRET_KEY` and `AUTH_USERS_JSON` required |
 | `config/thresholds.yaml` | Decision thresholds | FIX/HOLD/SCALE/CUT rules; lead quality; waste detection |
 | `config/junk_patterns.yaml` | Junk pattern library | Intent mismatch patterns; safe-terms whitelist |
 | `render.yaml` | Render.com deployment | **Single web service** (uvicorn); Render cron jobs decommissioned by PR-ADS-019; in-app APScheduler handles all scheduled jobs |
 | `Makefile` | Manual ops runner | `healthcheck`, `daily`, `weekly`, `monthly`, `validate`, `runs` targets |
 | `scheduler/daily.py` | Daily pulse orchestrator | Step counter fixed; structured logging per step; result saved to `outputs/daily_YYYY-MM-DD.json` |
 | `scripts/validate_phase1.py` | Phase 1 read-only validation | Syntax, YAML, docs, and stale-reference checks |
-| `scripts/phase1_readiness.py` | Phase 1 production readiness audit | Env vars, files, Makefile targets, render.yaml, forbidden modules, delegates to healthcheck + validate |
+| `scripts/phase1_readiness.py` | Phase 1 production readiness audit | Updated in PR-ADS-021: `ANTHROPIC_API_KEY` removed from required list; `APP_SECRET_KEY`, `AUTH_USERS_JSON` added; `api/server.py` removed from forbidden modules (was stale entry); deterministic advisor check added |
+| `scripts/create_user_hash.py` | Password hash generator | **NEW in PR-ADS-021** — generates PBKDF2-SHA256 password hash for `AUTH_USERS_JSON`; never prints password |
 | `docs/PHASE1_PRODUCTION_READINESS.md` | Go/no-go checklist | Official Phase 1 production readiness gate |
-| `.env.example` | Environment variable reference | All required vars documented |
+| `.env.example` | Environment variable reference | Updated in PR-ADS-021: `ADVISOR_MODE`, `APP_SECRET_KEY`, `AUTH_USERS_JSON` added; Claude moved to optional |
 | `requirements.txt` | Python dependencies | All runtime deps present |
 | `api/__init__.py` | API package declaration | Declares `api/` as a Python package |
-| `api/server.py` | FastAPI web entry point | Phase 1 endpoints: `/health`, `/readiness`, `/runs/latest`, `/reports/latest`, `/reports/latest/raw`, `/scheduler/status`; protected run endpoints: `POST /run/daily`, `/run/weekly`, `/run/monthly`; `GET /` serves dashboard; starts/stops in-app scheduler via lifespan handler |
+| `api/auth.py` | Internal auth module | **NEW in PR-ADS-021** — cookie-based session auth; PBKDF2-SHA256 password verification; role-based access (admin/viewer/mdr); all crypto via Python stdlib |
+| `api/server.py` | FastAPI web entry point | Updated in PR-ADS-021: adds `/auth/login`, `/auth/logout`, `/auth/me`; all dashboard/report/run/scheduler endpoints require auth; `/health` remains public; `/readiness` requires admin; run endpoints accept cookie session (admin) or Bearer token |
 | `api/scheduler.py` | In-app APScheduler | Schedules daily (06:00), weekly (Mon 07:00), monthly (1st 08:00) Phase 1 jobs in Asia/Amman timezone; exposes shared lock state and `get_scheduler_status()` |
-| `static/index.html` | Dashboard UI | System status cards (health, readiness, run, report, scheduler), latest run/report panels, scheduler status panel, manual run controls, doctrine reminder |
-| `static/app.js` | Dashboard frontend logic | Fetches all API endpoints including `/scheduler/status`; triggers runs with Bearer token; stores token in sessionStorage only |
-| `static/styles.css` | Dashboard styles | Modern neutral SaaS style; responsive cards and panels |
-| `scripts/verify_live_deployment.py` | Live deployment verifier | External HTTP checks against the deployed Render URL; read-only; never writes data |
+| `static/index.html` | Dashboard UI | Updated in PR-ADS-021: login screen + user badge + role badge + logout button; manual run controls visible to admin only |
+| `static/app.js` | Dashboard frontend logic | Updated in PR-ADS-021: checks `/auth/me` on load; shows login form if unauthenticated; submits via `/auth/login`; hides run controls unless admin; handles 401 by returning to login |
+| `static/styles.css` | Dashboard styles | Updated in PR-ADS-021: login card + user badge + role badge + logout button styles |
+| `scripts/verify_live_deployment.py` | Live deployment verifier | Updated in PR-ADS-021: checks `/health` is public; checks protected endpoints return 401 when unauthenticated; optional login test via `TEST_USERNAME`/`TEST_PASSWORD` |
 | `docs/LIVE_VALIDATION_LOG.md` | Phase 1 validation log | Official 4-week validation tracking template |
+
+**Phase 1 state:** Read-only. Deterministic advisor active. Internal auth active. Claude API optional.
 
 ---
 

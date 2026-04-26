@@ -3,6 +3,9 @@ Weekly Report Scheduler
 Runs every Monday at 7am GMT via Render cron.
 Orchestrates: windsor_pull → hubspot_pull → waste_detection → lead_quality → campaign_truth → advisor
 No business logic lives here. This module only sequences the steps.
+
+Report generation uses the deterministic advisor by default (ADVISOR_MODE=deterministic).
+Set ADVISOR_MODE=claude to use Claude API (requires ANTHROPIC_API_KEY).
 """
 
 import os
@@ -69,8 +72,8 @@ def run_weekly_report():
         from analysis.core import run_campaign_truth
         run_campaign_truth()
 
-        # Step 6: Generate weekly report via Claude API
-        print("Step 6/6: Generating weekly report via Claude API...")
+        # Step 6: Generate weekly report via advisor (deterministic by default)
+        print("Step 6/6: Generating weekly report (deterministic advisor)...")
         from analysis.advisor import generate_weekly_report
         report_path = generate_weekly_report()
 

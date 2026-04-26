@@ -1,23 +1,32 @@
 """
 analysis/advisor.py
 
-Takes the three structured JSON outputs.
-Calls Claude API with DOCTRINE.md as system prompt.
-Returns plain-language weekly report.
+Dispatches report generation to the appropriate advisor based on ADVISOR_MODE.
 
-Claude receives: structured findings only.
-Claude does NOT: invent data, extrapolate, recommend actions not in the data.
+Default:   ADVISOR_MODE=deterministic  — uses analysis/rule_advisor.py
+Optional:  ADVISOR_MODE=claude         — calls Claude API (requires ANTHROPIC_API_KEY)
+
+Environment variables:
+  ADVISOR_MODE         — "deterministic" (default) or "claude"
+  ANTHROPIC_API_KEY    — required only when ADVISOR_MODE=claude
+
+Backward compatibility:
+  generate_weekly_report() and generate_monthly_report() continue to work
+  for all existing scheduler calls.
 """
 
 import json
 import os
 from datetime import datetime
 from pathlib import Path
-from anthropic import Anthropic
 
-client = Anthropic()
-DOCTRINE_PATH = Path("docs/DOCTRINE.md")
-MODEL = "claude-sonnet-4-6"
+# Deterministic advisor — imported at module level so it is always available
+# without requiring ANTHROPIC_API_KEY.
+from analysis.rule_advisor import generate_deterministic_report
+
+
+def _get_advisor_mode() -> str:
+    return os.getenv("ADVISOR_MODE", "deterministic").lower().strip()
 
 
 def load_json(path):
@@ -27,14 +36,12 @@ def load_json(path):
         return json.load(f)
 
 
-def build_data_summary(waste, lead_quality, campaign_truth):
-    """
-    Assembles a clean summary of findings for Claude.
-    Only includes what the data actually shows.
-    """
+# ── Claude helpers (only used when ADVISOR_MODE=claude) ──────────────────────
+
+def _build_data_summary(waste, lead_quality, campaign_truth):
+    """Assembles a structured findings dict for the Claude prompt."""
     summary = {}
 
-    # Waste findings
     if waste:
         summary["waste_detection"] = {
             "data_source": waste.get("data_source"),
@@ -45,7 +52,6 @@ def build_data_summary(waste, lead_quality, campaign_truth):
     else:
         summary["waste_detection"] = {"error": "Waste data unavailable"}
 
-    # Lead quality
     if lead_quality:
         summary["lead_quality"] = {
             "total_contacts_analysed": lead_quality.get("total_contacts_analysed"),
@@ -69,7 +75,6 @@ def build_data_summary(waste, lead_quality, campaign_truth):
     else:
         summary["lead_quality"] = {"error": "Lead quality data unavailable"}
 
-    # Campaign truth
     if campaign_truth:
         summary["campaign_truth"] = {
             "summary": campaign_truth.get("summary"),
@@ -81,10 +86,26 @@ def build_data_summary(waste, lead_quality, campaign_truth):
     return summary
 
 
-def generate_weekly_report():
-    os.makedirs("outputs", exist_ok=True)
+def _claude_report(report_type: str) -> str | None:
+    """
+    Generate a report via Claude API.
+    Only called when ADVISOR_MODE=claude.
 
-    # Load all analysis outputs
+    Raises RuntimeError if ANTHROPIC_API_KEY is not set.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "ADVISOR_MODE=claude requires ANTHROPIC_API_KEY to be set. "
+            "Set ADVISOR_MODE=deterministic to use the built-in deterministic advisor instead."
+        )
+
+    from anthropic import Anthropic  # noqa: PLC0415
+
+    client = Anthropic()
+    doctrine_path = Path("docs/DOCTRINE.md")
+
+    os.makedirs("outputs", exist_ok=True)
     waste = load_json("outputs/waste_report.json")
     lead_quality = load_json("outputs/lead_quality.json")
     campaign_truth = load_json("outputs/campaign_truth.json")
@@ -93,14 +114,11 @@ def generate_weekly_report():
         print("No analysis outputs found. Run analysis scripts first.")
         return None
 
-    # Load doctrine
-    system_prompt = DOCTRINE_PATH.read_text()
+    system_prompt = doctrine_path.read_text()
+    data_summary = _build_data_summary(waste, lead_quality, campaign_truth)
 
-    # Build clean data summary
-    data_summary = build_data_summary(waste, lead_quality, campaign_truth)
-
-    # Call Claude
-    user_message = f"""
+    if report_type == "weekly":
+        user_message = f"""
 Here are the findings from this week's data analysis for Logistaas Google Ads.
 
 DATA:
@@ -116,57 +134,10 @@ Please produce the weekly report following the structure in your instructions:
 Base everything on the data provided. If data is missing or uncertain, say so clearly.
 Do not recommend actions not directly supported by the numbers.
 """
-
-    print("Calling Claude API for weekly report...")
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=4096,
-        temperature=0,  # Deterministic — same data should produce same report
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}]
-    )
-
-    report_text = response.content[0].text
-    date_str = datetime.utcnow().strftime("%Y-%m-%d")
-
-    # Save report
-    report_path = f"outputs/weekly_report_{date_str}.md"
-    with open(report_path, "w") as f:
-        f.write(f"# Logistaas Weekly Ads Intelligence Report\n")
-        f.write(f"**Generated:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n\n")
-        f.write(report_text)
-
-    print(f"Weekly report saved: {report_path}")
-    print(f"Tokens used: {response.usage.input_tokens} in, {response.usage.output_tokens} out")
-
-    return report_path
-
-
-def generate_monthly_report():
-    """
-    Loads analysis outputs, calls Claude with DOCTRINE.md as system prompt,
-    and saves the strategic monthly report to outputs/monthly_report_YYYY-MM.md.
-    Returns the report file path on success, or None if analysis data is missing.
-    """
-    os.makedirs("outputs", exist_ok=True)
-
-    # Load all analysis outputs
-    waste = load_json("outputs/waste_report.json")
-    lead_quality = load_json("outputs/lead_quality.json")
-    campaign_truth = load_json("outputs/campaign_truth.json")
-
-    if not any([waste, lead_quality, campaign_truth]):
-        print("No analysis outputs found. Run analysis scripts first.")
-        return None
-
-    # Load doctrine
-    system_prompt = DOCTRINE_PATH.read_text()
-
-    # Build clean data summary
-    data_summary = build_data_summary(waste, lead_quality, campaign_truth)
-
-    # Call Claude
-    user_message = f"""
+        title = "Logistaas Weekly Ads Intelligence Report"
+        report_path = f"outputs/weekly_report_{datetime.utcnow().strftime('%Y-%m-%d')}.md"
+    else:
+        user_message = f"""
 Here are the findings from this month's data analysis for Logistaas Google Ads.
 
 DATA:
@@ -182,30 +153,58 @@ Please produce the monthly strategic report following the structure in your inst
 Base everything on the data provided. If data is missing or uncertain, say so clearly.
 Do not recommend actions not directly supported by the numbers.
 """
+        title = "Logistaas Monthly Ads Intelligence Report"
+        report_path = f"outputs/monthly_report_{datetime.utcnow().strftime('%Y-%m')}.md"
 
-    print("Calling Claude API for monthly report...")
+    print(f"Calling Claude API for {report_type} report...")
     response = client.messages.create(
-        model=MODEL,
+        model="claude-sonnet-4-6",
         max_tokens=4096,
-        temperature=0,  # Deterministic — same data should produce same report
+        temperature=0,
         system=system_prompt,
-        messages=[{"role": "user", "content": user_message}]
+        messages=[{"role": "user", "content": user_message}],
     )
 
     report_text = response.content[0].text
-    month_str = datetime.utcnow().strftime("%Y-%m")
 
-    # Save report
-    report_path = f"outputs/monthly_report_{month_str}.md"
     with open(report_path, "w") as f:
-        f.write(f"# Logistaas Monthly Ads Intelligence Report\n")
+        f.write(f"# {title}\n")
         f.write(f"**Generated:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n\n")
         f.write(report_text)
 
-    print(f"Monthly report saved: {report_path}")
+    print(f"{report_type.capitalize()} report saved: {report_path}")
     print(f"Tokens used: {response.usage.input_tokens} in, {response.usage.output_tokens} out")
-
     return report_path
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def generate_weekly_report() -> str | None:
+    """
+    Generate the weekly report.
+
+    Uses deterministic mode by default (ADVISOR_MODE=deterministic or unset).
+    Falls back to Claude API only when ADVISOR_MODE=claude.
+    """
+    mode = _get_advisor_mode()
+    if mode == "claude":
+        return _claude_report("weekly")
+    return generate_deterministic_report("weekly")
+
+
+def generate_monthly_report() -> str | None:
+    """
+    Generate the monthly report.
+
+    Uses deterministic mode by default (ADVISOR_MODE=deterministic or unset).
+    Falls back to Claude API only when ADVISOR_MODE=claude.
+
+    Returns the report file path on success, or None if analysis data is missing.
+    """
+    mode = _get_advisor_mode()
+    if mode == "claude":
+        return _claude_report("monthly")
+    return generate_deterministic_report("monthly")
 
 
 if __name__ == "__main__":

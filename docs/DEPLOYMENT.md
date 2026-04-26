@@ -21,16 +21,19 @@ endpoints, and all Phase 1 scheduled jobs (daily, weekly, monthly).
 Render.com
  └── logistaas-ads-intelligence  (web service)
        python -m uvicorn api.server:app --host 0.0.0.0 --port $PORT
-       ├── GET  /                    — Dashboard UI
-       ├── GET  /health              — Liveness check
-       ├── GET  /readiness           — Structured readiness check
-       ├── GET  /scheduler/status    — In-app scheduler state (read-only)
-       ├── GET  /runs/latest         — Latest run history record
-       ├── GET  /reports/latest      — Latest report metadata
-       ├── GET  /reports/latest/raw  — Raw report content
-       ├── POST /run/daily           — Trigger daily pulse (Bearer token)
-       ├── POST /run/weekly          — Trigger weekly report (Bearer token)
-       └── POST /run/monthly         — Trigger monthly report (Bearer token)
+       ├── GET  /                    — Dashboard UI (auth state managed by JS)
+       ├── GET  /health              — Liveness check (public)
+       ├── POST /auth/login          — Login with username + password
+       ├── POST /auth/logout         — Clear session cookie
+       ├── GET  /auth/me             — Current user info (requires auth)
+       ├── GET  /readiness           — Structured readiness check (requires admin)
+       ├── GET  /scheduler/status    — In-app scheduler state (requires auth)
+       ├── GET  /runs/latest         — Latest run history record (requires auth)
+       ├── GET  /reports/latest      — Latest report metadata (requires auth)
+       ├── GET  /reports/latest/raw  — Raw report content (requires auth)
+       ├── POST /run/daily           — Trigger daily pulse (requires admin)
+       ├── POST /run/weekly          — Trigger weekly report (requires admin)
+       └── POST /run/monthly         — Trigger monthly report (requires admin)
 
 In-app scheduler (APScheduler, runs inside the web service process):
   Daily pulse      — every day at 06:00 Asia/Amman (03:00 UTC)
@@ -68,16 +71,20 @@ All services are defined in `render.yaml` at the repo root.
 | Endpoint | Auth | Description |
 |----------|------|-------------|
 | `GET /health` | None | Liveness check — returns `{"status": "ok"}` |
-| `GET /readiness` | None | Structured check — dirs, config files, docs, core imports |
-| `GET /scheduler/status` | None | In-app scheduler state and next run times (read-only) |
-| `GET /runs/latest` | None | Latest record from `runtime_logs/run_history.jsonl` |
-| `GET /reports/latest` | None | Metadata for the most recent file in `outputs/` |
-| `GET /reports/latest/raw` | None | Raw markdown content of the latest report |
-| `POST /run/daily` | Bearer | Trigger daily pulse scheduler |
-| `POST /run/weekly` | Bearer | Trigger weekly report scheduler |
-| `POST /run/monthly` | Bearer | Trigger monthly report scheduler |
+| `POST /auth/login` | None | Login with username + password; sets session cookie |
+| `POST /auth/logout` | None | Clear session cookie |
+| `GET /auth/me` | Cookie session | Return current user info |
+| `GET /readiness` | Admin | Structured check — dirs, config files, docs, core imports |
+| `GET /scheduler/status` | Any auth | In-app scheduler state and next run times (read-only) |
+| `GET /runs/latest` | Any auth | Latest record from `runtime_logs/run_history.jsonl` |
+| `GET /reports/latest` | Any auth | Metadata for the most recent file in `outputs/` |
+| `GET /reports/latest/raw` | Any auth | Raw markdown content of the latest report |
+| `POST /run/daily` | Admin (cookie or Bearer) | Trigger daily pulse scheduler |
+| `POST /run/weekly` | Admin (cookie or Bearer) | Trigger weekly report scheduler |
+| `POST /run/monthly` | Admin (cookie or Bearer) | Trigger monthly report scheduler |
 
-Read-only GET endpoints are public. Run endpoints require `Authorization: Bearer <ADMIN_API_TOKEN>`.
+Unauthenticated requests to protected endpoints return **401**.
+Authenticated requests with insufficient role return **403**.
 
 ### Local verification
 
@@ -115,20 +122,108 @@ curl -X POST http://localhost:8000/run/daily
 
 Set each variable in the Render dashboard under **Service → Environment** for the web service.
 
-| Variable | Required by | Description |
-|----------|-------------|-------------|
-| `ADMIN_API_TOKEN` | web service | Long random token protecting `/run/*` endpoints — generate with `openssl rand -hex 32` |
-| `ANTHROPIC_API_KEY` | all schedulers | Claude API key for doctrine analysis |
-| `HUBSPOT_API_KEY` | all schedulers | HubSpot private app token |
-| `WINDSOR_API_KEY` | all schedulers | Windsor.ai API key |
-| `WINDSOR_ACCOUNT_ID` | all schedulers | Windsor.ai account identifier |
-| `SENDGRID_API_KEY` | weekly, monthly | SendGrid API key for email delivery |
-| `REPORT_SENDER_EMAIL` | weekly, monthly | Verified SendGrid sender address |
-| `REPORT_RECIPIENT_EMAIL` | weekly, monthly | Report delivery recipient |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `APP_SECRET_KEY` | ✅ required | Long random secret for signing session cookies — `openssl rand -hex 32` |
+| `AUTH_USERS_JSON` | ✅ required | JSON array of users — see "Creating Users" below |
+| `HUBSPOT_API_KEY` | ✅ required | HubSpot private app token |
+| `WINDSOR_API_KEY` | ✅ required | Windsor.ai API key |
+| `WINDSOR_ACCOUNT_ID` | ✅ required | Windsor.ai account identifier |
+| `ADVISOR_MODE` | ⬜ optional | `deterministic` (default) or `claude` |
+| `ANTHROPIC_API_KEY` | ⬜ optional | Required only when `ADVISOR_MODE=claude` |
+| `ADMIN_API_TOKEN` | ⬜ optional | For API-only manual triggers without dashboard login |
+| `SENDGRID_API_KEY` | ⬜ optional | For email delivery of reports |
+| `REPORT_SENDER_EMAIL` | ⬜ optional | Verified sender address |
+| `REPORT_RECIPIENT_EMAIL` | ⬜ optional | Report delivery recipient |
 
-> **Security warning:** Run endpoints are protected but powerful. Do not expose `ADMIN_API_TOKEN` in logs or responses. Do not call run endpoints repeatedly in quick succession — schedulers are heavyweight and designed to run at most once per day/week/month.
+> **Security warning:** `APP_SECRET_KEY` must be a long random secret (at least 32 bytes).
+> Never commit it to source control. Rotating this key will invalidate all active sessions.
 
-> **Note:** `GOOGLE_ADS_*` variables are reserved for `connectors/oct_uploader.py` (not yet built). Do not configure them until that module is available.
+> **Local development:** Set `APP_ENV=development` in your local `.env` file.
+> This disables the `Secure` flag on session cookies, allowing them to work over HTTP.
+> On Render (HTTPS), always use `APP_ENV=production`.
+
+> **Note:** `GOOGLE_ADS_*` variables are reserved for Phase 2+. Do not configure until available.
+
+---
+
+## Deterministic Advisor
+
+By default, `ADVISOR_MODE=deterministic`. Reports are generated from structured analysis outputs
+(`outputs/waste_report.json`, `outputs/lead_quality.json`, `outputs/campaign_truth.json`)
+without calling any external AI model.
+
+Claude API is optional. To switch to Claude mode:
+
+```bash
+ADVISOR_MODE=claude
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+If `ADVISOR_MODE=claude` is set but `ANTHROPIC_API_KEY` is missing, the scheduler will fail
+with a clear error message and suggest switching to deterministic mode.
+
+---
+
+## Internal User Authentication
+
+The dashboard requires login. No external auth provider or database is needed.
+Users and roles are configured entirely via `AUTH_USERS_JSON` on Render.
+
+### User roles
+
+| Role | Access |
+|------|--------|
+| `admin` | Full access — dashboard, reports, run history, scheduler status, manual run triggers |
+| `viewer` | Read-only — dashboard, reports, run history, scheduler status |
+| `mdr` | Limited read-only — dashboard, reports only |
+
+### Creating users
+
+Generate a password hash for each user:
+
+```bash
+python scripts/create_user_hash.py
+```
+
+This tool prompts for a username, password, and role, then outputs a JSON entry.
+The password is never stored or displayed.
+
+Example output:
+
+```json
+{
+  "username": "youssef",
+  "password_hash": "pbkdf2_sha256$260000$<salt>$<hash>",
+  "role": "admin"
+}
+```
+
+### Setting AUTH_USERS_JSON on Render
+
+Combine all user entries into a JSON array and set it as the `AUTH_USERS_JSON` environment variable:
+
+```json
+[
+  {"username":"youssef","password_hash":"pbkdf2_sha256$260000$...","role":"admin"},
+  {"username":"kareem","password_hash":"pbkdf2_sha256$260000$...","role":"viewer"},
+  {"username":"mdr","password_hash":"pbkdf2_sha256$260000$...","role":"mdr"}
+]
+```
+
+> ⚠️ `AUTH_USERS_JSON` must be a **single-line** JSON string in the Render dashboard.
+> Do not include line breaks or indent the JSON when setting the env var.
+
+> ⚠️ Never commit password hashes to source control. Store them only as Render env vars.
+
+### Auth behavior
+
+- Login: `POST /auth/login` with `{"username": "...", "password": "..."}`
+- Session stored in HTTP-only signed cookie (8-hour expiry)
+- `GET /auth/me` returns `{"username": "...", "role": "..."}`
+- `POST /auth/logout` clears the session cookie
+- 401 returned for unauthenticated requests to protected endpoints
+- 403 returned for authenticated requests with insufficient role
 
 ---
 

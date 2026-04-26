@@ -9,25 +9,32 @@ Responsibility:
   - Expose health and readiness endpoints for Render Web Service.
   - Expose read-only endpoints for latest run history and reports.
   - Expose protected manual run endpoints for Phase 1 schedulers.
+  - Provide internal authentication (login/logout/me) via signed cookie sessions.
   - Start the in-app APScheduler on startup and stop it on shutdown.
   - NO writes to Google Ads, HubSpot, or any external service.
   - NO business logic or analysis execution.
   - NO secrets or PII in responses.
 
-Endpoints:
+Public endpoints:
+  GET  /health              — Simple liveness check (no auth required).
+
+Auth endpoints:
+  POST /auth/login          — Login with username + password; sets session cookie.
+  POST /auth/logout         — Clear session cookie.
+  GET  /auth/me             — Return current user info (requires auth).
+
+Protected endpoints (require authenticated session):
   GET  /                    — Dashboard UI (serves static/index.html).
-  GET  /health              — Simple liveness check.
-  GET  /readiness           — Structured readiness check (dirs, config, imports).
-  GET  /runs/latest         — Latest record from runtime_logs/run_history.jsonl.
-  GET  /reports/latest      — Metadata for the latest report file in outputs/.
-  GET  /reports/latest/raw  — Raw markdown content of the latest report.
-  GET  /scheduler/status    — In-app scheduler state and next run times (read-only).
-  POST /run/daily           — Trigger daily scheduler (requires Bearer token).
-  POST /run/weekly          — Trigger weekly scheduler (requires Bearer token).
-  POST /run/monthly         — Trigger monthly scheduler (requires Bearer token).
+  GET  /readiness           — Structured readiness check (requires admin).
+  GET  /runs/latest         — Latest run record (requires auth).
+  GET  /reports/latest      — Latest report metadata (requires auth).
+  GET  /reports/latest/raw  — Raw report content (requires auth).
+  GET  /scheduler/status    — Scheduler state (requires auth).
+  POST /run/daily           — Trigger daily run (requires admin or ADMIN_API_TOKEN).
+  POST /run/weekly          — Trigger weekly run (requires admin or ADMIN_API_TOKEN).
+  POST /run/monthly         — Trigger monthly run (requires admin or ADMIN_API_TOKEN).
 """
 
-import glob
 import importlib
 import json
 import logging
@@ -37,10 +44,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
+from api.auth import (
+    check_admin_or_token,
+    clear_session,
+    get_current_user,
+    get_user,
+    require_auth,
+    set_session,
+    verify_password,
+)
 from api.scheduler import (
     _job_state,
     _run_lock,
@@ -96,6 +113,8 @@ _DOCTRINE_DOC = _REPO_ROOT / "docs" / "DOCTRINE.md"
 _REQUIRED_MODULES = [
     "analysis.core",
     "analysis.advisor",
+    "analysis.rule_advisor",
+    "api.auth",
     "scheduler.daily",
     "scheduler.weekly",
     "scheduler.monthly",
@@ -126,12 +145,21 @@ def _latest_report_path() -> Path | None:
 
 
 # ---------------------------------------------------------------------------
+# Login request schema
+# ---------------------------------------------------------------------------
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def dashboard() -> str:
-    """Serve the main dashboard page."""
+    """Serve the main dashboard page. Auth state is handled client-side."""
     html_file = _STATIC_DIR / "index.html"
     if not html_file.is_file():
         raise HTTPException(status_code=404, detail="Dashboard not found")
@@ -140,18 +168,64 @@ def dashboard() -> str:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    """Liveness check — always returns ok when the process is running."""
+    """Liveness check — always returns ok when the process is running. No auth required."""
     return {"status": "ok", "service": "logistaas-ads-intelligence"}
 
 
-@app.get("/readiness")
-def readiness() -> dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/auth/login")
+def auth_login(body: LoginRequest, response: Response) -> dict[str, Any]:
     """
-    Structured readiness check.
+    Authenticate with username and password.
+    Sets an HTTP-only signed session cookie on success.
+    Returns 401 for invalid credentials.
+    """
+    user = get_user(body.username)
+    if not user or not verify_password(body.password, user.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    role = user.get("role", "viewer")
+    set_session(response, user["username"], role)
+    return {"username": user["username"], "role": role}
+
+
+@app.post("/auth/logout")
+def auth_logout(response: Response) -> dict[str, str]:
+    """Clear the session cookie."""
+    clear_session(response)
+    return {"status": "ok"}
+
+
+@app.get("/auth/me")
+def auth_me(request: Request) -> dict[str, Any]:
+    """Return the current authenticated user's username and role. Requires auth."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"username": user["username"], "role": user["role"]}
+
+
+# ---------------------------------------------------------------------------
+# Protected read-only endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/readiness")
+def readiness(request: Request) -> dict[str, Any]:
+    """
+    Structured readiness check. Requires admin role.
 
     Verifies required directories, config files, docs, and core module
     imports.  Does NOT call any external API.
     """
+    # Require admin — readiness exposes system configuration state
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
     checks: dict[str, Any] = {}
 
     # Required directories — must exist or be creatable.
@@ -199,8 +273,8 @@ def readiness() -> dict[str, Any]:
 
 
 @app.get("/runs/latest")
-def runs_latest() -> dict[str, Any]:
-    """Return the most recent record from runtime_logs/run_history.jsonl."""
+def runs_latest(user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Return the most recent record from runtime_logs/run_history.jsonl. Requires auth."""
     if not _RUN_HISTORY_FILE.is_file():
         return {"status": "empty", "message": "No run history found yet"}
 
@@ -224,8 +298,8 @@ def runs_latest() -> dict[str, Any]:
 
 
 @app.get("/reports/latest")
-def reports_latest() -> dict[str, Any]:
-    """Return metadata for the latest report file in outputs/."""
+def reports_latest(user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Return metadata for the latest report file in outputs/. Requires auth."""
     report_path = _latest_report_path()
 
     if report_path is None:
@@ -244,7 +318,6 @@ def reports_latest() -> dict[str, Any]:
     # generated_at: use file modification time as a best-effort timestamp.
     try:
         mtime = report_path.stat().st_mtime
-        from datetime import datetime, timezone
         generated_at = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
@@ -261,8 +334,8 @@ def reports_latest() -> dict[str, Any]:
 
 
 @app.get("/reports/latest/raw", response_class=PlainTextResponse)
-def reports_latest_raw() -> str:
-    """Return the raw content of the latest markdown report as text/plain."""
+def reports_latest_raw(user: dict = Depends(require_auth)) -> str:
+    """Return the raw content of the latest markdown report as text/plain. Requires auth."""
     report_path = _latest_report_path()
 
     if report_path is None or report_path.suffix != ".md":
@@ -275,48 +348,23 @@ def reports_latest_raw() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler status endpoint — read-only.
+# Scheduler status endpoint — read-only, requires auth.
 # ---------------------------------------------------------------------------
 
 @app.get("/scheduler/status")
-def scheduler_status() -> dict[str, Any]:
-    """Return the in-app scheduler state and next run times for all jobs."""
+def scheduler_status(user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Return the in-app scheduler state and next run times for all jobs. Requires auth."""
     return get_scheduler_status()
 
 
 # ---------------------------------------------------------------------------
-# Auth helper — shared by all /run/* endpoints.
-# ---------------------------------------------------------------------------
-
-def _require_admin_token(request: Request) -> None:
-    """
-    Validate the Bearer token in the Authorization header.
-
-    Raises:
-        HTTPException 503 — ADMIN_API_TOKEN not configured in environment.
-        HTTPException 401 — Token missing from request or does not match.
-    """
-    admin_token = os.getenv("ADMIN_API_TOKEN", "")
-    if not admin_token:
-        raise HTTPException(status_code=503, detail="ADMIN_API_TOKEN not configured")
-
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    provided = auth_header[len("Bearer "):]
-    if provided != admin_token:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-# ---------------------------------------------------------------------------
-# Protected manual run endpoints
+# Protected manual run endpoints — require admin role or ADMIN_API_TOKEN.
 # ---------------------------------------------------------------------------
 
 @app.post("/run/daily")
 def run_daily(request: Request) -> dict[str, Any]:
-    """Trigger the daily pulse scheduler. Requires Bearer token."""
-    _require_admin_token(request)
+    """Trigger the daily pulse scheduler. Requires admin session or ADMIN_API_TOKEN."""
+    check_admin_or_token(request)
 
     with _run_lock:
         if _job_state["daily"]:
@@ -359,8 +407,8 @@ def run_daily(request: Request) -> dict[str, Any]:
 
 @app.post("/run/weekly")
 def run_weekly(request: Request) -> dict[str, Any]:
-    """Trigger the weekly report scheduler. Requires Bearer token."""
-    _require_admin_token(request)
+    """Trigger the weekly report scheduler. Requires admin session or ADMIN_API_TOKEN."""
+    check_admin_or_token(request)
 
     with _run_lock:
         if _job_state["weekly"]:
@@ -399,8 +447,8 @@ def run_weekly(request: Request) -> dict[str, Any]:
 
 @app.post("/run/monthly")
 def run_monthly(request: Request) -> dict[str, Any]:
-    """Trigger the monthly report scheduler. Requires Bearer token."""
-    _require_admin_token(request)
+    """Trigger the monthly report scheduler. Requires admin session or ADMIN_API_TOKEN."""
+    check_admin_or_token(request)
 
     with _run_lock:
         if _job_state["monthly"]:

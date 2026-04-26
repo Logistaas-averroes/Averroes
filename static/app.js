@@ -7,7 +7,8 @@
  *  - No hardcoded secrets.
  *  - No external tracking or analytics.
  *  - No third-party JS dependencies.
- *  - Token stored in sessionStorage only (cleared on tab close).
+ *  - Auth state managed via HTTP-only session cookie (not accessible to JS).
+ *  - Role-based UI: admin sees run controls; viewer/mdr see read-only dashboard.
  */
 
 "use strict";
@@ -45,18 +46,162 @@ const STATUS_MAP = {
   empty:   "badge--empty",
 };
 
+// ── Current session state ──────────────────────────────────────────────────
+
+let _currentUser = null;  // { username, role } or null
+
 // ── Fetch wrappers ─────────────────────────────────────────────────────────
 
-async function fetchJSON(url) {
-  const res = await fetch(url);
+async function fetchJSON(url, options) {
+  const res = await fetch(url, options);
+  if (res.status === 401) {
+    showLoginScreen();
+    throw new Error("HTTP 401");
+  }
+  if (res.status === 403) {
+    throw new Error("HTTP 403 Forbidden");
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
 async function fetchText(url) {
   const res = await fetch(url);
+  if (res.status === 401) {
+    showLoginScreen();
+    throw new Error("HTTP 401");
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.text();
+}
+
+// ── Auth flow ──────────────────────────────────────────────────────────────
+
+function showLoginScreen() {
+  const loginEl = document.getElementById("login-screen");
+  const dashEl = document.getElementById("dashboard");
+  if (loginEl) loginEl.style.display = "flex";
+  if (dashEl) dashEl.style.display = "none";
+  _currentUser = null;
+}
+
+function showDashboard(user) {
+  const loginEl = document.getElementById("login-screen");
+  const dashEl = document.getElementById("dashboard");
+  if (loginEl) loginEl.style.display = "none";
+  if (dashEl) dashEl.style.display = "block";
+  _currentUser = user;
+  applyRoleUI(user);
+}
+
+function applyRoleUI(user) {
+  // User badge in header
+  const userBadge = document.getElementById("user-badge");
+  const userName = document.getElementById("user-name");
+  const userRoleBadge = document.getElementById("user-role-badge");
+  const logoutBtn = document.getElementById("btn-logout");
+
+  if (userBadge) userBadge.style.display = "inline-flex";
+  if (userName) userName.textContent = user.username;
+  if (userRoleBadge) {
+    userRoleBadge.textContent = user.role;
+    userRoleBadge.className = `role-badge role-badge--${user.role}`;
+  }
+  if (logoutBtn) logoutBtn.style.display = "inline-flex";
+
+  // Show run controls only for admin
+  const runSection = document.getElementById("run-controls-section");
+  if (runSection) {
+    runSection.style.display = user.role === "admin" ? "block" : "none";
+  }
+}
+
+async function checkAuth() {
+  try {
+    const data = await fetch("/auth/me");
+    if (data.status === 401) {
+      showLoginScreen();
+      return false;
+    }
+    if (!data.ok) {
+      showLoginScreen();
+      return false;
+    }
+    const user = await data.json();
+    showDashboard(user);
+    return true;
+  } catch (e) {
+    showLoginScreen();
+    return false;
+  }
+}
+
+async function handleLogin(e) {
+  e.preventDefault();
+  const usernameEl = document.getElementById("login-username");
+  const passwordEl = document.getElementById("login-password");
+  const errorEl = document.getElementById("login-error");
+  const submitBtn = document.getElementById("login-submit-btn");
+
+  const username = usernameEl ? usernameEl.value.trim() : "";
+  const password = passwordEl ? passwordEl.value : "";
+
+  if (!username || !password) {
+    if (errorEl) {
+      errorEl.textContent = "Username and password are required.";
+      errorEl.style.display = "block";
+    }
+    return;
+  }
+
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Signing in…";
+  }
+  if (errorEl) errorEl.style.display = "none";
+
+  try {
+    const res = await fetch("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+
+    if (res.ok) {
+      const user = await res.json();
+      // Clear password field for security
+      if (passwordEl) passwordEl.value = "";
+      showDashboard(user);
+      // Load dashboard data
+      loadAll();
+    } else {
+      const body = await res.json().catch(() => ({}));
+      if (errorEl) {
+        errorEl.textContent = body.detail || "Invalid username or password.";
+        errorEl.style.display = "block";
+      }
+    }
+  } catch (err) {
+    if (errorEl) {
+      errorEl.textContent = "Login failed — please try again.";
+      errorEl.style.display = "block";
+    }
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Sign in";
+    }
+  }
+}
+
+async function handleLogout() {
+  try {
+    await fetch("/auth/logout", { method: "POST" });
+  } catch (_) {
+    // Ignore errors — still show login
+  }
+  _currentUser = null;
+  showLoginScreen();
 }
 
 // ── Health card ────────────────────────────────────────────────────────────
@@ -65,13 +210,13 @@ async function loadHealth() {
   const el = document.getElementById("card-health");
   const headerBadge = document.getElementById("header-health-badge");
   try {
-    const data = await fetchJSON("/health");
+    const data = await fetch("/health").then(r => r.json());
     const status = data.status || "unknown";
     const badge = statusBadge(status, STATUS_MAP);
-    el.querySelector(".card__value").innerHTML = badge;
+    if (el) el.querySelector(".card__value").innerHTML = badge;
     if (headerBadge) headerBadge.innerHTML = badge;
   } catch (e) {
-    el.querySelector(".card__value").innerHTML = statusBadge("error", STATUS_MAP);
+    if (el) el.querySelector(".card__value").innerHTML = statusBadge("error", STATUS_MAP);
   }
 }
 
@@ -79,10 +224,17 @@ async function loadHealth() {
 
 async function loadReadiness() {
   const el = document.getElementById("card-readiness");
+  if (!el) return;
+  // Only admins can see readiness details; hide card for other roles
+  if (!_currentUser || _currentUser.role !== "admin") {
+    el.style.display = "none";
+    return;
+  }
   try {
     const data = await fetchJSON("/readiness");
     el.querySelector(".card__value").innerHTML = statusBadge(data.status || "unknown", STATUS_MAP);
   } catch (e) {
+    if (e.message === "HTTP 401") return;
     el.querySelector(".card__value").innerHTML = statusBadge("error", STATUS_MAP);
   }
 }
@@ -97,15 +249,15 @@ async function loadLatestRun() {
     const data = await fetchJSON("/runs/latest");
 
     if (data.status === "empty" || !data.run_type) {
-      cardEl.querySelector(".card__value").innerHTML = statusBadge("empty", STATUS_MAP);
-      bodyEl.innerHTML = `<p class="empty-state">No run history yet. Trigger a manual run or wait for the next scheduled run.</p>`;
+      if (cardEl) cardEl.querySelector(".card__value").innerHTML = statusBadge("empty", STATUS_MAP);
+      if (bodyEl) bodyEl.innerHTML = `<p class="empty-state">No run history yet. Trigger a manual run or wait for the next scheduled run.</p>`;
       return;
     }
 
     const runStatus = data.status || "unknown";
-    cardEl.querySelector(".card__value").innerHTML = statusBadge(runStatus, STATUS_MAP);
+    if (cardEl) cardEl.querySelector(".card__value").innerHTML = statusBadge(runStatus, STATUS_MAP);
 
-    bodyEl.innerHTML = `
+    if (bodyEl) bodyEl.innerHTML = `
       <dl class="kv-list">
         <dt>Run type</dt>     <dd>${fmt(data.run_type)}</dd>
         <dt>Status</dt>       <dd>${statusBadge(runStatus, STATUS_MAP)}</dd>
@@ -117,8 +269,9 @@ async function loadLatestRun() {
           : ""}
       </dl>`;
   } catch (e) {
-    cardEl.querySelector(".card__value").innerHTML = statusBadge("error", STATUS_MAP);
-    bodyEl.innerHTML = `<p class="empty-state">Could not load run history.</p>`;
+    if (e.message === "HTTP 401") return;
+    if (cardEl) cardEl.querySelector(".card__value").innerHTML = statusBadge("error", STATUS_MAP);
+    if (bodyEl) bodyEl.innerHTML = `<p class="empty-state">Could not load run history.</p>`;
   }
 }
 
@@ -133,17 +286,17 @@ async function loadLatestReport() {
     const data = await fetchJSON("/reports/latest");
 
     if (!data.exists) {
-      cardEl.querySelector(".card__value").innerHTML = statusBadge("empty", STATUS_MAP);
-      bodyEl.innerHTML = `<p class="empty-state">No report found yet. Reports appear after the first successful run.</p>`;
+      if (cardEl) cardEl.querySelector(".card__value").innerHTML = statusBadge("empty", STATUS_MAP);
+      if (bodyEl) bodyEl.innerHTML = `<p class="empty-state">No report found yet. Reports appear after the first successful run.</p>`;
       if (rawBtn) rawBtn.style.display = "none";
       return;
     }
 
-    cardEl.querySelector(".card__value").innerHTML = statusBadge("available", {
+    if (cardEl) cardEl.querySelector(".card__value").innerHTML = statusBadge("available", {
       available: "badge--ok",
     });
 
-    bodyEl.innerHTML = `
+    if (bodyEl) bodyEl.innerHTML = `
       <dl class="kv-list">
         <dt>Type</dt>      <dd>${fmt(data.report_type)}</dd>
         <dt>Filename</dt>  <dd>${fmt(data.filename)}</dd>
@@ -151,8 +304,9 @@ async function loadLatestReport() {
         <dt>Path</dt>      <dd>${fmt(data.path)}</dd>
       </dl>`;
   } catch (e) {
-    cardEl.querySelector(".card__value").innerHTML = statusBadge("error", STATUS_MAP);
-    bodyEl.innerHTML = `<p class="empty-state">Could not load report metadata.</p>`;
+    if (e.message === "HTTP 401") return;
+    if (cardEl) cardEl.querySelector(".card__value").innerHTML = statusBadge("error", STATUS_MAP);
+    if (bodyEl) bodyEl.innerHTML = `<p class="empty-state">Could not load report metadata.</p>`;
     if (rawBtn) rawBtn.style.display = "none";
   }
 }
@@ -179,8 +333,10 @@ async function loadRawReport() {
     viewer.classList.add("visible");
     btn.textContent = "Hide Raw Report";
   } catch (e) {
-    viewer.textContent = "Could not load raw report. No markdown report may be available yet.";
-    viewer.classList.add("visible");
+    if (e.message !== "HTTP 401") {
+      viewer.textContent = "Could not load raw report. No markdown report may be available yet.";
+      viewer.classList.add("visible");
+    }
     btn.textContent = "View Raw Report";
   } finally {
     btn.disabled = false;
@@ -221,6 +377,7 @@ async function loadSchedulerStatus() {
       bodyEl.innerHTML = `<dl class="kv-list">${rows}</dl>`;
     }
   } catch (e) {
+    if (e.message === "HTTP 401") return;
     if (cardEl) {
       cardEl.querySelector(".card__value").innerHTML = statusBadge("error", STATUS_MAP);
     }
@@ -230,33 +387,11 @@ async function loadSchedulerStatus() {
   }
 }
 
-function getToken() {
-  const inputEl = document.getElementById("admin-token-input");
-  const val = inputEl ? inputEl.value.trim() : "";
-  if (val) {
-    sessionStorage.setItem("_adm_tok", val);
-    return val;
-  }
-  return sessionStorage.getItem("_adm_tok") || "";
-}
-
-function clearToken() {
-  sessionStorage.removeItem("_adm_tok");
-  const inputEl = document.getElementById("admin-token-input");
-  if (inputEl) inputEl.value = "";
-}
-
-// ── Manual run trigger ─────────────────────────────────────────────────────
+// ── Manual run trigger (admin only) ───────────────────────────────────────
 
 async function triggerRun(jobType) {
   const feedbackEl = document.getElementById("run-feedback");
   const buttons = document.querySelectorAll(".run-buttons .btn");
-
-  const token = getToken();
-  if (!token) {
-    showFeedback(feedbackEl, "error", "Please enter your ADMIN_API_TOKEN before triggering a run.");
-    return;
-  }
 
   buttons.forEach(b => { b.disabled = true; });
   showFeedback(feedbackEl, "loading", `<span class="spinner"></span> Running ${jobType} job — this may take a minute…`);
@@ -264,7 +399,7 @@ async function triggerRun(jobType) {
   try {
     const res = await fetch(`/run/${jobType}`, {
       method: "POST",
-      headers: { "Authorization": `Bearer ${token}` },
+      credentials: "same-origin",
     });
 
     const data = await res.json();
@@ -273,14 +408,14 @@ async function triggerRun(jobType) {
       const rp = data.result && data.result.report_path ? ` Report: ${escapeHtml(data.result.report_path)}` : "";
       showFeedback(feedbackEl, "success",
         `✓ ${escapeHtml(jobType)} run completed. Finished at ${escapeHtml(data.finished_at || "—")}.${rp}`);
-      // Refresh panels after a successful run.
       await Promise.all([loadLatestRun(), loadLatestReport()]);
     } else if (res.status === 401) {
-      showFeedback(feedbackEl, "error", "Unauthorized — token is missing or incorrect.");
+      showFeedback(feedbackEl, "error", "Session expired — please sign in again.");
+      showLoginScreen();
+    } else if (res.status === 403) {
+      showFeedback(feedbackEl, "error", "Access denied — admin role required.");
     } else if (res.status === 409) {
       showFeedback(feedbackEl, "error", `${escapeHtml(jobType)} job is already running. Wait for it to finish.`);
-    } else if (res.status === 503) {
-      showFeedback(feedbackEl, "error", "ADMIN_API_TOKEN is not configured on the server.");
     } else {
       const errMsg = data.error || data.detail || "Unknown error";
       showFeedback(feedbackEl, "error", `Run failed: ${escapeHtml(errMsg)}`);
@@ -293,45 +428,46 @@ async function triggerRun(jobType) {
 }
 
 function showFeedback(el, type, html) {
+  if (!el) return;
   el.className = `run-feedback run-feedback--${type} visible`;
   el.innerHTML = html;
 }
 
-// ── Wire up event listeners ────────────────────────────────────────────────
+// ── Load all dashboard data ────────────────────────────────────────────────
 
-document.addEventListener("DOMContentLoaded", () => {
-  // Load all data sections.
+function loadAll() {
   loadHealth();
   loadReadiness();
   loadLatestRun();
   loadLatestReport();
   loadSchedulerStatus();
+}
 
-  // Restore token from sessionStorage (page reload within same tab).
-  const saved = sessionStorage.getItem("_adm_tok");
-  if (saved) {
-    const inp = document.getElementById("admin-token-input");
-    if (inp) inp.value = saved;
-  }
+// ── Wire up event listeners ────────────────────────────────────────────────
 
-  // Run buttons.
-  document.getElementById("btn-run-daily")
-    .addEventListener("click", () => triggerRun("daily"));
-  document.getElementById("btn-run-weekly")
-    .addEventListener("click", () => triggerRun("weekly"));
-  document.getElementById("btn-run-monthly")
-    .addEventListener("click", () => triggerRun("monthly"));
+document.addEventListener("DOMContentLoaded", async () => {
+  // Check auth first
+  const loginForm = document.getElementById("login-form");
+  if (loginForm) loginForm.addEventListener("submit", handleLogin);
 
-  // Raw report toggle.
-  document.getElementById("btn-view-raw")
-    .addEventListener("click", loadRawReport);
+  const logoutBtn = document.getElementById("btn-logout");
+  if (logoutBtn) logoutBtn.addEventListener("click", handleLogout);
 
-  // Token clear button.
-  document.getElementById("btn-clear-token")
-    .addEventListener("click", () => {
-      clearToken();
-      const feedbackEl = document.getElementById("run-feedback");
-      showFeedback(feedbackEl, "success", "Token cleared from session.");
-      setTimeout(() => { feedbackEl.className = "run-feedback"; }, 2000);
-    });
+  const isAuth = await checkAuth();
+  if (!isAuth) return;
+
+  // Load dashboard data
+  loadAll();
+
+  // Raw report toggle
+  const rawBtn = document.getElementById("btn-view-raw");
+  if (rawBtn) rawBtn.addEventListener("click", loadRawReport);
+
+  // Run buttons (only visible to admin, but wire up regardless)
+  const dailyBtn = document.getElementById("btn-run-daily");
+  const weeklyBtn = document.getElementById("btn-run-weekly");
+  const monthlyBtn = document.getElementById("btn-run-monthly");
+  if (dailyBtn) dailyBtn.addEventListener("click", () => triggerRun("daily"));
+  if (weeklyBtn) weeklyBtn.addEventListener("click", () => triggerRun("weekly"));
+  if (monthlyBtn) monthlyBtn.addEventListener("click", () => triggerRun("monthly"));
 });
