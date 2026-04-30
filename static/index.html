@@ -11,8 +11,8 @@
 </head>
 <body>
 
-  <!-- ── Login screen ───────────────────────────────────────────────────── -->
-  <div id="login-screen" class="login-screen" hidden>
+  <!-- ── Login screen ── visible by default, JS hides it after auth check -->
+  <div id="login-screen" class="login-screen">
     <div class="login-card">
       <div class="login-card__brand">
         <div class="login-card__wordmark">Logistaas</div>
@@ -56,13 +56,12 @@
     </div>
   </div>
 
-  <!-- ── App shell ──────────────────────────────────────────────────────── -->
-  <div id="app" class="app" hidden>
+  <!-- ── App shell ── hidden by default, JS shows it after successful auth -->
+  <div id="app" class="app" style="display:none">
 
-    <!-- ── Sidebar ──────────────────────────────────────────────────────── -->
+    <!-- ── Sidebar ── -->
     <nav id="sidebar" class="sidebar" aria-label="Main navigation">
 
-      <!-- Logo / wordmark -->
       <div class="sidebar__logo">
         <div class="sidebar__wordmark">Logistaas</div>
         <div class="sidebar__product">Ads Intelligence</div>
@@ -72,7 +71,6 @@
         </div>
       </div>
 
-      <!-- Navigation items -->
       <ul class="sidebar__nav" role="list">
         <li>
           <a class="nav-item" data-page="dashboard" href="#" role="button" tabindex="0" aria-label="Dashboard">
@@ -132,7 +130,6 @@
         </li>
       </ul>
 
-      <!-- Sidebar footer -->
       <div class="sidebar__footer">
         <div class="phase-badge sidebar__phase-badge">Phase 1 — Read Only</div>
         <div class="sidebar__user" id="sidebar-user">
@@ -146,17 +143,15 @@
       </div>
     </nav>
 
-    <!-- ── Main content area ──────────────────────────────────────────────── -->
+    <!-- ── Main content ── -->
     <div class="main-content">
 
-      <!-- ── Dashboard page ───────────────────────────────────────────────── -->
+      <!-- Dashboard -->
       <section id="page-dashboard" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">Dashboard</h1>
           <p class="page-subtitle">Campaign intelligence overview</p>
         </header>
-
-        <!-- KPI bar -->
         <div class="kpi-grid">
           <div class="kpi-card">
             <div class="kpi-card__label">Total Spend (30d)</div>
@@ -175,55 +170,35 @@
             <div class="kpi-card__value" id="kpi-waste">—</div>
           </div>
         </div>
-
-        <!-- Campaign verdict summary -->
         <div class="panel">
           <div class="panel__header">
-            <span class="panel__header-icon" aria-hidden="true">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/></svg>
-            </span>
+            <span class="panel__header-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/></svg></span>
             Campaign Verdict Summary
           </div>
-          <div class="panel__body" id="dash-verdict-body">
-            <p class="empty-state">Loading campaigns…</p>
-          </div>
+          <div class="panel__body" id="dash-verdict-body"><p class="empty-state">Loading campaigns…</p></div>
         </div>
-
-        <!-- Active alerts -->
         <div class="panel">
           <div class="panel__header">
-            <span class="panel__header-icon" aria-hidden="true">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            </span>
+            <span class="panel__header-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
             Active Alerts
           </div>
-          <div class="panel__body" id="dash-alerts-body">
-            <p class="empty-state">Loading alerts…</p>
-          </div>
+          <div class="panel__body" id="dash-alerts-body"><p class="empty-state">Loading alerts…</p></div>
         </div>
-
-        <!-- Recent run timeline -->
         <div class="panel">
           <div class="panel__header">
-            <span class="panel__header-icon" aria-hidden="true">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-            </span>
+            <span class="panel__header-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
             Recent Run
           </div>
-          <div class="panel__body" id="dash-run-body">
-            <p class="empty-state">Loading run history…</p>
-          </div>
+          <div class="panel__body" id="dash-run-body"><p class="empty-state">Loading run history…</p></div>
         </div>
       </section>
 
-      <!-- ── Campaigns page ───────────────────────────────────────────────── -->
+      <!-- Campaigns -->
       <section id="page-campaigns" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">Campaigns</h1>
           <p class="page-subtitle">Campaign truth table — spend, quality, and verdict</p>
         </header>
-
-        <!-- Verdict summary cards -->
         <div class="verdict-count-grid" id="camp-verdict-grid">
           <div class="verdict-count-card verdict-count-card--scale">
             <div class="verdict-count-card__num" id="vc-scale">—</div>
@@ -242,8 +217,6 @@
             <div class="verdict-count-card__label">CUT</div>
           </div>
         </div>
-
-        <!-- Truth table -->
         <div class="panel">
           <div class="panel__header">Campaign Truth Table</div>
           <div class="panel__body panel__body--flush" id="camp-table-body">
@@ -252,14 +225,12 @@
         </div>
       </section>
 
-      <!-- ── Lead Quality page ─────────────────────────────────────────────── -->
+      <!-- Lead Quality -->
       <section id="page-leads" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">Lead Quality</h1>
           <p class="page-subtitle">Contact qualification breakdown by campaign</p>
         </header>
-
-        <!-- Summary cards -->
         <div class="kpi-grid">
           <div class="kpi-card">
             <div class="kpi-card__label">Total Contacts</div>
@@ -278,37 +249,28 @@
             <div class="kpi-card__value" id="leads-progress">—</div>
           </div>
         </div>
-
-        <!-- Per-campaign breakdown -->
         <div class="panel">
           <div class="panel__header">Per-Campaign Breakdown</div>
           <div class="panel__body panel__body--flush" id="leads-table-body">
             <p class="empty-state" style="padding: var(--space-5);">Loading lead quality data…</p>
           </div>
         </div>
-
         <p class="grace-note">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           Contacts created in the last 7 days are excluded from junk rate — MDR has not yet reached them.
         </p>
       </section>
 
-      <!-- ── Deals page ────────────────────────────────────────────────────── -->
+      <!-- Deals -->
       <section id="page-deals" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">Deals</h1>
           <p class="page-subtitle">GCLID-matched deal pipeline</p>
         </header>
-
-        <!-- Pipeline funnel -->
         <div class="panel">
           <div class="panel__header">Pipeline Stages</div>
-          <div class="panel__body" id="deals-funnel-body">
-            <p class="empty-state">Loading deals…</p>
-          </div>
+          <div class="panel__body" id="deals-funnel-body"><p class="empty-state">Loading deals…</p></div>
         </div>
-
-        <!-- Deals table -->
         <div class="panel">
           <div class="panel__header">Deals Table</div>
           <div class="panel__body panel__body--flush" id="deals-table-body">
@@ -317,44 +279,32 @@
         </div>
       </section>
 
-      <!-- ── Opportunities page ────────────────────────────────────────────── -->
+      <!-- Opportunities -->
       <section id="page-opportunities" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">Opportunities</h1>
           <p class="page-subtitle">Active leads in progress — meeting booked and pending</p>
         </header>
-
-        <div id="opps-body">
-          <p class="empty-state">Loading opportunities…</p>
-        </div>
+        <div id="opps-body"><p class="empty-state">Loading opportunities…</p></div>
       </section>
 
-      <!-- ── Scheduler page ───────────────────────────────────────────────── -->
+      <!-- Scheduler -->
       <section id="page-scheduler" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">Scheduler</h1>
           <p class="page-subtitle">In-app APScheduler — job status and manual triggers</p>
         </header>
-
-        <!-- Job cards -->
-        <div class="sched-grid" id="sched-jobs-grid">
-          <p class="empty-state">Loading scheduler…</p>
-        </div>
-
-        <!-- Trigger feedback -->
+        <div class="sched-grid" id="sched-jobs-grid"><p class="empty-state">Loading scheduler…</p></div>
         <div class="run-feedback" id="sched-feedback" hidden></div>
       </section>
 
-      <!-- ── System Health page ────────────────────────────────────────────── -->
+      <!-- System Health -->
       <section id="page-health" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">System Health</h1>
           <p class="page-subtitle">Readiness checks — environment, config, modules</p>
         </header>
-
-        <div id="health-body">
-          <p class="empty-state">Loading readiness data…</p>
-        </div>
+        <div id="health-body"><p class="empty-state">Loading readiness data…</p></div>
       </section>
 
     </div><!-- /.main-content -->
