@@ -10,6 +10,7 @@ import json
 import time
 import functools
 from datetime import datetime, timedelta
+import requests
 import hubspot
 from hubspot.crm.contacts import ApiException
 from dotenv import load_dotenv
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
 
+HUBSPOT_API_BASE_URL = "https://api.hubapi.com"
 MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 2
 
@@ -158,6 +160,11 @@ def pull_deals_with_gclid(contacts: list) -> list:
     """
     For contacts that have a GCLID, pull their associated deals.
     This gives us the full ad click → pipeline journey.
+
+    Uses the HubSpot CRM v4 associations REST API directly (version-agnostic).
+    Endpoint: GET /crm/v4/objects/contacts/{contact_id}/associations/deals
+    This avoids SDK breakage when hubspot-api-client (>=9.0.0) reorganises its
+    associations interface between minor versions.
     """
     client = get_client()
     gclid_contacts = [
@@ -172,15 +179,32 @@ def pull_deals_with_gclid(contacts: list) -> list:
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                assoc = client.crm.contacts.associations_api.get_all(
-                    contact_id=contact_id,
-                    to_object_type="deals"
+                # Use REST API directly — version-agnostic, never breaks on SDK upgrades
+                assoc_url = (
+                    f"{HUBSPOT_API_BASE_URL}/crm/v4/objects/contacts"
+                    f"/{contact_id}/associations/deals"
                 )
+                headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+                resp = requests.get(assoc_url, headers=headers, timeout=30)
 
-                for deal_ref in assoc.results:
-                    deal_id = deal_ref.id
+                if resp.status_code == 429 and attempt < MAX_RETRIES:
+                    wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    logger.warning(
+                        "HubSpot rate limited on associations — retry %d/%d in %ds",
+                        attempt, MAX_RETRIES, wait,
+                    )
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                assoc_results = resp.json().get("results", [])  # TODO PR-ADS-028: add associations pagination
+
+                for deal_ref in assoc_results:
+                    deal_id = deal_ref.get("toObjectId") or deal_ref.get("id")
+                    if not deal_id:
+                        continue
                     deal = client.crm.deals.basic_api.get_by_id(
-                        deal_id=deal_id,
+                        deal_id=str(deal_id),
                         properties=["dealname", "dealstage", "amount",
                                    "closedate", "createdate", "pipeline",
                                    "hs_deal_stage_probability"]
@@ -194,6 +218,20 @@ def pull_deals_with_gclid(contacts: list) -> list:
                     deals.append(deal_dict)
                 break  # success — exit retry loop
 
+            except requests.exceptions.RequestException as exc:
+                if attempt < MAX_RETRIES:
+                    wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Transient error fetching associations for contact %s — retry %d/%d in %ds: %s",
+                        contact_id, attempt, MAX_RETRIES, wait, exc,
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.warning(
+                        "Failed to fetch associations for contact %s after %d retries: %s",
+                        contact_id, MAX_RETRIES, exc,
+                    )
+                    break
             except ApiException as exc:
                 if exc.status == 429 and attempt < MAX_RETRIES:
                     wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
