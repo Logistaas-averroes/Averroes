@@ -121,11 +121,19 @@ def pull_search_terms(days_back: int = 14) -> list:
 
     Uses date_preset (not date_from/date_to) — the confirmed working query pattern.
     The segment=search_term parameter is rejected by Windsor with 400 BAD REQUEST.
+    days_back is mapped to Windsor presets: ≤1 → last_1d, ≤7 → last_7d, else → last_14d.
     """
+    if days_back <= 1:
+        date_preset = "last_1d"
+    elif days_back <= 7:
+        date_preset = "last_7d"
+    else:
+        date_preset = "last_14d"
+
     params = {
         "api_key": WINDSOR_API_KEY,
         "account_id": WINDSOR_ACCOUNT_ID,
-        "date_preset": "last_14d",
+        "date_preset": date_preset,
         "data_source": "google_ads",
         "fields": ",".join([
             "date",

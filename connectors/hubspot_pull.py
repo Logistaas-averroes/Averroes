@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
 
 HUBSPOT_API_BASE_URL = "https://api.hubapi.com"
+MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 2
 
 # Fields confirmed live from Logistaas HubSpot account
@@ -196,7 +197,7 @@ def pull_deals_with_gclid(contacts: list) -> list:
                     continue
 
                 resp.raise_for_status()
-                assoc_results = resp.json().get("results", [])
+                assoc_results = resp.json().get("results", [])  # TODO PR-ADS-028: add associations pagination
 
                 for deal_ref in assoc_results:
                     deal_id = deal_ref.get("toObjectId") or deal_ref.get("id")
@@ -218,11 +219,19 @@ def pull_deals_with_gclid(contacts: list) -> list:
                 break  # success — exit retry loop
 
             except requests.exceptions.RequestException as exc:
-                logger.warning(
-                    "Failed to fetch associations for contact %s: %s",
-                    contact_id, exc,
-                )
-                break
+                if attempt < MAX_RETRIES:
+                    wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Transient error fetching associations for contact %s — retry %d/%d in %ds: %s",
+                        contact_id, attempt, MAX_RETRIES, wait, exc,
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.warning(
+                        "Failed to fetch associations for contact %s after %d retries: %s",
+                        contact_id, MAX_RETRIES, exc,
+                    )
+                    break
             except ApiException as exc:
                 if exc.status == 429 and attempt < MAX_RETRIES:
                     wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
