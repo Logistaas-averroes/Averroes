@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-023 — Brand-Aligned Dashboard Rebuild (April 2026)
+**Last updated:** PR-ADS-027 — Fix HubSpot Associations API + Windsor Search Term Query (April 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -13,8 +13,8 @@
 
 | File | Module | Notes |
 |------|--------|-------|
-| `connectors/hubspot_pull.py` | HubSpot CRM connector | Pulls contacts, deals, GCLID; retry logic included |
-| `connectors/windsor_pull.py` | Windsor.ai connector | Pulls campaigns, search terms, keywords, geo |
+| `connectors/hubspot_pull.py` | HubSpot CRM connector | associations_api crash fixed (PR-ADS-027); now uses CRM v4 REST API for associations — version-agnostic |
+| `connectors/windsor_pull.py` | Windsor.ai connector | search term query fixed (PR-ADS-027); removed segment=search_term (400 error), switched to date_preset |
 | `connectors/gclid_match.py` | GCLID reconciliation | Joins Windsor + HubSpot via GCLID; falls back if `logistaas_config.yaml` missing |
 | `analysis/core.py` | Waste detection + lead quality + campaign truth | All three functions in one file; `load_json` defined at line 471 |
 | `analysis/rule_advisor.py` | Deterministic report generator | **NEW in PR-ADS-021** — `generate_deterministic_report(report_type)` generates markdown from structured JSON outputs; no external API; replaces Claude as default |
@@ -91,6 +91,7 @@ No files are currently in a broken state.
 | PR-ADS-021B | Plain-text password fallback hotfix — `authenticate_user()` dual-mode, unblocks login | ✅ Complete |
 | PR-ADS-022  | Premium Dashboard Visual Upgrade — CSS/HTML/JS polish, no backend changes | ✅ This PR |
 | PR-ADS-023 | Brand-Aligned Dashboard Rebuild — 5-page SPA, Sora font, full API wiring | ✅ Complete |
+| PR-ADS-027 | Fix HubSpot associations_api crash + Windsor search term 400 error | ✅ Complete |
 | **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 

@@ -118,13 +118,15 @@ def pull_search_terms(days_back: int = 14) -> list:
     Pull actual search terms that triggered ads.
     This is the raw material for N-gram analysis.
     Requires Windsor.ai paid plan.
-    """
-    start, end = get_date_range(days_back)
 
+    Uses date_preset (not date_from/date_to) — the confirmed working query pattern.
+    The segment=search_term parameter is rejected by Windsor with 400 BAD REQUEST.
+    """
     params = {
         "api_key": WINDSOR_API_KEY,
-        "date_from": start,
-        "date_to": end,
+        "account_id": WINDSOR_ACCOUNT_ID,
+        "date_preset": "last_14d",
+        "data_source": "google_ads",
         "fields": ",".join([
             "date",
             "search_term",
@@ -138,9 +140,6 @@ def pull_search_terms(days_back: int = 14) -> list:
             "impressions",
             "conversions",
         ]),
-        "data_source": "google_ads",
-        "account_id": WINDSOR_ACCOUNT_ID,
-        "segment": "search_term",
     }
 
     return _request_with_retry(params, "search term")
