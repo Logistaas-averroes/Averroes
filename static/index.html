@@ -3,198 +3,362 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Logistaas Ads Intelligence — Dashboard</title>
+  <title>Logistaas Ads Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
 
   <!-- ── Login screen ───────────────────────────────────────────────────── -->
-  <div id="login-screen" class="login-screen" style="display:none;">
+  <div id="login-screen" class="login-screen" hidden>
     <div class="login-card">
       <div class="login-card__brand">
-        <div class="login-card__product">Logistaas</div>
+        <div class="login-card__wordmark">Logistaas</div>
         <div class="login-card__title">Ads Intelligence</div>
         <div class="login-card__subtitle">Sign in to continue</div>
       </div>
       <div class="login-card__body">
-      <form id="login-form" class="login-form">
-        <div class="login-field">
-          <label for="login-username">Username</label>
-          <input
-            type="text"
-            id="login-username"
-            name="username"
-            placeholder="username"
-            autocomplete="username"
-            spellcheck="false"
-            required
-          />
+        <form id="login-form" class="login-form" novalidate>
+          <div class="login-field">
+            <label for="login-username">Username</label>
+            <input
+              type="text"
+              id="login-username"
+              name="username"
+              placeholder="username"
+              autocomplete="username"
+              spellcheck="false"
+              required
+            />
+          </div>
+          <div class="login-field">
+            <label for="login-password">Password</label>
+            <input
+              type="password"
+              id="login-password"
+              name="password"
+              placeholder="password"
+              autocomplete="current-password"
+              required
+            />
+          </div>
+          <div class="login-error" id="login-error" hidden></div>
+          <button type="submit" class="btn btn--primary login-btn" id="login-submit-btn">
+            Sign in
+          </button>
+        </form>
+        <div class="login-phase-note">
+          <span class="phase-badge">Phase 1 — Read Only</span>
         </div>
-        <div class="login-field">
-          <label for="login-password">Password</label>
-          <input
-            type="password"
-            id="login-password"
-            name="password"
-            placeholder="password"
-            autocomplete="current-password"
-            required
-          />
-        </div>
-        <div class="login-error" id="login-error" style="display:none;"></div>
-        <button type="submit" class="btn btn--primary login-btn" id="login-submit-btn">
-          Sign in
-        </button>
-      </form>
-      <div class="login-phase-badge">
-        <span class="badge badge--phase">Phase 1 — Read Only</span>
-      </div>
       </div>
     </div>
   </div>
 
-  <!-- ── Dashboard ──────────────────────────────────────────────────────── -->
-  <div id="dashboard" style="display:none;">
+  <!-- ── App shell ──────────────────────────────────────────────────────── -->
+  <div id="app" class="app" hidden>
 
-    <!-- ── Header ─────────────────────────────────────────────────────── -->
-    <header class="site-header">
-      <div class="site-header__brand">
-        <div>
-          <div class="site-header__eyebrow">Logistaas</div>
-          <div class="site-header__title">Ads Intelligence</div>
+    <!-- ── Sidebar ──────────────────────────────────────────────────────── -->
+    <nav id="sidebar" class="sidebar" aria-label="Main navigation">
+
+      <!-- Logo / wordmark -->
+      <div class="sidebar__logo">
+        <div class="sidebar__wordmark">Logistaas</div>
+        <div class="sidebar__product">Ads Intelligence</div>
+        <div class="sidebar__status">
+          <span class="status-dot" id="sidebar-status-dot"></span>
+          <span class="sidebar__status-text" id="sidebar-status-text">Checking…</span>
         </div>
       </div>
-      <div class="site-header__meta">
-        <span id="header-health-badge" class="badge badge--loading">
-          <span class="dot"></span>loading…
-        </span>
-        <span class="badge badge--phase">Phase 1 — Read Only</span>
-        <span id="user-badge" class="user-badge" style="display:none;">
-          <span id="user-name"></span>
-          <span id="user-role-badge" class="role-badge"></span>
-        </span>
-        <button class="btn btn--logout" id="btn-logout" style="display:none;">
-          Sign out
+
+      <!-- Navigation items -->
+      <ul class="sidebar__nav" role="list">
+        <li>
+          <a class="nav-item" data-page="dashboard" href="#" role="button" tabindex="0" aria-label="Dashboard">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            </span>
+            <span class="nav-item__label">Dashboard</span>
+          </a>
+        </li>
+        <li>
+          <a class="nav-item" data-page="campaigns" href="#" role="button" tabindex="0" aria-label="Campaigns">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/></svg>
+            </span>
+            <span class="nav-item__label">Campaigns</span>
+          </a>
+        </li>
+        <li>
+          <a class="nav-item" data-page="leads" href="#" role="button" tabindex="0" aria-label="Lead Quality">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            </span>
+            <span class="nav-item__label">Lead Quality</span>
+          </a>
+        </li>
+        <li>
+          <a class="nav-item" data-page="deals" href="#" role="button" tabindex="0" aria-label="Deals">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+            </span>
+            <span class="nav-item__label">Deals</span>
+          </a>
+        </li>
+        <li>
+          <a class="nav-item" data-page="opportunities" href="#" role="button" tabindex="0" aria-label="Opportunities">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+            </span>
+            <span class="nav-item__label">Opportunities</span>
+          </a>
+        </li>
+        <li>
+          <a class="nav-item" data-page="scheduler" href="#" role="button" tabindex="0" aria-label="Scheduler">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </span>
+            <span class="nav-item__label">Scheduler</span>
+          </a>
+        </li>
+        <li id="nav-health-item">
+          <a class="nav-item" data-page="health" href="#" role="button" tabindex="0" aria-label="System Health">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+            </span>
+            <span class="nav-item__label">System Health</span>
+          </a>
+        </li>
+      </ul>
+
+      <!-- Sidebar footer -->
+      <div class="sidebar__footer">
+        <div class="phase-badge sidebar__phase-badge">Phase 1 — Read Only</div>
+        <div class="sidebar__user" id="sidebar-user">
+          <span class="sidebar__username" id="sidebar-user-name"></span>
+          <span class="sidebar__role" id="sidebar-user-role"></span>
+        </div>
+        <button class="btn btn--signout" id="btn-signout" type="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          <span class="nav-item__label">Sign out</span>
         </button>
       </div>
-    </header>
+    </nav>
 
-    <!-- ── Page content ─────────────────────────────────────────────────── -->
-    <main class="page-content">
+    <!-- ── Main content area ──────────────────────────────────────────────── -->
+    <div class="main-content">
 
-      <!-- System status cards -->
-      <p class="section-title">⬡ System Status</p>
-      <div class="cards-grid">
+      <!-- ── Dashboard page ───────────────────────────────────────────────── -->
+      <section id="page-dashboard" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Dashboard</h1>
+          <p class="page-subtitle">Campaign intelligence overview</p>
+        </header>
 
-        <div class="card" id="card-health">
-          <div class="card__label">Health</div>
-          <div class="card__value">
-            <span class="badge badge--loading"><span class="dot"></span>loading…</span>
+        <!-- KPI bar -->
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-card__label">Total Spend (30d)</div>
+            <div class="kpi-card__value" id="kpi-spend">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">Confirmed SQLs</div>
+            <div class="kpi-card__value" id="kpi-sqls">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">Avg CPQL</div>
+            <div class="kpi-card__value" id="kpi-cpql">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">Confirmed Waste</div>
+            <div class="kpi-card__value" id="kpi-waste">—</div>
           </div>
         </div>
 
-        <div class="card" id="card-readiness">
-          <div class="card__label">Readiness</div>
-          <div class="card__value">
-            <span class="badge badge--loading"><span class="dot"></span>loading…</span>
-          </div>
-        </div>
-
-        <div class="card" id="card-run">
-          <div class="card__label">Latest Run</div>
-          <div class="card__value">
-            <span class="badge badge--loading"><span class="dot"></span>loading…</span>
-          </div>
-        </div>
-
-        <div class="card" id="card-report">
-          <div class="card__label">Latest Report</div>
-          <div class="card__value">
-            <span class="badge badge--loading"><span class="dot"></span>loading…</span>
-          </div>
-        </div>
-
-        <div class="card" id="card-scheduler">
-          <div class="card__label">Scheduler</div>
-          <div class="card__value">
-            <span class="badge badge--loading"><span class="dot"></span>loading…</span>
-          </div>
-        </div>
-
-      </div>
-
-      <!-- Latest Run + Latest Report panels -->
-      <p class="section-title">◎ Details</p>
-      <div class="panels-grid">
-
-        <!-- Latest Run Panel -->
-        <div class="panel">
-          <div class="panel__header">Latest Run</div>
-          <div class="panel__body" id="run-panel-body">
-            <p class="empty-state">Loading run data…</p>
-          </div>
-        </div>
-
-        <!-- Latest Report Panel -->
+        <!-- Campaign verdict summary -->
         <div class="panel">
           <div class="panel__header">
-            Latest Report
-            <button class="btn btn--secondary" id="btn-view-raw" style="text-transform:none;font-size:.8rem;padding:.3rem .7rem;">
-              View Raw Report
-            </button>
+            <span class="panel__header-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/></svg>
+            </span>
+            Campaign Verdict Summary
           </div>
-          <div class="panel__body" id="report-panel-body">
-            <p class="empty-state">Loading report data…</p>
-          </div>
-          <div class="panel__body" style="padding-top:0;">
-            <pre class="report-viewer" id="report-raw-viewer"></pre>
+          <div class="panel__body" id="dash-verdict-body">
+            <p class="empty-state">Loading campaigns…</p>
           </div>
         </div>
 
-      </div>
-
-      <!-- Scheduler Status -->
-      <p class="section-title">⏱ Scheduler</p>
-      <div class="panel">
-        <div class="panel__header">In-App Scheduler Status</div>
-        <div class="panel__body" id="scheduler-panel-body">
-          <p class="empty-state">Loading scheduler status…</p>
-        </div>
-      </div>
-
-      <!-- Manual Run Controls — admin only -->
-      <div id="run-controls-section" style="display:none;">
-        <p class="section-title">▶ Manual Run Controls</p>
+        <!-- Active alerts -->
         <div class="panel">
-          <div class="panel__header">Trigger a Scheduler Run</div>
-          <div class="panel__body">
-            <div class="run-controls">
-              <div class="run-buttons">
-                <button class="btn btn--primary" id="btn-run-daily">▶ Run Daily</button>
-                <button class="btn btn--primary" id="btn-run-weekly">▶ Run Weekly</button>
-                <button class="btn btn--primary" id="btn-run-monthly">▶ Run Monthly</button>
-              </div>
-              <div class="run-feedback" id="run-feedback"></div>
-            </div>
+          <div class="panel__header">
+            <span class="panel__header-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            </span>
+            Active Alerts
+          </div>
+          <div class="panel__body" id="dash-alerts-body">
+            <p class="empty-state">Loading alerts…</p>
           </div>
         </div>
-      </div>
 
-      <!-- Doctrine Reminder -->
-      <p class="section-title">⚖ Doctrine</p>
-      <div class="doctrine-box">
-        <div class="doctrine-box__title">⚖️ Phase 1 — Read Only</div>
-        <ul>
-          <li>This system is in read-only Phase 1. No actions are taken automatically.</li>
-          <li>AI explains, humans decide. All recommendations require human review.</li>
-          <li>No write-back to Google Ads. No write-back to HubSpot.</li>
-          <li>Manual run buttons (admin only) only trigger existing Phase 1 schedulers — no additional logic.</li>
-          <li>In-app scheduler runs daily (06:00), weekly (Mon 07:00), and monthly (1st 08:00) in Asia/Amman timezone.</li>
-        </ul>
-      </div>
+        <!-- Recent run timeline -->
+        <div class="panel">
+          <div class="panel__header">
+            <span class="panel__header-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </span>
+            Recent Run
+          </div>
+          <div class="panel__body" id="dash-run-body">
+            <p class="empty-state">Loading run history…</p>
+          </div>
+        </div>
+      </section>
 
-    </main>
-  </div>
+      <!-- ── Campaigns page ───────────────────────────────────────────────── -->
+      <section id="page-campaigns" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Campaigns</h1>
+          <p class="page-subtitle">Campaign truth table — spend, quality, and verdict</p>
+        </header>
+
+        <!-- Verdict summary cards -->
+        <div class="verdict-count-grid" id="camp-verdict-grid">
+          <div class="verdict-count-card verdict-count-card--scale">
+            <div class="verdict-count-card__num" id="vc-scale">—</div>
+            <div class="verdict-count-card__label">SCALE</div>
+          </div>
+          <div class="verdict-count-card verdict-count-card--fix">
+            <div class="verdict-count-card__num" id="vc-fix">—</div>
+            <div class="verdict-count-card__label">FIX</div>
+          </div>
+          <div class="verdict-count-card verdict-count-card--hold">
+            <div class="verdict-count-card__num" id="vc-hold">—</div>
+            <div class="verdict-count-card__label">HOLD</div>
+          </div>
+          <div class="verdict-count-card verdict-count-card--cut">
+            <div class="verdict-count-card__num" id="vc-cut">—</div>
+            <div class="verdict-count-card__label">CUT</div>
+          </div>
+        </div>
+
+        <!-- Truth table -->
+        <div class="panel">
+          <div class="panel__header">Campaign Truth Table</div>
+          <div class="panel__body panel__body--flush" id="camp-table-body">
+            <p class="empty-state" style="padding: var(--space-5);">Loading campaigns…</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Lead Quality page ─────────────────────────────────────────────── -->
+      <section id="page-leads" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Lead Quality</h1>
+          <p class="page-subtitle">Contact qualification breakdown by campaign</p>
+        </header>
+
+        <!-- Summary cards -->
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-card__label">Total Contacts</div>
+            <div class="kpi-card__value" id="leads-total">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">Confirmed SQLs</div>
+            <div class="kpi-card__value" id="leads-sqls">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">Confirmed Junk</div>
+            <div class="kpi-card__value" id="leads-junk">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">In Progress</div>
+            <div class="kpi-card__value" id="leads-progress">—</div>
+          </div>
+        </div>
+
+        <!-- Per-campaign breakdown -->
+        <div class="panel">
+          <div class="panel__header">Per-Campaign Breakdown</div>
+          <div class="panel__body panel__body--flush" id="leads-table-body">
+            <p class="empty-state" style="padding: var(--space-5);">Loading lead quality data…</p>
+          </div>
+        </div>
+
+        <p class="grace-note">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Contacts created in the last 7 days are excluded from junk rate — MDR has not yet reached them.
+        </p>
+      </section>
+
+      <!-- ── Deals page ────────────────────────────────────────────────────── -->
+      <section id="page-deals" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Deals</h1>
+          <p class="page-subtitle">GCLID-matched deal pipeline</p>
+        </header>
+
+        <!-- Pipeline funnel -->
+        <div class="panel">
+          <div class="panel__header">Pipeline Stages</div>
+          <div class="panel__body" id="deals-funnel-body">
+            <p class="empty-state">Loading deals…</p>
+          </div>
+        </div>
+
+        <!-- Deals table -->
+        <div class="panel">
+          <div class="panel__header">Deals Table</div>
+          <div class="panel__body panel__body--flush" id="deals-table-body">
+            <p class="empty-state" style="padding: var(--space-5);">Loading deals…</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Opportunities page ────────────────────────────────────────────── -->
+      <section id="page-opportunities" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Opportunities</h1>
+          <p class="page-subtitle">Active leads in progress — meeting booked and pending</p>
+        </header>
+
+        <div id="opps-body">
+          <p class="empty-state">Loading opportunities…</p>
+        </div>
+      </section>
+
+      <!-- ── Scheduler page ───────────────────────────────────────────────── -->
+      <section id="page-scheduler" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Scheduler</h1>
+          <p class="page-subtitle">In-app APScheduler — job status and manual triggers</p>
+        </header>
+
+        <!-- Job cards -->
+        <div class="sched-grid" id="sched-jobs-grid">
+          <p class="empty-state">Loading scheduler…</p>
+        </div>
+
+        <!-- Trigger feedback -->
+        <div class="run-feedback" id="sched-feedback" hidden></div>
+      </section>
+
+      <!-- ── System Health page ────────────────────────────────────────────── -->
+      <section id="page-health" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">System Health</h1>
+          <p class="page-subtitle">Readiness checks — environment, config, modules</p>
+        </header>
+
+        <div id="health-body">
+          <p class="empty-state">Loading readiness data…</p>
+        </div>
+      </section>
+
+    </div><!-- /.main-content -->
+  </div><!-- /#app -->
 
   <script src="/static/app.js"></script>
 </body>
