@@ -214,15 +214,15 @@ async function fetchJSON(url, options = {}) {
 // ── Auth flow ──────────────────────────────────────────────────────────────
 
 function showLogin() {
-  document.getElementById("login-screen").hidden = false;
-  document.getElementById("app").hidden = true;
+  document.getElementById("login-screen").style.display = "flex";
+  document.getElementById("app").style.display = "none";
   _currentUser = null;
   _reportCache = null;
 }
 
 function showApp(user) {
-  document.getElementById("login-screen").hidden = true;
-  document.getElementById("app").hidden = false;
+  document.getElementById("login-screen").style.display = "none";
+  document.getElementById("app").style.display = "flex";
   _currentUser = user;
   applySidebarUser(user);
   // Show/hide System Health nav item
