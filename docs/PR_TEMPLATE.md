@@ -1,566 +1,335 @@
-# Logistaas Ads Intelligence System
-## Canonical PR Blueprint
+# PR Template — Logistaas Ads Intelligence System
 
-Every Pull Request — connector, engine module, scheduler, API endpoint, or doctrine update — must follow this structure exactly.
+Every PR uses one of two templates below. Pick the one that matches your work.
 
-This blueprint ensures signal integrity, system stability, and doctrine compliance across all builds.
+- **Template A — Backend / Logic** — for `connectors/`, `analysis/`, `scheduler/`, `api/`, `config/`, `scripts/`
+- **Template B — Frontend** — for `static/` (HTML, CSS, JS)
+
+If a PR touches both backend and frontend, split it into two PRs.
 
 ---
 
-## 📐 PR Header (Roadmap Context)
+## How to use this file
 
-Every PR must start with a platform progress header.
+1. Copy the relevant template into the PR description.
+2. Fill in every field. No `TBD` allowed at merge time.
+3. Run the test commands locally before requesting review.
+4. Update `docs/09_REPO_STATE.md` as the **last commit** of every PR.
 
-**Example:**
+---
+
+# Template A — Backend / Logic PR
+
 ```
 📐 Logistaas Ads Intelligence System
-PR-ADS-001 — HubSpot + Windsor Connectors (Phase 1 Foundation)
+PR-ADS-XXX — [Short Title]
+Type:    Backend / Logic
+Doctrine: Avverros v1.0
+Phase:   [1 — Read Only / 2 — OCT / 3 — Actions / 4 — Platform]
 ```
 
-### Roadmap Version
-`Avverros Doctrine v1.0 — Revenue Intelligence System`
+---
 
-### Project Countdown
-| Scope | Status |
-|-------|--------|
-| Total Roadmap PRs | ~20 |
-| Completed | 0 |
-| Remaining | ~20 |
-| Platform Completion | 0% before merge |
+## PR Classification
 
-### Module Progress
-| Module | Status |
-|--------|--------|
-| Connectors (Windsor + HubSpot) | ⬜ Not Started |
-| GCLID Reconciliation | ⬜ Not Started |
-| OCT Uploader | ⬜ Not Started |
-| Signal Integrity Engine | ⬜ Not Started |
-| N-gram Analysis Engine | ⬜ Not Started |
-| Campaign Classifier | ⬜ Not Started |
-| Lead Quality Scorer | ⬜ Not Started |
-| Doctrine Advisor (Claude API) | ⬜ Not Started |
-| Daily Scheduler | ⬜ Not Started |
-| Weekly Scheduler | ⬜ Not Started |
-| Monthly Scheduler | ⬜ Not Started |
-| FastAPI Server | ⬜ Not Started |
-| Render Deployment | ⬜ Not Started |
+```
+PR Type:      [Feature / Hardening / Config / Fix / Docs]
+Module:       [connectors/ / analysis/ / scheduler/ / api/ / config/ / scripts/]
+Roadmap ID:   PR-ADS-XXX
+Depends On:   [PR-ADS-XXX or Nothing]
+Blocks:       [PR-ADS-XXX or Nothing]
+PR Stage:     [stabilization / feature-expansion / phase-transition]
+```
 
-### Architecture Status
-| Item | Status |
+---
+
+## 1. Problem
+
+*One paragraph. What is missing or broken. Be specific. Reference live data evidence where possible.*
+
+---
+
+## 2. Implementation
+
+### File: `path/to/file.py` — [BUILD NEW / HARDEN / UPDATE / DELETE]
+
+**Responsibility:** One sentence describing what this module is responsible for.
+
+**Changes made:**
+- Added X
+- Fixed Y
+- Updated Z
+
+**Forbidden in this file:**
+- No analysis logic in connectors
+- No external API calls in analysis modules
+- No business logic in schedulers
+- No write-back to Google Ads or HubSpot in Phase 1
+
+*(Repeat the block above for each file changed.)*
+
+---
+
+## 3. Contract Impact
+
+```
+Data output changed:    None / Yes — describe new schema
+Config changed:         None / Yes — list new keys in config/thresholds.yaml or junk_patterns.yaml
+API endpoint changed:   None / Yes — describe new contract
+Breaking change:        No / Yes — describe migration path
+Phase 1 read-only:      Confirmed — no writes to Google Ads or HubSpot
+```
+
+---
+
+## 4. Testing
+
+```bash
+# Local commands the reviewer can run
+python -m connectors.example
+python -m analysis.example
+
+# Expected output (paste actual output, not "should print X")
+"Pulled 312 contacts"
+"GCLID coverage: 87.4%"
+
+# Files that must exist after running
+ls data/example.json     # exists, valid JSON
+ls outputs/example.md    # exists, non-empty
+```
+
+---
+
+## 5. Doctrine Checklist
+
+- [ ] Connectors only fetch and save — no analysis inside
+- [ ] Analysis modules only read `data/` — no external API calls
+- [ ] Schedulers only orchestrate — no business logic
+- [ ] No thresholds hardcoded — all values in `config/thresholds.yaml`
+- [ ] No junk patterns hardcoded — all in `config/junk_patterns.yaml`
+- [ ] No API keys in code — all from environment variables
+- [ ] No `print()` debug statements left in production paths
+- [ ] `DICARDED` spelled with one R in all MQL status references
+- [ ] `mql___mdr_comments` written with three underscores
+- [ ] `data/` and `outputs/` are gitignored — nothing committed there
+- [ ] Brand and non-brand data never mixed in any analysis output
+- [ ] Phase 1: zero write operations to Google Ads, HubSpot, or any external service
+
+---
+
+## 6. Operational Readiness
+
+```
+Logging added:                Yes / No
+Error handling for API down:  Yes / No
+Rate limit (429) handling:    Yes / No
+Env vars documented in .env.example: Yes / No
+Config keys documented:       Yes / No
+```
+
+---
+
+## 7. Failure Modes
+
+| Failure | Behaviour |
+|---------|-----------|
+| Windsor.ai 429 rate limit | Exponential backoff, max 3 retries |
+| HubSpot API timeout | Logged, returns empty list, downstream proceeds |
+| Required env var missing | Healthcheck fails before connector runs |
+
+---
+
+## 8. Post-Merge Verification
+
+```bash
+# Commands to verify after deploy
+make healthcheck
+make validate
+python -m scheduler.daily   # exits 0
+```
+
+**Success criteria:** *Specific output that proves this works in production.*
+
+**Owner:** Youssef Awwad
+**Unblocks:** PR-ADS-XXX — [title]
+
+---
+
+## 9. State Update
+
+The final commit in this PR must update `docs/09_REPO_STATE.md` to reflect:
+- Files moved from "Built but Broken" to "Built and Verified"
+- Files added under "Built and Verified"
+- This PR added under "Current PR Index"
+
+---
+---
+
+# Template B — Frontend PR
+
+```
+📐 Logistaas Ads Intelligence System
+PR-ADS-XXX — [Short Title]
+Type:    Frontend
+Module:  static/
+Phase:   [1 — Read Only / 4 — Platform]
+```
+
+---
+
+## PR Classification
+
+```
+PR Type:      [Feature / Visual Refresh / Fix / Refactor]
+Roadmap ID:   PR-ADS-XXX
+Depends On:   [PR-ADS-XXX or Nothing]
+Blocks:       Nothing
+PR Stage:     [feature-expansion / stabilization]
+```
+
+---
+
+## 1. Problem
+
+*One paragraph. What's wrong with the current UI or what new capability is needed.*
+
+---
+
+## 2. Files Changed
+
+| File | Action |
 |------|--------|
-| Doctrine Rules (DOCTRINE.md) | ✅ Complete |
-| Config (logistaas_config.yaml) | ✅ Complete |
-| Pattern Library (patterns.yaml) | ✅ Complete |
-| Connector Layer | ⬜ Pending |
-| Engine Layer | ⬜ Pending |
-| Scheduler Layer | ⬜ Pending |
-| API Layer | ⬜ Pending |
-
-### PR Context
-*Explain how this PR fits the roadmap and what it unblocks.*
+| `static/index.html` | Replace / Update |
+| `static/styles.css` | Replace / Update |
+| `static/app.js` | Replace / Update |
+| `static/assets/...` | Add / N/A |
 
 ---
 
-## 0️⃣ Platform Architecture Rule
+## 3. Brand Compliance
 
-The system follows a **single-service, three-layer architecture**.
+All frontend PRs must follow `docs/BRAND.md`. Confirm:
 
-### Core Stack
-- Python backend (connectors, engines, schedulers)
-- FastAPI (on-demand API server)
-- Render.com (hosting + cron jobs)
-- HubSpot CRM (pipeline data source)
-- Windsor.ai (Google Ads data source)
-- Anthropic Claude API (doctrine analysis engine)
-
-### System Layers
-```
-Logistaas Ads Intelligence System
- ├── Layer 1: Connectors    (data ingestion — Windsor, HubSpot, Google Ads API)
- ├── Layer 2: Engines       (analysis — signal check, n-gram, classifier, quality)
- ├── Layer 3: Doctrine      (advisory — Claude API with Avverros Doctrine)
- ├── Layer 4: Schedulers    (orchestration — daily, weekly, monthly)
- └── Layer 5: API           (on-demand — FastAPI server on Render)
-```
-
-### Forbidden
-- Connectors performing analysis (connectors only fetch and save raw data)
-- Engines calling external APIs (engines receive data, return findings)
-- Schedulers containing business logic (schedulers only orchestrate)
-- Any module importing from a higher layer than itself
-- Doctrine rules hardcoded in Python (all doctrine lives in `docs/DOCTRINE.md`)
+- [ ] Sora font loaded from Google Fonts (Bold 700, Regular 400, Light 300)
+- [ ] Primary accent: `#129ef5` (Light Sky Blue)
+- [ ] Dark surface: `#011931` (Midnight Blue)
+- [ ] Accent green: `#00ffa9` (Turquoise) — used only for status / success
+- [ ] Light gradient available for hero/login: `#ecf4ff → #129ef5`
+- [ ] No DM Sans, Inter, Roboto, system-ui fonts used
+- [ ] No purple gradients or generic AI aesthetics
+- [ ] Verdict badges follow doctrine colour mapping (SCALE=green, FIX=orange, HOLD=gray, CUT=red)
 
 ---
 
-## 0.1 Data Flow Rule
+## 4. Pages / Components in Scope
 
-**Single direction. No exceptions.**
+List every page or component this PR adds or modifies.
 
-```
-Windsor.ai → connectors/windsor_pull.py → data/ads_*.json
-HubSpot    → connectors/hubspot_pull.py → data/crm_*.json
-                         ↓
-              connectors/gclid_match.py → data/matched.json
-                         ↓
-              engine/*.py → findings passed to doctrine/advisor.py
-                         ↓
-              doctrine/advisor.py → outputs/report_*.md
-                         ↓
-              scheduler/*.py → deliver report
-```
-
-**Forbidden:**
-- Engines writing to HubSpot or Google Ads (only `oct_uploader.py` may write back)
-- Schedulers accessing `data/` directly without going through a module
-- Doctrine advisor receiving raw API data (always receives pre-processed engine output)
+| Page | Route (JS) | Role Visibility |
+|------|-----------|----------------|
+| Dashboard | `dashboard` | all |
+| Campaigns | `campaigns` | all |
+| Lead Quality | `leads` | all |
+| Deals | `deals` | all |
+| Opportunities | `opportunities` | all |
+| Scheduler | `scheduler` | admin shows triggers |
 
 ---
 
-## 0.2 Doctrine Integrity Rule
+## 5. API Endpoints Used
 
-All recommendations must be consistent with `docs/DOCTRINE.md`.
-
-**The three sacred separations:**
-1. Brand vs Non-Brand — NEVER mixed in analysis or reporting
-2. Conversions vs Revenue — NEVER equated without CRM verification
-3. Platform metrics vs Business metrics — NEVER used interchangeably
-
-**Forbidden in any module:**
-- Optimising for CPL alone (must use CPQL)
-- Trusting Google Ads conversion counts without HubSpot cross-reference
-- Recommending scale without statistical significance check
-
----
-
-## 0.3 PR Classification Rule
-
-Every PR must declare its category.
-
-**Allowed Types:**
-- `Feature` — new module or capability
-- `Fix` — bug or incorrect behavior
-- `Hardening` — making existing module more robust
-- `Refactor` — restructuring without behavior change
-- `Doctrine` — updating doctrine rules or config
-- `Config` — updating YAML config files
-- `Test` — adding or updating tests
-- `Docs` — documentation only
-- `Migration` — data structure changes
-- `Performance` — speed or efficiency improvement
-
-**Required Block:**
-```
-PR Type:
-Module:
-Roadmap PR ID:
-Related Prior PRs:
-Depends On:
-Blocks:
-```
-
-**Every PR must also declare which lifecycle stage it belongs to:**
-```
-PR Stage:   stabilization | feature-expansion | phase-transition
-```
-
-- `stabilization` — fixing broken references, aligning docs to reality, hardening existing Phase 1 modules
-- `feature-expansion` — adding new capability within the current phase
-- `phase-transition` — gate PR that advances from one phase to the next (requires explicit approval)
-
----
-
-## 0.4 Scope Control Rule
-
-Every PR must declare:
+JS only calls existing endpoints. List them and confirm no new endpoints are needed.
 
 ```
-This PR does / does not expand functional scope.
+GET  /auth/me
+POST /auth/login
+POST /auth/logout
+GET  /runs/latest
+GET  /reports/latest
+GET  /reports/latest/raw
+GET  /scheduler/status
+GET  /health
+GET  /readiness         (admin only)
+POST /run/daily         (admin only)
+POST /run/weekly        (admin only)
+POST /run/monthly       (admin only)
 ```
 
 ---
 
-## 1️⃣ Summary / Problem Analysis
+## 6. What Is NOT Changing
 
-### Problem
-*Describe the issue or missing feature.*
+Confirm these are untouched:
 
-### Incorrect Behavior (if fix)
-*What is currently happening that is wrong.*
-
-### User / System Impact
-- Daily pulse not running
-- Lead quality scoring incorrect
-- GCLID matching broken
-- OCT not uploading to Google Ads
-- Campaign classification wrong
-- Report not delivered
-
-### Location
-- `connectors/` — data ingestion
-- `engine/` — analysis logic
-- `doctrine/` — Claude API integration
-- `scheduler/` — orchestration
-- `api/` — FastAPI server
-- `config/` — YAML configuration
-- `docs/` — doctrine and documentation
-
-### What Is NOT Broken
-*Explicitly list unaffected modules.*
-
-### Scope Boundaries
-*Explicitly define what this PR must not modify.*
+- [ ] `api/server.py` — no new endpoints, no changed contracts
+- [ ] `api/auth.py` — no auth logic changes
+- [ ] `api/scheduler.py` — no scheduler changes
+- [ ] All Python modules — frontend PRs are static-only
 
 ---
 
-## 1.1 Root Cause Analysis
+## 7. Frontend Rules
 
-**Required:**
-- What caused the issue
-- Why the previous implementation failed or was missing
-- Why the new implementation is correct
-
----
-
-## 2️⃣ Implementation Plan
-
-Each change must specify:
-
-### File: `connectors/example.py`
-**Responsibility:** *What this module is responsible for.*
-
-**Changes:**
-- Add X
-- Fix Y
-- Remove Z
-
-**Forbidden changes in this file:**
-- Do not add analysis logic (engines only)
-- Do not call Claude API (doctrine only)
+- [ ] No build step — plain HTML, CSS, JS files served by FastAPI `StaticFiles`
+- [ ] No npm, no React, no bundlers
+- [ ] No external JS frameworks loaded from CDN beyond fonts
+- [ ] No `localStorage` for sensitive data — session cookie is the only auth state
+- [ ] Mobile-responsive: usable on iPad and laptop, acceptable on phone
+- [ ] Accessibility: keyboard navigable, focus visible, semantic HTML
 
 ---
 
-## 2.1 Interface / Contract Impact
+## 8. Testing
 
-Declare what changes externally visible behavior.
-
-```
-Data Output Changed:     None / Yes — describe new schema
-Config Change:           None / Yes — describe new keys
-Claude Prompt Changed:   None / Yes — describe doctrine impact
-API Endpoint Changed:    None / Yes — describe new contract
-HubSpot Field Added:     None / Yes — describe field
-Windsor Field Added:     None / Yes — describe field
-```
-
----
-
-## 2.2 Data / Config Change Plan
-
-If `config/logistaas_config.yaml` or `config/patterns.yaml` changes:
-
-```
-Config File Changed:     Yes / No
-New Keys Added:          Yes / No — list them
-Breaking Change:         Yes / No
-Default Values Set:      Yes / No
-Rollback Safe:           Yes / No
-```
-
----
-
-## 2.3 Signal Integrity Impact
-
-**Required if PR touches:**
-- GCLID matching logic
-- Brand vs non-brand separation
-- Conversion counting
-- Lead quality scoring
-- Campaign classification thresholds
-
-**Must declare:**
-- What signal is affected
-- How integrity is preserved
-- Whether doctrine thresholds changed
-- Whether existing classifications change after merge
-
----
-
-## 3️⃣ Testing Plan
-
-### Connector Validation
 ```bash
-python connectors/hubspot_pull.py
-python connectors/windsor_pull.py
-```
-Verify: data files written to `data/`, correct field names, no API errors.
+# Start the server locally
+python -m uvicorn api.server:app --host 0.0.0.0 --port 8000
 
-### Engine Validation
+# Open in browser
+open http://localhost:8000
+
+# Manual checklist
+# [ ] Login screen renders with brand gradient background
+# [ ] Login with valid credentials → dashboard appears
+# [ ] All pages reachable via sidebar nav
+# [ ] Admin role: run trigger buttons visible
+# [ ] Viewer role: run trigger buttons hidden
+# [ ] Logout returns to login screen
+# [ ] Sora font loaded (check DevTools → Network)
+# [ ] No console errors
+```
+
+---
+
+## 9. Visual Evidence
+
+Attach screenshots in the PR description:
+- Login screen
+- Dashboard (admin view)
+- Each unique page added/changed
+- Mobile breakpoint (~390px wide)
+
+---
+
+## 10. Post-Merge Verification
+
 ```bash
-python engine/signal_check.py
-python engine/ngram_analysis.py
-python engine/campaign_classifier.py
-python engine/lead_quality.py
-```
-Verify: output matches expected doctrine classifications.
-
-### Scheduler Validation
-```bash
-python scheduler/daily.py
-```
-Verify: full run completes, report saved to `outputs/`.
-
-### API Validation
-```bash
-uvicorn api.server:app --reload
-curl http://localhost:8000/health
+# After deploy on Render
+curl https://<service>.onrender.com/health   # 200 OK
+# Open https://<service>.onrender.com in browser
+# Verify all pages render with brand styling
 ```
 
-### Regression Areas
-- GCLID coverage calculation
-- FIX/HOLD/SCALE/CUT classification logic
-- Brand vs non-brand split
-- OCT upload (do not accidentally double-upload)
-- Junk pattern matching
+**Success criteria:** Every page renders with Sora font, brand colours, and no console errors. All API calls succeed for authenticated users.
+
+**Owner:** Youssef Awwad
 
 ---
 
-## 3.1 Required Test Evidence
+## 11. State Update
 
-```
-Automated Tests Added:
-Automated Tests Updated:
-Manual Validation Performed:
-Data Output Sample Attached:
-API Response Evidence Attached:
-```
+The final commit in this PR must update `docs/09_REPO_STATE.md`:
+- Update `static/index.html`, `static/styles.css`, `static/app.js` rows with the PR number
+- Add this PR under "Current PR Index"
 
 ---
-
-## 3.2 Regression Risk Statement
-
-*What could break, why it's at risk, what checks were performed.*
-
----
-
-## 4️⃣ Mandatory Checklist (Definition of Done)
-
-Mark each: ✅ Complete | 🟨 Partial | ❌ Missing
-
-### Phase A — Code Quality
-- [ ] Connector only fetches and saves (no analysis)
-- [ ] Engine only receives data and returns findings (no API calls)
-- [ ] No doctrine rules hardcoded in Python (all in DOCTRINE.md)
-- [ ] No API keys in code (all from environment variables)
-- [ ] Config values from `logistaas_config.yaml` not hardcoded
-- [ ] Data written to `data/` only (not hardcoded paths)
-- [ ] Reports written to `outputs/` only
-
-### Phase B — Doctrine Compliance
-- [ ] Brand and non-brand are NEVER mixed
-- [ ] CPQL used, not CPL alone
-- [ ] Conversions cross-referenced with HubSpot before any recommendation
-- [ ] FIX/HOLD/SCALE/CUT thresholds match `logistaas_config.yaml`
-- [ ] Junk patterns sourced from `config/patterns.yaml`
-
-### Phase C — Local Testing
-- [ ] Module runs without error on local machine
-- [ ] Data output files are valid JSON/YAML
-- [ ] No hardcoded test data left in production code
-- [ ] Full scheduler run completes end-to-end
-
-### Phase D — Security
-- [ ] No API keys committed
-- [ ] `.env` in `.gitignore`
-- [ ] No PII (emails, names) written to output files
-- [ ] No debug `print` statements left in production paths
-
----
-
-## 4.1 Operational Readiness
-
-```
-Logging added:               Yes / No
-Error handling added:        Yes / No
-Graceful failure on API down: Yes / No
-Environment variable documented in .env.example: Yes / No
-Config key documented in logistaas_config.yaml:  Yes / No
-```
-
----
-
-## 4.2 Failure Modes
-
-*Describe what happens when:*
-- Windsor.ai API is down
-- HubSpot API returns 429 (rate limit)
-- GCLID field is empty on a contact
-- Google Ads API rejects OCT upload
-- Claude API returns unexpected format
-
----
-
-## 5️⃣ PR Description
-
-### Context
-*Why this PR exists.*
-
-### Problem
-*What was wrong or missing.*
-
-### Root Cause
-*Why it was wrong.*
-
-### Implementation
-*What changed.*
-
-### Validation
-*How it was tested.*
-
-### Impact
-*Behavior after merge.*
-
-### Non-goals
-*What this PR deliberately does not do.*
-
-### Risks
-*What reviewers should watch.*
-
-### Follow-ups
-*Future PRs this enables or requires.*
-
----
-
-## 6️⃣ Vertical Module Development Rule
-
-Full-feature PRs must include:
-- Connector or engine Python module
-- Unit test or validation script
-- Config update if thresholds added
-- Doctrine update if rules added
-- `CLAUDE_CODE_BRIEFING.md` updated to mark module as complete
-
-System must remain runnable after each PR (no broken imports).
-
----
-
-## 6.1 Hardening / Audit PR Exception
-
-Exceptions allowed for:
-- Hardening existing connectors
-- Doctrine rule updates
-- Config-only changes
-- Test-only PRs
-- Docs PRs
-
-These PRs must explain why full vertical slice is unnecessary.
-
----
-
-## 7️⃣ Ads Intelligence Hierarchy
-
-The system respects this data hierarchy. Never break it.
-
-```
-Google Ads Click (GCLID)
- └── HubSpot Contact (hs_google_click_id)
-      └── MQL Status (mql_status)
-           └── HubSpot Deal (dealstage)
-                └── OCT Conversion Event (Google Ads API)
-                     └── Bidding Signal (Smart Bidding learns)
-```
-
-**Forbidden:**
-- OCT upload without confirmed GCLID
-- Lead quality score without MQL status
-- Campaign classification without minimum data threshold
-- Doctrine recommendation without CRM cross-reference
-
-### Confirmed HubSpot Field IDs (live account 142257138)
-```
-hs_google_click_id         → GCLID (confirmed populated)
-mql_status                 → Lead qualification
-hs_analytics_source_data_1 → Campaign name
-hs_analytics_source_data_2 → Keyword
-ip_country                 → Geography
-mql___mdr_comments         → MDR comments (junk signals)
-
-Deal stage IDs:
-qualifiedtobuy → Proposal/Implementation Plan
-334269159      → In Trials
-326093513      → Pricing Acceptance
-326093515      → Invoice Agreement Sent
-326093516      → Deal Won (primary OCT signal)
-379124201      → Lost Deal
-```
-
----
-
-## 8️⃣ Doctrine Document
-
-File: `docs/DOCTRINE.md`
-
-This is the system north star. It is injected verbatim as the Claude API system prompt. Every PR must preserve its integrity.
-
-**Never:**
-- Hardcode doctrine rules in Python
-- Contradict DOCTRINE.md in engine logic
-- Change classification thresholds without updating `logistaas_config.yaml`
-
-### Roadmap Alignment
-```
-Roadmap Item:
-PR Role: Complete / Advance / Harden / Align
-Roadmap Deviation: None / Yes
-Doctrine Debt Created: None / Yes
-```
-
----
-
-## 9️⃣ Deployment / Rollback Plan
-
-```
-Deployment Order:
-Requires Coordinated Deploy: Yes / No
-Render Cron Jobs Affected:   Yes / No
-Rollback Plan:
-Rollback Risk Level:         Low / Medium / High
-```
-
----
-
-## 🔟 Post-Merge Verification
-
-```
-python scheduler/daily.py    → runs clean
-python connectors/hubspot_pull.py → returns contacts
-Render deployment successful → Yes / No
-Cron jobs registered in Render → Yes / No
-```
-
-**Required Block:**
-```
-Post-Merge Checks:
-Owner: Youssef Awwad
-Success Criteria:
-```
-
----
-
-## 1️⃣1️⃣ Follow-Up Governance
-
-```
-Follow-up PR ID:
-Doctrine Debt Description:
-Reason Deferred:
-Risk of Deferral:
-```
-
----
-
-## 1️⃣2️⃣ Optional Appendices
-
-- Sample data output (JSON snippet)
-- Before/after classification table
-- Search term examples flagged as junk
-- GCLID match rate before/after
-- API response evidence
