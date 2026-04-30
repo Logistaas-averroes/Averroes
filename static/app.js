@@ -19,6 +19,13 @@
 
 const PAGES = ["dashboard", "campaigns", "leads", "deals", "opportunities", "scheduler", "health"];
 
+// Junk rate thresholds (from config/thresholds.yaml doctrine)
+const JUNK_RATE_LOW_THRESHOLD  = 15;  // below this → green
+const JUNK_RATE_HIGH_THRESHOLD = 30;  // above this → red
+
+// Deal pipeline stages (Phase 1 read-only reference)
+const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
+
 // ── Session state ──────────────────────────────────────────────────────────
 
 let _currentUser = null;   // { username, role } or null
@@ -77,6 +84,9 @@ function fmtDollar(n) {
 }
 
 // Strip emojis and extra whitespace from a string (e.g. "✅ SCALE" → "SCALE")
+// Unicode ranges: Miscellaneous Symbols and Pictographs (1F000–1FFFF),
+// Miscellaneous Symbols / Dingbats / Arrows (2600–27FF),
+// Variation Selectors (FE00–FEFF), Zero Width Joiner (200D).
 function stripEmoji(str) {
   return str
     .replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{FE00}-\u{FEFF}]/gu, "")
@@ -605,7 +615,7 @@ async function loadCampaigns() {
 
     const tbody = dataRows.map(({ row, verdict }) => {
       const junkPct  = parsePct(row[4] || "");
-      const junkCls  = junkPct === null ? "" : junkPct < 15 ? "junk--low" : junkPct <= 30 ? "junk--mid" : "junk--high";
+      const junkCls  = junkPct === null ? "" : junkPct < JUNK_RATE_LOW_THRESHOLD ? "junk--low" : junkPct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
       const sqls     = parseNum(row[3] || "");
       // CPQL shows N/A when SQLs = 0
       const cpql     = sqls === 0 ? "N/A" : fmt(row[5] || "N/A");
@@ -683,8 +693,8 @@ async function loadLeads() {
     const tbody = rows.map((row) => {
       const junkPct  = parsePct(row[7] || "");
       const pct      = junkPct !== null ? Math.min(100, Math.round(junkPct)) : 0;
-      const barCls   = pct < 15 ? "progress-bar__fill--low" : pct <= 30 ? "progress-bar__fill--mid" : "progress-bar__fill--high";
-      const junkCls  = pct < 15 ? "junk--low" : pct <= 30 ? "junk--mid" : "junk--high";
+      const barCls   = pct < JUNK_RATE_LOW_THRESHOLD ? "progress-bar__fill--low" : pct <= JUNK_RATE_HIGH_THRESHOLD ? "progress-bar__fill--mid" : "progress-bar__fill--high";
+      const junkCls  = pct < JUNK_RATE_LOW_THRESHOLD ? "junk--low" : pct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
 
       return `
         <tr>
@@ -736,13 +746,12 @@ async function loadDeals() {
 
     // Attempt to render pipeline stages from deal rows
     // Expected columns (best-effort): Company | Country | Stage | Amount | Keyword | Campaign
-    const stages = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
     const stageCounts = {};
-    stages.forEach((s) => { stageCounts[s] = 0; });
+    DEAL_PIPELINE_STAGES.forEach((s) => { stageCounts[s] = 0; });
 
     dealRows.forEach((row) => {
       const stage = row[2] || "";
-      const matchedStage = stages.find((s) => stage.toLowerCase().includes(s.toLowerCase()));
+      const matchedStage = DEAL_PIPELINE_STAGES.find((s) => stage.toLowerCase().includes(s.toLowerCase()));
       if (matchedStage) stageCounts[matchedStage]++;
     });
 
@@ -751,7 +760,7 @@ async function loadDeals() {
     if (funnelEl) {
       funnelEl.innerHTML = `
         <div class="funnel">
-          ${stages.map((s) => {
+          ${DEAL_PIPELINE_STAGES.map((s) => {
             const count = stageCounts[s];
             const w     = Math.max(30, Math.round((count / maxCount) * 400));
             return `

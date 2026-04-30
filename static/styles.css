@@ -65,6 +65,7 @@
 
   /* Typography */
   --font-sans: 'Sora', system-ui, -apple-system, sans-serif;
+  --font-mono: "SF Mono", "Fira Code", Menlo, Monaco, Consolas, monospace;
 
   /* Layout */
   --sidebar-w: 240px;
@@ -1069,7 +1070,7 @@ a {
 }
 
 .health-row__key {
-  font-family: "SF Mono", "Fira Code", Menlo, Monaco, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-secondary);
   overflow: hidden;
