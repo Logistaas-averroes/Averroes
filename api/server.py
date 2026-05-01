@@ -529,7 +529,7 @@ def api_campaigns(
                             campaign_name,
                             verdict AS latest_verdict
                         FROM date_filtered
-                        ORDER BY campaign_name, run_date DESC
+                        ORDER BY campaign_name, run_date DESC, created_at DESC, id DESC
                     )
                     SELECT
                         agg.campaign_name,
