@@ -520,7 +520,14 @@ def api_campaigns(
                 cur.execute(
                     """
                     WITH date_filtered AS (
-                        SELECT *
+                        SELECT
+                            campaign_name,
+                            verdict,
+                            spend_usd,
+                            confirmed_sqls,
+                            junk_rate_pct,
+                            cpql_usd,
+                            run_date
                         FROM campaigns
                         WHERE run_date >= NOW() - INTERVAL '1 day' * %s
                     ),
