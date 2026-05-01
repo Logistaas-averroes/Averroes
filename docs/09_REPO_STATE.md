@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-024 — PostgreSQL Foundation: Schema, Writers, and Time-Range API (May 2026)
+**Last updated:** PR-ADS-025A — Fix /api/campaigns Query Crash: PERCENTILE_CONT removed, exc_info=True logging (May 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -37,7 +37,7 @@
 | `requirements.txt` | Python dependencies | Added psycopg2-binary (PR-ADS-024) |
 | `api/__init__.py` | API package declaration | Declares `api/` as a Python package |
 | `api/auth.py` | Internal auth module | Updated in PR-ADS-021B: `authenticate_user()` added — supports both `password_hash` (PBKDF2) and `password` (plain-text fallback via `hmac.compare_digest`); passwords never logged or exposed in API responses |
-| `api/server.py` | FastAPI web entry point | Updated in PR-ADS-021B: `/auth/login` now uses `authenticate_user()` for dual-mode credential verification; Updated in PR-ADS-024: DB init in lifespan + 6 new `/api/*` endpoints with `?days=` param |
+| `api/server.py` | FastAPI web entry point | Updated in PR-ADS-021B: `/auth/login` now uses `authenticate_user()` for dual-mode credential verification; Updated in PR-ADS-024: DB init in lifespan + 6 new `/api/*` endpoints with `?days=` param; Updated in PR-ADS-025A: `/api/campaigns` PERCENTILE_CONT removed, flat aggregate query, trend hardcoded to stable; exc_info=True added to all /api/* except blocks |
 | `api/scheduler.py` | In-app APScheduler | Schedules daily (06:00), weekly (Mon 07:00), monthly (1st 08:00) Phase 1 jobs in Asia/Amman timezone; exposes shared lock state and `get_scheduler_status()` |
 | `db/__init__.py` | DB package | New in PR-ADS-024 |
 | `db/schema.py` | PostgreSQL schema + init_db() | CREATE TABLE IF NOT EXISTS; idempotent; non-fatal. New in PR-ADS-024 |
@@ -97,6 +97,7 @@ No files are currently in a broken state.
 | PR-ADS-023 | Brand-Aligned Dashboard Rebuild — 5-page SPA, Sora font, full API wiring | ✅ Complete |
 | PR-ADS-027 | Fix HubSpot associations_api crash + Windsor search term 400 error | ✅ Complete |
 | PR-ADS-024 | PostgreSQL Foundation — schema, writers, time-range API | ✅ Complete |
+| PR-ADS-025A | Fix /api/campaigns query crash — PERCENTILE_CONT removed, exc_info=True logging | ✅ Complete |
 | **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 
