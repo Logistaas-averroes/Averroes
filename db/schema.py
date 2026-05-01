@@ -137,6 +137,34 @@ UPDATE leads SET campaign_name = 'compliance - markets'  WHERE campaign_name = '
 UPDATE leads SET campaign_name = 'emerging - markets'    WHERE campaign_name = 'emerging markets';
 UPDATE leads SET campaign_name = 'mature - markets'      WHERE campaign_name = 'mature markets';
 UPDATE leads SET campaign_name = 'europe low cpc-new'    WHERE campaign_name = 'europe low-cpc-2026';
+
+-- PR-ADS-025F: migrations table for one-time idempotent operations
+CREATE TABLE IF NOT EXISTS migrations (
+    migration_id VARCHAR(50) PRIMARY KEY,
+    applied_at   TIMESTAMP DEFAULT NOW()
+);
+
+-- PR-ADS-025F: delete junk HubSpot source entries from campaigns table (idempotent)
+DELETE FROM campaigns WHERE campaign_name IN (
+    '(referral)', '(organic)', '(direct)', '(not set)',
+    '(cross-network)', '(none)', '(content)', '(social)'
+);
+DELETE FROM campaigns WHERE campaign_name ~ '(?i)email_campaign';
+
+-- PR-ADS-025F: one-time cleanup of pre-merge split rows
+-- Safe: next weekly run repopulates with correct merged data
+-- REMOVE THIS BLOCK after confirming campaigns table has merged rows
+-- with non-zero avg_cpql_usd (verify via GET /api/campaigns?days=30).
+-- Owner: Youssef Awwad — tracked in PR-ADS-025F post-deploy checklist.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM migrations WHERE migration_id = 'PR-ADS-025F-truncate-campaigns'
+    ) THEN
+        TRUNCATE TABLE campaigns;
+        INSERT INTO migrations (migration_id) VALUES ('PR-ADS-025F-truncate-campaigns');
+    END IF;
+END $$;
 """
 
 
