@@ -111,6 +111,10 @@ def _map_source_type(hs_source: str, campaign_name: Optional[str]) -> str:
     if s in ("DIRECT_TRAFFIC", "DIRECT"):
         return "direct"
     if s == "EMAIL_MARKETING" or (
+        # Also detect email if the raw campaign_name contains EMAIL_CAMPAIGN —
+        # this catches cases where hs_analytics_source is absent/empty but the
+        # campaign_name itself reveals it's an email send.  _clean_campaign_name()
+        # will still return None for these, but source_type is set first.
         campaign_name and _EMAIL_CAMPAIGN_PATTERN.search(campaign_name)
     ):
         return "email"
@@ -219,7 +223,7 @@ def write_campaigns(run_id: int, campaigns: list) -> None:
     rows = []
     for c in campaigns:
         raw_name = c.get("campaign_name") or c.get("campaign")
-        campaign_name = raw_name.strip().lower() if raw_name else None
+        campaign_name = str(raw_name).strip().lower() if raw_name is not None else None
         rows.append((
             run_id,
             run_date,
