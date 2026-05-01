@@ -119,6 +119,20 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_name     ON campaigns(campaign_name);
 --   until the next weekly run populates them — this is expected and handled by frontend.
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS source_type VARCHAR(30);
 CREATE INDEX IF NOT EXISTS idx_leads_source_type ON leads(source_type);
+
+-- PR-ADS-025E: canonicalise Windsor variant campaign names (idempotent)
+-- Campaigns stored before this PR may have Windsor naming; map them to canonical (HubSpot UTM) names.
+UPDATE campaigns SET campaign_name = 'mexico,chile'          WHERE campaign_name = 'mexico, chile, colombia';
+UPDATE campaigns SET campaign_name = 'compliance - markets'  WHERE campaign_name = 'compliance markets';
+UPDATE campaigns SET campaign_name = 'emerging - markets'    WHERE campaign_name = 'emerging markets';
+UPDATE campaigns SET campaign_name = 'mature - markets'      WHERE campaign_name = 'mature markets';
+UPDATE campaigns SET campaign_name = 'europe low cpc-new'    WHERE campaign_name = 'europe low-cpc-2026';
+
+UPDATE leads SET campaign_name = 'mexico,chile'          WHERE campaign_name = 'mexico, chile, colombia';
+UPDATE leads SET campaign_name = 'compliance - markets'  WHERE campaign_name = 'compliance markets';
+UPDATE leads SET campaign_name = 'emerging - markets'    WHERE campaign_name = 'emerging markets';
+UPDATE leads SET campaign_name = 'mature - markets'      WHERE campaign_name = 'mature markets';
+UPDATE leads SET campaign_name = 'europe low cpc-new'    WHERE campaign_name = 'europe low-cpc-2026';
 """
 
 
