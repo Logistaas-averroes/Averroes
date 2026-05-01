@@ -777,14 +777,15 @@ def api_summary(
                 return _empty
 
             with conn.cursor() as cur:
-                # Campaign aggregates — read from latest run only to avoid
-                # overcounting spend across multiple weekly runs in the window
+                # Campaign aggregates — join on MAX(run_id) from the runs table to
+                # guarantee exactly one run's data, even if multiple runs fired on
+                # the same calendar day (run_date is a DATE — not a timestamp).
                 cur.execute(
                     """
                     WITH latest_run AS (
-                        SELECT MAX(run_date) AS max_date
-                        FROM campaigns
-                        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                        SELECT MAX(id) AS max_run_id
+                        FROM runs
+                        WHERE started_at >= NOW() - INTERVAL '1 day' * %s
                     )
                     SELECT
                         SUM(c.spend_usd)        AS total_spend_usd,
@@ -792,7 +793,7 @@ def api_summary(
                         SUM(c.total_leads)      AS total_leads,
                         SUM(c.junk_count)       AS total_junk
                     FROM campaigns c
-                    JOIN latest_run lr ON c.run_date = lr.max_date
+                    JOIN latest_run lr ON c.run_id = lr.max_run_id
                     """,
                     (days,),
                 )

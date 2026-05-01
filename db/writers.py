@@ -251,9 +251,11 @@ def write_campaigns(run_id: int, campaigns: list) -> None:
         raw_name = c.get("campaign_name") or c.get("campaign")
         # Windsor campaign data never contains HubSpot pseudo-names, so only
         # canonicalisation is needed here (not the full _clean_campaign_name() filter).
-        campaign_name = _canonicalise_campaign_name(
-            raw_name.strip().lower() if raw_name else None
-        )
+        campaign_name = None
+        if raw_name is not None:
+            normalized_name = str(raw_name).strip()
+            if normalized_name:
+                campaign_name = _canonicalise_campaign_name(normalized_name.lower())
         spend = _float_or_none(c.get("spend_usd") or c.get("spend_30d_usd") or c.get("spend")) or 0.0
         sqls = _int_or_none(c.get("confirmed_sqls")) or 0
         cpql = round(spend / sqls, 2) if sqls > 0 else None
