@@ -8,11 +8,15 @@ Report generation uses the deterministic advisor by default (ADVISOR_MODE=determ
 Set ADVISOR_MODE=claude to use Claude API (requires ANTHROPIC_API_KEY).
 """
 
+import logging
 import os
 from datetime import datetime
 from dotenv import load_dotenv
 from scheduler.delivery import deliver_report
 from scheduler.run_history import start_run, finish_run
+import db.writers as db_writers
+
+log = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -25,6 +29,7 @@ def run_weekly_report():
     run_record = start_run("weekly")
     delivery_attempted = False
     delivery_ok = None
+    run_id = None
 
     try:
         # Step 1: Pull Google Ads data (30-day window)
@@ -57,10 +62,29 @@ def run_weekly_report():
         hubspot_save(contacts, deals, crm_summary)
         print(f"  HubSpot pull complete — {len(contacts)} contacts, {len(deals)} deals with GCLID")
 
+        # Write run record + leads + deals to database
+        try:
+            run_id = db_writers.write_run(run_record)
+            if run_id is not None:
+                db_writers.write_leads(run_id, contacts)
+                db_writers.write_deals(run_id, deals)
+            else:
+                log.error("[weekly] DB write after Step 2: write_run returned no run_id")
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[weekly] DB write after Step 2 failed: %s", db_exc)
+            run_id = None
+
         # Step 3: Waste detection
         print("Step 3/6: Running waste detection...")
         from analysis.core import run_waste_detection
-        run_waste_detection()
+        waste_output = run_waste_detection()
+
+        # Write waste terms to database
+        try:
+            if run_id is not None and waste_output:
+                db_writers.write_waste_terms(run_id, waste_output.get("confirmed_waste_items", []))
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[weekly] DB write after Step 3 failed: %s", db_exc)
 
         # Step 4: Lead quality analysis
         print("Step 4/6: Running lead quality analysis...")
@@ -70,7 +94,14 @@ def run_weekly_report():
         # Step 5: Campaign truth table
         print("Step 5/6: Building campaign truth table...")
         from analysis.core import run_campaign_truth
-        run_campaign_truth()
+        campaign_truth = run_campaign_truth()
+
+        # Write campaigns to database
+        try:
+            if run_id is not None and campaign_truth:
+                db_writers.write_campaigns(run_id, campaign_truth.get("campaigns", []))
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[weekly] DB write after Step 5 failed: %s", db_exc)
 
         # Step 6: Generate weekly report via advisor (deterministic by default)
         print("Step 6/6: Generating weekly report (deterministic advisor)...")
@@ -92,6 +123,10 @@ def run_weekly_report():
             delivery_attempted=delivery_attempted,
             delivery_success=delivery_ok,
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[weekly] update_run failed: %s", db_exc)
         return report_path
 
     except Exception as exc:
@@ -103,6 +138,10 @@ def run_weekly_report():
             failed_step=getattr(exc, "_step", None),
             error_message=str(exc),
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[weekly] update_run (failed run) failed: %s", db_exc)
         raise
 
 

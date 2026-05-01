@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-027 — Fix HubSpot Associations API + Windsor Search Term Query (April 2026)
+**Last updated:** PR-ADS-024 — PostgreSQL Foundation: Schema, Writers, and Time-Range API (May 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -19,8 +19,8 @@
 | `analysis/core.py` | Waste detection + lead quality + campaign truth | All three functions in one file; `load_json` defined at line 471 |
 | `analysis/rule_advisor.py` | Deterministic report generator | **NEW in PR-ADS-021** — `generate_deterministic_report(report_type)` generates markdown from structured JSON outputs; no external API; replaces Claude as default |
 | `analysis/advisor.py` | Report generation dispatcher | `generate_weekly_report()` and `generate_monthly_report()` — now defaults to `rule_advisor`; Claude optional via `ADVISOR_MODE=claude`; importing does not require `ANTHROPIC_API_KEY` |
-| `scheduler/weekly.py` | Weekly report orchestrator | Full pipeline: pull → analyse → report → deliver; uses deterministic advisor by default |
-| `scheduler/monthly.py` | Monthly report orchestrator | Full pipeline: pull → analyse → report → deliver; per-step error handling; uses deterministic advisor by default |
+| `scheduler/weekly.py` | Weekly report orchestrator | Full pipeline: pull → analyse → report → deliver; uses deterministic advisor by default; also writes to Postgres after each step (PR-ADS-024) |
+| `scheduler/monthly.py` | Monthly report orchestrator | Full pipeline: pull → analyse → report → deliver; per-step error handling; uses deterministic advisor by default; also writes to Postgres after each step (PR-ADS-024) |
 | `scheduler/delivery.py` | SendGrid email delivery | Delivers weekly and monthly report files; returns bool |
 | `scheduler/run_history.py` | Persistent run log | Writes JSONL to `runtime_logs/run_history.jsonl` |
 | `scripts/healthcheck.py` | Pre-flight environment check | Validates env vars, dirs, imports; `ANTHROPIC_API_KEY` optional unless `ADVISOR_MODE=claude`; `APP_SECRET_KEY` and `AUTH_USERS_JSON` required |
@@ -28,17 +28,21 @@
 | `config/junk_patterns.yaml` | Junk pattern library | Intent mismatch patterns; safe-terms whitelist |
 | `render.yaml` | Render.com deployment | **Single web service** (uvicorn); Render cron jobs decommissioned by PR-ADS-019; in-app APScheduler handles all scheduled jobs |
 | `Makefile` | Manual ops runner | `healthcheck`, `daily`, `weekly`, `monthly`, `validate`, `runs` targets |
-| `scheduler/daily.py` | Daily pulse orchestrator | Step counter fixed; structured logging per step; result saved to `outputs/daily_YYYY-MM-DD.json` |
+| `scheduler/daily.py` | Daily pulse orchestrator | Step counter fixed; structured logging per step; result saved to `outputs/daily_YYYY-MM-DD.json`; also writes to Postgres after data pull (PR-ADS-024) |
 | `scripts/validate_phase1.py` | Phase 1 read-only validation | Syntax, YAML, docs, and stale-reference checks |
 | `scripts/phase1_readiness.py` | Phase 1 production readiness audit | Updated in PR-ADS-021: `ANTHROPIC_API_KEY` removed from required list; `APP_SECRET_KEY`, `AUTH_USERS_JSON` added; `api/server.py` removed from forbidden modules (was stale entry); deterministic advisor check added |
 | `scripts/create_user_hash.py` | Password hash generator | **NEW in PR-ADS-021** — generates PBKDF2-SHA256 password hash for `AUTH_USERS_JSON`; never prints password |
 | `docs/PHASE1_PRODUCTION_READINESS.md` | Go/no-go checklist | Official Phase 1 production readiness gate |
 | `.env.example` | Environment variable reference | Updated in PR-ADS-021: `ADVISOR_MODE`, `APP_SECRET_KEY`, `AUTH_USERS_JSON` added; Claude moved to optional |
-| `requirements.txt` | Python dependencies | All runtime deps present |
+| `requirements.txt` | Python dependencies | Added psycopg2-binary (PR-ADS-024) |
 | `api/__init__.py` | API package declaration | Declares `api/` as a Python package |
 | `api/auth.py` | Internal auth module | Updated in PR-ADS-021B: `authenticate_user()` added — supports both `password_hash` (PBKDF2) and `password` (plain-text fallback via `hmac.compare_digest`); passwords never logged or exposed in API responses |
-| `api/server.py` | FastAPI web entry point | Updated in PR-ADS-021B: `/auth/login` now uses `authenticate_user()` for dual-mode credential verification |
+| `api/server.py` | FastAPI web entry point | Updated in PR-ADS-021B: `/auth/login` now uses `authenticate_user()` for dual-mode credential verification; Updated in PR-ADS-024: DB init in lifespan + 6 new `/api/*` endpoints with `?days=` param |
 | `api/scheduler.py` | In-app APScheduler | Schedules daily (06:00), weekly (Mon 07:00), monthly (1st 08:00) Phase 1 jobs in Asia/Amman timezone; exposes shared lock state and `get_scheduler_status()` |
+| `db/__init__.py` | DB package | New in PR-ADS-024 |
+| `db/schema.py` | PostgreSQL schema + init_db() | CREATE TABLE IF NOT EXISTS; idempotent; non-fatal. New in PR-ADS-024 |
+| `db/connection.py` | Connection pool, non-fatal if unavailable | ThreadedConnectionPool max 10; DATABASE_URL from env; yields None if unavailable. New in PR-ADS-024 |
+| `db/writers.py` | Write runs, campaigns, leads, waste, deals | All functions non-fatal; MQL status mapped to status_category. New in PR-ADS-024 |
 | `static/index.html` | Dashboard UI  | Updated in PR-ADS-023: 5-page brand-aligned SPA — login screen, sidebar nav, 7 page containers |
 | `static/app.js`     | Frontend logic | Updated in PR-ADS-023: full SPA routing, role-based UI, markdown report parser, API wiring for all 7 pages |
 | `static/styles.css` | Dashboard styles | Updated in PR-ADS-023: Sora font, full Logistaas brand token system, sidebar layout, all components |
@@ -92,6 +96,7 @@ No files are currently in a broken state.
 | PR-ADS-022  | Premium Dashboard Visual Upgrade — CSS/HTML/JS polish, no backend changes | ✅ This PR |
 | PR-ADS-023 | Brand-Aligned Dashboard Rebuild — 5-page SPA, Sora font, full API wiring | ✅ Complete |
 | PR-ADS-027 | Fix HubSpot associations_api crash + Windsor search term 400 error | ✅ Complete |
+| PR-ADS-024 | PostgreSQL Foundation — schema, writers, time-range API | ✅ Complete |
 | **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 
