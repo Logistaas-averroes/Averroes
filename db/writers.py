@@ -1,0 +1,298 @@
+"""
+db/writers.py
+
+Database write functions for the Logistaas Ads Intelligence System.
+
+Responsibility:
+  - Write structured run data to the database after each scheduler step.
+  - All functions are non-fatal: DB write failures are logged and swallowed —
+    the scheduler must never abort because of a database failure.
+  - JSON file writes in the schedulers are NOT replaced; this is additive.
+
+MQL status → status_category mapping:
+  qualified    — CLOSED - Sales Qualified, CLOSED - Deal Created
+  in_progress  — OPEN - Meeting Booked, OPEN - Pending Meeting
+  junk         — CLOSED - Job Seeker, DICARDED   (one R — canonical spelling)
+  wrong_fit    — CLOSED - Bad Product Fit, CLOSED - Sales Disqualified
+  unknown      — everything else
+"""
+
+import logging
+from datetime import date, datetime, timezone
+from typing import Optional
+
+from db.connection import get_conn
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# MQL status → status_category
+# ---------------------------------------------------------------------------
+
+_QUALIFIED    = {"CLOSED - Sales Qualified", "CLOSED - Deal Created"}
+_IN_PROGRESS  = {"OPEN - Meeting Booked", "OPEN - Pending Meeting"}
+_JUNK         = {"CLOSED - Job Seeker", "DICARDED"}   # one R — canonical
+_WRONG_FIT    = {"CLOSED - Bad Product Fit", "CLOSED - Sales Disqualified"}
+
+
+def _map_status_category(mql_status: Optional[str]) -> str:
+    if not mql_status:
+        return "unknown"
+    if mql_status in _QUALIFIED:
+        return "qualified"
+    if mql_status in _IN_PROGRESS:
+        return "in_progress"
+    if mql_status in _JUNK:
+        return "junk"
+    if mql_status in _WRONG_FIT:
+        return "wrong_fit"
+    return "unknown"
+
+
+def _today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+# ---------------------------------------------------------------------------
+# Public write functions
+# ---------------------------------------------------------------------------
+
+def write_run(run_data: dict) -> Optional[int]:
+    """Insert a run record and return its auto-generated run_id.
+
+    Returns None if the database is unavailable or the write fails.
+    Never raises.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO runs (
+                        run_type, started_at, finished_at, status,
+                        failed_step, error_message, report_path,
+                        delivery_attempted, delivery_success
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        run_data.get("run_type"),
+                        run_data.get("started_at"),
+                        run_data.get("finished_at"),
+                        run_data.get("status", "failed"),
+                        run_data.get("failed_step"),
+                        run_data.get("error_message"),
+                        run_data.get("report_path"),
+                        bool(run_data.get("delivery_attempted", False)),
+                        run_data.get("delivery_success"),
+                    ),
+                )
+                row = cur.fetchone()
+                run_id = row[0] if row else None
+                log.info("Wrote run record to database — run_id=%s", run_id)
+                return run_id
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_run failed: %s", exc)
+        return None
+
+
+def write_campaigns(run_id: int, campaigns: list) -> None:
+    """Insert campaign rows for this run.
+
+    Each item in *campaigns* should be a dict produced by analysis/core.py
+    (campaign truth table output).  Missing keys default to None.
+    Never raises.
+    """
+    if not campaigns:
+        return
+    run_date = _today()
+    rows = []
+    for c in campaigns:
+        rows.append((
+            run_id,
+            run_date,
+            c.get("campaign_name") or c.get("campaign"),
+            _float_or_none(c.get("spend_usd") or c.get("spend_30d_usd") or c.get("spend")),
+            _int_or_none(c.get("clicks")),
+            _int_or_none(c.get("impressions")),
+            _float_or_none(c.get("conversions")),
+            _int_or_none(c.get("total_leads")),
+            _int_or_none(c.get("confirmed_sqls")),
+            _int_or_none(c.get("junk_count")),
+            _float_or_none(c.get("junk_rate_pct")),
+            _float_or_none(c.get("cpql_usd")),
+            c.get("verdict"),
+            c.get("verdict_reason"),
+        ))
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO campaigns (
+                        run_id, run_date, campaign_name, spend_usd, clicks,
+                        impressions, conversions, total_leads, confirmed_sqls,
+                        junk_count, junk_rate_pct, cpql_usd, verdict, verdict_reason
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    rows,
+                )
+        log.info("Wrote %d campaign rows to database (run_id=%s)", len(rows), run_id)
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_campaigns failed (run_id=%s): %s", run_id, exc)
+
+
+def write_leads(run_id: int, contacts: list) -> None:
+    """Insert lead rows for this run.
+
+    Each item in *contacts* should be a dict produced by hubspot_pull.py.
+    mql_status is mapped to status_category automatically.
+    Never raises.
+    """
+    if not contacts:
+        return
+    run_date = _today()
+    rows = []
+    for c in contacts:
+        mql_status = c.get("mql_status") or c.get("mql___mdr_comments")
+        rows.append((
+            run_id,
+            run_date,
+            c.get("contact_id") or c.get("id"),
+            c.get("campaign_name") or c.get("campaign"),
+            c.get("keyword"),
+            c.get("country"),
+            mql_status,
+            _map_status_category(mql_status),
+            c.get("gclid"),
+        ))
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO leads (
+                        run_id, run_date, contact_id, campaign_name,
+                        keyword, country, mql_status, status_category, gclid
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    rows,
+                )
+        log.info("Wrote %d lead rows to database (run_id=%s)", len(rows), run_id)
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_leads failed (run_id=%s): %s", run_id, exc)
+
+
+def write_waste_terms(run_id: int, waste_items: list) -> None:
+    """Insert waste term rows for this run.
+
+    Each item in *waste_items* should be a dict from the waste detection
+    analysis output (confirmed_waste_items list).
+    Never raises.
+    """
+    if not waste_items:
+        return
+    run_date = _today()
+    rows = []
+    for w in waste_items:
+        rows.append((
+            run_id,
+            run_date,
+            w.get("search_term") or w.get("term", ""),
+            w.get("campaign_name") or w.get("campaign"),
+            _float_or_none(w.get("spend_usd") or w.get("spend")),
+            w.get("junk_category") or w.get("category"),
+            w.get("matched_pattern") or w.get("pattern"),
+            int(w.get("crm_junk_confirmed", 0) or 0),
+        ))
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO waste_terms (
+                        run_id, run_date, search_term, campaign_name,
+                        spend_usd, junk_category, matched_pattern, crm_junk_confirmed
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    rows,
+                )
+        log.info("Wrote %d waste term rows to database (run_id=%s)", len(rows), run_id)
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_waste_terms failed (run_id=%s): %s", run_id, exc)
+
+
+def write_deals(run_id: int, deals: list) -> None:
+    """Insert deal rows for this run.
+
+    Each item in *deals* should be a dict produced by hubspot_pull.py
+    (pull_deals_with_gclid output).
+    Never raises.
+    """
+    if not deals:
+        return
+    run_date = _today()
+    rows = []
+    for d in deals:
+        rows.append((
+            run_id,
+            run_date,
+            d.get("contact_id") or d.get("id"),
+            d.get("company"),
+            d.get("country"),
+            d.get("keyword"),
+            d.get("campaign_name") or d.get("campaign"),
+            d.get("deal_stage"),
+            d.get("deal_stage_label"),
+            _float_or_none(d.get("deal_amount_usd") or d.get("amount")),
+            d.get("mql_status"),
+            d.get("gclid"),
+        ))
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO deals (
+                        run_id, run_date, contact_id, company, country,
+                        keyword, campaign_name, deal_stage, deal_stage_label,
+                        deal_amount_usd, mql_status, gclid
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    rows,
+                )
+        log.info("Wrote %d deal rows to database (run_id=%s)", len(rows), run_id)
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_deals failed (run_id=%s): %s", run_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _float_or_none(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

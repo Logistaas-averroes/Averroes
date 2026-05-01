@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -78,6 +78,10 @@ APP_ENV = os.getenv("APP_ENV", "production")
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Start the in-app scheduler on startup; stop it cleanly on shutdown."""
+    from db.connection import init_pool
+    from db.schema import init_db
+    init_pool()
+    init_db()
     start_scheduler()
     yield
     stop_scheduler()
@@ -482,3 +486,360 @@ def run_monthly(request: Request) -> dict[str, Any]:
     finally:
         with _run_lock:
             _job_state["monthly"] = False
+
+
+# ---------------------------------------------------------------------------
+# Time-range data endpoints — require auth, accept ?days= parameter.
+# All database queries are non-fatal: returns db_unavailable flag when down.
+# ---------------------------------------------------------------------------
+
+def _clamp_days(days: int) -> int:
+    """Clamp days to the range [1, 365]."""
+    return max(1, min(365, days))
+
+
+def _db_empty_response(days: int, key: str) -> dict[str, Any]:
+    """Return a structured empty response when the database is unavailable."""
+    return {"days": days, key: [], "db_unavailable": True}
+
+
+@app.get("/api/campaigns")
+def api_campaigns(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return aggregated campaign metrics for the last N days. Requires auth."""
+    if not isinstance(days, int) or days != days:  # basic type guard
+        raise HTTPException(status_code=400, detail="?days= must be an integer")
+    days = _clamp_days(days)
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _db_empty_response(days, "campaigns")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        campaign_name,
+                        MAX(verdict)                          AS latest_verdict,
+                        AVG(spend_usd)                        AS avg_spend_usd,
+                        SUM(confirmed_sqls)                   AS total_confirmed_sqls,
+                        AVG(junk_rate_pct)                    AS avg_junk_rate_pct,
+                        AVG(cpql_usd)                         AS avg_cpql_usd,
+                        COUNT(*)                              AS run_count,
+                        -- trend: compare avg junk_rate of older half vs newer half
+                        AVG(CASE WHEN run_date < (
+                                SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY run_date)
+                                FROM campaigns c2
+                                WHERE c2.campaign_name = c.campaign_name
+                                  AND c2.run_date >= NOW() - INTERVAL '%s days'
+                            ) THEN junk_rate_pct END)         AS older_junk_rate,
+                        AVG(CASE WHEN run_date >= (
+                                SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY run_date)
+                                FROM campaigns c2
+                                WHERE c2.campaign_name = c.campaign_name
+                                  AND c2.run_date >= NOW() - INTERVAL '%s days'
+                            ) THEN junk_rate_pct END)         AS newer_junk_rate
+                    FROM campaigns c
+                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                    GROUP BY campaign_name
+                    ORDER BY avg_spend_usd DESC NULLS LAST
+                    """,
+                    (days, days, days),
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                campaigns = []
+                for row in rows:
+                    r = dict(zip(cols, row))
+                    older = r.get("older_junk_rate")
+                    newer = r.get("newer_junk_rate")
+                    if older is not None and newer is not None:
+                        if newer < older - 2:
+                            trend = "improving"
+                        elif newer > older + 2:
+                            trend = "degrading"
+                        else:
+                            trend = "stable"
+                    else:
+                        trend = "stable"
+                    campaigns.append({
+                        "campaign_name": r["campaign_name"],
+                        "latest_verdict": r["latest_verdict"],
+                        "avg_spend_usd": round(float(r["avg_spend_usd"]), 2) if r["avg_spend_usd"] is not None else None,
+                        "total_confirmed_sqls": int(r["total_confirmed_sqls"] or 0),
+                        "avg_junk_rate_pct": round(float(r["avg_junk_rate_pct"]), 2) if r["avg_junk_rate_pct"] is not None else None,
+                        "avg_cpql_usd": round(float(r["avg_cpql_usd"]), 2) if r["avg_cpql_usd"] is not None else None,
+                        "run_count": int(r["run_count"]),
+                        "trend": trend,
+                    })
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/campaigns] database error: %s", exc)
+        return _db_empty_response(days, "campaigns")
+
+    return {
+        "days": days,
+        "generated_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "campaigns": campaigns,
+    }
+
+
+@app.get("/api/leads")
+def api_leads(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return lead rows for the last N days. Requires auth."""
+    days = _clamp_days(days)
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _db_empty_response(days, "leads")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT contact_id, campaign_name, keyword, country,
+                           mql_status, status_category, gclid, run_date
+                    FROM leads
+                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                    ORDER BY run_date DESC, id DESC
+                    LIMIT 1000
+                    """,
+                    (days,),
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                leads = [dict(zip(cols, row)) for row in rows]
+                for lead in leads:
+                    if lead.get("run_date"):
+                        lead["run_date"] = str(lead["run_date"])
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/leads] database error: %s", exc)
+        return _db_empty_response(days, "leads")
+
+    return {"days": days, "leads": leads}
+
+
+@app.get("/api/deals")
+def api_deals(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return deal rows for the last N days. Requires auth."""
+    days = _clamp_days(days)
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _db_empty_response(days, "deals")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT contact_id, company, country, keyword, campaign_name,
+                           deal_stage, deal_stage_label, deal_amount_usd,
+                           mql_status, gclid, run_date
+                    FROM deals
+                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                    ORDER BY run_date DESC, id DESC
+                    LIMIT 1000
+                    """,
+                    (days,),
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                deals_out = [dict(zip(cols, row)) for row in rows]
+                for deal in deals_out:
+                    if deal.get("run_date"):
+                        deal["run_date"] = str(deal["run_date"])
+                    if deal.get("deal_amount_usd") is not None:
+                        deal["deal_amount_usd"] = float(deal["deal_amount_usd"])
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/deals] database error: %s", exc)
+        return _db_empty_response(days, "deals")
+
+    return {"days": days, "deals": deals_out}
+
+
+@app.get("/api/waste")
+def api_waste(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return waste term rows for the last N days. Requires auth."""
+    days = _clamp_days(days)
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _db_empty_response(days, "waste")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT search_term, campaign_name, spend_usd,
+                           junk_category, matched_pattern, crm_junk_confirmed, run_date
+                    FROM waste_terms
+                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                    ORDER BY spend_usd DESC NULLS LAST, run_date DESC
+                    LIMIT 500
+                    """,
+                    (days,),
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                waste_out = [dict(zip(cols, row)) for row in rows]
+                for item in waste_out:
+                    if item.get("run_date"):
+                        item["run_date"] = str(item["run_date"])
+                    if item.get("spend_usd") is not None:
+                        item["spend_usd"] = float(item["spend_usd"])
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/waste] database error: %s", exc)
+        return _db_empty_response(days, "waste")
+
+    return {"days": days, "waste": waste_out}
+
+
+@app.get("/api/runs")
+def api_runs(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return scheduler run records for the last N days. Requires auth."""
+    days = _clamp_days(days)
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _db_empty_response(days, "runs")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT run_type, started_at, finished_at, status, report_path
+                    FROM runs
+                    WHERE started_at >= NOW() - INTERVAL '%s days'
+                    ORDER BY started_at DESC
+                    """,
+                    (days,),
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                runs_out = []
+                for row in rows:
+                    r = dict(zip(cols, row))
+                    r["started_at"] = r["started_at"].strftime("%Y-%m-%dT%H:%M:%SZ") if r.get("started_at") else None
+                    r["finished_at"] = r["finished_at"].strftime("%Y-%m-%dT%H:%M:%SZ") if r.get("finished_at") else None
+                    runs_out.append(r)
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/runs] database error: %s", exc)
+        return _db_empty_response(days, "runs")
+
+    return {"days": days, "runs": runs_out}
+
+
+@app.get("/api/summary")
+def api_summary(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return aggregated summary metrics for the last N days. Requires auth."""
+    days = _clamp_days(days)
+
+    _empty = {
+        "days": days,
+        "total_spend_usd": None,
+        "confirmed_sqls": None,
+        "avg_cpql_usd": None,
+        "confirmed_waste_usd": None,
+        "total_leads": None,
+        "junk_rate_pct": None,
+        "run_count": 0,
+        "last_run_at": None,
+        "last_run_status": None,
+        "db_unavailable": True,
+    }
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _empty
+
+            with conn.cursor() as cur:
+                # Campaign aggregates
+                cur.execute(
+                    """
+                    SELECT
+                        SUM(spend_usd)        AS total_spend_usd,
+                        SUM(confirmed_sqls)   AS confirmed_sqls,
+                        SUM(total_leads)      AS total_leads,
+                        SUM(junk_count)       AS total_junk
+                    FROM campaigns
+                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                    """,
+                    (days,),
+                )
+                c_row = cur.fetchone()
+
+                # Waste aggregates
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(spend_usd), 0)
+                    FROM waste_terms
+                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                      AND crm_junk_confirmed > 0
+                    """,
+                    (days,),
+                )
+                waste_row = cur.fetchone()
+
+                # Run count + last run
+                cur.execute(
+                    """
+                    SELECT COUNT(*), MAX(started_at), MAX(status)
+                    FROM runs
+                    WHERE started_at >= NOW() - INTERVAL '%s days'
+                    """,
+                    (days,),
+                )
+                r_row = cur.fetchone()
+
+            total_spend = float(c_row[0]) if c_row and c_row[0] is not None else None
+            confirmed_sqls = int(c_row[1]) if c_row and c_row[1] is not None else None
+            total_leads = int(c_row[2]) if c_row and c_row[2] is not None else None
+            total_junk = int(c_row[3]) if c_row and c_row[3] is not None else None
+            confirmed_waste = float(waste_row[0]) if waste_row and waste_row[0] is not None else 0.0
+            run_count = int(r_row[0]) if r_row else 0
+            last_run_at = r_row[1].strftime("%Y-%m-%dT%H:%M:%SZ") if r_row and r_row[1] else None
+            last_run_status = r_row[2] if r_row else None
+
+            avg_cpql = None
+            if total_spend is not None and confirmed_sqls:
+                avg_cpql = round(total_spend / confirmed_sqls, 2)
+
+            junk_rate = None
+            if total_leads and total_junk is not None:
+                junk_rate = round((total_junk / total_leads) * 100, 1) if total_leads > 0 else 0.0
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/summary] database error: %s", exc)
+        return _empty
+
+    return {
+        "days": days,
+        "total_spend_usd": round(total_spend, 2) if total_spend is not None else None,
+        "confirmed_sqls": confirmed_sqls,
+        "avg_cpql_usd": avg_cpql,
+        "confirmed_waste_usd": round(confirmed_waste, 2),
+        "total_leads": total_leads,
+        "junk_rate_pct": junk_rate,
+        "run_count": run_count,
+        "last_run_at": last_run_at,
+        "last_run_status": last_run_status,
+    }

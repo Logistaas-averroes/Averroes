@@ -22,6 +22,9 @@ apscheduler>=3.10.0
 # Email delivery
 sendgrid>=6.11.0
 
+# Database
+psycopg2-binary>=2.9.0
+
 # Environment
 python-dotenv>=1.0.0
 

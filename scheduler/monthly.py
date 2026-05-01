@@ -14,6 +14,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from scheduler.delivery import deliver_report
 from scheduler.run_history import start_run, finish_run
+import db.writers as db_writers
 
 load_dotenv()
 
@@ -86,6 +87,16 @@ def run_monthly_report():
             f"Step 2/6 END: HubSpot pull complete — "
             f"{len(contacts)} contacts, {len(deals)} deals with GCLID"
         )
+
+        # Write run record + leads + deals to database
+        try:
+            run_id = db_writers.write_run(run_record)
+            db_writers.write_leads(run_id, contacts)
+            db_writers.write_deals(run_id, deals)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("DB write after Step 2 failed: %s", db_exc)
+            run_id = None
+
     except Exception as e:
         log.error(f"Step 2/6 FAILED: HubSpot pull error — {e}")
         finish_run(
@@ -114,8 +125,16 @@ def run_monthly_report():
     log.info("Step 3/6 START: Running waste detection...")
     try:
         from analysis.core import run_waste_detection
-        run_waste_detection()
+        waste_output = run_waste_detection()
         log.info("Step 3/6 END: Waste detection complete")
+
+        # Write waste terms to database
+        try:
+            if run_id is not None and waste_output:
+                db_writers.write_waste_terms(run_id, waste_output.get("confirmed_waste_items", []))
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("DB write after Step 3 failed: %s", db_exc)
+
     except Exception as e:
         log.error(f"Step 3/6 FAILED: Waste detection error — {e}")
         finish_run(
@@ -146,8 +165,16 @@ def run_monthly_report():
     log.info("Step 5/6 START: Building campaign truth table...")
     try:
         from analysis.core import run_campaign_truth
-        run_campaign_truth()
+        campaign_truth = run_campaign_truth()
         log.info("Step 5/6 END: Campaign truth table complete")
+
+        # Write campaigns to database
+        try:
+            if run_id is not None and campaign_truth:
+                db_writers.write_campaigns(run_id, campaign_truth.get("campaigns", []))
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("DB write after Step 5 failed: %s", db_exc)
+
     except Exception as e:
         log.error(f"Step 5/6 FAILED: Campaign truth error — {e}")
         finish_run(

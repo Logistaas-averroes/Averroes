@@ -4,13 +4,17 @@ Runs at 6am GMT every day via Render cron.
 Fast path: anomaly detection, spend spikes, new junk terms, CRM delta.
 """
 
+import logging
 import os
 import json
 from datetime import datetime
 from dotenv import load_dotenv
 from scheduler.run_history import start_run, finish_run
+import db.writers as db_writers
 
 load_dotenv()
+
+log = logging.getLogger(__name__)
 
 
 def run_daily_pulse():
@@ -31,6 +35,13 @@ def run_daily_pulse():
         print("Step 2/5: Pulling HubSpot contacts (last 2 days)...")
         contacts = pull_paid_search_contacts(days_back=2)
         crm_summary = get_lead_quality_summary(contacts)
+
+        # Write run record + leads to database
+        try:
+            run_id = db_writers.write_run(run_record)
+            db_writers.write_leads(run_id, contacts)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[daily] DB write after Step 2 failed: %s", db_exc)
 
         # 2. Detect anomalies
         print("Step 3/5: Running anomaly detection...")

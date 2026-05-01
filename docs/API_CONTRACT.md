@@ -223,6 +223,177 @@ Trigger the monthly strategy report scheduler. Same response shape as `/run/dail
 
 ---
 
+### Time-Range Data Endpoints (New in PR-ADS-024)
+
+All endpoints below require authentication, accept a `?days=` query parameter (default 30, max 365), and query the PostgreSQL database. If the database is unavailable, they return a structured empty response with `"db_unavailable": true` — never a 500.
+
+**`?days=` rules:**
+- Default: 30
+- Maximum: 365 (values above 365 are clamped silently)
+- Non-integer: returns 400 with a clear message
+
+---
+
+#### `GET /api/campaigns?days=30`
+Aggregated campaign metrics for the last N days.
+
+**Auth:** Auth
+**Query params:** `days` (integer, default 30, max 365)
+**Response 200:**
+```json
+{
+  "days": 30,
+  "generated_at": "2026-04-30T15:00:00Z",
+  "campaigns": [
+    {
+      "campaign_name": "Gulf",
+      "latest_verdict": "SCALE",
+      "avg_spend_usd": 1400.00,
+      "total_confirmed_sqls": 2,
+      "avg_junk_rate_pct": 6.0,
+      "avg_cpql_usd": 700.00,
+      "run_count": 4,
+      "trend": "improving"
+    }
+  ]
+}
+```
+`trend` is `"improving"` / `"stable"` / `"degrading"` based on junk rate direction over the period.
+When database is unavailable: `{ "days": 30, "campaigns": [], "db_unavailable": true }`
+
+---
+
+#### `GET /api/leads?days=30`
+Individual lead rows for the last N days (max 1000 rows).
+
+**Auth:** Auth
+**Query params:** `days` (integer, default 30, max 365)
+**Response 200:**
+```json
+{
+  "days": 30,
+  "leads": [
+    {
+      "contact_id": "12345",
+      "campaign_name": "Gulf",
+      "keyword": "freight forwarding",
+      "country": "AE",
+      "mql_status": "CLOSED - Sales Qualified",
+      "status_category": "qualified",
+      "gclid": "abc123",
+      "run_date": "2026-04-30"
+    }
+  ]
+}
+```
+When database is unavailable: `{ "days": 30, "leads": [], "db_unavailable": true }`
+
+---
+
+#### `GET /api/deals?days=30`
+GCLID-matched deal rows for the last N days (max 1000 rows).
+
+**Auth:** Auth
+**Query params:** `days` (integer, default 30, max 365)
+**Response 200:**
+```json
+{
+  "days": 30,
+  "deals": [
+    {
+      "contact_id": "12345",
+      "company": "Acme Freight",
+      "country": "AE",
+      "keyword": "freight forwarding",
+      "campaign_name": "Gulf",
+      "deal_stage": "closedwon",
+      "deal_stage_label": "Closed Won",
+      "deal_amount_usd": 5000.00,
+      "mql_status": "CLOSED - Deal Created",
+      "gclid": "abc123",
+      "run_date": "2026-04-30"
+    }
+  ]
+}
+```
+When database is unavailable: `{ "days": 30, "deals": [], "db_unavailable": true }`
+
+---
+
+#### `GET /api/waste?days=30`
+Waste search term rows for the last N days (max 500 rows, sorted by spend descending).
+
+**Auth:** Auth
+**Query params:** `days` (integer, default 30, max 365)
+**Response 200:**
+```json
+{
+  "days": 30,
+  "waste": [
+    {
+      "search_term": "freight forwarder jobs",
+      "campaign_name": "Gulf",
+      "spend_usd": 47.20,
+      "junk_category": "job_seeker",
+      "matched_pattern": "jobs",
+      "crm_junk_confirmed": 2,
+      "run_date": "2026-04-30"
+    }
+  ]
+}
+```
+When database is unavailable: `{ "days": 30, "waste": [], "db_unavailable": true }`
+
+---
+
+#### `GET /api/runs?days=30`
+Scheduler run records for the last N days.
+
+**Auth:** Auth
+**Query params:** `days` (integer, default 30, max 365)
+**Response 200:**
+```json
+{
+  "days": 30,
+  "runs": [
+    {
+      "run_type": "weekly",
+      "started_at": "2026-04-30T15:10:01Z",
+      "finished_at": "2026-04-30T15:12:44Z",
+      "status": "success",
+      "report_path": "outputs/weekly_report_2026-04-30.md"
+    }
+  ]
+}
+```
+When database is unavailable: `{ "days": 30, "runs": [], "db_unavailable": true }`
+
+---
+
+#### `GET /api/summary?days=30`
+Aggregated headline metrics for the last N days.
+
+**Auth:** Auth
+**Query params:** `days` (integer, default 30, max 365)
+**Response 200:**
+```json
+{
+  "days": 30,
+  "total_spend_usd": 6420.00,
+  "confirmed_sqls": 8,
+  "avg_cpql_usd": 802.50,
+  "confirmed_waste_usd": 847.00,
+  "total_leads": 196,
+  "junk_rate_pct": 27.6,
+  "run_count": 4,
+  "last_run_at": "2026-04-30T15:10:01Z",
+  "last_run_status": "success"
+}
+```
+When database is unavailable: all numeric fields are `null`, `run_count` is `0`, `"db_unavailable": true`.
+
+---
+
 ## Endpoint Quick Reference
 
 | Method | Path | Auth | Purpose |
@@ -232,13 +403,19 @@ Trigger the monthly strategy report scheduler. Same response shape as `/run/dail
 | POST | `/auth/logout` | Public | Sign out |
 | GET | `/auth/me` | Auth | Current user |
 | GET | `/readiness` | Admin | System readiness |
-| GET | `/runs/latest` | Auth | Latest run record |
+| GET | `/runs/latest` | Auth | Latest run record (JSONL) |
 | GET | `/reports/latest` | Auth | Latest report metadata |
 | GET | `/reports/latest/raw` | Auth | Latest report markdown |
 | GET | `/scheduler/status` | Auth | Scheduler state |
 | POST | `/run/daily` | Admin | Trigger daily |
 | POST | `/run/weekly` | Admin | Trigger weekly |
 | POST | `/run/monthly` | Admin | Trigger monthly |
+| GET | `/api/campaigns` | Auth | Campaign metrics (DB, ?days=) |
+| GET | `/api/leads` | Auth | Lead rows (DB, ?days=) |
+| GET | `/api/deals` | Auth | Deal rows (DB, ?days=) |
+| GET | `/api/waste` | Auth | Waste terms (DB, ?days=) |
+| GET | `/api/runs` | Auth | Run records (DB, ?days=) |
+| GET | `/api/summary` | Auth | Headline metrics (DB, ?days=) |
 
 ---
 
