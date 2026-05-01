@@ -246,7 +246,7 @@ Aggregated campaign metrics for the last N days.
   "generated_at": "2026-04-30T15:00:00Z",
   "campaigns": [
     {
-      "campaign_name": "Gulf",
+      "campaign_name": "gulf",
       "latest_verdict": "SCALE",
       "avg_spend_usd": 1400.00,
       "total_confirmed_sqls": 2,
