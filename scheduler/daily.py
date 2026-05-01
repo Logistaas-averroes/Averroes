@@ -46,7 +46,6 @@ def run_daily_pulse():
                 log.error("[daily] Skipping lead write because write_run returned no run_id")
         except Exception as db_exc:  # noqa: BLE001
             log.error("[daily] DB write after Step 2 failed: %s", db_exc)
-            run_id = None
 
         # 2. Detect anomalies
         print("Step 3/5: Running anomaly detection...")
