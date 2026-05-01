@@ -47,7 +47,7 @@
 | `static/app.js`     | Frontend logic | Updated in PR-ADS-023: full SPA routing, role-based UI, markdown report parser, API wiring for all 7 pages |
 | `static/styles.css` | Dashboard styles | Updated in PR-ADS-023: Sora font, full Logistaas brand token system, sidebar layout, all components |
 | `scripts/verify_live_deployment.py` | Live deployment verifier | Updated in PR-ADS-021: checks `/health` is public; checks protected endpoints return 401 when unauthenticated; optional login test via `TEST_USERNAME`/`TEST_PASSWORD` |
-| `docs/API_CONTRACT.md` | API endpoint contract | PR-ADS-025C: /api/leads response updated — source_type field added, valid values: paid_search, organic_search, referral, direct, email, other. Single source of truth for every endpoint in api/server.py |
+| `docs/API_CONTRACT.md` | API endpoint contract | PR-ADS-025C: /api/leads response/example updated to include source_type. Valid source_type enum remains documented here in repo state: paid_search, organic_search, referral, direct, email, other. Single source of truth for every endpoint in api/server.py |
 
 **Phase 1 state:** Read-only. Deterministic advisor active. Internal auth active. Claude API optional.
 
