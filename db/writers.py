@@ -79,6 +79,8 @@ def _clean_campaign_name(campaign_name: Optional[str]) -> Optional[str]:
         return None
 
     stripped = campaign_name.strip()
+    if not stripped:
+        return None
 
     if stripped.lower() in _HUBSPOT_SOURCE_PSEUDONAMES:
         return None
