@@ -509,7 +509,7 @@ def api_campaigns(
     days: int = Query(default=30, description="Number of days to look back (1–365)"),
 ) -> dict[str, Any]:
     """Return aggregated campaign metrics for the last N days. Requires auth."""
-    if not isinstance(days, int) or days != days:  # basic type guard
+    if not isinstance(days, int):
         raise HTTPException(status_code=400, detail="?days= must be an integer")
     days = _clamp_days(days)
 
@@ -534,16 +534,16 @@ def api_campaigns(
                                 SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY run_date)
                                 FROM campaigns c2
                                 WHERE c2.campaign_name = c.campaign_name
-                                  AND c2.run_date >= NOW() - INTERVAL '%s days'
+                                  AND c2.run_date >= NOW() - INTERVAL '1 day' * %s
                             ) THEN junk_rate_pct END)         AS older_junk_rate,
                         AVG(CASE WHEN run_date >= (
                                 SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY run_date)
                                 FROM campaigns c2
                                 WHERE c2.campaign_name = c.campaign_name
-                                  AND c2.run_date >= NOW() - INTERVAL '%s days'
+                                  AND c2.run_date >= NOW() - INTERVAL '1 day' * %s
                             ) THEN junk_rate_pct END)         AS newer_junk_rate
                     FROM campaigns c
-                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
                     GROUP BY campaign_name
                     ORDER BY avg_spend_usd DESC NULLS LAST
                     """,
@@ -605,7 +605,7 @@ def api_leads(
                     SELECT contact_id, campaign_name, keyword, country,
                            mql_status, status_category, gclid, run_date
                     FROM leads
-                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
                     ORDER BY run_date DESC, id DESC
                     LIMIT 1000
                     """,
@@ -644,7 +644,7 @@ def api_deals(
                            deal_stage, deal_stage_label, deal_amount_usd,
                            mql_status, gclid, run_date
                     FROM deals
-                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
                     ORDER BY run_date DESC, id DESC
                     LIMIT 1000
                     """,
@@ -684,7 +684,7 @@ def api_waste(
                     SELECT search_term, campaign_name, spend_usd,
                            junk_category, matched_pattern, crm_junk_confirmed, run_date
                     FROM waste_terms
-                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
                     ORDER BY spend_usd DESC NULLS LAST, run_date DESC
                     LIMIT 500
                     """,
@@ -723,7 +723,7 @@ def api_runs(
                     """
                     SELECT run_type, started_at, finished_at, status, report_path
                     FROM runs
-                    WHERE started_at >= NOW() - INTERVAL '%s days'
+                    WHERE started_at >= NOW() - INTERVAL '1 day' * %s
                     ORDER BY started_at DESC
                     """,
                     (days,),
@@ -781,7 +781,7 @@ def api_summary(
                         SUM(total_leads)      AS total_leads,
                         SUM(junk_count)       AS total_junk
                     FROM campaigns
-                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
                     """,
                     (days,),
                 )
@@ -792,7 +792,7 @@ def api_summary(
                     """
                     SELECT COALESCE(SUM(spend_usd), 0)
                     FROM waste_terms
-                    WHERE run_date >= NOW() - INTERVAL '%s days'
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
                       AND crm_junk_confirmed > 0
                     """,
                     (days,),
@@ -804,7 +804,7 @@ def api_summary(
                     """
                     SELECT COUNT(*), MAX(started_at), MAX(status)
                     FROM runs
-                    WHERE started_at >= NOW() - INTERVAL '%s days'
+                    WHERE started_at >= NOW() - INTERVAL '1 day' * %s
                     """,
                     (days,),
                 )
