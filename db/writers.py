@@ -66,6 +66,29 @@ _HUBSPOT_SOURCE_PSEUDONAMES = {
     "(cross-network)", "(none)", "(content)", "(social)",
 }
 
+# Canonical campaign name map: Windsor variant → canonical name
+# Canonical = HubSpot UTM convention (how the name appears in lead attribution)
+# Note: "mexico, chile, colombia" maps to "mexico,chile" — HubSpot UTM tracks
+# this campaign without Colombia in the name; both names refer to the same campaign.
+_CAMPAIGN_CANONICAL = {
+    "mexico, chile, colombia":  "mexico,chile",
+    "compliance markets":       "compliance - markets",
+    "emerging markets":         "emerging - markets",
+    "mature markets":           "mature - markets",
+    "europe low-cpc-2026":      "europe low cpc-new",
+    # Add new entries here as campaigns are renamed in Windsor
+}
+
+
+def _canonicalise_campaign_name(name: Optional[str]) -> Optional[str]:
+    """Apply canonical name mapping after lowercasing.
+
+    Call this AFTER _clean_campaign_name() — input is already lowercase.
+    """
+    if name is None:
+        return None
+    return _CAMPAIGN_CANONICAL.get(name, name)
+
 
 def _clean_campaign_name(campaign_name: Optional[str]) -> Optional[str]:
     """Normalise campaign name for consistent storage.
@@ -74,6 +97,7 @@ def _clean_campaign_name(campaign_name: Optional[str]) -> Optional[str]:
     - Return None for HubSpot traffic source pseudo-names
     - Return None for HubSpot email campaign ID strings
     - Return None for empty/null values
+    - Apply canonical name mapping (Windsor → HubSpot UTM)
     """
     if not campaign_name:
         return None
@@ -88,7 +112,7 @@ def _clean_campaign_name(campaign_name: Optional[str]) -> Optional[str]:
     if _EMAIL_CAMPAIGN_PATTERN.search(stripped):
         return None
 
-    return stripped.lower()
+    return _canonicalise_campaign_name(stripped.lower())
 
 
 def _map_source_type(hs_source: str, campaign_name: Optional[str]) -> str:
@@ -225,20 +249,29 @@ def write_campaigns(run_id: int, campaigns: list) -> None:
     rows = []
     for c in campaigns:
         raw_name = c.get("campaign_name") or c.get("campaign")
-        campaign_name = str(raw_name).strip().lower() if raw_name is not None else None
+        # Windsor campaign data never contains HubSpot pseudo-names, so only
+        # canonicalisation is needed here (not the full _clean_campaign_name() filter).
+        campaign_name = None
+        if raw_name is not None:
+            normalized_name = str(raw_name).strip()
+            if normalized_name:
+                campaign_name = _canonicalise_campaign_name(normalized_name.lower())
+        spend = _float_or_none(c.get("spend_usd") or c.get("spend_30d_usd") or c.get("spend")) or 0.0
+        sqls = _int_or_none(c.get("confirmed_sqls")) or 0
+        cpql = round(spend / sqls, 2) if sqls > 0 else None
         rows.append((
             run_id,
             run_date,
             campaign_name,
-            _float_or_none(c.get("spend_usd") or c.get("spend_30d_usd") or c.get("spend")),
+            spend,
             _int_or_none(c.get("clicks")),
             _int_or_none(c.get("impressions")),
             _float_or_none(c.get("conversions")),
             _int_or_none(c.get("total_leads")),
-            _int_or_none(c.get("confirmed_sqls")),
+            sqls,
             _int_or_none(c.get("junk_count")),
             _float_or_none(c.get("junk_rate_pct")),
-            _float_or_none(c.get("cpql_usd")),
+            cpql,
             c.get("verdict"),
             c.get("verdict_reason"),
         ))

@@ -118,7 +118,25 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_name     ON campaigns(campaign_name);
 -- Existing DBs: ALTER TABLE adds the column; existing rows will have source_type NULL
 --   until the next weekly run populates them — this is expected and handled by frontend.
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS source_type VARCHAR(30);
-CREATE INDEX IF NOT EXISTS idx_leads_source_type ON leads(source_type);
+CREATE INDEX IF NOT EXISTS idx_leads_source_type    ON leads(source_type);
+-- PR-ADS-025E-FIX: index on leads(campaign_name) to prevent full table scans on backfill UPDATEs
+CREATE INDEX IF NOT EXISTS idx_leads_campaign_name  ON leads(campaign_name);
+
+-- PR-ADS-025E: canonicalise Windsor variant campaign names (idempotent)
+-- Authoritative source: _CAMPAIGN_CANONICAL dict in db/writers.py.
+-- If you add a new Windsor→canonical mapping there, add the matching UPDATE pair here too.
+-- "mexico, chile, colombia" → "mexico,chile": HubSpot UTM tracks this campaign without Colombia in the name.
+UPDATE campaigns SET campaign_name = 'mexico,chile'          WHERE campaign_name = 'mexico, chile, colombia';
+UPDATE campaigns SET campaign_name = 'compliance - markets'  WHERE campaign_name = 'compliance markets';
+UPDATE campaigns SET campaign_name = 'emerging - markets'    WHERE campaign_name = 'emerging markets';
+UPDATE campaigns SET campaign_name = 'mature - markets'      WHERE campaign_name = 'mature markets';
+UPDATE campaigns SET campaign_name = 'europe low cpc-new'    WHERE campaign_name = 'europe low-cpc-2026';
+
+UPDATE leads SET campaign_name = 'mexico,chile'          WHERE campaign_name = 'mexico, chile, colombia';
+UPDATE leads SET campaign_name = 'compliance - markets'  WHERE campaign_name = 'compliance markets';
+UPDATE leads SET campaign_name = 'emerging - markets'    WHERE campaign_name = 'emerging markets';
+UPDATE leads SET campaign_name = 'mature - markets'      WHERE campaign_name = 'mature markets';
+UPDATE leads SET campaign_name = 'europe low cpc-new'    WHERE campaign_name = 'europe low-cpc-2026';
 """
 
 
