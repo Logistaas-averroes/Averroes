@@ -253,7 +253,7 @@ Aggregated campaign metrics for the last N days.
       "avg_junk_rate_pct": 6.0,
       "avg_cpql_usd": 700.00,
       "run_count": 4,
-      "trend": "improving"
+      "trend": "stable"
     }
   ]
 }

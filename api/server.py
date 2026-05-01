@@ -554,7 +554,11 @@ def api_campaigns(
                         "avg_junk_rate_pct": round(float(r["avg_junk_rate_pct"]), 2) if r["avg_junk_rate_pct"] is not None else None,
                         "avg_cpql_usd": round(float(r["avg_cpql_usd"]), 2) if r["avg_cpql_usd"] is not None else None,
                         "run_count": int(r["run_count"]),
-                        "trend": "stable",  # Requires 4+ runs — hardcoded until validation period completes
+                        # TODO: Replace hardcoded "stable" with junk rate trend calculation
+                        # once 4+ weekly runs exist. Pattern: compare avg junk_rate of
+                        # older half vs newer half of the date window.
+                        # Tracked: PR-ADS-025B or standalone cleanup PR.
+                        "trend": "stable",
                     })
     except Exception as exc:  # noqa: BLE001
         log.error("[api/campaigns] database error: %s", exc, exc_info=True)

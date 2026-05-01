@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-024 — PostgreSQL Foundation: Schema, Writers, and Time-Range API (May 2026)
+**Last updated:** PR-ADS-025A — Fix /api/campaigns Query Crash: PERCENTILE_CONT removed, exc_info=True logging (May 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
