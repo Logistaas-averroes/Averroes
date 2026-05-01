@@ -519,27 +519,41 @@ def api_campaigns(
             with conn.cursor() as cur:
                 cur.execute(
                     """
+                    WITH date_filtered AS (
+                        SELECT
+                            LOWER(campaign_name) AS campaign_name,
+                            verdict,
+                            spend_usd,
+                            confirmed_sqls,
+                            junk_rate_pct,
+                            cpql_usd,
+                            run_date,
+                            created_at,
+                            id
+                        FROM campaigns
+                        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                    ),
+                    latest_verdicts AS (
+                        SELECT DISTINCT ON (campaign_name)
+                            campaign_name,
+                            verdict AS latest_verdict
+                        FROM date_filtered
+                        ORDER BY campaign_name, run_date DESC, created_at DESC, id DESC
+                    )
                     SELECT
-                        LOWER(c.campaign_name)                  AS campaign_name,
-                        (
-                            SELECT c2.verdict
-                            FROM campaigns c2
-                            WHERE LOWER(c2.campaign_name) = LOWER(c.campaign_name)
-                              AND c2.run_date >= NOW() - INTERVAL '1 day' * %s
-                            ORDER BY c2.run_date DESC
-                            LIMIT 1
-                        )                                       AS latest_verdict,
-                        AVG(c.spend_usd)                        AS avg_spend_usd,
-                        SUM(c.confirmed_sqls)                   AS total_confirmed_sqls,
-                        AVG(c.junk_rate_pct)                    AS avg_junk_rate_pct,
-                        AVG(c.cpql_usd)                         AS avg_cpql_usd,
-                        COUNT(*)                                AS run_count
-                    FROM campaigns c
-                    WHERE c.run_date >= NOW() - INTERVAL '1 day' * %s
-                    GROUP BY LOWER(c.campaign_name)
+                        agg.campaign_name,
+                        lv.latest_verdict,
+                        AVG(agg.spend_usd)          AS avg_spend_usd,
+                        SUM(agg.confirmed_sqls)     AS total_confirmed_sqls,
+                        AVG(agg.junk_rate_pct)      AS avg_junk_rate_pct,
+                        AVG(agg.cpql_usd)           AS avg_cpql_usd,
+                        COUNT(*)                    AS run_count
+                    FROM date_filtered agg
+                    JOIN latest_verdicts lv ON lv.campaign_name = agg.campaign_name
+                    GROUP BY agg.campaign_name, lv.latest_verdict
                     ORDER BY avg_spend_usd DESC NULLS LAST
                     """,
-                    (days, days),
+                    (days,),
                 )
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]

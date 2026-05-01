@@ -37,7 +37,7 @@
 | `requirements.txt` | Python dependencies | Added psycopg2-binary (PR-ADS-024) |
 | `api/__init__.py` | API package declaration | Declares `api/` as a Python package |
 | `api/auth.py` | Internal auth module | Updated in PR-ADS-021B: `authenticate_user()` added — supports both `password_hash` (PBKDF2) and `password` (plain-text fallback via `hmac.compare_digest`); passwords never logged or exposed in API responses |
-| `api/server.py` | FastAPI web entry point | Updated in PR-ADS-021B: `/auth/login` now uses `authenticate_user()` for dual-mode credential verification; Updated in PR-ADS-024: DB init in lifespan + 6 new `/api/*` endpoints with `?days=` param; Updated in PR-ADS-025A: `/api/campaigns` PERCENTILE_CONT removed, flat aggregate query, trend hardcoded to stable; exc_info=True added to all /api/* except blocks; Updated in PR-ADS-025C: `/api/leads` SELECT includes source_type |
+| `api/server.py` | FastAPI web entry point | Updated in PR-ADS-021B: `/auth/login` now uses `authenticate_user()` for dual-mode credential verification; Updated in PR-ADS-024: DB init in lifespan + 6 new `/api/*` endpoints with `?days=` param; Updated in PR-ADS-025A: `/api/campaigns` PERCENTILE_CONT removed, flat aggregate query, trend hardcoded to stable; exc_info=True added to all /api/* except blocks; Updated in PR-ADS-025C: `/api/leads` SELECT includes source_type; Updated in PR-ADS-025D: `/api/campaigns` GroupingError fixed — correlated subquery replaced with DISTINCT ON CTE |
 | `api/scheduler.py` | In-app APScheduler | Schedules daily (06:00), weekly (Mon 07:00), monthly (1st 08:00) Phase 1 jobs in Asia/Amman timezone; exposes shared lock state and `get_scheduler_status()` |
 | `db/__init__.py` | DB package | New in PR-ADS-024 |
 | `db/schema.py` | PostgreSQL schema + init_db() | PR-ADS-025C: leads table gains source_type VARCHAR(30) column + index; ALTER TABLE IF NOT EXISTS ensures idempotent migration on startup. CREATE TABLE IF NOT EXISTS; idempotent; non-fatal. New in PR-ADS-024 |
@@ -99,6 +99,7 @@ No files are currently in a broken state.
 | PR-ADS-024 | PostgreSQL Foundation — schema, writers, time-range API | ✅ Complete |
 | PR-ADS-025A | Fix /api/campaigns query crash — PERCENTILE_CONT removed, exc_info=True logging | ✅ Complete |
 | PR-ADS-025C | Data quality fix — campaign normalisation, lead property mapping, source_type tracking | ✅ Complete |
+| PR-ADS-025D | Fix /api/campaigns GroupingError — DISTINCT ON CTE replaces correlated subquery | ✅ Complete |
 | **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 
