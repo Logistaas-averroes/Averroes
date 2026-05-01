@@ -258,7 +258,7 @@ Aggregated campaign metrics for the last N days.
   ]
 }
 ```
-`trend` is `"improving"` / `"stable"` / `"degrading"` based on junk rate direction over the period.
+`trend` is hardcoded to `"stable"` until 4+ weekly runs are available, at which point it will be calculated from junk rate direction. Valid values when dynamic calculation resumes: `"improving"` / `"stable"` / `"degrading"`.
 When database is unavailable: `{ "days": 30, "campaigns": [], "db_unavailable": true }`
 
 ---

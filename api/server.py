@@ -519,73 +519,33 @@ def api_campaigns(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    WITH filtered_campaigns AS (
-                        SELECT *
-                        FROM campaigns
-                        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                    ),
-                    latest_campaigns AS (
-                        SELECT DISTINCT ON (campaign_name)
-                            campaign_name,
-                            verdict
-                        FROM filtered_campaigns
-                        ORDER BY campaign_name, run_date DESC
-                    ),
-                    aggregated_campaigns AS (
-                        SELECT
-                            c.campaign_name,
-                            AVG(spend_usd)                        AS avg_spend_usd,
-                            SUM(confirmed_sqls)                   AS total_confirmed_sqls,
-                            AVG(junk_rate_pct)                    AS avg_junk_rate_pct,
-                            AVG(cpql_usd)                         AS avg_cpql_usd,
-                            COUNT(*)                              AS run_count,
-                            -- trend: compare avg junk_rate of older half vs newer half
-                            AVG(CASE WHEN run_date < (
-                                    SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY run_date)
-                                    FROM filtered_campaigns c2
-                                    WHERE c2.campaign_name = c.campaign_name
-                                ) THEN junk_rate_pct END)         AS older_junk_rate,
-                            AVG(CASE WHEN run_date >= (
-                                    SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY run_date)
-                                    FROM filtered_campaigns c2
-                                    WHERE c2.campaign_name = c.campaign_name
-                                ) THEN junk_rate_pct END)         AS newer_junk_rate
-                        FROM filtered_campaigns c
-                        GROUP BY c.campaign_name
-                    )
                     SELECT
-                        agg.campaign_name,
-                        latest.verdict                           AS latest_verdict,
-                        agg.avg_spend_usd,
-                        agg.total_confirmed_sqls,
-                        agg.avg_junk_rate_pct,
-                        agg.avg_cpql_usd,
-                        agg.run_count,
-                        agg.older_junk_rate,
-                        agg.newer_junk_rate
-                    FROM aggregated_campaigns agg
-                    JOIN latest_campaigns latest
-                      ON latest.campaign_name = agg.campaign_name
-                    ORDER BY agg.avg_spend_usd DESC NULLS LAST
+                        c.campaign_name,
+                        (
+                            SELECT c2.verdict
+                            FROM campaigns c2
+                            WHERE c2.campaign_name = c.campaign_name
+                              AND c2.run_date >= NOW() - INTERVAL '1 day' * %s
+                            ORDER BY c2.run_date DESC
+                            LIMIT 1
+                        )                                       AS latest_verdict,
+                        AVG(c.spend_usd)                        AS avg_spend_usd,
+                        SUM(c.confirmed_sqls)                   AS total_confirmed_sqls,
+                        AVG(c.junk_rate_pct)                    AS avg_junk_rate_pct,
+                        AVG(c.cpql_usd)                         AS avg_cpql_usd,
+                        COUNT(*)                                AS run_count
+                    FROM campaigns c
+                    WHERE c.run_date >= NOW() - INTERVAL '1 day' * %s
+                    GROUP BY c.campaign_name
+                    ORDER BY avg_spend_usd DESC NULLS LAST
                     """,
-                    (days,),
+                    (days, days),
                 )
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
                 campaigns = []
                 for row in rows:
                     r = dict(zip(cols, row))
-                    older = r.get("older_junk_rate")
-                    newer = r.get("newer_junk_rate")
-                    if older is not None and newer is not None:
-                        if newer < older - 2:
-                            trend = "improving"
-                        elif newer > older + 2:
-                            trend = "degrading"
-                        else:
-                            trend = "stable"
-                    else:
-                        trend = "stable"
                     campaigns.append({
                         "campaign_name": r["campaign_name"],
                         "latest_verdict": r["latest_verdict"],
@@ -594,10 +554,10 @@ def api_campaigns(
                         "avg_junk_rate_pct": round(float(r["avg_junk_rate_pct"]), 2) if r["avg_junk_rate_pct"] is not None else None,
                         "avg_cpql_usd": round(float(r["avg_cpql_usd"]), 2) if r["avg_cpql_usd"] is not None else None,
                         "run_count": int(r["run_count"]),
-                        "trend": trend,
+                        "trend": "stable",  # Requires 4+ runs — hardcoded until validation period completes
                     })
     except Exception as exc:  # noqa: BLE001
-        log.error("[api/campaigns] database error: %s", exc)
+        log.error("[api/campaigns] database error: %s", exc, exc_info=True)
         return _db_empty_response(days, "campaigns")
 
     return {
@@ -639,7 +599,7 @@ def api_leads(
                     if lead.get("run_date"):
                         lead["run_date"] = str(lead["run_date"])
     except Exception as exc:  # noqa: BLE001
-        log.error("[api/leads] database error: %s", exc)
+        log.error("[api/leads] database error: %s", exc, exc_info=True)
         return _db_empty_response(days, "leads")
 
     return {"days": days, "leads": leads}
@@ -680,7 +640,7 @@ def api_deals(
                     if deal.get("deal_amount_usd") is not None:
                         deal["deal_amount_usd"] = float(deal["deal_amount_usd"])
     except Exception as exc:  # noqa: BLE001
-        log.error("[api/deals] database error: %s", exc)
+        log.error("[api/deals] database error: %s", exc, exc_info=True)
         return _db_empty_response(days, "deals")
 
     return {"days": days, "deals": deals_out}
@@ -720,7 +680,7 @@ def api_waste(
                     if item.get("spend_usd") is not None:
                         item["spend_usd"] = float(item["spend_usd"])
     except Exception as exc:  # noqa: BLE001
-        log.error("[api/waste] database error: %s", exc)
+        log.error("[api/waste] database error: %s", exc, exc_info=True)
         return _db_empty_response(days, "waste")
 
     return {"days": days, "waste": waste_out}
@@ -764,7 +724,7 @@ def api_runs(
                     )
                     runs_out.append(r)
     except Exception as exc:  # noqa: BLE001
-        log.error("[api/runs] database error: %s", exc)
+        log.error("[api/runs] database error: %s", exc, exc_info=True)
         return _db_empty_response(days, "runs")
 
     return {"days": days, "runs": runs_out}
@@ -867,7 +827,7 @@ def api_summary(
                 junk_rate = round((total_junk / total_leads) * 100, 1) if total_leads > 0 else 0.0
 
     except Exception as exc:  # noqa: BLE001
-        log.error("[api/summary] database error: %s", exc)
+        log.error("[api/summary] database error: %s", exc, exc_info=True)
         return _empty
 
     return {
