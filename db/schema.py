@@ -122,6 +122,7 @@ CREATE INDEX IF NOT EXISTS idx_leads_source_type ON leads(source_type);
 
 -- PR-ADS-025E: canonicalise Windsor variant campaign names (idempotent)
 -- Campaigns stored before this PR may have Windsor naming; map them to canonical (HubSpot UTM) names.
+-- "mexico, chile, colombia" → "mexico,chile": HubSpot UTM tracks this campaign without Colombia in the name.
 UPDATE campaigns SET campaign_name = 'mexico,chile'          WHERE campaign_name = 'mexico, chile, colombia';
 UPDATE campaigns SET campaign_name = 'compliance - markets'  WHERE campaign_name = 'compliance markets';
 UPDATE campaigns SET campaign_name = 'emerging - markets'    WHERE campaign_name = 'emerging markets';

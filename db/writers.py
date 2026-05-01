@@ -68,6 +68,8 @@ _HUBSPOT_SOURCE_PSEUDONAMES = {
 
 # Canonical campaign name map: Windsor variant → canonical name
 # Canonical = HubSpot UTM convention (how the name appears in lead attribution)
+# Note: "mexico, chile, colombia" maps to "mexico,chile" — HubSpot UTM tracks
+# this campaign without Colombia in the name; both names refer to the same campaign.
 _CAMPAIGN_CANONICAL = {
     "mexico, chile, colombia":  "mexico,chile",
     "compliance markets":       "compliance - markets",
@@ -247,6 +249,8 @@ def write_campaigns(run_id: int, campaigns: list) -> None:
     rows = []
     for c in campaigns:
         raw_name = c.get("campaign_name") or c.get("campaign")
+        # Windsor campaign data never contains HubSpot pseudo-names, so only
+        # canonicalisation is needed here (not the full _clean_campaign_name() filter).
         campaign_name = _canonicalise_campaign_name(
             raw_name.strip().lower() if raw_name else None
         )
