@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS leads (
     mql_status          TEXT,
     status_category     VARCHAR(20),
     gclid               TEXT,
+    source_type         VARCHAR(30),
     created_at          TIMESTAMPTZ  DEFAULT NOW()
 );
 
@@ -111,6 +112,13 @@ CREATE INDEX IF NOT EXISTS idx_leads_run_date     ON leads(run_date);
 CREATE INDEX IF NOT EXISTS idx_waste_run_date     ON waste_terms(run_date);
 CREATE INDEX IF NOT EXISTS idx_deals_run_date     ON deals(run_date);
 CREATE INDEX IF NOT EXISTS idx_campaigns_name     ON campaigns(campaign_name);
+
+-- PR-ADS-025C: source type tracking + index (idempotent migration for existing DBs)
+-- New installs: source_type is already in the CREATE TABLE above; ALTER is a no-op.
+-- Existing DBs: ALTER TABLE adds the column; existing rows will have source_type NULL
+--   until the next weekly run populates them — this is expected and handled by frontend.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS source_type VARCHAR(30);
+CREATE INDEX IF NOT EXISTS idx_leads_source_type ON leads(source_type);
 """
 
 

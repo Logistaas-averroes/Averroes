@@ -520,11 +520,11 @@ def api_campaigns(
                 cur.execute(
                     """
                     SELECT
-                        c.campaign_name,
+                        LOWER(c.campaign_name)                  AS campaign_name,
                         (
                             SELECT c2.verdict
                             FROM campaigns c2
-                            WHERE c2.campaign_name = c.campaign_name
+                            WHERE LOWER(c2.campaign_name) = LOWER(c.campaign_name)
                               AND c2.run_date >= NOW() - INTERVAL '1 day' * %s
                             ORDER BY c2.run_date DESC
                             LIMIT 1
@@ -536,7 +536,7 @@ def api_campaigns(
                         COUNT(*)                                AS run_count
                     FROM campaigns c
                     WHERE c.run_date >= NOW() - INTERVAL '1 day' * %s
-                    GROUP BY c.campaign_name
+                    GROUP BY LOWER(c.campaign_name)
                     ORDER BY avg_spend_usd DESC NULLS LAST
                     """,
                     (days, days),
@@ -588,7 +588,7 @@ def api_leads(
                 cur.execute(
                     """
                     SELECT contact_id, campaign_name, keyword, country,
-                           mql_status, status_category, gclid, run_date
+                           mql_status, status_category, gclid, source_type, run_date
                     FROM leads
                     WHERE run_date >= NOW() - INTERVAL '1 day' * %s
                     ORDER BY run_date DESC, id DESC
