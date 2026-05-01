@@ -40,6 +40,7 @@ def run_monthly_report():
     run_record = start_run("monthly")
     delivery_attempted = False
     delivery_ok = None
+    run_id = None
 
     # Step 1: Pull Google Ads data (30-day window)
     log.info("Step 1/6 START: Pulling Google Ads data via Windsor.ai (30 days)...")
@@ -68,6 +69,10 @@ def run_monthly_report():
             failed_step="Step 1/6: Windsor pull",
             error_message=str(e),
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("update_run failed: %s", db_exc)
         return None
 
     # Step 2: Pull HubSpot CRM data (30-day window)
@@ -91,8 +96,11 @@ def run_monthly_report():
         # Write run record + leads + deals to database
         try:
             run_id = db_writers.write_run(run_record)
-            db_writers.write_leads(run_id, contacts)
-            db_writers.write_deals(run_id, deals)
+            if run_id is not None:
+                db_writers.write_leads(run_id, contacts)
+                db_writers.write_deals(run_id, deals)
+            else:
+                log.error("DB write after Step 2: write_run returned no run_id; skipping child writes")
         except Exception as db_exc:  # noqa: BLE001
             log.error("DB write after Step 2 failed: %s", db_exc)
             run_id = None
@@ -105,6 +113,10 @@ def run_monthly_report():
             failed_step="Step 2/6: HubSpot pull",
             error_message=str(e),
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("update_run failed: %s", db_exc)
         return None
 
     # Validate required data files exist before running analysis
@@ -119,6 +131,10 @@ def run_monthly_report():
             failed_step="pre-analysis data validation",
             error_message=f"Missing files: {', '.join(missing)}",
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("update_run failed: %s", db_exc)
         return None
 
     # Step 3: Waste detection
@@ -143,6 +159,10 @@ def run_monthly_report():
             failed_step="Step 3/6: Waste detection",
             error_message=str(e),
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("update_run failed: %s", db_exc)
         return None
 
     # Step 4: Lead quality analysis
@@ -159,6 +179,10 @@ def run_monthly_report():
             failed_step="Step 4/6: Lead quality",
             error_message=str(e),
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("update_run failed: %s", db_exc)
         return None
 
     # Step 5: Campaign truth table
@@ -183,6 +207,10 @@ def run_monthly_report():
             failed_step="Step 5/6: Campaign truth",
             error_message=str(e),
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("update_run failed: %s", db_exc)
         return None
 
     # Step 6: Generate monthly report via advisor (deterministic by default)
@@ -198,6 +226,10 @@ def run_monthly_report():
             failed_step="Step 6/6: Advisor",
             error_message=str(e),
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("update_run failed: %s", db_exc)
         return None
 
     # Validate advisor returned a valid report path
@@ -209,6 +241,10 @@ def run_monthly_report():
             failed_step="Step 6/6: Advisor",
             error_message="Advisor returned no report path",
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("update_run failed: %s", db_exc)
         return None
 
     # Validate report file exists on disk
@@ -220,6 +256,10 @@ def run_monthly_report():
             failed_step="Step 6/6: Report file missing",
             error_message=f"Report file not found at {report_path}",
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("update_run failed: %s", db_exc)
         return None
 
     log.info(f"Step 6/6 END: Monthly report generated — {report_path}")
@@ -240,6 +280,10 @@ def run_monthly_report():
         delivery_attempted=delivery_attempted,
         delivery_success=delivery_ok,
     )
+    try:
+        db_writers.update_run(run_id, run_record)
+    except Exception as db_exc:  # noqa: BLE001
+        log.error("update_run failed: %s", db_exc)
     return report_path
 
 

@@ -509,8 +509,6 @@ def api_campaigns(
     days: int = Query(default=30, description="Number of days to look back (1–365)"),
 ) -> dict[str, Any]:
     """Return aggregated campaign metrics for the last N days. Requires auth."""
-    if not isinstance(days, int):
-        raise HTTPException(status_code=400, detail="?days= must be an integer")
     days = _clamp_days(days)
 
     from db.connection import get_conn  # noqa: PLC0415
@@ -521,33 +519,56 @@ def api_campaigns(
             with conn.cursor() as cur:
                 cur.execute(
                     """
+                    WITH filtered_campaigns AS (
+                        SELECT *
+                        FROM campaigns
+                        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                    ),
+                    latest_campaigns AS (
+                        SELECT DISTINCT ON (campaign_name)
+                            campaign_name,
+                            verdict
+                        FROM filtered_campaigns
+                        ORDER BY campaign_name, run_date DESC
+                    ),
+                    aggregated_campaigns AS (
+                        SELECT
+                            c.campaign_name,
+                            AVG(spend_usd)                        AS avg_spend_usd,
+                            SUM(confirmed_sqls)                   AS total_confirmed_sqls,
+                            AVG(junk_rate_pct)                    AS avg_junk_rate_pct,
+                            AVG(cpql_usd)                         AS avg_cpql_usd,
+                            COUNT(*)                              AS run_count,
+                            -- trend: compare avg junk_rate of older half vs newer half
+                            AVG(CASE WHEN run_date < (
+                                    SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY run_date)
+                                    FROM filtered_campaigns c2
+                                    WHERE c2.campaign_name = c.campaign_name
+                                ) THEN junk_rate_pct END)         AS older_junk_rate,
+                            AVG(CASE WHEN run_date >= (
+                                    SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY run_date)
+                                    FROM filtered_campaigns c2
+                                    WHERE c2.campaign_name = c.campaign_name
+                                ) THEN junk_rate_pct END)         AS newer_junk_rate
+                        FROM filtered_campaigns c
+                        GROUP BY c.campaign_name
+                    )
                     SELECT
-                        campaign_name,
-                        MAX(verdict)                          AS latest_verdict,
-                        AVG(spend_usd)                        AS avg_spend_usd,
-                        SUM(confirmed_sqls)                   AS total_confirmed_sqls,
-                        AVG(junk_rate_pct)                    AS avg_junk_rate_pct,
-                        AVG(cpql_usd)                         AS avg_cpql_usd,
-                        COUNT(*)                              AS run_count,
-                        -- trend: compare avg junk_rate of older half vs newer half
-                        AVG(CASE WHEN run_date < (
-                                SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY run_date)
-                                FROM campaigns c2
-                                WHERE c2.campaign_name = c.campaign_name
-                                  AND c2.run_date >= NOW() - INTERVAL '1 day' * %s
-                            ) THEN junk_rate_pct END)         AS older_junk_rate,
-                        AVG(CASE WHEN run_date >= (
-                                SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY run_date)
-                                FROM campaigns c2
-                                WHERE c2.campaign_name = c.campaign_name
-                                  AND c2.run_date >= NOW() - INTERVAL '1 day' * %s
-                            ) THEN junk_rate_pct END)         AS newer_junk_rate
-                    FROM campaigns c
-                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                    GROUP BY campaign_name
-                    ORDER BY avg_spend_usd DESC NULLS LAST
+                        agg.campaign_name,
+                        latest.verdict                           AS latest_verdict,
+                        agg.avg_spend_usd,
+                        agg.total_confirmed_sqls,
+                        agg.avg_junk_rate_pct,
+                        agg.avg_cpql_usd,
+                        agg.run_count,
+                        agg.older_junk_rate,
+                        agg.newer_junk_rate
+                    FROM aggregated_campaigns agg
+                    JOIN latest_campaigns latest
+                      ON latest.campaign_name = agg.campaign_name
+                    ORDER BY agg.avg_spend_usd DESC NULLS LAST
                     """,
-                    (days, days, days),
+                    (days,),
                 )
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
@@ -733,8 +754,14 @@ def api_runs(
                 runs_out = []
                 for row in rows:
                     r = dict(zip(cols, row))
-                    r["started_at"] = r["started_at"].strftime("%Y-%m-%dT%H:%M:%SZ") if r.get("started_at") else None
-                    r["finished_at"] = r["finished_at"].strftime("%Y-%m-%dT%H:%M:%SZ") if r.get("finished_at") else None
+                    r["started_at"] = (
+                        r["started_at"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        if r.get("started_at") else None
+                    )
+                    r["finished_at"] = (
+                        r["finished_at"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        if r.get("finished_at") else None
+                    )
                     runs_out.append(r)
     except Exception as exc:  # noqa: BLE001
         log.error("[api/runs] database error: %s", exc)
@@ -802,11 +829,20 @@ def api_summary(
                 # Run count + last run
                 cur.execute(
                     """
-                    SELECT COUNT(*), MAX(started_at), MAX(status)
+                    SELECT
+                        COUNT(*) AS run_count,
+                        MAX(started_at) AS last_run_at,
+                        (
+                            SELECT status
+                            FROM runs latest
+                            WHERE latest.started_at >= NOW() - INTERVAL '1 day' * %s
+                            ORDER BY latest.started_at DESC
+                            LIMIT 1
+                        ) AS last_run_status
                     FROM runs
                     WHERE started_at >= NOW() - INTERVAL '1 day' * %s
                     """,
-                    (days,),
+                    (days, days),
                 )
                 r_row = cur.fetchone()
 
@@ -816,7 +852,10 @@ def api_summary(
             total_junk = int(c_row[3]) if c_row and c_row[3] is not None else None
             confirmed_waste = float(waste_row[0]) if waste_row and waste_row[0] is not None else 0.0
             run_count = int(r_row[0]) if r_row else 0
-            last_run_at = r_row[1].strftime("%Y-%m-%dT%H:%M:%SZ") if r_row and r_row[1] else None
+            last_run_at = (
+                r_row[1].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if r_row and r_row[1] else None
+            )
             last_run_status = r_row[2] if r_row else None
 
             avg_cpql = None

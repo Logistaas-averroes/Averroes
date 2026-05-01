@@ -98,6 +98,47 @@ def write_run(run_data: dict) -> Optional[int]:
         return None
 
 
+def update_run(run_id: int, run_data: dict) -> None:
+    """Update an existing run record with final status, finished_at, and delivery fields.
+
+    Called after finish_run() so the DB row reflects the true final state of the run.
+    Never raises.
+    """
+    if run_id is None:
+        return
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE runs
+                    SET finished_at        = %s,
+                        status             = %s,
+                        failed_step        = %s,
+                        error_message      = %s,
+                        report_path        = %s,
+                        delivery_attempted = %s,
+                        delivery_success   = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        run_data.get("finished_at"),
+                        run_data.get("status", "failed"),
+                        run_data.get("failed_step"),
+                        run_data.get("error_message"),
+                        run_data.get("report_path"),
+                        bool(run_data.get("delivery_attempted", False)),
+                        run_data.get("delivery_success"),
+                        run_id,
+                    ),
+                )
+        log.info("Updated run record in database — run_id=%s status=%s", run_id, run_data.get("status"))
+    except Exception as exc:  # noqa: BLE001
+        log.error("update_run failed (run_id=%s): %s", run_id, exc)
+
+
 def write_campaigns(run_id: int, campaigns: list) -> None:
     """Insert campaign rows for this run.
 
@@ -105,6 +146,9 @@ def write_campaigns(run_id: int, campaigns: list) -> None:
     (campaign truth table output).  Missing keys default to None.
     Never raises.
     """
+    if run_id is None:
+        log.debug("write_campaigns skipped — run_id is None")
+        return
     if not campaigns:
         return
     run_date = _today()
@@ -153,6 +197,9 @@ def write_leads(run_id: int, contacts: list) -> None:
     mql_status is mapped to status_category automatically.
     Never raises.
     """
+    if run_id is None:
+        log.debug("write_leads skipped — run_id is None")
+        return
     if not contacts:
         return
     run_date = _today()
@@ -196,6 +243,9 @@ def write_waste_terms(run_id: int, waste_items: list) -> None:
     analysis output (confirmed_waste_items list).
     Never raises.
     """
+    if run_id is None:
+        log.debug("write_waste_terms skipped — run_id is None")
+        return
     if not waste_items:
         return
     run_date = _today()
@@ -237,6 +287,9 @@ def write_deals(run_id: int, deals: list) -> None:
     (pull_deals_with_gclid output).
     Never raises.
     """
+    if run_id is None:
+        log.debug("write_deals skipped — run_id is None")
+        return
     if not deals:
         return
     run_date = _today()

@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS runs (
 -- One row per campaign per run
 CREATE TABLE IF NOT EXISTS campaigns (
     id                  SERIAL PRIMARY KEY,
-    run_id              INTEGER      REFERENCES runs(id) ON DELETE CASCADE,
+    run_id              INTEGER      NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     run_date            DATE         NOT NULL,
     campaign_name       TEXT         NOT NULL,
     spend_usd           NUMERIC(10,2),
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
 -- One row per HubSpot contact per run
 CREATE TABLE IF NOT EXISTS leads (
     id                  SERIAL PRIMARY KEY,
-    run_id              INTEGER      REFERENCES runs(id) ON DELETE CASCADE,
+    run_id              INTEGER      NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     run_date            DATE         NOT NULL,
     contact_id          TEXT,
     campaign_name       TEXT,
@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS leads (
 -- One row per waste term per run
 CREATE TABLE IF NOT EXISTS waste_terms (
     id                  SERIAL PRIMARY KEY,
-    run_id              INTEGER      REFERENCES runs(id) ON DELETE CASCADE,
+    run_id              INTEGER      NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     run_date            DATE         NOT NULL,
     search_term         TEXT         NOT NULL,
     campaign_name       TEXT,
@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS waste_terms (
 -- One row per GCLID-matched deal per run
 CREATE TABLE IF NOT EXISTS deals (
     id                  SERIAL PRIMARY KEY,
-    run_id              INTEGER      REFERENCES runs(id) ON DELETE CASCADE,
+    run_id              INTEGER      NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     run_date            DATE         NOT NULL,
     contact_id          TEXT,
     company             TEXT,

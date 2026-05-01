@@ -23,6 +23,7 @@ def run_daily_pulse():
     print(f"{'='*60}\n")
 
     run_record = start_run("daily")
+    run_id = None
 
     try:
         # 1. Pull fresh data
@@ -39,9 +40,13 @@ def run_daily_pulse():
         # Write run record + leads to database
         try:
             run_id = db_writers.write_run(run_record)
-            db_writers.write_leads(run_id, contacts)
+            if run_id is not None:
+                db_writers.write_leads(run_id, contacts)
+            else:
+                log.error("[daily] Skipping lead write because write_run returned no run_id")
         except Exception as db_exc:  # noqa: BLE001
             log.error("[daily] DB write after Step 2 failed: %s", db_exc)
+            run_id = None
 
         # 2. Detect anomalies
         print("Step 3/5: Running anomaly detection...")
@@ -88,6 +93,10 @@ def run_daily_pulse():
             delivery_attempted=result.get("status") != "clean",
             delivery_success=None,  # daily deliver_report has no return value yet (Phase 3)
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[daily] update_run failed: %s", db_exc)
         return result
 
     except Exception as exc:
@@ -97,6 +106,10 @@ def run_daily_pulse():
             failed_step=getattr(exc, "_step", None),
             error_message=str(exc),
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[daily] update_run (failed run) failed: %s", db_exc)
         raise
 
 

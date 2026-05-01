@@ -28,7 +28,6 @@ import logging
 import os
 
 import psycopg2
-from psycopg2 import pool
 
 log = logging.getLogger(__name__)
 

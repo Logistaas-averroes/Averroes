@@ -29,6 +29,7 @@ def run_weekly_report():
     run_record = start_run("weekly")
     delivery_attempted = False
     delivery_ok = None
+    run_id = None
 
     try:
         # Step 1: Pull Google Ads data (30-day window)
@@ -64,8 +65,11 @@ def run_weekly_report():
         # Write run record + leads + deals to database
         try:
             run_id = db_writers.write_run(run_record)
-            db_writers.write_leads(run_id, contacts)
-            db_writers.write_deals(run_id, deals)
+            if run_id is not None:
+                db_writers.write_leads(run_id, contacts)
+                db_writers.write_deals(run_id, deals)
+            else:
+                log.error("[weekly] DB write after Step 2: write_run returned no run_id")
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write after Step 2 failed: %s", db_exc)
             run_id = None
@@ -119,6 +123,10 @@ def run_weekly_report():
             delivery_attempted=delivery_attempted,
             delivery_success=delivery_ok,
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[weekly] update_run failed: %s", db_exc)
         return report_path
 
     except Exception as exc:
@@ -130,6 +138,10 @@ def run_weekly_report():
             failed_step=getattr(exc, "_step", None),
             error_message=str(exc),
         )
+        try:
+            db_writers.update_run(run_id, run_record)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[weekly] update_run (failed run) failed: %s", db_exc)
         raise
 
 

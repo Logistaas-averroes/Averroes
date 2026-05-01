@@ -230,7 +230,7 @@ All endpoints below require authentication, accept a `?days=` query parameter (d
 **`?days=` rules:**
 - Default: 30
 - Maximum: 365 (values above 365 are clamped silently)
-- Non-integer: returns 400 with a clear message
+- Non-integer: returns 422 validation error (FastAPI rejects before handler)
 
 ---
 
