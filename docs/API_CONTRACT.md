@@ -275,12 +275,13 @@ Individual lead rows for the last N days (max 1000 rows).
   "leads": [
     {
       "contact_id": "12345",
-      "campaign_name": "Gulf",
+      "campaign_name": "gulf",
       "keyword": "freight forwarding",
       "country": "AE",
       "mql_status": "CLOSED - Sales Qualified",
       "status_category": "qualified",
       "gclid": "abc123",
+      "source_type": "paid_search",
       "run_date": "2026-04-30"
     }
   ]

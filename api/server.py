@@ -588,7 +588,7 @@ def api_leads(
                 cur.execute(
                     """
                     SELECT contact_id, campaign_name, keyword, country,
-                           mql_status, status_category, gclid, run_date
+                           mql_status, status_category, gclid, source_type, run_date
                     FROM leads
                     WHERE run_date >= NOW() - INTERVAL '1 day' * %s
                     ORDER BY run_date DESC, id DESC

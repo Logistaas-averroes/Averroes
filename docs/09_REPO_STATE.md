@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-025A — Fix /api/campaigns Query Crash: PERCENTILE_CONT removed, exc_info=True logging (May 2026)
+**Last updated:** PR-ADS-025C — Data Quality Fix: Campaign Name Normalisation, Lead Property Mapping, Source Type Tracking (May 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -37,17 +37,17 @@
 | `requirements.txt` | Python dependencies | Added psycopg2-binary (PR-ADS-024) |
 | `api/__init__.py` | API package declaration | Declares `api/` as a Python package |
 | `api/auth.py` | Internal auth module | Updated in PR-ADS-021B: `authenticate_user()` added — supports both `password_hash` (PBKDF2) and `password` (plain-text fallback via `hmac.compare_digest`); passwords never logged or exposed in API responses |
-| `api/server.py` | FastAPI web entry point | Updated in PR-ADS-021B: `/auth/login` now uses `authenticate_user()` for dual-mode credential verification; Updated in PR-ADS-024: DB init in lifespan + 6 new `/api/*` endpoints with `?days=` param; Updated in PR-ADS-025A: `/api/campaigns` PERCENTILE_CONT removed, flat aggregate query, trend hardcoded to stable; exc_info=True added to all /api/* except blocks |
+| `api/server.py` | FastAPI web entry point | Updated in PR-ADS-021B: `/auth/login` now uses `authenticate_user()` for dual-mode credential verification; Updated in PR-ADS-024: DB init in lifespan + 6 new `/api/*` endpoints with `?days=` param; Updated in PR-ADS-025A: `/api/campaigns` PERCENTILE_CONT removed, flat aggregate query, trend hardcoded to stable; exc_info=True added to all /api/* except blocks; Updated in PR-ADS-025C: `/api/leads` SELECT includes source_type |
 | `api/scheduler.py` | In-app APScheduler | Schedules daily (06:00), weekly (Mon 07:00), monthly (1st 08:00) Phase 1 jobs in Asia/Amman timezone; exposes shared lock state and `get_scheduler_status()` |
 | `db/__init__.py` | DB package | New in PR-ADS-024 |
-| `db/schema.py` | PostgreSQL schema + init_db() | CREATE TABLE IF NOT EXISTS; idempotent; non-fatal. New in PR-ADS-024 |
+| `db/schema.py` | PostgreSQL schema + init_db() | PR-ADS-025C: leads table gains source_type VARCHAR(30) column + index; ALTER TABLE IF NOT EXISTS ensures idempotent migration on startup. CREATE TABLE IF NOT EXISTS; idempotent; non-fatal. New in PR-ADS-024 |
 | `db/connection.py` | Connection pool, non-fatal if unavailable | ThreadedConnectionPool max 10; DATABASE_URL from env; yields None if unavailable. New in PR-ADS-024 |
-| `db/writers.py` | Write runs, campaigns, leads, waste, deals | All functions non-fatal; MQL status mapped to status_category. New in PR-ADS-024 |
+| `db/writers.py` | Write runs, campaigns, leads, waste, deals | PR-ADS-025C: write_leads() fixed to unpack HubSpot properties dict; _clean_campaign_name() normalises to lowercase, filters pseudo-names; _map_source_type() maps hs_analytics_source to closed source_type enum; write_campaigns() normalises campaign_name to lowercase. New in PR-ADS-024 |
 | `static/index.html` | Dashboard UI  | Updated in PR-ADS-023: 5-page brand-aligned SPA — login screen, sidebar nav, 7 page containers |
 | `static/app.js`     | Frontend logic | Updated in PR-ADS-023: full SPA routing, role-based UI, markdown report parser, API wiring for all 7 pages |
 | `static/styles.css` | Dashboard styles | Updated in PR-ADS-023: Sora font, full Logistaas brand token system, sidebar layout, all components |
 | `scripts/verify_live_deployment.py` | Live deployment verifier | Updated in PR-ADS-021: checks `/health` is public; checks protected endpoints return 401 when unauthenticated; optional login test via `TEST_USERNAME`/`TEST_PASSWORD` |
-| `docs/LIVE_VALIDATION_LOG.md` | Phase 1 validation log | Official 4-week validation tracking template |
+| `docs/API_CONTRACT.md` | API endpoint contract | PR-ADS-025C: /api/leads response updated — source_type field added, valid values: paid_search, organic_search, referral, direct, email, other. Single source of truth for every endpoint in api/server.py |
 
 **Phase 1 state:** Read-only. Deterministic advisor active. Internal auth active. Claude API optional.
 
@@ -98,6 +98,7 @@ No files are currently in a broken state.
 | PR-ADS-027 | Fix HubSpot associations_api crash + Windsor search term 400 error | ✅ Complete |
 | PR-ADS-024 | PostgreSQL Foundation — schema, writers, time-range API | ✅ Complete |
 | PR-ADS-025A | Fix /api/campaigns query crash — PERCENTILE_CONT removed, exc_info=True logging | ✅ Complete |
+| PR-ADS-025C | Data quality fix — campaign normalisation, lead property mapping, source_type tracking | ✅ Complete |
 | **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 
