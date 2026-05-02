@@ -30,7 +30,15 @@ const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoi
 
 let _currentUser   = null;  // { username, role } or null
 let _currentPage   = null;  // active page id string
-let _selectedDays  = 30;    // time range selector — persists for browser session
+let _selectedDays  = (() => {
+  try {
+    const stored = sessionStorage.getItem("ads_days");
+    const n = stored ? parseInt(stored, 10) : 30;
+    return [7, 14, 30, 60].includes(n) ? n : 30;
+  } catch (_) {
+    return 30;
+  }
+})();  // time range selector — tab-scoped via sessionStorage
 
 // ── Utility helpers ────────────────────────────────────────────────────────
 
@@ -94,6 +102,7 @@ function getSelectedDays() {
 
 function setSelectedDays(days) {
   _selectedDays = days;
+  try { sessionStorage.setItem("ads_days", String(days)); } catch (_) { /* ignore */ }
   // Update active button state
   document.querySelectorAll(".time-range-btn").forEach((btn) => {
     btn.classList.toggle("active", parseInt(btn.dataset.days, 10) === days);
@@ -318,11 +327,11 @@ function renderKPIs(summary) {
     return;
   }
 
-  if (spendEl) spendEl.textContent = summary.total_spend_usd
+  if (spendEl) spendEl.textContent = summary.total_spend_usd != null
     ? fmtDollar(summary.total_spend_usd) : "—";
   if (sqlsEl)  sqlsEl.textContent  = summary.confirmed_sqls != null
     ? String(summary.confirmed_sqls) : "0";
-  if (cpqlEl)  cpqlEl.textContent  = summary.avg_cpql_usd
+  if (cpqlEl)  cpqlEl.textContent  = summary.avg_cpql_usd != null
     ? fmtDollar(summary.avg_cpql_usd) : "N/A";
   if (wasteEl) wasteEl.textContent = summary.confirmed_waste_usd != null
     ? fmtDollar(summary.confirmed_waste_usd) : "—";
@@ -496,8 +505,8 @@ async function loadCampaigns() {
       const v       = (c.latest_verdict || "").toUpperCase();
       const junkPct = c.avg_junk_rate_pct;
       const junkCls = junkPct == null ? "" :
-                      junkPct < 15   ? "junk--low" :
-                      junkPct <= 30  ? "junk--mid" : "junk--high";
+                      junkPct < JUNK_RATE_LOW_THRESHOLD   ? "junk--low" :
+                      junkPct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
       const junkStr = junkPct != null ? junkPct.toFixed(1) + "%" : "—";
       const cpql    = c.total_confirmed_sqls === 0 ? "N/A" :
                       c.avg_cpql_usd != null ? fmtDollar(c.avg_cpql_usd) : "—";
@@ -540,12 +549,18 @@ async function loadLeads() {
   try {
     const data  = await fetchJSON(`/api/leads?days=${getSelectedDays()}`);
     // Deduplicate by contact_id — leads endpoint returns one row per run per lead.
-    // Take the most recent run row per contact_id.
+    // Rows without contact_id are kept individually (not collapsed under null key).
     const seen  = new Map();
-    for (const lead of (data.leads || [])) {
-      const existing = seen.get(lead.contact_id);
+    for (const [index, lead] of (data.leads || []).entries()) {
+      const hasContactId = lead.contact_id !== null &&
+                           lead.contact_id !== undefined &&
+                           lead.contact_id !== "";
+      const dedupeKey = hasContactId
+        ? `contact:${lead.contact_id}`
+        : `row:${index}`;
+      const existing = seen.get(dedupeKey);
       if (!existing || lead.run_date > existing.run_date) {
-        seen.set(lead.contact_id, lead);
+        seen.set(dedupeKey, lead);
       }
     }
     const leads = Array.from(seen.values());
@@ -611,10 +626,10 @@ async function loadLeads() {
 
     const tbody = rows.map(([name, g]) => {
       const junkPct = g.total > 0 ? Math.round((g.junk / g.total) * 100) : 0;
-      const barCls  = junkPct < 15 ? "progress-bar__fill--low" :
-                      junkPct <= 30 ? "progress-bar__fill--mid" : "progress-bar__fill--high";
-      const junkCls = junkPct < 15 ? "junk--low" :
-                      junkPct <= 30 ? "junk--mid" : "junk--high";
+      const barCls  = junkPct < JUNK_RATE_LOW_THRESHOLD   ? "progress-bar__fill--low" :
+                      junkPct <= JUNK_RATE_HIGH_THRESHOLD ? "progress-bar__fill--mid" : "progress-bar__fill--high";
+      const junkCls = junkPct < JUNK_RATE_LOW_THRESHOLD   ? "junk--low" :
+                      junkPct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
       return `
         <tr>
           <td class="td--name">${escapeHtml(name)}</td>
@@ -664,7 +679,7 @@ async function loadDeals() {
     const stageCounts = {};
     DEAL_PIPELINE_STAGES.forEach((s) => { stageCounts[s] = 0; });
     deals.forEach((d) => {
-      const stage = d.stage || "";
+      const stage = d.deal_stage || "";
       const match = DEAL_PIPELINE_STAGES.find((s) =>
         stage.toLowerCase().includes(s.toLowerCase())
       );
@@ -703,13 +718,13 @@ async function loadDeals() {
       </thead>`;
 
     const tbody = deals.map((d) => {
-      const isWon = (d.stage || "").toLowerCase().includes("won");
+      const isWon = (d.deal_stage || "").toLowerCase().includes("won");
       return `
         <tr${isWon ? ' class="row--won"' : ""}>
           <td class="td--name">${escapeHtml(d.company || "—")}</td>
           <td>${escapeHtml(d.country || "—")}</td>
-          <td>${escapeHtml(d.stage || "—")}</td>
-          <td class="td--num">${d.amount_usd != null ? fmtDollar(d.amount_usd) : "—"}</td>
+          <td>${escapeHtml(d.deal_stage_label || d.deal_stage || "—")}</td>
+          <td class="td--num">${d.deal_amount_usd != null ? fmtDollar(d.deal_amount_usd) : "—"}</td>
           <td>${escapeHtml(d.campaign_name || "—")}</td>
           <td>${escapeHtml(d.keyword || "—")}</td>
         </tr>`;
@@ -734,12 +749,18 @@ async function loadOpportunities() {
   try {
     const data  = await fetchJSON(`/api/leads?days=${getSelectedDays()}`);
 
-    // Deduplicate by contact_id (same as loadLeads)
+    // Deduplicate by contact_id (same null-safe approach as loadLeads)
     const seen = new Map();
-    for (const lead of (data.leads || [])) {
-      const existing = seen.get(lead.contact_id);
+    for (const [index, lead] of (data.leads || []).entries()) {
+      const hasContactId = lead.contact_id !== null &&
+                           lead.contact_id !== undefined &&
+                           lead.contact_id !== "";
+      const dedupeKey = hasContactId
+        ? `contact:${lead.contact_id}`
+        : `row:${index}`;
+      const existing = seen.get(dedupeKey);
       if (!existing || lead.run_date > existing.run_date) {
-        seen.set(lead.contact_id, lead);
+        seen.set(dedupeKey, lead);
       }
     }
 
@@ -981,6 +1002,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Wire up time range buttons
   document.querySelectorAll(".time-range-btn").forEach((btn) => {
     btn.addEventListener("click", () => setSelectedDays(parseInt(btn.dataset.days, 10)));
+  });
+  // Sync active state to the stored/default value on page load
+  document.querySelectorAll(".time-range-btn").forEach((btn) => {
+    btn.classList.toggle("active", parseInt(btn.dataset.days, 10) === _selectedDays);
   });
 
   // Check auth and load initial page
