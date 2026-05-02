@@ -158,11 +158,12 @@ DELETE FROM campaigns WHERE campaign_name ~ '(?i)email_campaign';
 -- Owner: Youssef Awwad — tracked in PR-ADS-025F post-deploy checklist.
 DO $$
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM migrations WHERE migration_id = 'PR-ADS-025F-truncate-campaigns'
-    ) THEN
+    INSERT INTO migrations (migration_id)
+    VALUES ('PR-ADS-025F-truncate-campaigns')
+    ON CONFLICT (migration_id) DO NOTHING;
+
+    IF FOUND THEN
         TRUNCATE TABLE campaigns;
-        INSERT INTO migrations (migration_id) VALUES ('PR-ADS-025F-truncate-campaigns');
     END IF;
 END $$;
 """

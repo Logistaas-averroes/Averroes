@@ -413,12 +413,36 @@ def run_campaign_truth():
         spend_by_campaign[canonical] = spend_by_campaign.get(canonical, 0) + spend
 
     # Build lead quality by campaign (HubSpot source — filter pseudo-names and canonicalise)
+    # Aggregate counts when multiple HubSpot name variants canonicalise to the same key.
     lq_by_campaign = {}
     for lq in lead_quality.get("by_campaign", []):
         raw_name = lq.get("campaign", "")
         canonical = _clean_campaign_name(raw_name)
-        if canonical:
-            lq_by_campaign[canonical] = lq
+        if not canonical:
+            continue
+        if canonical not in lq_by_campaign:
+            lq_by_campaign[canonical] = dict(lq)
+        else:
+            # Aggregate: sum count fields, recompute junk_rate_pct from combined totals
+            existing = lq_by_campaign[canonical]
+            combined_total    = (existing.get("total") or 0) + (lq.get("total") or 0)
+            combined_qualified = (existing.get("qualified") or 0) + (lq.get("qualified") or 0)
+            combined_junk     = (existing.get("junk") or 0) + (lq.get("junk") or 0)
+            combined_verdicted = (
+                combined_qualified
+                + (existing.get("in_progress") or 0) + (lq.get("in_progress") or 0)
+                + combined_junk
+                + (existing.get("wrong_fit") or 0) + (lq.get("wrong_fit") or 0)
+            )
+            existing["total"]        = combined_total
+            existing["qualified"]    = combined_qualified
+            existing["junk"]         = combined_junk
+            existing["junk_rate_pct"] = (
+                round(combined_junk / combined_verdicted * 100, 1)
+                if combined_verdicted > 0 else None
+            )
+            if lq.get("warnings"):
+                existing.setdefault("warnings", []).extend(lq["warnings"])
 
     # Build truth table — one merged row per canonical campaign name
     rows = []
@@ -454,8 +478,13 @@ def run_campaign_truth():
         )
 
         rows.append({
+            # Canonical keys (PR-ADS-025F)
             "campaign_name": campaign,
             "spend_usd": spend,
+            # Legacy keys — kept for backwards compatibility with report generator
+            # TODO: remove after rule_advisor.py is updated to use canonical keys
+            "campaign": campaign,
+            "spend_30d_usd": spend,
             "total_leads": total_leads,
             "confirmed_sqls": confirmed_sqls,
             "junk_count": junk_count,
