@@ -2,7 +2,7 @@
  * static/app.js
  *
  * Logistaas Ads Intelligence — 5-page SPA frontend logic.
- * PR-ADS-023 — Brand-Aligned Dashboard Rebuild
+ * PR-ADS-025B — Dashboard Live Data Upgrade
  *
  * Rules:
  *  - No hardcoded secrets.
@@ -28,9 +28,17 @@ const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoi
 
 // ── Session state ──────────────────────────────────────────────────────────
 
-let _currentUser = null;   // { username, role } or null
-let _currentPage = null;   // active page id string
-let _reportCache = null;   // { text, sections } or null — cache per session
+let _currentUser   = null;  // { username, role } or null
+let _currentPage   = null;  // active page id string
+let _selectedDays  = (() => {
+  try {
+    const stored = sessionStorage.getItem("ads_days");
+    const n = stored ? parseInt(stored, 10) : 30;
+    return [7, 14, 30, 60].includes(n) ? n : 30;
+  } catch (_) {
+    return 30;
+  }
+})();  // time range selector — tab-scoped via sessionStorage
 
 // ── Utility helpers ────────────────────────────────────────────────────────
 
@@ -59,39 +67,10 @@ function fmtDate(iso) {
   }
 }
 
-function parseDollar(str) {
-  if (!str || str === "N/A" || str === "—") return null;
-  const m = String(str).replace(/[$,]/g, "").match(/[\d.]+/);
-  return m ? parseFloat(m[0]) : null;
-}
-
-function parseNum(str) {
-  if (!str || str === "N/A" || str === "—") return null;
-  const m = String(str).replace(/,/g, "").match(/\d+/);
-  return m ? parseInt(m[0], 10) : null;
-}
-
-function parsePct(str) {
-  if (!str || str === "N/A" || str === "—") return null;
-  const m = String(str).match(/([\d.]+)%/);
-  return m ? parseFloat(m[1]) : null;
-}
-
 function fmtDollar(n) {
   if (n === null || n === undefined) return "—";
   if (n >= 1000) return "$" + (n / 1000).toFixed(1) + "k";
   return "$" + n.toFixed(0);
-}
-
-// Strip emojis and extra whitespace from a string (e.g. "✅ SCALE" → "SCALE")
-// Unicode ranges: Miscellaneous Symbols and Pictographs (1F000–1FFFF),
-// Miscellaneous Symbols / Dingbats / Arrows (2600–27FF),
-// Variation Selectors (FE00–FEFF), Zero Width Joiner (200D).
-function stripEmoji(str) {
-  return str
-    .replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{FE00}-\u{FEFF}]/gu, "")
-    .replace(/[\u{200D}]/gu, "")
-    .trim();
 }
 
 function verdictBadge(verdict) {
@@ -115,84 +94,28 @@ function statusBadge(status) {
   return `<span class="badge ${cls}"><span class="dot"></span>${escapeHtml(status || "unknown")}</span>`;
 }
 
-// ── Markdown report parser ─────────────────────────────────────────────────
-
-/**
- * Parse a markdown report string into a map of section name → table lines.
- * Section names are normalised (lowercase, trimmed, leading number stripped).
- * Wrapped in try/catch — returns empty object on any failure.
- */
-function parseMarkdownReport(md) {
-  try {
-    const lines = md.split("\n");
-    const sections = {};
-    let currentKey = null;
-    let tableLines = [];
-
-    for (const line of lines) {
-      if (line.startsWith("## ")) {
-        if (currentKey !== null) {
-          sections[currentKey] = tableLines;
-        }
-        // Normalise: strip leading "N. " or "N." number prefix, lowercase
-        const title = line.replace(/^##\s+/, "").replace(/^\d+\.\s*/, "").trim().toLowerCase();
-        currentKey = title;
-        tableLines = [];
-      } else if (currentKey !== null && line.trimStart().startsWith("|")) {
-        tableLines.push(line);
-      }
-    }
-    if (currentKey !== null) {
-      sections[currentKey] = tableLines;
-    }
-    return sections;
-  } catch (_) {
-    return {};
-  }
+// Returns true when a lead's contact_id is a usable dedup key (non-null, non-empty).
+function hasValidContactId(lead) {
+  return lead.contact_id !== null &&
+         lead.contact_id !== undefined &&
+         lead.contact_id !== "";
 }
 
-/**
- * Parse markdown table lines into { headers, rows }.
- * Filters out separator rows (|---|---|).
- * Returns { headers: string[], rows: string[][] }.
- */
-function parseMdTable(tableLines) {
-  try {
-    const isSeparator = (line) => /^\|[\s\-:|]+\|$/.test(line.trim());
-    const dataLines = tableLines.filter((l) => !isSeparator(l));
-    if (dataLines.length === 0) return { headers: [], rows: [] };
+// ── Time range selector ────────────────────────────────────────────────────
 
-    const parseRow = (line) =>
-      line.split("|").slice(1, -1).map((c) => c.trim());
-
-    const headers = parseRow(dataLines[0]);
-    const rows = dataLines.slice(1).map(parseRow);
-    return { headers, rows };
-  } catch (_) {
-    return { headers: [], rows: [] };
-  }
+function getSelectedDays() {
+  return _selectedDays;
 }
 
-/** Get or fetch the parsed report. Caches result for the session. */
-async function getReport() {
-  if (_reportCache) return _reportCache;
-  try {
-    const res = await fetch("/reports/latest/raw", { credentials: "same-origin" });
-    if (!res.ok) return { text: null, sections: {} };
-    const text = await res.text();
-    const sections = parseMarkdownReport(text);
-    _reportCache = { text, sections };
-    return _reportCache;
-  } catch (_) {
-    return { text: null, sections: {} };
-  }
-}
-
-/** Find a section by matching key fragment (case-insensitive substring). */
-function findSection(sections, fragment) {
-  const frag = fragment.toLowerCase();
-  const key = Object.keys(sections).find((k) => k.includes(frag));
-  return key ? sections[key] : [];
+function setSelectedDays(days) {
+  _selectedDays = days;
+  try { sessionStorage.setItem("ads_days", String(days)); } catch (_) { /* ignore */ }
+  // Update active button state
+  document.querySelectorAll(".time-range-btn").forEach((btn) => {
+    btn.classList.toggle("active", parseInt(btn.dataset.days, 10) === days);
+  });
+  // Reload current page with new window
+  if (_currentPage) loadPage(_currentPage);
 }
 
 // ── Fetch helpers ──────────────────────────────────────────────────────────
@@ -217,7 +140,6 @@ function showLogin() {
   document.getElementById("login-screen").style.display = "flex";
   document.getElementById("app").style.display = "none";
   _currentUser = null;
-  _reportCache = null;
 }
 
 function showApp(user) {
@@ -308,7 +230,6 @@ async function handleLogout() {
     await fetch("/auth/logout", { method: "POST", credentials: "same-origin" });
   } catch (_) { /* ignore */ }
   _currentUser = null;
-  _reportCache = null;
   showLogin();
 }
 
@@ -375,102 +296,76 @@ async function loadSidebarHealth() {
 // ── Dashboard page ─────────────────────────────────────────────────────────
 
 async function loadDashboard() {
-  // Load KPI + verdict summary from report in parallel with run data
-  const [, latestRun] = await Promise.allSettled([
-    loadDashboardReport(),
+  const days = getSelectedDays();
+
+  const [summaryResult, runResult] = await Promise.allSettled([
+    fetchJSON(`/api/summary?days=${days}`),
     fetchJSON("/runs/latest"),
   ]);
 
-  renderRunTimeline(latestRun.status === "fulfilled" ? latestRun.value : null);
-}
+  const summary = summaryResult.status === "fulfilled" ? summaryResult.value : null;
+  const run     = runResult.status === "fulfilled"     ? runResult.value     : null;
 
-async function loadDashboardReport() {
-  const { sections } = await getReport();
+  renderKPIs(summary);
+  renderRunTimeline(run);
 
-  // Campaign Truth Table → KPIs + verdict summary + alerts
-  const campLines = findSection(sections, "campaign truth table");
-  const { rows: campRows } = parseMdTable(campLines);
-
-  if (campRows.length === 0) {
-    renderKPIsEmpty();
+  // Load campaign data for the verdict summary panel and alerts panel
+  try {
+    const campaigns = await fetchJSON(`/api/campaigns?days=${days}`);
+    renderVerdictSummary(campaigns.campaigns || []);
+    renderAlerts(campaigns.campaigns || []);
+  } catch (_) {
     renderVerdictSummaryEmpty();
     renderAlertsEmpty();
+  }
+}
+
+function renderKPIs(summary) {
+  const spendEl = document.getElementById("kpi-spend");
+  const sqlsEl  = document.getElementById("kpi-sqls");
+  const cpqlEl  = document.getElementById("kpi-cpql");
+  const wasteEl = document.getElementById("kpi-waste");
+
+  if (!summary) {
+    ["kpi-spend", "kpi-sqls", "kpi-cpql", "kpi-waste"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = "—";
+    });
     return;
   }
 
-  // Column indices (best-effort — fall back gracefully)
-  // Headers: Campaign | Spend (30d) | Leads | Confirmed SQLs | Junk Rate | CPQL | Verdict | Reason
-  let totalSpend = 0;
-  let totalSQLs  = 0;
-  let confirmedWaste = null;
-  const verdicts = [];
-
-  for (const row of campRows) {
-    if (row.length < 7) continue;
-    const spend = parseDollar(row[1]);
-    const sqls  = parseNum(row[3]);
-    const verdict = stripEmoji(row[6] || "");
-    if (spend !== null) totalSpend += spend;
-    if (sqls !== null)  totalSQLs  += sqls;
-    if (verdict) verdicts.push({ name: row[0], spend, sqls, verdict });
-  }
-
-  // Waste from "## 4. Waste Detection Summary"
-  const wasteLines = findSection(sections, "waste detection");
-  if (wasteLines.length > 0) {
-    const { rows: wasteRows } = parseMdTable(wasteLines);
-    for (const r of wasteRows) {
-      if (r.length >= 2 && r[0].toLowerCase().includes("confirmed waste")) {
-        confirmedWaste = parseDollar(r[1]);
-        break;
-      }
-    }
-  }
-
-  renderKPIs(totalSpend, totalSQLs, confirmedWaste);
-  renderVerdictSummary(verdicts);
-  renderAlerts(verdicts);
+  if (spendEl) spendEl.textContent = summary.total_spend_usd != null
+    ? fmtDollar(summary.total_spend_usd) : "—";
+  if (sqlsEl)  sqlsEl.textContent  = summary.confirmed_sqls != null
+    ? String(summary.confirmed_sqls) : "0";
+  if (cpqlEl)  cpqlEl.textContent  = summary.avg_cpql_usd != null
+    ? fmtDollar(summary.avg_cpql_usd) : "N/A";
+  if (wasteEl) wasteEl.textContent = summary.confirmed_waste_usd != null
+    ? fmtDollar(summary.confirmed_waste_usd) : "—";
 }
 
-function renderKPIs(spend, sqls, waste) {
-  const spendEl  = document.getElementById("kpi-spend");
-  const sqlsEl   = document.getElementById("kpi-sqls");
-  const cpqlEl   = document.getElementById("kpi-cpql");
-  const wasteEl  = document.getElementById("kpi-waste");
-
-  if (spendEl)  spendEl.textContent  = spend > 0 ? fmtDollar(spend) : "—";
-  if (sqlsEl)   sqlsEl.textContent   = sqls > 0  ? String(sqls)     : "0";
-  if (cpqlEl)   cpqlEl.textContent   = (sqls > 0 && spend > 0) ? fmtDollar(spend / sqls) : "N/A";
-  if (wasteEl)  wasteEl.textContent  = waste !== null ? fmtDollar(waste) : "—";
-}
-
-function renderKPIsEmpty() {
-  ["kpi-spend", "kpi-sqls", "kpi-cpql", "kpi-waste"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = "—";
-  });
-}
-
-function renderVerdictSummary(verdicts) {
+// campaigns: array of { campaign_name, latest_verdict, avg_spend_usd, ... }
+function renderVerdictSummary(campaigns) {
   const el = document.getElementById("dash-verdict-body");
   if (!el) return;
 
-  if (verdicts.length === 0) {
+  const real = campaigns.filter((c) => c.avg_spend_usd != null && c.avg_spend_usd > 0);
+
+  if (real.length === 0) {
     el.innerHTML = `<p class="empty-state">No campaign data yet. Trigger a weekly run to populate.</p>`;
     return;
   }
 
-  // Sort by spend desc
-  const sorted = [...verdicts].sort((a, b) => (b.spend || 0) - (a.spend || 0));
-  const maxSpend = sorted[0].spend || 1;
+  const sorted   = [...real].sort((a, b) => (b.avg_spend_usd || 0) - (a.avg_spend_usd || 0));
+  const maxSpend = sorted[0].avg_spend_usd || 1;
 
-  const rows = sorted.map((c) => {
-    const pct   = Math.max(5, Math.round(((c.spend || 0) / maxSpend) * 100));
-    const v     = c.verdict ? c.verdict.toUpperCase() : "";
-    const spend = c.spend !== null ? fmtDollar(c.spend) : "—";
+  el.innerHTML = sorted.map((c) => {
+    const pct   = Math.max(5, Math.round((c.avg_spend_usd / maxSpend) * 100));
+    const v     = (c.latest_verdict || "").toUpperCase();
+    const spend = c.avg_spend_usd != null ? fmtDollar(c.avg_spend_usd) : "—";
     return `
       <div class="verdict-row">
-        <div class="verdict-row__name" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</div>
+        <div class="verdict-row__name" title="${escapeHtml(c.campaign_name)}">${escapeHtml(c.campaign_name)}</div>
         <div class="verdict-row__bar">
           <div class="verdict-row__bar-fill verdict-row__bar-fill--${escapeHtml(v)}" style="width:${pct}%"></div>
         </div>
@@ -480,8 +375,6 @@ function renderVerdictSummary(verdicts) {
         </div>
       </div>`;
   }).join("");
-
-  el.innerHTML = rows;
 }
 
 function renderVerdictSummaryEmpty() {
@@ -489,14 +382,16 @@ function renderVerdictSummaryEmpty() {
   if (el) el.innerHTML = `<p class="empty-state">No campaign data yet. Trigger a weekly run to populate.</p>`;
 }
 
-function renderAlerts(verdicts) {
+function renderAlerts(campaigns) {
   const el = document.getElementById("dash-alerts-body");
   if (!el) return;
 
-  const alerts = verdicts.filter((c) => c.verdict === "FIX" || c.verdict === "CUT");
+  const alerts = (campaigns || []).filter((c) =>
+    c.latest_verdict === "FIX" || c.latest_verdict === "CUT"
+  );
 
   if (alerts.length === 0) {
-    el.innerHTML = `<p class="empty-state">No active alerts. All campaigns are within acceptable parameters.</p>`;
+    el.innerHTML = `<p class="empty-state">No active alerts.</p>`;
     return;
   }
 
@@ -506,11 +401,11 @@ function renderAlerts(verdicts) {
 
   el.innerHTML = alerts.map((c) => `
     <div class="alert-item">
-      ${icon(c.verdict)}
+      ${icon(c.latest_verdict)}
       <div class="alert-text">
-        Campaign <span class="alert-campaign">${escapeHtml(c.name)}</span>
-        — verdict ${verdictBadge(c.verdict)}
-        ${c.spend !== null ? `· Spend: ${fmtDollar(c.spend)}` : ""}
+        Campaign <span class="alert-campaign">${escapeHtml(c.campaign_name)}</span>
+        — verdict ${verdictBadge(c.latest_verdict)}
+        ${c.avg_spend_usd != null ? `· Spend: ${fmtDollar(c.avg_spend_usd)}` : ""}
       </div>
     </div>`).join("");
 }
@@ -556,21 +451,22 @@ function renderRunTimeline(runData) {
 // ── Campaigns page ─────────────────────────────────────────────────────────
 
 async function loadCampaigns() {
-  const tableEl   = document.getElementById("camp-table-body");
-  const scaleEl   = document.getElementById("vc-scale");
-  const fixEl     = document.getElementById("vc-fix");
-  const holdEl    = document.getElementById("vc-hold");
-  const cutEl     = document.getElementById("vc-cut");
+  const tableEl = document.getElementById("camp-table-body");
+  const scaleEl = document.getElementById("vc-scale");
+  const fixEl   = document.getElementById("vc-fix");
+  const holdEl  = document.getElementById("vc-hold");
+  const cutEl   = document.getElementById("vc-cut");
 
-  if (tableEl) tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading campaigns…</p>`;
+  if (tableEl) tableEl.innerHTML =
+    `<p class="empty-state" style="padding:var(--space-5)">Loading campaigns…</p>`;
 
   try {
-    const { sections } = await getReport();
-    const campLines = findSection(sections, "campaign truth table");
-    const { headers, rows } = parseMdTable(campLines);
+    const data = await fetchJSON(`/api/campaigns?days=${getSelectedDays()}`);
+    const campaigns = data.campaigns || [];
 
-    if (rows.length === 0) {
-      if (tableEl) tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">No campaign data yet. Trigger a weekly run.</p>`;
+    if (campaigns.length === 0) {
+      if (tableEl) tableEl.innerHTML =
+        `<p class="empty-state" style="padding:var(--space-5)">No campaign data. Trigger a weekly run.</p>`;
       ["vc-scale", "vc-fix", "vc-hold", "vc-cut"].forEach((id) => {
         const el = document.getElementById(id);
         if (el) el.textContent = "0";
@@ -578,15 +474,14 @@ async function loadCampaigns() {
       return;
     }
 
-    // Count verdicts (column 6)
+    // Count verdicts
     let nScale = 0, nFix = 0, nHold = 0, nCut = 0;
-    const dataRows = rows.map((row) => {
-      const v = row.length >= 7 ? stripEmoji(row[6] || "") : "";
-      if (v === "SCALE") nScale++;
-      else if (v === "FIX")   nFix++;
-      else if (v === "HOLD")  nHold++;
-      else if (v === "CUT")   nCut++;
-      return { row, verdict: v };
+    campaigns.forEach((c) => {
+      const v = (c.latest_verdict || "").toUpperCase();
+      if (v === "SCALE")     nScale++;
+      else if (v === "FIX")  nFix++;
+      else if (v === "HOLD") nHold++;
+      else if (v === "CUT")  nCut++;
     });
 
     if (scaleEl) scaleEl.textContent = String(nScale);
@@ -594,48 +489,55 @@ async function loadCampaigns() {
     if (holdEl)  holdEl.textContent  = String(nHold);
     if (cutEl)   cutEl.textContent   = String(nCut);
 
-    // Sort by spend descending (column 1)
-    dataRows.sort((a, b) => (parseDollar(b.row[1]) || 0) - (parseDollar(a.row[1]) || 0));
+    // Sort by spend desc, null spend goes to bottom
+    const sorted = [...campaigns].sort((a, b) =>
+      (b.avg_spend_usd || 0) - (a.avg_spend_usd || 0)
+    );
 
-    // Render table
-    // Headers: Campaign | Spend (30d) | Leads | Confirmed SQLs | Junk Rate | CPQL | Verdict | Reason
     const thead = `
       <thead>
         <tr>
           <th>Campaign</th>
-          <th>Spend (30d)</th>
+          <th class="td--num">Spend (avg/run)</th>
           <th class="td--num">Leads</th>
           <th class="td--num">SQLs</th>
           <th>Junk %</th>
           <th class="td--num">CPQL</th>
           <th>Verdict</th>
-          <th>Reason</th>
+          <th class="td--num">Runs</th>
         </tr>
       </thead>`;
 
-    const tbody = dataRows.map(({ row, verdict }) => {
-      const junkPct  = parsePct(row[4] || "");
-      const junkCls  = junkPct === null ? "" : junkPct < JUNK_RATE_LOW_THRESHOLD ? "junk--low" : junkPct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
-      const sqls     = parseNum(row[3] || "");
-      // CPQL shows N/A when SQLs = 0
-      const cpql     = sqls === 0 ? "N/A" : fmt(row[5] || "N/A");
+    const tbody = sorted.map((c) => {
+      const v       = (c.latest_verdict || "").toUpperCase();
+      const junkPct = c.avg_junk_rate_pct;
+      const junkCls = junkPct == null ? "" :
+                      junkPct < JUNK_RATE_LOW_THRESHOLD   ? "junk--low" :
+                      junkPct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
+      const junkStr = junkPct != null ? junkPct.toFixed(1) + "%" : "—";
+      const cpql    = c.total_confirmed_sqls === 0 ? "N/A" :
+                      c.avg_cpql_usd != null ? fmtDollar(c.avg_cpql_usd) : "—";
+      const spend   = c.avg_spend_usd != null ? fmtDollar(c.avg_spend_usd) : "—";
 
       return `
         <tr>
-          <td class="td--name">${escapeHtml(row[0] || "—")}</td>
-          <td class="td--num">${escapeHtml(row[1] || "—")}</td>
-          <td class="td--num">${escapeHtml(row[2] || "—")}</td>
-          <td class="td--num">${escapeHtml(row[3] || "—")}</td>
-          <td class="${junkCls}">${escapeHtml(row[4] || "—")}</td>
+          <td class="td--name">${escapeHtml(c.campaign_name || "—")}</td>
+          <td class="td--num">${spend}</td>
+          <td class="td--num">—</td>
+          <td class="td--num">${c.total_confirmed_sqls != null ? String(c.total_confirmed_sqls) : "0"}</td>
+          <td class="${junkCls}">${junkStr}</td>
           <td class="td--num ${cpql === "N/A" ? "td--na" : ""}">${cpql}</td>
-          <td>${verdictBadge(verdict)}</td>
-          <td>${escapeHtml(row[7] || "—")}</td>
+          <td>${verdictBadge(v)}</td>
+          <td class="td--num">${c.run_count != null ? String(c.run_count) : "—"}</td>
         </tr>`;
     }).join("");
 
-    if (tableEl) tableEl.innerHTML = `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+    if (tableEl) tableEl.innerHTML =
+      `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+
   } catch (_) {
-    if (tableEl) tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Could not load campaign data.</p>`;
+    if (tableEl) tableEl.innerHTML =
+      `<p class="empty-state" style="padding:var(--space-5)">Could not load campaign data.</p>`;
   }
 }
 
@@ -648,33 +550,69 @@ async function loadLeads() {
   const junkEl     = document.getElementById("leads-junk");
   const progressEl = document.getElementById("leads-progress");
 
-  if (tableEl) tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading lead quality data…</p>`;
+  if (tableEl) tableEl.innerHTML =
+    `<p class="empty-state" style="padding:var(--space-5)">Loading lead quality data…</p>`;
 
   try {
-    const { sections } = await getReport();
-    const leadLines = findSection(sections, "lead quality breakdown");
-    const { rows } = parseMdTable(leadLines);
+    const data  = await fetchJSON(`/api/leads?days=${getSelectedDays()}`);
+    // Deduplicate by contact_id — leads endpoint returns one row per run per lead.
+    // Rows without contact_id are kept individually (not collapsed under null key).
+    const seen  = new Map();
+    for (const [index, lead] of (data.leads || []).entries()) {
+      const dedupeKey = hasValidContactId(lead)
+        ? `contact:${lead.contact_id}`
+        : `row:${index}`;
+      const existing = seen.get(dedupeKey);
+      if (!existing || lead.run_date > existing.run_date) {
+        seen.set(dedupeKey, lead);
+      }
+    }
+    const leads = Array.from(seen.values());
 
-    if (rows.length === 0) {
-      if (tableEl) tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">No lead quality data yet. Trigger a weekly run.</p>`;
-      [totalEl, sqlsEl, junkEl, progressEl].forEach((el) => { if (el) el.textContent = "—"; });
+    if (leads.length === 0) {
+      if (tableEl) tableEl.innerHTML =
+        `<p class="empty-state" style="padding:var(--space-5)">No lead data yet. Trigger a weekly run.</p>`;
+      [totalEl, sqlsEl, junkEl, progressEl].forEach((el) => {
+        if (el) el.textContent = "—";
+      });
       return;
     }
 
-    // Headers: Campaign | Total | Qualified (SQL) | In Progress | Junk | Wrong Fit | No Status | Junk Rate
+    // Aggregate KPIs
     let sumTotal = 0, sumSQL = 0, sumJunk = 0, sumProgress = 0;
-
-    rows.forEach((row) => {
-      sumTotal    += parseNum(row[1] || "") || 0;
-      sumSQL      += parseNum(row[2] || "") || 0;
-      sumProgress += parseNum(row[3] || "") || 0;
-      sumJunk     += parseNum(row[4] || "") || 0;
+    leads.forEach((l) => {
+      const cat = l.status_category || "unknown";
+      sumTotal++;
+      if (cat === "qualified")   sumSQL++;
+      if (cat === "junk")        sumJunk++;
+      if (cat === "in_progress") sumProgress++;
     });
 
-    if (totalEl)    totalEl.textContent    = sumTotal    > 0 ? String(sumTotal)    : "0";
-    if (sqlsEl)     sqlsEl.textContent     = sumSQL      > 0 ? String(sumSQL)      : "0";
-    if (junkEl)     junkEl.textContent     = sumJunk     > 0 ? String(sumJunk)     : "0";
-    if (progressEl) progressEl.textContent = sumProgress > 0 ? String(sumProgress) : "0";
+    if (totalEl)    totalEl.textContent    = String(sumTotal);
+    if (sqlsEl)     sqlsEl.textContent     = String(sumSQL);
+    if (junkEl)     junkEl.textContent     = String(sumJunk);
+    if (progressEl) progressEl.textContent = String(sumProgress);
+
+    // Group by campaign for per-campaign breakdown
+    const byCampaign = new Map();
+    leads.forEach((l) => {
+      const name = l.campaign_name || "(unknown)";
+      if (!byCampaign.has(name)) {
+        byCampaign.set(name, { total: 0, sql: 0, progress: 0, junk: 0, wrong_fit: 0, unknown: 0 });
+      }
+      const g = byCampaign.get(name);
+      g.total++;
+      const cat = l.status_category || "unknown";
+      if (cat === "qualified")   g.sql++;
+      if (cat === "in_progress") g.progress++;
+      if (cat === "junk")        g.junk++;
+      if (cat === "wrong_fit")   g.wrong_fit++;
+      if (cat === "unknown")     g.unknown++;
+    });
+
+    // Sort by total leads desc
+    const rows = Array.from(byCampaign.entries())
+      .sort((a, b) => b[1].total - a[1].total);
 
     const thead = `
       <thead>
@@ -685,40 +623,43 @@ async function loadLeads() {
           <th class="td--num">In Progress</th>
           <th class="td--num">Junk</th>
           <th class="td--num">Wrong Fit</th>
-          <th class="td--num">No Status</th>
+          <th class="td--num">Unknown</th>
           <th>Junk Rate</th>
         </tr>
       </thead>`;
 
-    const tbody = rows.map((row) => {
-      const junkPct  = parsePct(row[7] || "");
-      const pct      = junkPct !== null ? Math.min(100, Math.round(junkPct)) : 0;
-      const barCls   = pct < JUNK_RATE_LOW_THRESHOLD ? "progress-bar__fill--low" : pct <= JUNK_RATE_HIGH_THRESHOLD ? "progress-bar__fill--mid" : "progress-bar__fill--high";
-      const junkCls  = pct < JUNK_RATE_LOW_THRESHOLD ? "junk--low" : pct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
-
+    const tbody = rows.map(([name, g]) => {
+      const junkPct = g.total > 0 ? Math.round((g.junk / g.total) * 100) : 0;
+      const barCls  = junkPct < JUNK_RATE_LOW_THRESHOLD   ? "progress-bar__fill--low" :
+                      junkPct <= JUNK_RATE_HIGH_THRESHOLD ? "progress-bar__fill--mid" : "progress-bar__fill--high";
+      const junkCls = junkPct < JUNK_RATE_LOW_THRESHOLD   ? "junk--low" :
+                      junkPct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
       return `
         <tr>
-          <td class="td--name">${escapeHtml(row[0] || "—")}</td>
-          <td class="td--num">${escapeHtml(row[1] || "—")}</td>
-          <td class="td--num">${escapeHtml(row[2] || "—")}</td>
-          <td class="td--num">${escapeHtml(row[3] || "—")}</td>
-          <td class="td--num">${escapeHtml(row[4] || "—")}</td>
-          <td class="td--num">${escapeHtml(row[5] || "—")}</td>
-          <td class="td--num">${escapeHtml(row[6] || "—")}</td>
+          <td class="td--name">${escapeHtml(name)}</td>
+          <td class="td--num">${g.total}</td>
+          <td class="td--num">${g.sql}</td>
+          <td class="td--num">${g.progress}</td>
+          <td class="td--num">${g.junk}</td>
+          <td class="td--num">${g.wrong_fit}</td>
+          <td class="td--num">${g.unknown}</td>
           <td>
             <div style="display:flex;align-items:center;gap:8px;">
               <div class="progress-bar" style="width:80px">
-                <div class="progress-bar__fill ${barCls}" style="width:${pct}%"></div>
+                <div class="progress-bar__fill ${barCls}" style="width:${junkPct}%"></div>
               </div>
-              <span class="${junkCls}" style="font-size:12px;font-weight:500;">${escapeHtml(row[7] || "—")}</span>
+              <span class="${junkCls}" style="font-size:12px;font-weight:500;">${junkPct}%</span>
             </div>
           </td>
         </tr>`;
     }).join("");
 
-    if (tableEl) tableEl.innerHTML = `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+    if (tableEl) tableEl.innerHTML =
+      `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+
   } catch (_) {
-    if (tableEl) tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Could not load lead quality data.</p>`;
+    if (tableEl) tableEl.innerHTML =
+      `<p class="empty-state" style="padding:var(--space-5)">Could not load lead quality data.</p>`;
   }
 }
 
@@ -727,32 +668,27 @@ async function loadLeads() {
 async function loadDeals() {
   const funnelEl = document.getElementById("deals-funnel-body");
   const tableEl  = document.getElementById("deals-table-body");
+  const EMPTY    = "No GCLID-matched deals found yet. Deals appear here once HubSpot deal attribution is active.";
 
-  const EMPTY_MSG = "No GCLID-matched deals found yet. Run the weekly report to populate.";
-
-  if (funnelEl) funnelEl.innerHTML = `<p class="empty-state">${EMPTY_MSG}</p>`;
-  if (tableEl)  tableEl.innerHTML  = `<p class="empty-state" style="padding:var(--space-5)">${EMPTY_MSG}</p>`;
+  if (funnelEl) funnelEl.innerHTML = `<p class="empty-state">${EMPTY}</p>`;
+  if (tableEl)  tableEl.innerHTML  = `<p class="empty-state" style="padding:var(--space-5)">${EMPTY}</p>`;
 
   try {
-    const { sections } = await getReport();
+    const data  = await fetchJSON(`/api/deals?days=${getSelectedDays()}`);
+    const deals = data.deals || [];
 
-    // Look for a Deals section in the report (may not exist in Phase 1 reports)
-    const dealLines = findSection(sections, "deal");
-    const { rows: dealRows } = parseMdTable(dealLines);
+    if (deals.length === 0) return; // Empty state already set
 
-    if (dealRows.length === 0) {
-      return; // Empty state already set
-    }
-
-    // Attempt to render pipeline stages from deal rows
-    // Expected columns (best-effort): Company | Country | Stage | Amount | Keyword | Campaign
+    // Count by stage
     const stageCounts = {};
     DEAL_PIPELINE_STAGES.forEach((s) => { stageCounts[s] = 0; });
-
-    dealRows.forEach((row) => {
-      const stage = row[2] || "";
-      const matchedStage = DEAL_PIPELINE_STAGES.find((s) => stage.toLowerCase().includes(s.toLowerCase()));
-      if (matchedStage) stageCounts[matchedStage]++;
+    deals.forEach((d) => {
+      // Use deal_stage (raw DB value) for pipeline stage matching
+      const stage = d.deal_stage || "";
+      const match = DEAL_PIPELINE_STAGES.find((s) =>
+        stage.toLowerCase().includes(s.toLowerCase())
+      );
+      if (match) stageCounts[match]++;
     });
 
     const maxCount = Math.max(...Object.values(stageCounts), 1);
@@ -781,27 +717,29 @@ async function loadDeals() {
           <th>Country</th>
           <th>Stage</th>
           <th class="td--num">Amount</th>
-          <th>Keyword</th>
           <th>Campaign</th>
+          <th>Keyword</th>
         </tr>
       </thead>`;
 
-    const tbody = dealRows.map((row) => {
-      const isWon = (row[2] || "").toLowerCase().includes("won");
+    const tbody = deals.map((d) => {
+      const isWon = (d.deal_stage || "").toLowerCase().includes("won");
       return `
         <tr${isWon ? ' class="row--won"' : ""}>
-          <td class="td--name">${escapeHtml(row[0] || "—")}</td>
-          <td>${escapeHtml(row[1] || "—")}</td>
-          <td>${escapeHtml(row[2] || "—")}</td>
-          <td class="td--num">${escapeHtml(row[3] || "—")}</td>
-          <td>${escapeHtml(row[4] || "—")}</td>
-          <td>${escapeHtml(row[5] || "—")}</td>
+          <td class="td--name">${escapeHtml(d.company || "—")}</td>
+          <td>${escapeHtml(d.country || "—")}</td>
+          <td>${escapeHtml(d.deal_stage_label || d.deal_stage || "—")}</td><!-- prefer human-readable label -->
+          <td class="td--num">${d.deal_amount_usd != null ? fmtDollar(d.deal_amount_usd) : "—"}</td>
+          <td>${escapeHtml(d.campaign_name || "—")}</td>
+          <td>${escapeHtml(d.keyword || "—")}</td>
         </tr>`;
     }).join("");
 
-    if (tableEl) tableEl.innerHTML = `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+    if (tableEl) tableEl.innerHTML =
+      `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+
   } catch (_) {
-    if (funnelEl) funnelEl.innerHTML = `<p class="empty-state">${EMPTY_MSG}</p>`;
+    // Empty state already set — silently fail
   }
 }
 
@@ -814,71 +752,65 @@ async function loadOpportunities() {
   el.innerHTML = `<p class="empty-state">Loading opportunities…</p>`;
 
   try {
-    const { sections } = await getReport();
+    const data  = await fetchJSON(`/api/leads?days=${getSelectedDays()}`);
 
-    // Look for opportunities / in-progress section
-    const oppLines = findSection(sections, "opportunit");
-    const leadLines = findSection(sections, "lead quality breakdown");
+    // Deduplicate by contact_id (same null-safe approach as loadLeads)
+    const seen = new Map();
+    for (const [index, lead] of (data.leads || []).entries()) {
+      const dedupeKey = hasValidContactId(lead)
+        ? `contact:${lead.contact_id}`
+        : `row:${index}`;
+      const existing = seen.get(dedupeKey);
+      if (!existing || lead.run_date > existing.run_date) {
+        seen.set(dedupeKey, lead);
+      }
+    }
 
-    // Parse lead quality data and filter for "In Progress" status
-    const { rows: leadRows } = parseMdTable(leadLines);
+    // Filter to in-progress only
+    const inProgress = Array.from(seen.values())
+      .filter((l) => l.status_category === "in_progress");
 
-    // Build opportunity list from leads in progress (col 3 > 0)
-    const inProgress = leadRows.filter((row) => (parseNum(row[3] || "") || 0) > 0);
-
-    // Also try dedicated opportunities section if it exists
-    const { rows: oppRows } = parseMdTable(oppLines);
-    const allOpps = oppRows.length > 0 ? oppRows : [];
-
-    if (allOpps.length === 0 && inProgress.length === 0) {
-      el.innerHTML = `<p class="empty-state">No active opportunities found in latest report.</p>`;
+    if (inProgress.length === 0) {
+      el.innerHTML = `<p class="empty-state">No active opportunities in the selected window.</p>`;
       return;
     }
 
-    if (allOpps.length > 0) {
-      // Render from dedicated section: Company | Country | Keyword | Campaign | Status | Created
-      // Group by status (Meeting Booked first)
-      const booked  = allOpps.filter((r) => (r[4] || "").toLowerCase().includes("meeting booked"));
-      const pending = allOpps.filter((r) => !booked.includes(r));
+    // Group by mql_status
+    const booked  = inProgress.filter((l) =>
+      (l.mql_status || "").toLowerCase().includes("meeting booked")
+    );
+    const pending = inProgress.filter((l) =>
+      (l.mql_status || "").toLowerCase().includes("pending meeting")
+    );
+    const other   = inProgress.filter((l) => !booked.includes(l) && !pending.includes(l));
 
-      el.innerHTML = renderOppGroup("Meeting Booked", booked)
-                   + renderOppGroup("Pending Meeting", pending);
-    } else {
-      // Fall back: show campaigns with in-progress leads as summary cards
-      el.innerHTML = `
-        <p class="opp-group-title">Campaigns with In-Progress Leads</p>
+    const renderGroup = (title, leads) => {
+      if (leads.length === 0) return "";
+      return `
+        <p class="opp-group-title">${escapeHtml(title)} (${leads.length})</p>
         <div class="opp-grid">
-          ${inProgress.map((row) => `
+          ${leads.map((l) => `
             <div class="opp-card">
-              <div class="opp-card__company">${escapeHtml(row[0] || "Unknown")}</div>
+              <div class="opp-card__company">${escapeHtml(l.mql_status || "In Progress")}</div>
               <div class="opp-card__meta">
-                <span class="opp-card__tag">In Progress: ${escapeHtml(row[3] || "0")}</span>
-                <span class="opp-card__tag">Total: ${escapeHtml(row[1] || "0")}</span>
+                ${l.campaign_name ? `<span class="opp-card__tag">${escapeHtml(l.campaign_name)}</span>` : ""}
+                ${l.keyword ? `<span class="opp-card__tag">${escapeHtml(l.keyword)}</span>` : ""}
+                ${l.country ? `<span class="opp-card__tag">${escapeHtml(l.country)}</span>` : ""}
+              </div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+                ID: ${escapeHtml(l.contact_id || "—")}
               </div>
             </div>`).join("")}
         </div>`;
-    }
+    };
+
+    el.innerHTML = renderGroup("Meeting Booked", booked)
+                 + renderGroup("Pending Meeting", pending)
+                 + renderGroup("Connecting", other);
+
   } catch (_) {
     el.innerHTML = `<p class="empty-state">Could not load opportunity data.</p>`;
   }
-}
-
-function renderOppGroup(title, rows) {
-  if (rows.length === 0) return "";
-  return `
-    <p class="opp-group-title">${escapeHtml(title)}</p>
-    <div class="opp-grid">
-      ${rows.map((row) => `
-        <div class="opp-card">
-          <div class="opp-card__company">${escapeHtml(row[0] || "Unknown")}</div>
-          <div class="opp-card__meta">
-            ${row[1] ? `<span class="opp-card__tag">${escapeHtml(row[1])}</span>` : ""}
-            ${row[2] ? `<span class="opp-card__tag">${escapeHtml(row[2])}</span>` : ""}
-            ${row[3] ? `<span class="opp-card__tag">${escapeHtml(row[3])}</span>` : ""}
-          </div>
-          ${row[5] ? `<div style="font-size:11px;color:var(--text-muted)">Created: ${escapeHtml(row[5])}</div>` : ""}
-        </div>`).join("")}
-    </div>`;
 }
 
 // ── Scheduler page ─────────────────────────────────────────────────────────
@@ -961,7 +893,6 @@ async function triggerRun(jobType) {
         ? ` Report: ${escapeHtml(data.result.report_path)}`
         : "";
       showSchedFeedback("success", `Run completed. Finished at ${escapeHtml(data.finished_at || "—")}.${rp}`);
-      _reportCache = null; // Invalidate cache
     } else if (res.status === 409) {
       showSchedFeedback("error", `${escapeHtml(jobType)} job is already running.`);
     } else if (res.status === 403) {
@@ -1068,6 +999,15 @@ document.addEventListener("DOMContentLoaded", async () => {
         navigate(el.dataset.page);
       }
     });
+  });
+
+  // Wire up time range buttons
+  document.querySelectorAll(".time-range-btn").forEach((btn) => {
+    btn.addEventListener("click", () => setSelectedDays(parseInt(btn.dataset.days, 10)));
+  });
+  // Sync active state to the stored/default value on page load
+  document.querySelectorAll(".time-range-btn").forEach((btn) => {
+    btn.classList.toggle("active", parseInt(btn.dataset.days, 10) === _selectedDays);
   });
 
   // Check auth and load initial page

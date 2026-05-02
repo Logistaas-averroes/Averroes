@@ -43,9 +43,9 @@
 | `db/schema.py` | PostgreSQL schema + init_db() | PR-ADS-025F-FIX: TRUNCATE guard uses INSERT ON CONFLICT DO NOTHING + IF FOUND — race-safe. PR-ADS-025F: migrations table added; one-time TRUNCATE campaigns guard (runs once via migration flag); DELETE junk campaign rows (idempotent). PR-ADS-025E-FIX: idx_leads_campaign_name added; authoritative-source comment on backfill UPDATEs. PR-ADS-025E: Backfill UPDATEs for 5 Windsor→canonical campaign name variants in both campaigns and leads tables. Idempotent. PR-ADS-025C: leads table gains source_type VARCHAR(30) column + index; ALTER TABLE IF NOT EXISTS ensures idempotent migration on startup. CREATE TABLE IF NOT EXISTS; idempotent; non-fatal. New in PR-ADS-024 |
 | `db/connection.py` | Connection pool, non-fatal if unavailable | ThreadedConnectionPool max 10; DATABASE_URL from env; yields None if unavailable. New in PR-ADS-024 |
 | `db/writers.py` | Write runs, campaigns, leads, waste, deals | PR-ADS-025F: write_campaigns() now receives pre-merged rows — one per campaign. PR-ADS-025E-FIX: str() guard + empty check in write_campaigns() name normalisation. PR-ADS-025E: _canonicalise_campaign_name() added — Windsor→canonical name map; write_campaigns() now computes and stores cpql_usd at write time. PR-ADS-025C: write_leads() fixed to unpack HubSpot properties dict; _clean_campaign_name() normalises to lowercase, filters pseudo-names; _map_source_type() maps hs_analytics_source to closed source_type enum; write_campaigns() normalises campaign_name to lowercase. New in PR-ADS-024 |
-| `static/index.html` | Dashboard UI  | Updated in PR-ADS-023: 5-page brand-aligned SPA — login screen, sidebar nav, 7 page containers |
-| `static/app.js`     | Frontend logic | Updated in PR-ADS-023: full SPA routing, role-based UI, markdown report parser, API wiring for all 7 pages |
-| `static/styles.css` | Dashboard styles | Updated in PR-ADS-023: Sora font, full Logistaas brand token system, sidebar layout, all components |
+| `static/index.html` | Dashboard UI  | PR-ADS-025B: time range selector bar added to main content header |
+| `static/app.js`     | Frontend logic | PR-ADS-025B: full rewrite — markdown parser removed, all pages read from /api/* DB endpoints, time range selector (7d/14d/30d/60d) added |
+| `static/styles.css` | Dashboard styles | PR-ADS-025B: .time-range-bar, .time-range-btn styles appended |
 | `scripts/verify_live_deployment.py` | Live deployment verifier | Updated in PR-ADS-021: checks `/health` is public; checks protected endpoints return 401 when unauthenticated; optional login test via `TEST_USERNAME`/`TEST_PASSWORD` |
 | `docs/API_CONTRACT.md` | API endpoint contract | PR-ADS-025C: /api/leads response/example updated to include source_type. Valid source_type enum remains documented here in repo state: paid_search, organic_search, referral, direct, email, other. Single source of truth for every endpoint in api/server.py |
 
@@ -104,6 +104,7 @@ No files are currently in a broken state.
 | PR-ADS-025E-FIX | Copilot fixes — run_id dedup, str() guard, leads index, canonical map comment | 🔄 In Progress |
 | PR-ADS-025F | Campaign truth table merge — Windsor spend + HubSpot SQLs unified per run, junk filter, one-time DB cleanup | 🔄 In Progress |
 | PR-ADS-025F-FIX | Copilot fixes — lq aggregate, legacy key shim, race-safe TRUNCATE | 🔄 In Progress |
+| PR-ADS-025B | Dashboard live data — markdown parser removed, /api/* DB calls, time range selector | 🔄 In Progress |
 | **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 

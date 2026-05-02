@@ -146,6 +146,15 @@
     <!-- ── Main content ── -->
     <div class="main-content">
 
+      <!-- Time range selector — shown on all data pages -->
+      <div class="time-range-bar" id="time-range-bar">
+        <span class="time-range-bar__label">Window:</span>
+        <button class="time-range-btn" data-days="7"  type="button">7d</button>
+        <button class="time-range-btn" data-days="14" type="button">14d</button>
+        <button class="time-range-btn active" data-days="30" type="button">30d</button>
+        <button class="time-range-btn" data-days="60" type="button">60d</button>
+      </div>
+
       <!-- Dashboard -->
       <section id="page-dashboard" class="page" hidden>
         <header class="page-header">
