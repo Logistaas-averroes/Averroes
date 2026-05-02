@@ -94,6 +94,13 @@ function statusBadge(status) {
   return `<span class="badge ${cls}"><span class="dot"></span>${escapeHtml(status || "unknown")}</span>`;
 }
 
+// Returns true when a lead's contact_id is a usable dedup key (non-null, non-empty).
+function hasValidContactId(lead) {
+  return lead.contact_id !== null &&
+         lead.contact_id !== undefined &&
+         lead.contact_id !== "";
+}
+
 // ── Time range selector ────────────────────────────────────────────────────
 
 function getSelectedDays() {
@@ -552,10 +559,7 @@ async function loadLeads() {
     // Rows without contact_id are kept individually (not collapsed under null key).
     const seen  = new Map();
     for (const [index, lead] of (data.leads || []).entries()) {
-      const hasContactId = lead.contact_id !== null &&
-                           lead.contact_id !== undefined &&
-                           lead.contact_id !== "";
-      const dedupeKey = hasContactId
+      const dedupeKey = hasValidContactId(lead)
         ? `contact:${lead.contact_id}`
         : `row:${index}`;
       const existing = seen.get(dedupeKey);
@@ -679,6 +683,7 @@ async function loadDeals() {
     const stageCounts = {};
     DEAL_PIPELINE_STAGES.forEach((s) => { stageCounts[s] = 0; });
     deals.forEach((d) => {
+      // Use deal_stage (raw DB value) for pipeline stage matching
       const stage = d.deal_stage || "";
       const match = DEAL_PIPELINE_STAGES.find((s) =>
         stage.toLowerCase().includes(s.toLowerCase())
@@ -723,7 +728,7 @@ async function loadDeals() {
         <tr${isWon ? ' class="row--won"' : ""}>
           <td class="td--name">${escapeHtml(d.company || "—")}</td>
           <td>${escapeHtml(d.country || "—")}</td>
-          <td>${escapeHtml(d.deal_stage_label || d.deal_stage || "—")}</td>
+          <td>${escapeHtml(d.deal_stage_label || d.deal_stage || "—")}</td><!-- prefer human-readable label -->
           <td class="td--num">${d.deal_amount_usd != null ? fmtDollar(d.deal_amount_usd) : "—"}</td>
           <td>${escapeHtml(d.campaign_name || "—")}</td>
           <td>${escapeHtml(d.keyword || "—")}</td>
@@ -752,10 +757,7 @@ async function loadOpportunities() {
     // Deduplicate by contact_id (same null-safe approach as loadLeads)
     const seen = new Map();
     for (const [index, lead] of (data.leads || []).entries()) {
-      const hasContactId = lead.contact_id !== null &&
-                           lead.contact_id !== undefined &&
-                           lead.contact_id !== "";
-      const dedupeKey = hasContactId
+      const dedupeKey = hasValidContactId(lead)
         ? `contact:${lead.contact_id}`
         : `row:${index}`;
       const existing = seen.get(dedupeKey);
