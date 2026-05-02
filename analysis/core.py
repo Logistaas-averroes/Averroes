@@ -323,8 +323,66 @@ Outputs to: outputs/campaign_truth.json
 
 import json
 import os
+import re
 import yaml
 from datetime import datetime
+
+# Canonical campaign name map: Windsor variant → HubSpot UTM convention.
+# All keys are lowercase (matched after .lower() on input).
+# Mirrors _CAMPAIGN_CANONICAL in db/writers.py — keep both in sync when adding entries.
+# "mexico, chile, colombia" → "mexico,chile": HubSpot UTM tracks this campaign without
+# Colombia in the name; both Windsor and HubSpot refer to the same single campaign.
+_CAMPAIGN_CANONICAL = {
+    "mexico, chile, colombia":  "mexico,chile",
+    "compliance markets":       "compliance - markets",
+    "emerging markets":         "emerging - markets",
+    "mature markets":           "mature - markets",
+    "europe low-cpc-2026":      "europe low cpc-new",
+}
+
+# HubSpot traffic source values that appear as campaign_name — not real campaigns
+_HUBSPOT_SOURCE_PSEUDONAMES = {
+    "(referral)", "(organic)", "(direct)", "(not set)",
+    "(cross-network)", "(none)", "(content)", "(social)",
+}
+
+_EMAIL_CAMPAIGN_RE = re.compile(r"email_campaign", re.IGNORECASE)
+
+
+def _canonicalise_campaign_name(name):
+    """Apply canonical name mapping (Windsor variant → HubSpot UTM convention)."""
+    if name is None:
+        return None
+    return _CAMPAIGN_CANONICAL.get(name, name)
+
+
+def _clean_campaign_name(name):
+    """Normalise and validate a campaign name from HubSpot source data.
+
+    Returns None for pseudo-names, email campaign IDs, and empty values.
+    Applies canonical name mapping after lowercasing.
+    """
+    if not name:
+        return None
+    stripped = name.strip()
+    if not stripped:
+        return None
+    if stripped.lower() in _HUBSPOT_SOURCE_PSEUDONAMES:
+        return None
+    if _EMAIL_CAMPAIGN_RE.search(stripped):
+        return None
+    return _canonicalise_campaign_name(stripped.lower())
+
+
+def _is_real_campaign(name):
+    """Return True if the campaign name represents a real Google Ads campaign."""
+    if not name:
+        return False
+    if name in _HUBSPOT_SOURCE_PSEUDONAMES:
+        return False
+    if _EMAIL_CAMPAIGN_RE.search(name):
+        return False
+    return True
 
 
 def run_campaign_truth():
@@ -344,23 +402,56 @@ def run_campaign_truth():
     fix_t = thresholds["campaign_verdicts"]["fix"]
     confirmed_cut = set(thresholds.get("confirmed_cut_markets", []))
 
-    # Build spend by campaign
+    # Build spend by campaign (Windsor source — apply canonical name mapping)
     spend_by_campaign = {}
     for row in ads_data:
-        campaign = row.get("campaign") or "unknown"
+        raw_name = (row.get("campaign") or "").strip().lower()
+        if not raw_name:
+            continue
+        canonical = _canonicalise_campaign_name(raw_name)
         spend = float(row.get("spend", 0) or 0)
-        spend_by_campaign[campaign] = spend_by_campaign.get(campaign, 0) + spend
+        spend_by_campaign[canonical] = spend_by_campaign.get(canonical, 0) + spend
 
-    # Build lead quality by campaign
+    # Build lead quality by campaign (HubSpot source — filter pseudo-names and canonicalise)
+    # Aggregate counts when multiple HubSpot name variants canonicalise to the same key.
     lq_by_campaign = {}
     for lq in lead_quality.get("by_campaign", []):
-        lq_by_campaign[lq["campaign"]] = lq
+        raw_name = lq.get("campaign", "")
+        canonical = _clean_campaign_name(raw_name)
+        if not canonical:
+            continue
+        if canonical not in lq_by_campaign:
+            lq_by_campaign[canonical] = dict(lq)
+        else:
+            # Aggregate: sum count fields, recompute junk_rate_pct from combined totals
+            existing = lq_by_campaign[canonical]
+            combined_total    = (existing.get("total") or 0) + (lq.get("total") or 0)
+            combined_qualified = (existing.get("qualified") or 0) + (lq.get("qualified") or 0)
+            combined_junk     = (existing.get("junk") or 0) + (lq.get("junk") or 0)
+            combined_verdicted = (
+                combined_qualified
+                + (existing.get("in_progress") or 0) + (lq.get("in_progress") or 0)
+                + combined_junk
+                + (existing.get("wrong_fit") or 0) + (lq.get("wrong_fit") or 0)
+            )
+            existing["total"]        = combined_total
+            existing["qualified"]    = combined_qualified
+            existing["junk"]         = combined_junk
+            existing["junk_rate_pct"] = (
+                round(combined_junk / combined_verdicted * 100, 1)
+                if combined_verdicted > 0 else None
+            )
+            if lq.get("warnings"):
+                existing.setdefault("warnings", []).extend(lq["warnings"])
 
-    # Build truth table
+    # Build truth table — one merged row per canonical campaign name
     rows = []
-    all_campaigns = set(list(spend_by_campaign.keys()) + list(lq_by_campaign.keys()))
+    all_campaigns = set(spend_by_campaign.keys()) | set(lq_by_campaign.keys())
 
     for campaign in all_campaigns:
+        if not _is_real_campaign(campaign):
+            continue
+
         spend = round(spend_by_campaign.get(campaign, 0), 2)
         lq = lq_by_campaign.get(campaign, {})
 
@@ -387,6 +478,11 @@ def run_campaign_truth():
         )
 
         rows.append({
+            # Canonical keys (PR-ADS-025F)
+            "campaign_name": campaign,
+            "spend_usd": spend,
+            # Legacy keys — kept for backwards compatibility with report generator
+            # TODO: remove after rule_advisor.py is updated to use canonical keys
             "campaign": campaign,
             "spend_30d_usd": spend,
             "total_leads": total_leads,
@@ -401,7 +497,7 @@ def run_campaign_truth():
 
     # Sort by verdict priority then spend
     verdict_order = {"FIX": 0, "CUT": 1, "SCALE": 2, "HOLD": 3}
-    rows.sort(key=lambda x: (verdict_order.get(x["verdict"], 99), -x["spend_30d_usd"]))
+    rows.sort(key=lambda x: (verdict_order.get(x["verdict"], 99), -x["spend_usd"]))
 
     output = {
         "generated_at": datetime.utcnow().isoformat(),
@@ -411,7 +507,7 @@ def run_campaign_truth():
             "cut_count": sum(1 for r in rows if r["verdict"] == "CUT"),
             "scale_count": sum(1 for r in rows if r["verdict"] == "SCALE"),
             "hold_count": sum(1 for r in rows if r["verdict"] == "HOLD"),
-            "total_spend_usd": round(sum(r["spend_30d_usd"] for r in rows), 2),
+            "total_spend_usd": round(sum(r["spend_usd"] for r in rows), 2),
             "total_confirmed_sqls": sum(r["confirmed_sqls"] for r in rows),
         },
     }
