@@ -597,7 +597,9 @@ async function loadWaste() {
 
 function renderWasteKPIs(items) {
   const totalSpend    = items.reduce((sum, t) => sum + (t.spend_usd || 0), 0);
-  const uniqueTerms   = new Set(items.map((t) => t.search_term)).size;
+  const uniqueTerms   = new Set(
+    items.map((t) => (t.search_term || "").trim()).filter(Boolean)
+  ).size;
   const uniqueCamps   = new Set(items.map((t) => t.campaign_name).filter(Boolean)).size;
   const crmConfirmed  = items.reduce((sum, t) => sum + (t.crm_junk_confirmed || 0), 0);
 
@@ -713,7 +715,7 @@ function applyWasteFilters() {
 
 function copyWasteTerms() {
   const terms = getFilteredWasteTerms()
-    .map((t) => t.search_term || "")
+    .map((t) => (t.search_term || "").trim())
     .filter(Boolean);
   if (terms.length === 0) return;
 
