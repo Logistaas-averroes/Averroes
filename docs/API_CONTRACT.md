@@ -124,6 +124,8 @@ Return the most recent record from `runtime_logs/run_history.jsonl`.
 { "status": "empty", "message": "No run history found yet" }
 ```
 
+**UI note (PR-ADS-028A):** Used as a JSONL-backed fallback by both the global freshness bar and the Run History panel when `/api/runs` returns `db_unavailable: true` or an empty result. Detect the empty state via `status === "empty"` or missing `run_type`.
+
 ---
 
 #### `GET /reports/latest`
@@ -378,7 +380,7 @@ Scheduler run records for the last N days.
 ```
 When database is unavailable: `{ "days": 30, "runs": [], "db_unavailable": true }`
 
-**UI note (PR-ADS-028):** The Run History timeline on the Dashboard page reads up to 10 runs from this endpoint. It is read-only and purely presentational.
+**UI note (PR-ADS-028/028A):** The Run History timeline on the Dashboard page reads up to 10 runs from this endpoint (scoped to `getSelectedDays()`). When `db_unavailable: true`, the UI distinguishes this from an empty result and attempts the `/runs/latest` JSONL fallback. It is read-only and purely presentational.
 
 ---
 
@@ -404,7 +406,7 @@ Aggregated headline metrics for the last N days.
 ```
 When database is unavailable: all numeric fields are `null`, `run_count` is `0`, `"db_unavailable": true`.
 
-**UI note (PR-ADS-028):** The global data freshness bar in the SPA reads `last_run_at` and `last_run_status` from this endpoint. It is read-only and purely presentational — it does not write to any system.
+**UI note (PR-ADS-028A):** The global data freshness bar reads run records from `/api/runs?days=90` (fixed window, not scoped to the reporting filter) using `normalizeRunStatus()` to handle in-progress rows. When the DB is unavailable, it falls back to `/runs/latest` (JSONL-backed). The badge represents the latest recorded scheduler run — a daily run may not refresh campaign or waste data. It is read-only and purely presentational — it does not write to any system.
 
 ---
 

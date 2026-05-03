@@ -113,6 +113,17 @@ function hasValidContactId(lead) {
          lead.contact_id !== "";
 }
 
+// Normalise a run record's status, accounting for in-progress rows.
+// The DB inserts runs with status='failed' at start and updates on completion;
+// a row with no finished_at and a non-success status is therefore still running.
+function normalizeRunStatus(run) {
+  const raw = (run.status || "unknown").toLowerCase();
+  if (!run.finished_at && raw !== "success") return "running";
+  if (["failed", "error", "fail"].includes(raw)) return "failed";
+  if (raw === "success") return "success";
+  return raw || "unknown";
+}
+
 // ── Time range selector ────────────────────────────────────────────────────
 
 function getSelectedDays() {
@@ -319,36 +330,62 @@ async function loadDataFreshness() {
   statusEl.textContent = "Checking data freshness…";
   statusEl.className   = "freshness-status";
 
+  // Freshness is global — always use a fixed 90d window, not the reporting filter.
+  let latestRun     = null;
+  let dbUnavailable = false;
+
   try {
-    const data = await fetchJSON(`/api/summary?days=${getSelectedDays()}`);
-    const lastRunAt     = data.last_run_at     || null;
-    const lastRunStatus = data.last_run_status || null;
-
-    if (!lastRunAt) {
-      statusEl.textContent = "No completed run found yet";
-      statusEl.className   = "freshness-status freshness-empty";
-      return;
-    }
-
-    const dateStr = fmtDate(lastRunAt);
-    const ageStr  = formatRelativeAge(lastRunAt);
-    const ageDays = Math.floor((Date.now() - new Date(lastRunAt).getTime()) / 86400000);
-    const isFailed = lastRunStatus &&
-      ["failed", "error", "fail"].includes(lastRunStatus.toLowerCase());
-
-    if (isFailed) {
-      statusEl.textContent = `Last run failed · ${dateStr} · check Scheduler`;
-      statusEl.className   = "freshness-status freshness-error";
-    } else if (ageDays <= 2) {
-      statusEl.textContent = `Data as of ${dateStr} · ${ageStr} · ${escapeHtml(lastRunStatus || "completed")}`;
-      statusEl.className   = "freshness-status freshness-ok";
+    const data = await fetchJSON("/api/runs?days=90");
+    if (data.db_unavailable) {
+      dbUnavailable = true;
     } else {
-      statusEl.textContent = `Data as of ${dateStr} · ${ageStr} · ${escapeHtml(lastRunStatus || "unknown")}`;
-      statusEl.className   = "freshness-status freshness-warning";
+      latestRun = (data.runs || [])[0] || null;  // already ordered DESC by started_at
     }
-  } catch (_) {
-    statusEl.textContent = "Freshness unavailable";
+  } catch (_) { /* fetch failed entirely — will fall through to JSONL fallback */ }
+
+  // If DB is unavailable or no DB run found, try the JSONL-backed /runs/latest fallback.
+  if (!latestRun) {
+    try {
+      const fallback = await fetchJSON("/runs/latest");
+      if (fallback && fallback.status !== "empty" && fallback.run_type) {
+        latestRun = fallback;
+      }
+    } catch (_) { /* ignore — both sources unavailable */ }
+  }
+
+  // Both sources unavailable — show explicit DB-offline error.
+  if (dbUnavailable && !latestRun) {
+    statusEl.textContent = "Run history unavailable · database offline";
+    statusEl.className   = "freshness-status freshness-error";
+    return;
+  }
+
+  // No run data available from any source.
+  if (!latestRun) {
+    statusEl.textContent = "No completed run found yet";
     statusEl.className   = "freshness-status freshness-empty";
+    return;
+  }
+
+  const status   = normalizeRunStatus(latestRun);
+  const runType  = latestRun.run_type || "unknown";
+  const dateStr  = fmtDate(latestRun.finished_at || latestRun.started_at);
+  const ageDays  = latestRun.finished_at || latestRun.started_at
+    ? Math.floor((Date.now() - new Date(latestRun.finished_at || latestRun.started_at).getTime()) / 86400000)
+    : Infinity;
+
+  if (status === "failed") {
+    statusEl.textContent = `Latest recorded run failed · ${dateStr} · check Scheduler`;
+    statusEl.className   = "freshness-status freshness-error";
+  } else if (status === "running") {
+    statusEl.textContent = `Latest run in progress · ${runType} · ${dateStr}`;
+    statusEl.className   = "freshness-status freshness-warning";
+  } else if (ageDays > 2) {
+    statusEl.textContent = `Latest recorded run is stale · ${dateStr} · ${runType} · ${latestRun.status || "success"}`;
+    statusEl.className   = "freshness-status freshness-warning";
+  } else {
+    statusEl.textContent = `Latest recorded run · ${dateStr} · ${runType} · ${latestRun.status || "success"}`;
+    statusEl.className   = "freshness-status freshness-ok";
   }
 }
 
@@ -483,8 +520,25 @@ async function loadRunHistory() {
 
   try {
     const data = await fetchJSON(`/api/runs?days=${getSelectedDays()}`);
-    const runs = (data.runs || []).slice(0, 10);
 
+    if (data.db_unavailable) {
+      // Attempt JSONL fallback so the panel isn't completely empty during a DB outage.
+      let fallbackHtml = "";
+      try {
+        const fallback = await fetchJSON("/runs/latest");
+        if (fallback && fallback.status !== "empty" && fallback.run_type) {
+          fallbackHtml = renderRunHistoryItem(fallback);
+        }
+      } catch (_) { /* no JSONL fallback available */ }
+
+      el.innerHTML = (fallbackHtml
+        ? `<p class="empty-state" style="margin-bottom:var(--space-3)">Showing latest run from runtime log (database offline).</p>${fallbackHtml}`
+        : `<p class="empty-state">Run history temporarily unavailable — database offline.</p>`
+      );
+      return;
+    }
+
+    const runs = (data.runs || []).slice(0, 10);
     if (runs.length === 0) {
       el.innerHTML = `<p class="empty-state">No runs found in the selected window.</p>`;
       return;
@@ -497,7 +551,7 @@ async function loadRunHistory() {
 }
 
 function renderRunHistoryItem(run) {
-  const status   = (run.status || "unknown").toLowerCase();
+  const status   = normalizeRunStatus(run);
   const dotCls   = status === "success" ? "run-entry__dot--success"
                  : status === "failed"  ? "run-entry__dot--failed"
                  : "run-entry__dot--empty";
@@ -520,7 +574,7 @@ function renderRunHistoryItem(run) {
       <div class="run-entry__meta">
         <div class="run-history-item__header">
           <span class="run-entry__type">${fmt(run.run_type)} run</span>
-          <span class="run-status-badge ${badgeCls}">${escapeHtml(run.status || "unknown")}</span>
+          <span class="run-status-badge ${badgeCls}">${escapeHtml(status)}</span>
         </div>
         <div class="run-entry__time">${timeStr}</div>
         ${reportPart}

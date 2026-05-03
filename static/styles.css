@@ -1260,6 +1260,119 @@ a {
   flex-shrink: 0;
 }
 
+/* ── Data freshness bar ───────────────────────────────────────────────────── */
+.data-freshness-bar {
+  display: flex;
+  align-items: center;
+  padding: 7px var(--space-8);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-card);
+  min-height: 36px;
+}
+
+.freshness-status {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.freshness-ok {
+  background: var(--c-success-bg);
+  color: var(--c-success);
+  border-color: var(--c-success-border);
+}
+
+.freshness-warning {
+  background: var(--c-warning-bg);
+  color: var(--c-warning);
+  border-color: var(--c-warning-border);
+}
+
+.freshness-error {
+  background: var(--c-danger-bg);
+  color: var(--c-danger);
+  border-color: var(--c-danger-border);
+}
+
+.freshness-empty {
+  background: var(--c-neutral-bg);
+  color: var(--text-muted);
+  border-color: var(--c-neutral-border);
+}
+
+/* ── Run history timeline (dashboard) ─────────────────────────────────────── */
+.run-history-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.run-history-item:last-child {
+  border-bottom: none;
+}
+
+.run-history-item__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: 3px;
+  flex-wrap: wrap;
+}
+
+.run-status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid transparent;
+}
+
+.run-status-success {
+  background: var(--c-success-bg);
+  color: var(--c-success);
+  border-color: var(--c-success-border);
+}
+
+.run-status-failed {
+  background: var(--c-danger-bg);
+  color: var(--c-danger);
+  border-color: var(--c-danger-border);
+}
+
+.run-status-running {
+  background: rgba(18, 158, 245, 0.1);
+  color: var(--brand-sky-accent);
+  border-color: rgba(18, 158, 245, 0.25);
+}
+
+.run-meta {
+  display: block;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-error-message {
+  font-size: 12px;
+  color: var(--c-danger);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Responsive — tablet (768px) ──────────────────────────────────────────── */
 @media (max-width: 768px) {
   .app {
@@ -1378,118 +1491,6 @@ a {
   }
 }
 
-/* ── Data freshness bar ───────────────────────────────────────────────────── */
-.data-freshness-bar {
-  display: flex;
-  align-items: center;
-  padding: 7px var(--space-8);
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-card);
-  min-height: 36px;
-}
-
-.freshness-status {
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1;
-  padding: 4px 10px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-}
-
-.freshness-ok {
-  background: var(--c-success-bg);
-  color: var(--c-success);
-  border-color: var(--c-success-border);
-}
-
-.freshness-warning {
-  background: var(--c-warning-bg);
-  color: var(--c-warning);
-  border-color: var(--c-warning-border);
-}
-
-.freshness-error {
-  background: var(--c-danger-bg);
-  color: var(--c-danger);
-  border-color: var(--c-danger-border);
-}
-
-.freshness-empty {
-  background: var(--c-neutral-bg);
-  color: var(--text-muted);
-  border-color: var(--c-neutral-border);
-}
-
-/* ── Run history timeline (dashboard) ─────────────────────────────────────── */
-.run-history-item {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-4);
-  padding: var(--space-4) 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.run-history-item:last-child {
-  border-bottom: none;
-}
-
-.run-history-item__header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-bottom: 3px;
-  flex-wrap: wrap;
-}
-
-.run-status-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  border: 1px solid transparent;
-}
-
-.run-status-success {
-  background: var(--c-success-bg);
-  color: var(--c-success);
-  border-color: var(--c-success-border);
-}
-
-.run-status-failed {
-  background: var(--c-danger-bg);
-  color: var(--c-danger);
-  border-color: var(--c-danger-border);
-}
-
-.run-status-running {
-  background: rgba(18, 158, 245, 0.1);
-  color: var(--brand-sky-accent);
-  border-color: rgba(18, 158, 245, 0.25);
-}
-
-.run-meta {
-  display: block;
-  font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--text-muted);
-  margin-top: 3px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.run-error-message {
-  font-size: 12px;
-  color: var(--c-danger);
-  margin-top: 3px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 
 /* ── Time range selector ──────────────────────────────────────────────────── */
