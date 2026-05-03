@@ -162,7 +162,7 @@ DELETE FROM campaigns WHERE campaign_name ~ '(?i)email_campaign';
 -- PR-ADS-029: geo performance per run
 CREATE TABLE IF NOT EXISTS geo (
     id              SERIAL PRIMARY KEY,
-    run_id          INTEGER REFERENCES runs(id) ON DELETE CASCADE,
+    run_id          INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     run_date        DATE         NOT NULL,
     country         TEXT,
     campaign_name   TEXT,
@@ -177,6 +177,12 @@ CREATE INDEX IF NOT EXISTS idx_geo_run_date   ON geo(run_date);
 CREATE INDEX IF NOT EXISTS idx_geo_country    ON geo(country);
 CREATE INDEX IF NOT EXISTS idx_geo_campaign   ON geo(campaign_name);
 CREATE INDEX IF NOT EXISTS idx_geo_run_id     ON geo(run_id);
+
+-- PR-ADS-029A: idempotent migration — enforce NOT NULL on geo.run_id for existing DBs
+-- New installs: run_id is already NOT NULL from CREATE TABLE above; these are no-ops.
+-- Existing DBs: removes any orphan rows then sets the constraint.
+DELETE FROM geo WHERE run_id IS NULL;
+ALTER TABLE geo ALTER COLUMN run_id SET NOT NULL;
 
 -- PR-ADS-025F: one-time cleanup of pre-merge split rows
 -- Safe: next weekly run repopulates with correct merged data

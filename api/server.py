@@ -907,7 +907,7 @@ def api_geo(
                         COUNT(DISTINCT run_id) AS runs,
                         MAX(run_date)         AS last_run_date
                     FROM geo
-                    WHERE run_date >= CURRENT_DATE - INTERVAL '1 day' * %s
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
                     GROUP BY country, campaign_name
                     ORDER BY spend_usd DESC
                     """,
