@@ -1295,7 +1295,8 @@ function renderGeoMap(rows, metric) {
 
   const countries  = rows.map((r) => r.country);
   // junk_rate_pct is intentionally nullable (null = no verdicted leads, not 0% junk).
-  // Preserve null for that metric so Plotly treats it as missing data, not zero.
+  // Preserve null for that metric so any future map renderer treats it as missing
+  // data rather than zero. Other numeric metrics default to 0 when absent.
   const nullableMetrics = new Set(["junk_rate_pct"]);
   const values = rows.map((r) => {
     const value = r[metric];
