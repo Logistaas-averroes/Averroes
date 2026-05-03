@@ -1427,3 +1427,137 @@ a {
   outline: 2px solid var(--brand-sky-accent);
   outline-offset: 2px;
 }
+
+/* ── Waste Terms page ─────────────────────────────────────────────────────── */
+
+/* Controls bar (search + dropdowns + copy button) */
+.waste-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-2);
+}
+
+.waste-search-input {
+  flex: 1;
+  min-width: 200px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 400;
+  background: var(--surface-card);
+  color: var(--text-primary);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.waste-search-input:focus {
+  outline: none;
+  border-color: var(--brand-sky-accent);
+  box-shadow: 0 0 0 3px rgba(18, 158, 245, 0.12);
+}
+
+.waste-search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.waste-filter-select {
+  padding: 7px 28px 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 400;
+  background: var(--surface-card);
+  color: var(--text-primary);
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  transition: border-color 0.15s;
+}
+
+.waste-filter-select:focus {
+  outline: none;
+  border-color: var(--brand-sky-accent);
+  box-shadow: 0 0 0 3px rgba(18, 158, 245, 0.12);
+}
+
+.waste-copy-btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+  padding: 7px 14px;
+  font-size: 12px;
+}
+
+.waste-copy-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: var(--space-4);
+}
+
+/* Junk category badges */
+.junk-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  background: var(--c-neutral-bg);
+  color: var(--c-neutral);
+  border: 1px solid var(--c-neutral-border);
+}
+
+.junk-badge--job_seeker     { background: #fef3c7; color: #b45309; border-color: rgba(180,83,9,0.2); }
+.junk-badge--student        { background: rgba(18,158,245,0.1); color: var(--brand-sky-accent); border-color: rgba(18,158,245,0.25); }
+.junk-badge--free_intent_english,
+.junk-badge--free_intent_spanish,
+.junk-badge--free_intent_arabic { background: #ede9fe; color: #7c3aed; border-color: rgba(124,58,237,0.2); }
+.junk-badge--fraud          { background: var(--c-danger-bg); color: var(--c-danger); border-color: var(--c-danger-border); }
+
+/* High-spend row emphasis */
+.data-table tr.row--high-spend td {
+  background: rgba(185, 28, 28, 0.03);
+}
+
+.waste-spend--high {
+  color: var(--c-danger);
+  font-weight: 600;
+}
+
+/* Matched pattern column — mono style */
+.waste-pattern {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Empty state with subtext */
+.waste-empty-state {
+  padding: var(--space-6) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.waste-empty-subtext {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+@media (max-width: 768px) {
+  .waste-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .waste-search-input {
+    min-width: 0;
+  }
+}

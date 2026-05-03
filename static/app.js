@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "campaigns", "leads", "deals", "opportunities", "scheduler", "health"];
+const PAGES = ["dashboard", "campaigns", "waste", "leads", "deals", "opportunities", "scheduler", "health"];
 
 // Junk rate thresholds (from config/thresholds.yaml doctrine)
 const JUNK_RATE_LOW_THRESHOLD  = 15;  // below this → green
@@ -265,6 +265,7 @@ function loadPage(page) {
   switch (page) {
     case "dashboard":     loadDashboard();     break;
     case "campaigns":     loadCampaigns();     break;
+    case "waste":         loadWaste();         break;
     case "leads":         loadLeads();         break;
     case "deals":         loadDeals();         break;
     case "opportunities": loadOpportunities(); break;
@@ -538,6 +539,218 @@ async function loadCampaigns() {
   } catch (_) {
     if (tableEl) tableEl.innerHTML =
       `<p class="empty-state" style="padding:var(--space-5)">Could not load campaign data.</p>`;
+  }
+}
+
+// ── Waste Terms page ───────────────────────────────────────────────────────
+
+let _wasteData = [];  // raw API response, reset on each load
+
+const JUNK_CATEGORY_LABELS = {
+  job_seeker:           "Job Seeker",
+  student:              "Student",
+  free_intent_english:  "Free Intent",
+  free_intent_spanish:  "Free Intent ES",
+  free_intent_arabic:   "Free Intent AR",
+  fraud:                "Fraud",
+};
+
+function formatJunkCategory(cat) {
+  if (!cat) return "—";
+  if (JUNK_CATEGORY_LABELS[cat]) return JUNK_CATEGORY_LABELS[cat];
+  // fallback: replace underscores with spaces and title-case
+  return cat.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function junkCategoryBadge(cat) {
+  const label = formatJunkCategory(cat);
+  const slug  = (cat || "unknown").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
+  return `<span class="junk-badge junk-badge--${escapeHtml(slug)}">${escapeHtml(label)}</span>`;
+}
+
+async function loadWaste() {
+  const days = getSelectedDays();
+
+  const tableEl = document.getElementById("waste-table-body");
+  if (tableEl) tableEl.innerHTML =
+    `<p class="empty-state" style="padding:var(--space-5)">Loading waste terms…</p>`;
+
+  ["waste-kpi-spend", "waste-kpi-terms", "waste-kpi-campaigns", "waste-kpi-crm"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = "—";
+  });
+
+  try {
+    const data = await fetchJSON(`/api/waste?days=${days}`);
+    _wasteData = data.waste || [];
+
+    populateWasteFilters(_wasteData);
+    renderWasteKPIs(_wasteData);
+    applyWasteFilters();
+
+  } catch (_) {
+    _wasteData = [];
+    if (tableEl) tableEl.innerHTML =
+      `<p class="empty-state" style="padding:var(--space-5)">Could not load waste terms. Check API health or run status.</p>`;
+  }
+}
+
+function renderWasteKPIs(items) {
+  const totalSpend    = items.reduce((sum, t) => sum + (t.spend_usd || 0), 0);
+  const uniqueTerms   = new Set(
+    items.map((t) => (t.search_term || "").trim()).filter(Boolean)
+  ).size;
+  const uniqueCamps   = new Set(items.map((t) => t.campaign_name).filter(Boolean)).size;
+  const crmConfirmed  = items.reduce((sum, t) => sum + (t.crm_junk_confirmed || 0), 0);
+
+  const spendEl = document.getElementById("waste-kpi-spend");
+  const termsEl = document.getElementById("waste-kpi-terms");
+  const campsEl = document.getElementById("waste-kpi-campaigns");
+  const crmEl   = document.getElementById("waste-kpi-crm");
+
+  if (spendEl) spendEl.textContent = fmtDollar(totalSpend);
+  if (termsEl) termsEl.textContent = String(uniqueTerms);
+  if (campsEl) campsEl.textContent = String(uniqueCamps);
+  if (crmEl)   crmEl.textContent   = String(crmConfirmed);
+}
+
+function populateWasteFilters(items) {
+  const catSel  = document.getElementById("waste-filter-category");
+  const campSel = document.getElementById("waste-filter-campaign");
+
+  if (catSel) {
+    const cats = [...new Set(items.map((t) => t.junk_category).filter(Boolean))].sort();
+    catSel.innerHTML = `<option value="">All categories</option>` +
+      cats.map((c) =>
+        `<option value="${escapeHtml(c)}">${escapeHtml(formatJunkCategory(c))}</option>`
+      ).join("");
+  }
+
+  if (campSel) {
+    const camps = [...new Set(items.map((t) => t.campaign_name).filter(Boolean))].sort();
+    campSel.innerHTML = `<option value="">All campaigns</option>` +
+      camps.map((c) =>
+        `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`
+      ).join("");
+  }
+}
+
+// Threshold above which a spend cell gets the high-spend style
+const WASTE_HIGH_SPEND_USD = 100;
+
+function renderWasteTable(items) {
+  const tableEl = document.getElementById("waste-table-body");
+  if (!tableEl) return;
+
+  if (items.length === 0) {
+    if (_wasteData.length === 0) {
+      tableEl.innerHTML = `
+        <div class="waste-empty-state">
+          <p class="empty-state">No flagged waste terms in this time range.</p>
+          <p class="waste-empty-subtext">This does not mean there was no waste. It means no terms crossed the current detection rules for the selected window.</p>
+        </div>`;
+    } else {
+      tableEl.innerHTML =
+        `<p class="empty-state" style="padding:var(--space-5)">No results match the current filter.</p>`;
+    }
+    return;
+  }
+
+  const thead = `
+    <thead>
+      <tr>
+        <th>Search Term</th>
+        <th>Campaign</th>
+        <th class="td--num">Spend</th>
+        <th>Junk Category</th>
+        <th>Matched Pattern</th>
+        <th class="td--num">CRM Confirmed</th>
+        <th>Run Date</th>
+      </tr>
+    </thead>`;
+
+  const tbody = items.map((t) => {
+    const highSpend = (t.spend_usd || 0) >= WASTE_HIGH_SPEND_USD;
+    return `
+      <tr${highSpend ? ' class="row--high-spend"' : ""}>
+        <td class="td--name">${escapeHtml(t.search_term || "—")}</td>
+        <td>${escapeHtml(t.campaign_name || "—")}</td>
+        <td class="td--num${highSpend ? " waste-spend--high" : ""}">${t.spend_usd != null ? fmtDollar(t.spend_usd) : "—"}</td>
+        <td>${t.junk_category ? junkCategoryBadge(t.junk_category) : "—"}</td>
+        <td class="waste-pattern">${escapeHtml(t.matched_pattern || "—")}</td>
+        <td class="td--num">${t.crm_junk_confirmed != null ? String(t.crm_junk_confirmed) : "—"}</td>
+        <td>${fmtDate(t.run_date)}</td>
+      </tr>`;
+  }).join("");
+
+  tableEl.innerHTML = `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+}
+
+// Returns the currently visible (filtered) waste terms based on filter control state.
+function getFilteredWasteTerms() {
+  const searchInput = document.getElementById("waste-filter-search");
+  const catSel      = document.getElementById("waste-filter-category");
+  const campSel     = document.getElementById("waste-filter-campaign");
+
+  const search = searchInput ? searchInput.value.trim().toLowerCase() : "";
+  const cat    = catSel      ? catSel.value  : "";
+  const camp   = campSel     ? campSel.value : "";
+
+  let filtered = _wasteData;
+  if (search) {
+    filtered = filtered.filter((t) =>
+      (t.search_term     || "").toLowerCase().includes(search) ||
+      (t.campaign_name   || "").toLowerCase().includes(search) ||
+      (t.matched_pattern || "").toLowerCase().includes(search)
+    );
+  }
+  if (cat)  filtered = filtered.filter((t) => t.junk_category === cat);
+  if (camp) filtered = filtered.filter((t) => t.campaign_name === camp);
+  return filtered;
+}
+
+function applyWasteFilters() {
+  renderWasteTable(getFilteredWasteTerms());
+}
+
+function copyWasteTerms() {
+  const terms = getFilteredWasteTerms()
+    .map((t) => (t.search_term || "").trim())
+    .filter(Boolean);
+  if (terms.length === 0) return;
+
+  const text   = terms.join("\n");
+  const btn    = document.getElementById("waste-copy-btn");
+  const origHTML = btn ? btn.innerHTML : null;
+
+  const showFeedback = (success) => {
+    if (!btn) return;
+    btn.innerHTML = success
+      ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Copied!`
+      : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> Copy failed`;
+    btn.disabled = true;
+    setTimeout(() => {
+      if (btn && origHTML !== null) { btn.innerHTML = origHTML; btn.disabled = false; }
+    }, 2000);
+  };
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => showFeedback(true),
+      () => showFeedback(false),
+    );
+  } else {
+    // Fallback for older browsers
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity  = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { /* ignore */ }
+    document.body.removeChild(ta);
+    showFeedback(ok);
   }
 }
 
@@ -1020,6 +1233,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll(".time-range-btn").forEach((btn) => {
     btn.classList.toggle("active", parseInt(btn.dataset.days, 10) === _selectedDays);
   });
+
+  // Wire up waste filter controls
+  const wasteSearch  = document.getElementById("waste-filter-search");
+  const wasteCatSel  = document.getElementById("waste-filter-category");
+  const wasteCampSel = document.getElementById("waste-filter-campaign");
+  const wasteCopyBtn = document.getElementById("waste-copy-btn");
+  if (wasteSearch)  wasteSearch.addEventListener("input",  applyWasteFilters);
+  if (wasteCatSel)  wasteCatSel.addEventListener("change", applyWasteFilters);
+  if (wasteCampSel) wasteCampSel.addEventListener("change", applyWasteFilters);
+  if (wasteCopyBtn) wasteCopyBtn.addEventListener("click", copyWasteTerms);
 
   // Check auth and load initial page
   const isAuth = await checkAuth();

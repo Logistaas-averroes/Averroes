@@ -349,6 +349,11 @@ Waste search term rows for the last N days (max 500 rows, sorted by spend descen
 ```
 When database is unavailable: `{ "days": 30, "waste": [], "db_unavailable": true }`
 
+**Important scope notes:**
+- This endpoint returns **flagged waste terms only** — terms that crossed the current waste-detection rules. It does not return the full search-term universe.
+- Filtering (by junk category, campaign, or free-text) is performed **client-side** in the SPA. No filter parameters are accepted by this endpoint.
+- The `junk_category` field may be `null` for older rows; consumers must handle null safely.
+
 ---
 
 #### `GET /api/runs?days=30`
