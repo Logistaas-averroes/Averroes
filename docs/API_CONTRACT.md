@@ -378,6 +378,8 @@ Scheduler run records for the last N days.
 ```
 When database is unavailable: `{ "days": 30, "runs": [], "db_unavailable": true }`
 
+**UI note (PR-ADS-028):** The Run History timeline on the Dashboard page reads up to 10 runs from this endpoint. It is read-only and purely presentational.
+
 ---
 
 #### `GET /api/summary?days=30`
@@ -401,6 +403,8 @@ Aggregated headline metrics for the last N days.
 }
 ```
 When database is unavailable: all numeric fields are `null`, `run_count` is `0`, `"db_unavailable": true`.
+
+**UI note (PR-ADS-028):** The global data freshness bar in the SPA reads `last_run_at` and `last_run_status` from this endpoint. It is read-only and purely presentational — it does not write to any system.
 
 ---
 

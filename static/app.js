@@ -67,6 +67,18 @@ function fmtDate(iso) {
   }
 }
 
+function formatRelativeAge(isoStr) {
+  if (!isoStr) return "";
+  try {
+    const ageDays = Math.floor((Date.now() - new Date(isoStr).getTime()) / 86400000);
+    if (ageDays === 0) return "Updated today";
+    if (ageDays === 1) return "Updated 1 day ago";
+    return `Updated ${ageDays} days ago`;
+  } catch (_) {
+    return "";
+  }
+}
+
 function fmtDollar(n) {
   if (n === null || n === undefined) return "—";
   if (n >= 1000) return "$" + (n / 1000).toFixed(1) + "k";
@@ -116,6 +128,7 @@ function setSelectedDays(days) {
   });
   // Reload current page with new window
   if (_currentPage) loadPage(_currentPage);
+  loadDataFreshness();
 }
 
 // ── Fetch helpers ──────────────────────────────────────────────────────────
@@ -150,8 +163,9 @@ function showApp(user) {
   // Show/hide System Health nav item
   const healthNav = document.getElementById("nav-health-item");
   if (healthNav) healthNav.hidden = user.role !== "admin";
-  // Start with sidebar health check
+  // Start with sidebar health check and data freshness
   loadSidebarHealth();
+  loadDataFreshness();
 }
 
 function applySidebarUser(user) {
@@ -294,21 +308,65 @@ async function loadSidebarHealth() {
   }
 }
 
+// ── Data freshness bar ─────────────────────────────────────────────────────
+
+async function loadDataFreshness() {
+  const barEl    = document.getElementById("data-freshness-bar");
+  const statusEl = document.getElementById("freshness-status");
+  if (!barEl || !statusEl) return;
+
+  barEl.hidden = false;
+  statusEl.textContent = "Checking data freshness…";
+  statusEl.className   = "freshness-status";
+
+  try {
+    const data = await fetchJSON(`/api/summary?days=${getSelectedDays()}`);
+    const lastRunAt     = data.last_run_at     || null;
+    const lastRunStatus = data.last_run_status || null;
+
+    if (!lastRunAt) {
+      statusEl.textContent = "No completed run found yet";
+      statusEl.className   = "freshness-status freshness-empty";
+      return;
+    }
+
+    const dateStr = fmtDate(lastRunAt);
+    const ageStr  = formatRelativeAge(lastRunAt);
+    const ageDays = Math.floor((Date.now() - new Date(lastRunAt).getTime()) / 86400000);
+    const isFailed = lastRunStatus &&
+      ["failed", "error", "fail"].includes(lastRunStatus.toLowerCase());
+
+    if (isFailed) {
+      statusEl.textContent = `Last run failed · ${dateStr} · check Scheduler`;
+      statusEl.className   = "freshness-status freshness-error";
+    } else if (ageDays <= 2) {
+      statusEl.textContent = `Data as of ${dateStr} · ${ageStr} · ${escapeHtml(lastRunStatus || "success")}`;
+      statusEl.className   = "freshness-status freshness-ok";
+    } else {
+      statusEl.textContent = `Data as of ${dateStr} · ${ageStr} · ${escapeHtml(lastRunStatus || "unknown")}`;
+      statusEl.className   = "freshness-status freshness-warning";
+    }
+  } catch (_) {
+    statusEl.textContent = "Freshness unavailable";
+    statusEl.className   = "freshness-status freshness-empty";
+  }
+}
+
 // ── Dashboard page ─────────────────────────────────────────────────────────
 
 async function loadDashboard() {
   const days = getSelectedDays();
 
-  const [summaryResult, runResult] = await Promise.allSettled([
+  const summaryResult = await Promise.allSettled([
     fetchJSON(`/api/summary?days=${days}`),
-    fetchJSON("/runs/latest"),
   ]);
 
-  const summary = summaryResult.status === "fulfilled" ? summaryResult.value : null;
-  const run     = runResult.status === "fulfilled"     ? runResult.value     : null;
+  const summary = summaryResult[0].status === "fulfilled" ? summaryResult[0].value : null;
 
   renderKPIs(summary);
-  renderRunTimeline(run);
+
+  // Load run history timeline (non-blocking — failure does not affect other panels)
+  loadRunHistory();
 
   // Load campaign data for the verdict summary panel and alerts panel
   try {
@@ -416,36 +474,58 @@ function renderAlertsEmpty() {
   if (el) el.innerHTML = `<p class="empty-state">No alerts. Trigger a run to check for issues.</p>`;
 }
 
-function renderRunTimeline(runData) {
-  const el = document.getElementById("dash-run-body");
+// ── Run history timeline ───────────────────────────────────────────────────
+
+async function loadRunHistory() {
+  const el = document.getElementById("run-history-timeline");
   if (!el) return;
 
-  if (!runData || runData.status === "empty" || !runData.run_type) {
-    el.innerHTML = `<p class="empty-state">No run history yet. Trigger a manual run or wait for the next scheduled run.</p>`;
-    return;
+  el.innerHTML = `<p class="empty-state">Loading run history…</p>`;
+
+  try {
+    const data = await fetchJSON(`/api/runs?days=${getSelectedDays()}`);
+    const runs = (data.runs || []).slice(0, 10);
+
+    if (runs.length === 0) {
+      el.innerHTML = `<p class="empty-state">No runs found in the selected window.</p>`;
+      return;
+    }
+
+    el.innerHTML = runs.map(renderRunHistoryItem).join("");
+  } catch (_) {
+    el.innerHTML = `<p class="empty-state">Could not load run history.</p>`;
   }
+}
 
-  const dotCls = runData.status === "success" ? "run-entry__dot--success"
-               : runData.status === "failed"  ? "run-entry__dot--failed"
-               : "run-entry__dot--empty";
+function renderRunHistoryItem(run) {
+  const status   = (run.status || "unknown").toLowerCase();
+  const dotCls   = status === "success" ? "run-entry__dot--success"
+                 : status === "failed"  ? "run-entry__dot--failed"
+                 : "run-entry__dot--empty";
+  const badgeCls = status === "success" ? "run-status-success"
+                 : status === "failed"  ? "run-status-failed"
+                 : status === "running" ? "run-status-running"
+                 : "";
 
-  const outcome = runData.error_message
-    ? `Error: ${escapeHtml(runData.error_message)}`
-    : runData.delivery_success === false
-      ? "Delivery failed"
-      : runData.status === "success"
-        ? "Completed successfully"
-        : `Status: ${escapeHtml(runData.status || "unknown")}`;
+  const timeStr = run.started_at && run.finished_at
+    ? `${fmtDate(run.started_at)} → ${fmtDate(run.finished_at)}`
+    : fmtDate(run.started_at || run.finished_at);
 
-  el.innerHTML = `
-    <div class="run-entry">
+  const reportPart = run.report_path
+    ? `<span class="run-meta">${escapeHtml((run.report_path.split("/").pop()) || run.report_path)}</span>`
+    : "";
+
+  return `
+    <div class="run-history-item">
       <div class="run-entry__dot ${dotCls}"></div>
       <div class="run-entry__meta">
-        <div class="run-entry__type">${fmt(runData.run_type)} run</div>
-        <div class="run-entry__time">${fmtDate(runData.finished_at || runData.started_at)}</div>
-        <div class="run-entry__outcome">${outcome}</div>
+        <div class="run-history-item__header">
+          <span class="run-entry__type">${fmt(run.run_type)} run</span>
+          <span class="run-status-badge ${badgeCls}">${escapeHtml(run.status || "unknown")}</span>
+        </div>
+        <div class="run-entry__time">${timeStr}</div>
+        ${reportPart}
       </div>
-      ${statusBadge(runData.status)}
     </div>`;
 }
 
