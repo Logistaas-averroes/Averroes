@@ -979,7 +979,7 @@ def api_leads_country_summary(
                             id DESC
                     )
                     SELECT
-                        COALESCE(country, '(unknown)')               AS country,
+                        COALESCE(NULLIF(BTRIM(country), ''), '(unknown)') AS country,
                         COUNT(*)                                     AS total_leads,
                         SUM(CASE WHEN status_category = 'qualified'   THEN 1 ELSE 0 END) AS confirmed_sqls,
                         SUM(CASE WHEN status_category = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
@@ -990,7 +990,7 @@ def api_leads_country_summary(
                         mode() WITHIN GROUP (ORDER BY keyword)        AS top_keyword,
                         MAX(run_date)                                AS last_run_date
                     FROM deduped
-                    GROUP BY COALESCE(country, '(unknown)')
+                    GROUP BY COALESCE(NULLIF(BTRIM(country), ''), '(unknown)')
                     ORDER BY total_leads DESC
                     """,
                     (days,),

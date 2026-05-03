@@ -459,7 +459,9 @@ HubSpot lead quality aggregated by country for the last N days.
 - Lead quality is derived from HubSpot MQL status only — no inference or country-based scoring.
 - Unknown leads (including `OPEN - Connecting`) are **not** counted as junk.
 - `junk_rate_pct` denominator excludes unknown contacts — only verdicted leads count.
-- Leads are deduplicated by `contact_id` server-side (latest run per contact).
+- `junk_rate_pct` is `null` when `verdicted_leads = 0`; **null means insufficient verdict data, not 0% junk**. Consumers must not display null as 0%.
+- Leads are deduplicated server-side by `contact_id` when `contact_id` is present and non-blank (latest run per contact). Rows with NULL or blank `contact_id` use a per-row fallback key and are treated as unique rather than collapsed together.
+- Country values are normalized server-side: NULL, blank, and whitespace-only `country` values all become `(unknown)`. This matches the client-side normalization applied before merging with `/api/geo` results.
 - This endpoint is ad-performance geography combined UI-side with `/api/geo` — the two sources are separate.
 - `top_campaign` and `top_keyword` reflect the most frequent values for that country in the window (PostgreSQL `mode()`).
 

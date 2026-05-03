@@ -1107,6 +1107,14 @@ function junkRateBadge(junkPct) {
   return `<span class="junk-rate-badge junk-rate-badge--high">${junkPct.toFixed(1)}%</span>`;
 }
 
+// Normalize a country string to a consistent key. Trims whitespace; maps
+// null, empty, or whitespace-only values to "(unknown)". Used by both the
+// geo performance aggregator and the lead-quality map so merging is lossless.
+function normalizeCountryKey(country) {
+  const value = (country || "").trim();
+  return value || "(unknown)";
+}
+
 // ── Geo Intelligence page ──────────────────────────────────────────────────
 
 async function loadGeo() {
@@ -1147,7 +1155,7 @@ async function loadGeo() {
   // Aggregate geo performance rows by country
   const perfByCountry = new Map();
   for (const row of ((perfData && !perfData.db_unavailable) ? perfData.rows || [] : [])) {
-    const key = (row.country || "(unknown)").trim();
+    const key = normalizeCountryKey(row.country);
     if (!perfByCountry.has(key)) {
       perfByCountry.set(key, {
         spend_usd: 0, clicks: 0, impressions: 0, conversions: 0,
@@ -1171,7 +1179,7 @@ async function loadGeo() {
   // Build lead quality lookup by country
   const leadsByCountry = new Map();
   for (const row of ((leadsData && !leadsData.db_unavailable) ? leadsData.rows || [] : [])) {
-    const key = (row.country || "(unknown)").trim();
+    const key = normalizeCountryKey(row.country);
     leadsByCountry.set(key, row);
   }
 
@@ -1260,6 +1268,8 @@ async function loadGeo() {
 
   // Table
   renderGeoTable(merged);
+  // Reapply any active search filter so table stays consistent after reload
+  applyGeoSearch();
 }
 
 function renderGeoMap(rows, metric) {
@@ -1284,7 +1294,14 @@ function renderGeoMap(rows, metric) {
   };
 
   const countries  = rows.map((r) => r.country);
-  const values     = rows.map((r) => r[metric] != null ? r[metric] : 0);
+  // junk_rate_pct is intentionally nullable (null = no verdicted leads, not 0% junk).
+  // Preserve null for that metric so Plotly treats it as missing data, not zero.
+  const nullableMetrics = new Set(["junk_rate_pct"]);
+  const values = rows.map((r) => {
+    const value = r[metric];
+    if (value != null) return value;
+    return nullableMetrics.has(metric) ? null : 0;
+  });
 
   const customdata = rows.map((r) => [
     r.country,
