@@ -804,7 +804,7 @@ async function loadOpportunities() {
               <div class="opp-card__company">${escapeHtml(cardTitle)}</div>
               <div class="opp-card__meta">
                 <span class="opp-card__tag">${escapeHtml(l.mql_status || "In Progress")}</span>
-                ${isConnecting ? `<span class="opp-card__tag" style="color:var(--text-muted)">No verdict yet</span>` : ""}
+                ${isConnecting ? `<span class="opp-card__tag opp-card__tag--muted">No verdict yet</span>` : ""}
                 ${l.campaign_name ? `<span class="opp-card__tag">${escapeHtml(l.campaign_name)}</span>` : ""}
                 ${l.keyword ? `<span class="opp-card__tag">${escapeHtml(l.keyword)}</span>` : ""}
                 ${l.country ? `<span class="opp-card__tag">${escapeHtml(l.country)}</span>` : ""}

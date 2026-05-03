@@ -1145,6 +1145,12 @@ a {
   color: var(--text-secondary);
 }
 
+.opp-card__tag--muted {
+  color: var(--text-muted);
+  border-color: transparent;
+  background: transparent;
+}
+
 /* ── Pipeline funnel ──────────────────────────────────────────────────────── */
 .funnel {
   display: flex;
