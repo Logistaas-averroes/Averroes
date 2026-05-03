@@ -367,11 +367,12 @@ async function loadDataFreshness() {
     return;
   }
 
-  const status   = normalizeRunStatus(latestRun);
-  const runType  = latestRun.run_type || "unknown";
-  const dateStr  = fmtDate(latestRun.finished_at || latestRun.started_at);
-  const ageDays  = latestRun.finished_at || latestRun.started_at
-    ? Math.floor((Date.now() - new Date(latestRun.finished_at || latestRun.started_at).getTime()) / 86400000)
+  const status     = normalizeRunStatus(latestRun);
+  const runType    = latestRun.run_type || "unknown";
+  const timestamp  = latestRun.finished_at || latestRun.started_at;
+  const dateStr    = fmtDate(timestamp);
+  const ageDays    = timestamp
+    ? Math.floor((Date.now() - new Date(timestamp).getTime()) / 86400000)
     : Infinity;
 
   if (status === "failed") {
@@ -381,10 +382,10 @@ async function loadDataFreshness() {
     statusEl.textContent = `Latest run in progress · ${runType} · ${dateStr}`;
     statusEl.className   = "freshness-status freshness-warning";
   } else if (ageDays > 2) {
-    statusEl.textContent = `Latest recorded run is stale · ${dateStr} · ${runType} · ${latestRun.status || "success"}`;
+    statusEl.textContent = `Latest recorded run is stale · ${dateStr} · ${runType} · ${status}`;
     statusEl.className   = "freshness-status freshness-warning";
   } else {
-    statusEl.textContent = `Latest recorded run · ${dateStr} · ${runType} · ${latestRun.status || "success"}`;
+    statusEl.textContent = `Latest recorded run · ${dateStr} · ${runType} · ${status}`;
     statusEl.className   = "freshness-status freshness-ok";
   }
 }
