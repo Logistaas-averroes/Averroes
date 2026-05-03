@@ -633,30 +633,6 @@ function populateWasteFilters(items) {
   }
 }
 
-function applyWasteFilters() {
-  const searchInput = document.getElementById("waste-filter-search");
-  const catSel      = document.getElementById("waste-filter-category");
-  const campSel     = document.getElementById("waste-filter-campaign");
-
-  const search = searchInput ? searchInput.value.trim().toLowerCase() : "";
-  const cat    = catSel      ? catSel.value  : "";
-  const camp   = campSel     ? campSel.value : "";
-
-  let filtered = _wasteData;
-
-  if (search) {
-    filtered = filtered.filter((t) =>
-      (t.search_term    || "").toLowerCase().includes(search) ||
-      (t.campaign_name  || "").toLowerCase().includes(search) ||
-      (t.matched_pattern || "").toLowerCase().includes(search)
-    );
-  }
-  if (cat)  filtered = filtered.filter((t) => t.junk_category === cat);
-  if (camp) filtered = filtered.filter((t) => t.campaign_name === camp);
-
-  renderWasteTable(filtered);
-}
-
 // Threshold above which a spend cell gets the high-spend style
 const WASTE_HIGH_SPEND_USD = 100;
 
@@ -708,8 +684,8 @@ function renderWasteTable(items) {
   tableEl.innerHTML = `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
 }
 
-function copyWasteTerms() {
-  // Derive the current visible filtered list (same logic as applyWasteFilters)
+// Returns the currently visible (filtered) waste terms based on filter control state.
+function getFilteredWasteTerms() {
   const searchInput = document.getElementById("waste-filter-search");
   const catSel      = document.getElementById("waste-filter-category");
   const campSel     = document.getElementById("waste-filter-campaign");
@@ -721,20 +697,46 @@ function copyWasteTerms() {
   let filtered = _wasteData;
   if (search) {
     filtered = filtered.filter((t) =>
-      (t.search_term    || "").toLowerCase().includes(search) ||
-      (t.campaign_name  || "").toLowerCase().includes(search) ||
+      (t.search_term     || "").toLowerCase().includes(search) ||
+      (t.campaign_name   || "").toLowerCase().includes(search) ||
       (t.matched_pattern || "").toLowerCase().includes(search)
     );
   }
   if (cat)  filtered = filtered.filter((t) => t.junk_category === cat);
   if (camp) filtered = filtered.filter((t) => t.campaign_name === camp);
+  return filtered;
+}
 
-  const terms = filtered.map((t) => t.search_term || "").filter(Boolean);
+function applyWasteFilters() {
+  renderWasteTable(getFilteredWasteTerms());
+}
+
+function copyWasteTerms() {
+  const terms = getFilteredWasteTerms()
+    .map((t) => t.search_term || "")
+    .filter(Boolean);
   if (terms.length === 0) return;
 
-  const text = terms.join("\n");
+  const text   = terms.join("\n");
+  const btn    = document.getElementById("waste-copy-btn");
+  const origHTML = btn ? btn.innerHTML : null;
+
+  const showFeedback = (success) => {
+    if (!btn) return;
+    btn.innerHTML = success
+      ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Copied!`
+      : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> Copy failed`;
+    btn.disabled = true;
+    setTimeout(() => {
+      if (btn && origHTML !== null) { btn.innerHTML = origHTML; btn.disabled = false; }
+    }, 2000);
+  };
+
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).catch(() => { /* ignore */ });
+    navigator.clipboard.writeText(text).then(
+      () => showFeedback(true),
+      () => showFeedback(false),
+    );
   } else {
     // Fallback for older browsers
     const ta = document.createElement("textarea");
@@ -743,8 +745,10 @@ function copyWasteTerms() {
     ta.style.opacity  = "0";
     document.body.appendChild(ta);
     ta.select();
-    try { document.execCommand("copy"); } catch (_) { /* ignore */ }
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { /* ignore */ }
     document.body.removeChild(ta);
+    showFeedback(ok);
   }
 }
 

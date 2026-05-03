@@ -1513,15 +1513,11 @@ a {
   border: 1px solid var(--c-neutral-border);
 }
 
-.junk-badge--job_seeker,
-.junk-badge--job-seeker     { background: #fef3c7; color: #b45309; border-color: rgba(180,83,9,0.2); }
+.junk-badge--job_seeker     { background: #fef3c7; color: #b45309; border-color: rgba(180,83,9,0.2); }
 .junk-badge--student        { background: rgba(18,158,245,0.1); color: var(--brand-sky-accent); border-color: rgba(18,158,245,0.25); }
 .junk-badge--free_intent_english,
-.junk-badge--free-intent-english,
 .junk-badge--free_intent_spanish,
-.junk-badge--free-intent-spanish,
-.junk-badge--free_intent_arabic,
-.junk-badge--free-intent-arabic { background: #ede9fe; color: #7c3aed; border-color: rgba(124,58,237,0.2); }
+.junk-badge--free_intent_arabic { background: #ede9fe; color: #7c3aed; border-color: rgba(124,58,237,0.2); }
 .junk-badge--fraud          { background: var(--c-danger-bg); color: var(--c-danger); border-color: var(--c-danger-border); }
 
 /* High-spend row emphasis */
