@@ -324,7 +324,7 @@ def write_leads(run_id: int, contacts: list) -> None:
         mql_status = props.get("mql_status") or props.get("mql___mdr_comments")
         gclid = props.get("hs_google_click_id") or props.get("gclid")
         hs_source = props.get("hs_analytics_source", "")
-        company = props.get("company") or None
+        company = props.get("company")
 
         source_type = _map_source_type(hs_source, campaign_name)
         campaign_name_clean = _clean_campaign_name(campaign_name)
