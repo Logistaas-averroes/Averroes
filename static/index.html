@@ -163,6 +163,11 @@
         <button class="time-range-btn" data-days="60" type="button">60d</button>
       </div>
 
+      <!-- Global data freshness bar — visible on all authenticated data pages -->
+      <div id="data-freshness-bar" class="data-freshness-bar" hidden>
+        <span id="freshness-status" class="freshness-status freshness-empty" role="status" aria-live="polite" aria-atomic="true"></span>
+      </div>
+
       <!-- Dashboard -->
       <section id="page-dashboard" class="page" hidden>
         <header class="page-header">
@@ -204,9 +209,9 @@
         <div class="panel">
           <div class="panel__header">
             <span class="panel__header-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
-            Recent Run
+            Run History
           </div>
-          <div class="panel__body" id="dash-run-body"><p class="empty-state">Loading run history…</p></div>
+          <div class="panel__body" id="run-history-timeline"><p class="empty-state">Loading run history…</p></div>
         </div>
       </section>
 
