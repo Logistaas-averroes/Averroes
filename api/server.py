@@ -540,6 +540,13 @@ def api_campaigns(
                             verdict AS latest_verdict
                         FROM date_filtered
                         ORDER BY campaign_name, run_date DESC, created_at DESC, id DESC
+                    ),
+                    latest_leads AS (
+                        SELECT DISTINCT ON (campaign_name)
+                            campaign_name,
+                            total_leads
+                        FROM date_filtered
+                        ORDER BY campaign_name, run_date DESC, id DESC
                     )
                     SELECT
                         agg.campaign_name,
@@ -549,10 +556,11 @@ def api_campaigns(
                         AVG(agg.junk_rate_pct)      AS avg_junk_rate_pct,
                         AVG(agg.cpql_usd)           AS avg_cpql_usd,
                         COUNT(*)                    AS run_count,
-                        SUM(agg.total_leads)        AS total_leads
+                        COALESCE(ll.total_leads, 0) AS total_leads
                     FROM date_filtered agg
                     JOIN latest_verdicts lv ON lv.campaign_name = agg.campaign_name
-                    GROUP BY agg.campaign_name, lv.latest_verdict
+                    LEFT JOIN latest_leads ll ON ll.campaign_name = agg.campaign_name
+                    GROUP BY agg.campaign_name, lv.latest_verdict, ll.total_leads
                     ORDER BY avg_spend_usd DESC NULLS LAST
                     """,
                     (days,),

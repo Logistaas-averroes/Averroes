@@ -117,7 +117,8 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_name     ON campaigns(campaign_name);
 -- PR-ADS-026: company name on leads (idempotent migration for existing DBs)
 -- New installs: company is already in the CREATE TABLE above; ALTER is a no-op.
 -- Existing DBs: ALTER TABLE adds the column; historical rows will have company NULL
---   until the next weekly run populates them — this is expected and handled by frontend.
+--   until the next scheduler run that calls write_leads() populates them — this is
+--   expected and handled by frontend.
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS company TEXT;
 
 -- PR-ADS-025C: source type tracking + index (idempotent migration for existing DBs)

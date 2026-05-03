@@ -260,7 +260,7 @@ Aggregated campaign metrics for the last N days.
 }
 ```
 `trend` is hardcoded to `"stable"` until 4+ weekly runs are available, at which point it will be calculated from junk rate direction. Valid values when dynamic calculation resumes: `"improving"` / `"stable"` / `"degrading"`.
-`total_leads` is the sum of all lead counts across runs in the window. Returns `0` when no leads are recorded for a campaign.
+`total_leads` is the lead count from the **latest campaign snapshot** within the selected date range. It is not summed across overlapping runs (weekly + monthly runs can represent the same analysis window). Returns `0` when no value is recorded.
 When database is unavailable: `{ "days": 30, "campaigns": [], "db_unavailable": true }`
 
 ---

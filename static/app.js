@@ -745,6 +745,16 @@ async function loadDeals() {
 
 // ── In Progress Leads page ─────────────────────────────────────────────────
 
+// Explicit MDR workflow statuses shown on the In Progress Leads page.
+// OPEN - Connecting has status_category=unknown in the data model (backend
+// classification is not changed); it is included here because it is an active
+// work-queue status that MDR is still handling, not a final verdict.
+const ACTIVE_MDR_STATUSES = new Set([
+  "OPEN - Meeting Booked",
+  "OPEN - Pending Meeting",
+  "OPEN - Connecting",
+]);
+
 async function loadOpportunities() {
   const el = document.getElementById("opps-body");
   if (!el) return;
@@ -766,9 +776,10 @@ async function loadOpportunities() {
       }
     }
 
-    // Filter to in-progress only
+    // Filter by explicit MDR active statuses — includes OPEN - Connecting even
+    // though its status_category is "unknown" in the backend classification.
     const inProgress = Array.from(seen.values())
-      .filter((l) => l.status_category === "in_progress");
+      .filter((l) => ACTIVE_MDR_STATUSES.has(l.mql_status));
 
     if (inProgress.length === 0) {
       el.innerHTML = `<p class="empty-state">No in-progress leads in the selected window.</p>`;
@@ -776,13 +787,9 @@ async function loadOpportunities() {
     }
 
     // Group by mql_status
-    const booked  = inProgress.filter((l) =>
-      (l.mql_status || "").toLowerCase().includes("meeting booked")
-    );
-    const pending = inProgress.filter((l) =>
-      (l.mql_status || "").toLowerCase().includes("pending meeting")
-    );
-    const other   = inProgress.filter((l) => !booked.includes(l) && !pending.includes(l));
+    const booked     = inProgress.filter((l) => l.mql_status === "OPEN - Meeting Booked");
+    const pending    = inProgress.filter((l) => l.mql_status === "OPEN - Pending Meeting");
+    const connecting = inProgress.filter((l) => l.mql_status === "OPEN - Connecting");
 
     const renderGroup = (title, leads) => {
       if (leads.length === 0) return "";
@@ -791,11 +798,13 @@ async function loadOpportunities() {
         <div class="opp-grid">
           ${leads.map((l) => {
             const cardTitle = l.company || l.keyword || l.country || "Unnamed lead";
+            const isConnecting = l.mql_status === "OPEN - Connecting";
             return `
             <div class="opp-card">
               <div class="opp-card__company">${escapeHtml(cardTitle)}</div>
               <div class="opp-card__meta">
                 <span class="opp-card__tag">${escapeHtml(l.mql_status || "In Progress")}</span>
+                ${isConnecting ? `<span class="opp-card__tag" style="color:var(--text-muted)">No verdict yet</span>` : ""}
                 ${l.campaign_name ? `<span class="opp-card__tag">${escapeHtml(l.campaign_name)}</span>` : ""}
                 ${l.keyword ? `<span class="opp-card__tag">${escapeHtml(l.keyword)}</span>` : ""}
                 ${l.country ? `<span class="opp-card__tag">${escapeHtml(l.country)}</span>` : ""}
@@ -808,7 +817,7 @@ async function loadOpportunities() {
 
     el.innerHTML = renderGroup("Meeting Booked", booked)
                  + renderGroup("Pending Meeting", pending)
-                 + renderGroup("Connecting", other);
+                 + renderGroup("Connecting", connecting);
 
   } catch (_) {
     el.innerHTML = `<p class="empty-state">Could not load in-progress lead data.</p>`;
