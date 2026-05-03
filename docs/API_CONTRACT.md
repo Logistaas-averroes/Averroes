@@ -253,12 +253,14 @@ Aggregated campaign metrics for the last N days.
       "avg_junk_rate_pct": 6.0,
       "avg_cpql_usd": 700.00,
       "run_count": 4,
+      "total_leads": 18,
       "trend": "stable"
     }
   ]
 }
 ```
 `trend` is hardcoded to `"stable"` until 4+ weekly runs are available, at which point it will be calculated from junk rate direction. Valid values when dynamic calculation resumes: `"improving"` / `"stable"` / `"degrading"`.
+`total_leads` is the lead count from the **latest campaign snapshot** within the selected date range. It is not summed across overlapping runs (weekly + monthly runs can represent the same analysis window). Returns `0` when no value is recorded.
 When database is unavailable: `{ "days": 30, "campaigns": [], "db_unavailable": true }`
 
 ---
@@ -275,6 +277,7 @@ Individual lead rows for the last N days (max 1000 rows).
   "leads": [
     {
       "contact_id": "12345",
+      "company": "Acme Freight",
       "campaign_name": "gulf",
       "keyword": "freight forwarding",
       "country": "AE",
@@ -288,6 +291,7 @@ Individual lead rows for the last N days (max 1000 rows).
 }
 ```
 When database is unavailable: `{ "days": 30, "leads": [], "db_unavailable": true }`
+`company` may be `null` for historical rows written before PR-ADS-026 — existing consumers must handle null safely.
 
 ---
 
