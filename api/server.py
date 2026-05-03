@@ -33,6 +33,7 @@ Protected endpoints (require authenticated session):
   POST /run/daily           — Trigger daily run (requires admin or ADMIN_API_TOKEN).
   POST /run/weekly          — Trigger weekly run (requires admin or ADMIN_API_TOKEN).
   POST /run/monthly         — Trigger monthly run (requires admin or ADMIN_API_TOKEN).
+  GET  /api/geo             — Windsor geo performance by country/campaign (requires auth).
 """
 
 import importlib
@@ -878,3 +879,57 @@ def api_summary(
         "last_run_at": last_run_at,
         "last_run_status": last_run_status,
     }
+
+
+@app.get("/api/geo")
+def api_geo(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return aggregated Windsor geo performance by country/campaign for the last N days. Requires auth."""
+    days = _clamp_days(days)
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _db_empty_response(days, "rows")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        country,
+                        campaign_name,
+                        SUM(spend_usd)        AS spend_usd,
+                        SUM(clicks)           AS clicks,
+                        SUM(impressions)      AS impressions,
+                        SUM(conversions)      AS conversions,
+                        COUNT(DISTINCT run_id) AS runs,
+                        MAX(run_date)         AS last_run_date
+                    FROM geo
+                    WHERE run_date >= CURRENT_DATE - INTERVAL '1 day' * %s
+                    GROUP BY country, campaign_name
+                    ORDER BY spend_usd DESC
+                    """,
+                    (days,),
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                geo_out = []
+                for row in rows:
+                    r = dict(zip(cols, row))
+                    geo_out.append({
+                        "country": r["country"],
+                        "campaign_name": r["campaign_name"],
+                        "spend_usd": round(float(r["spend_usd"]), 2) if r["spend_usd"] is not None else 0.0,
+                        "clicks": int(r["clicks"] or 0),
+                        "impressions": int(r["impressions"] or 0),
+                        "conversions": round(float(r["conversions"]), 2) if r["conversions"] is not None else 0.0,
+                        "runs": int(r["runs"] or 0),
+                        "last_run_date": str(r["last_run_date"]) if r["last_run_date"] else None,
+                    })
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/geo] database error: %s", exc, exc_info=True)
+        return _db_empty_response(days, "rows")
+
+    return {"days": days, "rows": geo_out}

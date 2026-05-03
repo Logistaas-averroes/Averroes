@@ -74,6 +74,14 @@ def run_weekly_report():
             log.error("[weekly] DB write after Step 2 failed: %s", db_exc)
             run_id = None
 
+        # Write geo rows to database
+        try:
+            if run_id is not None:
+                geo_count = db_writers.write_geo(run_id, geos)
+                log.info("[weekly] Wrote %d geo rows to database", geo_count)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[weekly] DB write geo failed: %s", db_exc)
+
         # Step 3: Waste detection
         print("Step 3/6: Running waste detection...")
         from analysis.core import run_waste_detection

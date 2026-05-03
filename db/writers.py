@@ -405,7 +405,75 @@ def write_waste_terms(run_id: int, waste_items: list) -> None:
         log.error("write_waste_terms failed (run_id=%s): %s", run_id, exc)
 
 
-def write_deals(run_id: int, deals: list) -> None:
+def write_geo(run_id: int, geo_rows: list) -> int:
+    """Insert geo performance rows for this run.
+
+    Each item in *geo_rows* should be a dict produced by pull_geo_performance().
+    Deletes existing geo rows for the same run_id before inserting, keeping
+    manual re-runs idempotent.
+    Returns count of inserted rows.
+    Never raises.
+    """
+    if run_id is None:
+        log.debug("write_geo skipped — run_id is None")
+        return 0
+    if not geo_rows:
+        return 0
+    run_date = _today()
+    rows = []
+    for g in geo_rows:
+        raw_name = g.get("campaign") or g.get("campaign_name")
+        campaign_name = None
+        if raw_name is not None:
+            normalized = str(raw_name).strip()
+            if normalized:
+                campaign_name = _canonicalise_campaign_name(normalized.lower())
+        # Resolve run_date from row if available
+        row_date = g.get("date") or g.get("run_date")
+        if row_date:
+            try:
+                from datetime import date as _date
+                if isinstance(row_date, _date):
+                    effective_date = row_date
+                else:
+                    effective_date = _date.fromisoformat(str(row_date))
+            except (ValueError, TypeError):
+                effective_date = run_date
+        else:
+            effective_date = run_date
+        rows.append((
+            run_id,
+            effective_date,
+            g.get("country"),
+            campaign_name,
+            float(_float_or_none(g.get("spend") or g.get("spend_usd")) or 0),
+            int(_int_or_none(g.get("clicks")) or 0),
+            int(_int_or_none(g.get("impressions")) or 0),
+            float(_float_or_none(g.get("conversions")) or 0),
+        ))
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM geo WHERE run_id = %s", (run_id,))
+                cur.executemany(
+                    """
+                    INSERT INTO geo (
+                        run_id, run_date, country, campaign_name,
+                        spend_usd, clicks, impressions, conversions
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    rows,
+                )
+        log.info("Wrote %d geo rows to database (run_id=%s)", len(rows), run_id)
+        return len(rows)
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_geo failed (run_id=%s): %s", run_id, exc)
+        return 0
+
+
+
     """Insert deal rows for this run.
 
     Each item in *deals* should be a dict produced by hubspot_pull.py

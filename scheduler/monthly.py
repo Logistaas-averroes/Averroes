@@ -106,6 +106,14 @@ def run_monthly_report():
             log.error("DB write after Step 2 failed: %s", db_exc)
             run_id = None
 
+        # Write geo rows to database
+        try:
+            if run_id is not None:
+                geo_count = db_writers.write_geo(run_id, geos)
+                log.info("Wrote %d geo rows to database (run_id=%s)", geo_count, run_id)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("DB write geo failed: %s", db_exc)
+
     except Exception as e:
         log.error(f"Step 2/6 FAILED: HubSpot pull error — {e}")
         finish_run(

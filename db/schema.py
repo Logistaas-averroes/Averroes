@@ -159,6 +159,25 @@ DELETE FROM campaigns WHERE campaign_name IN (
 );
 DELETE FROM campaigns WHERE campaign_name ~ '(?i)email_campaign';
 
+-- PR-ADS-029: geo performance per run
+CREATE TABLE IF NOT EXISTS geo (
+    id              SERIAL PRIMARY KEY,
+    run_id          INTEGER REFERENCES runs(id) ON DELETE CASCADE,
+    run_date        DATE         NOT NULL,
+    country         TEXT,
+    campaign_name   TEXT,
+    spend_usd       NUMERIC(10,2) DEFAULT 0,
+    clicks          INTEGER       DEFAULT 0,
+    impressions     INTEGER       DEFAULT 0,
+    conversions     NUMERIC(8,2)  DEFAULT 0,
+    created_at      TIMESTAMPTZ   DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_geo_run_date   ON geo(run_date);
+CREATE INDEX IF NOT EXISTS idx_geo_country    ON geo(country);
+CREATE INDEX IF NOT EXISTS idx_geo_campaign   ON geo(campaign_name);
+CREATE INDEX IF NOT EXISTS idx_geo_run_id     ON geo(run_id);
+
 -- PR-ADS-025F: one-time cleanup of pre-merge split rows
 -- Safe: next weekly run repopulates with correct merged data
 -- REMOVE THIS BLOCK after confirming campaigns table has merged rows
