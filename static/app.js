@@ -1094,6 +1094,19 @@ async function loadDeals() {
   }
 }
 
+function junkRateBadge(junkPct) {
+  if (junkPct === null || junkPct === undefined) {
+    return `<span class="junk-rate-badge junk-rate-badge--none">—</span>`;
+  }
+  if (junkPct < JUNK_RATE_LOW_THRESHOLD) {
+    return `<span class="junk-rate-badge junk-rate-badge--low">${junkPct.toFixed(1)}%</span>`;
+  }
+  if (junkPct <= JUNK_RATE_HIGH_THRESHOLD) {
+    return `<span class="junk-rate-badge junk-rate-badge--medium">${junkPct.toFixed(1)}%</span>`;
+  }
+  return `<span class="junk-rate-badge junk-rate-badge--high">${junkPct.toFixed(1)}%</span>`;
+}
+
 // ── Geo Intelligence page ──────────────────────────────────────────────────
 
 async function loadGeo() {
@@ -1347,14 +1360,7 @@ function renderGeoTable(rows) {
     </thead>`;
 
   const tbody = rows.map((r) => {
-    const junkPct = r.junk_rate_pct;
-    const junkBadge = junkPct === null
-      ? `<span class="junk-rate-badge junk-rate-badge--none">—</span>`
-      : junkPct < JUNK_RATE_LOW_THRESHOLD
-        ? `<span class="junk-rate-badge junk-rate-badge--low">${junkPct.toFixed(1)}%</span>`
-        : junkPct <= JUNK_RATE_HIGH_THRESHOLD
-          ? `<span class="junk-rate-badge junk-rate-badge--medium">${junkPct.toFixed(1)}%</span>`
-          : `<span class="junk-rate-badge junk-rate-badge--high">${junkPct.toFixed(1)}%</span>`;
+    const badge = junkRateBadge(r.junk_rate_pct);
 
     return `
       <tr data-country="${escapeHtml(r.country)}"
@@ -1368,7 +1374,7 @@ function renderGeoTable(rows) {
         <td class="td--num">${r.confirmed_sqls > 0 ? r.confirmed_sqls : "—"}</td>
         <td class="td--num">${r.in_progress > 0 ? r.in_progress : "—"}</td>
         <td class="td--num">${r.confirmed_junk > 0 ? r.confirmed_junk : "—"}</td>
-        <td>${junkBadge}</td>
+        <td>${badge}</td>
         <td>${escapeHtml(r.top_campaign || "—")}</td>
         <td>${escapeHtml(r.top_keyword || "—")}</td>
         <td>${escapeHtml(r.last_run_date || "—")}</td>
