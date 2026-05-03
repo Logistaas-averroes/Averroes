@@ -1492,6 +1492,7 @@ a {
 }
 
 
+/* ── Time range selector ──────────────────────────────────────────────────── */
 .time-range-bar {
   display: flex;
   align-items: center;

@@ -340,7 +340,7 @@ async function loadDataFreshness() {
       statusEl.textContent = `Last run failed · ${dateStr} · check Scheduler`;
       statusEl.className   = "freshness-status freshness-error";
     } else if (ageDays <= 2) {
-      statusEl.textContent = `Data as of ${dateStr} · ${ageStr} · ${escapeHtml(lastRunStatus || "success")}`;
+      statusEl.textContent = `Data as of ${dateStr} · ${ageStr} · ${escapeHtml(lastRunStatus || "completed")}`;
       statusEl.className   = "freshness-status freshness-ok";
     } else {
       statusEl.textContent = `Data as of ${dateStr} · ${ageStr} · ${escapeHtml(lastRunStatus || "unknown")}`;
@@ -357,11 +357,10 @@ async function loadDataFreshness() {
 async function loadDashboard() {
   const days = getSelectedDays();
 
-  const summaryResult = await Promise.allSettled([
-    fetchJSON(`/api/summary?days=${days}`),
-  ]);
-
-  const summary = summaryResult[0].status === "fulfilled" ? summaryResult[0].value : null;
+  let summary = null;
+  try {
+    summary = await fetchJSON(`/api/summary?days=${days}`);
+  } catch (_) { /* summary unavailable — KPIs show dashes */ }
 
   renderKPIs(summary);
 
