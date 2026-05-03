@@ -410,7 +410,61 @@ Windsor geo performance data aggregated by country and campaign for the last N d
 `country` may be `null`/blank if the upstream Windsor data does not include a country value.
 Data represents Google Ads/Windsor geo performance — not HubSpot lead quality.
 No write operations are performed by this endpoint.
-Used by the future Geo Intelligence page (PR-ADS-030).
+Used by the Geo Intelligence page (PR-ADS-030).
+When database is unavailable: `{ "days": 30, "rows": [], "db_unavailable": true }`
+
+---
+
+#### `GET /api/leads/country-summary?days=30`
+HubSpot lead quality aggregated by country for the last N days.
+
+**Auth:** Auth
+**Query params:** `days` (integer, default 30, max 365)
+**Read-only:** Yes — no write to HubSpot or any external system
+**Source:** `leads` table — HubSpot MQL-derived `status_category` values only
+
+**Response 200:**
+```json
+{
+  "days": 30,
+  "rows": [
+    {
+      "country": "United Arab Emirates",
+      "total_leads": 12,
+      "confirmed_sqls": 2,
+      "in_progress": 4,
+      "confirmed_junk": 1,
+      "wrong_fit": 0,
+      "unknown": 5,
+      "verdicted_leads": 7,
+      "junk_rate_pct": 14.29,
+      "top_campaign": "gulf",
+      "top_keyword": "gofreight",
+      "last_run_date": "2026-05-02"
+    }
+  ]
+}
+```
+
+**Classification:**
+- `confirmed_sqls` — `status_category = qualified`
+- `in_progress` — `status_category = in_progress`
+- `confirmed_junk` — `status_category = junk`
+- `wrong_fit` — `status_category = wrong_fit`
+- `unknown` — `status_category = unknown` (includes `OPEN - Connecting`)
+- `verdicted_leads` — qualified + in_progress + junk + wrong_fit
+- `junk_rate_pct` — `confirmed_junk / verdicted_leads × 100`; `null` when `verdicted_leads = 0`
+
+**Important scope notes:**
+- Lead quality is derived from HubSpot MQL status only — no inference or country-based scoring.
+- Unknown leads (including `OPEN - Connecting`) are **not** counted as junk.
+- `junk_rate_pct` denominator excludes unknown contacts — only verdicted leads count.
+- `junk_rate_pct` is `null` when `verdicted_leads = 0`; **null means insufficient verdict data, not 0% junk**. Consumers must not display null as 0%.
+- Leads are deduplicated server-side by `contact_id` when `contact_id` is present and non-blank (latest run per contact). Rows with NULL or blank `contact_id` use a per-row fallback key and are treated as unique rather than collapsed together.
+- Country values are normalized server-side: NULL, blank, and whitespace-only `country` values all become `(unknown)`. This matches the client-side normalization applied before merging with `/api/geo` results.
+- This endpoint is ad-performance geography combined UI-side with `/api/geo` — the two sources are separate.
+- `top_campaign` and `top_keyword` reflect the most frequent values for that country in the window (PostgreSQL `mode()`).
+
 When database is unavailable: `{ "days": 30, "rows": [], "db_unavailable": true }`
 
 ---
@@ -464,6 +518,7 @@ When database is unavailable: all numeric fields are `null`, `run_count` is `0`,
 | GET | `/api/runs` | Auth | Run records (DB, ?days=) |
 | GET | `/api/summary` | Auth | Headline metrics (DB, ?days=) |
 | GET | `/api/geo` | Auth | Windsor geo performance by country/campaign (DB, ?days=) |
+| GET | `/api/leads/country-summary` | Auth | HubSpot lead quality by country (DB, ?days=) |
 
 ---
 
