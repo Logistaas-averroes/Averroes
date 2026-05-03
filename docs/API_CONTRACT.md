@@ -384,6 +384,37 @@ When database is unavailable: `{ "days": 30, "runs": [], "db_unavailable": true 
 
 ---
 
+#### `GET /api/geo?days=30`
+Windsor geo performance data aggregated by country and campaign for the last N days.
+
+**Auth:** Auth
+**Query params:** `days` (integer, default 30, max 365)
+**Response 200:**
+```json
+{
+  "days": 30,
+  "rows": [
+    {
+      "country": "United Arab Emirates",
+      "campaign_name": "gulf",
+      "spend_usd": 123.45,
+      "clicks": 10,
+      "impressions": 500,
+      "conversions": 1.0,
+      "runs": 2,
+      "last_run_date": "2026-05-02"
+    }
+  ]
+}
+```
+`country` may be `null`/blank if the upstream Windsor data does not include a country value.
+Data represents Google Ads/Windsor geo performance — not HubSpot lead quality.
+No write operations are performed by this endpoint.
+Used by the future Geo Intelligence page (PR-ADS-030).
+When database is unavailable: `{ "days": 30, "rows": [], "db_unavailable": true }`
+
+---
+
 #### `GET /api/summary?days=30`
 Aggregated headline metrics for the last N days.
 
@@ -432,6 +463,7 @@ When database is unavailable: all numeric fields are `null`, `run_count` is `0`,
 | GET | `/api/waste` | Auth | Waste terms (DB, ?days=) |
 | GET | `/api/runs` | Auth | Run records (DB, ?days=) |
 | GET | `/api/summary` | Auth | Headline metrics (DB, ?days=) |
+| GET | `/api/geo` | Auth | Windsor geo performance by country/campaign (DB, ?days=) |
 
 ---
 
