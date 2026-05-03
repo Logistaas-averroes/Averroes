@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "campaigns", "waste", "leads", "deals", "opportunities", "scheduler", "health"];
+const PAGES = ["dashboard", "campaigns", "waste", "geo", "leads", "deals", "opportunities", "scheduler", "health"];
 
 // Junk rate thresholds (from config/thresholds.yaml doctrine)
 const JUNK_RATE_LOW_THRESHOLD  = 15;  // below this → green
@@ -39,6 +39,9 @@ let _selectedDays  = (() => {
     return 30;
   }
 })();  // time range selector — tab-scoped via sessionStorage
+
+// Geo page state
+let geoMergedRows = [];
 
 // ── Utility helpers ────────────────────────────────────────────────────────
 
@@ -291,6 +294,7 @@ function loadPage(page) {
     case "dashboard":     loadDashboard();     break;
     case "campaigns":     loadCampaigns();     break;
     case "waste":         loadWaste();         break;
+    case "geo":           loadGeo();           break;
     case "leads":         loadLeads();         break;
     case "deals":         loadDeals();         break;
     case "opportunities": loadOpportunities(); break;
@@ -1090,6 +1094,306 @@ async function loadDeals() {
   }
 }
 
+// ── Geo Intelligence page ──────────────────────────────────────────────────
+
+async function loadGeo() {
+  const tableEl = document.getElementById("geo-table-body");
+  const mapEl   = document.getElementById("geo-map");
+  const mapFallbackEl = document.getElementById("geo-map-fallback");
+
+  if (tableEl) tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading geo intelligence…</p>`;
+  if (mapEl)   mapEl.innerHTML   = "";
+
+  const days = getSelectedDays();
+
+  // Fetch both endpoints; partial failures are tolerated.
+  let perfData  = null;
+  let leadsData = null;
+
+  try {
+    perfData = await fetchJSON(`/api/geo?days=${days}`);
+  } catch (_) { /* geo performance unavailable */ }
+
+  try {
+    leadsData = await fetchJSON(`/api/leads/country-summary?days=${days}`);
+  } catch (_) { /* lead country summary unavailable */ }
+
+  // Both failed
+  if (!perfData && !leadsData) {
+    ["geo-kpi-countries", "geo-kpi-spend", "geo-kpi-sqls", "geo-kpi-junk"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = "—";
+    });
+    if (tableEl) tableEl.innerHTML = `
+      <div class="geo-empty-state">
+        <p class="empty-state">Could not load geo intelligence. Check API health or run status.</p>
+      </div>`;
+    return;
+  }
+
+  // Aggregate geo performance rows by country
+  const perfByCountry = new Map();
+  for (const row of ((perfData && !perfData.db_unavailable) ? perfData.rows || [] : [])) {
+    const key = (row.country || "(unknown)").trim();
+    if (!perfByCountry.has(key)) {
+      perfByCountry.set(key, {
+        spend_usd: 0, clicks: 0, impressions: 0, conversions: 0,
+        campaigns: new Map(), last_run_date: null,
+      });
+    }
+    const agg = perfByCountry.get(key);
+    agg.spend_usd    += row.spend_usd    || 0;
+    agg.clicks       += row.clicks       || 0;
+    agg.impressions  += row.impressions  || 0;
+    agg.conversions  += (row.conversions || 0);
+    if (row.campaign_name) {
+      const prev = agg.campaigns.get(row.campaign_name) || 0;
+      agg.campaigns.set(row.campaign_name, prev + (row.spend_usd || 0));
+    }
+    if (row.last_run_date && (!agg.last_run_date || row.last_run_date > agg.last_run_date)) {
+      agg.last_run_date = row.last_run_date;
+    }
+  }
+
+  // Build lead quality lookup by country
+  const leadsByCountry = new Map();
+  for (const row of ((leadsData && !leadsData.db_unavailable) ? leadsData.rows || [] : [])) {
+    const key = (row.country || "(unknown)").trim();
+    leadsByCountry.set(key, row);
+  }
+
+  // Merge — union of all countries from both sources
+  const allCountries = new Set([...perfByCountry.keys(), ...leadsByCountry.keys()]);
+
+  const merged = [];
+  for (const country of allCountries) {
+    const perf  = perfByCountry.get(country) || null;
+    const leads = leadsByCountry.get(country) || null;
+
+    // Derive top campaign from perf spend
+    let topCampaign = (leads && leads.top_campaign) || null;
+    if (perf && perf.campaigns.size > 0) {
+      topCampaign = [...perf.campaigns.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    }
+
+    merged.push({
+      country,
+      spend_usd:        perf  ? Math.round(perf.spend_usd * 100) / 100 : 0,
+      clicks:           perf  ? perf.clicks       : 0,
+      impressions:      perf  ? perf.impressions  : 0,
+      conversions:      perf  ? Math.round(perf.conversions * 100) / 100 : 0,
+      campaigns_count:  perf  ? perf.campaigns.size : 0,
+      top_campaign:     topCampaign,
+      top_keyword:      leads ? leads.top_keyword   : null,
+      total_leads:      leads ? leads.total_leads   : 0,
+      confirmed_sqls:   leads ? leads.confirmed_sqls  : 0,
+      in_progress:      leads ? leads.in_progress    : 0,
+      confirmed_junk:   leads ? leads.confirmed_junk  : 0,
+      wrong_fit:        leads ? leads.wrong_fit       : 0,
+      unknown:          leads ? leads.unknown         : 0,
+      verdicted_leads:  leads ? leads.verdicted_leads : 0,
+      junk_rate_pct:    leads ? leads.junk_rate_pct   : null,
+      last_run_date:    (perf && perf.last_run_date)
+                          ? perf.last_run_date
+                          : (leads ? leads.last_run_date : null),
+    });
+  }
+
+  // Sort: spend desc, then total_leads desc
+  merged.sort((a, b) => {
+    if (b.spend_usd !== a.spend_usd) return b.spend_usd - a.spend_usd;
+    return b.total_leads - a.total_leads;
+  });
+
+  geoMergedRows = merged;
+
+  if (merged.length === 0) {
+    ["geo-kpi-countries", "geo-kpi-spend", "geo-kpi-sqls", "geo-kpi-junk"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = "—";
+    });
+    if (tableEl) tableEl.innerHTML = `
+      <div class="geo-empty-state">
+        <p class="empty-state">No geo intelligence available for the selected window.</p>
+        <p class="geo-empty-subtext">Geo data appears after a weekly or monthly run writes Windsor country performance to the database.</p>
+      </div>`;
+    return;
+  }
+
+  // KPI cards
+  const countriesActive = merged.filter((r) => r.spend_usd > 0 || r.total_leads > 0).length;
+  const totalSpend      = merged.reduce((s, r) => s + r.spend_usd, 0);
+  const countriesSQLs   = merged.filter((r) => r.confirmed_sqls > 0).length;
+  const highJunk        = merged.filter((r) => r.junk_rate_pct !== null && r.junk_rate_pct >= JUNK_RATE_HIGH_THRESHOLD).length;
+
+  const kpiCountriesEl = document.getElementById("geo-kpi-countries");
+  const kpiSpendEl     = document.getElementById("geo-kpi-spend");
+  const kpiSQLsEl      = document.getElementById("geo-kpi-sqls");
+  const kpiJunkEl      = document.getElementById("geo-kpi-junk");
+
+  if (kpiCountriesEl) kpiCountriesEl.textContent = String(countriesActive);
+  if (kpiSpendEl)     kpiSpendEl.textContent     = fmtDollar(totalSpend);
+  if (kpiSQLsEl)      kpiSQLsEl.textContent      = String(countriesSQLs);
+  if (kpiJunkEl)      kpiJunkEl.textContent      = String(highJunk);
+
+  // Map
+  renderGeoMap(merged, "total_leads");
+
+  // Wire up metric selector
+  const metricSel = document.getElementById("geo-map-metric");
+  if (metricSel) {
+    metricSel.onchange = () => renderGeoMap(geoMergedRows, metricSel.value);
+  }
+
+  // Table
+  renderGeoTable(merged);
+}
+
+function renderGeoMap(rows, metric) {
+  const mapEl         = document.getElementById("geo-map");
+  const fallbackEl    = document.getElementById("geo-map-fallback");
+  if (!mapEl) return;
+
+  if (!window.Plotly) {
+    mapEl.hidden     = true;
+    if (fallbackEl) fallbackEl.hidden = false;
+    return;
+  }
+  if (fallbackEl) fallbackEl.hidden = true;
+  mapEl.hidden = false;
+
+  const metricLabels = {
+    total_leads:    "Leads",
+    confirmed_sqls: "SQLs",
+    confirmed_junk: "Junk",
+    junk_rate_pct:  "Junk Rate %",
+    spend_usd:      "Spend (USD)",
+  };
+
+  const countries  = rows.map((r) => r.country);
+  const values     = rows.map((r) => r[metric] != null ? r[metric] : 0);
+
+  const customdata = rows.map((r) => [
+    r.country,
+    r.spend_usd != null ? fmtDollar(r.spend_usd) : "—",
+    r.total_leads  || 0,
+    r.confirmed_sqls || 0,
+    r.confirmed_junk || 0,
+    r.junk_rate_pct != null ? r.junk_rate_pct.toFixed(1) + "%" : "—",
+    r.top_campaign || "—",
+    r.top_keyword  || "—",
+  ]);
+
+  const data = [{
+    type: "choropleth",
+    locationmode: "country names",
+    locations:  countries,
+    z:          values,
+    text:       countries,
+    customdata,
+    hovertemplate:
+      "<b>%{customdata[0]}</b><br>" +
+      "Spend: %{customdata[1]}<br>" +
+      "Leads: %{customdata[2]}<br>" +
+      "SQLs: %{customdata[3]}<br>" +
+      "Junk: %{customdata[4]}<br>" +
+      "Junk Rate: %{customdata[5]}<br>" +
+      "Top Campaign: %{customdata[6]}<br>" +
+      "Top Keyword: %{customdata[7]}<extra></extra>",
+    colorscale: "Blues",
+    showscale: true,
+    colorbar: { title: { text: metricLabels[metric] || metric, side: "right" } },
+  }];
+
+  const layout = {
+    margin: { l: 0, r: 0, t: 0, b: 0 },
+    geo: {
+      showframe: false,
+      showcoastlines: true,
+      projection: { type: "natural earth" },
+    },
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor:  "rgba(0,0,0,0)",
+  };
+
+  window.Plotly.react(mapEl, data, layout, { responsive: true, displayModeBar: false });
+}
+
+function renderGeoTable(rows) {
+  const tableEl = document.getElementById("geo-table-body");
+  if (!tableEl) return;
+
+  if (rows.length === 0) {
+    tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">No countries to display.</p>`;
+    return;
+  }
+
+  const thead = `
+    <thead>
+      <tr>
+        <th>Country</th>
+        <th class="td--num">Spend</th>
+        <th class="td--num">Clicks</th>
+        <th class="td--num">Conv.</th>
+        <th class="td--num">Leads</th>
+        <th class="td--num">SQLs</th>
+        <th class="td--num">In Progress</th>
+        <th class="td--num">Junk</th>
+        <th>Junk Rate</th>
+        <th>Top Campaign</th>
+        <th>Top Keyword</th>
+        <th>Last Run</th>
+      </tr>
+    </thead>`;
+
+  const tbody = rows.map((r) => {
+    const junkPct = r.junk_rate_pct;
+    const junkBadge = junkPct === null
+      ? `<span class="junk-rate-badge junk-rate-badge--none">—</span>`
+      : junkPct < JUNK_RATE_LOW_THRESHOLD
+        ? `<span class="junk-rate-badge junk-rate-badge--low">${junkPct.toFixed(1)}%</span>`
+        : junkPct <= JUNK_RATE_HIGH_THRESHOLD
+          ? `<span class="junk-rate-badge junk-rate-badge--medium">${junkPct.toFixed(1)}%</span>`
+          : `<span class="junk-rate-badge junk-rate-badge--high">${junkPct.toFixed(1)}%</span>`;
+
+    return `
+      <tr data-country="${escapeHtml(r.country)}"
+          data-campaign="${escapeHtml(r.top_campaign || "")}"
+          data-keyword="${escapeHtml(r.top_keyword || "")}">
+        <td class="td--name">${escapeHtml(r.country)}</td>
+        <td class="td--num">${r.spend_usd > 0 ? fmtDollar(r.spend_usd) : "—"}</td>
+        <td class="td--num">${r.clicks > 0 ? r.clicks : "—"}</td>
+        <td class="td--num">${r.conversions > 0 ? r.conversions.toFixed(1) : "—"}</td>
+        <td class="td--num">${r.total_leads > 0 ? r.total_leads : "—"}</td>
+        <td class="td--num">${r.confirmed_sqls > 0 ? r.confirmed_sqls : "—"}</td>
+        <td class="td--num">${r.in_progress > 0 ? r.in_progress : "—"}</td>
+        <td class="td--num">${r.confirmed_junk > 0 ? r.confirmed_junk : "—"}</td>
+        <td>${junkBadge}</td>
+        <td>${escapeHtml(r.top_campaign || "—")}</td>
+        <td>${escapeHtml(r.top_keyword || "—")}</td>
+        <td>${escapeHtml(r.last_run_date || "—")}</td>
+      </tr>`;
+  }).join("");
+
+  tableEl.innerHTML = `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+}
+
+function applyGeoSearch() {
+  const search = (document.getElementById("geo-search") || {}).value || "";
+  const term   = search.trim().toLowerCase();
+  const tableEl = document.getElementById("geo-table-body");
+  if (!tableEl) return;
+
+  const rows = tableEl.querySelectorAll("tr[data-country]");
+  rows.forEach((row) => {
+    const country  = (row.dataset.country  || "").toLowerCase();
+    const campaign = (row.dataset.campaign || "").toLowerCase();
+    const keyword  = (row.dataset.keyword  || "").toLowerCase();
+    const match    = !term || country.includes(term) || campaign.includes(term) || keyword.includes(term);
+    row.hidden = !match;
+  });
+}
+
 // ── In Progress Leads page ─────────────────────────────────────────────────
 
 // Explicit MDR workflow statuses shown on the In Progress Leads page.
@@ -1377,6 +1681,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (wasteCatSel)  wasteCatSel.addEventListener("change", applyWasteFilters);
   if (wasteCampSel) wasteCampSel.addEventListener("change", applyWasteFilters);
   if (wasteCopyBtn) wasteCopyBtn.addEventListener("click", copyWasteTerms);
+
+  // Wire up geo search
+  const geoSearch = document.getElementById("geo-search");
+  if (geoSearch) geoSearch.addEventListener("input", applyGeoSearch);
 
   // Check auth and load initial page
   const isAuth = await checkAuth();

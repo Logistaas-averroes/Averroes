@@ -33,7 +33,8 @@ Protected endpoints (require authenticated session):
   POST /run/daily           — Trigger daily run (requires admin or ADMIN_API_TOKEN).
   POST /run/weekly          — Trigger weekly run (requires admin or ADMIN_API_TOKEN).
   POST /run/monthly         — Trigger monthly run (requires admin or ADMIN_API_TOKEN).
-  GET  /api/geo             — Windsor geo performance by country/campaign (requires auth).
+  GET  /api/geo                    — Windsor geo performance by country/campaign (requires auth).
+  GET  /api/leads/country-summary  — HubSpot lead quality aggregated by country (requires auth).
 """
 
 import importlib
@@ -933,3 +934,96 @@ def api_geo(
         return _db_empty_response(days, "rows")
 
     return {"days": days, "rows": geo_out}
+
+
+@app.get("/api/leads/country-summary")
+def api_leads_country_summary(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return HubSpot lead quality aggregated by country for the last N days. Requires auth."""
+    days = _clamp_days(days)
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _db_empty_response(days, "rows")
+            with conn.cursor() as cur:
+                # Deduplicate leads by contact_id (latest run per contact),
+                # then aggregate status counts per country.
+                cur.execute(
+                    """
+                    WITH deduped AS (
+                        SELECT DISTINCT ON (
+                            CASE
+                                WHEN contact_id IS NOT NULL AND contact_id <> ''
+                                THEN contact_id
+                                ELSE CAST(id AS TEXT)
+                            END
+                        )
+                            country,
+                            campaign_name,
+                            keyword,
+                            status_category,
+                            run_date
+                        FROM leads
+                        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                        ORDER BY
+                            CASE
+                                WHEN contact_id IS NOT NULL AND contact_id <> ''
+                                THEN contact_id
+                                ELSE CAST(id AS TEXT)
+                            END,
+                            run_date DESC,
+                            id DESC
+                    )
+                    SELECT
+                        COALESCE(country, '(unknown)')               AS country,
+                        COUNT(*)                                     AS total_leads,
+                        SUM(CASE WHEN status_category = 'qualified'   THEN 1 ELSE 0 END) AS confirmed_sqls,
+                        SUM(CASE WHEN status_category = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
+                        SUM(CASE WHEN status_category = 'junk'        THEN 1 ELSE 0 END) AS confirmed_junk,
+                        SUM(CASE WHEN status_category = 'wrong_fit'   THEN 1 ELSE 0 END) AS wrong_fit,
+                        SUM(CASE WHEN status_category = 'unknown'     THEN 1 ELSE 0 END) AS unknown,
+                        mode() WITHIN GROUP (ORDER BY campaign_name)  AS top_campaign,
+                        mode() WITHIN GROUP (ORDER BY keyword)        AS top_keyword,
+                        MAX(run_date)                                AS last_run_date
+                    FROM deduped
+                    GROUP BY COALESCE(country, '(unknown)')
+                    ORDER BY total_leads DESC
+                    """,
+                    (days,),
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                summary_out = []
+                for row in rows:
+                    r = dict(zip(cols, row))
+                    confirmed_junk = int(r["confirmed_junk"] or 0)
+                    qualified      = int(r["confirmed_sqls"] or 0)
+                    in_progress    = int(r["in_progress"] or 0)
+                    wrong_fit      = int(r["wrong_fit"] or 0)
+                    verdicted      = qualified + in_progress + confirmed_junk + wrong_fit
+                    junk_rate      = None
+                    if verdicted > 0:
+                        junk_rate = round((confirmed_junk / verdicted) * 100, 2)
+                    summary_out.append({
+                        "country":         r["country"],
+                        "total_leads":     int(r["total_leads"] or 0),
+                        "confirmed_sqls":  qualified,
+                        "in_progress":     in_progress,
+                        "confirmed_junk":  confirmed_junk,
+                        "wrong_fit":       wrong_fit,
+                        "unknown":         int(r["unknown"] or 0),
+                        "verdicted_leads": verdicted,
+                        "junk_rate_pct":   junk_rate,
+                        "top_campaign":    r["top_campaign"],
+                        "top_keyword":     r["top_keyword"],
+                        "last_run_date":   str(r["last_run_date"]) if r["last_run_date"] else None,
+                    })
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/leads/country-summary] database error: %s", exc, exc_info=True)
+        return _db_empty_response(days, "rows")
+
+    return {"days": days, "rows": summary_out}
