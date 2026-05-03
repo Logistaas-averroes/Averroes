@@ -180,9 +180,18 @@ CREATE INDEX IF NOT EXISTS idx_geo_run_id     ON geo(run_id);
 
 -- PR-ADS-029A: idempotent migration — enforce NOT NULL on geo.run_id for existing DBs
 -- New installs: run_id is already NOT NULL from CREATE TABLE above; these are no-ops.
--- Existing DBs: removes any orphan rows then sets the constraint.
-DELETE FROM geo WHERE run_id IS NULL;
-ALTER TABLE geo ALTER COLUMN run_id SET NOT NULL;
+-- Existing DBs: removes any orphan rows then sets the constraint (runs once via migrations table).
+DO $$
+BEGIN
+    INSERT INTO migrations (migration_id)
+    VALUES ('PR-ADS-029A-geo-run-id-not-null')
+    ON CONFLICT (migration_id) DO NOTHING;
+
+    IF FOUND THEN
+        DELETE FROM geo WHERE run_id IS NULL;
+        ALTER TABLE geo ALTER COLUMN run_id SET NOT NULL;
+    END IF;
+END $$;
 
 -- PR-ADS-025F: one-time cleanup of pre-merge split rows
 -- Safe: next weekly run repopulates with correct merged data
