@@ -324,6 +324,7 @@ def write_leads(run_id: int, contacts: list) -> None:
         mql_status = props.get("mql_status") or props.get("mql___mdr_comments")
         gclid = props.get("hs_google_click_id") or props.get("gclid")
         hs_source = props.get("hs_analytics_source", "")
+        company = props.get("company") or None
 
         source_type = _map_source_type(hs_source, campaign_name)
         campaign_name_clean = _clean_campaign_name(campaign_name)
@@ -339,6 +340,7 @@ def write_leads(run_id: int, contacts: list) -> None:
             _map_status_category(mql_status),
             gclid,
             source_type,
+            company,
         ))
     try:
         with get_conn() as conn:
@@ -349,8 +351,8 @@ def write_leads(run_id: int, contacts: list) -> None:
                     """
                     INSERT INTO leads (
                         run_id, run_date, contact_id, campaign_name,
-                        keyword, country, mql_status, status_category, gclid, source_type
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        keyword, country, mql_status, status_category, gclid, source_type, company
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     rows,
                 )

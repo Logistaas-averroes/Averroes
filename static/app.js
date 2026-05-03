@@ -523,7 +523,7 @@ async function loadCampaigns() {
         <tr>
           <td class="td--name">${escapeHtml(c.campaign_name || "—")}</td>
           <td class="td--num">${spend}</td>
-          <td class="td--num">—</td>
+          <td class="td--num">${c.total_leads != null ? String(c.total_leads) : "—"}</td>
           <td class="td--num">${c.total_confirmed_sqls != null ? String(c.total_confirmed_sqls) : "0"}</td>
           <td class="${junkCls}">${junkStr}</td>
           <td class="td--num ${cpql === "N/A" ? "td--na" : ""}">${cpql}</td>
@@ -743,13 +743,13 @@ async function loadDeals() {
   }
 }
 
-// ── Opportunities page ─────────────────────────────────────────────────────
+// ── In Progress Leads page ─────────────────────────────────────────────────
 
 async function loadOpportunities() {
   const el = document.getElementById("opps-body");
   if (!el) return;
 
-  el.innerHTML = `<p class="empty-state">Loading opportunities…</p>`;
+  el.innerHTML = `<p class="empty-state">Loading in-progress leads…</p>`;
 
   try {
     const data  = await fetchJSON(`/api/leads?days=${getSelectedDays()}`);
@@ -771,7 +771,7 @@ async function loadOpportunities() {
       .filter((l) => l.status_category === "in_progress");
 
     if (inProgress.length === 0) {
-      el.innerHTML = `<p class="empty-state">No active opportunities in the selected window.</p>`;
+      el.innerHTML = `<p class="empty-state">No in-progress leads in the selected window.</p>`;
       return;
     }
 
@@ -789,18 +789,20 @@ async function loadOpportunities() {
       return `
         <p class="opp-group-title">${escapeHtml(title)} (${leads.length})</p>
         <div class="opp-grid">
-          ${leads.map((l) => `
+          ${leads.map((l) => {
+            const cardTitle = l.company || l.keyword || l.country || "Unnamed lead";
+            return `
             <div class="opp-card">
-              <div class="opp-card__company">${escapeHtml(l.mql_status || "In Progress")}</div>
+              <div class="opp-card__company">${escapeHtml(cardTitle)}</div>
               <div class="opp-card__meta">
+                <span class="opp-card__tag">${escapeHtml(l.mql_status || "In Progress")}</span>
                 ${l.campaign_name ? `<span class="opp-card__tag">${escapeHtml(l.campaign_name)}</span>` : ""}
                 ${l.keyword ? `<span class="opp-card__tag">${escapeHtml(l.keyword)}</span>` : ""}
                 ${l.country ? `<span class="opp-card__tag">${escapeHtml(l.country)}</span>` : ""}
               </div>
-              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
-                ID: ${escapeHtml(l.contact_id || "—")}
-              </div>
-            </div>`).join("")}
+              ${l.contact_id ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">ID: ${escapeHtml(l.contact_id)}</div>` : ""}
+            </div>`;
+          }).join("")}
         </div>`;
     };
 
@@ -809,7 +811,7 @@ async function loadOpportunities() {
                  + renderGroup("Connecting", other);
 
   } catch (_) {
-    el.innerHTML = `<p class="empty-state">Could not load opportunity data.</p>`;
+    el.innerHTML = `<p class="empty-state">Could not load in-progress lead data.</p>`;
   }
 }
 

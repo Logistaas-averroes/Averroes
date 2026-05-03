@@ -527,6 +527,7 @@ def api_campaigns(
                             confirmed_sqls,
                             junk_rate_pct,
                             cpql_usd,
+                            total_leads,
                             run_date,
                             created_at,
                             id
@@ -547,7 +548,8 @@ def api_campaigns(
                         SUM(agg.confirmed_sqls)     AS total_confirmed_sqls,
                         AVG(agg.junk_rate_pct)      AS avg_junk_rate_pct,
                         AVG(agg.cpql_usd)           AS avg_cpql_usd,
-                        COUNT(*)                    AS run_count
+                        COUNT(*)                    AS run_count,
+                        SUM(agg.total_leads)        AS total_leads
                     FROM date_filtered agg
                     JOIN latest_verdicts lv ON lv.campaign_name = agg.campaign_name
                     GROUP BY agg.campaign_name, lv.latest_verdict
@@ -568,6 +570,7 @@ def api_campaigns(
                         "avg_junk_rate_pct": round(float(r["avg_junk_rate_pct"]), 2) if r["avg_junk_rate_pct"] is not None else None,
                         "avg_cpql_usd": round(float(r["avg_cpql_usd"]), 2) if r["avg_cpql_usd"] is not None else None,
                         "run_count": int(r["run_count"]),
+                        "total_leads": int(r["total_leads"]) if r["total_leads"] is not None else 0,
                         # TODO: Replace hardcoded "stable" with junk rate trend calculation
                         # once 4+ weekly runs exist. Pattern: compare avg junk_rate of
                         # older half vs newer half of the date window.
@@ -601,7 +604,7 @@ def api_leads(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT contact_id, campaign_name, keyword, country,
+                    SELECT contact_id, company, campaign_name, keyword, country,
                            mql_status, status_category, gclid, source_type, run_date
                     FROM leads
                     WHERE run_date >= NOW() - INTERVAL '1 day' * %s
