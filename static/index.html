@@ -534,6 +534,20 @@
     </div><!-- /.main-content -->
   </div><!-- /#app -->
 
+  <!-- ── Campaign Detail Drawer ── rendered by JS, reusable slide-over panel -->
+  <div id="campaign-drawer-overlay" class="drawer-overlay" hidden aria-hidden="true"></div>
+  <aside id="campaign-drawer" class="campaign-drawer" hidden aria-label="Campaign detail" role="dialog" aria-modal="true">
+    <div class="campaign-drawer__header">
+      <div id="drawer-campaign-title" class="campaign-drawer__title"></div>
+      <button id="drawer-close-btn" class="drawer-close" type="button" aria-label="Close campaign detail">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="campaign-drawer__body" id="campaign-drawer-body">
+      <p class="empty-state">Loading…</p>
+    </div>
+  </aside>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

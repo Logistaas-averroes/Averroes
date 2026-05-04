@@ -144,6 +144,8 @@ function setSelectedDays(days) {
   document.querySelectorAll(".time-range-btn").forEach((btn) => {
     btn.classList.toggle("active", parseInt(btn.dataset.days, 10) === days);
   });
+  // Close campaign drawer when selected reporting window changes to avoid stale detail.
+  closeCampaignDrawer();
   // Reload current page with new window
   if (_currentPage) loadPage(_currentPage);
   loadDataFreshness();
@@ -171,6 +173,8 @@ function showLogin() {
   document.getElementById("login-screen").style.display = "flex";
   document.getElementById("app").style.display = "none";
   _currentUser = null;
+  // Ensure the drawer/overlay are hidden so they don't block the login screen.
+  closeCampaignDrawer();
 }
 
 function showApp(user) {
@@ -649,6 +653,7 @@ async function loadCampaigns() {
           <th class="td--num">CPQL</th>
           <th>Verdict</th>
           <th class="td--num">Runs</th>
+          <th scope="col"><span class="sr-only">Actions</span></th>
         </tr>
       </thead>`;
 
@@ -673,11 +678,18 @@ async function loadCampaigns() {
           <td class="td--num ${cpql === "N/A" ? "td--na" : ""}">${cpql}</td>
           <td>${verdictBadge(v)}</td>
           <td class="td--num">${c.run_count != null ? String(c.run_count) : "—"}</td>
+          <td><button class="investigate-button" type="button" data-campaign="${escapeHtml(c.campaign_name || "")}">Investigate</button></td>
         </tr>`;
     }).join("");
 
-    if (tableEl) tableEl.innerHTML =
-      `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+    if (tableEl) {
+      tableEl.innerHTML =
+        `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+      // Wire up Investigate buttons — each opens the campaign detail drawer
+      tableEl.querySelectorAll(".investigate-button").forEach((btn) => {
+        btn.addEventListener("click", () => openCampaignDrawer(btn.dataset.campaign));
+      });
+    }
 
   } catch (_) {
     if (tableEl) tableEl.innerHTML =
@@ -1992,6 +2004,444 @@ async function loadHealth() {
   }
 }
 
+// ── Campaign Detail Drawer ─────────────────────────────────────────────────
+
+let _drawerOpenCampaign = null;  // campaign name string currently shown in drawer, or null
+let _drawerPreviousFocus = null; // element to restore focus to on close
+
+async function openCampaignDrawer(campaignName) {
+  if (!campaignName) return;
+  _drawerOpenCampaign = campaignName;
+
+  const overlay   = document.getElementById("campaign-drawer-overlay");
+  const drawer    = document.getElementById("campaign-drawer");
+  const titleEl   = document.getElementById("drawer-campaign-title");
+  const bodyEl    = document.getElementById("campaign-drawer-body");
+
+  // Save the currently focused element so we can restore it on close
+  _drawerPreviousFocus = document.activeElement;
+
+  // Show overlay + drawer immediately with loading state
+  if (overlay) { overlay.hidden = false; overlay.removeAttribute("aria-hidden"); }
+  if (drawer)  { drawer.hidden  = false; }
+  if (titleEl) titleEl.textContent = campaignName;
+  if (bodyEl)  bodyEl.innerHTML = `<p class="empty-state"><span class="spinner"></span> Loading campaign detail…</p>`;
+
+  // Move focus into the drawer — prefer close button, fallback drawer itself
+  const closeBtn = document.getElementById("drawer-close-btn");
+  if (closeBtn) {
+    closeBtn.focus();
+  } else if (drawer) {
+    drawer.setAttribute("tabindex", "-1");
+    drawer.focus();
+  }
+
+  // Bind keyboard handlers: Escape closes, Tab traps focus inside drawer
+  document.addEventListener("keydown", _drawerKeyHandler);
+
+  try {
+    // Preferred query-param endpoint (avoids routing issues with '/' in names)
+    const data = await fetchJSON(
+      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${getSelectedDays()}`
+    );
+    // Guard stale response: drawer may have been closed or switched while fetching
+    if (_drawerOpenCampaign !== campaignName) return;
+    renderCampaignDrawer(data);
+  } catch (err) {
+    if (_drawerOpenCampaign !== campaignName) return;
+    if (bodyEl) {
+      bodyEl.innerHTML = `
+        <div class="drawer-section">
+          <p class="drawer-empty">Could not load campaign detail — ${escapeHtml(err.message || "network error")}.</p>
+        </div>`;
+    }
+  }
+}
+
+function closeCampaignDrawer() {
+  _drawerOpenCampaign = null;
+  const overlay = document.getElementById("campaign-drawer-overlay");
+  const drawer  = document.getElementById("campaign-drawer");
+  if (overlay) { overlay.hidden = true; overlay.setAttribute("aria-hidden", "true"); }
+  if (drawer)  drawer.hidden = true;
+  document.removeEventListener("keydown", _drawerKeyHandler);
+
+  // Restore focus to the element that opened the drawer
+  if (_drawerPreviousFocus && typeof _drawerPreviousFocus.focus === "function" && document.contains(_drawerPreviousFocus)) {
+    _drawerPreviousFocus.focus();
+  }
+  _drawerPreviousFocus = null;
+}
+
+function _drawerKeyHandler(e) {
+  if (e.key === "Escape") {
+    closeCampaignDrawer();
+    return;
+  }
+  if (e.key === "Tab") {
+    _trapDrawerFocus(e);
+  }
+}
+
+function _trapDrawerFocus(e) {
+  const drawer = document.getElementById("campaign-drawer");
+  if (!drawer || drawer.hidden) return;
+
+  const focusable = Array.from(drawer.querySelectorAll(
+    'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+  )).filter((el) => !el.closest("[hidden]"));
+
+  if (!focusable.length) {
+    e.preventDefault();
+    drawer.focus();
+    return;
+  }
+
+  const first = focusable[0];
+  const last  = focusable[focusable.length - 1];
+
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+function renderCampaignDrawer(data) {
+  const titleEl = document.getElementById("drawer-campaign-title");
+  const bodyEl  = document.getElementById("campaign-drawer-body");
+  if (!bodyEl) return;
+
+  if (data.db_unavailable) {
+    bodyEl.innerHTML = `
+      <div class="drawer-section">
+        <p class="drawer-empty">Campaign detail temporarily unavailable — database offline.</p>
+      </div>`;
+    return;
+  }
+
+  if (!data.campaign) {
+    // campaign summary absent (e.g. daily-pulse window — no campaigns snapshot written)
+    // but evidence sections may still have data — render what we have
+    const hasEvidence = (data.lead_quality && data.lead_quality.total_leads > 0) ||
+                        (data.countries  && data.countries.length  > 0) ||
+                        (data.keywords   && data.keywords.length   > 0) ||
+                        (data.waste_terms && data.waste_terms.length > 0) ||
+                        (data.recent_leads && data.recent_leads.length > 0);
+
+    if (!hasEvidence) {
+      bodyEl.innerHTML = `
+        <div class="drawer-section">
+          <p class="drawer-empty">No campaign detail available for this window.</p>
+        </div>`;
+      return;
+    }
+    // Partial render — note missing campaign snapshot at the top
+    if (titleEl) titleEl.textContent = data.campaign_name || "";
+    // Inject a banner and fall through to the evidence sections below
+    bodyEl.innerHTML = "";
+    const banner = document.createElement("div");
+    banner.className = "drawer-section drawer-section--header";
+    banner.innerHTML = `<p class="drawer-source-note" style="color:var(--c-warning)">Campaign snapshot unavailable for this window — related evidence exists.</p>`;
+    bodyEl.appendChild(banner);
+    // render remaining evidence using partial helpers
+    _appendDrawerEvidenceSections(bodyEl, data, null);
+    return;
+  }
+
+  const camp = data.campaign;
+  const lq   = data.lead_quality;
+  if (titleEl) titleEl.textContent = camp.campaign_name || data.campaign_name;
+
+  // ── Header summary ─────────────────────────────────────────────────────
+  const v = (camp.verdict || "").toUpperCase();
+  const headerHtml = `
+    <div class="drawer-section drawer-section--header">
+      <div class="drawer-header-meta">
+        ${verdictBadge(v)}
+        <span class="drawer-verdict-reason">${escapeHtml(camp.verdict_reason || "")}</span>
+      </div>
+      <div class="drawer-source-note">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        Campaign truth from DB · Last run: ${escapeHtml(camp.last_run_date || "—")} · ${camp.runs != null ? camp.runs : "—"} run${camp.runs === 1 ? "" : "s"} in window
+      </div>
+    </div>`;
+
+  // ── KPI row ────────────────────────────────────────────────────────────
+  const cpqlStr  = camp.confirmed_sqls === 0 ? "N/A" : (camp.cpql_usd != null ? fmtDollar(camp.cpql_usd) : "—");
+  const junkStr  = camp.junk_rate_pct  != null ? camp.junk_rate_pct.toFixed(1) + "%" : "—";
+  const sqlsHint = lq ? `${lq.confirmed_sqls}` : (camp.confirmed_sqls != null ? String(camp.confirmed_sqls) : "—");
+  const kpiHtml = `
+    <div class="drawer-section">
+      <div class="drawer-kpi-grid">
+        <div class="drawer-kpi">
+          <div class="drawer-kpi__label">Spend</div>
+          <div class="drawer-kpi__value">${camp.spend_usd != null ? fmtDollar(camp.spend_usd) : "—"}</div>
+        </div>
+        <div class="drawer-kpi">
+          <div class="drawer-kpi__label">Leads</div>
+          <div class="drawer-kpi__value">${camp.total_leads != null ? camp.total_leads : "—"}</div>
+        </div>
+        <div class="drawer-kpi">
+          <div class="drawer-kpi__label">SQLs</div>
+          <div class="drawer-kpi__value">${sqlsHint}</div>
+        </div>
+        <div class="drawer-kpi">
+          <div class="drawer-kpi__label">Junk Rate</div>
+          <div class="drawer-kpi__value">${junkStr}</div>
+        </div>
+        <div class="drawer-kpi">
+          <div class="drawer-kpi__label">CPQL</div>
+          <div class="drawer-kpi__value">${cpqlStr}</div>
+        </div>
+        <div class="drawer-kpi">
+          <div class="drawer-kpi__label">Google Conv.</div>
+          <div class="drawer-kpi__value">${camp.conversions != null ? camp.conversions.toFixed(1) : "—"}</div>
+        </div>
+      </div>
+    </div>`;
+
+  bodyEl.innerHTML = headerHtml + kpiHtml;
+  _appendDrawerEvidenceSections(bodyEl, data, lq);
+}
+
+/**
+ * Appends lead quality, country, keyword, waste, recent leads, and source footer
+ * sections to `container`. Shared between full and partial drawer renders.
+ * `lq` is the lead_quality object (or null if absent).
+ */
+function _appendDrawerEvidenceSections(container, data, lq) {
+  // ── Lead Quality Split ─────────────────────────────────────────────────
+  let lqHtml;
+  if (!lq) {
+    lqHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">Lead Quality Split</div>
+        <p class="drawer-empty">No lead rows for this campaign in selected window.</p>
+      </div>`;
+  } else {
+    const lqJunkCls = lq.junk_rate_pct == null ? "" :
+                      lq.junk_rate_pct < JUNK_RATE_LOW_THRESHOLD   ? "junk--low" :
+                      lq.junk_rate_pct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
+    const lqJunkStr = lq.junk_rate_pct != null ? lq.junk_rate_pct.toFixed(1) + "%" : "—";
+    lqHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">Lead Quality Split</div>
+        <table class="drawer-table">
+          <thead>
+            <tr>
+              <th>Qualified</th><th>In Progress</th><th>Junk</th><th>Wrong Fit</th><th>Unknown</th><th>Junk Rate</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>${lq.confirmed_sqls}</td>
+              <td>${lq.in_progress}</td>
+              <td>${lq.confirmed_junk}</td>
+              <td>${lq.wrong_fit}</td>
+              <td>${lq.unknown}</td>
+              <td class="${lqJunkCls}">${lqJunkStr}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="drawer-source-note">Junk rate = confirmed junk ÷ verdicted leads (qualified + in-progress + junk + wrong fit). Unknown contacts are excluded from the denominator. Total in window: ${lq.total_leads}.</p>
+      </div>`;
+  }
+
+  // ── Country Breakdown ──────────────────────────────────────────────────
+  let countryHtml;
+  const countries = data.countries || [];
+  if (countries.length === 0) {
+    countryHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">Country Breakdown</div>
+        <p class="drawer-empty">No lead rows for this campaign in selected window.</p>
+      </div>`;
+  } else {
+    const rows = countries.map((r) => {
+      const junkCls = r.junk_rate_pct == null ? "" :
+                      r.junk_rate_pct < JUNK_RATE_LOW_THRESHOLD   ? "junk--low" :
+                      r.junk_rate_pct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
+      return `
+        <tr>
+          <td class="td--name">${escapeHtml(r.country)}</td>
+          <td>${r.total_leads}</td>
+          <td>${r.confirmed_sqls}</td>
+          <td>${r.in_progress != null ? r.in_progress : "—"}</td>
+          <td>${r.confirmed_junk}</td>
+          <td>${r.wrong_fit}</td>
+          <td>${r.unknown}</td>
+          <td class="${junkCls}">${r.junk_rate_pct != null ? r.junk_rate_pct.toFixed(1) + "%" : "—"}</td>
+        </tr>`;
+    }).join("");
+    countryHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">Country Breakdown</div>
+        <table class="drawer-table">
+          <thead>
+            <tr><th>Country</th><th>Leads</th><th>SQLs</th><th>In Progress</th><th>Junk</th><th>Wrong Fit</th><th>Unknown</th><th>Junk Rate</th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  // ── Keyword Preview ────────────────────────────────────────────────────
+  let kwHtml;
+  const keywords = data.keywords || [];
+  if (keywords.length === 0) {
+    kwHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">Keyword Preview</div>
+        <p class="drawer-empty">No keyword rows for this campaign in selected window.</p>
+      </div>`;
+  } else {
+    const kwRows = keywords.map((k) => `
+      <tr>
+        <td class="td--name">${escapeHtml(k.keyword || "—")}</td>
+        <td>${matchTypeBadge(k.match_type)}</td>
+        <td>${k.spend_usd != null ? fmtDollar(k.spend_usd) : "—"}</td>
+        <td>${k.clicks != null ? k.clicks : "—"}</td>
+        <td>${k.cpc_usd != null ? "$" + k.cpc_usd.toFixed(2) : "—"}</td>
+        <td>${k.conversions != null ? k.conversions.toFixed(1) : "—"}</td>
+        <td>${qualityScoreBadge(k.quality_score)}</td>
+      </tr>`).join("");
+    kwHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">Keyword Preview</div>
+        <table class="drawer-table">
+          <thead>
+            <tr><th>Keyword</th><th>Match</th><th>Spend</th><th>Clicks</th><th>CPC</th><th>Google Conv.</th><th>QS</th></tr>
+          </thead>
+          <tbody>${kwRows}</tbody>
+        </table>
+        <p class="drawer-source-note">Keyword metrics are Google Ads/Windsor platform metrics only.</p>
+      </div>`;
+  }
+
+  // ── Waste Terms Preview ────────────────────────────────────────────────
+  const wasteTerms = data.waste_terms || [];
+  let wasteHtml;
+  if (wasteTerms.length === 0) {
+    wasteHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">Waste Terms Preview</div>
+        <p class="drawer-empty">No flagged waste terms for this campaign in selected window.</p>
+      </div>`;
+  } else {
+    const wtRows = wasteTerms.map((t) => `
+      <tr>
+        <td class="td--name waste-pattern">${escapeHtml(t.search_term || "—")}</td>
+        <td>${t.spend_usd != null ? fmtDollar(t.spend_usd) : "—"}</td>
+        <td>${t.junk_category ? junkCategoryBadge(t.junk_category) : "—"}</td>
+        <td class="waste-pattern">${escapeHtml(t.matched_pattern || "—")}</td>
+        <td>${t.crm_junk_confirmed != null ? t.crm_junk_confirmed : "—"}</td>
+      </tr>`).join("");
+    wasteHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">Waste Terms Preview</div>
+        <table class="drawer-table">
+          <thead>
+            <tr><th>Search Term</th><th>Spend</th><th>Category</th><th>Pattern</th><th>CRM Junk Confirmed</th></tr>
+          </thead>
+          <tbody>${wtRows}</tbody>
+        </table>
+        <div style="margin-top:var(--space-3)">
+          <button class="btn btn--secondary waste-copy-btn" type="button" id="drawer-waste-copy-btn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            Copy waste terms from this campaign
+          </button>
+          <p class="drawer-source-note" style="margin-top:var(--space-2)">Review-only — no push action.</p>
+        </div>
+      </div>`;
+  }
+
+  // ── Recent Leads ───────────────────────────────────────────────────────
+  const recentLeads = data.recent_leads || [];
+  let leadsHtml;
+  if (recentLeads.length === 0) {
+    leadsHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">Recent Leads</div>
+        <p class="drawer-empty">No lead rows for this campaign in selected window.</p>
+      </div>`;
+  } else {
+    const rlRows = recentLeads.map((l) => {
+      const catCls = l.status_category === "qualified"   ? "junk--low"  :
+                     l.status_category === "junk"        ? "junk--high" :
+                     l.status_category === "in_progress" ? "junk--mid"  : "";
+      return `
+        <tr>
+          <td class="td--name">${escapeHtml(l.company || "—")}</td>
+          <td>${escapeHtml(l.country || "—")}</td>
+          <td>${escapeHtml(l.keyword || "—")}</td>
+          <td>${escapeHtml(l.mql_status || "—")}</td>
+          <td class="${catCls}">${escapeHtml(l.status_category || "—")}</td>
+          <td>${escapeHtml(l.run_date || "—")}</td>
+        </tr>`;
+    }).join("");
+    leadsHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">Recent Leads</div>
+        <table class="drawer-table">
+          <thead>
+            <tr><th>Company</th><th>Country</th><th>Keyword</th><th>MQL Status</th><th>Category</th><th>Run Date</th></tr>
+          </thead>
+          <tbody>${rlRows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  // ── Data source footer ─────────────────────────────────────────────────
+  const src = data.data_sources || {};
+  const footerHtml = `
+    <div class="drawer-section drawer-source-footer">
+      <p class="drawer-source-note">
+        Data sources: ${escapeHtml(src.campaign || "campaigns table")},
+        ${escapeHtml(src.lead_quality || "HubSpot-derived leads table")},
+        ${escapeHtml(src.keywords || "Windsor keyword performance")},
+        ${escapeHtml(src.waste_terms || "waste_terms table")}.
+      </p>
+    </div>`;
+
+  container.insertAdjacentHTML("beforeend", lqHtml + countryHtml + kwHtml + wasteHtml + leadsHtml + footerHtml);
+
+  // Wire up waste copy button if present (must happen after DOM insertion)
+  const wcBtn = container.querySelector("#drawer-waste-copy-btn");
+  if (wcBtn) {
+    wcBtn.addEventListener("click", () => copyDrawerWasteTerms(data.waste_terms || [], wcBtn));
+  }
+}
+
+function copyDrawerWasteTerms(terms, btn) {
+  const text = terms.map((t) => (t.search_term || "").trim()).filter(Boolean).join("\n");
+  if (!text) return;
+  const origHTML = btn ? btn.innerHTML : null;
+  const showFeedback = (success) => {
+    if (!btn) return;
+    btn.innerHTML = success
+      ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Copied!`
+      : `Failed`;
+    btn.disabled = true;
+    setTimeout(() => {
+      if (btn && origHTML !== null) { btn.innerHTML = origHTML; btn.disabled = false; }
+    }, 2000);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => showFeedback(true), () => showFeedback(false));
+  } else {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { /* ignore */ }
+    document.body.removeChild(ta);
+    showFeedback(ok);
+  }
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -2049,6 +2499,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (kwCampSel)  kwCampSel.addEventListener("change", applyKeywordFilters);
   if (kwMatchSel) kwMatchSel.addEventListener("change", applyKeywordFilters);
   if (kwCopyBtn)  kwCopyBtn.addEventListener("click",  copyKeywordRows);
+
+  // Wire up campaign drawer close controls
+  const drawerCloseBtn = document.getElementById("drawer-close-btn");
+  const drawerOverlay  = document.getElementById("campaign-drawer-overlay");
+  if (drawerCloseBtn) drawerCloseBtn.addEventListener("click", closeCampaignDrawer);
+  if (drawerOverlay)  drawerOverlay.addEventListener("click", closeCampaignDrawer);
 
   // Check auth and load initial page
   const isAuth = await checkAuth();
