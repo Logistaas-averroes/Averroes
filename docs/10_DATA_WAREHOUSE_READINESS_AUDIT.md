@@ -474,7 +474,7 @@ CREATE TABLE IF NOT EXISTS search_terms (
   clicks           INTEGER       DEFAULT 0,
   impressions      INTEGER       DEFAULT 0,
   conversions      NUMERIC(8,2)  DEFAULT 0,
-  is_flagged_waste BOOLEAN       DEFAULT FALSE,
+  is_flagged_waste BOOLEAN,
   junk_category    TEXT,
   matched_pattern  TEXT,
   created_at       TIMESTAMPTZ   DEFAULT NOW()
@@ -489,7 +489,14 @@ CREATE TABLE IF NOT EXISTS search_terms (
 
 **Upsert key:** `(source_date, campaign_name, ad_group, keyword, match_type, search_term)` — natural deduplication key.
 
-**`is_flagged_waste`, `junk_category`, `matched_pattern`:** These are derived by the analysis layer, not the connector. On initial write from the connector, these should be NULL. The analysis layer should update them in a subsequent pass. This preserves the connector → writer → analysis separation.
+**`is_flagged_waste`, `junk_category`, `matched_pattern`:** These are derived by the analysis layer, not the connector. On initial write from the connector, **all three fields should be left NULL**. The analysis layer updates them in a subsequent pass. This preserves the connector → writer → analysis separation.
+
+`is_flagged_waste` uses three-valued logic:
+- `NULL` — not yet analysed by the waste-detection layer
+- `TRUE` — analysed and flagged as waste
+- `FALSE` — analysed and confirmed clean
+
+Defaulting to `FALSE` would make unanalysed rows indistinguishable from rows that were analysed and found clean. The column must be nullable (`BOOLEAN` without a default) so that the analysis layer can reliably filter for rows that still need classification (`WHERE is_flagged_waste IS NULL`).
 
 ---
 
@@ -567,9 +574,11 @@ CREATE TABLE IF NOT EXISTS gclid_attribution (
   deal_amount_usd     NUMERIC(12,2),
   match_status        TEXT,           -- matched | unmatched | url_fallback
   created_at          TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(gclid, contact_id)
+  UNIQUE(gclid, contact_id, deal_id)
 );
 ```
+
+**Uniqueness note:** A single contact/GCLID pair may be associated with multiple deals (e.g., a trial deal and a won deal for the same click). The uniqueness key must include `deal_id` to avoid collapsing legitimate multi-deal attribution rows. If `deal_id` is unavailable for some rows (unmatched contacts without any deal), the implementation should use a partial unique index or a generated `attribution_key` so that unmatched rows are not accidentally collapsed against each other.
 
 This enables: GCLID attribution history, trend analysis on GCLID coverage over time, and a future `GET /api/gclid-attribution` endpoint without reading JSON files at request time.
 
@@ -587,7 +596,7 @@ This enables: GCLID attribution history, trend analysis on GCLID coverage over t
 | Contacts | `contact_id` | Yes | History optional | HubSpot is source of truth for contact state |
 | Deals | `deal_id` (when stored) | Yes | Yes (stage changes matter) | Deal stage changes are meaningful history |
 | Waste Terms | Derived from search_terms | Snapshot per run | Keep for current page | Until search_terms table is live |
-| GCLID Attribution | `gclid + contact_id` | Yes | No | Match is stable once written |
+| GCLID Attribution | `gclid + contact_id + deal_id` | Yes | No | Include deal_id to allow multi-deal contacts |
 
 **Key recommendation:**
 
@@ -683,8 +692,17 @@ Search terms are the primary volume concern. 14 days of data per weekly run × 5
 CREATE INDEX ON search_terms(source_date);
 CREATE INDEX ON search_terms(campaign_name);
 CREATE INDEX ON search_terms(is_flagged_waste);
-CREATE INDEX ON search_terms(search_term);  -- for LIKE/pattern queries
+
+-- Basic equality / prefix ordering helper
+CREATE INDEX ON search_terms(search_term);
+
+-- For contains / ILIKE / pattern search at scale, enable pg_trgm and use a trigram index:
+-- CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- CREATE INDEX idx_search_terms_search_term_trgm
+--   ON search_terms USING gin (search_term gin_trgm_ops);
 ```
+
+**Important:** A plain B-tree index on `search_term` does not efficiently support contains searches such as `ILIKE '%term%'`. If `/api/search-terms?q=` supports substring or contains search, PostgreSQL trigram indexing (`pg_trgm` extension, GIN index with `gin_trgm_ops`) should be considered from day one. Without it, contains searches will degrade to sequential scans on a table that may reach millions of rows.
 
 ### Retention and pagination
 
@@ -705,7 +723,7 @@ CREATE INDEX ON search_terms(search_term);  -- for LIKE/pattern queries
 |-----------|-------|
 | Source table | `search_terms` |
 | Purpose | Browse and filter all stored search terms |
-| Required pagination | ✅ Yes — `limit` + `offset` |
+| Required pagination | ✅ Yes — cursor/keyset preferred |
 | Phase | 2 (after search_terms table created) |
 | Read-only | ✅ Yes |
 
@@ -718,8 +736,23 @@ GET /api/search-terms
   &waste_only=     (boolean)
   &min_spend=      (numeric)
   &limit=          (default: 100, max: 500)
-  &offset=         (default: 0)
+  &cursor=         (opaque cursor for keyset pagination)
 ```
+
+**Recommended response shape:**
+
+```json
+{
+  "rows": [],
+  "pagination": {
+    "limit": 100,
+    "next_cursor": "opaque-token-or-null",
+    "has_more": false
+  }
+}
+```
+
+**Pagination note:** Use cursor/keyset pagination rather than `offset`. The `search_terms` table may reach hundreds of thousands to millions of rows. Offset pagination becomes progressively slower for deep pages (full index/table scan to skip N rows) and can return unstable slices while new rows are inserted concurrently. A keyset cursor — typically the `id` or `(source_date, id)` of the last row returned — avoids both problems and performs consistently at scale.
 
 ---
 
@@ -861,11 +894,11 @@ This separation means:
 
 ### PR-ADS-040 — Search Terms DB Table + Writer + `/api/search-terms`
 
-- Add `search_terms` table to `db/schema.py`
+- Add `search_terms` table to `db/schema.py` (`is_flagged_waste BOOLEAN` nullable, no default)
 - Add `write_search_terms()` to `db/writers.py`
 - Connect `pull_search_terms()` output to `write_search_terms()` in weekly/daily schedulers
-- Add `GET /api/search-terms` with pagination
-- Waste flag population handled by analysis layer (not writer)
+- Add `GET /api/search-terms` with **cursor/keyset pagination** from the first implementation (not offset)
+- Waste flag population handled by analysis layer (not writer); raw inserts leave `is_flagged_waste`, `junk_category`, `matched_pattern` as NULL
 - No UI page yet
 
 ### PR-ADS-041 — Historical Backfill Script (Skeleton)
