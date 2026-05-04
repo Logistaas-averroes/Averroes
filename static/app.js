@@ -173,6 +173,8 @@ function showLogin() {
   document.getElementById("login-screen").style.display = "flex";
   document.getElementById("app").style.display = "none";
   _currentUser = null;
+  // Ensure the drawer/overlay are hidden so they don't block the login screen.
+  closeCampaignDrawer();
 }
 
 function showApp(user) {
@@ -651,7 +653,7 @@ async function loadCampaigns() {
           <th class="td--num">CPQL</th>
           <th>Verdict</th>
           <th class="td--num">Runs</th>
-          <th></th>
+          <th scope="col"><span class="sr-only">Actions</span></th>
         </tr>
       </thead>`;
 
@@ -2005,6 +2007,7 @@ async function loadHealth() {
 // ── Campaign Detail Drawer ─────────────────────────────────────────────────
 
 let _drawerOpenCampaign = null;  // campaign name string currently shown in drawer, or null
+let _drawerPreviousFocus = null; // element to restore focus to on close
 
 async function openCampaignDrawer(campaignName) {
   if (!campaignName) return;
@@ -2015,18 +2018,31 @@ async function openCampaignDrawer(campaignName) {
   const titleEl   = document.getElementById("drawer-campaign-title");
   const bodyEl    = document.getElementById("campaign-drawer-body");
 
+  // Save the currently focused element so we can restore it on close
+  _drawerPreviousFocus = document.activeElement;
+
   // Show overlay + drawer immediately with loading state
   if (overlay) { overlay.hidden = false; overlay.removeAttribute("aria-hidden"); }
   if (drawer)  { drawer.hidden  = false; }
   if (titleEl) titleEl.textContent = campaignName;
   if (bodyEl)  bodyEl.innerHTML = `<p class="empty-state"><span class="spinner"></span> Loading campaign detail…</p>`;
 
-  // Trap focus — bind Escape key once
-  document.addEventListener("keydown", _drawerEscapeHandler);
+  // Move focus into the drawer — prefer close button, fallback drawer itself
+  const closeBtn = document.getElementById("drawer-close-btn");
+  if (closeBtn) {
+    closeBtn.focus();
+  } else if (drawer) {
+    drawer.setAttribute("tabindex", "-1");
+    drawer.focus();
+  }
+
+  // Bind keyboard handlers: Escape closes, Tab traps focus inside drawer
+  document.addEventListener("keydown", _drawerKeyHandler);
 
   try {
+    // Preferred query-param endpoint (avoids routing issues with '/' in names)
     const data = await fetchJSON(
-      `/api/campaigns/${encodeURIComponent(campaignName)}/detail?days=${getSelectedDays()}`
+      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${getSelectedDays()}`
     );
     // Guard stale response: drawer may have been closed or switched while fetching
     if (_drawerOpenCampaign !== campaignName) return;
@@ -2048,11 +2064,49 @@ function closeCampaignDrawer() {
   const drawer  = document.getElementById("campaign-drawer");
   if (overlay) { overlay.hidden = true; overlay.setAttribute("aria-hidden", "true"); }
   if (drawer)  drawer.hidden = true;
-  document.removeEventListener("keydown", _drawerEscapeHandler);
+  document.removeEventListener("keydown", _drawerKeyHandler);
+
+  // Restore focus to the element that opened the drawer
+  if (_drawerPreviousFocus && typeof _drawerPreviousFocus.focus === "function" && document.contains(_drawerPreviousFocus)) {
+    _drawerPreviousFocus.focus();
+  }
+  _drawerPreviousFocus = null;
 }
 
-function _drawerEscapeHandler(e) {
-  if (e.key === "Escape") closeCampaignDrawer();
+function _drawerKeyHandler(e) {
+  if (e.key === "Escape") {
+    closeCampaignDrawer();
+    return;
+  }
+  if (e.key === "Tab") {
+    _trapDrawerFocus(e);
+  }
+}
+
+function _trapDrawerFocus(e) {
+  const drawer = document.getElementById("campaign-drawer");
+  if (!drawer || drawer.hidden) return;
+
+  const focusable = Array.from(drawer.querySelectorAll(
+    'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+  )).filter((el) => !el.closest("[hidden]"));
+
+  if (!focusable.length) {
+    e.preventDefault();
+    drawer.focus();
+    return;
+  }
+
+  const first = focusable[0];
+  const last  = focusable[focusable.length - 1];
+
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
 }
 
 function renderCampaignDrawer(data) {
@@ -2069,10 +2123,31 @@ function renderCampaignDrawer(data) {
   }
 
   if (!data.campaign) {
-    bodyEl.innerHTML = `
-      <div class="drawer-section">
-        <p class="drawer-empty">No campaign detail available for this window.</p>
-      </div>`;
+    // campaign summary absent (e.g. daily-pulse window — no campaigns snapshot written)
+    // but evidence sections may still have data — render what we have
+    const hasEvidence = (data.lead_quality && data.lead_quality.total_leads > 0) ||
+                        (data.countries  && data.countries.length  > 0) ||
+                        (data.keywords   && data.keywords.length   > 0) ||
+                        (data.waste_terms && data.waste_terms.length > 0) ||
+                        (data.recent_leads && data.recent_leads.length > 0);
+
+    if (!hasEvidence) {
+      bodyEl.innerHTML = `
+        <div class="drawer-section">
+          <p class="drawer-empty">No campaign detail available for this window.</p>
+        </div>`;
+      return;
+    }
+    // Partial render — note missing campaign snapshot at the top
+    if (titleEl) titleEl.textContent = data.campaign_name || "";
+    // Inject a banner and fall through to the evidence sections below
+    bodyEl.innerHTML = "";
+    const banner = document.createElement("div");
+    banner.className = "drawer-section drawer-section--header";
+    banner.innerHTML = `<p class="drawer-source-note" style="color:var(--c-warning)">Campaign snapshot unavailable for this window — related evidence exists.</p>`;
+    bodyEl.appendChild(banner);
+    // render remaining evidence using partial helpers
+    _appendDrawerEvidenceSections(bodyEl, data, null);
     return;
   }
 
@@ -2128,6 +2203,22 @@ function renderCampaignDrawer(data) {
       </div>
     </div>`;
 
+  bodyEl.innerHTML = headerHtml + kpiHtml;
+  _appendDrawerEvidenceSections(bodyEl, data, lq);
+
+  // Wire up waste copy button if present
+  const wcBtn = document.getElementById("drawer-waste-copy-btn");
+  if (wcBtn) {
+    wcBtn.addEventListener("click", () => copyDrawerWasteTerms(data.waste_terms || [], wcBtn));
+  }
+}
+
+/**
+ * Appends lead quality, country, keyword, waste, recent leads, and source footer
+ * sections to `container`. Shared between full and partial drawer renders.
+ * `lq` is the lead_quality object (or null if absent).
+ */
+function _appendDrawerEvidenceSections(container, data, lq) {
   // ── Lead Quality Split ─────────────────────────────────────────────────
   let lqHtml;
   if (!lq) {
@@ -2321,10 +2412,10 @@ function renderCampaignDrawer(data) {
       </p>
     </div>`;
 
-  bodyEl.innerHTML = headerHtml + kpiHtml + lqHtml + countryHtml + kwHtml + wasteHtml + leadsHtml + footerHtml;
+  container.insertAdjacentHTML("beforeend", lqHtml + countryHtml + kwHtml + wasteHtml + leadsHtml + footerHtml);
 
-  // Wire up waste copy button if present
-  const wcBtn = document.getElementById("drawer-waste-copy-btn");
+  // Wire up waste copy button if present (must happen after DOM insertion)
+  const wcBtn = container.querySelector("#drawer-waste-copy-btn");
   if (wcBtn) {
     wcBtn.addEventListener("click", () => copyDrawerWasteTerms(wasteTerms, wcBtn));
   }

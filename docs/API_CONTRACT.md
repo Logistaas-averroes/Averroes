@@ -540,13 +540,15 @@ When database is unavailable: all numeric fields are `null`, `run_count` is `0`,
 
 ---
 
-#### `GET /api/campaigns/{campaign_name}/detail?days=N`
+#### `GET /api/campaign-detail?campaign_name={encoded_name}&days=N` *(Preferred)*
 Campaign drill-down detail — full investigation context for a single campaign.
 
 **Auth:** Auth required (cookie session, same as `/api/campaigns`)
-**Query params:** `days` (integer, default 30, max 365)
+**Query params:**
+- `campaign_name` (required, URL-encoded string) — campaign name, must use `encodeURIComponent`. Handles campaign names containing spaces, pipes, commas, slashes, and any other punctuation safely via the query string.
+- `days` (integer, default 30, max 365)
+
 **Read-only:** Yes — no write to Google Ads, HubSpot, or any external system
-**Campaign name:** Must be URL-encoded by the frontend (`encodeURIComponent`). Names with spaces, pipes, commas, and punctuation are supported. Campaign names with literal forward slashes may not route correctly.
 
 **Response 200:**
 ```json
@@ -584,10 +586,11 @@ Campaign drill-down detail — full investigation context for a single campaign.
       "country": "Nigeria",
       "total_leads": 10,
       "confirmed_sqls": 0,
+      "in_progress": 1,
       "confirmed_junk": 4,
       "wrong_fit": 1,
-      "unknown": 5,
-      "junk_rate_pct": 80.0
+      "unknown": 4,
+      "junk_rate_pct": 66.67
     }
   ],
   "keywords": [
@@ -631,14 +634,20 @@ Campaign drill-down detail — full investigation context for a single campaign.
 }
 ```
 
-**Missing campaign (no rows in window):** `campaign` and `lead_quality` are `null`; arrays are empty.
+**Partial payload (campaign snapshot missing in window):**
+`campaign` may be `null` when no campaigns-table snapshot was written in the selected window (e.g. a short window that only received a daily-pulse run, which writes leads but not campaign snapshots). **Consumers must not treat `campaign: null` as total absence of detail.** The other sections (`lead_quality`, `countries`, `keywords`, `waste_terms`, `recent_leads`) may still return data.
 
-When database is unavailable: `{ "days": 30, "campaign_name": "...", "campaign": null, "lead_quality": null, "countries": [], "keywords": [], "waste_terms": [], "recent_leads": [], "db_unavailable": true }`
+Example partial response:
+```json
+{ "days": 7, "campaign_name": "global - competitors", "campaign": null, "lead_quality": { ... }, "countries": [ ... ], ... }
+```
+
+**When database is unavailable:** `{ "days": 30, "campaign_name": "...", "campaign": null, "lead_quality": null, "countries": [], "keywords": [], "waste_terms": [], "recent_leads": [], "db_unavailable": true }`
 
 **Data source details:**
 - `campaign` — latest snapshot row from the campaigns table for the campaign name in the selected window. `total_leads` uses latest-snapshot semantics (not summed across overlapping runs).
 - `lead_quality` — HubSpot-derived `status_category` from the leads table, deduplicated by `contact_id` (latest run per contact wins; null `contact_id` rows treated as unique).
-- `countries` — deduped leads grouped by `COALESCE(NULLIF(BTRIM(country), ''), '(unknown)')`, sorted by total leads descending.
+- `countries` — deduped leads grouped by `COALESCE(NULLIF(BTRIM(country), ''), '(unknown)')`, sorted by total leads descending. Includes `in_progress` in both the response and the verdicted_leads denominator (consistent with lead-quality).
 - `keywords` — top 10 keyword rows by spend from the keywords table, aggregated by keyword + match_type. Google Ads/Windsor platform metrics only — no HubSpot lead quality joined.
 - `waste_terms` — top 10 waste term rows by spend from the waste_terms table, aggregated by search_term + junk_category + matched_pattern.
 - `recent_leads` — 10 most recent deduped leads for this campaign (by run_date descending). Does not expose contact_id.
@@ -651,6 +660,13 @@ When database is unavailable: `{ "days": 30, "campaign_name": "...", "campaign":
 - Waste section shows flagged waste terms only — no apply/push action.
 - Lead quality uses HubSpot-derived `status_category` only.
 - Phase 1 read-only — no AI inference, no recommendations, no bid/budget changes.
+
+---
+
+#### `GET /api/campaigns/{campaign_name}/detail?days=N` *(Legacy — path-segment form)*
+Same response shape as `/api/campaign-detail`. Preserved for backwards compatibility.
+
+**Limitation:** Campaign names containing a literal forward slash (`/`) cannot be addressed via this route even when URL-encoded, because the router treats slashes as path separators. Use `/api/campaign-detail?campaign_name=...` for new callers.
 
 ---
 
@@ -671,7 +687,8 @@ When database is unavailable: `{ "days": 30, "campaign_name": "...", "campaign":
 | POST | `/run/weekly` | Admin | Trigger weekly |
 | POST | `/run/monthly` | Admin | Trigger monthly |
 | GET | `/api/campaigns` | Auth | Campaign metrics (DB, ?days=) |
-| GET | `/api/campaigns/{campaign_name}/detail` | Auth | Campaign drill-down detail (DB, ?days=) |
+| GET | `/api/campaign-detail` | Auth | Campaign drill-down detail, query-param form (DB, ?campaign_name=&days=) **Preferred** |
+| GET | `/api/campaigns/{campaign_name}/detail` | Auth | Campaign drill-down detail, path-segment form (DB, ?days=) *Legacy* |
 | GET | `/api/leads` | Auth | Lead rows (DB, ?days=) |
 | GET | `/api/deals` | Auth | Deal rows (DB, ?days=) |
 | GET | `/api/waste` | Auth | Waste terms (DB, ?days=) |

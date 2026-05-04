@@ -36,7 +36,8 @@ Protected endpoints (require authenticated session):
   GET  /api/geo                    — Windsor geo performance by country/campaign (requires auth).
   GET  /api/keywords               — Windsor keyword performance by campaign/ad group/keyword (requires auth).
   GET  /api/leads/country-summary  — HubSpot lead quality aggregated by country (requires auth).
-  GET  /api/campaigns/{campaign_name}/detail — Campaign drill-down detail (requires auth).
+  GET  /api/campaign-detail        — Campaign drill-down detail, query-param form (requires auth). Preferred.
+  GET  /api/campaigns/{campaign_name}/detail — Campaign drill-down detail, path-segment form (requires auth). Legacy.
 """
 
 import importlib
@@ -1096,31 +1097,35 @@ def api_leads_country_summary(
     return {"days": days, "rows": summary_out}
 
 
-@app.get("/api/campaigns/{campaign_name}/detail")
-def api_campaign_detail(
-    campaign_name: str,
-    user: dict = Depends(require_auth),
-    days: int = Query(default=30, description="Number of days to look back (1–365)"),
-) -> dict[str, Any]:
-    """Return campaign drill-down detail for the given campaign name. Requires auth.
+# ── Campaign detail — shared builder ───────────────────────────────────────────
 
-    Campaign names are matched case-insensitively. The frontend must call
-    encodeURIComponent(campaign_name) before embedding in the URL path.
+def _build_campaign_detail(campaign_name: str, days: int) -> dict:
+    """Assemble full campaign investigation payload for a given campaign.
+
+    Campaign names are already stored lowercase; normalize in Python before
+    querying so that direct equality (campaign_name = %s) can use existing
+    indexes instead of full-table LOWER() scans.
+
+    Does NOT bail out when the campaigns table has no snapshot in the window —
+    lead, keyword, and waste evidence is still returned even when the campaign
+    summary is absent (e.g. a daily-pulse window that only wrote leads).
+
+    Returns a safe shape with db_unavailable=True when the database is down.
     Phase 1 read-only — no writes to Google Ads or HubSpot.
     """
-    days = _clamp_days(days)
-    # Normalise to lowercase to match stored values (writers.py lowercases on insert).
+    # Normalize to lowercase/strip to match canonical stored values
+    # (db/writers.py normalizes to lower+strip on every write).
     name_key = campaign_name.strip().lower()
 
-    _empty = {
-        "days": days,
+    _empty: dict = {
+        "days":          days,
         "campaign_name": campaign_name,
-        "campaign": None,
-        "lead_quality": None,
-        "countries": [],
-        "keywords": [],
-        "waste_terms": [],
-        "recent_leads": [],
+        "campaign":      None,
+        "lead_quality":  None,
+        "countries":     [],
+        "keywords":      [],
+        "waste_terms":   [],
+        "recent_leads":  [],
     }
     _db_empty = {**_empty, "db_unavailable": True}
 
@@ -1132,6 +1137,7 @@ def api_campaign_detail(
 
             with conn.cursor() as cur:
                 # ── Campaign summary — latest snapshot in window ──────────────
+                # Direct equality on campaign_name; index on campaigns(campaign_name) is usable.
                 cur.execute(
                     """
                     WITH date_filtered AS (
@@ -1143,7 +1149,7 @@ def api_campaign_detail(
                             created_at
                         FROM campaigns
                         WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                          AND LOWER(campaign_name) = %s
+                          AND campaign_name = %s
                     ),
                     run_stats AS (
                         SELECT
@@ -1174,30 +1180,32 @@ def api_campaign_detail(
                 )
                 camp_row = cur.fetchone()
 
-                if camp_row is None:
-                    # No campaign data found — return safe empty 200
-                    return _empty
-
-                camp_cols = [d[0] for d in cur.description]
-                camp_dict = dict(zip(camp_cols, camp_row))
-                campaign_out = {
-                    "campaign_name":  camp_dict["campaign_name"],
-                    "spend_usd":      float(camp_dict["spend_usd"])      if camp_dict["spend_usd"]      is not None else None,
-                    "clicks":         int(camp_dict["clicks"])            if camp_dict["clicks"]          is not None else None,
-                    "impressions":    int(camp_dict["impressions"])       if camp_dict["impressions"]     is not None else None,
-                    "conversions":    float(camp_dict["conversions"])     if camp_dict["conversions"]     is not None else None,
-                    "total_leads":    int(camp_dict["total_leads"])       if camp_dict["total_leads"]     is not None else 0,
-                    "confirmed_sqls": int(camp_dict["confirmed_sqls"])    if camp_dict["confirmed_sqls"]  is not None else 0,
-                    "junk_count":     int(camp_dict["junk_count"])        if camp_dict["junk_count"]      is not None else 0,
-                    "junk_rate_pct":  float(camp_dict["junk_rate_pct"])   if camp_dict["junk_rate_pct"]   is not None else None,
-                    "cpql_usd":       float(camp_dict["cpql_usd"])        if camp_dict["cpql_usd"]        is not None else None,
-                    "verdict":        camp_dict["verdict"],
-                    "verdict_reason": camp_dict["verdict_reason"],
-                    "runs":           int(camp_dict["runs"])              if camp_dict["runs"]            is not None else 0,
-                    "last_run_date":  str(camp_dict["last_run_date"])     if camp_dict["last_run_date"]   else None,
-                }
+                campaign_out = None
+                if camp_row is not None:
+                    camp_cols = [d[0] for d in cur.description]
+                    camp_dict = dict(zip(camp_cols, camp_row))
+                    campaign_out = {
+                        "campaign_name":  camp_dict["campaign_name"],
+                        "spend_usd":      float(camp_dict["spend_usd"])      if camp_dict["spend_usd"]      is not None else None,
+                        "clicks":         int(camp_dict["clicks"])            if camp_dict["clicks"]          is not None else None,
+                        "impressions":    int(camp_dict["impressions"])       if camp_dict["impressions"]     is not None else None,
+                        "conversions":    float(camp_dict["conversions"])     if camp_dict["conversions"]     is not None else None,
+                        "total_leads":    int(camp_dict["total_leads"])       if camp_dict["total_leads"]     is not None else 0,
+                        "confirmed_sqls": int(camp_dict["confirmed_sqls"])    if camp_dict["confirmed_sqls"]  is not None else 0,
+                        "junk_count":     int(camp_dict["junk_count"])        if camp_dict["junk_count"]      is not None else 0,
+                        "junk_rate_pct":  float(camp_dict["junk_rate_pct"])   if camp_dict["junk_rate_pct"]   is not None else None,
+                        "cpql_usd":       float(camp_dict["cpql_usd"])        if camp_dict["cpql_usd"]        is not None else None,
+                        "verdict":        camp_dict["verdict"],
+                        "verdict_reason": camp_dict["verdict_reason"],
+                        "runs":           int(camp_dict["runs"])              if camp_dict["runs"]            is not None else 0,
+                        "last_run_date":  str(camp_dict["last_run_date"])     if camp_dict["last_run_date"]   else None,
+                    }
+                # Note: do NOT return early here. Even when campaign_out is None
+                # (no snapshot in this window, e.g. a daily-pulse-only window),
+                # we continue to query and return leads, keyword, and waste evidence.
 
                 # ── Lead quality — deduped by contact_id, campaign-scoped ─────
+                # Direct equality on campaign_name (already normalized).
                 cur.execute(
                     """
                     WITH deduped AS (
@@ -1211,7 +1219,7 @@ def api_campaign_detail(
                             status_category
                         FROM leads
                         WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                          AND LOWER(campaign_name) = %s
+                          AND campaign_name = %s
                         ORDER BY
                             CASE
                                 WHEN contact_id IS NOT NULL AND contact_id <> ''
@@ -1259,6 +1267,7 @@ def api_campaign_detail(
                     }
 
                 # ── Country breakdown — deduped campaign leads by country ──────
+                # Direct equality on campaign_name (already normalized).
                 cur.execute(
                     """
                     WITH deduped AS (
@@ -1273,7 +1282,7 @@ def api_campaign_detail(
                             status_category
                         FROM leads
                         WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                          AND LOWER(campaign_name) = %s
+                          AND campaign_name = %s
                         ORDER BY
                             CASE
                                 WHEN contact_id IS NOT NULL AND contact_id <> ''
@@ -1323,6 +1332,7 @@ def api_campaign_detail(
                     })
 
                 # ── Keywords preview — top 10 by spend for this campaign ───────
+                # Direct equality on campaign_name (already normalized).
                 cur.execute(
                     """
                     SELECT
@@ -1339,7 +1349,7 @@ def api_campaign_detail(
                         END                AS cpc_usd
                     FROM keywords
                     WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                      AND LOWER(campaign_name) = %s
+                      AND campaign_name = %s
                     GROUP BY keyword, match_type
                     ORDER BY spend_usd DESC NULLS LAST
                     LIMIT 10
@@ -1363,6 +1373,7 @@ def api_campaign_detail(
                     })
 
                 # ── Waste terms preview — top 10 by spend for this campaign ───
+                # Direct equality on campaign_name (already normalized).
                 cur.execute(
                     """
                     SELECT
@@ -1374,7 +1385,7 @@ def api_campaign_detail(
                         MAX(run_date)           AS run_date
                     FROM waste_terms
                     WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                      AND LOWER(campaign_name) = %s
+                      AND campaign_name = %s
                     GROUP BY search_term, junk_category, matched_pattern
                     ORDER BY spend_usd DESC NULLS LAST
                     LIMIT 10
@@ -1396,6 +1407,7 @@ def api_campaign_detail(
                     })
 
                 # ── Recent leads — 10 most recent deduped leads ───────────────
+                # Direct equality on campaign_name (already normalized).
                 cur.execute(
                     """
                     WITH deduped AS (
@@ -1414,7 +1426,7 @@ def api_campaign_detail(
                             run_date
                         FROM leads
                         WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                          AND LOWER(campaign_name) = %s
+                          AND campaign_name = %s
                         ORDER BY
                             CASE
                                 WHEN contact_id IS NOT NULL AND contact_id <> ''
@@ -1446,18 +1458,18 @@ def api_campaign_detail(
                     })
 
     except Exception as exc:  # noqa: BLE001
-        log.error("[api/campaigns/detail] database error: %s", exc, exc_info=True)
+        log.error("[api/campaign-detail] database error: %s", exc, exc_info=True)
         return _db_empty
 
     return {
-        "days":         days,
+        "days":          days,
         "campaign_name": campaign_name,
-        "campaign":     campaign_out,
-        "lead_quality": lead_quality_out,
-        "countries":    countries_out,
-        "keywords":     keywords_out,
-        "waste_terms":  waste_out,
-        "recent_leads": recent_leads_out,
+        "campaign":      campaign_out,
+        "lead_quality":  lead_quality_out,
+        "countries":     countries_out,
+        "keywords":      keywords_out,
+        "waste_terms":   waste_out,
+        "recent_leads":  recent_leads_out,
         "data_sources": {
             "campaign":     "PostgreSQL campaigns table",
             "lead_quality": "HubSpot-derived leads table",
@@ -1465,3 +1477,34 @@ def api_campaign_detail(
             "waste_terms":  "Waste detection from search terms",
         },
     }
+
+
+@app.get("/api/campaign-detail")
+def api_campaign_detail_query(
+    user: dict = Depends(require_auth),
+    campaign_name: str = Query(..., description="Campaign name (URL-encoded)"),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return campaign drill-down detail via query parameter. Preferred endpoint.
+
+    Using a query parameter avoids routing issues with campaign names that
+    contain literal forward slashes. The frontend must call
+    encodeURIComponent(campaign_name) before appending to the URL.
+    Phase 1 read-only — no writes to Google Ads or HubSpot.
+    """
+    return _build_campaign_detail(campaign_name, _clamp_days(days))
+
+
+@app.get("/api/campaigns/{campaign_name}/detail")
+def api_campaign_detail_path(
+    campaign_name: str,
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return campaign drill-down detail via path segment. Legacy compatibility route.
+
+    Prefer /api/campaign-detail?campaign_name=... for new callers.
+    Campaign names containing literal '/' cannot be addressed via this route.
+    Phase 1 read-only — no writes to Google Ads or HubSpot.
+    """
+    return _build_campaign_detail(campaign_name, _clamp_days(days))
