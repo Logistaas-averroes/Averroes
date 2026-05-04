@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "campaigns", "waste", "geo", "keywords", "leads", "deals", "opportunities", "scheduler", "health"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "geo", "keywords", "leads", "deals", "opportunities", "scheduler", "health"];
 
 // Deal pipeline stages (Phase 1 read-only reference)
 const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
@@ -62,6 +62,12 @@ let geoMergedRows = [];
 // Keywords page state
 let keywordRows = [];
 let keywordLoadStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+
+// Reports page state
+let latestReportMarkdown = "";
+let latestReportMeta = null;
+let reportLoadStatus = "idle"; // idle | loading | ok | empty | error
+let reportCopyFeedbackTimer = null;
 
 // ── Utility helpers ────────────────────────────────────────────────────────
 
@@ -181,6 +187,24 @@ async function fetchJSON(url, options = {}) {
     throw new Error(body.detail || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+async function fetchText(path) {
+  const res = await fetch(path, { credentials: "same-origin" });
+  if (res.status === 401) {
+    showLogin();
+    throw new Error("Authentication required");
+  }
+  if (res.status === 403) throw new Error("HTTP 403");
+  if (res.status === 404) {
+    const err = new Error("Not found");
+    err.status = 404;
+    throw err;
+  }
+  if (!res.ok) {
+    throw new Error(`Request failed: ${res.status}`);
+  }
+  return res.text();
 }
 
 async function loadUiThresholds() {
@@ -347,6 +371,7 @@ function navigate(page) {
 function loadPage(page) {
   switch (page) {
     case "dashboard":     loadDashboard();     break;
+    case "reports":       loadReports();       break;
     case "campaigns":     loadCampaigns();     break;
     case "waste":         loadWaste();         break;
     case "geo":           loadGeo();           break;
@@ -447,6 +472,152 @@ async function loadDataFreshness() {
   } else {
     statusEl.textContent = `Latest recorded run · ${dateStr} · ${runType} · ${status}`;
     statusEl.className   = "freshness-status freshness-ok";
+  }
+}
+
+// ── Reports page ───────────────────────────────────────────────────────────
+
+function updateReportActionButtons() {
+  const copyBtn    = document.getElementById("report-copy-btn");
+  const refreshBtn = document.getElementById("report-refresh-btn");
+  const hasReport  = reportLoadStatus === "ok" && !!latestReportMarkdown.trim();
+  if (copyBtn)    copyBtn.disabled = !hasReport || reportLoadStatus === "loading";
+  if (refreshBtn) refreshBtn.disabled = reportLoadStatus === "loading";
+}
+
+async function loadReports() {
+  const metaEl = document.getElementById("reports-meta");
+  const bodyEl = document.getElementById("reports-viewer-body");
+
+  // Cancel any pending copy-feedback timeout before resetting state.
+  if (reportCopyFeedbackTimer) {
+    clearTimeout(reportCopyFeedbackTimer);
+    reportCopyFeedbackTimer = null;
+  }
+
+  reportLoadStatus = "loading";
+  latestReportMarkdown = "";
+  latestReportMeta = null;
+  updateReportActionButtons();
+
+  if (metaEl) metaEl.innerHTML = "";
+  if (bodyEl) bodyEl.innerHTML = `<p class="empty-state">Loading report…</p>`;
+
+  // Fetch metadata (non-fatal — raw report can still show without it).
+  try {
+    latestReportMeta = await fetchJSON("/reports/latest");
+  } catch (_) {
+    latestReportMeta = null;
+  }
+
+  // If metadata explicitly says no report exists, skip raw fetch.
+  if (latestReportMeta && latestReportMeta.exists === false) {
+    reportLoadStatus = "empty";
+    _renderReportsMeta(latestReportMeta);
+    updateReportActionButtons();
+    if (bodyEl) {
+      bodyEl.innerHTML = `
+        <p class="empty-state">No generated report found yet.</p>
+        <p class="empty-state-sub">Reports appear after weekly or monthly scheduler jobs complete.</p>`;
+    }
+    return;
+  }
+
+  // Fetch raw markdown body.
+  try {
+    latestReportMarkdown = await fetchText("/reports/latest/raw");
+    reportLoadStatus = latestReportMarkdown.trim() ? "ok" : "empty";
+  } catch (err) {
+    // 404 means no report on disk — treat as empty state, not a hard error.
+    reportLoadStatus = err.status === 404 ? "empty" : "error";
+    latestReportMarkdown = "";
+  }
+
+  _renderReportsMeta(latestReportMeta);
+  updateReportActionButtons();
+
+  if (!bodyEl) return;
+
+  if (reportLoadStatus === "error") {
+    bodyEl.innerHTML = `<p class="empty-state">Could not load latest report. Check API health or run status.</p>`;
+  } else if (reportLoadStatus === "empty") {
+    bodyEl.innerHTML = `
+      <p class="empty-state">No generated report found yet.</p>
+      <p class="empty-state-sub">Reports appear after weekly or monthly scheduler jobs complete.</p>`;
+  } else {
+    bodyEl.innerHTML = `<pre class="report-markdown">${escapeHtml(latestReportMarkdown)}</pre>`;
+  }
+}
+
+function _renderReportsMeta(meta) {
+  const metaEl = document.getElementById("reports-meta");
+  if (!metaEl) return;
+
+  const filename    = meta && meta.filename    ? meta.filename    : null;
+  const generatedAt = meta && meta.generated_at ? meta.generated_at : null;
+  const path        = meta && meta.path        ? meta.path        : null;
+  const reportType  = meta && meta.report_type ? meta.report_type : null;
+
+  // Report is available if metadata says so OR if the raw body loaded successfully.
+  const hasReportBody = !!(latestReportMarkdown && latestReportMarkdown.trim());
+  const exists = meta && meta.exists === true || hasReportBody;
+
+  metaEl.innerHTML = `
+    <div class="report-meta-card">
+      <div class="report-meta-card__label">Report file</div>
+      <div class="report-meta-card__value">${filename ? escapeHtml(filename) : "—"}</div>
+    </div>
+    <div class="report-meta-card">
+      <div class="report-meta-card__label">Generated</div>
+      <div class="report-meta-card__value">${generatedAt ? fmtDate(generatedAt) : "—"}</div>
+    </div>
+    <div class="report-meta-card">
+      <div class="report-meta-card__label">Source</div>
+      <div class="report-meta-card__value">${path ? escapeHtml(path) : "outputs/*.md"}</div>
+    </div>
+    <div class="report-meta-card">
+      <div class="report-meta-card__label">Type / Status</div>
+      <div class="report-meta-card__value">${reportType ? escapeHtml(reportType) : "—"} · ${exists ? "Available" : "Unavailable"}</div>
+    </div>`;
+}
+
+function copyLatestReport() {
+  const btn = document.getElementById("report-copy-btn");
+  const origHTML = btn ? btn.innerHTML : null;
+
+  const showFeedback = (success) => {
+    if (!btn) return;
+    btn.innerHTML = success
+      ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Copied!`
+      : `Copy failed`;
+    btn.disabled = true;
+    reportCopyFeedbackTimer = setTimeout(() => {
+      reportCopyFeedbackTimer = null;
+      if (!btn || origHTML === null) return;
+      btn.innerHTML = origHTML;
+      // Re-enable only if the report is still loaded — guard against a concurrent refresh.
+      btn.disabled = !(reportLoadStatus === "ok" && !!latestReportMarkdown.trim());
+    }, 2000);
+  };
+
+  if (!latestReportMarkdown) return;
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(latestReportMarkdown).then(
+      () => showFeedback(true),
+      () => showFeedback(false),
+    );
+  } else {
+    const ta = document.createElement("textarea");
+    ta.value = latestReportMarkdown;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { /* ignore */ }
+    document.body.removeChild(ta);
+    showFeedback(ok);
   }
 }
 
@@ -2552,6 +2723,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   const drawerOverlay  = document.getElementById("campaign-drawer-overlay");
   if (drawerCloseBtn) drawerCloseBtn.addEventListener("click", closeCampaignDrawer);
   if (drawerOverlay)  drawerOverlay.addEventListener("click", closeCampaignDrawer);
+
+  // Wire up reports page controls
+  const reportCopyBtn    = document.getElementById("report-copy-btn");
+  const reportRefreshBtn = document.getElementById("report-refresh-btn");
+  if (reportCopyBtn)    reportCopyBtn.addEventListener("click", copyLatestReport);
+  if (reportRefreshBtn) reportRefreshBtn.addEventListener("click", loadReports);
 
   // Check auth and load initial page
   const isAuth = await checkAuth();

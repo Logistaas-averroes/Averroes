@@ -147,6 +147,8 @@ Metadata for the most recently modified file in `outputs/`.
 { "report_type": null, "filename": null, "generated_at": null, "path": null, "exists": false }
 ```
 
+**UI note (PR-ADS-035):** Used by the Reports page to display report metadata cards (file, generated date, source path, type/status). Read-only — does not trigger scheduler jobs, does not call Claude, does not generate new analysis.
+
 ---
 
 #### `GET /reports/latest/raw`
@@ -155,6 +157,8 @@ Raw markdown content of the latest report. `text/plain` response.
 **Auth:** Auth
 **Response 200:** Plain markdown text (the report content)
 **Response 404:** `{ "detail": "No markdown report found" }`
+
+**UI note (PR-ADS-035):** Used by the Reports page to render the report body. The SPA renders the content as escaped text inside a `<pre>` element — markdown is **not** injected as raw HTML. The Reports page is a read-only viewer: it does not trigger scheduler jobs, does not call Claude, and does not generate new analysis. The report reflects the latest generated markdown file on disk, not a live re-analysis.
 
 ---
 
