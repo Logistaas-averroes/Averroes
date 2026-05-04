@@ -254,7 +254,7 @@ CREATE TABLE IF NOT EXISTS search_terms (
   ad_group         TEXT,
   keyword          TEXT,
   match_type       TEXT,
-  search_term      TEXT,
+  search_term      TEXT          NOT NULL,
   spend_usd        NUMERIC(10,2) DEFAULT 0,
   clicks           INTEGER       DEFAULT 0,
   impressions      INTEGER       DEFAULT 0,
@@ -316,6 +316,24 @@ CREATE INDEX IF NOT EXISTS idx_search_terms_sync_batch
 --     ON search_terms USING gin (search_term gin_trgm_ops);
 -- Until enabled, ?q= filtering is supported but uses a sequential scan.
 -- Do NOT add a plain B-tree index — it does not support LIKE '%term%' queries.
+
+-- PR-ADS-040A: idempotent migration — enforce NOT NULL on search_terms.search_term
+-- New installs: search_term is already NOT NULL from CREATE TABLE above; these are no-ops.
+-- Existing DBs (from initial PR-ADS-040 deploy): purge any null/blank rows then
+-- set the constraint.  Runs once via the migrations guard.
+DO $$
+BEGIN
+    INSERT INTO migrations (migration_id)
+    VALUES ('PR-ADS-040A-search-term-not-null')
+    ON CONFLICT (migration_id) DO NOTHING;
+
+    IF FOUND THEN
+        DELETE FROM search_terms
+        WHERE search_term IS NULL OR BTRIM(search_term) = '';
+
+        ALTER TABLE search_terms ALTER COLUMN search_term SET NOT NULL;
+    END IF;
+END $$;
 
 -- PR-ADS-029A: idempotent migration — enforce NOT NULL on geo.run_id for existing DBs
 -- New installs: run_id is already NOT NULL from CREATE TABLE above; these are no-ops.

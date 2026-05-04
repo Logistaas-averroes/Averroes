@@ -52,7 +52,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2854,22 +2854,34 @@ _SEARCH_TERMS_DATA_QUALITY_NOTE = (
 )
 
 
-def _encode_cursor(source_date: str, row_id: int) -> str:
-    """Encode a keyset cursor as URL-safe base64 JSON."""
-    payload = json.dumps({"source_date": source_date, "id": row_id}, separators=(",", ":"))
-    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+def _encode_cursor(source_date, row_id: int) -> str:
+    """Encode a keyset cursor as URL-safe base64 JSON (no padding)."""
+    payload = json.dumps(
+        {"source_date": str(source_date), "id": int(row_id)},
+        separators=(",", ":"),
+    )
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
 
 
 def _decode_cursor(token: str):
     """Decode a base64 JSON cursor.
 
-    Returns (source_date_str, id_int) or raises ValueError on invalid input.
+    Returns (source_date_as_date, id_int) or raises ValueError on invalid input.
+    Validates that source_date is a proper ISO date so that a corrupt/tampered
+    cursor always returns HTTP 400 — never an incorrect db_unavailable response.
     """
     try:
-        decoded = base64.urlsafe_b64decode(token.encode("ascii") + b"==")
+        # Restore base64 padding using the standard formula
+        padded = token + ("=" * (-len(token) % 4))
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
         obj = json.loads(decoded.decode("utf-8"))
-        source_date = str(obj["source_date"])
-        row_id      = int(obj["id"])
+
+        source_date = date.fromisoformat(str(obj["source_date"]))
+        row_id = int(obj["id"])
+
+        if row_id <= 0:
+            raise ValueError("cursor id must be positive")
+
         return source_date, row_id
     except Exception as exc:
         raise ValueError(f"Invalid cursor: {exc}") from exc
@@ -2917,8 +2929,8 @@ def api_search_terms(
     }
 
     # ── Decode cursor ─────────────────────────────────────────────────────
-    cursor_date: str | None   = None
-    cursor_id:   int | None   = None
+    cursor_date: date | None = None
+    cursor_id:   int | None  = None
     if cursor:
         try:
             cursor_date, cursor_id = _decode_cursor(cursor)

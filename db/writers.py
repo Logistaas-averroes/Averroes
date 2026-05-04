@@ -687,47 +687,46 @@ def write_search_terms(
     if not rows:
         return 0
 
-    inserted = 0
+    _upsert_sql = """
+        INSERT INTO search_terms (
+            run_id, source_date, campaign_name, campaign_id,
+            ad_group, keyword, match_type, search_term,
+            spend_usd, clicks, impressions, conversions,
+            sync_batch_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (
+            source_date,
+            COALESCE(campaign_name, ''),
+            COALESCE(ad_group,      ''),
+            COALESCE(keyword,       ''),
+            COALESCE(match_type,    ''),
+            COALESCE(search_term,   '')
+        ) DO UPDATE SET
+            run_id        = EXCLUDED.run_id,
+            sync_batch_id = COALESCE(EXCLUDED.sync_batch_id,
+                                     search_terms.sync_batch_id),
+            spend_usd     = EXCLUDED.spend_usd,
+            clicks        = EXCLUDED.clicks,
+            impressions   = EXCLUDED.impressions,
+            conversions   = EXCLUDED.conversions,
+            campaign_id   = COALESCE(EXCLUDED.campaign_id,
+                                     search_terms.campaign_id),
+            updated_at    = NOW()
+    """
+
     try:
         with get_conn() as conn:
             if conn is None:
                 return 0
             with conn.cursor() as cur:
-                for row in rows:
-                    cur.execute(
-                        """
-                        INSERT INTO search_terms (
-                            run_id, source_date, campaign_name, campaign_id,
-                            ad_group, keyword, match_type, search_term,
-                            spend_usd, clicks, impressions, conversions,
-                            sync_batch_id
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (
-                            source_date,
-                            COALESCE(campaign_name, ''),
-                            COALESCE(ad_group,      ''),
-                            COALESCE(keyword,       ''),
-                            COALESCE(match_type,    ''),
-                            COALESCE(search_term,   '')
-                        ) DO UPDATE SET
-                            run_id       = EXCLUDED.run_id,
-                            sync_batch_id = COALESCE(EXCLUDED.sync_batch_id,
-                                                     search_terms.sync_batch_id),
-                            spend_usd    = EXCLUDED.spend_usd,
-                            clicks       = EXCLUDED.clicks,
-                            impressions  = EXCLUDED.impressions,
-                            conversions  = EXCLUDED.conversions,
-                            campaign_id  = COALESCE(EXCLUDED.campaign_id,
-                                                    search_terms.campaign_id),
-                            updated_at   = NOW()
-                        """,
-                        row,
-                    )
-                    inserted += cur.rowcount
+                cur.executemany(_upsert_sql, rows)
+                # executemany rowcount reflects the last statement in psycopg2;
+                # use attempted count as a reliable proxy for high-volume datasets.
+                attempted = len(rows)
         log.info(
-            "write_search_terms: upserted %d rows (run_id=%s)", inserted, run_id
+            "write_search_terms: upserted %d rows (run_id=%s)", attempted, run_id
         )
-        return inserted
+        return attempted
     except Exception as exc:  # noqa: BLE001
         log.error("write_search_terms failed (run_id=%s): %s", run_id, exc)
         return 0
