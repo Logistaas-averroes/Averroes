@@ -178,6 +178,30 @@ CREATE INDEX IF NOT EXISTS idx_geo_country    ON geo(country);
 CREATE INDEX IF NOT EXISTS idx_geo_campaign   ON geo(campaign_name);
 CREATE INDEX IF NOT EXISTS idx_geo_run_id     ON geo(run_id);
 
+-- PR-ADS-031: keyword performance per run
+CREATE TABLE IF NOT EXISTS keywords (
+    id              SERIAL PRIMARY KEY,
+    run_id          INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    run_date        DATE         NOT NULL,
+    campaign_name   TEXT,
+    ad_group        TEXT,
+    keyword         TEXT,
+    match_type      TEXT,
+    quality_score   NUMERIC(5,2),
+    spend_usd       NUMERIC(10,2) DEFAULT 0,
+    clicks          INTEGER       DEFAULT 0,
+    impressions     INTEGER       DEFAULT 0,
+    conversions     NUMERIC(8,2)  DEFAULT 0,
+    cpc_usd         NUMERIC(10,2) DEFAULT 0,
+    created_at      TIMESTAMPTZ   DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_keywords_run_date   ON keywords(run_date);
+CREATE INDEX IF NOT EXISTS idx_keywords_campaign   ON keywords(campaign_name);
+CREATE INDEX IF NOT EXISTS idx_keywords_keyword    ON keywords(keyword);
+CREATE INDEX IF NOT EXISTS idx_keywords_match_type ON keywords(match_type);
+CREATE INDEX IF NOT EXISTS idx_keywords_run_id     ON keywords(run_id);
+
 -- PR-ADS-029A: idempotent migration — enforce NOT NULL on geo.run_id for existing DBs
 -- New installs: run_id is already NOT NULL from CREATE TABLE above; these are no-ops.
 -- Existing DBs: removes any orphan rows then sets the constraint (runs once via migrations table).

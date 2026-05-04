@@ -473,7 +473,7 @@ def write_geo(run_id: int, geo_rows: list) -> int:
         return 0
 
 
-
+def write_deals(run_id: int, deals: list) -> None:
     """Insert deal rows for this run.
 
     Each item in *deals* should be a dict produced by hubspot_pull.py
@@ -520,6 +520,81 @@ def write_geo(run_id: int, geo_rows: list) -> int:
         log.info("Wrote %d deal rows to database (run_id=%s)", len(rows), run_id)
     except Exception as exc:  # noqa: BLE001
         log.error("write_deals failed (run_id=%s): %s", run_id, exc)
+
+
+def write_keywords(run_id: int, keyword_rows: list) -> int:
+    """Insert keyword performance rows for this run.
+
+    Each item in *keyword_rows* should be a dict produced by
+    pull_keyword_performance(). Deletes existing keyword rows for the same
+    run_id before inserting, keeping manual re-runs idempotent.
+    Returns count of inserted rows.
+    Never raises.
+    """
+    if run_id is None:
+        log.debug("write_keywords skipped — run_id is None")
+        return 0
+    if not keyword_rows:
+        return 0
+    today = _today()
+    rows = []
+    for k in keyword_rows:
+        raw_name = k.get("campaign") or k.get("campaign_name")
+        campaign_name = None
+        if raw_name is not None:
+            normalized = str(raw_name).strip()
+            if normalized:
+                campaign_name = _canonicalise_campaign_name(normalized.lower())
+        match_type = k.get("match_type")
+        if match_type is not None:
+            match_type = str(match_type).strip() or None
+        # Resolve run_date from the row if available, falling back to today
+        raw_date = k.get("date") if k.get("date") is not None else k.get("run_date")
+        if raw_date is not None:
+            try:
+                if isinstance(raw_date, date):
+                    effective_date = raw_date
+                else:
+                    effective_date = date.fromisoformat(str(raw_date))
+            except (ValueError, TypeError):
+                effective_date = today
+        else:
+            effective_date = today
+        rows.append((
+            run_id,
+            effective_date,
+            campaign_name,
+            k.get("ad_group"),
+            k.get("keyword"),
+            match_type,
+            _float_or_none(k.get("quality_score")),
+            float(_float_or_none(k.get("spend") or k.get("spend_usd")) or 0),
+            int(_int_or_none(k.get("clicks")) or 0),
+            int(_int_or_none(k.get("impressions")) or 0),
+            float(_float_or_none(k.get("conversions")) or 0),
+            float(_float_or_none(k.get("cpc") or k.get("cpc_usd")) or 0),
+        ))
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM keywords WHERE run_id = %s", (run_id,))
+                cur.executemany(
+                    """
+                    INSERT INTO keywords (
+                        run_id, run_date, campaign_name, ad_group, keyword,
+                        match_type, quality_score, spend_usd, clicks,
+                        impressions, conversions, cpc_usd
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    rows,
+                )
+        log.info("Wrote %d keyword rows to database (run_id=%s)", len(rows), run_id)
+        return len(rows)
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_keywords failed (run_id=%s): %s", run_id, exc)
+        return 0
 
 
 # ---------------------------------------------------------------------------

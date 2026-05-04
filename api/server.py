@@ -34,6 +34,7 @@ Protected endpoints (require authenticated session):
   POST /run/weekly          — Trigger weekly run (requires admin or ADMIN_API_TOKEN).
   POST /run/monthly         — Trigger monthly run (requires admin or ADMIN_API_TOKEN).
   GET  /api/geo                    — Windsor geo performance by country/campaign (requires auth).
+  GET  /api/keywords               — Windsor keyword performance by campaign/ad group/keyword (requires auth).
   GET  /api/leads/country-summary  — HubSpot lead quality aggregated by country (requires auth).
 """
 
@@ -934,6 +935,71 @@ def api_geo(
         return _db_empty_response(days, "rows")
 
     return {"days": days, "rows": geo_out}
+
+
+@app.get("/api/keywords")
+def api_keywords(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return aggregated Windsor keyword performance for the last N days. Requires auth."""
+    days = _clamp_days(days)
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _db_empty_response(days, "rows")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        campaign_name,
+                        ad_group,
+                        keyword,
+                        match_type,
+                        AVG(quality_score)    AS quality_score,
+                        SUM(spend_usd)        AS spend_usd,
+                        SUM(clicks)           AS clicks,
+                        SUM(impressions)      AS impressions,
+                        SUM(conversions)      AS conversions,
+                        CASE
+                            WHEN SUM(clicks) > 0 THEN SUM(spend_usd) / SUM(clicks)
+                            ELSE 0
+                        END                   AS cpc_usd,
+                        COUNT(DISTINCT run_id) AS runs,
+                        MAX(run_date)         AS last_run_date
+                    FROM keywords
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                    GROUP BY campaign_name, ad_group, keyword, match_type
+                    ORDER BY spend_usd DESC
+                    """,
+                    (days,),
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                kw_out = []
+                for row in rows:
+                    r = dict(zip(cols, row))
+                    kw_out.append({
+                        "campaign_name": r["campaign_name"],
+                        "ad_group": r["ad_group"],
+                        "keyword": r["keyword"],
+                        "match_type": r["match_type"],
+                        "quality_score": round(float(r["quality_score"]), 2) if r["quality_score"] is not None else None,
+                        "spend_usd": round(float(r["spend_usd"]), 2) if r["spend_usd"] is not None else 0.0,
+                        "clicks": int(r["clicks"] or 0),
+                        "impressions": int(r["impressions"] or 0),
+                        "conversions": round(float(r["conversions"]), 2) if r["conversions"] is not None else 0.0,
+                        "cpc_usd": round(float(r["cpc_usd"]), 2) if r["cpc_usd"] is not None else 0.0,
+                        "runs": int(r["runs"] or 0),
+                        "last_run_date": str(r["last_run_date"]) if r["last_run_date"] else None,
+                    })
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/keywords] database error: %s", exc, exc_info=True)
+        return _db_empty_response(days, "rows")
+
+    return {"days": days, "rows": kw_out}
 
 
 @app.get("/api/leads/country-summary")
