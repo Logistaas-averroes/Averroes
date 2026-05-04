@@ -81,6 +81,14 @@
           </a>
         </li>
         <li>
+          <a class="nav-item" data-page="action-queue" href="#" role="button" tabindex="0" aria-label="Action Queue">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            </span>
+            <span class="nav-item__label">Action Queue</span>
+          </a>
+        </li>
+        <li>
           <a class="nav-item" data-page="reports" href="#" role="button" tabindex="0" aria-label="Reports">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
@@ -260,6 +268,55 @@
           </div>
           <div class="panel__body" id="run-history-timeline"><p class="empty-state">Loading run history…</p></div>
         </div>
+      </section>
+
+      <!-- Action Queue -->
+      <section id="page-action-queue" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Action Queue</h1>
+          <p class="page-subtitle">Ranked human-review items based on campaign, waste, geo, keyword, and data-quality signals.</p>
+        </header>
+        <div class="kpi-grid" id="action-queue-kpis">
+          <div class="kpi-card">
+            <div class="kpi-card__label">Total Review Items</div>
+            <div class="kpi-card__value" id="aq-kpi-total">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">High Severity</div>
+            <div class="kpi-card__value" id="aq-kpi-high">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">Medium Severity</div>
+            <div class="kpi-card__value" id="aq-kpi-medium">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">Low Severity</div>
+            <div class="kpi-card__value" id="aq-kpi-low">—</div>
+          </div>
+        </div>
+        <div class="action-queue-controls">
+          <select id="aq-filter-severity" class="waste-filter-select" aria-label="Filter by severity">
+            <option value="">All severities</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+          <select id="aq-filter-type" class="waste-filter-select" aria-label="Filter by type">
+            <option value="">All types</option>
+            <option value="campaign_review">Campaign</option>
+            <option value="waste_review">Waste</option>
+            <option value="geo_review">Geo</option>
+            <option value="keyword_review">Keyword</option>
+            <option value="data_quality_review">Data Quality</option>
+          </select>
+        </div>
+        <div id="action-queue-list" class="action-queue-list">
+          <p class="empty-state">Loading action queue…</p>
+        </div>
+        <p class="grace-note">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Queue items are human-review prompts only. No automated actions are executed. Severity is display-only.
+        </p>
       </section>
 
       <!-- Reports -->

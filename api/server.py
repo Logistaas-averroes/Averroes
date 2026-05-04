@@ -40,6 +40,7 @@ Protected endpoints (require authenticated session):
   GET  /api/campaigns/{campaign_name}/detail — Campaign drill-down detail, path-segment form (requires auth). Legacy.
   GET  /api/config/ui-thresholds  — UI-safe display thresholds from config/thresholds.yaml (requires auth).
   GET  /api/dashboard/trends      — Previous-period trend comparison for dashboard (requires auth).
+  GET  /api/action-queue          — Ranked human-review queue based on campaign, waste, geo, keyword, and data signals (requires auth).
 """
 
 import importlib
@@ -2149,4 +2150,546 @@ def api_dashboard_trends(
         "campaign_movements": movements[:10],  # top 10 by severity_score
         "alerts":            alerts,
         "data_quality":      data_quality,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Action Queue endpoint — ranked human-review queue. Read-only, auth required.
+# ---------------------------------------------------------------------------
+
+_QUEUE_JUNK_HIGH_PCT_DEFAULT = 30        # fallback if thresholds not loaded
+_QUEUE_HIGH_SPEND_USD_DEFAULT = 100      # fallback if thresholds not loaded
+_QUEUE_MAX_ITEMS = 30                    # hard cap on returned queue items
+_QUEUE_FRAUD_CATEGORIES = {"fraud", "job_seeker", "student", "free_intent_english",
+                             "free_intent_spanish", "free_intent_arabic"}
+
+
+def _queue_severity_label(score: int) -> str:
+    """Map a severity score to high / medium / low label."""
+    if score >= 75:
+        return "high"
+    if score >= 40:
+        return "medium"
+    return "low"
+
+
+def _build_campaign_queue_items(
+    cur,
+    days: int,
+    high_junk_pct: float,
+    high_spend_usd: float,
+) -> list[dict]:
+    """Build campaign_review queue items from the campaigns table."""
+    cur.execute(
+        """
+        SELECT DISTINCT ON (campaign_name)
+            campaign_name,
+            spend_usd,
+            confirmed_sqls,
+            junk_rate_pct,
+            verdict
+        FROM campaigns
+        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+        ORDER BY campaign_name, run_date DESC, created_at DESC, id DESC
+        """,
+        (days,),
+    )
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    items: list[dict] = []
+    for row in rows:
+        r = dict(zip(cols, row))
+        spend = float(r["spend_usd"] or 0)
+        sqls = int(r["confirmed_sqls"] or 0)
+        junk_rate = float(r["junk_rate_pct"]) if r["junk_rate_pct"] is not None else None
+        verdict = (r["verdict"] or "").upper()
+
+        # Queue inclusion rules
+        qualifies = (
+            verdict in ("FIX", "CUT")
+            or (sqls == 0 and spend > 0)
+            or (junk_rate is not None and junk_rate >= high_junk_pct)
+        )
+        if not qualifies:
+            continue
+
+        # Severity scoring (display-only)
+        score = 0
+        if sqls == 0 and spend > 0:
+            score += 30
+        if junk_rate is not None and junk_rate >= high_junk_pct:
+            score += 25
+        if verdict == "FIX":
+            score += 20
+        elif verdict == "CUT":
+            score += 30
+        if spend >= high_spend_usd:
+            score += 15
+        score = min(100, score)
+
+        name = r["campaign_name"] or ""
+        safe_id = name.replace(" ", "-").replace("/", "-").replace("_", "-")
+
+        detail_parts: list[str] = []
+        if spend > 0:
+            detail_parts.append(f"Spend is ${spend:.2f}")
+        if sqls == 0 and spend > 0:
+            detail_parts.append("confirmed SQLs are 0")
+        if junk_rate is not None:
+            detail_parts.append(f"junk rate is {junk_rate:.1f}%")
+        if verdict in ("FIX", "CUT"):
+            detail_parts.append(f"verdict is {verdict}")
+        detail = ". ".join(detail_parts).capitalize() + ". Warrants review." if detail_parts else "Warrants review."
+
+        items.append({
+            "id": f"campaign-{safe_id}-review",
+            "type": "campaign_review",
+            "severity": _queue_severity_label(score),
+            "severity_score": score,
+            "title": f"Campaign warrants review: {name}",
+            "detail": detail,
+            "entity_label": name,
+            "entity_type": "campaign",
+            "campaign_name": name,
+            "source": "campaigns table",
+            "evidence": {
+                "spend_usd": round(spend, 2),
+                "confirmed_sqls": sqls,
+                "junk_rate_pct": round(junk_rate, 1) if junk_rate is not None else None,
+                "verdict": verdict or None,
+            },
+            "primary_link": {
+                "page": "campaigns",
+                "action": "open_campaign_drawer",
+                "campaign_name": name,
+            },
+        })
+    return items
+
+
+def _build_waste_queue_items(
+    cur,
+    days: int,
+    high_spend_usd: float,
+) -> list[dict]:
+    """Build waste_review queue items from the waste_terms table (top 10 by spend)."""
+    cur.execute(
+        """
+        SELECT
+            search_term,
+            campaign_name,
+            SUM(spend_usd)          AS spend_usd,
+            junk_category,
+            SUM(crm_junk_confirmed) AS crm_junk_confirmed
+        FROM waste_terms
+        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+        GROUP BY search_term, campaign_name, junk_category
+        HAVING SUM(spend_usd) >= %s OR SUM(crm_junk_confirmed) > 0
+        ORDER BY spend_usd DESC NULLS LAST
+        LIMIT 10
+        """,
+        (days, high_spend_usd),
+    )
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    items: list[dict] = []
+    for row in rows:
+        r = dict(zip(cols, row))
+        spend = float(r["spend_usd"] or 0)
+        crm_confirmed = int(r["crm_junk_confirmed"] or 0)
+        category = (r["junk_category"] or "").lower()
+        term = r["search_term"] or ""
+        camp = r["campaign_name"] or ""
+
+        # Severity scoring
+        score = 30
+        if spend >= high_spend_usd:
+            score += 25
+        if crm_confirmed > 0:
+            score += 20
+        if category and any(cat in category for cat in ("fraud", "job", "student", "free")):
+            score += 10
+        score = min(100, score)
+
+        safe_id = term.replace(" ", "-").replace("/", "-")[:40]
+        detail = f"Waste term '{term}' has ${spend:.2f} spend"
+        if crm_confirmed > 0:
+            detail += f" and {crm_confirmed} CRM junk confirmed"
+        detail += ". Warrants review."
+
+        items.append({
+            "id": f"waste-{safe_id}-review",
+            "type": "waste_review",
+            "severity": _queue_severity_label(score),
+            "severity_score": score,
+            "title": f"Waste term warrants review: {term}",
+            "detail": detail,
+            "entity_label": term,
+            "entity_type": "waste_term",
+            "campaign_name": camp,
+            "source": "waste_terms table",
+            "evidence": {
+                "spend_usd": round(spend, 2),
+                "crm_junk_confirmed": crm_confirmed,
+                "junk_category": r["junk_category"],
+            },
+            "primary_link": {
+                "page": "waste",
+                "action": "navigate",
+            },
+        })
+    return items
+
+
+def _build_geo_queue_items(
+    cur,
+    days: int,
+    high_junk_pct: float,
+) -> list[dict]:
+    """Build geo_review queue items using leads country summary logic (top 8)."""
+    # Deduplicated country summary from leads
+    cur.execute(
+        """
+        WITH deduped AS (
+            SELECT DISTINCT ON (
+                CASE
+                    WHEN contact_id IS NOT NULL AND contact_id <> ''
+                    THEN contact_id
+                    ELSE CAST(id AS TEXT)
+                END
+            )
+                country,
+                status_category
+            FROM leads
+            WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+            ORDER BY
+                CASE
+                    WHEN contact_id IS NOT NULL AND contact_id <> ''
+                    THEN contact_id
+                    ELSE CAST(id AS TEXT)
+                END,
+                run_date DESC,
+                id DESC
+        )
+        SELECT
+            COALESCE(NULLIF(BTRIM(country), ''), '(unknown)') AS country,
+            COUNT(*)                                     AS total_leads,
+            SUM(CASE WHEN status_category = 'qualified'   THEN 1 ELSE 0 END) AS confirmed_sqls,
+            SUM(CASE WHEN status_category = 'junk'        THEN 1 ELSE 0 END) AS confirmed_junk,
+            SUM(CASE WHEN status_category = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
+            SUM(CASE WHEN status_category = 'wrong_fit'   THEN 1 ELSE 0 END) AS wrong_fit
+        FROM deduped
+        GROUP BY COALESCE(NULLIF(BTRIM(country), ''), '(unknown)')
+        ORDER BY total_leads DESC
+        """,
+        (days,),
+    )
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+
+    # Also get geo spend per country from the geo table
+    cur.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(BTRIM(country), ''), '(unknown)') AS country,
+            SUM(spend_usd) AS spend_usd
+        FROM geo
+        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+        GROUP BY COALESCE(NULLIF(BTRIM(country), ''), '(unknown)')
+        """,
+        (days,),
+    )
+    spend_rows = cur.fetchall()
+    geo_spend: dict[str, float] = {r[0]: float(r[1] or 0) for r in spend_rows}
+
+    items: list[dict] = []
+    for row in rows:
+        r = dict(zip(cols, row))
+        country = r["country"]
+        sqls = int(r["confirmed_sqls"] or 0)
+        junk = int(r["confirmed_junk"] or 0)
+        in_progress = int(r["in_progress"] or 0)
+        wrong_fit = int(r["wrong_fit"] or 0)
+        verdicted = sqls + in_progress + junk + wrong_fit
+        junk_rate = round((junk / verdicted) * 100, 1) if verdicted > 0 else None
+        spend = geo_spend.get(country, 0.0)
+
+        # Queue inclusion rules
+        qualifies = (
+            (junk_rate is not None and junk_rate >= high_junk_pct and verdicted > 0)
+            or (spend > 0 and sqls == 0)
+            or country == "(unknown)"
+        )
+        if not qualifies:
+            continue
+
+        # Severity scoring
+        score = 25
+        if junk_rate is not None and junk_rate >= high_junk_pct:
+            score += 25
+        if sqls == 0 and spend > 0:
+            score += 20
+        if country == "(unknown)":
+            score += 15
+        score = min(100, score)
+
+        safe_id = country.replace(" ", "-").replace("(", "").replace(")", "")
+        detail_parts: list[str] = []
+        if junk_rate is not None:
+            detail_parts.append(f"junk rate is {junk_rate:.1f}%")
+        if sqls == 0 and spend > 0:
+            detail_parts.append("no confirmed SQLs with active spend")
+        if country == "(unknown)":
+            detail_parts.append("country is unresolved")
+        detail = "Country signal warrants review" + (": " + ", ".join(detail_parts) if detail_parts else "") + "."
+
+        items.append({
+            "id": f"geo-{safe_id}-review",
+            "type": "geo_review",
+            "severity": _queue_severity_label(score),
+            "severity_score": score,
+            "title": f"Country signal warrants review: {country}",
+            "detail": detail,
+            "entity_label": country,
+            "entity_type": "country",
+            "campaign_name": None,
+            "source": "leads country summary + geo table",
+            "evidence": {
+                "country": country,
+                "confirmed_sqls": sqls,
+                "confirmed_junk": junk,
+                "verdicted_leads": verdicted,
+                "junk_rate_pct": junk_rate,
+                "spend_usd": round(spend, 2),
+            },
+            "primary_link": {
+                "page": "geo",
+                "action": "navigate",
+            },
+        })
+
+    # Sort by score desc then country, limit 8
+    items.sort(key=lambda x: (-x["severity_score"], x["entity_label"]))
+    return items[:8]
+
+
+def _build_keyword_queue_items(
+    cur,
+    days: int,
+    high_spend_usd: float,
+) -> list[dict]:
+    """Build keyword_review queue items — keywords with spend >= threshold but no conversions (top 10)."""
+    cur.execute(
+        """
+        SELECT
+            campaign_name,
+            ad_group,
+            keyword,
+            match_type,
+            SUM(spend_usd)    AS spend_usd,
+            SUM(conversions)  AS conversions
+        FROM keywords
+        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+        GROUP BY campaign_name, ad_group, keyword, match_type
+        HAVING SUM(spend_usd) >= %s AND COALESCE(SUM(conversions), 0) <= 0
+        ORDER BY spend_usd DESC NULLS LAST
+        LIMIT 10
+        """,
+        (days, high_spend_usd),
+    )
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    items: list[dict] = []
+    for row in rows:
+        r = dict(zip(cols, row))
+        spend = float(r["spend_usd"] or 0)
+        conversions = float(r["conversions"] or 0)
+        kw = r["keyword"] or ""
+        match_type = (r["match_type"] or "").lower()
+        camp = r["campaign_name"] or ""
+        ad_group = r["ad_group"] or ""
+
+        # Severity scoring
+        score = 20
+        if spend >= high_spend_usd:
+            score += 25
+        if conversions <= 0:
+            score += 20
+        if match_type == "broad":
+            score += 10
+        score = min(100, score)
+
+        safe_id = kw.replace(" ", "-").replace("/", "-")[:40]
+        detail = (
+            f"Keyword '{kw}' has ${spend:.2f} spend with 0 Google Ads conversions"
+            + (f" ({match_type} match)" if match_type else "")
+            + ". Warrants review."
+        )
+
+        items.append({
+            "id": f"keyword-{safe_id}-review",
+            "type": "keyword_review",
+            "severity": _queue_severity_label(score),
+            "severity_score": score,
+            "title": f"Keyword warrants review: {kw}",
+            "detail": detail,
+            "entity_label": kw,
+            "entity_type": "keyword",
+            "campaign_name": camp,
+            "source": "keywords table",
+            "evidence": {
+                "keyword": kw,
+                "ad_group": ad_group,
+                "match_type": r["match_type"],
+                "spend_usd": round(spend, 2),
+                "google_ads_conversions": round(conversions, 2),
+            },
+            "primary_link": {
+                "page": "keywords",
+                "action": "navigate",
+            },
+        })
+    return items
+
+
+def _build_data_quality_items(cur, days: int) -> list[dict]:
+    """Build data_quality_review items from the runs table."""
+    # Get latest run overall and recent weekly/monthly runs
+    cur.execute(
+        """
+        SELECT run_type, started_at, finished_at, status
+        FROM runs
+        ORDER BY started_at DESC
+        LIMIT 1
+        """,
+    )
+    latest_row = cur.fetchone()
+    latest_cols = [d[0] for d in cur.description]
+    latest_run = dict(zip(latest_cols, latest_row)) if latest_row else None
+
+    cur.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM runs
+        WHERE run_type IN ('weekly', 'monthly')
+          AND status = 'success'
+          AND started_at >= NOW() - INTERVAL '1 day' * %s
+        """,
+        (days,),
+    )
+    wm_row = cur.fetchone()
+    has_recent_weekly_monthly = int(wm_row[0] or 0) > 0 if wm_row else False
+
+    items: list[dict] = []
+
+    if latest_run:
+        latest_status = (latest_run.get("status") or "").lower()
+        latest_finished = latest_run.get("finished_at")
+        # A row inserted but not finished yet has no finished_at and non-success status — still running
+        run_failed = latest_finished is not None and latest_status not in ("success",)
+
+        score = 40
+        if run_failed:
+            score += 40
+        if not has_recent_weekly_monthly:
+            score += 20
+        score = min(100, score)
+
+        if run_failed or not has_recent_weekly_monthly:
+            detail_parts: list[str] = []
+            if run_failed:
+                detail_parts.append(f"latest run has status '{latest_status}'")
+            if not has_recent_weekly_monthly:
+                detail_parts.append(f"no successful weekly or monthly run in the last {days} days")
+            detail = "Data quality warrants review: " + " and ".join(detail_parts) + "." if detail_parts else "Data quality warrants review."
+            items.append({
+                "id": "data-quality-run-health",
+                "type": "data_quality_review",
+                "severity": _queue_severity_label(score),
+                "severity_score": score,
+                "title": "Data quality warrants review",
+                "detail": detail,
+                "entity_label": "run health",
+                "entity_type": "data_quality",
+                "campaign_name": None,
+                "source": "runs table",
+                "evidence": {
+                    "latest_run_status": latest_status,
+                    "latest_run_type": latest_run.get("run_type"),
+                    "has_recent_weekly_monthly": has_recent_weekly_monthly,
+                },
+                "primary_link": {
+                    "page": "scheduler",
+                    "action": "navigate",
+                },
+            })
+
+    return items
+
+
+@app.get("/api/action-queue")
+def api_action_queue(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return a ranked human-review queue based on campaign, waste, geo, keyword, and data signals.
+
+    Requires auth. Read-only. No write operations. No external API calls.
+    Severity is display-only — items are human-review prompts, not automated recommendations.
+    Phase 1 read-only — no writes to Google Ads or HubSpot.
+    """
+    days = _clamp_days(days)
+
+    _safe_empty: dict[str, Any] = {
+        "days": days,
+        "items": [],
+        "summary": {"total": 0, "high": 0, "medium": 0, "low": 0},
+        "data_quality": {"status": "db_unavailable"},
+        "db_unavailable": True,
+    }
+
+    # Load UI thresholds (best-effort; fall back to defaults)
+    thresholds = _load_ui_thresholds()
+    high_junk_pct = float((thresholds.get("junk_rate") or {}).get("high_pct") or _QUEUE_JUNK_HIGH_PCT_DEFAULT)
+    high_spend_usd = float((thresholds.get("spend") or {}).get("high_spend_usd") or _QUEUE_HIGH_SPEND_USD_DEFAULT)
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _safe_empty
+
+            with conn.cursor() as cur:
+                campaign_items = _build_campaign_queue_items(cur, days, high_junk_pct, high_spend_usd)
+                waste_items    = _build_waste_queue_items(cur, days, high_spend_usd)
+                geo_items      = _build_geo_queue_items(cur, days, high_junk_pct)
+                keyword_items  = _build_keyword_queue_items(cur, days, high_spend_usd)
+                dq_items       = _build_data_quality_items(cur, days)
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/action-queue] database error: %s", exc, exc_info=True)
+        return _safe_empty
+
+    all_items = campaign_items + waste_items + geo_items + keyword_items + dq_items
+
+    # Sort: highest score first, then type, then entity_label for stable ordering
+    all_items.sort(key=lambda x: (-x["severity_score"], x["type"], x["entity_label"]))
+
+    # Cap at 30 items
+    all_items = all_items[:_QUEUE_MAX_ITEMS]
+
+    n_high   = sum(1 for i in all_items if i["severity"] == "high")
+    n_medium = sum(1 for i in all_items if i["severity"] == "medium")
+    n_low    = sum(1 for i in all_items if i["severity"] == "low")
+
+    return {
+        "days": days,
+        "items": all_items,
+        "summary": {
+            "total":  len(all_items),
+            "high":   n_high,
+            "medium": n_medium,
+            "low":    n_low,
+        },
+        "data_quality": {"status": "ok"},
     }
