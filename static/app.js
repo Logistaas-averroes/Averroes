@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "campaigns", "waste", "geo", "keywords", "leads", "deals", "opportunities", "scheduler", "health"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "geo", "keywords", "leads", "deals", "opportunities", "scheduler", "health"];
 
 // Deal pipeline stages (Phase 1 read-only reference)
 const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
@@ -62,6 +62,11 @@ let geoMergedRows = [];
 // Keywords page state
 let keywordRows = [];
 let keywordLoadStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+
+// Reports page state
+let latestReportMarkdown = "";
+let latestReportMeta = null;
+let reportLoadStatus = "idle"; // idle | loading | ok | empty | error
 
 // ── Utility helpers ────────────────────────────────────────────────────────
 
@@ -181,6 +186,19 @@ async function fetchJSON(url, options = {}) {
     throw new Error(body.detail || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+async function fetchText(path) {
+  const res = await fetch(path, { credentials: "same-origin" });
+  if (res.status === 401) {
+    showLogin();
+    throw new Error("HTTP 401");
+  }
+  if (res.status === 403) throw new Error("HTTP 403");
+  if (!res.ok) {
+    throw new Error(`Request failed: ${res.status}`);
+  }
+  return res.text();
 }
 
 async function loadUiThresholds() {
@@ -347,6 +365,7 @@ function navigate(page) {
 function loadPage(page) {
   switch (page) {
     case "dashboard":     loadDashboard();     break;
+    case "reports":       loadReports();       break;
     case "campaigns":     loadCampaigns();     break;
     case "waste":         loadWaste();         break;
     case "geo":           loadGeo();           break;
@@ -447,6 +466,133 @@ async function loadDataFreshness() {
   } else {
     statusEl.textContent = `Latest recorded run · ${dateStr} · ${runType} · ${status}`;
     statusEl.className   = "freshness-status freshness-ok";
+  }
+}
+
+// ── Reports page ───────────────────────────────────────────────────────────
+
+async function loadReports() {
+  const metaEl   = document.getElementById("reports-meta");
+  const bodyEl   = document.getElementById("reports-viewer-body");
+  const copyBtn  = document.getElementById("report-copy-btn");
+
+  reportLoadStatus = "loading";
+  latestReportMarkdown = "";
+  latestReportMeta = null;
+
+  if (metaEl) metaEl.innerHTML = "";
+  if (bodyEl) bodyEl.innerHTML = `<p class="empty-state">Loading report…</p>`;
+  if (copyBtn) { copyBtn.disabled = true; }
+
+  // Fetch metadata (non-fatal — raw report can still show without it).
+  try {
+    latestReportMeta = await fetchJSON("/reports/latest");
+  } catch (_) {
+    latestReportMeta = null;
+  }
+
+  // If metadata says no report exists, skip raw fetch.
+  if (latestReportMeta && latestReportMeta.exists === false) {
+    reportLoadStatus = "empty";
+    _renderReportsMeta(latestReportMeta);
+    if (bodyEl) {
+      bodyEl.innerHTML = `
+        <p class="empty-state">No generated report found yet.</p>
+        <p class="empty-state-sub">Reports appear after weekly or monthly scheduler jobs complete.</p>`;
+    }
+    return;
+  }
+
+  // Fetch raw markdown body.
+  try {
+    latestReportMarkdown = await fetchText("/reports/latest/raw");
+    reportLoadStatus = "ok";
+  } catch (_) {
+    reportLoadStatus = "error";
+    latestReportMarkdown = "";
+    _renderReportsMeta(latestReportMeta);
+    if (bodyEl) {
+      bodyEl.innerHTML = `<p class="empty-state">Could not load latest report. Check API health or run status.</p>`;
+    }
+    return;
+  }
+
+  _renderReportsMeta(latestReportMeta);
+
+  if (bodyEl) {
+    if (!latestReportMarkdown.trim()) {
+      bodyEl.innerHTML = `
+        <p class="empty-state">No generated report found yet.</p>
+        <p class="empty-state-sub">Reports appear after weekly or monthly scheduler jobs complete.</p>`;
+    } else {
+      bodyEl.innerHTML = `<pre class="report-markdown">${escapeHtml(latestReportMarkdown)}</pre>`;
+      if (copyBtn) copyBtn.disabled = false;
+    }
+  }
+}
+
+function _renderReportsMeta(meta) {
+  const metaEl = document.getElementById("reports-meta");
+  if (!metaEl) return;
+
+  const filename    = meta && meta.filename    ? meta.filename    : null;
+  const generatedAt = meta && meta.generated_at ? meta.generated_at : null;
+  const path        = meta && meta.path        ? meta.path        : null;
+  const reportType  = meta && meta.report_type ? meta.report_type : null;
+  const exists      = meta && meta.exists === true;
+
+  metaEl.innerHTML = `
+    <div class="report-meta-card">
+      <div class="report-meta-card__label">Report file</div>
+      <div class="report-meta-card__value">${filename ? escapeHtml(filename) : "—"}</div>
+    </div>
+    <div class="report-meta-card">
+      <div class="report-meta-card__label">Generated</div>
+      <div class="report-meta-card__value">${generatedAt ? fmtDate(generatedAt) : "—"}</div>
+    </div>
+    <div class="report-meta-card">
+      <div class="report-meta-card__label">Source</div>
+      <div class="report-meta-card__value">${path ? escapeHtml(path) : "outputs/*.md"}</div>
+    </div>
+    <div class="report-meta-card">
+      <div class="report-meta-card__label">Type / Status</div>
+      <div class="report-meta-card__value">${reportType ? escapeHtml(reportType) : "—"} · ${exists ? "Available" : "Unavailable"}</div>
+    </div>`;
+}
+
+function copyLatestReport() {
+  const btn = document.getElementById("report-copy-btn");
+  const origHTML = btn ? btn.innerHTML : null;
+
+  const showFeedback = (success) => {
+    if (!btn) return;
+    btn.innerHTML = success
+      ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Copied!`
+      : `Copy failed`;
+    btn.disabled = true;
+    setTimeout(() => {
+      if (btn && origHTML !== null) { btn.innerHTML = origHTML; btn.disabled = false; }
+    }, 2000);
+  };
+
+  if (!latestReportMarkdown) return;
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(latestReportMarkdown).then(
+      () => showFeedback(true),
+      () => showFeedback(false),
+    );
+  } else {
+    const ta = document.createElement("textarea");
+    ta.value = latestReportMarkdown;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { /* ignore */ }
+    document.body.removeChild(ta);
+    showFeedback(ok);
   }
 }
 
@@ -2552,6 +2698,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   const drawerOverlay  = document.getElementById("campaign-drawer-overlay");
   if (drawerCloseBtn) drawerCloseBtn.addEventListener("click", closeCampaignDrawer);
   if (drawerOverlay)  drawerOverlay.addEventListener("click", closeCampaignDrawer);
+
+  // Wire up reports page controls
+  const reportCopyBtn    = document.getElementById("report-copy-btn");
+  const reportRefreshBtn = document.getElementById("report-refresh-btn");
+  if (reportCopyBtn)    reportCopyBtn.addEventListener("click", copyLatestReport);
+  if (reportRefreshBtn) reportRefreshBtn.addEventListener("click", loadReports);
 
   // Check auth and load initial page
   const isAuth = await checkAuth();
