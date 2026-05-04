@@ -2205,12 +2205,6 @@ function renderCampaignDrawer(data) {
 
   bodyEl.innerHTML = headerHtml + kpiHtml;
   _appendDrawerEvidenceSections(bodyEl, data, lq);
-
-  // Wire up waste copy button if present
-  const wcBtn = document.getElementById("drawer-waste-copy-btn");
-  if (wcBtn) {
-    wcBtn.addEventListener("click", () => copyDrawerWasteTerms(data.waste_terms || [], wcBtn));
-  }
 }
 
 /**
@@ -2417,7 +2411,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
   // Wire up waste copy button if present (must happen after DOM insertion)
   const wcBtn = container.querySelector("#drawer-waste-copy-btn");
   if (wcBtn) {
-    wcBtn.addEventListener("click", () => copyDrawerWasteTerms(wasteTerms, wcBtn));
+    wcBtn.addEventListener("click", () => copyDrawerWasteTerms(data.waste_terms || [], wcBtn));
   }
 }
 
