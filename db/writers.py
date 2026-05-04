@@ -549,14 +549,13 @@ def write_keywords(run_id: int, keyword_rows: list) -> int:
         if match_type is not None:
             match_type = str(match_type).strip() or None
         # Resolve run_date from the row if available, falling back to today
-        row_date = k.get("date") or k.get("run_date")
-        if row_date:
+        raw_date = k.get("date") if k.get("date") is not None else k.get("run_date")
+        if raw_date is not None:
             try:
-                from datetime import date as _date
-                if isinstance(row_date, _date):
-                    effective_date = row_date
+                if isinstance(raw_date, date):
+                    effective_date = raw_date
                 else:
-                    effective_date = _date.fromisoformat(str(row_date))
+                    effective_date = date.fromisoformat(str(raw_date))
             except (ValueError, TypeError):
                 effective_date = today
         else:
