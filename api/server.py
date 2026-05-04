@@ -39,6 +39,7 @@ Protected endpoints (require authenticated session):
   GET  /api/campaign-detail        — Campaign drill-down detail, query-param form (requires auth). Preferred.
   GET  /api/campaigns/{campaign_name}/detail — Campaign drill-down detail, path-segment form (requires auth). Legacy.
   GET  /api/config/ui-thresholds  — UI-safe display thresholds from config/thresholds.yaml (requires auth).
+  GET  /api/dashboard/trends      — Previous-period trend comparison for dashboard (requires auth).
 """
 
 import importlib
@@ -1637,3 +1638,515 @@ def api_ui_thresholds(user: dict = Depends(require_auth)) -> dict[str, Any]:
     file cannot be read. Phase 1 read-only — no writes to any external system.
     """
     return _load_ui_thresholds()
+
+
+# ---------------------------------------------------------------------------
+# Dashboard trends endpoint — previous-period comparison. Read-only, auth required.
+# ---------------------------------------------------------------------------
+
+# Movement classification thresholds.
+# These are local constants pending potential migration to config/thresholds.yaml.
+# junk_rate: meaningful if absolute delta >= 10 percentage points.
+# spend:     meaningful if relative delta >= 20% of previous period spend.
+# sqls:      meaningful if integer delta != 0.
+_TREND_JUNK_DELTA_THRESHOLD = 10      # absolute percentage-point change
+_TREND_SPEND_DELTA_PCT = 20           # percent spend change considered meaningful
+_TREND_HIGH_JUNK_PCT = 30             # matches uiThresholds.junk_rate.high_pct default
+
+
+def _trend_metric_insufficient(current: float | int | None) -> dict[str, Any]:
+    """Build a trend metric object for when no previous-period data exists."""
+    return {
+        "current":   current,
+        "previous":  None,
+        "delta":     None,
+        "delta_pct": None,
+        "trend":     "insufficient_data",
+    }
+
+
+def _trend_metric(cur_val: float, prev_val: float) -> dict[str, Any]:
+    """Build a comparable metric object for a float value."""
+    c = round(float(cur_val or 0), 2)
+    p = round(float(prev_val or 0), 2)
+    delta = round(c - p, 2)
+    delta_pct = round((delta / p) * 100, 2) if p != 0 else None
+    trend = "up" if delta > 0 else ("down" if delta < 0 else "flat")
+    return {"current": c, "previous": p, "delta": delta, "delta_pct": delta_pct, "trend": trend}
+
+
+def _trend_metric_int(cur_val: int, prev_val: int) -> dict[str, Any]:
+    """Build a comparable metric object for an integer value."""
+    c = int(cur_val or 0)
+    p = int(prev_val or 0)
+    delta = c - p
+    delta_pct = round((delta / p) * 100, 2) if p != 0 else None
+    trend = "up" if delta > 0 else ("down" if delta < 0 else "flat")
+    return {"current": c, "previous": p, "delta": delta, "delta_pct": delta_pct, "trend": trend}
+
+
+def _compute_severity(
+    cur_c: dict | None,
+    prev_c: dict | None,
+    spend_delta_pct: float | None = None,
+    junk_delta: float | None = None,
+) -> int:
+    """Compute a 0–100 display severity score for a campaign movement.
+
+    Scoring (display severity only — not an automated action recommendation):
+      +30 if current SQLs = 0 and spend > 0
+      +25 if current junk_rate_pct >= high junk threshold
+      +20 if spend increased >= 20%
+      +20 if junk rate increased >= 10 points
+      +15 if verdict is FIX
+      +25 if verdict is CUT
+    Capped at 100.
+    """
+    if cur_c is None:
+        return 0
+    score = 0
+    if cur_c["confirmed_sqls"] == 0 and (cur_c["spend_usd"] or 0) > 0:
+        score += 30
+    if cur_c["junk_rate_pct"] is not None and cur_c["junk_rate_pct"] >= _TREND_HIGH_JUNK_PCT:
+        score += 25
+    if spend_delta_pct is not None and spend_delta_pct >= _TREND_SPEND_DELTA_PCT:
+        score += 20
+    if junk_delta is not None and junk_delta >= _TREND_JUNK_DELTA_THRESHOLD:
+        score += 20
+    verdict = (cur_c.get("verdict") or "").upper()
+    if verdict == "FIX":
+        score += 15
+    elif verdict == "CUT":
+        score += 25
+    return min(100, score)
+
+
+def _build_trend_alerts(movements: list[dict], has_previous: bool) -> list[dict]:
+    """Build alert objects from campaign movement data.
+
+    Alert language is evidence-based and warrants review only.
+    Does not say pause, cut, increase budget, or apply negatives.
+    Returns up to 8 alerts ordered by severity bucket (high, medium, low).
+    """
+    alerts: list[dict] = []
+
+    for m in movements:
+        cur_c = m.get("current")
+        prev_c = m.get("previous")
+        name = m["campaign_name"]
+        movement = m["movement"]
+        score = m["severity_score"]
+
+        if movement == "worsened":
+            if cur_c and cur_c["confirmed_sqls"] == 0 and (cur_c["spend_usd"] or 0) > 0 and prev_c:
+                prev_sqls = prev_c["confirmed_sqls"]
+                spend_str = f"${cur_c['spend_usd']:.0f}" if cur_c["spend_usd"] else "unknown spend"
+                alerts.append({
+                    "campaign_name": name,
+                    "severity": "high" if score >= 60 else "medium",
+                    "title": "Spend rose without SQLs",
+                    "detail": (
+                        f"Spend is {spend_str} with 0 confirmed SQLs this period"
+                        + (f" (was {prev_sqls} SQL{'s' if prev_sqls != 1 else ''} previously)" if prev_sqls else "")
+                        + ". Warrants review."
+                    ),
+                    "source": "campaigns table",
+                })
+            elif cur_c and cur_c.get("junk_rate_pct") is not None and prev_c and prev_c.get("junk_rate_pct") is not None:
+                junk_delta = cur_c["junk_rate_pct"] - prev_c["junk_rate_pct"]
+                if junk_delta >= _TREND_JUNK_DELTA_THRESHOLD:
+                    alerts.append({
+                        "campaign_name": name,
+                        "severity": "high" if score >= 60 else "medium",
+                        "title": "Junk rate worsened",
+                        "detail": (
+                            f"Junk rate increased from {prev_c['junk_rate_pct']:.1f}% to "
+                            f"{cur_c['junk_rate_pct']:.1f}% (+{junk_delta:.1f} points). Warrants review."
+                        ),
+                        "source": "campaigns table",
+                    })
+                else:
+                    alerts.append({
+                        "campaign_name": name,
+                        "severity": "medium" if score >= 40 else "low",
+                        "title": f"Campaign moved to {cur_c.get('verdict', 'worsened')} status",
+                        "detail": m["reason"] + " Warrants review.",
+                        "source": "campaigns table",
+                    })
+            else:
+                alerts.append({
+                    "campaign_name": name,
+                    "severity": "medium" if score >= 40 else "low",
+                    "title": "Campaign performance worsened",
+                    "detail": m["reason"] + " Warrants review.",
+                    "source": "campaigns table",
+                })
+
+        elif movement == "new" and not has_previous:
+            alerts.append({
+                "campaign_name": name,
+                "severity": "low",
+                "title": "Campaign has no previous-period comparison",
+                "detail": "No previous-period data available for comparison yet.",
+                "source": "campaigns table",
+            })
+
+        elif cur_c and (cur_c.get("verdict") or "").upper() in ("FIX", "CUT"):
+            verdict = cur_c["verdict"].upper()
+            if not any(a["campaign_name"] == name for a in alerts):
+                alerts.append({
+                    "campaign_name": name,
+                    "severity": "high" if verdict == "CUT" else "medium",
+                    "title": f"Campaign has verdict {verdict}",
+                    "detail": f"Campaign is currently rated {verdict}. Warrants review.",
+                    "source": "campaigns table",
+                })
+
+    # Deduplicate by campaign_name (keep highest severity)
+    seen: dict[str, int] = {}
+    deduped: list[dict] = []
+    severity_rank = {"high": 3, "medium": 2, "low": 1}
+    for a in alerts:
+        key = a["campaign_name"]
+        rank = severity_rank.get(a["severity"], 0)
+        if key not in seen or rank > seen[key]:
+            seen[key] = rank
+            deduped = [x for x in deduped if x["campaign_name"] != key]
+            deduped.append(a)
+
+    # Re-sort by severity
+    deduped.sort(key=lambda x: severity_rank.get(x["severity"], 0), reverse=True)
+    return deduped[:8]
+
+
+@app.get("/api/dashboard/trends")
+def api_dashboard_trends(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return previous-period trend comparison for the dashboard. Requires auth.
+
+    Compares the current period (last N days) against the previous period
+    (the N days before that). Returns summary metrics, campaign movements,
+    and display alerts. Phase 1 read-only — no writes to any external system.
+    """
+    from datetime import timedelta  # noqa: PLC0415
+
+    days = _clamp_days(days)
+
+    _safe_empty: dict[str, Any] = {
+        "days": days,
+        "summary": {},
+        "campaign_movements": [],
+        "alerts": [],
+        "data_quality": {"status": "db_unavailable"},
+        "db_unavailable": True,
+    }
+
+    # Period date bounds for response metadata (UTC date arithmetic)
+    today = datetime.now(tz=timezone.utc).date()
+    current_start = today - timedelta(days=days)
+    previous_start = today - timedelta(days=days * 2)
+    previous_end = current_start  # exclusive upper bound for previous period
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _safe_empty
+
+            with conn.cursor() as cur:
+                # ── Run counts per period (data quality) ─────────────────────
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE started_at >= NOW() - INTERVAL '1 day' * %s
+                        ) AS current_runs,
+                        COUNT(*) FILTER (
+                            WHERE started_at >= NOW() - INTERVAL '1 day' * (%s * 2)
+                              AND started_at <  NOW() - INTERVAL '1 day' * %s
+                        ) AS previous_runs
+                    FROM runs
+                    """,
+                    (days, days, days),
+                )
+                rc_row = cur.fetchone()
+                current_runs = int(rc_row[0] or 0) if rc_row else 0
+                previous_runs = int(rc_row[1] or 0) if rc_row else 0
+                has_previous = previous_runs > 0
+
+                # ── Summary: spend/SQLs from campaigns (latest run per period) ─
+                # Uses the same latest-run-per-period pattern as /api/summary to
+                # avoid double-counting overlapping weekly/monthly run snapshots.
+                cur.execute(
+                    """
+                    WITH latest_run AS (
+                        SELECT MAX(id) AS max_run_id
+                        FROM runs
+                        WHERE started_at >= NOW() - INTERVAL '1 day' * %s
+                    )
+                    SELECT
+                        COALESCE(SUM(c.spend_usd), 0)      AS total_spend_usd,
+                        COALESCE(SUM(c.confirmed_sqls), 0) AS confirmed_sqls,
+                        COALESCE(SUM(c.total_leads), 0)    AS total_leads,
+                        COALESCE(SUM(c.junk_count), 0)     AS total_junk
+                    FROM campaigns c
+                    JOIN latest_run lr ON c.run_id = lr.max_run_id
+                    """,
+                    (days,),
+                )
+                cur_camp_agg = cur.fetchone()
+
+                cur.execute(
+                    """
+                    WITH latest_run AS (
+                        SELECT MAX(id) AS max_run_id
+                        FROM runs
+                        WHERE started_at >= NOW() - INTERVAL '1 day' * (%s * 2)
+                          AND started_at <  NOW() - INTERVAL '1 day' * %s
+                    )
+                    SELECT
+                        COALESCE(SUM(c.spend_usd), 0)      AS total_spend_usd,
+                        COALESCE(SUM(c.confirmed_sqls), 0) AS confirmed_sqls,
+                        COALESCE(SUM(c.total_leads), 0)    AS total_leads,
+                        COALESCE(SUM(c.junk_count), 0)     AS total_junk
+                    FROM campaigns c
+                    JOIN latest_run lr ON c.run_id = lr.max_run_id
+                    """,
+                    (days, days),
+                )
+                prev_camp_agg = cur.fetchone()
+
+                # ── Waste spend summed over period (confirmed junk only) ───────
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(spend_usd), 0) AS waste_usd
+                    FROM waste_terms
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                      AND crm_junk_confirmed > 0
+                    """,
+                    (days,),
+                )
+                cur_waste_row = cur.fetchone()
+
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(spend_usd), 0) AS waste_usd
+                    FROM waste_terms
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * (%s * 2)
+                      AND run_date  <  NOW() - INTERVAL '1 day' * %s
+                      AND crm_junk_confirmed > 0
+                    """,
+                    (days, days),
+                )
+                prev_waste_row = cur.fetchone()
+
+                # ── Campaign snapshots for movement analysis ──────────────────
+                # Latest snapshot per campaign in current period.
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (campaign_name)
+                        campaign_name,
+                        spend_usd,
+                        confirmed_sqls,
+                        junk_rate_pct,
+                        verdict
+                    FROM campaigns
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                    ORDER BY campaign_name, run_date DESC, created_at DESC, id DESC
+                    """,
+                    (days,),
+                )
+                cur_camp_rows = cur.fetchall()
+                cur_camp_cols = [d[0] for d in cur.description]
+
+                # Latest snapshot per campaign in previous period.
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (campaign_name)
+                        campaign_name,
+                        spend_usd,
+                        confirmed_sqls,
+                        junk_rate_pct,
+                        verdict
+                    FROM campaigns
+                    WHERE run_date >= NOW() - INTERVAL '1 day' * (%s * 2)
+                      AND run_date  <  NOW() - INTERVAL '1 day' * %s
+                    ORDER BY campaign_name, run_date DESC, created_at DESC, id DESC
+                    """,
+                    (days, days),
+                )
+                prev_camp_rows = cur.fetchall()
+                prev_camp_cols = [d[0] for d in cur.description]
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/dashboard/trends] database error: %s", exc, exc_info=True)
+        return _safe_empty
+
+    # ── Build summary metrics ─────────────────────────────────────────────────
+    cur_spend   = float(cur_camp_agg[0]  or 0) if cur_camp_agg  else 0.0
+    prev_spend  = float(prev_camp_agg[0] or 0) if prev_camp_agg else 0.0
+    cur_sqls    = int(cur_camp_agg[1]    or 0) if cur_camp_agg  else 0
+    prev_sqls   = int(prev_camp_agg[1]   or 0) if prev_camp_agg else 0
+    cur_leads   = int(cur_camp_agg[2]    or 0) if cur_camp_agg  else 0
+    cur_junk    = int(cur_camp_agg[3]    or 0) if cur_camp_agg  else 0
+    prev_leads  = int(prev_camp_agg[2]   or 0) if prev_camp_agg else 0
+    prev_junk   = int(prev_camp_agg[3]   or 0) if prev_camp_agg else 0
+    cur_waste   = float(cur_waste_row[0]  or 0) if cur_waste_row  else 0.0
+    prev_waste  = float(prev_waste_row[0] or 0) if prev_waste_row else 0.0
+
+    cur_junk_rate  = round((cur_junk  / cur_leads)  * 100, 1) if cur_leads  > 0 else None
+    prev_junk_rate = round((prev_junk / prev_leads) * 100, 1) if prev_leads > 0 else None
+
+    summary: dict[str, Any]
+    if not has_previous:
+        # No previous-period data — return current values only, no fake comparisons against zero.
+        summary = {
+            "spend_usd":           _trend_metric_insufficient(round(cur_spend, 2)),
+            "confirmed_sqls":      _trend_metric_insufficient(cur_sqls),
+            "confirmed_waste_usd": _trend_metric_insufficient(round(cur_waste, 2)),
+            "avg_junk_rate_pct":   _trend_metric_insufficient(cur_junk_rate),
+        }
+    else:
+        summary = {
+            "spend_usd":            _trend_metric(cur_spend, prev_spend),
+            "confirmed_sqls":       _trend_metric_int(cur_sqls, prev_sqls),
+            "confirmed_waste_usd":  _trend_metric(cur_waste, prev_waste),
+        }
+
+        # Junk rate metric — both values may be None if no lead data exists
+        if cur_junk_rate is not None and prev_junk_rate is not None:
+            junk_delta     = round(cur_junk_rate - prev_junk_rate, 2)
+            junk_delta_pct = round((junk_delta / prev_junk_rate) * 100, 2) if prev_junk_rate != 0 else None
+            junk_trend     = "up" if junk_delta > 0 else ("down" if junk_delta < 0 else "flat")
+            summary["avg_junk_rate_pct"] = {
+                "current": cur_junk_rate, "previous": prev_junk_rate,
+                "delta": junk_delta, "delta_pct": junk_delta_pct, "trend": junk_trend,
+            }
+        else:
+            summary["avg_junk_rate_pct"] = {
+                "current": cur_junk_rate, "previous": prev_junk_rate,
+                "delta": None, "delta_pct": None, "trend": "insufficient_data",
+            }
+
+    # ── Build campaign movement lookup dicts ──────────────────────────────────
+    def _snap(cols: list[str], rows: list[tuple]) -> dict[str, dict]:
+        result: dict[str, dict] = {}
+        for row in rows:
+            r = dict(zip(cols, row))
+            result[r["campaign_name"]] = {
+                "spend_usd":      float(r["spend_usd"])      if r["spend_usd"]      is not None else 0.0,
+                "confirmed_sqls": int(r["confirmed_sqls"] or 0),
+                "junk_rate_pct":  float(r["junk_rate_pct"]) if r["junk_rate_pct"]  is not None else None,
+                "verdict":        r["verdict"],
+            }
+        return result
+
+    cur_snaps  = _snap(cur_camp_cols,  cur_camp_rows)
+    prev_snaps = _snap(prev_camp_cols, prev_camp_rows)
+
+    all_campaign_names = set(cur_snaps.keys()) | set(prev_snaps.keys())
+    movements: list[dict] = []
+
+    for name in sorted(all_campaign_names):
+        in_current  = name in cur_snaps
+        in_previous = name in prev_snaps
+        cur_c  = cur_snaps.get(name)
+        prev_c = prev_snaps.get(name)
+
+        spend_delta_pct: float | None = None
+        junk_rate_delta: float | None = None
+
+        if in_current and not in_previous:
+            movement = "new"
+            reason   = "Campaign appears in current period with no previous-period data."
+            severity = _compute_severity(cur_c, None)
+
+        elif in_previous and not in_current:
+            movement = "dropped"
+            reason   = "Campaign no longer appears in current period."
+            severity = 0
+
+        else:
+            # Both periods present — calculate deltas
+            if prev_c["spend_usd"] > 0:
+                spend_delta_pct = ((cur_c["spend_usd"] - prev_c["spend_usd"]) / prev_c["spend_usd"]) * 100
+            if cur_c["junk_rate_pct"] is not None and prev_c["junk_rate_pct"] is not None:
+                junk_rate_delta = cur_c["junk_rate_pct"] - prev_c["junk_rate_pct"]
+
+            sql_delta = cur_c["confirmed_sqls"] - prev_c["confirmed_sqls"]
+
+            severity = _compute_severity(cur_c, prev_c, spend_delta_pct, junk_rate_delta)
+
+            if cur_c["junk_rate_pct"] is None and prev_c["junk_rate_pct"] is None:
+                movement = "insufficient_data"
+                reason   = "No junk rate data available in either period for comparison."
+            else:
+                spend_rose  = spend_delta_pct is not None and spend_delta_pct >= _TREND_SPEND_DELTA_PCT
+                junk_rose   = junk_rate_delta  is not None and junk_rate_delta  >= _TREND_JUNK_DELTA_THRESHOLD
+                junk_fell   = junk_rate_delta  is not None and junk_rate_delta  <= -_TREND_JUNK_DELTA_THRESHOLD
+                sqls_rose   = sql_delta > 0
+                sqls_fell   = sql_delta < 0
+                no_sqls_spend = spend_rose and cur_c["confirmed_sqls"] == 0
+
+                if sqls_fell or junk_rose or no_sqls_spend:
+                    movement = "worsened"
+                    parts: list[str] = []
+                    if sqls_fell:
+                        parts.append(f"SQLs fell by {abs(sql_delta)}")
+                    if junk_rose:
+                        parts.append(f"junk rate rose {junk_rate_delta:.1f} points")
+                    if no_sqls_spend:
+                        parts.append(f"spend rose {spend_delta_pct:.0f}% with no SQLs")
+                    if parts:
+                        joined = ". ".join(parts)
+                        reason = joined[0].upper() + joined[1:] + "."
+                    else:
+                        reason = "Performance metrics worsened."
+                elif sqls_rose or junk_fell:
+                    movement = "improved"
+                    parts = []
+                    if sqls_rose:
+                        parts.append(f"SQLs increased by {sql_delta}")
+                    if junk_fell:
+                        parts.append(f"junk rate fell {abs(junk_rate_delta):.1f} points")
+                    if parts:
+                        joined = ". ".join(parts)
+                        reason = joined[0].upper() + joined[1:] + "."
+                    else:
+                        reason = "Performance metrics improved."
+                else:
+                    movement = "stable"
+                    reason   = "No meaningful change detected."
+
+        movements.append({
+            "campaign_name": name,
+            "current":        cur_c,
+            "previous":       prev_c,
+            "movement":       movement,
+            "reason":         reason,
+            "severity_score": severity,
+        })
+
+    movements.sort(key=lambda x: (-x["severity_score"], x["campaign_name"]))
+
+    # ── Build alerts (display severity only, no action recommendations) ───────
+    alerts = _build_trend_alerts(movements, has_previous)
+
+    data_quality: dict[str, Any] = {
+        "has_previous_period": has_previous,
+        "current_runs":        current_runs,
+        "previous_runs":       previous_runs,
+        "status":              "ok" if has_previous else "insufficient_previous_data",
+    }
+
+    return {
+        "days": days,
+        "current_period":  {"start": str(current_start),  "end": str(today)},
+        "previous_period": {"start": str(previous_start), "end": str(previous_end)},
+        "summary":           summary,
+        "campaign_movements": movements[:10],  # top 10 by severity_score
+        "alerts":            alerts,
+        "data_quality":      data_quality,
+    }

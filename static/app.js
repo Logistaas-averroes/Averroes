@@ -636,15 +636,20 @@ async function loadDashboard() {
   // Load run history timeline (non-blocking — failure does not affect other panels)
   loadRunHistory();
 
-  // Load campaign data for the verdict summary panel and alerts panel
+  // Load campaign data for the verdict summary panel
+  let campaigns = [];
   try {
-    const campaigns = await fetchJSON(`/api/campaigns?days=${days}`);
-    renderVerdictSummary(campaigns.campaigns || []);
-    renderAlerts(campaigns.campaigns || []);
+    const campData = await fetchJSON(`/api/campaigns?days=${days}`);
+    campaigns = campData.campaigns || [];
+    renderVerdictSummary(campaigns);
   } catch (_) {
     renderVerdictSummaryEmpty();
-    renderAlertsEmpty();
   }
+
+  // Load dashboard trends (non-blocking — failure does not break dashboard).
+  // Alerts panel is upgraded with trend alerts when available; falls back to
+  // campaign-verdict alerts otherwise.
+  loadDashboardTrends(campaigns);
 }
 
 function renderKPIs(summary) {
@@ -740,6 +745,273 @@ function renderAlerts(campaigns) {
 function renderAlertsEmpty() {
   const el = document.getElementById("dash-alerts-body");
   if (el) el.innerHTML = `<p class="empty-state">No alerts. Trigger a run to check for issues.</p>`;
+}
+
+function renderAlertsUnavailable() {
+  const el = document.getElementById("dash-alerts-body");
+  if (el) el.innerHTML = `<p class="empty-state">Alerts temporarily unavailable.</p>`;
+}
+
+// ── Dashboard trends (What Changed + Campaign Movement + Alerts upgrade) ────
+
+async function loadDashboardTrends(fallbackCampaigns) {
+  const trendsEl    = document.getElementById("dashboard-trends");
+  const movementEl  = document.getElementById("campaign-movement-list");
+
+  // Show loading states
+  if (trendsEl)   trendsEl.innerHTML   = `<p class="empty-state">Loading…</p>`;
+  if (movementEl) movementEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading…</p>`;
+
+  // Whether /api/campaigns returned actual data — used for fallback alert distinction
+  const hasFallbackData = Array.isArray(fallbackCampaigns) && fallbackCampaigns.length > 0;
+
+  let data = null;
+  try {
+    data = await fetchJSON(`/api/dashboard/trends?days=${getSelectedDays()}`);
+  } catch (_) {
+    // Endpoint unavailable — fall back to campaign-verdict alerts
+    if (trendsEl)   trendsEl.innerHTML   = `<p class="empty-state">Trend data temporarily unavailable.</p>`;
+    if (movementEl) movementEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Campaign movement data unavailable.</p>`;
+    if (hasFallbackData) {
+      renderAlerts(fallbackCampaigns);
+    } else {
+      renderAlertsUnavailable();
+    }
+    return;
+  }
+
+  if (data.db_unavailable) {
+    if (trendsEl)   trendsEl.innerHTML   = `<p class="empty-state">Trend data temporarily unavailable — database offline.</p>`;
+    if (movementEl) movementEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Campaign movement temporarily unavailable — database offline.</p>`;
+    if (hasFallbackData) {
+      renderAlerts(fallbackCampaigns);
+    } else {
+      renderAlertsUnavailable();
+    }
+    return;
+  }
+
+  const dq = data.data_quality || {};
+  const hasPrevious = dq.has_previous_period === true;
+
+  // ── Render summary trend cards ─────────────────────────────────────────────
+  renderTrendSummary(data.summary || {}, hasPrevious, trendsEl);
+
+  // ── Render campaign movement list ──────────────────────────────────────────
+  renderCampaignMovements(data.campaign_movements || [], hasPrevious, movementEl);
+
+  // ── Upgrade alerts panel with trend alerts (fall back to campaign verdicts) ─
+  const trendAlerts = data.alerts || [];
+  if (trendAlerts.length > 0) {
+    renderTrendAlerts(trendAlerts);
+  } else if (hasFallbackData) {
+    renderAlerts(fallbackCampaigns);
+  } else {
+    renderAlertsUnavailable();
+  }
+}
+
+// Direction semantics:
+//   spend   — up is neutral (context-dependent), down is neutral
+//   sqls    — up is good,  down is bad
+//   waste   — up is bad,   down is good
+//   junkRate — up is bad,  down is good
+const TREND_DIRECTION = {
+  spend_usd:           { up: "neutral", down: "neutral" },
+  confirmed_sqls:      { up: "good",    down: "bad"     },
+  confirmed_waste_usd: { up: "bad",     down: "good"    },
+  avg_junk_rate_pct:   { up: "bad",     down: "good"    },
+};
+
+const TREND_LABELS = {
+  spend_usd:           "Spend",
+  confirmed_sqls:      "SQLs",
+  confirmed_waste_usd: "Waste Spend",
+  avg_junk_rate_pct:   "Avg Junk Rate",
+};
+
+function _trendDirectionClass(key, trend) {
+  if (trend === "flat")              return "trend-neutral";
+  if (trend === "insufficient_data") return "trend-neutral";
+  const map = TREND_DIRECTION[key] || { up: "neutral", down: "neutral" };
+  const valence = trend === "up" ? map.up : map.down;
+  if (valence === "good")    return "trend-good";
+  if (valence === "bad")     return "trend-bad";
+  return "trend-neutral";
+}
+
+function _trendDirectionLabel(key, trend) {
+  if (trend === "insufficient_data") return "No comparison";
+  if (trend === "flat")              return "No change";
+  const map = TREND_DIRECTION[key] || { up: "neutral", down: "neutral" };
+  const valence = trend === "up" ? map.up : map.down;
+  if (valence === "good") return "Improved";
+  if (valence === "bad")  return "Worsened";
+  return trend === "up" ? "Higher" : "Lower";
+}
+
+function _fmtMetricValue(key, value) {
+  if (value === null || value === undefined) return "—";
+  if (key === "confirmed_sqls") return String(value);
+  if (key === "avg_junk_rate_pct") return value.toFixed(1) + "%";
+  return fmtDollar(value);
+}
+
+// Format a delta value for display. Junk-rate delta is in percentage points
+// (not %) so it is shown as "+6.5 pts" rather than "+6.5%".
+function _fmtMetricDeltaValue(key, value) {
+  if (value === null || value === undefined) return "—";
+  if (key === "avg_junk_rate_pct") {
+    return `${value > 0 ? "+" : ""}${value.toFixed(1)} pts`;
+  }
+  return (value > 0 ? "+" : "") + _fmtMetricValue(key, value);
+}
+
+function renderTrendSummary(summary, hasPrevious, container) {
+  if (!container) return;
+
+  const metricKeys = ["spend_usd", "confirmed_sqls", "confirmed_waste_usd", "avg_junk_rate_pct"];
+
+  const noDataNote = !hasPrevious
+    ? `<p class="trend-no-previous-note">Not enough previous-period data yet. Current values are shown without comparison.</p>`
+    : "";
+
+  const cards = metricKeys.map((key) => {
+    const m = summary[key];
+    if (!m) return "";
+    const dirCls   = _trendDirectionClass(key, m.trend);
+    const dirLabel = _trendDirectionLabel(key, m.trend);
+    const curVal   = _fmtMetricValue(key, m.current);
+    const prevVal  = _fmtMetricValue(key, m.previous);
+
+    // Delta display — junk-rate delta is percentage points, others use value formatter
+    let deltaStr = null;
+    if (m.delta !== null && m.delta !== undefined) {
+      const deltaFmt = _fmtMetricDeltaValue(key, m.delta);
+      const deltaPctFmt = (m.delta_pct !== null && key !== "avg_junk_rate_pct")
+        ? ` / ${m.delta_pct > 0 ? "+" : ""}${m.delta_pct.toFixed(1)}%`
+        : "";
+      deltaStr = deltaFmt + deltaPctFmt;
+    }
+
+    const arrowUp   = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>`;
+    const arrowDown = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>`;
+    const arrowIcon = m.trend === "up" ? arrowUp : (m.trend === "down" ? arrowDown : "");
+
+    return `
+      <div class="trend-card">
+        <div class="trend-card__label">${escapeHtml(TREND_LABELS[key] || key)}</div>
+        <div class="trend-card__current">${escapeHtml(curVal)}</div>
+        <div class="trend-card__comparison">vs. ${escapeHtml(prevVal)} previous</div>
+        ${deltaStr ? `<div class="trend-delta ${dirCls}">${arrowIcon}<span>${escapeHtml(deltaStr)}</span></div>` : ""}
+        <div class="trend-direction-badge ${dirCls}">${escapeHtml(dirLabel)}</div>
+      </div>`;
+  }).join("");
+
+  container.innerHTML = `${noDataNote}<div class="dashboard-trends">${cards}</div>`;
+}
+
+function renderCampaignMovements(movements, hasPrevious, container) {
+  if (!container) return;
+
+  if (movements.length === 0) {
+    if (!hasPrevious) {
+      container.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Not enough previous-period data yet. Trends will appear after more runs.</p>`;
+    } else {
+      container.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">No campaign movement detected in this period.</p>`;
+    }
+    return;
+  }
+
+  const rows = movements.map((m) => {
+    const cur  = m.current  || {};
+    const prev = m.previous || {};
+    const name = m.campaign_name || "—";
+    const mv   = m.movement || "stable";
+
+    const mvCls = {
+      improved:          "movement-improved",
+      worsened:          "movement-worsened",
+      stable:            "movement-stable",
+      new:               "movement-new",
+      dropped:           "movement-dropped",
+      insufficient_data: "movement-insufficient",
+    }[mv] || "movement-stable";
+
+    const mvLabel = {
+      improved:          "Improved",
+      worsened:          "Worsened",
+      stable:            "Stable",
+      new:               "New",
+      dropped:           "Dropped",
+      insufficient_data: "Insufficient data",
+    }[mv] || mv;
+
+    const spend    = cur.spend_usd      != null ? fmtDollar(cur.spend_usd)     : "—";
+    const sqls     = cur.confirmed_sqls != null ? String(cur.confirmed_sqls)   : "—";
+    const junk     = cur.junk_rate_pct  != null ? cur.junk_rate_pct.toFixed(1) + "%" : "—";
+    const verdict  = cur.verdict        || "";
+
+    const prevSpend  = prev.spend_usd      != null ? fmtDollar(prev.spend_usd)     : "—";
+    const prevSqls   = prev.confirmed_sqls != null ? String(prev.confirmed_sqls)   : "—";
+    const prevJunk   = prev.junk_rate_pct  != null ? prev.junk_rate_pct.toFixed(1) + "%" : "—";
+
+    // Investigate button if campaign name is available
+    const investigateBtn = name && name !== "—"
+      ? `<button class="investigate-button movement-investigate-btn" type="button" data-campaign="${escapeHtml(name)}">Investigate</button>`
+      : "";
+
+    return `
+      <div class="campaign-movement-item">
+        <div class="campaign-movement-item__header">
+          <span class="campaign-movement-item__name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+          <span class="movement-badge ${mvCls}">${escapeHtml(mvLabel)}</span>
+          ${verdictBadge(verdict)}
+          ${investigateBtn}
+        </div>
+        <div class="campaign-movement-item__metrics">
+          <span class="movement-metric"><span class="movement-metric__label">Spend</span> <span class="movement-metric__val">${escapeHtml(spend)}</span> <span class="movement-metric__prev">(was ${escapeHtml(prevSpend)})</span></span>
+          <span class="movement-metric"><span class="movement-metric__label">SQLs</span> <span class="movement-metric__val">${escapeHtml(sqls)}</span> <span class="movement-metric__prev">(was ${escapeHtml(prevSqls)})</span></span>
+          <span class="movement-metric"><span class="movement-metric__label">Junk</span> <span class="movement-metric__val">${escapeHtml(junk)}</span> <span class="movement-metric__prev">(was ${escapeHtml(prevJunk)})</span></span>
+        </div>
+        ${m.reason ? `<div class="campaign-movement-item__reason">${escapeHtml(m.reason)}</div>` : ""}
+      </div>`;
+  }).join("");
+
+  container.innerHTML = `<div class="campaign-movement-list">${rows}</div>`;
+
+  // Wire up Investigate buttons
+  container.querySelectorAll(".movement-investigate-btn").forEach((btn) => {
+    btn.addEventListener("click", () => openCampaignDrawer(btn.dataset.campaign));
+  });
+}
+
+function renderTrendAlerts(alerts) {
+  const el = document.getElementById("dash-alerts-body");
+  if (!el) return;
+
+  if (alerts.length === 0) {
+    el.innerHTML = `<p class="empty-state">No active alerts.</p>`;
+    return;
+  }
+
+  const severityIcon = (sev) => {
+    if (sev === "high") {
+      return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="alert-icon alert-icon--cut"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
+    }
+    return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="alert-icon alert-icon--fix"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
+  };
+
+  el.innerHTML = alerts.map((a) => `
+    <div class="alert-item">
+      ${severityIcon(a.severity)}
+      <div class="alert-text">
+        <span class="alert-severity-badge alert-severity-${escapeHtml(a.severity || "low")}">${escapeHtml((a.severity || "low").toUpperCase())}</span>
+        <span class="alert-campaign">${escapeHtml(a.campaign_name || "")}</span>
+        — <strong>${escapeHtml(a.title || "")}</strong>
+        <div class="alert-detail">${escapeHtml(a.detail || "")}</div>
+      </div>
+    </div>`).join("");
 }
 
 // ── Run history timeline ───────────────────────────────────────────────────
