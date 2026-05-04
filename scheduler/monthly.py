@@ -114,6 +114,14 @@ def run_monthly_report():
         except Exception as db_exc:  # noqa: BLE001
             log.error("DB write geo failed: %s", db_exc)
 
+        # Write keyword rows to database
+        try:
+            if run_id is not None:
+                kw_count = db_writers.write_keywords(run_id, keywords)
+                log.info("Wrote %d keyword rows to database (run_id=%s)", kw_count, run_id)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("DB write keywords failed: %s", db_exc)
+
     except Exception as e:
         log.error(f"Step 2/6 FAILED: HubSpot pull error — {e}")
         finish_run(

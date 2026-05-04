@@ -82,6 +82,14 @@ def run_weekly_report():
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write geo failed: %s", db_exc)
 
+        # Write keyword rows to database
+        try:
+            if run_id is not None:
+                kw_count = db_writers.write_keywords(run_id, keywords)
+                log.info("[weekly] Wrote %d keyword rows to database", kw_count)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[weekly] DB write keywords failed: %s", db_exc)
+
         # Step 3: Waste detection
         print("Step 3/6: Running waste detection...")
         from analysis.core import run_waste_detection

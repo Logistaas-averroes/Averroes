@@ -415,6 +415,51 @@ When database is unavailable: `{ "days": 30, "rows": [], "db_unavailable": true 
 
 ---
 
+#### `GET /api/keywords?days=30`
+Windsor keyword performance data aggregated by campaign, ad group, keyword, and match type for the last N days.
+
+**Auth:** Auth
+**Query params:** `days` (integer, default 30, max 365)
+**Read-only:** Yes — no write to Google Ads or any external system
+**Source:** `keywords` table — Windsor keyword performance data persisted per run
+
+**Response 200:**
+```json
+{
+  "days": 30,
+  "rows": [
+    {
+      "campaign_name": "global - competitors",
+      "ad_group": "competitors",
+      "keyword": "cargowise",
+      "match_type": "phrase",
+      "quality_score": 7.0,
+      "spend_usd": 123.45,
+      "clicks": 10,
+      "impressions": 500,
+      "conversions": 1.0,
+      "cpc_usd": 12.35,
+      "runs": 2,
+      "last_run_date": "2026-05-02"
+    }
+  ]
+}
+```
+
+**Important scope notes:**
+- This endpoint returns Google Ads keyword performance only — it does not include HubSpot lead quality.
+- It does not include actual user search terms (those are in `/api/waste`).
+- `match_type` may be `null`/blank if the upstream Windsor data does not include a match type value.
+- `quality_score` may be `null` if not reported by Windsor for a keyword.
+- `cpc_usd` is recalculated server-side from `spend / clicks` where clicks > 0; otherwise 0.
+- Rows are aggregated over the selected window — `spend_usd`, `clicks`, `impressions`, and `conversions` are summed; `quality_score` is averaged.
+- `runs` is the count of distinct run IDs contributing to each aggregated row.
+- Used by the future Keywords Performance page (PR-ADS-032).
+
+When database is unavailable: `{ "days": 30, "rows": [], "db_unavailable": true }`
+
+---
+
 #### `GET /api/leads/country-summary?days=30`
 HubSpot lead quality aggregated by country for the last N days.
 
@@ -518,6 +563,7 @@ When database is unavailable: all numeric fields are `null`, `run_count` is `0`,
 | GET | `/api/runs` | Auth | Run records (DB, ?days=) |
 | GET | `/api/summary` | Auth | Headline metrics (DB, ?days=) |
 | GET | `/api/geo` | Auth | Windsor geo performance by country/campaign (DB, ?days=) |
+| GET | `/api/keywords` | Auth | Windsor keyword performance by campaign/ad group/keyword (DB, ?days=) |
 | GET | `/api/leads/country-summary` | Auth | HubSpot lead quality by country (DB, ?days=) |
 
 ---
