@@ -238,7 +238,6 @@ CREATE TABLE IF NOT EXISTS sync_state (
     UNIQUE(source, dataset)
 );
 
-CREATE INDEX IF NOT EXISTS idx_sync_state_source_dataset ON sync_state(source, dataset);
 CREATE INDEX IF NOT EXISTS idx_sync_state_status         ON sync_state(status);
 CREATE INDEX IF NOT EXISTS idx_sync_state_updated_at     ON sync_state(updated_at);
 

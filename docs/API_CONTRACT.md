@@ -1043,7 +1043,7 @@ One row per source+dataset — the current watermark/freshness state.
 | `error_message` | TEXT | Nullable |
 | `updated_at` | TIMESTAMPTZ | Updated on every upsert |
 
-UNIQUE constraint on `(source, dataset)`.
+UNIQUE constraint on `(source, dataset)` — serves as the primary lookup index.
 
 ---
 
