@@ -41,6 +41,7 @@ Protected endpoints (require authenticated session):
   GET  /api/config/ui-thresholds  — UI-safe display thresholds from config/thresholds.yaml (requires auth).
   GET  /api/dashboard/trends      — Previous-period trend comparison for dashboard (requires auth).
   GET  /api/action-queue          — Ranked human-review queue based on campaign, waste, geo, keyword, and data signals (requires auth).
+  GET  /api/datasets/freshness    — Per-dataset sync state / watermark from sync_state table (requires auth).
 """
 
 import hashlib
@@ -2712,4 +2713,126 @@ def api_action_queue(
             "low":    n_low,
         },
         "data_quality": {"status": "ok"},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Dataset freshness endpoint — read-only, auth required. (PR-ADS-039)
+# ---------------------------------------------------------------------------
+
+# Known source/dataset pairs — returned as placeholders when sync_state is empty.
+_KNOWN_DATASETS: list[tuple[str, str]] = [
+    ("windsor", "campaigns"),
+    ("windsor", "keywords"),
+    ("windsor", "search_terms"),
+    ("windsor", "geo"),
+    ("hubspot", "contacts"),
+    ("hubspot", "deals"),
+    ("gclid",   "matches"),
+]
+
+
+@app.get("/api/datasets/freshness")
+def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Return per-dataset sync state / watermark from the sync_state table.
+
+    Auth required. Read-only. No live fetch, no sync execution, no external calls.
+    Phase 1 read-only — no writes to Google Ads, HubSpot, or any external system.
+    Source: sync_state table (PR-ADS-039).
+    """
+    _safe_empty: dict[str, Any] = {
+        "datasets": [],
+        "summary": {"total": 0, "success": 0, "failed": 0, "running": 0, "unknown": 0},
+        "db_unavailable": True,
+    }
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _safe_empty
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        source,
+                        dataset,
+                        status,
+                        last_successful_sync_at,
+                        last_source_date,
+                        last_batch_id,
+                        error_message,
+                        updated_at
+                    FROM sync_state
+                    ORDER BY source, dataset
+                    """,
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/datasets/freshness] database error: %s", exc, exc_info=True)
+        return _safe_empty
+
+    # Build a lookup of rows that exist in sync_state
+    db_map: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        r = dict(zip(cols, row))
+        key = (r["source"], r["dataset"])
+        db_map[key] = {
+            "source":                  r["source"],
+            "dataset":                 r["dataset"],
+            "status":                  r["status"],
+            "last_successful_sync_at": r["last_successful_sync_at"].isoformat() if r["last_successful_sync_at"] else None,
+            "last_source_date":        str(r["last_source_date"]) if r["last_source_date"] else None,
+            "last_batch_id":           r["last_batch_id"],
+            "error_message":           r["error_message"],
+            "updated_at":              r["updated_at"].isoformat() if r["updated_at"] else None,
+        }
+
+    # Merge known dataset list with DB rows; fill missing entries as 'unknown'
+    datasets: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    for source, dataset in _KNOWN_DATASETS:
+        key = (source, dataset)
+        seen.add(key)
+        if key in db_map:
+            datasets.append(db_map[key])
+        else:
+            datasets.append({
+                "source":                  source,
+                "dataset":                 dataset,
+                "status":                  "unknown",
+                "last_successful_sync_at": None,
+                "last_source_date":        None,
+                "last_batch_id":           None,
+                "error_message":           None,
+                "updated_at":              None,
+            })
+
+    # Append any extra rows in sync_state that are not in the known list
+    for key, row in db_map.items():
+        if key not in seen:
+            datasets.append(row)
+
+    # Build summary counts
+    status_counts: dict[str, int] = {"success": 0, "failed": 0, "running": 0, "unknown": 0}
+    for d in datasets:
+        s = d.get("status") or "unknown"
+        if s in status_counts:
+            status_counts[s] += 1
+        else:
+            status_counts["unknown"] += 1
+
+    return {
+        "datasets": datasets,
+        "summary": {
+            "total":   len(datasets),
+            "success": status_counts["success"],
+            "failed":  status_counts["failed"],
+            "running": status_counts["running"],
+            "unknown": status_counts["unknown"],
+        },
     }

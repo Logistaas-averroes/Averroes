@@ -202,6 +202,46 @@ CREATE INDEX IF NOT EXISTS idx_keywords_keyword    ON keywords(keyword);
 CREATE INDEX IF NOT EXISTS idx_keywords_match_type ON keywords(match_type);
 CREATE INDEX IF NOT EXISTS idx_keywords_run_id     ON keywords(run_id);
 
+-- PR-ADS-039: sync batch audit trail — one row per dataset sync operation
+CREATE TABLE IF NOT EXISTS sync_batches (
+    id            SERIAL PRIMARY KEY,
+    run_id        INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+    source        TEXT NOT NULL,
+    dataset       TEXT NOT NULL,
+    sync_type     TEXT NOT NULL,
+    date_from     DATE,
+    date_to       DATE,
+    started_at    TIMESTAMPTZ DEFAULT NOW(),
+    finished_at   TIMESTAMPTZ,
+    status        TEXT NOT NULL DEFAULT 'running',
+    row_count     INTEGER DEFAULT 0,
+    error_message TEXT,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_batches_source_dataset ON sync_batches(source, dataset);
+CREATE INDEX IF NOT EXISTS idx_sync_batches_status         ON sync_batches(status);
+CREATE INDEX IF NOT EXISTS idx_sync_batches_started_at     ON sync_batches(started_at);
+CREATE INDEX IF NOT EXISTS idx_sync_batches_run_id         ON sync_batches(run_id);
+
+-- PR-ADS-039: sync state / watermark — one row per source+dataset (upserted on each sync)
+CREATE TABLE IF NOT EXISTS sync_state (
+    id                      SERIAL PRIMARY KEY,
+    source                  TEXT NOT NULL,
+    dataset                 TEXT NOT NULL,
+    last_successful_sync_at TIMESTAMPTZ,
+    last_source_date        DATE,
+    last_batch_id           INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+    status                  TEXT NOT NULL DEFAULT 'unknown',
+    error_message           TEXT,
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(source, dataset)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_state_source_dataset ON sync_state(source, dataset);
+CREATE INDEX IF NOT EXISTS idx_sync_state_status         ON sync_state(status);
+CREATE INDEX IF NOT EXISTS idx_sync_state_updated_at     ON sync_state(updated_at);
+
 -- PR-ADS-029A: idempotent migration — enforce NOT NULL on geo.run_id for existing DBs
 -- New installs: run_id is already NOT NULL from CREATE TABLE above; these are no-ops.
 -- Existing DBs: removes any orphan rows then sets the constraint (runs once via migrations table).

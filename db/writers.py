@@ -598,6 +598,279 @@ def write_keywords(run_id: int, keyword_rows: list) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Sync tracking helpers (PR-ADS-039)
+# ---------------------------------------------------------------------------
+
+# Allowed values — used for normalisation/validation; not hard-fail guards so
+# that new sources/datasets can be added to the system without a code deploy.
+VALID_SYNC_SOURCES   = {"windsor", "hubspot", "gclid"}
+VALID_SYNC_DATASETS  = {"campaigns", "keywords", "search_terms", "geo",
+                        "contacts", "deals", "matches"}
+VALID_SYNC_TYPES     = {"backfill", "daily", "weekly", "monthly", "manual"}
+VALID_SYNC_STATUSES  = {"running", "success", "failed", "unknown"}
+
+
+def start_sync_batch(
+    source: str,
+    dataset: str,
+    sync_type: str,
+    date_from=None,
+    date_to=None,
+    run_id: Optional[int] = None,
+) -> int:
+    """Insert a sync_batches row with status='running' and return its id.
+
+    Returns 0 if the DB is unavailable or the inputs are invalid.
+    Never raises.
+    """
+    source    = (source    or "").strip().lower()
+    dataset   = (dataset   or "").strip().lower()
+    sync_type = (sync_type or "").strip().lower()
+
+    if not source or not dataset or not sync_type:
+        log.warning("start_sync_batch called with empty source/dataset/sync_type")
+        return 0
+
+    if source not in VALID_SYNC_SOURCES:
+        log.warning("start_sync_batch: unknown source %r", source)
+    if dataset not in VALID_SYNC_DATASETS:
+        log.warning("start_sync_batch: unknown dataset %r", dataset)
+    if sync_type not in VALID_SYNC_TYPES:
+        log.warning("start_sync_batch: unknown sync_type %r", sync_type)
+
+    # Safe date coercion
+    def _to_date(val):
+        if val is None:
+            return None
+        if isinstance(val, date):
+            return val
+        try:
+            return date.fromisoformat(str(val))
+        except (ValueError, TypeError):
+            return None
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO sync_batches (
+                        run_id, source, dataset, sync_type,
+                        date_from, date_to, started_at, status
+                    ) VALUES (%s, %s, %s, %s, %s, %s, NOW(), 'running')
+                    RETURNING id
+                    """,
+                    (run_id, source, dataset, sync_type,
+                     _to_date(date_from), _to_date(date_to)),
+                )
+                row = cur.fetchone()
+                batch_id = row[0] if row else 0
+                log.info(
+                    "start_sync_batch — source=%s dataset=%s sync_type=%s batch_id=%s",
+                    source, dataset, sync_type, batch_id,
+                )
+                return batch_id or 0
+    except Exception as exc:  # noqa: BLE001
+        log.error("start_sync_batch failed: %s", exc)
+        return 0
+
+
+def finish_sync_batch(
+    batch_id: int,
+    status: str,
+    row_count: int = 0,
+    error_message: Optional[str] = None,
+    last_source_date=None,
+) -> bool:
+    """Mark a sync_batches row as finished and update sync_state.
+
+    status must be 'success' or 'failed'.
+    Returns True on success, False on DB unavailable or invalid batch_id.
+    Never raises.
+    """
+    if not batch_id:
+        log.warning("finish_sync_batch called with invalid batch_id=%r", batch_id)
+        return False
+
+    status = (status or "").strip().lower()
+    if status not in ("success", "failed"):
+        log.warning("finish_sync_batch: invalid status %r for batch_id=%s", status, batch_id)
+        return False
+
+    def _to_date(val):
+        if val is None:
+            return None
+        if isinstance(val, date):
+            return val
+        try:
+            return date.fromisoformat(str(val))
+        except (ValueError, TypeError):
+            return None
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                # Update the batch row
+                cur.execute(
+                    """
+                    UPDATE sync_batches
+                    SET finished_at   = NOW(),
+                        status        = %s,
+                        row_count     = %s,
+                        error_message = %s
+                    WHERE id = %s
+                    RETURNING source, dataset, date_to
+                    """,
+                    (status, row_count or 0, error_message, batch_id),
+                )
+                batch_row = cur.fetchone()
+                if not batch_row:
+                    log.warning("finish_sync_batch: batch_id=%s not found", batch_id)
+                    return False
+
+                source, dataset, batch_date_to = batch_row
+
+                # Resolve last_source_date
+                resolved_source_date = _to_date(last_source_date) or _to_date(batch_date_to)
+
+                if status == "success":
+                    cur.execute(
+                        """
+                        INSERT INTO sync_state (
+                            source, dataset,
+                            last_successful_sync_at, last_source_date,
+                            last_batch_id, status, error_message, updated_at
+                        ) VALUES (%s, %s, NOW(), %s, %s, 'success', NULL, NOW())
+                        ON CONFLICT (source, dataset) DO UPDATE SET
+                            last_successful_sync_at = NOW(),
+                            last_source_date        = COALESCE(EXCLUDED.last_source_date, sync_state.last_source_date),
+                            last_batch_id           = EXCLUDED.last_batch_id,
+                            status                  = 'success',
+                            error_message           = NULL,
+                            updated_at              = NOW()
+                        """,
+                        (source, dataset, resolved_source_date, batch_id),
+                    )
+                else:
+                    # failed — update status/error but preserve successful watermark
+                    cur.execute(
+                        """
+                        INSERT INTO sync_state (
+                            source, dataset,
+                            status, error_message, updated_at
+                        ) VALUES (%s, %s, 'failed', %s, NOW())
+                        ON CONFLICT (source, dataset) DO UPDATE SET
+                            status        = 'failed',
+                            error_message = EXCLUDED.error_message,
+                            updated_at    = NOW()
+                        """,
+                        (source, dataset, error_message),
+                    )
+
+        log.info(
+            "finish_sync_batch — batch_id=%s source=%s dataset=%s status=%s row_count=%s",
+            batch_id, source, dataset, status, row_count,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("finish_sync_batch failed (batch_id=%s): %s", batch_id, exc)
+        return False
+
+
+def update_sync_state(
+    source: str,
+    dataset: str,
+    status: str,
+    last_successful_sync_at=None,
+    last_source_date=None,
+    last_batch_id: Optional[int] = None,
+    error_message: Optional[str] = None,
+) -> bool:
+    """Upsert a sync_state row for (source, dataset).
+
+    Does not overwrite last_successful_sync_at or last_source_date with NULL
+    on failure unless explicit non-None values are supplied.
+    Returns True on success, False on DB unavailable.
+    Never raises.
+    """
+    source  = (source  or "").strip().lower()
+    dataset = (dataset or "").strip().lower()
+    status  = (status  or "").strip().lower()
+
+    if not source or not dataset or not status:
+        log.warning("update_sync_state called with empty source/dataset/status")
+        return False
+
+    if source not in VALID_SYNC_SOURCES:
+        log.warning("update_sync_state: unknown source %r", source)
+    if dataset not in VALID_SYNC_DATASETS:
+        log.warning("update_sync_state: unknown dataset %r", dataset)
+    if status not in VALID_SYNC_STATUSES:
+        log.warning("update_sync_state: unknown status %r", status)
+
+    def _to_date(val):
+        if val is None:
+            return None
+        if isinstance(val, date):
+            return val
+        try:
+            return date.fromisoformat(str(val))
+        except (ValueError, TypeError):
+            return None
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO sync_state (
+                        source, dataset,
+                        last_successful_sync_at, last_source_date,
+                        last_batch_id, status, error_message, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (source, dataset) DO UPDATE SET
+                        last_successful_sync_at = COALESCE(
+                            EXCLUDED.last_successful_sync_at,
+                            sync_state.last_successful_sync_at
+                        ),
+                        last_source_date = COALESCE(
+                            EXCLUDED.last_source_date,
+                            sync_state.last_source_date
+                        ),
+                        last_batch_id = COALESCE(
+                            EXCLUDED.last_batch_id,
+                            sync_state.last_batch_id
+                        ),
+                        status        = EXCLUDED.status,
+                        error_message = EXCLUDED.error_message,
+                        updated_at    = NOW()
+                    """,
+                    (
+                        source, dataset,
+                        last_successful_sync_at,
+                        _to_date(last_source_date),
+                        last_batch_id,
+                        status,
+                        error_message,
+                    ),
+                )
+        log.info(
+            "update_sync_state — source=%s dataset=%s status=%s",
+            source, dataset, status,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("update_sync_state failed (source=%s dataset=%s): %s", source, dataset, exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

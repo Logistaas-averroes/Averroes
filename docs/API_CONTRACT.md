@@ -922,7 +922,130 @@ Data quality:
 
 ---
 
-## Endpoint Quick Reference
+#### `GET /api/datasets/freshness`
+Per-dataset sync state / watermark. Returns the latest known sync status for each source+dataset pair.
+
+**Auth:** Auth
+**Read-only:** Yes — no live fetch, no sync execution, no external API calls
+**Source:** `sync_state` table (PR-ADS-039)
+
+**Known datasets:**
+- `windsor` / `campaigns`
+- `windsor` / `keywords`
+- `windsor` / `search_terms`
+- `windsor` / `geo`
+- `hubspot` / `contacts`
+- `hubspot` / `deals`
+- `gclid` / `matches`
+
+**Status values:** `success` | `failed` | `running` | `unknown`
+
+**Response 200 (with sync data):**
+```json
+{
+  "datasets": [
+    {
+      "source": "windsor",
+      "dataset": "campaigns",
+      "status": "success",
+      "last_successful_sync_at": "2026-05-04T06:00:00+00:00",
+      "last_source_date": "2026-05-03",
+      "last_batch_id": 12,
+      "error_message": null,
+      "updated_at": "2026-05-04T06:03:00+00:00"
+    }
+  ],
+  "summary": {
+    "total": 7,
+    "success": 3,
+    "failed": 1,
+    "running": 0,
+    "unknown": 3
+  }
+}
+```
+
+**Response 200 (no sync rows yet — returns known placeholders):**
+```json
+{
+  "datasets": [
+    { "source": "windsor",  "dataset": "campaigns",    "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
+    { "source": "windsor",  "dataset": "keywords",     "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
+    { "source": "windsor",  "dataset": "search_terms", "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
+    { "source": "windsor",  "dataset": "geo",          "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
+    { "source": "hubspot",  "dataset": "contacts",     "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
+    { "source": "hubspot",  "dataset": "deals",        "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
+    { "source": "gclid",    "dataset": "matches",      "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null }
+  ],
+  "summary": {
+    "total": 7,
+    "success": 0,
+    "failed": 0,
+    "running": 0,
+    "unknown": 7
+  }
+}
+```
+
+**DB unavailable response:**
+```json
+{
+  "datasets": [],
+  "summary": { "total": 0, "success": 0, "failed": 0, "running": 0, "unknown": 0 },
+  "db_unavailable": true
+}
+```
+
+**Important scope notes:**
+- Returns data from `sync_state` table only — does not fetch live data from Windsor or HubSpot.
+- Does not trigger any sync or scheduler job.
+- `last_successful_sync_at` is the system time when the sync succeeded (not the source-data date).
+- `last_source_date` is the latest source-data date covered by the last successful sync.
+- `last_batch_id` links to the `sync_batches` row for the last successful sync.
+- Datasets not yet in `sync_state` are returned with `status: "unknown"` and all watermark fields null.
+- Extra `sync_state` rows beyond the known dataset list are appended after the known pairs.
+
+---
+
+## DB Schema Notes (PR-ADS-039)
+
+### `sync_batches`
+One row per dataset sync operation (backfill, daily, weekly, monthly, manual).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | SERIAL PK | Auto-generated batch ID |
+| `run_id` | INTEGER (nullable FK → runs) | Nullable — manual backfills may run outside scheduler runs |
+| `source` | TEXT NOT NULL | `windsor` \| `hubspot` \| `gclid` |
+| `dataset` | TEXT NOT NULL | `campaigns` \| `keywords` \| `search_terms` \| `geo` \| `contacts` \| `deals` \| `matches` |
+| `sync_type` | TEXT NOT NULL | `backfill` \| `daily` \| `weekly` \| `monthly` \| `manual` |
+| `date_from` | DATE | Nullable — start of data range synced |
+| `date_to` | DATE | Nullable — end of data range synced |
+| `started_at` | TIMESTAMPTZ | Set to NOW() on insert |
+| `finished_at` | TIMESTAMPTZ | Nullable — set by `finish_sync_batch()` |
+| `status` | TEXT NOT NULL | `running` \| `success` \| `failed` |
+| `row_count` | INTEGER | Default 0 |
+| `error_message` | TEXT | Nullable |
+| `created_at` | TIMESTAMPTZ | Set to NOW() on insert |
+
+### `sync_state`
+One row per source+dataset — the current watermark/freshness state.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | SERIAL PK | |
+| `source` | TEXT NOT NULL | |
+| `dataset` | TEXT NOT NULL | |
+| `last_successful_sync_at` | TIMESTAMPTZ | Nullable — system time of last successful sync |
+| `last_source_date` | DATE | Nullable — latest source-data date covered |
+| `last_batch_id` | INTEGER (nullable FK → sync_batches) | |
+| `status` | TEXT NOT NULL | Default `unknown` |
+| `error_message` | TEXT | Nullable |
+| `updated_at` | TIMESTAMPTZ | Updated on every upsert |
+
+UNIQUE constraint on `(source, dataset)`.
+
+---
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
@@ -952,6 +1075,7 @@ Data quality:
 | GET | `/api/config/ui-thresholds` | Auth | UI-safe display thresholds from config/thresholds.yaml |
 | GET | `/api/dashboard/trends` | Auth | Previous-period trend comparison for dashboard (DB, ?days=) |
 | GET | `/api/action-queue` | Auth | Ranked human-review queue (DB, ?days=) |
+| GET | `/api/datasets/freshness` | Auth | Per-dataset sync state / watermark (sync_state table) |
 
 ---
 
