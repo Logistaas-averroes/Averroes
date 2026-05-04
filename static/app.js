@@ -284,8 +284,13 @@ async function handleLogin(e) {
       const user = await res.json();
       if (passwordEl) passwordEl.value = "";
       showApp(user);
-      await loadUiThresholds();
       navigate("dashboard");
+      // Load thresholds in background — do not block first page render.
+      loadUiThresholds().then(() => {
+        if (_currentPage) loadPage(_currentPage);
+      }).catch((err) => {
+        console.warn("[loadUiThresholds] background load failed; continuing with defaults.", err);
+      });
     } else {
       const body = await res.json().catch(() => ({}));
       showLoginError(errorEl, body.detail || "Invalid username or password.");
@@ -2551,7 +2556,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Check auth and load initial page
   const isAuth = await checkAuth();
   if (isAuth) {
-    await loadUiThresholds();
     navigate("dashboard");
+    // Load thresholds in background — do not block first page render.
+    loadUiThresholds().then(() => {
+      if (_currentPage) loadPage(_currentPage);
+    }).catch((err) => {
+      console.warn("[loadUiThresholds] background load failed; continuing with defaults.", err);
+    });
   }
 });

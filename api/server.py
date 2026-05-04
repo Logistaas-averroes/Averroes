@@ -1536,46 +1536,91 @@ _UI_THRESHOLDS_DEFAULTS: dict[str, Any] = {
 def _load_ui_thresholds() -> dict[str, Any]:
     """Load UI-safe threshold values from config/thresholds.yaml.
 
-    Only exposes display thresholds from the 'ui:' section of the YAML.
-    Falls back to safe defaults if the file is missing or malformed.
+    Validates each field individually:
+    - Numeric type (rejects strings like "30%").
+    - Range bounds per field.
+    - Ordering constraints (high_pct >= low_pct; strong_min >= medium_min).
+    Falls back to the safe default for any field that fails validation and sets
+    using_defaults=True in the response.
     Never exposes API keys, account IDs, or full YAML content.
     """
+    defaults = _UI_THRESHOLDS_DEFAULTS
+    using_defaults = False
+
+    def _num(value: Any, default: float, lo: float | None = None, hi: float | None = None) -> tuple[float, bool]:
+        """Parse *value* as a float and check range; return (result, fell_back)."""
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default, True
+        if lo is not None and parsed < lo:
+            return default, True
+        if hi is not None and parsed > hi:
+            return default, True
+        return parsed, False
+
     try:
         with _CONFIG_THRESHOLDS.open(encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
         ui_section = raw.get("ui", {}) or {}
 
-        junk_rate = ui_section.get("junk_rate", {}) or {}
-        spend = ui_section.get("spend", {}) or {}
+        junk_rate    = ui_section.get("junk_rate",    {}) or {}
+        spend        = ui_section.get("spend",        {}) or {}
         quality_score = ui_section.get("quality_score", {}) or {}
 
-        defaults = _UI_THRESHOLDS_DEFAULTS
-        return {
-            "junk_rate": {
-                "low_pct": junk_rate.get(
-                    "low_pct", defaults["junk_rate"]["low_pct"]
-                ),
-                "high_pct": junk_rate.get(
-                    "high_pct", defaults["junk_rate"]["high_pct"]
-                ),
-            },
-            "spend": {
-                "high_spend_usd": spend.get(
-                    "high_spend_usd", defaults["spend"]["high_spend_usd"]
-                ),
-            },
-            "quality_score": {
-                "strong_min": quality_score.get(
-                    "strong_min", defaults["quality_score"]["strong_min"]
-                ),
-                "medium_min": quality_score.get(
-                    "medium_min", defaults["quality_score"]["medium_min"]
-                ),
-            },
-        }
+        # ── junk_rate ──────────────────────────────────────────────────────
+        low_pct,  fb_low  = _num(junk_rate.get("low_pct"),  defaults["junk_rate"]["low_pct"],  lo=0, hi=100)
+        high_pct, fb_high = _num(junk_rate.get("high_pct"), defaults["junk_rate"]["high_pct"], lo=0, hi=100)
+        if fb_low or fb_high:
+            using_defaults = True
+        # Ordering: high must be >= low; reset both if violated.
+        if high_pct < low_pct:
+            log.warning("[/api/config/ui-thresholds] junk_rate.high_pct < low_pct, using defaults")
+            low_pct  = float(defaults["junk_rate"]["low_pct"])
+            high_pct = float(defaults["junk_rate"]["high_pct"])
+            using_defaults = True
+
+        # ── spend ──────────────────────────────────────────────────────────
+        high_spend_usd, fb_spend = _num(
+            spend.get("high_spend_usd"),
+            defaults["spend"]["high_spend_usd"],
+            lo=0,
+        )
+        if fb_spend:
+            using_defaults = True
+
+        # ── quality_score ──────────────────────────────────────────────────
+        strong_min, fb_strong = _num(quality_score.get("strong_min"), defaults["quality_score"]["strong_min"], lo=0, hi=10)
+        medium_min, fb_medium = _num(quality_score.get("medium_min"), defaults["quality_score"]["medium_min"], lo=0, hi=10)
+        if fb_strong or fb_medium:
+            using_defaults = True
+        # Ordering: medium must be <= strong; reset both if violated.
+        if medium_min > strong_min:
+            log.warning("[/api/config/ui-thresholds] quality_score.medium_min > strong_min, using defaults")
+            strong_min = float(defaults["quality_score"]["strong_min"])
+            medium_min = float(defaults["quality_score"]["medium_min"])
+            using_defaults = True
+
     except Exception as exc:  # noqa: BLE001
         log.warning("[/api/config/ui-thresholds] YAML load failed, using defaults: %s", exc)
         return {**_UI_THRESHOLDS_DEFAULTS, "using_defaults": True}
+
+    result: dict[str, Any] = {
+        "junk_rate": {
+            "low_pct":  int(low_pct)  if low_pct  == int(low_pct)  else low_pct,
+            "high_pct": int(high_pct) if high_pct == int(high_pct) else high_pct,
+        },
+        "spend": {
+            "high_spend_usd": int(high_spend_usd) if high_spend_usd == int(high_spend_usd) else high_spend_usd,
+        },
+        "quality_score": {
+            "strong_min": int(strong_min) if strong_min == int(strong_min) else strong_min,
+            "medium_min": int(medium_min) if medium_min == int(medium_min) else medium_min,
+        },
+    }
+    if using_defaults:
+        result["using_defaults"] = True
+    return result
 
 
 @app.get("/api/config/ui-thresholds")
