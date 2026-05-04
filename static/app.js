@@ -1500,14 +1500,14 @@ async function loadKeywords() {
   }
 }
 
+function keywordDedupeKey(r) {
+  return `${(r.keyword || "").toLowerCase()}|${normalizeMatchType(r.match_type)}|${(r.campaign_name || "").toLowerCase()}`;
+}
+
 function renderKeywordsKPIs(rows) {
   const totalSpend = rows.reduce((s, r) => s + (r.spend_usd || 0), 0);
 
-  const activeKeywords = new Set(
-    rows.map((r) =>
-      `${(r.keyword || "").toLowerCase()}|${normalizeMatchType(r.match_type)}|${(r.campaign_name || "").toLowerCase()}`
-    )
-  ).size;
+  const activeKeywords = new Set(rows.map(keywordDedupeKey)).size;
 
   const broadSpend = rows
     .filter((r) => normalizeMatchType(r.match_type) === "broad")
@@ -1569,6 +1569,7 @@ function renderMatchTypeSummary(rows) {
             <span class="matchtype-card__label">clicks</span>
           </div>
           <div class="matchtype-card__stat">
+            <!-- Google Ads conversions are fractional due to cross-device attribution -->
             <span class="matchtype-card__num">${g.conversions.toFixed(1)}</span>
             <span class="matchtype-card__label">Google conv.</span>
           </div>
@@ -1614,6 +1615,7 @@ function applyKeywordFilters() {
   renderKeywordsTable(getFilteredKeywordRows());
 }
 
+// Threshold above which a keyword row gets subtle high-spend emphasis (matches waste page convention)
 const KW_HIGH_SPEND_USD = 100;
 
 function renderKeywordsTable(rows) {
