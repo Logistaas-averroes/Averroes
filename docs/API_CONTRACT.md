@@ -818,6 +818,110 @@ Previous-period trend comparison for the dashboard. Returns summary metrics, cam
 
 ---
 
+#### `GET /api/action-queue?days=30`
+Ranked human-review queue based on campaign, waste, geo, keyword, and data-quality signals.
+
+**Auth:** Auth
+**Query params:** `days` (integer, default 30, max 365)
+**Read-only:** Yes — no write to Google Ads, HubSpot, or any external system
+**Sources:** `campaigns`, `waste_terms`, `geo`, `leads`, `keywords`, `runs` tables
+
+**Item types:**
+- `campaign_review` — campaigns with verdict FIX/CUT, zero SQLs with spend, or high junk rate
+- `waste_review` — top waste terms by spend that meet high-spend or CRM-confirmed threshold
+- `geo_review` — countries with high junk rate, zero SQLs with spend, or unknown country
+- `keyword_review` — keywords with spend above threshold and zero Google Ads conversions
+- `data_quality_review` — run failures or absence of recent weekly/monthly successful runs
+
+**Severity scoring (display-only — not automated recommendations):**
+
+Campaign:
+- +30 if SQLs = 0 and spend > 0
+- +25 if junk rate ≥ high_pct threshold (default 30%)
+- +20 if verdict = FIX
+- +30 if verdict = CUT
+- +15 if spend ≥ high_spend_usd threshold (default $100)
+- Capped at 100
+
+Waste:
+- Base 30 + up to +55 based on spend, CRM confirmed, and fraud/job/student/free category
+
+Geo:
+- Base 25 + up to +60 based on junk rate, zero SQLs with spend, unknown country
+
+Keyword:
+- Base 20 + up to +55 based on spend threshold, zero conversions, broad match type
+
+Data quality:
+- Base 40 + up to +60 based on latest run failure and absence of weekly/monthly runs
+
+**Severity labels:** `high` (score ≥ 75), `medium` (40–74), `low` (< 40)
+
+**Sorting:** Items sorted by `(-severity_score, type, entity_label)` for stable ordering.
+
+**Limit:** Maximum 30 items returned.
+
+**Important scope notes:**
+- Queue items are human-review prompts only — not automated action recommendations.
+- Severity is display-only.
+- No writes are performed by this endpoint.
+- No external API calls are made.
+- Keyword `evidence.google_ads_conversions` reflects Google Ads/Windsor platform conversions only, not HubSpot SQLs.
+
+**Response 200:**
+```json
+{
+  "days": 30,
+  "items": [
+    {
+      "id": "campaign-global-competitors-review",
+      "type": "campaign_review",
+      "severity": "high",
+      "severity_score": 92,
+      "title": "Campaign warrants review: global - competitors",
+      "detail": "Spend is $1200.50. Confirmed SQLs are 0. Junk rate is 42.0%. Verdict is FIX. Warrants review.",
+      "entity_label": "global - competitors",
+      "entity_type": "campaign",
+      "campaign_name": "global - competitors",
+      "source": "campaigns table",
+      "evidence": {
+        "spend_usd": 1200.50,
+        "confirmed_sqls": 0,
+        "junk_rate_pct": 42.0,
+        "verdict": "FIX"
+      },
+      "primary_link": {
+        "page": "campaigns",
+        "action": "open_campaign_drawer",
+        "campaign_name": "global - competitors"
+      }
+    }
+  ],
+  "summary": {
+    "total": 12,
+    "high": 3,
+    "medium": 6,
+    "low": 3
+  },
+  "data_quality": {
+    "status": "ok"
+  }
+}
+```
+
+**DB unavailable response:**
+```json
+{
+  "days": 30,
+  "items": [],
+  "summary": { "total": 0, "high": 0, "medium": 0, "low": 0 },
+  "data_quality": { "status": "db_unavailable" },
+  "db_unavailable": true
+}
+```
+
+---
+
 ## Endpoint Quick Reference
 
 | Method | Path | Auth | Purpose |
@@ -847,6 +951,7 @@ Previous-period trend comparison for the dashboard. Returns summary metrics, cam
 | GET | `/api/leads/country-summary` | Auth | HubSpot lead quality by country (DB, ?days=) |
 | GET | `/api/config/ui-thresholds` | Auth | UI-safe display thresholds from config/thresholds.yaml |
 | GET | `/api/dashboard/trends` | Auth | Previous-period trend comparison for dashboard (DB, ?days=) |
+| GET | `/api/action-queue` | Auth | Ranked human-review queue (DB, ?days=) |
 
 ---
 

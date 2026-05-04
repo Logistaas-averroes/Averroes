@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "geo", "keywords", "leads", "deals", "opportunities", "scheduler", "health"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "geo", "keywords", "leads", "deals", "opportunities", "scheduler", "health", "action-queue"];
 
 // Deal pipeline stages (Phase 1 read-only reference)
 const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
@@ -62,6 +62,10 @@ let geoMergedRows = [];
 // Keywords page state
 let keywordRows = [];
 let keywordLoadStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+
+// Action Queue page state
+let actionQueueItems = [];
+let actionQueueStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
 
 // Reports page state
 let latestReportMarkdown = "";
@@ -381,6 +385,7 @@ function loadPage(page) {
     case "opportunities": loadOpportunities(); break;
     case "scheduler":     loadScheduler();     break;
     case "health":        loadHealth();        break;
+    case "action-queue":  loadActionQueue();   break;
   }
 }
 
@@ -2932,6 +2937,211 @@ function copyDrawerWasteTerms(terms, btn) {
   }
 }
 
+// ── Action Queue page ──────────────────────────────────────────────────────
+
+const QUEUE_TYPE_LABELS = {
+  campaign_review:     "Campaign",
+  waste_review:        "Waste",
+  geo_review:          "Geo",
+  keyword_review:      "Keyword",
+  data_quality_review: "Data Quality",
+};
+
+async function loadActionQueue() {
+  const listEl = document.getElementById("action-queue-list");
+  if (listEl) listEl.innerHTML = `<p class="empty-state">Loading action queue…</p>`;
+
+  ["aq-kpi-total", "aq-kpi-high", "aq-kpi-medium", "aq-kpi-low"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = "—";
+  });
+
+  actionQueueStatus = "loading";
+  actionQueueItems = [];
+
+  try {
+    const data = await fetchJSON(`/api/action-queue?days=${getSelectedDays()}`);
+
+    if (data.db_unavailable) {
+      actionQueueStatus = "db_unavailable";
+      actionQueueItems = [];
+      _renderActionQueueKPIs(null);
+      _renderActionQueueList();
+      return;
+    }
+
+    actionQueueItems = data.items || [];
+    actionQueueStatus = actionQueueItems.length === 0 ? "empty" : "ok";
+    _renderActionQueueKPIs(data.summary || null);
+    _renderActionQueueList();
+
+  } catch (_) {
+    actionQueueStatus = "error";
+    actionQueueItems = [];
+    _renderActionQueueKPIs(null);
+    _renderActionQueueList();
+  }
+}
+
+function _renderActionQueueKPIs(summary) {
+  const totalEl  = document.getElementById("aq-kpi-total");
+  const highEl   = document.getElementById("aq-kpi-high");
+  const mediumEl = document.getElementById("aq-kpi-medium");
+  const lowEl    = document.getElementById("aq-kpi-low");
+
+  if (!summary) {
+    [totalEl, highEl, mediumEl, lowEl].forEach((el) => {
+      if (el) el.textContent = "—";
+    });
+    return;
+  }
+
+  if (totalEl)  totalEl.textContent  = String(summary.total  ?? "—");
+  if (highEl)   highEl.textContent   = String(summary.high   ?? "—");
+  if (mediumEl) mediumEl.textContent = String(summary.medium ?? "—");
+  if (lowEl)    lowEl.textContent    = String(summary.low    ?? "—");
+}
+
+function _getFilteredQueueItems() {
+  const sevSel  = document.getElementById("aq-filter-severity");
+  const typeSel = document.getElementById("aq-filter-type");
+  const sevVal  = sevSel  ? sevSel.value  : "";
+  const typeVal = typeSel ? typeSel.value : "";
+
+  let items = actionQueueItems;
+  if (sevVal)  items = items.filter((i) => i.severity === sevVal);
+  if (typeVal) items = items.filter((i) => i.type     === typeVal);
+  return items;
+}
+
+function _renderActionQueueList() {
+  const listEl = document.getElementById("action-queue-list");
+  if (!listEl) return;
+
+  if (actionQueueStatus === "db_unavailable") {
+    listEl.innerHTML = `
+      <div class="action-queue-item action-queue-item--empty">
+        <p class="empty-state">Action Queue temporarily unavailable — database offline.</p>
+      </div>`;
+    return;
+  }
+
+  if (actionQueueStatus === "error") {
+    listEl.innerHTML = `
+      <div class="action-queue-item action-queue-item--empty">
+        <p class="empty-state">Could not load Action Queue. Check API health or run status.</p>
+      </div>`;
+    return;
+  }
+
+  const items = _getFilteredQueueItems();
+
+  if (items.length === 0) {
+    const isFiltered = (document.getElementById("aq-filter-severity") || {}).value ||
+                       (document.getElementById("aq-filter-type")     || {}).value;
+    listEl.innerHTML = `
+      <div class="action-queue-item action-queue-item--empty">
+        <p class="empty-state">${isFiltered
+          ? "No items match the current filter."
+          : "No review items found for the selected window."
+        }</p>
+        ${!isFiltered ? `<p class="empty-state-sub">This means no queue rules crossed the current review thresholds.</p>` : ""}
+      </div>`;
+    return;
+  }
+
+  listEl.innerHTML = items.map((item) => _renderQueueItemCard(item)).join("");
+
+  // Wire up action buttons
+  listEl.querySelectorAll(".queue-action-btn[data-campaign]").forEach((btn) => {
+    btn.addEventListener("click", () => openCampaignDrawer(btn.dataset.campaign));
+  });
+  listEl.querySelectorAll(".queue-action-btn[data-navigate]").forEach((btn) => {
+    btn.addEventListener("click", () => navigate(btn.dataset.navigate));
+  });
+}
+
+function _renderQueueItemCard(item) {
+  const rawSev  = item.severity || "low";
+  const rawType = item.type     || "";
+  // Sanitize values used in class names against known allowed sets
+  const sev   = ["high", "medium", "low"].includes(rawSev) ? rawSev : "low";
+  const type  = Object.prototype.hasOwnProperty.call(QUEUE_TYPE_LABELS, rawType) ? rawType : "";
+  const score = item.severity_score != null ? item.severity_score : 0;
+
+  const sevBadge  = `<span class="action-queue-badge severity-${escapeHtml(sev)}">${escapeHtml(sev.toUpperCase())}</span>`;
+  const typeBadge = `<span class="queue-type-badge queue-type-${escapeHtml(type)}">${escapeHtml(QUEUE_TYPE_LABELS[type] || type)}</span>`;
+
+  // Build evidence mini-grid
+  const ev = item.evidence || {};
+  const evEntries = Object.entries(ev).filter(([, v]) => v !== null && v !== undefined);
+  let evidenceHtml = "";
+  if (evEntries.length > 0) {
+    const cells = evEntries.map(([k, v]) => {
+      const label = k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      const display = typeof v === "number"
+        ? (k.includes("usd") ? fmtDollar(v) : (k.includes("pct") ? v.toFixed(1) + "%" : String(v)))
+        : escapeHtml(String(v));
+      return `<div class="queue-evidence-cell"><div class="queue-evidence-cell__label">${escapeHtml(label)}</div><div class="queue-evidence-cell__value">${display}</div></div>`;
+    }).join("");
+    evidenceHtml = `<div class="queue-evidence-grid">${cells}</div>`;
+  }
+
+  // Build read-only action button driven by primary_link contract; fall back to type-based defaults.
+  let actionBtn = "";
+  const link = item.primary_link || {};
+  // Only trust navigation to pages explicitly listed in the PAGES registry.
+  const linkAction  = typeof link.action        === "string" ? link.action        : "";
+  const linkPage    = typeof link.page          === "string" && PAGES.includes(link.page) ? link.page : "";
+  const linkCampaign = typeof link.campaign_name === "string" && link.campaign_name ? link.campaign_name : "";
+
+  if (linkAction === "open_campaign_drawer" && (linkCampaign || item.campaign_name)) {
+    const campaignName = linkCampaign || item.campaign_name;
+    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-campaign="${escapeHtml(campaignName)}">Investigate campaign</button>`;
+  } else if (linkAction === "navigate" && linkPage) {
+    const navLabels = {
+      waste: "View Waste Terms", geo: "View Geo",
+      keywords: "View Keywords", scheduler: "View Scheduler",
+    };
+    const label = navLabels[linkPage] || "View";
+    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="${escapeHtml(linkPage)}">${escapeHtml(label)}</button>`;
+  } else if (type === "campaign_review" && item.campaign_name) {
+    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-campaign="${escapeHtml(item.campaign_name)}">Investigate campaign</button>`;
+  } else if (type === "waste_review") {
+    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="waste">View Waste Terms</button>`;
+  } else if (type === "geo_review") {
+    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="geo">View Geo</button>`;
+  } else if (type === "keyword_review") {
+    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="keywords">View Keywords</button>`;
+  } else if (type === "data_quality_review") {
+    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="scheduler">View Scheduler</button>`;
+  }
+
+  const sourceHtml = item.source
+    ? `<div class="queue-source">Source: ${escapeHtml(item.source)}</div>`
+    : "";
+
+  return `
+    <div class="action-queue-item severity-border-${escapeHtml(sev)}">
+      <div class="action-queue-item__header">
+        <div class="action-queue-item__badges">
+          ${sevBadge}
+          ${typeBadge}
+          <span class="queue-score-note">Score: ${score}</span>
+        </div>
+        ${actionBtn ? `<div class="queue-readonly-actions">${actionBtn}</div>` : ""}
+      </div>
+      <div class="action-queue-item__title">${escapeHtml(item.title || "")}</div>
+      <div class="action-queue-item__detail">${escapeHtml(item.detail || "")}</div>
+      ${evidenceHtml}
+      ${sourceHtml}
+    </div>`;
+}
+
+function applyActionQueueFilters() {
+  _renderActionQueueList();
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -2989,6 +3199,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (kwCampSel)  kwCampSel.addEventListener("change", applyKeywordFilters);
   if (kwMatchSel) kwMatchSel.addEventListener("change", applyKeywordFilters);
   if (kwCopyBtn)  kwCopyBtn.addEventListener("click",  copyKeywordRows);
+
+  // Wire up action queue filter controls
+  const aqSevSel  = document.getElementById("aq-filter-severity");
+  const aqTypeSel = document.getElementById("aq-filter-type");
+  if (aqSevSel)  aqSevSel.addEventListener("change",  applyActionQueueFilters);
+  if (aqTypeSel) aqTypeSel.addEventListener("change",  applyActionQueueFilters);
 
   // Wire up campaign drawer close controls
   const drawerCloseBtn = document.getElementById("drawer-close-btn");
