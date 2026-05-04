@@ -61,6 +61,13 @@ def run_daily_pulse():
         label = "junk term" if len(new_junk) == 1 else "junk terms"
         print(f"  → {len(new_junk)} new {label} found.")
 
+        # Persist raw search terms to DB (non-fatal; daily incremental sync comes later)
+        try:
+            st_count = db_writers.write_search_terms(run_id, search_terms)
+            log.info("[daily] Wrote %d search term rows to database", st_count)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("[daily] DB write search terms failed: %s", db_exc)
+
         # 4. CRM delta check + budget pacing
         print("Step 5/5: Checking CRM delta and budget pacing...")
         crm_delta = check_crm_delta(campaigns, crm_summary)

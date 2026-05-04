@@ -42,15 +42,17 @@ Protected endpoints (require authenticated session):
   GET  /api/dashboard/trends      — Previous-period trend comparison for dashboard (requires auth).
   GET  /api/action-queue          — Ranked human-review queue based on campaign, waste, geo, keyword, and data signals (requires auth).
   GET  /api/datasets/freshness    — Per-dataset sync state / watermark from sync_state table (requires auth).
+  GET  /api/search-terms          — Paginated search-term fact rows from search_terms table (requires auth).
 """
 
+import base64
 import hashlib
 import importlib
 import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2834,5 +2836,221 @@ def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]
             "failed":  status_counts["failed"],
             "running": status_counts["running"],
             "unknown": status_counts["unknown"],
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Search Terms endpoint — cursor-paginated, read-only, auth required. (PR-ADS-040)
+# ---------------------------------------------------------------------------
+
+_SEARCH_TERMS_MAX_LIMIT   = 500
+_SEARCH_TERMS_DEFAULT_DAYS = 14
+_SEARCH_TERMS_MAX_DAYS    = 90
+
+_SEARCH_TERMS_DATA_QUALITY_NOTE = (
+    "Current Windsor connector is confirmed up to last_14d search-term window "
+    "unless plan supports more."
+)
+
+
+def _encode_cursor(source_date: date, row_id: int) -> str:
+    """Encode a keyset cursor as URL-safe base64 JSON (no padding)."""
+    payload = json.dumps(
+        {"source_date": str(source_date), "id": int(row_id)},
+        separators=(",", ":"),
+    )
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(token: str):
+    """Decode a base64 JSON cursor.
+
+    Returns (source_date_as_date, id_int) or raises ValueError on invalid input.
+    Validates that source_date is a proper ISO date so that a corrupt/tampered
+    cursor always returns HTTP 400 — never an incorrect db_unavailable response.
+    """
+    try:
+        # Restore base64 padding using the standard formula
+        padded = token + ("=" * (-len(token) % 4))
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+        obj = json.loads(decoded.decode("utf-8"))
+
+        source_date = date.fromisoformat(str(obj["source_date"]))
+        row_id = int(obj["id"])
+
+        if row_id <= 0:
+            raise ValueError("cursor id must be positive")
+
+        return source_date, row_id
+    except Exception as exc:
+        raise ValueError(f"Invalid cursor: {exc}") from exc
+
+
+@app.get("/api/search-terms")
+def api_search_terms(
+    user: dict = Depends(require_auth),
+    days: int = Query(
+        default=_SEARCH_TERMS_DEFAULT_DAYS,
+        description="Number of days to look back (1–90)",
+    ),
+    campaign: str = Query(default=None, description="Filter by exact campaign_name"),
+    match_type: str = Query(default=None, description="Filter by match_type (contains, case-insensitive)"),
+    q: str = Query(default=None, description="Case-insensitive contains search on search_term"),
+    waste_only: bool = Query(default=False, description="If true, return only is_flagged_waste = TRUE rows"),
+    min_spend: float = Query(default=None, description="Minimum spend_usd threshold"),
+    limit: int = Query(default=100, description="Page size (1–500)"),
+    cursor: str = Query(default=None, description="Opaque pagination cursor from previous response"),
+) -> dict[str, Any]:
+    """Return paginated search-term fact rows for the last N days.
+
+    Uses cursor/keyset pagination on (source_date DESC, id DESC).
+    Auth required. Read-only. No writes to Google Ads or HubSpot.
+    Source: search_terms table (PR-ADS-040).
+    """
+    # ── Clamp / validate params ────────────────────────────────────────────
+    days  = max(1, min(_SEARCH_TERMS_MAX_DAYS, days))
+    limit = max(1, min(_SEARCH_TERMS_MAX_LIMIT, limit))
+
+    _safe_empty: dict[str, Any] = {
+        "days": days,
+        "rows": [],
+        "pagination": {
+            "limit":       limit,
+            "next_cursor": None,
+            "has_more":    False,
+        },
+        "data_quality": {
+            "source":  "windsor",
+            "dataset": "search_terms",
+            "status":  "db_unavailable",
+        },
+        "db_unavailable": True,
+    }
+
+    # ── Decode cursor ─────────────────────────────────────────────────────
+    cursor_date: date | None = None
+    cursor_id:   int | None  = None
+    if cursor:
+        try:
+            cursor_date, cursor_id = _decode_cursor(cursor)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # ── Campaign name normalisation (match stored canonical lowercase) ─────
+    campaign_key: str | None = None
+    if campaign:
+        from db.writers import _canonicalise_campaign_name  # noqa: PLC0415
+        campaign_key = _canonicalise_campaign_name(campaign.strip().lower())
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _safe_empty
+
+            with conn.cursor() as cur:
+                # ── Build dynamic WHERE clauses ───────────────────────────
+                conditions: list[str] = [
+                    "source_date >= NOW() - INTERVAL '1 day' * %s",
+                ]
+                params: list[Any] = [days]
+
+                if cursor_date is not None and cursor_id is not None:
+                    conditions.append(
+                        "(source_date < %s OR (source_date = %s AND id < %s))"
+                    )
+                    params += [cursor_date, cursor_date, cursor_id]
+
+                if campaign_key is not None:
+                    conditions.append("campaign_name = %s")
+                    params.append(campaign_key)
+
+                if match_type:
+                    conditions.append("match_type ILIKE %s")
+                    params.append(f"%{match_type.strip()}%")
+
+                if q:
+                    conditions.append("search_term ILIKE %s")
+                    params.append(f"%{q.strip()}%")
+
+                if waste_only:
+                    conditions.append("is_flagged_waste IS TRUE")
+
+                if min_spend is not None:
+                    conditions.append("spend_usd >= %s")
+                    params.append(min_spend)
+
+                where_sql = " AND ".join(conditions)
+
+                # Fetch limit+1 to detect whether more rows exist
+                fetch_limit = limit + 1
+                params.append(fetch_limit)
+
+                # All user-supplied values are passed via parameterized %s placeholders.
+                # where_sql is built exclusively from the static string literals in
+                # `conditions` above — no user input is ever interpolated into the SQL text.
+                query = (
+                    "SELECT"
+                    " id, source_date, campaign_name, campaign_id,"
+                    " ad_group, keyword, match_type, search_term,"
+                    " spend_usd, clicks, impressions, conversions,"
+                    " is_flagged_waste, junk_category, matched_pattern, updated_at"
+                    " FROM search_terms"
+                    " WHERE " + where_sql +
+                    " ORDER BY source_date DESC, id DESC"
+                    " LIMIT %s"
+                )
+                cur.execute(query, params)
+                raw_rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/search-terms] database error: %s", exc, exc_info=True)
+        return _safe_empty
+
+    has_more = len(raw_rows) > limit
+    page_rows = raw_rows[:limit]
+
+    out: list[dict] = []
+    for row in page_rows:
+        r = dict(zip(cols, row))
+        out.append({
+            "id":              r["id"],
+            "source_date":     str(r["source_date"]) if r["source_date"] else None,
+            "campaign_name":   r["campaign_name"],
+            "campaign_id":     r["campaign_id"],
+            "ad_group":        r["ad_group"],
+            "keyword":         r["keyword"],
+            "match_type":      r["match_type"],
+            "search_term":     r["search_term"],
+            "spend_usd":       round(float(r["spend_usd"]), 2) if r["spend_usd"] is not None else 0.0,
+            "clicks":          int(r["clicks"] or 0),
+            "impressions":     int(r["impressions"] or 0),
+            "conversions":     round(float(r["conversions"]), 2) if r["conversions"] is not None else 0.0,
+            "is_flagged_waste": r["is_flagged_waste"],  # tri-state: null | true | false
+            "junk_category":   r["junk_category"],
+            "matched_pattern": r["matched_pattern"],
+            "last_seen_at":    r["updated_at"].isoformat() if r["updated_at"] else None,
+        })
+
+    # Build next cursor from last row on this page
+    next_cursor: str | None = None
+    if has_more and page_rows:
+        last = dict(zip(cols, page_rows[-1]))
+        next_cursor = _encode_cursor(str(last["source_date"]), int(last["id"]))
+
+    return {
+        "days": days,
+        "rows": out,
+        "pagination": {
+            "limit":       limit,
+            "next_cursor": next_cursor,
+            "has_more":    has_more,
+        },
+        "data_quality": {
+            "source":  "windsor",
+            "dataset": "search_terms",
+            "note":    _SEARCH_TERMS_DATA_QUALITY_NOTE,
         },
     }

@@ -597,6 +597,142 @@ def write_keywords(run_id: int, keyword_rows: list) -> int:
         return 0
 
 
+def write_search_terms(
+    run_id: Optional[int],
+    search_term_rows: list,
+    sync_batch_id: Optional[int] = None,
+) -> int:
+    """Upsert raw search-term fact rows into the search_terms table.
+
+    Accepts rows from pull_search_terms() (windsor connector format).
+    Preserves existing is_flagged_waste / junk_category / matched_pattern on
+    conflict — raw write is NOT allowed to override waste classifications.
+
+    Returns count of inserted/updated rows.
+    Returns 0 safely for empty input or DB unavailable.
+    Never raises.
+    """
+    if not search_term_rows:
+        return 0
+
+    today = _today()
+    rows = []
+
+    for raw in search_term_rows:
+        # ── Resolve source_date ──────────────────────────────────────────
+        raw_date = raw.get("date") or raw.get("source_date")
+        if raw_date is not None:
+            try:
+                if isinstance(raw_date, date):
+                    source_date = raw_date
+                else:
+                    source_date = date.fromisoformat(str(raw_date))
+            except (ValueError, TypeError):
+                log.warning(
+                    "write_search_terms: skipping row with unparseable date %r", raw_date
+                )
+                continue
+        else:
+            source_date = today
+
+        # ── Validate search_term ─────────────────────────────────────────
+        raw_term = raw.get("search_term") or raw.get("term")
+        search_term = str(raw_term).strip() if raw_term is not None else ""
+        if not search_term:
+            log.warning("write_search_terms: skipping row with blank search_term")
+            continue
+
+        # ── Campaign name ────────────────────────────────────────────────
+        raw_name = raw.get("campaign") or raw.get("campaign_name")
+        campaign_name: Optional[str] = None
+        if raw_name is not None:
+            normalized = str(raw_name).strip()
+            if normalized:
+                campaign_name = _canonicalise_campaign_name(normalized.lower())
+
+        campaign_id = raw.get("campaign_id")
+        ad_group    = raw.get("ad_group")
+        keyword     = raw.get("keyword")
+
+        # ── Match type ───────────────────────────────────────────────────
+        match_type_raw = raw.get("match_type")
+        match_type: Optional[str] = None
+        if match_type_raw is not None:
+            stripped_mt = str(match_type_raw).strip()
+            if stripped_mt:
+                match_type = stripped_mt
+
+        # ── Numeric coercion ─────────────────────────────────────────────
+        spend_usd   = float(_float_or_none(raw.get("spend") or raw.get("spend_usd")) or 0)
+        clicks      = int(_int_or_none(raw.get("clicks")) or 0)
+        impressions = int(_int_or_none(raw.get("impressions")) or 0)
+        conversions = float(_float_or_none(raw.get("conversions")) or 0)
+
+        rows.append((
+            run_id,
+            source_date,
+            campaign_name,
+            campaign_id,
+            ad_group,
+            keyword,
+            match_type,
+            search_term,
+            spend_usd,
+            clicks,
+            impressions,
+            conversions,
+            sync_batch_id,
+        ))
+
+    if not rows:
+        return 0
+
+    _upsert_sql = """
+        INSERT INTO search_terms (
+            run_id, source_date, campaign_name, campaign_id,
+            ad_group, keyword, match_type, search_term,
+            spend_usd, clicks, impressions, conversions,
+            sync_batch_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (
+            source_date,
+            COALESCE(campaign_name, ''),
+            COALESCE(ad_group,      ''),
+            COALESCE(keyword,       ''),
+            COALESCE(match_type,    ''),
+            search_term
+        ) DO UPDATE SET
+            run_id        = EXCLUDED.run_id,
+            sync_batch_id = COALESCE(EXCLUDED.sync_batch_id,
+                                     search_terms.sync_batch_id),
+            spend_usd     = EXCLUDED.spend_usd,
+            clicks        = EXCLUDED.clicks,
+            impressions   = EXCLUDED.impressions,
+            conversions   = EXCLUDED.conversions,
+            campaign_id   = COALESCE(EXCLUDED.campaign_id,
+                                     search_terms.campaign_id),
+            updated_at    = NOW()
+    """
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(_upsert_sql, rows)
+                # executemany with ON CONFLICT makes rowcount unreliable for
+                # determining actual inserts vs updates; use len(rows) as the
+                # attempted-upsert count.
+                attempted = len(rows)
+        log.info(
+            "write_search_terms: upserted %d rows (run_id=%s)", attempted, run_id
+        )
+        return attempted
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_search_terms failed (run_id=%s): %s", run_id, exc)
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Sync tracking helpers (PR-ADS-039)
 # ---------------------------------------------------------------------------

@@ -1007,7 +1007,100 @@ Per-dataset sync state / watermark. Returns the latest known sync status for eac
 
 ---
 
-## DB Schema Notes (PR-ADS-039)
+#### `GET /api/search-terms`
+Paginated raw search-term fact rows for the last N days.
+
+**Auth:** Auth
+**Read-only:** Yes — no write to Google Ads, HubSpot, or any external system
+**Source:** `search_terms` table (PR-ADS-040)
+
+**Query params:**
+
+| Param | Type | Default | Notes |
+|-------|------|---------|-------|
+| `days` | integer | 14 | Look-back window (1–90) |
+| `campaign` | string | — | Exact canonical campaign_name match |
+| `match_type` | string | — | Case-insensitive contains match on match_type |
+| `q` | string | — | Case-insensitive contains search on search_term |
+| `waste_only` | boolean | false | Return only `is_flagged_waste IS TRUE` rows |
+| `min_spend` | numeric | — | Minimum spend_usd |
+| `limit` | integer | 100 | Page size (1–500) |
+| `cursor` | string | — | Opaque pagination cursor from previous response |
+
+**Pagination:** Cursor/keyset on `(source_date DESC, id DESC)`. Do not parse or construct the cursor — it is opaque. Use `pagination.next_cursor` from each response to fetch the next page.
+
+**`is_flagged_waste` tri-state:**
+- `null` — not analysed yet
+- `true` — analysed and flagged as waste
+- `false` — analysed and not flagged (clean)
+
+**Response 200:**
+```json
+{
+  "days": 14,
+  "rows": [
+    {
+      "id": 12345,
+      "source_date": "2026-05-03",
+      "campaign_name": "global - competitors",
+      "campaign_id": "123",
+      "ad_group": "competitors",
+      "keyword": "cargowise",
+      "match_type": "broad",
+      "search_term": "software logistica gratis",
+      "spend_usd": 25.50,
+      "clicks": 4,
+      "impressions": 120,
+      "conversions": 1.0,
+      "is_flagged_waste": true,
+      "junk_category": "free_intent_spanish",
+      "matched_pattern": "gratis",
+      "last_seen_at": "2026-05-04T06:00:00+00:00"
+    }
+  ],
+  "pagination": {
+    "limit": 100,
+    "next_cursor": "eyJzb3VyY2VfZGF0ZSI6ICIyMDI2LTA1LTAzIiwgImlkIjogMTIzNDV9",
+    "has_more": true
+  },
+  "data_quality": {
+    "source": "windsor",
+    "dataset": "search_terms",
+    "note": "Current Windsor connector is confirmed up to last_14d search-term window unless plan supports more."
+  }
+}
+```
+
+**DB unavailable response:**
+```json
+{
+  "days": 14,
+  "rows": [],
+  "pagination": { "limit": 100, "next_cursor": null, "has_more": false },
+  "data_quality": { "source": "windsor", "dataset": "search_terms", "status": "db_unavailable" },
+  "db_unavailable": true
+}
+```
+
+**Invalid cursor response:**
+```json
+{ "detail": "Invalid cursor: ..." }
+```
+HTTP 400.
+
+**Important scope notes:**
+- This endpoint returns the full search-term universe — not just flagged waste terms. Use `?waste_only=true` to filter waste rows.
+- Does not include HubSpot lead quality or SQL enrichment.
+- Does not infer negative keyword candidates.
+- Does not push negative keywords to Google Ads.
+- `is_flagged_waste` is nullable tri-state — null means not yet analysed, not that the term is clean.
+- Historical range depends on Windsor plan/connector limitation (confirmed up to last_14d).
+- Cursor is opaque to callers — do not parse or construct it.
+- `?q=` filtering uses ILIKE (sequential scan until pg_trgm extension is enabled on the DB).
+
+---
+
+## DB Schema Notes (PR-ADS-039 / PR-ADS-040)
 
 ### `sync_batches`
 One row per dataset sync operation (backfill, daily, weekly, monthly, manual).
@@ -1047,6 +1140,41 @@ UNIQUE constraint on `(source, dataset)` — serves as the primary lookup index.
 
 ---
 
+### `search_terms` (PR-ADS-040)
+Raw search-term fact table. Grain: `source_date` + `campaign_name` + `ad_group` + `keyword` + `match_type` + `search_term`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | SERIAL PK | |
+| `run_id` | INTEGER (nullable FK → runs) | Nullable — backfill/sync rows may not have a scheduler run_id |
+| `source_date` | DATE NOT NULL | Actual search-term data date (not the scheduler write date) |
+| `campaign_name` | TEXT | Canonical lowercase campaign name |
+| `campaign_id` | TEXT | Google Ads campaign ID (nullable) |
+| `ad_group` | TEXT | |
+| `keyword` | TEXT | |
+| `match_type` | TEXT | |
+| `search_term` | TEXT | The actual user search query |
+| `spend_usd` | NUMERIC(10,2) | Default 0 |
+| `clicks` | INTEGER | Default 0 |
+| `impressions` | INTEGER | Default 0 |
+| `conversions` | NUMERIC(8,2) | Default 0 |
+| `is_flagged_waste` | BOOLEAN (nullable) | **Tri-state:** `NULL` = not analysed \| `TRUE` = waste \| `FALSE` = clean |
+| `junk_category` | TEXT | Waste category label (nullable) |
+| `matched_pattern` | TEXT | Waste pattern that triggered classification (nullable) |
+| `sync_batch_id` | INTEGER (nullable FK → sync_batches) | |
+| `created_at` | TIMESTAMPTZ | |
+| `updated_at` | TIMESTAMPTZ | Updated on every upsert |
+
+**Unique natural key index:** `(source_date, COALESCE(campaign_name,''), COALESCE(ad_group,''), COALESCE(keyword,''), COALESCE(match_type,''), COALESCE(search_term,''))`
+
+**Important:**
+- `is_flagged_waste` is nullable tri-state — do NOT treat `null` as `false`.
+- Raw writer never sets `is_flagged_waste = FALSE`. Only waste-analysis logic may update that field.
+- `source_date` reflects the actual Google Ads data date, not the write timestamp.
+- Historical range is limited by the Windsor plan/connector window (confirmed up to last_14d).
+
+---
+
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/health` | Public | Liveness |
@@ -1076,6 +1204,7 @@ UNIQUE constraint on `(source, dataset)` — serves as the primary lookup index.
 | GET | `/api/dashboard/trends` | Auth | Previous-period trend comparison for dashboard (DB, ?days=) |
 | GET | `/api/action-queue` | Auth | Ranked human-review queue (DB, ?days=) |
 | GET | `/api/datasets/freshness` | Auth | Per-dataset sync state / watermark (sync_state table) |
+| GET | `/api/search-terms` | Auth | Paginated search-term fact rows (search_terms table, cursor pagination) |
 
 ---
 
