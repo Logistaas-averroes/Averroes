@@ -2975,32 +2975,21 @@ def api_search_terms(
                 fetch_limit = limit + 1
                 params.append(fetch_limit)
 
-                cur.execute(
-                    f"""
-                    SELECT
-                        id,
-                        source_date,
-                        campaign_name,
-                        campaign_id,
-                        ad_group,
-                        keyword,
-                        match_type,
-                        search_term,
-                        spend_usd,
-                        clicks,
-                        impressions,
-                        conversions,
-                        is_flagged_waste,
-                        junk_category,
-                        matched_pattern,
-                        updated_at
-                    FROM search_terms
-                    WHERE {where_sql}
-                    ORDER BY source_date DESC, id DESC
-                    LIMIT %s
-                    """,
-                    params,
+                # All user-supplied values are passed via parameterized %s placeholders.
+                # where_sql is built exclusively from the static string literals in
+                # `conditions` above — no user input is ever interpolated into the SQL text.
+                query = (
+                    "SELECT"
+                    " id, source_date, campaign_name, campaign_id,"
+                    " ad_group, keyword, match_type, search_term,"
+                    " spend_usd, clicks, impressions, conversions,"
+                    " is_flagged_waste, junk_category, matched_pattern, updated_at"
+                    " FROM search_terms"
+                    " WHERE " + where_sql +
+                    " ORDER BY source_date DESC, id DESC"
+                    " LIMIT %s"
                 )
+                cur.execute(query, params)
                 raw_rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
 
