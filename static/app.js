@@ -747,6 +747,11 @@ function renderAlertsEmpty() {
   if (el) el.innerHTML = `<p class="empty-state">No alerts. Trigger a run to check for issues.</p>`;
 }
 
+function renderAlertsUnavailable() {
+  const el = document.getElementById("dash-alerts-body");
+  if (el) el.innerHTML = `<p class="empty-state">Alerts temporarily unavailable.</p>`;
+}
+
 // ── Dashboard trends (What Changed + Campaign Movement + Alerts upgrade) ────
 
 async function loadDashboardTrends(fallbackCampaigns) {
@@ -757,6 +762,9 @@ async function loadDashboardTrends(fallbackCampaigns) {
   if (trendsEl)   trendsEl.innerHTML   = `<p class="empty-state">Loading…</p>`;
   if (movementEl) movementEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading…</p>`;
 
+  // Whether /api/campaigns returned actual data — used for fallback alert distinction
+  const hasFallbackData = Array.isArray(fallbackCampaigns) && fallbackCampaigns.length > 0;
+
   let data = null;
   try {
     data = await fetchJSON(`/api/dashboard/trends?days=${getSelectedDays()}`);
@@ -764,14 +772,22 @@ async function loadDashboardTrends(fallbackCampaigns) {
     // Endpoint unavailable — fall back to campaign-verdict alerts
     if (trendsEl)   trendsEl.innerHTML   = `<p class="empty-state">Trend data temporarily unavailable.</p>`;
     if (movementEl) movementEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Campaign movement data unavailable.</p>`;
-    renderAlerts(fallbackCampaigns || []);
+    if (hasFallbackData) {
+      renderAlerts(fallbackCampaigns);
+    } else {
+      renderAlertsUnavailable();
+    }
     return;
   }
 
   if (data.db_unavailable) {
     if (trendsEl)   trendsEl.innerHTML   = `<p class="empty-state">Trend data temporarily unavailable — database offline.</p>`;
     if (movementEl) movementEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Campaign movement temporarily unavailable — database offline.</p>`;
-    renderAlerts(fallbackCampaigns || []);
+    if (hasFallbackData) {
+      renderAlerts(fallbackCampaigns);
+    } else {
+      renderAlertsUnavailable();
+    }
     return;
   }
 
@@ -788,8 +804,10 @@ async function loadDashboardTrends(fallbackCampaigns) {
   const trendAlerts = data.alerts || [];
   if (trendAlerts.length > 0) {
     renderTrendAlerts(trendAlerts);
+  } else if (hasFallbackData) {
+    renderAlerts(fallbackCampaigns);
   } else {
-    renderAlerts(fallbackCampaigns || []);
+    renderAlertsUnavailable();
   }
 }
 
@@ -839,18 +857,24 @@ function _fmtMetricValue(key, value) {
   return fmtDollar(value);
 }
 
+// Format a delta value for display. Junk-rate delta is in percentage points
+// (not %) so it is shown as "+6.5 pts" rather than "+6.5%".
+function _fmtMetricDeltaValue(key, value) {
+  if (value === null || value === undefined) return "—";
+  if (key === "avg_junk_rate_pct") {
+    return `${value > 0 ? "+" : ""}${value.toFixed(1)} pts`;
+  }
+  return (value > 0 ? "+" : "") + _fmtMetricValue(key, value);
+}
+
 function renderTrendSummary(summary, hasPrevious, container) {
   if (!container) return;
 
   const metricKeys = ["spend_usd", "confirmed_sqls", "confirmed_waste_usd", "avg_junk_rate_pct"];
 
-  if (!hasPrevious) {
-    container.innerHTML = `
-      <div class="trend-no-previous">
-        <p class="empty-state">Not enough previous-period data yet. Trends will appear after more runs.</p>
-      </div>`;
-    return;
-  }
+  const noDataNote = !hasPrevious
+    ? `<p class="trend-no-previous-note">Not enough previous-period data yet. Current values are shown without comparison.</p>`
+    : "";
 
   const cards = metricKeys.map((key) => {
     const m = summary[key];
@@ -859,10 +883,17 @@ function renderTrendSummary(summary, hasPrevious, container) {
     const dirLabel = _trendDirectionLabel(key, m.trend);
     const curVal   = _fmtMetricValue(key, m.current);
     const prevVal  = _fmtMetricValue(key, m.previous);
-    const deltaStr = m.delta !== null && m.delta !== undefined
-      ? (m.delta > 0 ? "+" : "") + _fmtMetricValue(key, m.delta)
-        + (m.delta_pct !== null ? ` / ${m.delta_pct > 0 ? "+" : ""}${m.delta_pct.toFixed(1)}%` : "")
-      : null;
+
+    // Delta display — junk-rate delta is percentage points, others use value formatter
+    let deltaStr = null;
+    if (m.delta !== null && m.delta !== undefined) {
+      const deltaFmt = _fmtMetricDeltaValue(key, m.delta);
+      const deltaPctFmt = (m.delta_pct !== null && key !== "avg_junk_rate_pct")
+        ? ` / ${m.delta_pct > 0 ? "+" : ""}${m.delta_pct.toFixed(1)}%`
+        : "";
+      deltaStr = deltaFmt + deltaPctFmt;
+    }
+
     const arrowUp   = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>`;
     const arrowDown = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>`;
     const arrowIcon = m.trend === "up" ? arrowUp : (m.trend === "down" ? arrowDown : "");
@@ -877,7 +908,7 @@ function renderTrendSummary(summary, hasPrevious, container) {
       </div>`;
   }).join("");
 
-  container.innerHTML = `<div class="dashboard-trends">${cards}</div>`;
+  container.innerHTML = `${noDataNote}<div class="dashboard-trends">${cards}</div>`;
 }
 
 function renderCampaignMovements(movements, hasPrevious, container) {

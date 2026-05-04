@@ -1654,6 +1654,17 @@ _TREND_SPEND_DELTA_PCT = 20           # percent spend change considered meaningf
 _TREND_HIGH_JUNK_PCT = 30             # matches uiThresholds.junk_rate.high_pct default
 
 
+def _trend_metric_insufficient(current: float | int | None) -> dict[str, Any]:
+    """Build a trend metric object for when no previous-period data exists."""
+    return {
+        "current":   current,
+        "previous":  None,
+        "delta":     None,
+        "delta_pct": None,
+        "trend":     "insufficient_data",
+    }
+
+
 def _trend_metric(cur_val: float, prev_val: float) -> dict[str, Any]:
     """Build a comparable metric object for a float value."""
     c = round(float(cur_val or 0), 2)
@@ -1715,7 +1726,7 @@ def _build_trend_alerts(movements: list[dict], has_previous: bool) -> list[dict]
 
     Alert language is evidence-based and warrants review only.
     Does not say pause, cut, increase budget, or apply negatives.
-    Returns up to 8 alerts ordered by severity_score descending.
+    Returns up to 8 alerts ordered by severity bucket (high, medium, low).
     """
     alerts: list[dict] = []
 
@@ -1988,26 +1999,36 @@ def api_dashboard_trends(
     cur_junk_rate  = round((cur_junk  / cur_leads)  * 100, 1) if cur_leads  > 0 else None
     prev_junk_rate = round((prev_junk / prev_leads) * 100, 1) if prev_leads > 0 else None
 
-    summary: dict[str, Any] = {
-        "spend_usd":            _trend_metric(cur_spend, prev_spend),
-        "confirmed_sqls":       _trend_metric_int(cur_sqls, prev_sqls),
-        "confirmed_waste_usd":  _trend_metric(cur_waste, prev_waste),
-    }
-
-    # Junk rate metric — both values may be None if no lead data exists
-    if cur_junk_rate is not None and prev_junk_rate is not None:
-        junk_delta     = round(cur_junk_rate - prev_junk_rate, 2)
-        junk_delta_pct = round((junk_delta / prev_junk_rate) * 100, 2) if prev_junk_rate != 0 else None
-        junk_trend     = "up" if junk_delta > 0 else ("down" if junk_delta < 0 else "flat")
-        summary["avg_junk_rate_pct"] = {
-            "current": cur_junk_rate, "previous": prev_junk_rate,
-            "delta": junk_delta, "delta_pct": junk_delta_pct, "trend": junk_trend,
+    summary: dict[str, Any]
+    if not has_previous:
+        # No previous-period data — return current values only, no fake comparisons against zero.
+        summary = {
+            "spend_usd":           _trend_metric_insufficient(round(cur_spend, 2)),
+            "confirmed_sqls":      _trend_metric_insufficient(cur_sqls),
+            "confirmed_waste_usd": _trend_metric_insufficient(round(cur_waste, 2)),
+            "avg_junk_rate_pct":   _trend_metric_insufficient(cur_junk_rate),
         }
     else:
-        summary["avg_junk_rate_pct"] = {
-            "current": cur_junk_rate, "previous": prev_junk_rate,
-            "delta": None, "delta_pct": None, "trend": "insufficient_data",
+        summary = {
+            "spend_usd":            _trend_metric(cur_spend, prev_spend),
+            "confirmed_sqls":       _trend_metric_int(cur_sqls, prev_sqls),
+            "confirmed_waste_usd":  _trend_metric(cur_waste, prev_waste),
         }
+
+        # Junk rate metric — both values may be None if no lead data exists
+        if cur_junk_rate is not None and prev_junk_rate is not None:
+            junk_delta     = round(cur_junk_rate - prev_junk_rate, 2)
+            junk_delta_pct = round((junk_delta / prev_junk_rate) * 100, 2) if prev_junk_rate != 0 else None
+            junk_trend     = "up" if junk_delta > 0 else ("down" if junk_delta < 0 else "flat")
+            summary["avg_junk_rate_pct"] = {
+                "current": cur_junk_rate, "previous": prev_junk_rate,
+                "delta": junk_delta, "delta_pct": junk_delta_pct, "trend": junk_trend,
+            }
+        else:
+            summary["avg_junk_rate_pct"] = {
+                "current": cur_junk_rate, "previous": prev_junk_rate,
+                "delta": None, "delta_pct": None, "trend": "insufficient_data",
+            }
 
     # ── Build campaign movement lookup dicts ──────────────────────────────────
     def _snap(cols: list[str], rows: list[tuple]) -> dict[str, dict]:
@@ -2028,7 +2049,7 @@ def api_dashboard_trends(
     all_campaign_names = set(cur_snaps.keys()) | set(prev_snaps.keys())
     movements: list[dict] = []
 
-    for name in all_campaign_names:
+    for name in sorted(all_campaign_names):
         in_current  = name in cur_snaps
         in_previous = name in prev_snaps
         cur_c  = cur_snaps.get(name)
@@ -2078,7 +2099,11 @@ def api_dashboard_trends(
                         parts.append(f"junk rate rose {junk_rate_delta:.1f} points")
                     if no_sqls_spend:
                         parts.append(f"spend rose {spend_delta_pct:.0f}% with no SQLs")
-                    reason = (". ".join(parts).capitalize() + ".") if parts else "Performance metrics worsened."
+                    if parts:
+                        joined = ". ".join(parts)
+                        reason = joined[0].upper() + joined[1:] + "."
+                    else:
+                        reason = "Performance metrics worsened."
                 elif sqls_rose or junk_fell:
                     movement = "improved"
                     parts = []
@@ -2086,7 +2111,11 @@ def api_dashboard_trends(
                         parts.append(f"SQLs increased by {sql_delta}")
                     if junk_fell:
                         parts.append(f"junk rate fell {abs(junk_rate_delta):.1f} points")
-                    reason = (". ".join(parts).capitalize() + ".") if parts else "Performance metrics improved."
+                    if parts:
+                        joined = ". ".join(parts)
+                        reason = joined[0].upper() + joined[1:] + "."
+                    else:
+                        reason = "Performance metrics improved."
                 else:
                     movement = "stable"
                     reason   = "No meaningful change detected."
@@ -2100,7 +2129,7 @@ def api_dashboard_trends(
             "severity_score": severity,
         })
 
-    movements.sort(key=lambda x: x["severity_score"], reverse=True)
+    movements.sort(key=lambda x: (-x["severity_score"], x["campaign_name"]))
 
     # ── Build alerts (display severity only, no action recommendations) ───────
     alerts = _build_trend_alerts(movements, has_previous)
