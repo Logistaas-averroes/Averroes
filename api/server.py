@@ -38,6 +38,7 @@ Protected endpoints (require authenticated session):
   GET  /api/leads/country-summary  — HubSpot lead quality aggregated by country (requires auth).
   GET  /api/campaign-detail        — Campaign drill-down detail, query-param form (requires auth). Preferred.
   GET  /api/campaigns/{campaign_name}/detail — Campaign drill-down detail, path-segment form (requires auth). Legacy.
+  GET  /api/config/ui-thresholds  — UI-safe display thresholds from config/thresholds.yaml (requires auth).
 """
 
 import importlib
@@ -48,6 +49,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse
@@ -1508,3 +1511,129 @@ def api_campaign_detail_path(
     Phase 1 read-only — no writes to Google Ads or HubSpot.
     """
     return _build_campaign_detail(campaign_name, _clamp_days(days))
+
+
+# ---------------------------------------------------------------------------
+# UI config endpoint — read-only, auth required.
+# ---------------------------------------------------------------------------
+
+# Safe backend defaults — match current hardcoded UI values.
+_UI_THRESHOLDS_DEFAULTS: dict[str, Any] = {
+    "junk_rate": {
+        "low_pct": 15,
+        "high_pct": 30,
+    },
+    "spend": {
+        "high_spend_usd": 100,
+    },
+    "quality_score": {
+        "strong_min": 8,
+        "medium_min": 5,
+    },
+}
+
+
+def _load_ui_thresholds() -> dict[str, Any]:
+    """Load UI-safe threshold values from config/thresholds.yaml.
+
+    Validates each field individually:
+    - Numeric type (rejects strings like "30%").
+    - Range bounds per field.
+    - Ordering constraints (junk high_pct >= low_pct; quality strong_min >= medium_min).
+    Falls back to the safe default for any field that fails validation and sets
+    using_defaults=True in the response.
+    Never exposes API keys, account IDs, or full YAML content.
+    """
+    defaults = _UI_THRESHOLDS_DEFAULTS
+    using_defaults = False
+
+    def _validate_num(value: Any, default: float, lo: float | None = None, hi: float | None = None) -> tuple[float, bool]:
+        """Parse *value* as float, enforce range [lo, hi]; return (result, fell_back)."""
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default, True
+        if lo is not None and parsed < lo:
+            return default, True
+        if hi is not None and parsed > hi:
+            return default, True
+        return parsed, False
+
+    def _int_if_whole(v: float) -> int | float:
+        """Return an int when the float has no fractional part, to keep JSON tidy."""
+        return int(v) if v == int(v) else v
+
+    try:
+        with _CONFIG_THRESHOLDS.open(encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh) or {}
+        ui_section = raw.get("ui", {}) or {}
+
+        junk_rate     = ui_section.get("junk_rate",     {}) or {}
+        spend         = ui_section.get("spend",         {}) or {}
+        quality_score = ui_section.get("quality_score", {}) or {}
+
+        # ── junk_rate ──────────────────────────────────────────────────────
+        low_pct,  fb_low  = _validate_num(junk_rate.get("low_pct"),  defaults["junk_rate"]["low_pct"],  lo=0, hi=100)
+        high_pct, fb_high = _validate_num(junk_rate.get("high_pct"), defaults["junk_rate"]["high_pct"], lo=0, hi=100)
+        if fb_low or fb_high:
+            using_defaults = True
+        # Ordering: high_pct must be >= low_pct (they bound the mid/yellow band from below and above).
+        if high_pct < low_pct:
+            log.warning("[/api/config/ui-thresholds] junk_rate.high_pct < low_pct, using defaults")
+            low_pct  = float(defaults["junk_rate"]["low_pct"])
+            high_pct = float(defaults["junk_rate"]["high_pct"])
+            using_defaults = True
+
+        # ── spend ──────────────────────────────────────────────────────────
+        high_spend_usd, fb_spend = _validate_num(
+            spend.get("high_spend_usd"),
+            defaults["spend"]["high_spend_usd"],
+            lo=0,
+        )
+        if fb_spend:
+            using_defaults = True
+
+        # ── quality_score ──────────────────────────────────────────────────
+        # strong_min is the higher bar (e.g. 8+); medium_min is the lower bar (e.g. 5–7).
+        # medium_min must be <= strong_min so the two bands do not overlap or invert.
+        strong_min, fb_strong = _validate_num(quality_score.get("strong_min"), defaults["quality_score"]["strong_min"], lo=0, hi=10)
+        medium_min, fb_medium = _validate_num(quality_score.get("medium_min"), defaults["quality_score"]["medium_min"], lo=0, hi=10)
+        if fb_strong or fb_medium:
+            using_defaults = True
+        if medium_min > strong_min:
+            log.warning("[/api/config/ui-thresholds] quality_score.medium_min > strong_min, using defaults")
+            strong_min = float(defaults["quality_score"]["strong_min"])
+            medium_min = float(defaults["quality_score"]["medium_min"])
+            using_defaults = True
+
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[/api/config/ui-thresholds] YAML load failed, using defaults: %s", exc)
+        return {**_UI_THRESHOLDS_DEFAULTS, "using_defaults": True}
+
+    result: dict[str, Any] = {
+        "junk_rate": {
+            "low_pct":  _int_if_whole(low_pct),
+            "high_pct": _int_if_whole(high_pct),
+        },
+        "spend": {
+            "high_spend_usd": _int_if_whole(high_spend_usd),
+        },
+        "quality_score": {
+            "strong_min": _int_if_whole(strong_min),
+            "medium_min": _int_if_whole(medium_min),
+        },
+    }
+    if using_defaults:
+        result["using_defaults"] = True
+    return result
+
+
+@app.get("/api/config/ui-thresholds")
+def api_ui_thresholds(user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Return UI-safe display thresholds from config/thresholds.yaml.
+
+    Auth required. Read-only. Does not expose full config, API keys, account
+    IDs, or any sensitive values. Falls back to safe defaults if the config
+    file cannot be read. Phase 1 read-only — no writes to any external system.
+    """
+    return _load_ui_thresholds()

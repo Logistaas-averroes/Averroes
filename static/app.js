@@ -19,12 +19,28 @@
 
 const PAGES = ["dashboard", "campaigns", "waste", "geo", "keywords", "leads", "deals", "opportunities", "scheduler", "health"];
 
-// Junk rate thresholds (from config/thresholds.yaml doctrine)
-const JUNK_RATE_LOW_THRESHOLD  = 15;  // below this → green
-const JUNK_RATE_HIGH_THRESHOLD = 30;  // above this → red
-
 // Deal pipeline stages (Phase 1 read-only reference)
 const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
+
+// ── UI threshold state ─────────────────────────────────────────────────────
+
+// Default values matching config/thresholds.yaml doctrine — used as fallback
+// when /api/config/ui-thresholds is unavailable.
+const DEFAULT_UI_THRESHOLDS = {
+  junk_rate: {
+    low_pct: 15,   // below this → green
+    high_pct: 30,  // above this → red
+  },
+  spend: {
+    high_spend_usd: 100,
+  },
+  quality_score: {
+    strong_min: 8,
+    medium_min: 5,
+  },
+};
+
+let uiThresholds = DEFAULT_UI_THRESHOLDS;
 
 // ── Session state ──────────────────────────────────────────────────────────
 
@@ -167,6 +183,31 @@ async function fetchJSON(url, options = {}) {
   return res.json();
 }
 
+async function loadUiThresholds() {
+  try {
+    const data = await fetchJSON("/api/config/ui-thresholds");
+    uiThresholds = {
+      ...DEFAULT_UI_THRESHOLDS,
+      ...data,
+      junk_rate: {
+        ...DEFAULT_UI_THRESHOLDS.junk_rate,
+        ...(data.junk_rate || {}),
+      },
+      spend: {
+        ...DEFAULT_UI_THRESHOLDS.spend,
+        ...(data.spend || {}),
+      },
+      quality_score: {
+        ...DEFAULT_UI_THRESHOLDS.quality_score,
+        ...(data.quality_score || {}),
+      },
+    };
+  } catch (err) {
+    console.warn("[loadUiThresholds] failed, using defaults:", err);
+    uiThresholds = DEFAULT_UI_THRESHOLDS;
+  }
+}
+
 // ── Auth flow ──────────────────────────────────────────────────────────────
 
 function showLogin() {
@@ -244,6 +285,12 @@ async function handleLogin(e) {
       if (passwordEl) passwordEl.value = "";
       showApp(user);
       navigate("dashboard");
+      // Load thresholds in background — do not block first page render.
+      loadUiThresholds().then(() => {
+        if (_currentPage) loadPage(_currentPage);
+      }).catch((err) => {
+        console.warn("[loadUiThresholds] background load failed; continuing with defaults.", err);
+      });
     } else {
       const body = await res.json().catch(() => ({}));
       showLoginError(errorEl, body.detail || "Invalid username or password.");
@@ -661,8 +708,8 @@ async function loadCampaigns() {
       const v       = (c.latest_verdict || "").toUpperCase();
       const junkPct = c.avg_junk_rate_pct;
       const junkCls = junkPct == null ? "" :
-                      junkPct < JUNK_RATE_LOW_THRESHOLD   ? "junk--low" :
-                      junkPct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
+                      junkPct < uiThresholds.junk_rate.low_pct   ? "junk--low" :
+                      junkPct <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
       const junkStr = junkPct != null ? junkPct.toFixed(1) + "%" : "—";
       const cpql    = c.total_confirmed_sqls === 0 ? "N/A" :
                       c.avg_cpql_usd != null ? fmtDollar(c.avg_cpql_usd) : "—";
@@ -998,10 +1045,10 @@ async function loadLeads() {
 
     const tbody = rows.map(([name, g]) => {
       const junkPct = g.total > 0 ? Math.round((g.junk / g.total) * 100) : 0;
-      const barCls  = junkPct < JUNK_RATE_LOW_THRESHOLD   ? "progress-bar__fill--low" :
-                      junkPct <= JUNK_RATE_HIGH_THRESHOLD ? "progress-bar__fill--mid" : "progress-bar__fill--high";
-      const junkCls = junkPct < JUNK_RATE_LOW_THRESHOLD   ? "junk--low" :
-                      junkPct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
+      const barCls  = junkPct < uiThresholds.junk_rate.low_pct   ? "progress-bar__fill--low" :
+                      junkPct <= uiThresholds.junk_rate.high_pct ? "progress-bar__fill--mid" : "progress-bar__fill--high";
+      const junkCls = junkPct < uiThresholds.junk_rate.low_pct   ? "junk--low" :
+                      junkPct <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
       return `
         <tr>
           <td class="td--name">${escapeHtml(name)}</td>
@@ -1115,10 +1162,10 @@ function junkRateBadge(junkPct) {
   if (junkPct === null || junkPct === undefined) {
     return `<span class="junk-rate-badge junk-rate-badge--none">—</span>`;
   }
-  if (junkPct < JUNK_RATE_LOW_THRESHOLD) {
+  if (junkPct < uiThresholds.junk_rate.low_pct) {
     return `<span class="junk-rate-badge junk-rate-badge--low">${junkPct.toFixed(1)}%</span>`;
   }
-  if (junkPct <= JUNK_RATE_HIGH_THRESHOLD) {
+  if (junkPct <= uiThresholds.junk_rate.high_pct) {
     return `<span class="junk-rate-badge junk-rate-badge--medium">${junkPct.toFixed(1)}%</span>`;
   }
   return `<span class="junk-rate-badge junk-rate-badge--high">${junkPct.toFixed(1)}%</span>`;
@@ -1262,7 +1309,7 @@ async function loadGeo() {
   const countriesActive = merged.filter((r) => r.spend_usd > 0 || r.total_leads > 0).length;
   const totalSpend      = merged.reduce((s, r) => s + r.spend_usd, 0);
   const countriesSQLs   = merged.filter((r) => r.confirmed_sqls > 0).length;
-  const highJunk        = merged.filter((r) => r.junk_rate_pct !== null && r.junk_rate_pct >= JUNK_RATE_HIGH_THRESHOLD).length;
+  const highJunk        = merged.filter((r) => r.junk_rate_pct !== null && r.junk_rate_pct >= uiThresholds.junk_rate.high_pct).length;
 
   const kpiCountriesEl = document.getElementById("geo-kpi-countries");
   const kpiSpendEl     = document.getElementById("geo-kpi-spend");
@@ -1458,9 +1505,9 @@ function qualityScoreBadge(qs) {
   const n = parseFloat(qs);
   if (isNaN(n)) return `<span class="quality-score-badge quality-score-none">—</span>`;
   let cls;
-  if (n >= 8)      cls = "quality-score-strong";
-  else if (n >= 5) cls = "quality-score-medium";
-  else             cls = "quality-score-weak";
+  if (n >= uiThresholds.quality_score.strong_min)      cls = "quality-score-strong";
+  else if (n >= uiThresholds.quality_score.medium_min) cls = "quality-score-medium";
+  else                                                  cls = "quality-score-weak";
   return `<span class="quality-score-badge ${cls}">${n.toFixed(1)}</span>`;
 }
 
@@ -1630,8 +1677,8 @@ function applyKeywordFilters() {
   renderKeywordsTable(getFilteredKeywordRows());
 }
 
-// Threshold above which a keyword row gets subtle high-spend emphasis (matches waste page convention)
-const KW_HIGH_SPEND_USD = 100;
+// Keyword rows with spend at or above uiThresholds.spend.high_spend_usd get subtle high-spend emphasis.
+// Value is loaded from /api/config/ui-thresholds after auth; falls back to DEFAULT_UI_THRESHOLDS.
 
 function renderKeywordsTable(rows) {
   const tableEl = document.getElementById("kw-table-body");
@@ -1688,7 +1735,7 @@ function renderKeywordsTable(rows) {
     </thead>`;
 
   const tbody = sorted.map((r) => {
-    const highSpend = (r.spend_usd || 0) >= KW_HIGH_SPEND_USD;
+    const highSpend = (r.spend_usd || 0) >= uiThresholds.spend.high_spend_usd;
     return `
       <tr${highSpend ? ' class="row--high-spend"' : ""}>
         <td class="td--name">${escapeHtml(r.keyword || "—")}</td>
@@ -2223,8 +2270,8 @@ function _appendDrawerEvidenceSections(container, data, lq) {
       </div>`;
   } else {
     const lqJunkCls = lq.junk_rate_pct == null ? "" :
-                      lq.junk_rate_pct < JUNK_RATE_LOW_THRESHOLD   ? "junk--low" :
-                      lq.junk_rate_pct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
+                      lq.junk_rate_pct < uiThresholds.junk_rate.low_pct   ? "junk--low" :
+                      lq.junk_rate_pct <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
     const lqJunkStr = lq.junk_rate_pct != null ? lq.junk_rate_pct.toFixed(1) + "%" : "—";
     lqHtml = `
       <div class="drawer-section">
@@ -2262,8 +2309,8 @@ function _appendDrawerEvidenceSections(container, data, lq) {
   } else {
     const rows = countries.map((r) => {
       const junkCls = r.junk_rate_pct == null ? "" :
-                      r.junk_rate_pct < JUNK_RATE_LOW_THRESHOLD   ? "junk--low" :
-                      r.junk_rate_pct <= JUNK_RATE_HIGH_THRESHOLD ? "junk--mid" : "junk--high";
+                      r.junk_rate_pct < uiThresholds.junk_rate.low_pct   ? "junk--low" :
+                      r.junk_rate_pct <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
       return `
         <tr>
           <td class="td--name">${escapeHtml(r.country)}</td>
@@ -2510,5 +2557,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   const isAuth = await checkAuth();
   if (isAuth) {
     navigate("dashboard");
+    // Load thresholds in background — do not block first page render.
+    loadUiThresholds().then(() => {
+      if (_currentPage) loadPage(_currentPage);
+    }).catch((err) => {
+      console.warn("[loadUiThresholds] background load failed; continuing with defaults.", err);
+    });
   }
 });

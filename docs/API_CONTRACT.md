@@ -663,6 +663,57 @@ Example partial response:
 
 ---
 
+#### `GET /api/config/ui-thresholds`
+UI-safe display thresholds from `config/thresholds.yaml`.
+
+**Auth:** Auth
+**Read-only:** Yes — no writes to any external system
+**Source:** `ui:` section of `config/thresholds.yaml`, with safe defaults when the file is missing or malformed
+
+**Response 200:**
+```json
+{
+  "junk_rate": {
+    "low_pct": 15,
+    "high_pct": 30
+  },
+  "spend": {
+    "high_spend_usd": 100
+  },
+  "quality_score": {
+    "strong_min": 8,
+    "medium_min": 5
+  }
+}
+```
+
+**Response 200 (YAML load failed — safe defaults returned):**
+```json
+{
+  "junk_rate": { "low_pct": 15, "high_pct": 30 },
+  "spend": { "high_spend_usd": 100 },
+  "quality_score": { "strong_min": 8, "medium_min": 5 },
+  "using_defaults": true
+}
+```
+
+**Important scope notes:**
+- Returns UI-safe display thresholds only — does not expose full config, API keys, account IDs, or sensitive fields.
+- Used by the SPA for: junk-rate visual states (green/yellow/red), high-spend row emphasis on Keywords page, quality-score display bands.
+- If the endpoint fails, the SPA falls back to `DEFAULT_UI_THRESHOLDS` (same values) so all visual classification continues to work.
+- Does not change backend analysis thresholds.
+- Phase 1 read-only — no write to Google Ads, HubSpot, or any external system.
+
+**Response fields:**
+- `junk_rate.low_pct` — junk rate below this → green visual state
+- `junk_rate.high_pct` — junk rate above this → red visual state
+- `spend.high_spend_usd` — keyword spend at or above this → high-spend row emphasis
+- `quality_score.strong_min` — quality score at or above this → strong badge
+- `quality_score.medium_min` — quality score at or above this (but below strong_min) → medium badge
+- `using_defaults` — present and `true` only when the YAML file could not be loaded
+
+---
+
 #### `GET /api/campaigns/{campaign_name}/detail?days=N` *(Legacy — path-segment form)*
 Same response shape as `/api/campaign-detail`. Preserved for backwards compatibility.
 
@@ -697,6 +748,7 @@ Same response shape as `/api/campaign-detail`. Preserved for backwards compatibi
 | GET | `/api/geo` | Auth | Windsor geo performance by country/campaign (DB, ?days=) |
 | GET | `/api/keywords` | Auth | Windsor keyword performance by campaign/ad group/keyword (DB, ?days=) |
 | GET | `/api/leads/country-summary` | Auth | HubSpot lead quality by country (DB, ?days=) |
+| GET | `/api/config/ui-thresholds` | Auth | UI-safe display thresholds from config/thresholds.yaml |
 
 ---
 
