@@ -38,6 +38,7 @@ Protected endpoints (require authenticated session):
   GET  /api/leads/country-summary  — HubSpot lead quality aggregated by country (requires auth).
   GET  /api/campaign-detail        — Campaign drill-down detail, query-param form (requires auth). Preferred.
   GET  /api/campaigns/{campaign_name}/detail — Campaign drill-down detail, path-segment form (requires auth). Legacy.
+  GET  /api/config/ui-thresholds  — UI-safe display thresholds from config/thresholds.yaml (requires auth).
 """
 
 import importlib
@@ -48,6 +49,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse
@@ -1508,3 +1511,79 @@ def api_campaign_detail_path(
     Phase 1 read-only — no writes to Google Ads or HubSpot.
     """
     return _build_campaign_detail(campaign_name, _clamp_days(days))
+
+
+# ---------------------------------------------------------------------------
+# UI config endpoint — read-only, auth required.
+# ---------------------------------------------------------------------------
+
+# Safe backend defaults — match current hardcoded UI values.
+_UI_THRESHOLDS_DEFAULTS: dict[str, Any] = {
+    "junk_rate": {
+        "low_pct": 15,
+        "high_pct": 30,
+    },
+    "spend": {
+        "high_spend_usd": 100,
+    },
+    "quality_score": {
+        "strong_min": 8,
+        "medium_min": 5,
+    },
+}
+
+
+def _load_ui_thresholds() -> dict[str, Any]:
+    """Load UI-safe threshold values from config/thresholds.yaml.
+
+    Only exposes display thresholds from the 'ui:' section of the YAML.
+    Falls back to safe defaults if the file is missing or malformed.
+    Never exposes API keys, account IDs, or full YAML content.
+    """
+    try:
+        with _CONFIG_THRESHOLDS.open(encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh) or {}
+        ui_section = raw.get("ui", {}) or {}
+
+        junk_rate = ui_section.get("junk_rate", {}) or {}
+        spend = ui_section.get("spend", {}) or {}
+        quality_score = ui_section.get("quality_score", {}) or {}
+
+        defaults = _UI_THRESHOLDS_DEFAULTS
+        return {
+            "junk_rate": {
+                "low_pct": junk_rate.get(
+                    "low_pct", defaults["junk_rate"]["low_pct"]
+                ),
+                "high_pct": junk_rate.get(
+                    "high_pct", defaults["junk_rate"]["high_pct"]
+                ),
+            },
+            "spend": {
+                "high_spend_usd": spend.get(
+                    "high_spend_usd", defaults["spend"]["high_spend_usd"]
+                ),
+            },
+            "quality_score": {
+                "strong_min": quality_score.get(
+                    "strong_min", defaults["quality_score"]["strong_min"]
+                ),
+                "medium_min": quality_score.get(
+                    "medium_min", defaults["quality_score"]["medium_min"]
+                ),
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[api/config/ui-thresholds] YAML load failed, using defaults: %s", exc)
+        return {**_UI_THRESHOLDS_DEFAULTS, "using_defaults": True}
+
+
+@app.get("/api/config/ui-thresholds")
+def api_ui_thresholds(user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Return UI-safe display thresholds from config/thresholds.yaml.
+
+    Auth required. Read-only. Does not expose full config, API keys, account
+    IDs, or any sensitive values. Falls back to safe defaults if the config
+    file cannot be read. Phase 1 read-only — no writes to any external system.
+    """
+    return _load_ui_thresholds()

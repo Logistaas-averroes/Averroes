@@ -69,3 +69,16 @@ accounts:
 # Do not add countries here without 60+ days of confirmed zero SQL data
 confirmed_cut_markets:
   - venezuela
+
+# UI-safe display thresholds — consumed by GET /api/config/ui-thresholds
+# These values drive frontend visual classification only.
+# Do not change analysis thresholds above.
+ui:
+  junk_rate:
+    low_pct: 15
+    high_pct: 30
+  spend:
+    high_spend_usd: 100
+  quality_score:
+    strong_min: 8
+    medium_min: 5
