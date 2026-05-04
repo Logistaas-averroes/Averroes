@@ -2035,7 +2035,7 @@ def api_dashboard_trends(
         prev_c = prev_snaps.get(name)
 
         spend_delta_pct: float | None = None
-        junk_delta_val:  float | None = None
+        junk_rate_delta: float | None = None
 
         if in_current and not in_previous:
             movement = "new"
@@ -2049,22 +2049,22 @@ def api_dashboard_trends(
 
         else:
             # Both periods present — calculate deltas
-            if prev_c["spend_usd"] and prev_c["spend_usd"] > 0:
+            if prev_c["spend_usd"] > 0:
                 spend_delta_pct = ((cur_c["spend_usd"] - prev_c["spend_usd"]) / prev_c["spend_usd"]) * 100
             if cur_c["junk_rate_pct"] is not None and prev_c["junk_rate_pct"] is not None:
-                junk_delta_val = cur_c["junk_rate_pct"] - prev_c["junk_rate_pct"]
+                junk_rate_delta = cur_c["junk_rate_pct"] - prev_c["junk_rate_pct"]
 
             sql_delta = cur_c["confirmed_sqls"] - prev_c["confirmed_sqls"]
 
-            severity = _compute_severity(cur_c, prev_c, spend_delta_pct, junk_delta_val)
+            severity = _compute_severity(cur_c, prev_c, spend_delta_pct, junk_rate_delta)
 
             if cur_c["junk_rate_pct"] is None and prev_c["junk_rate_pct"] is None:
                 movement = "insufficient_data"
                 reason   = "No junk rate data available in either period for comparison."
             else:
                 spend_rose  = spend_delta_pct is not None and spend_delta_pct >= _TREND_SPEND_DELTA_PCT
-                junk_rose   = junk_delta_val  is not None and junk_delta_val  >= _TREND_JUNK_DELTA_THRESHOLD
-                junk_fell   = junk_delta_val  is not None and junk_delta_val  <= -_TREND_JUNK_DELTA_THRESHOLD
+                junk_rose   = junk_rate_delta  is not None and junk_rate_delta  >= _TREND_JUNK_DELTA_THRESHOLD
+                junk_fell   = junk_rate_delta  is not None and junk_rate_delta  <= -_TREND_JUNK_DELTA_THRESHOLD
                 sqls_rose   = sql_delta > 0
                 sqls_fell   = sql_delta < 0
                 no_sqls_spend = spend_rose and cur_c["confirmed_sqls"] == 0
@@ -2075,7 +2075,7 @@ def api_dashboard_trends(
                     if sqls_fell:
                         parts.append(f"SQLs fell by {abs(sql_delta)}")
                     if junk_rose:
-                        parts.append(f"junk rate rose {junk_delta_val:.1f} points")
+                        parts.append(f"junk rate rose {junk_rate_delta:.1f} points")
                     if no_sqls_spend:
                         parts.append(f"spend rose {spend_delta_pct:.0f}% with no SQLs")
                     reason = (". ".join(parts).capitalize() + ".") if parts else "Performance metrics worsened."
@@ -2085,7 +2085,7 @@ def api_dashboard_trends(
                     if sqls_rose:
                         parts.append(f"SQLs increased by {sql_delta}")
                     if junk_fell:
-                        parts.append(f"junk rate fell {abs(junk_delta_val):.1f} points")
+                        parts.append(f"junk rate fell {abs(junk_rate_delta):.1f} points")
                     reason = (". ".join(parts).capitalize() + ".") if parts else "Performance metrics improved."
                 else:
                     movement = "stable"

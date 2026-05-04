@@ -827,8 +827,8 @@ function _trendDirectionLabel(key, trend) {
   if (trend === "flat")              return "No change";
   const map = TREND_DIRECTION[key] || { up: "neutral", down: "neutral" };
   const valence = trend === "up" ? map.up : map.down;
-  if (valence === "good") return trend === "up" ? "Improved" : "Improved";
-  if (valence === "bad")  return trend === "up" ? "Worsened" : "Improved";
+  if (valence === "good") return "Improved";
+  if (valence === "bad")  return "Worsened";
   return trend === "up" ? "Higher" : "Lower";
 }
 
@@ -871,7 +871,7 @@ function renderTrendSummary(summary, hasPrevious, container) {
       <div class="trend-card">
         <div class="trend-card__label">${escapeHtml(TREND_LABELS[key] || key)}</div>
         <div class="trend-card__current">${escapeHtml(curVal)}</div>
-        <div class="trend-card__comparison">${escapeHtml(curVal)} now · ${escapeHtml(prevVal)} previous</div>
+        <div class="trend-card__comparison">vs. ${escapeHtml(prevVal)} previous</div>
         ${deltaStr ? `<div class="trend-delta ${dirCls}">${arrowIcon}<span>${escapeHtml(deltaStr)}</span></div>` : ""}
         <div class="trend-direction-badge ${dirCls}">${escapeHtml(dirLabel)}</div>
       </div>`;

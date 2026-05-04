@@ -1028,10 +1028,6 @@ a {
   border: 1px solid var(--c-neutral-border);
 }
 
-/* Aliases used on delta spans (no background needed there) */
-.trend-up   { color: inherit; }
-.trend-down { color: inherit; }
-
 .trend-no-previous {
   padding: var(--space-2) 0;
 }
