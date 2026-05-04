@@ -913,6 +913,250 @@ a {
   color: var(--text-primary);
 }
 
+.alert-detail {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+/* ── Alert severity badges ────────────────────────────────────────────────── */
+.alert-severity-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin-right: var(--space-1);
+  vertical-align: middle;
+}
+
+.alert-severity-high {
+  background: var(--c-danger-bg);
+  color: var(--c-danger);
+  border: 1px solid var(--c-danger-border);
+}
+
+.alert-severity-medium {
+  background: var(--c-warning-bg);
+  color: var(--c-warning);
+  border: 1px solid var(--c-warning-border);
+}
+
+.alert-severity-low {
+  background: var(--c-neutral-bg);
+  color: var(--c-neutral);
+  border: 1px solid var(--c-neutral-border);
+}
+
+/* ── Dashboard trends (What Changed) ─────────────────────────────────────── */
+.dashboard-trends {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-4);
+}
+
+.trend-card {
+  background: var(--surface-page);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.trend-card__label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.trend-card__current {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.trend-card__comparison {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.trend-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: var(--space-1);
+}
+
+.trend-direction-badge {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  align-self: flex-start;
+  margin-top: 2px;
+}
+
+/* Trend colour classes */
+.trend-good {
+  color: var(--c-success);
+  background: var(--c-success-bg);
+  border: 1px solid var(--c-success-border);
+}
+
+.trend-bad {
+  color: var(--c-danger);
+  background: var(--c-danger-bg);
+  border: 1px solid var(--c-danger-border);
+}
+
+.trend-neutral {
+  color: var(--c-neutral);
+  background: var(--c-neutral-bg);
+  border: 1px solid var(--c-neutral-border);
+}
+
+/* Aliases used on delta spans (no background needed there) */
+.trend-up   { color: inherit; }
+.trend-down { color: inherit; }
+
+.trend-no-previous {
+  padding: var(--space-2) 0;
+}
+
+/* ── Campaign movement list ───────────────────────────────────────────────── */
+.campaign-movement-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.campaign-movement-item {
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.campaign-movement-item:last-child {
+  border-bottom: none;
+}
+
+.campaign-movement-item__header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.campaign-movement-item__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.campaign-movement-item__metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.movement-metric {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.movement-metric__label {
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.movement-metric__val {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.movement-metric__prev {
+  color: var(--text-muted);
+}
+
+.campaign-movement-item__reason {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* ── Movement badges ──────────────────────────────────────────────────────── */
+.movement-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.movement-improved {
+  background: var(--c-success-bg);
+  color: var(--c-success);
+  border-color: var(--c-success-border);
+}
+
+.movement-worsened {
+  background: var(--c-danger-bg);
+  color: var(--c-danger);
+  border-color: var(--c-danger-border);
+}
+
+.movement-stable {
+  background: var(--c-neutral-bg);
+  color: var(--c-neutral);
+  border-color: var(--c-neutral-border);
+}
+
+.movement-new {
+  background: rgba(18, 158, 245, 0.08);
+  color: var(--brand-sky-accent);
+  border-color: rgba(18, 158, 245, 0.25);
+}
+
+.movement-dropped {
+  background: var(--c-warning-bg);
+  color: var(--c-warning);
+  border-color: var(--c-warning-border);
+}
+
+.movement-insufficient {
+  background: var(--c-neutral-bg);
+  color: var(--text-muted);
+  border-color: var(--c-neutral-border);
+}
+
 /* ── Run timeline ─────────────────────────────────────────────────────────── */
 .run-entry {
   display: flex;
@@ -1455,6 +1699,10 @@ a {
 
   .health-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-trends {
+    grid-template-columns: repeat(2, 1fr);
   }
 }
 

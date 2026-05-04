@@ -725,6 +725,99 @@ Same response shape as `/api/campaign-detail`. Preserved for backwards compatibi
 
 ---
 
+#### `GET /api/dashboard/trends?days=N`
+Previous-period trend comparison for the dashboard. Returns summary metrics, campaign movements, and display alerts comparing the current period against the previous period of equal length.
+
+**Auth:** Auth (session cookie, same as other dashboard endpoints)
+**Query params:** `days` (integer, default 30, max 365)
+**Read-only:** Yes — no write to Google Ads, HubSpot, or any external system
+**Phase 1 read-only:** Confirmed
+
+**Period definition:**
+- Current period: `NOW() - N days → NOW()`
+- Previous period: `NOW() - 2N days → NOW() - N days`
+
+**Response 200:**
+```json
+{
+  "days": 30,
+  "current_period":  { "start": "2026-04-02", "end": "2026-05-02" },
+  "previous_period": { "start": "2026-03-03", "end": "2026-04-02" },
+  "summary": {
+    "spend_usd":           { "current": 6500.25, "previous": 5900.00, "delta": 600.25, "delta_pct": 10.17, "trend": "up" },
+    "confirmed_sqls":      { "current": 8,       "previous": 5,       "delta": 3,      "delta_pct": 60.0,  "trend": "up" },
+    "confirmed_waste_usd": { "current": 420.00,  "previous": 300.00,  "delta": 120.00, "delta_pct": 40.0,  "trend": "up" },
+    "avg_junk_rate_pct":   { "current": 28.5,    "previous": 22.0,    "delta": 6.5,    "delta_pct": 29.55, "trend": "up" }
+  },
+  "campaign_movements": [
+    {
+      "campaign_name": "global - competitors",
+      "current":  { "spend_usd": 1000, "confirmed_sqls": 0, "junk_rate_pct": 42, "verdict": "FIX" },
+      "previous": { "spend_usd": 800,  "confirmed_sqls": 1, "junk_rate_pct": 25, "verdict": "HOLD" },
+      "movement": "worsened",
+      "reason": "SQLs fell by 1. Junk rate rose 17.0 points.",
+      "severity_score": 85
+    }
+  ],
+  "alerts": [
+    {
+      "campaign_name": "global - competitors",
+      "severity": "high",
+      "title": "Junk rate worsened",
+      "detail": "Junk rate increased from 25.0% to 42.0% (+17.0 points). Warrants review.",
+      "source": "campaigns table"
+    }
+  ],
+  "data_quality": {
+    "has_previous_period": true,
+    "current_runs": 2,
+    "previous_runs": 1,
+    "status": "ok"
+  }
+}
+```
+
+**Movement classification:**
+- `new` — campaign appears in current period but not previous
+- `dropped` — campaign present in previous but absent in current
+- `improved` — SQLs increased OR junk rate decreased ≥ 10 points
+- `worsened` — SQLs decreased OR junk rate increased ≥ 10 points OR spend rose ≥ 20% with zero SQLs
+- `stable` — no meaningful change detected
+- `insufficient_data` — junk rate unavailable in both periods
+
+**Thresholds used for movement classification (local constants in endpoint):**
+- Junk rate meaningful change: absolute delta ≥ 10 percentage points
+- Spend meaningful change: relative delta ≥ 20% of previous-period spend
+- SQL change meaningful: integer delta ≠ 0
+
+**Severity score (0–100, display-only — not an automated action recommendation):**
+- +30 if current SQLs = 0 and spend > 0
+- +25 if current junk rate ≥ 30% (high junk threshold default)
+- +20 if spend increased ≥ 20%
+- +20 if junk rate increased ≥ 10 points
+- +15 if verdict is FIX
+- +25 if verdict is CUT
+- Capped at 100
+
+**Alert language:** Evidence-based, warrants-review only. Does not use the words pause, cut, increase budget, or apply negatives.
+
+**Data quality states:**
+- `ok` — previous-period data available
+- `insufficient_previous_data` — no previous-period runs found (endpoint still returns current metrics)
+- `db_unavailable` — database offline (safe empty response returned)
+
+**DB unavailable response:**
+```json
+{ "days": 30, "summary": {}, "campaign_movements": [], "alerts": [], "data_quality": { "status": "db_unavailable" }, "db_unavailable": true }
+```
+
+**`campaign_movements` ordering:** Sorted by `severity_score` descending; top 10 returned.
+**`alerts` ordering:** Sorted by severity (high → medium → low), deduplicated per campaign; up to 8 returned.
+**`summary.spend_usd`** uses latest-run-per-period aggregation (same convention as `/api/summary`) to avoid double-counting overlapping weekly/monthly run snapshots.
+**`summary.confirmed_waste_usd`** is summed from `waste_terms` rows where `crm_junk_confirmed > 0` in each period.
+
+---
+
 ## Endpoint Quick Reference
 
 | Method | Path | Auth | Purpose |
@@ -753,6 +846,7 @@ Same response shape as `/api/campaign-detail`. Preserved for backwards compatibi
 | GET | `/api/keywords` | Auth | Windsor keyword performance by campaign/ad group/keyword (DB, ?days=) |
 | GET | `/api/leads/country-summary` | Auth | HubSpot lead quality by country (DB, ?days=) |
 | GET | `/api/config/ui-thresholds` | Auth | UI-safe display thresholds from config/thresholds.yaml |
+| GET | `/api/dashboard/trends` | Auth | Previous-period trend comparison for dashboard (DB, ?days=) |
 
 ---
 
