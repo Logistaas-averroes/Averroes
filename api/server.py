@@ -2307,7 +2307,7 @@ def _build_waste_queue_items(
             score += 25
         if crm_confirmed > 0:
             score += 20
-        if category and any(cat in category for cat in ("fraud", "job", "student", "free")):
+        if category in _QUEUE_FRAUD_CATEGORIES:
             score += 10
         score = min(100, score)
 
@@ -2491,7 +2491,7 @@ def _build_keyword_queue_items(
         FROM keywords
         WHERE run_date >= NOW() - INTERVAL '1 day' * %s
         GROUP BY campaign_name, ad_group, keyword, match_type
-        HAVING SUM(spend_usd) >= %s AND COALESCE(SUM(conversions), 0) <= 0
+        HAVING SUM(spend_usd) >= %s AND COALESCE(SUM(conversions), 0) = 0
         ORDER BY spend_usd DESC NULLS LAST
         LIMIT 10
         """,

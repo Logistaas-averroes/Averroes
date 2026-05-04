@@ -3062,8 +3062,11 @@ function _renderActionQueueList() {
 }
 
 function _renderQueueItemCard(item) {
-  const sev   = item.severity || "low";
-  const type  = item.type     || "";
+  const rawSev  = item.severity || "low";
+  const rawType = item.type     || "";
+  // Sanitize values used in class names against known allowed sets
+  const sev   = ["high", "medium", "low"].includes(rawSev) ? rawSev : "low";
+  const type  = Object.prototype.hasOwnProperty.call(QUEUE_TYPE_LABELS, rawType) ? rawType : "";
   const score = item.severity_score != null ? item.severity_score : 0;
 
   const sevBadge  = `<span class="action-queue-badge severity-${escapeHtml(sev)}">${escapeHtml(sev.toUpperCase())}</span>`;
