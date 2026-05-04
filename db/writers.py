@@ -536,7 +536,7 @@ def write_keywords(run_id: int, keyword_rows: list) -> int:
         return 0
     if not keyword_rows:
         return 0
-    run_date = _today()
+    today = _today()
     rows = []
     for k in keyword_rows:
         raw_name = k.get("campaign") or k.get("campaign_name")
@@ -548,9 +548,22 @@ def write_keywords(run_id: int, keyword_rows: list) -> int:
         match_type = k.get("match_type")
         if match_type is not None:
             match_type = str(match_type).strip() or None
+        # Resolve run_date from the row if available, falling back to today
+        row_date = k.get("date") or k.get("run_date")
+        if row_date:
+            try:
+                from datetime import date as _date
+                if isinstance(row_date, _date):
+                    effective_date = row_date
+                else:
+                    effective_date = _date.fromisoformat(str(row_date))
+            except (ValueError, TypeError):
+                effective_date = today
+        else:
+            effective_date = today
         rows.append((
             run_id,
-            run_date,
+            effective_date,
             campaign_name,
             k.get("ad_group"),
             k.get("keyword"),
