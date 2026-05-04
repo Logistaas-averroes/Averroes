@@ -275,7 +275,7 @@ CREATE TABLE IF NOT EXISTS search_terms (
 );
 
 -- Unique natural key: prevents duplicate fact rows for the same search term event
--- Expression COALESCE converts NULLs to '' so the unique constraint covers nullable columns
+-- COALESCE handles nullable columns; search_term is NOT NULL so listed directly.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_search_terms_unique_fact
   ON search_terms (
     source_date,
@@ -283,7 +283,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_search_terms_unique_fact
     COALESCE(ad_group,       ''),
     COALESCE(keyword,        ''),
     COALESCE(match_type,     ''),
-    COALESCE(search_term,    '')
+    search_term
   );
 
 -- Cursor/keyset pagination index (source_date DESC, id DESC)

@@ -2854,7 +2854,7 @@ _SEARCH_TERMS_DATA_QUALITY_NOTE = (
 )
 
 
-def _encode_cursor(source_date, row_id: int) -> str:
+def _encode_cursor(source_date: date, row_id: int) -> str:
     """Encode a keyset cursor as URL-safe base64 JSON (no padding)."""
     payload = json.dumps(
         {"source_date": str(source_date), "id": int(row_id)},

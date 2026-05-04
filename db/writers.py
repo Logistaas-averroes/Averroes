@@ -700,7 +700,7 @@ def write_search_terms(
             COALESCE(ad_group,      ''),
             COALESCE(keyword,       ''),
             COALESCE(match_type,    ''),
-            COALESCE(search_term,   '')
+            search_term
         ) DO UPDATE SET
             run_id        = EXCLUDED.run_id,
             sync_batch_id = COALESCE(EXCLUDED.sync_batch_id,
@@ -720,8 +720,9 @@ def write_search_terms(
                 return 0
             with conn.cursor() as cur:
                 cur.executemany(_upsert_sql, rows)
-                # executemany rowcount reflects the last statement in psycopg2;
-                # use attempted count as a reliable proxy for high-volume datasets.
+                # executemany with ON CONFLICT makes rowcount unreliable for
+                # determining actual inserts vs updates; use len(rows) as the
+                # attempted-upsert count.
                 attempted = len(rows)
         log.info(
             "write_search_terms: upserted %d rows (run_id=%s)", attempted, run_id
