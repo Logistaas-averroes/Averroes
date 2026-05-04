@@ -45,6 +45,7 @@ let geoMergedRows = [];
 
 // Keywords page state
 let keywordRows = [];
+let keywordLoadStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
 
 // ── Utility helpers ────────────────────────────────────────────────────────
 
@@ -1463,40 +1464,37 @@ async function loadKeywords() {
     if (el) el.textContent = "—";
   });
 
+  keywordLoadStatus = "loading";
   const days = getSelectedDays();
 
   try {
     const data = await fetchJSON(`/api/keywords?days=${days}`);
 
     if (data.db_unavailable) {
+      keywordLoadStatus = "db_unavailable";
       keywordRows = [];
-      if (tableEl) tableEl.innerHTML = `
-        <div class="keywords-empty-state">
-          <p class="empty-state">Keyword data temporarily unavailable — database offline.</p>
-        </div>`;
+      renderKeywordsTable([]);
       return;
     }
 
     keywordRows = data.rows || [];
 
     if (keywordRows.length === 0) {
-      if (tableEl) tableEl.innerHTML = `
-        <div class="keywords-empty-state">
-          <p class="empty-state">No keyword data available for the selected window.</p>
-          <p class="keywords-empty-subtext">Keyword rows appear after weekly or monthly runs persist Windsor keyword performance.</p>
-        </div>`;
+      keywordLoadStatus = "empty";
+      renderKeywordsTable([]);
       return;
     }
 
+    keywordLoadStatus = "ok";
     renderKeywordsKPIs(keywordRows);
     renderMatchTypeSummary(keywordRows);
     populateKeywordFilters(keywordRows);
     applyKeywordFilters();
 
   } catch (_) {
+    keywordLoadStatus = "error";
     keywordRows = [];
-    if (tableEl) tableEl.innerHTML =
-      `<p class="empty-state" style="padding:var(--space-5)">Could not load keyword data. Check API health or run status.</p>`;
+    renderKeywordsTable([]);
   }
 }
 
@@ -1537,11 +1535,12 @@ function renderMatchTypeSummary(rows) {
   const labels = { broad: "Broad", phrase: "Phrase", exact: "Exact", unknown: "Unknown" };
 
   const grouped = {};
-  types.forEach((t) => { grouped[t] = { count: 0, spend: 0, clicks: 0, conversions: 0 }; });
+  types.forEach((t) => { grouped[t] = { keys: new Set(), spend: 0, clicks: 0, conversions: 0 }; });
 
   for (const row of rows) {
     const t = normalizeMatchType(row.match_type);
-    grouped[t].count++;
+    // Count distinct keyword texts per match type (same keyword in multiple ad groups counts once)
+    grouped[t].keys.add((row.keyword || "").trim().toLowerCase());
     grouped[t].spend       += row.spend_usd    || 0;
     grouped[t].clicks      += row.clicks       || 0;
     grouped[t].conversions += row.conversions  || 0;
@@ -1549,7 +1548,7 @@ function renderMatchTypeSummary(rows) {
 
   const cards = types.map((t) => {
     const g = grouped[t];
-    if (g.count === 0) return "";
+    if (g.keys.size === 0) return "";
     return `
       <div class="matchtype-card">
         <div class="matchtype-card__header">
@@ -1557,7 +1556,7 @@ function renderMatchTypeSummary(rows) {
         </div>
         <div class="matchtype-card__stats">
           <div class="matchtype-card__stat">
-            <span class="matchtype-card__num">${g.count}</span>
+            <span class="matchtype-card__num">${g.keys.size}</span>
             <span class="matchtype-card__label">keywords</span>
           </div>
           <div class="matchtype-card__stat">
@@ -1612,6 +1611,10 @@ function getFilteredKeywordRows() {
 }
 
 function applyKeywordFilters() {
+  if (keywordLoadStatus !== "ok") {
+    renderKeywordsTable([]);
+    return;
+  }
   renderKeywordsTable(getFilteredKeywordRows());
 }
 
@@ -1622,8 +1625,24 @@ function renderKeywordsTable(rows) {
   const tableEl = document.getElementById("kw-table-body");
   if (!tableEl) return;
 
+  if (keywordLoadStatus === "db_unavailable") {
+    tableEl.innerHTML = `
+      <div class="keywords-empty-state">
+        <p class="empty-state">Keyword data temporarily unavailable — database offline.</p>
+      </div>`;
+    return;
+  }
+
+  if (keywordLoadStatus === "error") {
+    tableEl.innerHTML = `
+      <div class="keywords-empty-state">
+        <p class="empty-state">Could not load keyword data. Check API health or run status.</p>
+      </div>`;
+    return;
+  }
+
   if (rows.length === 0) {
-    if (keywordRows.length === 0) {
+    if (keywordLoadStatus === "empty") {
       tableEl.innerHTML = `
         <div class="keywords-empty-state">
           <p class="empty-state">No keyword data available for the selected window.</p>

@@ -1958,6 +1958,11 @@ a {
     align-items: stretch;
   }
 
+  .keywords-controls .waste-search-input {
+    min-width: 0;
+    width: 100%;
+  }
+
   .matchtype-summary {
     flex-direction: column;
   }
