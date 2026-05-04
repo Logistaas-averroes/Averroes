@@ -481,7 +481,7 @@ function updateReportActionButtons() {
   const copyBtn    = document.getElementById("report-copy-btn");
   const refreshBtn = document.getElementById("report-refresh-btn");
   const hasReport  = reportLoadStatus === "ok" && !!latestReportMarkdown.trim();
-  if (copyBtn)    copyBtn.disabled    = !hasReport || reportLoadStatus === "loading";
+  if (copyBtn)    copyBtn.disabled = !hasReport || reportLoadStatus === "loading";
   if (refreshBtn) refreshBtn.disabled = reportLoadStatus === "loading";
 }
 
@@ -560,7 +560,7 @@ function _renderReportsMeta(meta) {
 
   // Report is available if metadata says so OR if the raw body loaded successfully.
   const hasReportBody = !!(latestReportMarkdown && latestReportMarkdown.trim());
-  const exists = (meta && meta.exists === true) || hasReportBody;
+  const exists = meta && meta.exists === true || hasReportBody;
 
   metaEl.innerHTML = `
     <div class="report-meta-card">
