@@ -3087,10 +3087,25 @@ function _renderQueueItemCard(item) {
     evidenceHtml = `<div class="queue-evidence-grid">${cells}</div>`;
   }
 
-  // Build read-only action button
+  // Build read-only action button driven by primary_link contract; fall back to type-based defaults.
   let actionBtn = "";
   const link = item.primary_link || {};
-  if (type === "campaign_review" && item.campaign_name) {
+  // Only trust navigation to pages explicitly listed in the PAGES registry.
+  const linkAction  = typeof link.action        === "string" ? link.action        : "";
+  const linkPage    = typeof link.page          === "string" && PAGES.includes(link.page) ? link.page : "";
+  const linkCampaign = typeof link.campaign_name === "string" && link.campaign_name ? link.campaign_name : "";
+
+  if (linkAction === "open_campaign_drawer" && (linkCampaign || item.campaign_name)) {
+    const campaignName = linkCampaign || item.campaign_name;
+    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-campaign="${escapeHtml(campaignName)}">Investigate campaign</button>`;
+  } else if (linkAction === "navigate" && linkPage) {
+    const navLabels = {
+      waste: "View Waste Terms", geo: "View Geo",
+      keywords: "View Keywords", scheduler: "View Scheduler",
+    };
+    const label = navLabels[linkPage] || "View";
+    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="${escapeHtml(linkPage)}">${escapeHtml(label)}</button>`;
+  } else if (type === "campaign_review" && item.campaign_name) {
     actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-campaign="${escapeHtml(item.campaign_name)}">Investigate campaign</button>`;
   } else if (type === "waste_review") {
     actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="waste">View Waste Terms</button>`;

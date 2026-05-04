@@ -43,6 +43,7 @@ Protected endpoints (require authenticated session):
   GET  /api/action-queue          — Ranked human-review queue based on campaign, waste, geo, keyword, and data signals (requires auth).
 """
 
+import hashlib
 import importlib
 import json
 import logging
@@ -2173,6 +2174,19 @@ def _queue_severity_label(score: int) -> str:
     return "low"
 
 
+def _queue_id(prefix: str, *parts: object) -> str:
+    """Build a stable, collision-safe queue item ID.
+
+    Combines a readable prefix with a short SHA-1 digest of the
+    normalised constituent parts so that items that differ only by
+    campaign_name, junk_category, match_type, etc. get distinct IDs.
+    """
+    raw = "|".join(str(p or "").strip().lower() for p in parts)
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]  # noqa: S324 — non-security hash for ID dedup
+    safe_prefix = prefix.replace(" ", "-").replace("/", "-").lower()
+    return f"{safe_prefix}-{digest}"
+
+
 def _build_campaign_queue_items(
     cur,
     days: int,
@@ -2228,7 +2242,6 @@ def _build_campaign_queue_items(
         score = min(100, score)
 
         name = r["campaign_name"] or ""
-        safe_id = name.replace(" ", "-").replace("/", "-").replace("_", "-")
 
         detail_parts: list[str] = []
         if spend > 0:
@@ -2239,10 +2252,14 @@ def _build_campaign_queue_items(
             detail_parts.append(f"junk rate is {junk_rate:.1f}%")
         if verdict in ("FIX", "CUT"):
             detail_parts.append(f"verdict is {verdict}")
-        detail = ". ".join(detail_parts).capitalize() + ". Warrants review." if detail_parts else "Warrants review."
+        if detail_parts:
+            detail_body = ". ".join(detail_parts)
+            detail = f"{detail_body[:1].upper()}{detail_body[1:]}. Warrants review."
+        else:
+            detail = "Warrants review."
 
         items.append({
-            "id": f"campaign-{safe_id}-review",
+            "id": _queue_id("campaign-review", name),
             "type": "campaign_review",
             "severity": _queue_severity_label(score),
             "severity_score": score,
@@ -2318,7 +2335,7 @@ def _build_waste_queue_items(
         detail += ". Warrants review."
 
         items.append({
-            "id": f"waste-{safe_id}-review",
+            "id": _queue_id("waste-review", term, camp, r["junk_category"]),
             "type": "waste_review",
             "severity": _queue_severity_label(score),
             "severity_score": score,
@@ -2444,7 +2461,7 @@ def _build_geo_queue_items(
         detail = "Country signal warrants review" + (": " + ", ".join(detail_parts) if detail_parts else "") + "."
 
         items.append({
-            "id": f"geo-{safe_id}-review",
+            "id": _queue_id("geo-review", country),
             "type": "geo_review",
             "severity": _queue_severity_label(score),
             "severity_score": score,
@@ -2527,7 +2544,7 @@ def _build_keyword_queue_items(
         )
 
         items.append({
-            "id": f"keyword-{safe_id}-review",
+            "id": _queue_id("keyword-review", camp, ad_group, kw, match_type),
             "type": "keyword_review",
             "severity": _queue_severity_label(score),
             "severity_score": score,
