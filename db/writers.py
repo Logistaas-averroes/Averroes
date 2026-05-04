@@ -610,6 +610,34 @@ VALID_SYNC_TYPES     = {"backfill", "daily", "weekly", "monthly", "manual"}
 VALID_SYNC_STATUSES  = {"running", "success", "failed", "unknown"}
 
 
+def _to_date_or_none(value):
+    """Coerce a date-like value to datetime.date, or return None.
+
+    Accepts:
+    - datetime.date
+    - ISO date string: YYYY-MM-DD
+
+    Returns None for:
+    - None
+    - empty string
+    - invalid/unparseable strings
+    - unexpected types (not str or datetime.date)
+    """
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except (ValueError, TypeError):
+        return None
+
+
 def start_sync_batch(
     source: str,
     dataset: str,
@@ -638,16 +666,21 @@ def start_sync_batch(
     if sync_type not in VALID_SYNC_TYPES:
         log.warning("start_sync_batch: unknown sync_type %r", sync_type)
 
-    # Safe date coercion
-    def _to_date(val):
-        if val is None:
-            return None
-        if isinstance(val, date):
-            return val
-        try:
-            return date.fromisoformat(str(val))
-        except (ValueError, TypeError):
-            return None
+    date_from_value = _to_date_or_none(date_from)
+    date_to_value   = _to_date_or_none(date_to)
+
+    if date_from is not None and date_from_value is None:
+        log.warning(
+            "start_sync_batch: invalid date_from %r; expected datetime.date or ISO format YYYY-MM-DD",
+            date_from,
+        )
+        return 0
+    if date_to is not None and date_to_value is None:
+        log.warning(
+            "start_sync_batch: invalid date_to %r; expected datetime.date or ISO format YYYY-MM-DD",
+            date_to,
+        )
+        return 0
 
     try:
         with get_conn() as conn:
@@ -663,7 +696,7 @@ def start_sync_batch(
                     RETURNING id
                     """,
                     (run_id, source, dataset, sync_type,
-                     _to_date(date_from), _to_date(date_to)),
+                     date_from_value, date_to_value),
                 )
                 row = cur.fetchone()
                 batch_id = row[0] if row else 0
@@ -699,15 +732,13 @@ def finish_sync_batch(
         log.warning("finish_sync_batch: invalid status %r for batch_id=%s", status, batch_id)
         return False
 
-    def _to_date(val):
-        if val is None:
-            return None
-        if isinstance(val, date):
-            return val
-        try:
-            return date.fromisoformat(str(val))
-        except (ValueError, TypeError):
-            return None
+    last_source_date_value = _to_date_or_none(last_source_date)
+    if last_source_date is not None and last_source_date_value is None:
+        log.warning(
+            "finish_sync_batch: invalid last_source_date %r;"
+            " expected datetime.date or ISO format YYYY-MM-DD; storing NULL",
+            last_source_date,
+        )
 
     try:
         with get_conn() as conn:
@@ -735,7 +766,7 @@ def finish_sync_batch(
                 source, dataset, batch_date_to = batch_row
 
                 # Resolve last_source_date
-                resolved_source_date = _to_date(last_source_date) or _to_date(batch_date_to)
+                resolved_source_date = last_source_date_value or _to_date_or_none(batch_date_to)
 
                 if status == "success":
                     cur.execute(
@@ -812,15 +843,13 @@ def update_sync_state(
     if status not in VALID_SYNC_STATUSES:
         log.warning("update_sync_state: unknown status %r", status)
 
-    def _to_date(val):
-        if val is None:
-            return None
-        if isinstance(val, date):
-            return val
-        try:
-            return date.fromisoformat(str(val))
-        except (ValueError, TypeError):
-            return None
+    last_source_date_value = _to_date_or_none(last_source_date)
+    if last_source_date is not None and last_source_date_value is None:
+        log.warning(
+            "update_sync_state: invalid last_source_date %r;"
+            " expected datetime.date or ISO format YYYY-MM-DD; storing NULL",
+            last_source_date,
+        )
 
     try:
         with get_conn() as conn:
@@ -854,7 +883,7 @@ def update_sync_state(
                     (
                         source, dataset,
                         last_successful_sync_at,
-                        _to_date(last_source_date),
+                        last_source_date_value,
                         last_batch_id,
                         status,
                         error_message,
