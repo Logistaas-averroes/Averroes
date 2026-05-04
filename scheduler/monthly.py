@@ -122,6 +122,15 @@ def run_monthly_report():
         except Exception as db_exc:  # noqa: BLE001
             log.error("DB write keywords failed: %s", db_exc)
 
+        # Write search term rows to database (non-fatal)
+        # Note: monthly pull_search_terms(days_back=30) maps to Windsor last_14d window;
+        # do not claim full 30-day coverage — write whatever Windsor returns.
+        try:
+            st_count = db_writers.write_search_terms(run_id, search_terms)
+            log.info("Wrote %d search term rows to database (run_id=%s)", st_count, run_id)
+        except Exception as db_exc:  # noqa: BLE001
+            log.error("DB write search terms failed: %s", db_exc)
+
     except Exception as e:
         log.error(f"Step 2/6 FAILED: HubSpot pull error — {e}")
         finish_run(

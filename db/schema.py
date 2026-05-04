@@ -241,6 +241,82 @@ CREATE TABLE IF NOT EXISTS sync_state (
 CREATE INDEX IF NOT EXISTS idx_sync_state_status         ON sync_state(status);
 CREATE INDEX IF NOT EXISTS idx_sync_state_updated_at     ON sync_state(updated_at);
 
+-- PR-ADS-040: full search-term fact table
+-- grain: source_date + campaign + ad_group + keyword + match_type + search_term
+-- is_flagged_waste tri-state: NULL = not analysed | TRUE = flagged waste | FALSE = analysed clean
+-- Do NOT default is_flagged_waste to FALSE — raw writer must leave it NULL.
+CREATE TABLE IF NOT EXISTS search_terms (
+  id               SERIAL PRIMARY KEY,
+  run_id           INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+  source_date      DATE         NOT NULL,
+  campaign_name    TEXT,
+  campaign_id      TEXT,
+  ad_group         TEXT,
+  keyword          TEXT,
+  match_type       TEXT,
+  search_term      TEXT,
+  spend_usd        NUMERIC(10,2) DEFAULT 0,
+  clicks           INTEGER       DEFAULT 0,
+  impressions      INTEGER       DEFAULT 0,
+  conversions      NUMERIC(8,2)  DEFAULT 0,
+
+  -- Tri-state analysis flag:
+  -- NULL  = not analysed yet
+  -- TRUE  = analysed and flagged as waste
+  -- FALSE = analysed and not flagged
+  is_flagged_waste BOOLEAN,
+
+  junk_category    TEXT,
+  matched_pattern  TEXT,
+
+  sync_batch_id    INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  created_at       TIMESTAMPTZ DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Unique natural key: prevents duplicate fact rows for the same search term event
+-- Expression COALESCE converts NULLs to '' so the unique constraint covers nullable columns
+CREATE UNIQUE INDEX IF NOT EXISTS idx_search_terms_unique_fact
+  ON search_terms (
+    source_date,
+    COALESCE(campaign_name,  ''),
+    COALESCE(ad_group,       ''),
+    COALESCE(keyword,        ''),
+    COALESCE(match_type,     ''),
+    COALESCE(search_term,    '')
+  );
+
+-- Cursor/keyset pagination index (source_date DESC, id DESC)
+CREATE INDEX IF NOT EXISTS idx_search_terms_cursor
+  ON search_terms(source_date DESC, id DESC);
+
+-- Lookup indexes
+CREATE INDEX IF NOT EXISTS idx_search_terms_source_date
+  ON search_terms(source_date);
+
+CREATE INDEX IF NOT EXISTS idx_search_terms_campaign
+  ON search_terms(campaign_name);
+
+CREATE INDEX IF NOT EXISTS idx_search_terms_keyword
+  ON search_terms(keyword);
+
+CREATE INDEX IF NOT EXISTS idx_search_terms_match_type
+  ON search_terms(match_type);
+
+CREATE INDEX IF NOT EXISTS idx_search_terms_flagged_waste
+  ON search_terms(is_flagged_waste);
+
+CREATE INDEX IF NOT EXISTS idx_search_terms_sync_batch
+  ON search_terms(sync_batch_id);
+
+-- NOTE: Trigram index for /api/search-terms?q= (full-text contains search) requires
+-- the pg_trgm extension.  If you have DBA access, enable it once with:
+--   CREATE EXTENSION IF NOT EXISTS pg_trgm;
+--   CREATE INDEX IF NOT EXISTS idx_search_terms_search_term_trgm
+--     ON search_terms USING gin (search_term gin_trgm_ops);
+-- Until enabled, ?q= filtering is supported but uses a sequential scan.
+-- Do NOT add a plain B-tree index — it does not support LIKE '%term%' queries.
+
 -- PR-ADS-029A: idempotent migration — enforce NOT NULL on geo.run_id for existing DBs
 -- New installs: run_id is already NOT NULL from CREATE TABLE above; these are no-ops.
 -- Existing DBs: removes any orphan rows then sets the constraint (runs once via migrations table).
