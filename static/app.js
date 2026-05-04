@@ -2161,7 +2161,7 @@ function renderCampaignDrawer(data) {
             </tr>
           </tbody>
         </table>
-        <p class="drawer-source-note">Unknown contacts are excluded from junk-rate denominator. Total in window: ${lq.total_leads}.</p>
+        <p class="drawer-source-note">Junk rate = confirmed junk ÷ verdicted leads (qualified + in-progress + junk + wrong fit). Unknown contacts are excluded from the denominator. Total in window: ${lq.total_leads}.</p>
       </div>`;
   }
 
@@ -2184,6 +2184,7 @@ function renderCampaignDrawer(data) {
           <td class="td--name">${escapeHtml(r.country)}</td>
           <td>${r.total_leads}</td>
           <td>${r.confirmed_sqls}</td>
+          <td>${r.in_progress != null ? r.in_progress : "—"}</td>
           <td>${r.confirmed_junk}</td>
           <td>${r.wrong_fit}</td>
           <td>${r.unknown}</td>
@@ -2195,7 +2196,7 @@ function renderCampaignDrawer(data) {
         <div class="drawer-section__title">Country Breakdown</div>
         <table class="drawer-table">
           <thead>
-            <tr><th>Country</th><th>Leads</th><th>SQLs</th><th>Junk</th><th>Wrong Fit</th><th>Unknown</th><th>Junk Rate</th></tr>
+            <tr><th>Country</th><th>Leads</th><th>SQLs</th><th>In Progress</th><th>Junk</th><th>Wrong Fit</th><th>Unknown</th><th>Junk Rate</th></tr>
           </thead>
           <tbody>${rows}</tbody>
         </table>

@@ -1287,6 +1287,7 @@ def api_campaign_detail(
                         COALESCE(NULLIF(BTRIM(country), ''), '(unknown)') AS country,
                         COUNT(*)                                     AS total_leads,
                         SUM(CASE WHEN status_category = 'qualified'   THEN 1 ELSE 0 END) AS confirmed_sqls,
+                        SUM(CASE WHEN status_category = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
                         SUM(CASE WHEN status_category = 'junk'        THEN 1 ELSE 0 END) AS confirmed_junk,
                         SUM(CASE WHEN status_category = 'wrong_fit'   THEN 1 ELSE 0 END) AS wrong_fit,
                         SUM(CASE WHEN status_category = 'unknown'     THEN 1 ELSE 0 END) AS unknown
@@ -1302,15 +1303,19 @@ def api_campaign_detail(
                 for row in country_rows:
                     r = dict(zip(country_cols, row))
                     c_sqls = int(r["confirmed_sqls"] or 0)
+                    c_prog = int(r["in_progress"]    or 0)
                     c_junk = int(r["confirmed_junk"] or 0)
                     c_wfit = int(r["wrong_fit"]      or 0)
                     c_unk  = int(r["unknown"]        or 0)
-                    c_verd = c_sqls + c_junk + c_wfit
+                    # verdicted_leads = qualified + in_progress + junk + wrong_fit
+                    # (consistent with /api/leads/country-summary definition)
+                    c_verd = c_sqls + c_prog + c_junk + c_wfit
                     c_junk_rate = round((c_junk / c_verd) * 100, 2) if c_verd > 0 else None
                     countries_out.append({
                         "country":        r["country"],
                         "total_leads":    int(r["total_leads"] or 0),
                         "confirmed_sqls": c_sqls,
+                        "in_progress":    c_prog,
                         "confirmed_junk": c_junk,
                         "wrong_fit":      c_wfit,
                         "unknown":        c_unk,
