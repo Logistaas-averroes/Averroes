@@ -454,7 +454,7 @@ Windsor keyword performance data aggregated by campaign, ad group, keyword, and 
 - `cpc_usd` is recalculated server-side from `spend / clicks` where clicks > 0; otherwise 0.
 - Rows are aggregated over the selected window — `spend_usd`, `clicks`, `impressions`, and `conversions` are summed; `quality_score` is averaged.
 - `runs` is the count of distinct run IDs contributing to each aggregated row.
-- Used by the future Keywords Performance page (PR-ADS-032).
+- Rendered by the Keywords page as of PR-ADS-032. Shows Google Ads/Windsor keyword performance only — not HubSpot lead-quality data. Does not include full user search terms. Quality score and match type may be null/unknown.
 
 When database is unavailable: `{ "days": 30, "rows": [], "db_unavailable": true }`
 

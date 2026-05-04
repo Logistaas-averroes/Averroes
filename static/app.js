@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "campaigns", "waste", "geo", "leads", "deals", "opportunities", "scheduler", "health"];
+const PAGES = ["dashboard", "campaigns", "waste", "geo", "keywords", "leads", "deals", "opportunities", "scheduler", "health"];
 
 // Junk rate thresholds (from config/thresholds.yaml doctrine)
 const JUNK_RATE_LOW_THRESHOLD  = 15;  // below this → green
@@ -42,6 +42,9 @@ let _selectedDays  = (() => {
 
 // Geo page state
 let geoMergedRows = [];
+
+// Keywords page state
+let keywordRows = [];
 
 // ── Utility helpers ────────────────────────────────────────────────────────
 
@@ -295,6 +298,7 @@ function loadPage(page) {
     case "campaigns":     loadCampaigns();     break;
     case "waste":         loadWaste();         break;
     case "geo":           loadGeo();           break;
+    case "keywords":      loadKeywords();      break;
     case "leads":         loadLeads();         break;
     case "deals":         loadDeals();         break;
     case "opportunities": loadOpportunities(); break;
@@ -1418,6 +1422,311 @@ function applyGeoSearch() {
   });
 }
 
+// ── Keywords page ──────────────────────────────────────────────────────────
+
+function normalizeMatchType(value) {
+  const text = (value || "").toLowerCase().trim();
+  if (text.includes("broad")) return "broad";
+  if (text.includes("phrase")) return "phrase";
+  if (text.includes("exact")) return "exact";
+  return "unknown";
+}
+
+function matchTypeBadge(value) {
+  const norm = normalizeMatchType(value);
+  const labels = { broad: "Broad", phrase: "Phrase", exact: "Exact", unknown: "Unknown" };
+  return `<span class="match-type-badge match-type-${norm}">${labels[norm]}</span>`;
+}
+
+function qualityScoreBadge(qs) {
+  if (qs === null || qs === undefined) {
+    return `<span class="quality-score-badge quality-score-none">—</span>`;
+  }
+  const n = parseFloat(qs);
+  if (isNaN(n)) return `<span class="quality-score-badge quality-score-none">—</span>`;
+  let cls;
+  if (n >= 8)      cls = "quality-score-strong";
+  else if (n >= 5) cls = "quality-score-medium";
+  else             cls = "quality-score-weak";
+  return `<span class="quality-score-badge ${cls}">${n.toFixed(1)}</span>`;
+}
+
+async function loadKeywords() {
+  const tableEl   = document.getElementById("kw-table-body");
+  const summaryEl = document.getElementById("kw-matchtype-summary");
+
+  if (tableEl)   tableEl.innerHTML   = `<p class="empty-state" style="padding:var(--space-5)">Loading keywords…</p>`;
+  if (summaryEl) summaryEl.innerHTML = "";
+
+  ["kw-kpi-spend", "kw-kpi-active", "kw-kpi-broad", "kw-kpi-qs"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = "—";
+  });
+
+  const days = getSelectedDays();
+
+  try {
+    const data = await fetchJSON(`/api/keywords?days=${days}`);
+
+    if (data.db_unavailable) {
+      keywordRows = [];
+      if (tableEl) tableEl.innerHTML = `
+        <div class="keywords-empty-state">
+          <p class="empty-state">Keyword data temporarily unavailable — database offline.</p>
+        </div>`;
+      return;
+    }
+
+    keywordRows = data.rows || [];
+
+    if (keywordRows.length === 0) {
+      if (tableEl) tableEl.innerHTML = `
+        <div class="keywords-empty-state">
+          <p class="empty-state">No keyword data available for the selected window.</p>
+          <p class="keywords-empty-subtext">Keyword rows appear after weekly or monthly runs persist Windsor keyword performance.</p>
+        </div>`;
+      return;
+    }
+
+    renderKeywordsKPIs(keywordRows);
+    renderMatchTypeSummary(keywordRows);
+    populateKeywordFilters(keywordRows);
+    applyKeywordFilters();
+
+  } catch (_) {
+    keywordRows = [];
+    if (tableEl) tableEl.innerHTML =
+      `<p class="empty-state" style="padding:var(--space-5)">Could not load keyword data. Check API health or run status.</p>`;
+  }
+}
+
+function renderKeywordsKPIs(rows) {
+  const totalSpend = rows.reduce((s, r) => s + (r.spend_usd || 0), 0);
+
+  const activeKeywords = new Set(
+    rows.map((r) =>
+      `${(r.keyword || "").toLowerCase()}|${normalizeMatchType(r.match_type)}|${(r.campaign_name || "").toLowerCase()}`
+    )
+  ).size;
+
+  const broadSpend = rows
+    .filter((r) => normalizeMatchType(r.match_type) === "broad")
+    .reduce((s, r) => s + (r.spend_usd || 0), 0);
+
+  const qsRows = rows.filter((r) => r.quality_score != null);
+  const avgQS  = qsRows.length > 0
+    ? qsRows.reduce((s, r) => s + r.quality_score, 0) / qsRows.length
+    : null;
+
+  const spendEl  = document.getElementById("kw-kpi-spend");
+  const activeEl = document.getElementById("kw-kpi-active");
+  const broadEl  = document.getElementById("kw-kpi-broad");
+  const qsEl     = document.getElementById("kw-kpi-qs");
+
+  if (spendEl)  spendEl.textContent  = fmtDollar(totalSpend);
+  if (activeEl) activeEl.textContent = String(activeKeywords);
+  if (broadEl)  broadEl.textContent  = fmtDollar(broadSpend);
+  if (qsEl)     qsEl.textContent     = avgQS != null ? avgQS.toFixed(1) : "—";
+}
+
+function renderMatchTypeSummary(rows) {
+  const el = document.getElementById("kw-matchtype-summary");
+  if (!el) return;
+
+  const types  = ["broad", "phrase", "exact", "unknown"];
+  const labels = { broad: "Broad", phrase: "Phrase", exact: "Exact", unknown: "Unknown" };
+
+  const grouped = {};
+  types.forEach((t) => { grouped[t] = { count: 0, spend: 0, clicks: 0, conversions: 0 }; });
+
+  for (const row of rows) {
+    const t = normalizeMatchType(row.match_type);
+    grouped[t].count++;
+    grouped[t].spend       += row.spend_usd    || 0;
+    grouped[t].clicks      += row.clicks       || 0;
+    grouped[t].conversions += row.conversions  || 0;
+  }
+
+  const cards = types.map((t) => {
+    const g = grouped[t];
+    if (g.count === 0) return "";
+    return `
+      <div class="matchtype-card">
+        <div class="matchtype-card__header">
+          <span class="match-type-badge match-type-${t}">${labels[t]}</span>
+        </div>
+        <div class="matchtype-card__stats">
+          <div class="matchtype-card__stat">
+            <span class="matchtype-card__num">${g.count}</span>
+            <span class="matchtype-card__label">keywords</span>
+          </div>
+          <div class="matchtype-card__stat">
+            <span class="matchtype-card__num">${fmtDollar(g.spend)}</span>
+            <span class="matchtype-card__label">spend</span>
+          </div>
+          <div class="matchtype-card__stat">
+            <span class="matchtype-card__num">${g.clicks}</span>
+            <span class="matchtype-card__label">clicks</span>
+          </div>
+          <div class="matchtype-card__stat">
+            <span class="matchtype-card__num">${g.conversions.toFixed(1)}</span>
+            <span class="matchtype-card__label">Google conv.</span>
+          </div>
+        </div>
+      </div>`;
+  }).join("");
+
+  el.innerHTML = cards || `<p class="empty-state">No match type data available.</p>`;
+}
+
+function populateKeywordFilters(rows) {
+  const campSel = document.getElementById("kw-filter-campaign");
+  if (campSel) {
+    const camps = [...new Set(rows.map((r) => r.campaign_name).filter(Boolean))].sort();
+    campSel.innerHTML = `<option value="">All campaigns</option>` +
+      camps.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+  }
+}
+
+function getFilteredKeywordRows() {
+  const searchInput = document.getElementById("kw-filter-search");
+  const campSel     = document.getElementById("kw-filter-campaign");
+  const matchSel    = document.getElementById("kw-filter-matchtype");
+
+  const search = searchInput ? searchInput.value.trim().toLowerCase() : "";
+  const camp   = campSel     ? campSel.value  : "";
+  const match  = matchSel    ? matchSel.value : "";
+
+  let filtered = keywordRows;
+  if (search) {
+    filtered = filtered.filter((r) =>
+      (r.keyword       || "").toLowerCase().includes(search) ||
+      (r.campaign_name || "").toLowerCase().includes(search) ||
+      (r.ad_group      || "").toLowerCase().includes(search)
+    );
+  }
+  if (camp)  filtered = filtered.filter((r) => r.campaign_name === camp);
+  if (match) filtered = filtered.filter((r) => normalizeMatchType(r.match_type) === match);
+  return filtered;
+}
+
+function applyKeywordFilters() {
+  renderKeywordsTable(getFilteredKeywordRows());
+}
+
+const KW_HIGH_SPEND_USD = 100;
+
+function renderKeywordsTable(rows) {
+  const tableEl = document.getElementById("kw-table-body");
+  if (!tableEl) return;
+
+  if (rows.length === 0) {
+    if (keywordRows.length === 0) {
+      tableEl.innerHTML = `
+        <div class="keywords-empty-state">
+          <p class="empty-state">No keyword data available for the selected window.</p>
+          <p class="keywords-empty-subtext">Keyword rows appear after weekly or monthly runs persist Windsor keyword performance.</p>
+        </div>`;
+    } else {
+      tableEl.innerHTML =
+        `<p class="empty-state" style="padding:var(--space-5)">No results match the current filter.</p>`;
+    }
+    return;
+  }
+
+  const sorted = [...rows].sort((a, b) => (b.spend_usd || 0) - (a.spend_usd || 0));
+
+  const thead = `
+    <thead>
+      <tr>
+        <th>Keyword</th>
+        <th>Match Type</th>
+        <th>Campaign</th>
+        <th>Ad Group</th>
+        <th class="td--num">Spend</th>
+        <th class="td--num">Clicks</th>
+        <th class="td--num">Impressions</th>
+        <th class="td--num">CPC</th>
+        <th class="td--num">Google Conv.</th>
+        <th>Quality Score</th>
+        <th class="td--num">Runs</th>
+        <th>Last Run</th>
+      </tr>
+    </thead>`;
+
+  const tbody = sorted.map((r) => {
+    const highSpend = (r.spend_usd || 0) >= KW_HIGH_SPEND_USD;
+    return `
+      <tr${highSpend ? ' class="row--high-spend"' : ""}>
+        <td class="td--name">${escapeHtml(r.keyword || "—")}</td>
+        <td>${matchTypeBadge(r.match_type)}</td>
+        <td>${escapeHtml(r.campaign_name || "—")}</td>
+        <td>${escapeHtml(r.ad_group || "—")}</td>
+        <td class="td--num${highSpend ? " waste-spend--high" : ""}">${r.spend_usd != null ? fmtDollar(r.spend_usd) : "—"}</td>
+        <td class="td--num">${r.clicks != null ? r.clicks : "—"}</td>
+        <td class="td--num">${r.impressions != null ? r.impressions : "—"}</td>
+        <td class="td--num">${r.cpc_usd != null ? "$" + r.cpc_usd.toFixed(2) : "—"}</td>
+        <td class="td--num">${r.conversions != null ? r.conversions.toFixed(1) : "—"}</td>
+        <td>${qualityScoreBadge(r.quality_score)}</td>
+        <td class="td--num">${r.runs != null ? r.runs : "—"}</td>
+        <td>${r.last_run_date ? escapeHtml(r.last_run_date) : "—"}</td>
+      </tr>`;
+  }).join("");
+
+  tableEl.innerHTML = `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+}
+
+function copyKeywordRows() {
+  const rows = getFilteredKeywordRows();
+  if (rows.length === 0) return;
+
+  const sorted = [...rows].sort((a, b) => (b.spend_usd || 0) - (a.spend_usd || 0));
+  const headers = ["keyword", "match_type", "campaign_name", "spend_usd", "clicks", "conversions"];
+  const lines = [headers.join("\t")].concat(
+    sorted.map((r) => [
+      r.keyword        || "",
+      normalizeMatchType(r.match_type),
+      r.campaign_name  || "",
+      r.spend_usd      != null ? r.spend_usd.toFixed(2)      : "",
+      r.clicks         != null ? String(r.clicks)             : "",
+      r.conversions    != null ? r.conversions.toFixed(1)     : "",
+    ].join("\t"))
+  );
+  const text = lines.join("\n");
+
+  const btn      = document.getElementById("kw-copy-btn");
+  const origHTML = btn ? btn.innerHTML : null;
+
+  const showFeedback = (success) => {
+    if (!btn) return;
+    btn.innerHTML = success
+      ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Copied!`
+      : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> Copy failed`;
+    btn.disabled = true;
+    setTimeout(() => {
+      if (btn && origHTML !== null) { btn.innerHTML = origHTML; btn.disabled = false; }
+    }, 2000);
+  };
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => showFeedback(true),
+      () => showFeedback(false),
+    );
+  } else {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity  = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { /* ignore */ }
+    document.body.removeChild(ta);
+    showFeedback(ok);
+  }
+}
+
 // ── In Progress Leads page ─────────────────────────────────────────────────
 
 // Explicit MDR workflow statuses shown on the In Progress Leads page.
@@ -1709,6 +2018,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Wire up geo search
   const geoSearch = document.getElementById("geo-search");
   if (geoSearch) geoSearch.addEventListener("input", applyGeoSearch);
+
+  // Wire up keywords filter controls
+  const kwSearch   = document.getElementById("kw-filter-search");
+  const kwCampSel  = document.getElementById("kw-filter-campaign");
+  const kwMatchSel = document.getElementById("kw-filter-matchtype");
+  const kwCopyBtn  = document.getElementById("kw-copy-btn");
+  if (kwSearch)   kwSearch.addEventListener("input",   applyKeywordFilters);
+  if (kwCampSel)  kwCampSel.addEventListener("change", applyKeywordFilters);
+  if (kwMatchSel) kwMatchSel.addEventListener("change", applyKeywordFilters);
+  if (kwCopyBtn)  kwCopyBtn.addEventListener("click",  copyKeywordRows);
 
   // Check auth and load initial page
   const isAuth = await checkAuth();
