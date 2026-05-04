@@ -2181,7 +2181,7 @@ def _queue_id(prefix: str, *parts: object) -> str:
     normalised constituent parts so that items that differ only by
     campaign_name, junk_category, match_type, etc. get distinct IDs.
     """
-    raw = "|".join(str(p or "").strip().lower() for p in parts)
+    raw = "\x00".join(str(p or "").strip().lower() for p in parts)
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]  # noqa: S324 — non-security hash for ID dedup
     safe_prefix = prefix.replace(" ", "-").replace("/", "-").lower()
     return f"{safe_prefix}-{digest}"
@@ -2253,8 +2253,11 @@ def _build_campaign_queue_items(
         if verdict in ("FIX", "CUT"):
             detail_parts.append(f"verdict is {verdict}")
         if detail_parts:
-            detail_body = ". ".join(detail_parts)
-            detail = f"{detail_body[:1].upper()}{detail_body[1:]}. Warrants review."
+            detail_body = ". ".join(p for p in detail_parts if p)
+            if detail_body:
+                detail = f"{detail_body[:1].upper()}{detail_body[1:]}. Warrants review."
+            else:
+                detail = "Warrants review."
         else:
             detail = "Warrants review."
 
