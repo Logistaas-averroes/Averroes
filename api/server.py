@@ -1574,7 +1574,7 @@ def _load_ui_thresholds() -> dict[str, Any]:
             },
         }
     except Exception as exc:  # noqa: BLE001
-        log.warning("[api/config/ui-thresholds] YAML load failed, using defaults: %s", exc)
+        log.warning("[/api/config/ui-thresholds] YAML load failed, using defaults: %s", exc)
         return {**_UI_THRESHOLDS_DEFAULTS, "using_defaults": True}
 
 

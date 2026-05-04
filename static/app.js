@@ -202,7 +202,8 @@ async function loadUiThresholds() {
         ...(data.quality_score || {}),
       },
     };
-  } catch (_) {
+  } catch (err) {
+    console.warn("[loadUiThresholds] failed, using defaults:", err);
     uiThresholds = DEFAULT_UI_THRESHOLDS;
   }
 }
@@ -1671,7 +1672,7 @@ function applyKeywordFilters() {
   renderKeywordsTable(getFilteredKeywordRows());
 }
 
-// Threshold above which a keyword row gets subtle high-spend emphasis (matches waste page convention)
+// Keyword rows with spend at or above uiThresholds.spend.high_spend_usd get subtle high-spend emphasis.
 // Value is loaded from /api/config/ui-thresholds after auth; falls back to DEFAULT_UI_THRESHOLDS.
 
 function renderKeywordsTable(rows) {
