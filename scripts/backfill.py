@@ -169,9 +169,15 @@ def _parse_date(value: str, flag: str) -> date:
         sys.exit(1)
 
 
-def _validate_args(args: argparse.Namespace) -> tuple[date, date, list[str]]:
+def _validate_args(
+    args: argparse.Namespace,
+) -> tuple[date, date, list[str], dict[str, list[str]]]:
     """
-    Validate parsed arguments.  Returns (date_from, date_to, datasets).
+    Validate parsed arguments.
+
+    Returns:
+        (date_from, date_to, effective_sources, datasets_for)
+
     Exits with a non-zero code on any validation failure.
     """
     date_from = _parse_date(args.date_from, "--from")
@@ -213,6 +219,10 @@ def _validate_args(args: argparse.Namespace) -> tuple[date, date, list[str]]:
                 sys.exit(1)
 
     # Validate chunk_days
+    if args.chunk_days < 1:
+        print("ERROR: --chunk-days must be >= 1.")
+        sys.exit(1)
+
     for src in effective_sources:
         cap = MAX_CHUNK_DAYS.get(src, 90)
         if args.chunk_days > cap:
@@ -221,6 +231,11 @@ def _validate_args(args: argparse.Namespace) -> tuple[date, date, list[str]]:
                 f"for source '{src}'."
             )
             sys.exit(1)
+
+    # Validate limit_chunks
+    if args.limit_chunks is not None and args.limit_chunks < 1:
+        print("ERROR: --limit-chunks must be >= 1 when provided.")
+        sys.exit(1)
 
     # Determine datasets per source
     if args.dataset is not None:
@@ -243,9 +258,13 @@ def _build_chunks(
     date_from: date,
     date_to: date,
     chunk_days: int,
-    limit_chunks: Optional[int],
+    limit_chunks: Optional[int] = None,
 ) -> list[tuple[date, date]]:
     """Split [date_from, date_to] into chunks of at most chunk_days days."""
+    if chunk_days < 1:
+        raise ValueError("chunk_days must be >= 1")
+    if limit_chunks is not None and limit_chunks < 1:
+        raise ValueError("limit_chunks must be >= 1 when provided")
     chunks = []
     cursor = date_from
     while cursor <= date_to:

@@ -5,7 +5,7 @@
 **Phase:** 1.5 — Read-Only Data Foundation
 **Owner:** Youssef Awwad
 **Audit date:** 2026-05-04
-**Status:** Audit-only. No code changed. No schema changed.
+**Status:** Audit document. Initial PR-ADS-038 was audit-only (no code changed, no schema changed); PR-ADS-041 later added a guarded backfill CLI skeleton and operator runbook referenced below.
 
 > **PR-ADS-041 update:** The backfill CLI skeleton and operator runbook have been
 > added (`scripts/backfill.py`, `docs/BACKFILL_RUNBOOK.md`). Actual source-specific

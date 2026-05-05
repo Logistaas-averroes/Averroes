@@ -38,7 +38,7 @@ local PostgreSQL database for the Logistaas Ads Intelligence System.
    plan and connector support explicit date ranges. Do not assume historical
    search-term data will be returned for ranges older than 14 days.
 6. **Large date ranges (> 730 days) require explicit confirmation.** The script
-   will prompt you to add `--confirm-large-range I_UNDERSTAND_THIS_IS_LARGE`.
+   refuses to run and prints the required `--confirm-large-range I_UNDERSTAND_THIS_IS_LARGE` flag/value.
 7. **Execute mode requires explicit confirmation.** You must pass
    `--confirm I_UNDERSTAND_THIS_WRITES_LOCAL_DB` when using `--execute`.
 
