@@ -2098,7 +2098,7 @@ function renderSearchTermsKPIs(rows) {
   const totalSpend    = rows.reduce((s, r) => s + (r.spend_usd   || 0), 0);
   const totalClicks   = rows.reduce((s, r) => s + (r.clicks      || 0), 0);
   const flaggedWaste  = rows.filter((r) => r.is_flagged_waste === true).length;
-  const unanalysed    = rows.filter((r) => r.is_flagged_waste === null || r.is_flagged_waste === undefined).length;
+  const unanalyzed    = rows.filter((r) => r.is_flagged_waste === null || r.is_flagged_waste === undefined).length;
   const avgCPC        = totalClicks > 0 ? totalSpend / totalClicks : null;
 
   kpiGrid.innerHTML = `
@@ -2115,8 +2115,8 @@ function renderSearchTermsKPIs(rows) {
       <div class="kpi-card__value">${flaggedWaste}</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-card__label">Unanalysed</div>
-      <div class="kpi-card__value">${unanalysed}</div>
+      <div class="kpi-card__label">Unanalyzed</div>
+      <div class="kpi-card__value">${unanalyzed}</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-card__label">Avg CPC</div>
@@ -2129,9 +2129,9 @@ function searchTermStateBadge(isFlaggedWaste) {
     return `<span class="search-term-state-badge search-term-state-waste">Flagged Waste</span>`;
   }
   if (isFlaggedWaste === false) {
-    return `<span class="search-term-state-badge search-term-state-clean">Analysed Clean</span>`;
+    return `<span class="search-term-state-badge search-term-state-clean">Analyzed Clean</span>`;
   }
-  return `<span class="search-term-state-badge search-term-state-unanalyzed">Unanalysed</span>`;
+  return `<span class="search-term-state-badge search-term-state-unanalyzed">Unanalyzed</span>`;
 }
 
 function renderSearchTermsTable() {
