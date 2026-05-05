@@ -113,6 +113,14 @@
           </a>
         </li>
         <li>
+          <a class="nav-item" data-page="search-terms" href="#" role="button" tabindex="0" aria-label="Search Terms">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            </span>
+            <span class="nav-item__label">Search Terms</span>
+          </a>
+        </li>
+        <li>
           <a class="nav-item" data-page="geo" href="#" role="button" tabindex="0" aria-label="Geo">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
@@ -435,6 +443,67 @@
         <p class="grace-note">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           This page shows search terms flagged by waste detection. Full non-junk search-term storage is not part of this PR.
+        </p>
+      </section>
+
+      <!-- Search Terms Forensics -->
+      <section id="page-search-terms" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Search Terms</h1>
+          <p class="page-subtitle">Full Google Ads/Windsor search-term forensics. Read-only evidence view.</p>
+        </header>
+
+        <div id="search-terms-kpis" class="kpi-grid"></div>
+
+        <div class="panel">
+          <div class="panel__header search-terms-panel-header">
+            <div>
+              <span>Search-Term Universe</span>
+            </div>
+            <div class="search-terms-actions">
+              <button id="search-terms-refresh-btn" type="button" class="btn btn--secondary waste-copy-btn">Refresh</button>
+            </div>
+          </div>
+          <div class="panel__body">
+            <p class="page-subtitle" style="margin-bottom: var(--space-3);">Browse stored search terms by campaign, match type, spend, and waste status.</p>
+            <div class="search-terms-controls">
+              <input id="search-terms-query" type="search" class="waste-search-input" placeholder="Search terms…" aria-label="Search by term" />
+              <input id="search-terms-campaign" type="search" class="waste-search-input" placeholder="Campaign…" aria-label="Filter by campaign" style="min-width:160px;flex:0 1 200px;" />
+              <select id="search-terms-match-type" class="waste-filter-select" aria-label="Filter by match type">
+                <option value="">All match types</option>
+                <option value="broad">Broad</option>
+                <option value="phrase">Phrase</option>
+                <option value="exact">Exact</option>
+              </select>
+              <select id="search-terms-waste-filter" class="waste-filter-select" aria-label="Filter by analysis state">
+                <option value="">All analysis states</option>
+                <option value="waste">Flagged waste only</option>
+                <option value="clean">Analysed clean only</option>
+                <option value="unanalyzed">Unanalysed only</option>
+              </select>
+              <input id="search-terms-min-spend" type="number" min="0" step="1" class="waste-search-input" placeholder="Min spend" aria-label="Minimum spend in USD" style="min-width:120px;flex:0 1 140px;" />
+              <button id="search-terms-apply-btn" type="button" class="btn btn--secondary waste-copy-btn">Apply filters</button>
+              <button id="search-terms-clear-btn" type="button" class="btn btn--secondary waste-copy-btn">Clear</button>
+            </div>
+            <p id="search-terms-filter-note" class="search-terms-filter-note" hidden>
+              This filter applies to currently loaded rows only. Load all pages before filtering by analysis state for full coverage.
+            </p>
+          </div>
+
+          <div class="panel__body panel__body--flush" id="search-terms-table">
+            <p class="empty-state" style="padding: var(--space-5);">Loading search terms…</p>
+          </div>
+
+          <div class="pagination-actions">
+            <button id="search-terms-load-more-btn" type="button" class="btn btn--secondary" hidden>
+              Load more
+            </button>
+          </div>
+        </div>
+
+        <p class="grace-note">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          This page is read-only. It does not add negatives, push changes, pause campaigns, or modify bids/budgets.
         </p>
       </section>
 

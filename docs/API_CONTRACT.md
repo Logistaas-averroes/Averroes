@@ -1102,6 +1102,13 @@ HTTP 400.
 - Cursor is opaque to callers — do not parse or construct it.
 - `?q=` filtering uses ILIKE (sequential scan until pg_trgm extension is enabled on the DB).
 
+**Frontend usage (as of PR-ADS-043):**
+- Rendered by the Search Terms page in the SPA.
+- UI uses cursor pagination via `pagination.next_cursor` — Load More button appends rows.
+- KPI cards show counts and spend for currently loaded rows only, not the total database count.
+- `clean` / `unanalyzed` analysis-state filtering is client-side only (applied to loaded rows); `waste_only=true` is sent to the API.
+- Page is read-only: no negative keyword push, no marking/editing waste state, no campaign actions.
+
 ---
 
 ## DB Schema Notes (PR-ADS-039 / PR-ADS-040)

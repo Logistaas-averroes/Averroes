@@ -2726,3 +2726,98 @@ a {
     gap: var(--space-2);
   }
 }
+
+/* ── Search Terms Forensics page ──────────────────────────────────────────── */
+
+.search-terms-panel-header {
+  justify-content: space-between;
+}
+
+.search-terms-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.search-terms-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+}
+
+.search-terms-filter-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: var(--space-4);
+  font-style: italic;
+}
+
+/* Waste-state badges */
+.search-term-state-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.search-term-state-waste {
+  background: var(--c-danger-bg);
+  color: var(--c-danger);
+  border: 1px solid var(--c-danger-border);
+}
+
+.search-term-state-clean {
+  background: var(--c-success-bg);
+  color: var(--c-success);
+  border: 1px solid var(--c-success-border);
+}
+
+.search-term-state-unanalyzed {
+  background: var(--c-neutral-bg);
+  color: var(--c-neutral);
+  border: 1px solid var(--c-neutral-border);
+}
+
+/* Horizontally scrollable table wrapper */
+.search-terms-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Pagination actions row */
+.pagination-actions {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--border);
+}
+
+.pagination-actions:empty {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .search-terms-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .search-terms-controls .waste-search-input,
+  .search-terms-controls .waste-filter-select {
+    min-width: 0;
+    width: 100%;
+    flex: none;
+  }
+
+  .search-terms-panel-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+  }
+}

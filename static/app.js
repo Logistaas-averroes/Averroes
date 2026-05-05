@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "geo", "keywords", "leads", "deals", "opportunities", "scheduler", "health", "action-queue"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "geo", "keywords", "leads", "deals", "opportunities", "scheduler", "health", "action-queue"];
 
 // Deal pipeline stages (Phase 1 read-only reference)
 const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
@@ -66,6 +66,12 @@ let keywordLoadStatus = "idle"; // idle | loading | ok | empty | db_unavailable 
 // Action Queue page state
 let actionQueueItems = [];
 let actionQueueStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+
+// Search Terms page state
+let searchTermRows = [];
+let searchTermsNextCursor = null;
+let searchTermsHasMore = false;
+let searchTermsStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
 
 // Reports page state
 let latestReportMarkdown = "";
@@ -374,11 +380,12 @@ function navigate(page) {
 
 function loadPage(page) {
   switch (page) {
-    case "dashboard":     loadDashboard();     break;
-    case "reports":       loadReports();       break;
-    case "campaigns":     loadCampaigns();     break;
-    case "waste":         loadWaste();         break;
-    case "geo":           loadGeo();           break;
+    case "dashboard":     loadDashboard();                          break;
+    case "reports":       loadReports();                            break;
+    case "campaigns":     loadCampaigns();                          break;
+    case "waste":         loadWaste();                              break;
+    case "search-terms":  loadSearchTerms({ reset: true });         break;
+    case "geo":           loadGeo();                                break;
     case "keywords":      loadKeywords();      break;
     case "leads":         loadLeads();         break;
     case "deals":         loadDeals();         break;
@@ -1959,11 +1966,263 @@ function qualityScoreBadge(qs) {
   return `<span class="quality-score-badge ${cls}">${n.toFixed(1)}</span>`;
 }
 
+// ── Search Terms Forensics page ────────────────────────────────────────────
+
+function buildSearchTermsParams({ cursor = null } = {}) {
+  const params = new URLSearchParams();
+  params.set("days", String(getSelectedDays()));
+  params.set("limit", "100");
+
+  const q         = document.getElementById("search-terms-query")?.value.trim();
+  const campaign  = document.getElementById("search-terms-campaign")?.value.trim();
+  const matchType = document.getElementById("search-terms-match-type")?.value;
+  const minSpend  = document.getElementById("search-terms-min-spend")?.value;
+  const wasteFilter = document.getElementById("search-terms-waste-filter")?.value;
+
+  if (q)         params.set("q", q);
+  if (campaign)  params.set("campaign", campaign);
+  if (matchType) params.set("match_type", matchType);
+  if (minSpend)  params.set("min_spend", minSpend);
+
+  if (wasteFilter === "waste") params.set("waste_only", "true");
+  // clean / unanalyzed are frontend-filtered only — API does not support waste_state filter yet.
+
+  if (cursor) params.set("cursor", cursor);
+
+  return params;
+}
+
+function getVisibleSearchTermRows() {
+  const wasteFilter = document.getElementById("search-terms-waste-filter")?.value;
+
+  if (wasteFilter === "clean") {
+    return searchTermRows.filter((r) => r.is_flagged_waste === false);
+  }
+  if (wasteFilter === "unanalyzed") {
+    return searchTermRows.filter((r) => r.is_flagged_waste === null || r.is_flagged_waste === undefined);
+  }
+  return searchTermRows;
+}
+
+function _updateSearchTermsFilterNote() {
+  const noteEl      = document.getElementById("search-terms-filter-note");
+  const wasteFilter = document.getElementById("search-terms-waste-filter")?.value;
+  if (!noteEl) return;
+  noteEl.hidden = !(wasteFilter === "clean" || wasteFilter === "unanalyzed");
+}
+
+async function loadSearchTerms({ reset = false, cursor = null } = {}) {
+  if (searchTermsStatus === "loading") return;
+
+  searchTermsStatus = "loading";
+
+  const tableEl   = document.getElementById("search-terms-table");
+  const loadMoreBtn = document.getElementById("search-terms-load-more-btn");
+
+  if (reset) {
+    searchTermRows = [];
+    searchTermsNextCursor = null;
+    searchTermsHasMore = false;
+    if (tableEl) tableEl.innerHTML =
+      `<p class="empty-state" style="padding:var(--space-5)">Loading search terms…</p>`;
+    if (loadMoreBtn) loadMoreBtn.hidden = true;
+  } else {
+    if (loadMoreBtn) {
+      loadMoreBtn.disabled = true;
+      loadMoreBtn.textContent = "Loading…";
+    }
+  }
+
+  try {
+    const params = buildSearchTermsParams({ cursor });
+    const data   = await fetchJSON(`/api/search-terms?${params.toString()}`);
+
+    if (data.db_unavailable) {
+      searchTermsStatus = "db_unavailable";
+      searchTermRows = [];
+      renderSearchTermsKPIs([]);
+      renderSearchTermsTable();
+      if (loadMoreBtn) loadMoreBtn.hidden = true;
+      return;
+    }
+
+    const newRows = data.rows || [];
+    const pagination = data.pagination || {};
+
+    if (reset) {
+      searchTermRows = newRows;
+    } else {
+      searchTermRows = searchTermRows.concat(newRows);
+    }
+
+    searchTermsNextCursor = pagination.next_cursor || null;
+    searchTermsHasMore    = pagination.has_more || false;
+
+    if (searchTermRows.length === 0) {
+      searchTermsStatus = "empty";
+    } else {
+      searchTermsStatus = "ok";
+    }
+
+    renderSearchTermsKPIs(getVisibleSearchTermRows());
+    renderSearchTermsTable();
+
+    if (loadMoreBtn) {
+      if (searchTermsHasMore) {
+        loadMoreBtn.hidden   = false;
+        loadMoreBtn.disabled = false;
+        loadMoreBtn.textContent = "Load more";
+      } else {
+        loadMoreBtn.hidden = true;
+      }
+    }
+
+  } catch (err) {
+    // Distinguish invalid cursor (HTTP 400) from generic error
+    const isCursorError = err && err.message && err.message.includes("Invalid cursor");
+    searchTermsStatus = isCursorError ? "cursor_error" : "error";
+    renderSearchTermsTable();
+    if (loadMoreBtn) {
+      loadMoreBtn.hidden   = false;
+      loadMoreBtn.disabled = false;
+      loadMoreBtn.textContent = "Load more";
+    }
+  }
+}
+
+function renderSearchTermsKPIs(rows) {
+  const kpiGrid = document.getElementById("search-terms-kpis");
+  if (!kpiGrid) return;
+
+  const totalTerms    = rows.length;
+  const totalSpend    = rows.reduce((s, r) => s + (r.spend_usd   || 0), 0);
+  const totalClicks   = rows.reduce((s, r) => s + (r.clicks      || 0), 0);
+  const flaggedWaste  = rows.filter((r) => r.is_flagged_waste === true).length;
+  const unanalysed    = rows.filter((r) => r.is_flagged_waste === null || r.is_flagged_waste === undefined).length;
+  const avgCPC        = totalClicks > 0 ? totalSpend / totalClicks : null;
+
+  kpiGrid.innerHTML = `
+    <div class="kpi-card">
+      <div class="kpi-card__label">Loaded Terms</div>
+      <div class="kpi-card__value">${totalTerms}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Loaded Spend</div>
+      <div class="kpi-card__value">${fmtDollar(totalSpend)}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Flagged Waste</div>
+      <div class="kpi-card__value">${flaggedWaste}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Unanalysed</div>
+      <div class="kpi-card__value">${unanalysed}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Avg CPC</div>
+      <div class="kpi-card__value">${avgCPC !== null ? "$" + avgCPC.toFixed(2) : "—"}</div>
+    </div>`;
+}
+
+function searchTermStateBadge(isFlaggedWaste) {
+  if (isFlaggedWaste === true) {
+    return `<span class="search-term-state-badge search-term-state-waste">Flagged Waste</span>`;
+  }
+  if (isFlaggedWaste === false) {
+    return `<span class="search-term-state-badge search-term-state-clean">Analysed Clean</span>`;
+  }
+  return `<span class="search-term-state-badge search-term-state-unanalyzed">Unanalysed</span>`;
+}
+
+function renderSearchTermsTable() {
+  const tableEl = document.getElementById("search-terms-table");
+  if (!tableEl) return;
+
+  if (searchTermsStatus === "db_unavailable") {
+    tableEl.innerHTML = `
+      <div class="waste-empty-state">
+        <p class="empty-state">Search terms temporarily unavailable — database offline.</p>
+      </div>`;
+    return;
+  }
+
+  if (searchTermsStatus === "cursor_error") {
+    tableEl.innerHTML = `
+      <div class="waste-empty-state">
+        <p class="empty-state">Could not load the next page. Refresh and try again.</p>
+      </div>`;
+    return;
+  }
+
+  if (searchTermsStatus === "error") {
+    tableEl.innerHTML = `
+      <div class="waste-empty-state">
+        <p class="empty-state">Could not load search terms. Check API health or run status.</p>
+      </div>`;
+    return;
+  }
+
+  const visible = getVisibleSearchTermRows();
+
+  if (visible.length === 0) {
+    if (searchTermsStatus === "empty" || searchTermRows.length === 0) {
+      tableEl.innerHTML = `
+        <div class="waste-empty-state">
+          <p class="empty-state">No search terms found for the selected filters.</p>
+          <p class="waste-empty-subtext">Search terms appear after Windsor search-term pulls are persisted locally. Current connector coverage is confirmed up to the recent search-term window.</p>
+        </div>`;
+    } else {
+      tableEl.innerHTML =
+        `<p class="empty-state" style="padding:var(--space-5)">No results match the current filter.</p>`;
+    }
+    return;
+  }
+
+  const thead = `
+    <thead>
+      <tr>
+        <th>Source Date</th>
+        <th>Search Term</th>
+        <th>Waste State</th>
+        <th>Campaign</th>
+        <th>Ad Group</th>
+        <th>Keyword</th>
+        <th>Match Type</th>
+        <th class="td--num">Spend</th>
+        <th class="td--num">Clicks</th>
+        <th class="td--num">Impr.</th>
+        <th class="td--num">Google Conv.</th>
+        <th>Junk Category</th>
+        <th>Pattern</th>
+      </tr>
+    </thead>`;
+
+  const tbody = visible.map((r) => {
+    const highSpend = (r.spend_usd || 0) >= uiThresholds.spend.high_spend_usd;
+    return `
+      <tr${highSpend ? ' class="row--high-spend"' : ""}>
+        <td>${escapeHtml(r.source_date || "—")}</td>
+        <td class="td--name">${escapeHtml(r.search_term || "—")}</td>
+        <td>${searchTermStateBadge(r.is_flagged_waste)}</td>
+        <td>${escapeHtml(r.campaign_name || "—")}</td>
+        <td>${escapeHtml(r.ad_group || "—")}</td>
+        <td>${escapeHtml(r.keyword || "—")}</td>
+        <td>${matchTypeBadge(r.match_type)}</td>
+        <td class="td--num${highSpend ? " waste-spend--high" : ""}">${r.spend_usd != null ? fmtDollar(r.spend_usd) : "—"}</td>
+        <td class="td--num">${r.clicks != null ? r.clicks : "—"}</td>
+        <td class="td--num">${r.impressions != null ? r.impressions : "—"}</td>
+        <td class="td--num">${r.conversions != null ? r.conversions.toFixed(1) : "—"}</td>
+        <td>${r.junk_category ? junkCategoryBadge(r.junk_category) : `<span class="td--na">—</span>`}</td>
+        <td class="waste-pattern">${escapeHtml(r.matched_pattern || "—")}</td>
+      </tr>`;
+  }).join("");
+
+  tableEl.innerHTML = `<div class="search-terms-table-scroll"><table class="data-table">${thead}<tbody>${tbody}</tbody></table></div>`;
+}
+
 async function loadKeywords() {
   const tableEl   = document.getElementById("kw-table-body");
   const summaryEl = document.getElementById("kw-matchtype-summary");
-
-  if (tableEl)   tableEl.innerHTML   = `<p class="empty-state" style="padding:var(--space-5)">Loading keywords…</p>`;
   if (summaryEl) summaryEl.innerHTML = "";
 
   ["kw-kpi-spend", "kw-kpi-active", "kw-kpi-broad", "kw-kpi-qs"].forEach((id) => {
@@ -3189,6 +3448,49 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Wire up geo search
   const geoSearch = document.getElementById("geo-search");
   if (geoSearch) geoSearch.addEventListener("input", applyGeoSearch);
+
+  // Wire up search terms controls
+  const stQueryInput    = document.getElementById("search-terms-query");
+  const stCampaignInput = document.getElementById("search-terms-campaign");
+  const stApplyBtn      = document.getElementById("search-terms-apply-btn");
+  const stClearBtn      = document.getElementById("search-terms-clear-btn");
+  const stRefreshBtn    = document.getElementById("search-terms-refresh-btn");
+  const stLoadMoreBtn   = document.getElementById("search-terms-load-more-btn");
+  const stWasteFilter   = document.getElementById("search-terms-waste-filter");
+
+  if (stApplyBtn) stApplyBtn.addEventListener("click", () => loadSearchTerms({ reset: true }));
+  if (stClearBtn) stClearBtn.addEventListener("click", () => {
+    if (stQueryInput)    stQueryInput.value    = "";
+    if (stCampaignInput) stCampaignInput.value = "";
+    const stMatchType = document.getElementById("search-terms-match-type");
+    if (stMatchType) stMatchType.value = "";
+    if (stWasteFilter) stWasteFilter.value = "";
+    const stMinSpend = document.getElementById("search-terms-min-spend");
+    if (stMinSpend) stMinSpend.value = "";
+    _updateSearchTermsFilterNote();
+    loadSearchTerms({ reset: true });
+  });
+  if (stRefreshBtn)  stRefreshBtn.addEventListener("click",  () => loadSearchTerms({ reset: true }));
+  if (stLoadMoreBtn) stLoadMoreBtn.addEventListener("click", () => loadSearchTerms({ reset: false, cursor: searchTermsNextCursor }));
+
+  if (stWasteFilter) stWasteFilter.addEventListener("change", () => {
+    _updateSearchTermsFilterNote();
+    // If switching to waste only, re-fetch from server; otherwise re-render from loaded rows.
+    const v = stWasteFilter.value;
+    if (v === "waste") {
+      loadSearchTerms({ reset: true });
+    } else {
+      renderSearchTermsKPIs(getVisibleSearchTermRows());
+      renderSearchTermsTable();
+    }
+  });
+
+  // Enter key in query/campaign inputs triggers apply
+  [stQueryInput, stCampaignInput].forEach((el) => {
+    if (el) el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") loadSearchTerms({ reset: true });
+    });
+  });
 
   // Wire up keywords filter controls
   const kwSearch   = document.getElementById("kw-filter-search");
