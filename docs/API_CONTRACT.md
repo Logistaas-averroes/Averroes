@@ -1004,6 +1004,10 @@ Per-dataset sync state / watermark. Returns the latest known sync status for eac
 - `last_batch_id` links to the `sync_batches` row for the last successful sync.
 - Datasets not yet in `sync_state` are returned with `status: "unknown"` and all watermark fields null.
 - Extra `sync_state` rows beyond the known dataset list are appended after the known pairs.
+- As of PR-ADS-042, the daily scheduler updates freshness for datasets that are both fetched and
+  persisted locally: `windsor/search_terms` and `hubspot/contacts`. Other datasets may remain
+  `unknown` until their raw-fact sync path is implemented. `unknown` does not mean failed; it means
+  no successful tracked sync has been recorded yet.
 
 ---
 

@@ -221,5 +221,14 @@ grep -r "backfill" render.yaml
 
 ---
 
+## 8. Daily Sync vs Historical Backfill
+
+Daily sync (PR-ADS-042) is separate from historical backfill. The daily scheduler
+covers only a short recent overlap window (last 1–2 days) and updates `sync_state`
+for supported datasets (`windsor/search_terms`, `hubspot/contacts`). Historical
+backfill remains manual, guarded, and is not yet implemented in execute mode.
+
+---
+
 *This script writes only to local PostgreSQL when `--execute` is used.
 It never writes to Google Ads or HubSpot.*

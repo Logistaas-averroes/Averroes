@@ -12,6 +12,13 @@
 > backfill execution (Windsor connector date-range support, HubSpot paginated
 > date-window fetch) remains future work. No schema change. No scheduler change.
 
+> **PR-ADS-042 update:** Daily scheduler now wires `windsor/search_terms` and
+> `hubspot/contacts` into `sync_batches` / `sync_state`. Freshness for these two
+> datasets becomes visible via `/api/datasets/freshness` after each successful daily
+> run. Full daily raw-fact sync for `campaigns`, `keywords`, `geo`, and `deals`
+> remains future work — those datasets are either not pulled daily, not persisted as
+> raw source facts, or both.
+
 ---
 
 ## 1. Executive Verdict

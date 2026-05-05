@@ -295,18 +295,21 @@ def write_campaigns(run_id: int, campaigns: list) -> None:
         log.error("write_campaigns failed (run_id=%s): %s", run_id, exc)
 
 
-def write_leads(run_id: int, contacts: list) -> None:
+def write_leads(run_id: int, contacts: list) -> int:
     """Insert lead rows for this run.
 
     Each item in *contacts* should be a dict produced by hubspot_pull.py.
     mql_status is mapped to status_category automatically.
+    Returns count of rows inserted (0 for empty input, DB unavailable, or write
+    failure). Use _persistence_succeeded() in the scheduler to distinguish a
+    legitimate zero-row sync from a failed write.
     Never raises.
     """
     if run_id is None:
         log.debug("write_leads skipped — run_id is None")
-        return
+        return 0
     if not contacts:
-        return
+        return 0
     run_date = _today()
     rows = []
     for c in contacts:
@@ -345,7 +348,7 @@ def write_leads(run_id: int, contacts: list) -> None:
     try:
         with get_conn() as conn:
             if conn is None:
-                return
+                return 0
             with conn.cursor() as cur:
                 cur.executemany(
                     """
@@ -357,8 +360,10 @@ def write_leads(run_id: int, contacts: list) -> None:
                     rows,
                 )
         log.info("Wrote %d lead rows to database (run_id=%s)", len(rows), run_id)
+        return len(rows)
     except Exception as exc:  # noqa: BLE001
         log.error("write_leads failed (run_id=%s): %s", run_id, exc)
+        return 0
 
 
 def write_waste_terms(run_id: int, waste_items: list) -> None:
