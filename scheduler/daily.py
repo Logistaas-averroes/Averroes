@@ -7,7 +7,7 @@ Fast path: anomaly detection, spend spikes, new junk terms, CRM delta.
 import logging
 import os
 import json
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 from scheduler.run_history import start_run, finish_run
 import db.writers as db_writers
@@ -15,6 +15,37 @@ import db.writers as db_writers
 load_dotenv()
 
 log = logging.getLogger(__name__)
+
+
+def _parse_date_safe(value):
+    """Parse a date-like value to datetime.date, or return None."""
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10].strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _max_source_date(rows, fallback_date):
+    """Return the maximum source date found in rows, or fallback_date.
+
+    Checks top-level keys and nested 'properties' for date / source_date /
+    createdate fields (to support both Windsor and HubSpot row shapes).
+    """
+    dates = []
+    for row in rows or []:
+        props = row.get("properties") or {}
+        value = (
+            row.get("date") or row.get("source_date") or row.get("createdate")
+            or props.get("date") or props.get("source_date") or props.get("createdate")
+        )
+        parsed = _parse_date_safe(value)
+        if parsed:
+            dates.append(parsed)
+    return max(dates) if dates else fallback_date
 
 
 def run_daily_pulse():
@@ -37,15 +68,44 @@ def run_daily_pulse():
         contacts = pull_paid_search_contacts(days_back=2)
         crm_summary = get_lead_quality_summary(contacts)
 
-        # Write run record + leads to database
+        today = datetime.utcnow().date()
+
+        # Write run record to database
         try:
             run_id = db_writers.write_run(run_record)
-            if run_id is not None:
-                db_writers.write_leads(run_id, contacts)
-            else:
-                log.error("[daily] Skipping lead write because write_run returned no run_id")
         except Exception as db_exc:  # noqa: BLE001
-            log.error("[daily] DB write after Step 2 failed: %s", db_exc)
+            log.error("[daily] DB write of run record failed: %s", db_exc)
+
+        # Track HubSpot contacts daily sync
+        if run_id is not None:
+            contacts_batch_id = db_writers.start_sync_batch(
+                source="hubspot",
+                dataset="contacts",
+                sync_type="daily",
+                date_from=today - timedelta(days=2),
+                date_to=today,
+                run_id=run_id,
+            )
+            try:
+                db_writers.write_leads(run_id, contacts)
+                last_contact_date = _max_source_date(contacts, fallback_date=today)
+                if contacts_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=contacts_batch_id,
+                        status="success",
+                        row_count=len(contacts or []),
+                        last_source_date=last_contact_date,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                if contacts_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=contacts_batch_id,
+                        status="failed",
+                        error_message=str(exc)[:1000],
+                    )
+                log.warning("[daily] HubSpot contacts sync failed: %s", exc)
+        else:
+            log.error("[daily] Skipping lead write and contacts sync tracking because write_run returned no run_id")
 
         # 2. Detect anomalies
         print("Step 3/5: Running anomaly detection...")
@@ -61,12 +121,45 @@ def run_daily_pulse():
         label = "junk term" if len(new_junk) == 1 else "junk terms"
         print(f"  → {len(new_junk)} new {label} found.")
 
-        # Persist raw search terms to DB (non-fatal; daily incremental sync comes later)
+        # Track Windsor search_terms daily sync
+        st_batch_id = db_writers.start_sync_batch(
+            source="windsor",
+            dataset="search_terms",
+            sync_type="daily",
+            date_from=today - timedelta(days=1),
+            date_to=today,
+            run_id=run_id,
+        )
         try:
-            st_count = db_writers.write_search_terms(run_id, search_terms)
+            st_count = db_writers.write_search_terms(
+                run_id, search_terms, sync_batch_id=st_batch_id or None,
+            )
             log.info("[daily] Wrote %d search term rows to database", st_count)
-        except Exception as db_exc:  # noqa: BLE001
-            log.error("[daily] DB write search terms failed: %s", db_exc)
+            last_st_date = _max_source_date(search_terms, fallback_date=today)
+            if st_batch_id:
+                db_writers.finish_sync_batch(
+                    batch_id=st_batch_id,
+                    status="success",
+                    row_count=st_count,
+                    last_source_date=last_st_date,
+                )
+        except Exception as exc:  # noqa: BLE001
+            if st_batch_id:
+                db_writers.finish_sync_batch(
+                    batch_id=st_batch_id,
+                    status="failed",
+                    error_message=str(exc)[:1000],
+                )
+            log.warning("[daily] Daily search_terms sync failed: %s", exc)
+
+        # Do not update sync_state for datasets that are pulled but not persisted
+        # as durable source facts. Freshness means "stored locally and queryable",
+        # not merely "fetched from an external API".
+        # windsor/campaigns — campaign data is analysis output only, not raw Windsor facts
+        # windsor/keywords  — not pulled in daily
+        # windsor/geo       — not pulled in daily
+        # hubspot/deals     — not pulled in daily
+        # gclid/matches     — no DB persistence path yet
 
         # 4. CRM delta check + budget pacing
         print("Step 5/5: Checking CRM delta and budget pacing...")
