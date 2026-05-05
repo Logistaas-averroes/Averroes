@@ -48,6 +48,25 @@ def _max_source_date(rows, fallback_date):
     return max(dates) if dates else fallback_date
 
 
+def _persistence_succeeded(expected_rows, written_count) -> bool:
+    """Return True only when local DB persistence appears successful.
+
+    Rules:
+    - If no rows were fetched, a write count of 0 is acceptable (empty sync).
+    - If rows were fetched, written_count must be > 0.
+    - None is treated as failure.
+
+    Callers must use this helper to distinguish a legitimate zero-row sync
+    (nothing to write) from a failed persistence event (rows fetched but not stored).
+    """
+    expected_count = len(expected_rows or [])
+    if written_count is None:
+        return False
+    if expected_count == 0:
+        return written_count == 0
+    return written_count > 0
+
+
 def run_daily_pulse():
     print(f"\n{'='*60}")
     print(f"LOGISTAAS DAILY PULSE — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
@@ -87,13 +106,18 @@ def run_daily_pulse():
                 run_id=run_id,
             )
             try:
-                db_writers.write_leads(run_id, contacts)
+                contacts_written = db_writers.write_leads(run_id, contacts)
+                if not _persistence_succeeded(contacts, contacts_written):
+                    raise RuntimeError(
+                        f"HubSpot contacts persistence failed or wrote 0 rows "
+                        f"for {len(contacts or [])} fetched contacts"
+                    )
                 last_contact_date = _max_source_date(contacts, fallback_date=today)
                 if contacts_batch_id:
                     db_writers.finish_sync_batch(
                         batch_id=contacts_batch_id,
                         status="success",
-                        row_count=len(contacts or []),
+                        row_count=contacts_written,
                         last_source_date=last_contact_date,
                     )
             except Exception as exc:  # noqa: BLE001
@@ -134,6 +158,11 @@ def run_daily_pulse():
             st_count = db_writers.write_search_terms(
                 run_id, search_terms, sync_batch_id=st_batch_id or None,
             )
+            if not _persistence_succeeded(search_terms, st_count):
+                raise RuntimeError(
+                    f"Windsor search_terms persistence failed or wrote 0 rows "
+                    f"for {len(search_terms or [])} fetched rows"
+                )
             log.info("[daily] Wrote %d search term rows to database", st_count)
             last_st_date = _max_source_date(search_terms, fallback_date=today)
             if st_batch_id:
