@@ -7,6 +7,11 @@
 **Audit date:** 2026-05-04
 **Status:** Audit-only. No code changed. No schema changed.
 
+> **PR-ADS-041 update:** The backfill CLI skeleton and operator runbook have been
+> added (`scripts/backfill.py`, `docs/BACKFILL_RUNBOOK.md`). Actual source-specific
+> backfill execution (Windsor connector date-range support, HubSpot paginated
+> date-window fetch) remains future work. No schema change. No scheduler change.
+
 ---
 
 ## 1. Executive Verdict
