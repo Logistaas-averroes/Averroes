@@ -1328,7 +1328,7 @@ GCLID attribution evidence table. One row per matched GCLID evidence record. Mul
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | SERIAL PK | |
-| `attribution_key` | TEXT NOT NULL UNIQUE | SHA1 of gclid\|contact_id\|deal_id\|campaign_name\|keyword\|match_status |
+| `attribution_key` | TEXT NOT NULL UNIQUE | SHA1 of gclid\|contact_id\|(deal_id or first_url)\|campaign_name\|keyword\|match_status; first_url is used when deal_id is absent to avoid collapsing legitimate rows |
 | `run_id` | INTEGER (nullable FK → runs) | |
 | `sync_batch_id` | INTEGER (nullable FK → sync_batches) | |
 | `gclid` | TEXT NOT NULL | Google Click ID |

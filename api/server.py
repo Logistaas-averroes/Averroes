@@ -3326,7 +3326,7 @@ def api_gclid_coverage(
                         coverage_pct,
                         created_at
                     FROM gclid_coverage_snapshots
-                    WHERE snapshot_date >= NOW() - INTERVAL '1 day' * %s
+                    WHERE snapshot_date >= CURRENT_DATE - %s
                     ORDER BY snapshot_date DESC, id DESC
                     """,
                     (days,),

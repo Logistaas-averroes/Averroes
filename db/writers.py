@@ -1068,11 +1068,37 @@ def _int_or_none(value) -> Optional[int]:
 # GCLID attribution writers (PR-ADS-044)
 # ---------------------------------------------------------------------------
 
+def _normalise_gclid_match_status(row: dict) -> str:
+    """Return a normalised match_status string for GCLID attribution rows.
+
+    Used consistently in both _make_attribution_key() and write_gclid_attribution()
+    so the dedupe key always matches the stored column value.
+
+    Priority:
+      1. Explicit match_status field (stripped, lowercased).
+      2. Boolean 'matched' flag from connectors.gclid_match output.
+      3. Default: "unknown".
+    """
+    raw = row.get("match_status")
+    if raw:
+        stripped = str(raw).strip().lower()
+        if stripped:
+            return stripped
+
+    matched_flag = row.get("matched")
+    if matched_flag is True:
+        return "matched"
+    if matched_flag is False:
+        return "unmatched"
+
+    return "unknown"
+
+
 def _make_attribution_key(row: dict) -> str:
     """Generate a stable SHA1 dedupe key for a GCLID attribution row.
 
     Key parts:
-      gclid | contact_id | deal_id | campaign_name | keyword | match_status
+      gclid | contact_id | (deal_id or first_url) | campaign_name | keyword | match_status
 
     If deal_id is absent, fall back to including first_url to preserve
     uniqueness across contact-only matches.
@@ -1082,7 +1108,7 @@ def _make_attribution_key(row: dict) -> str:
     deal_id      = (row.get("deal_id") or "").strip()
     campaign     = (row.get("campaign_name") or row.get("campaign") or "").strip()
     keyword      = (row.get("keyword") or "").strip()
-    match_status = (row.get("match_status") or "unknown").strip()
+    match_status = _normalise_gclid_match_status(row)
     first_url    = (row.get("first_url") or "").strip()
 
     if deal_id:
@@ -1149,9 +1175,13 @@ def write_gclid_attribution(
         mql_status = raw.get("mql_status")
         status_category = raw.get("status_category") or _map_status_category(mql_status)
 
+        # Derive match_status using shared helper so the key and stored value always match.
+        match_status_value = _normalise_gclid_match_status(raw)
+
         attribution_key = _make_attribution_key({
             **raw,
             "campaign_name": campaign_name,
+            "match_status": match_status_value,
         })
 
         rows.append((
@@ -1176,7 +1206,7 @@ def write_gclid_attribution(
             _float_or_none(raw.get("deal_amount_usd") or raw.get("deal_amount")),
             mql_status,
             status_category,
-            raw.get("match_status") or "matched",
+            match_status_value,
             raw.get("match_source"),
         ))
 
@@ -1204,11 +1234,10 @@ def write_gclid_attribution(
             %s, %s
         )
         ON CONFLICT (attribution_key) DO UPDATE SET
-            -- Preserve existing run_id/sync_batch_id: older attribution rows
-            -- retain their original run context for audit trail continuity.
-            -- Only update if the existing value is NULL (first time population).
-            run_id           = COALESCE(EXCLUDED.run_id,           gclid_attribution.run_id),
-            sync_batch_id    = COALESCE(EXCLUDED.sync_batch_id,    gclid_attribution.sync_batch_id),
+            -- Preserve existing run_id/sync_batch_id so that the original run context
+            -- is retained for audit trail continuity; only populate when NULL.
+            run_id           = COALESCE(gclid_attribution.run_id,        EXCLUDED.run_id),
+            sync_batch_id    = COALESCE(gclid_attribution.sync_batch_id, EXCLUDED.sync_batch_id),
             campaign_name    = COALESCE(EXCLUDED.campaign_name,    gclid_attribution.campaign_name),
             keyword          = COALESCE(EXCLUDED.keyword,          gclid_attribution.keyword),
             match_type       = COALESCE(EXCLUDED.match_type,       gclid_attribution.match_type),
