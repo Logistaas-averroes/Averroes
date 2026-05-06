@@ -2798,12 +2798,14 @@ function datasetRelatedPage(source, dataset) {
 }
 
 // Derive display status — adds "stale" as a UI-only concept for old successes.
+// Threshold is display-only; it does not change backend sync_state.
+const DATASET_STALE_THRESHOLD_DAYS = 2;
+
 function datasetDisplayStatus(row) {
   if (row.status !== "success") return row.status || "unknown";
   if (!row.last_successful_sync_at) return "success";
   const ageDays = (Date.now() - new Date(row.last_successful_sync_at).getTime()) / 86400000;
-  // Treat as stale if last success > 2 days old (conservative single threshold for all datasets)
-  if (ageDays > 2) return "stale";
+  if (ageDays > DATASET_STALE_THRESHOLD_DAYS) return "stale";
   return "success";
 }
 
@@ -2922,9 +2924,9 @@ function renderDatasetFreshness(data) {
     return `
       <tr>
         <td>${escapeHtml(row.source || "—")}</td>
-        <td class="td--name">${escapeHtml((row.dataset || "—").replace(/_/g, " "))}</td>
+        <td class="td--name">${escapeHtml(fmt(row.dataset).replace(/_/g, " "))}</td>
         <td><span class="freshness-status-badge ${badgeCls}">${badgeLabel}</span></td>
-        <td>${row.last_successful_sync_at ? escapeHtml(new Date(row.last_successful_sync_at).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })) : '<span class="td--na">—</span>'}</td>
+        <td>${row.last_successful_sync_at ? fmtDate(row.last_successful_sync_at) : '<span class="td--na">—</span>'}</td>
         <td>${row.last_source_date ? escapeHtml(row.last_source_date) : '<span class="td--na">—</span>'}</td>
         <td>${row.last_batch_id != null ? escapeHtml(String(row.last_batch_id)) : '<span class="td--na">—</span>'}</td>
         <td class="${row.error_message ? "" : "td--na"}">${row.error_message ? escapeHtml(row.error_message) : "—"}</td>
