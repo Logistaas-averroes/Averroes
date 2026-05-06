@@ -71,7 +71,7 @@ let actionQueueStatus = "idle"; // idle | loading | ok | empty | db_unavailable 
 let searchTermRows = [];
 let searchTermsNextCursor = null;
 let searchTermsHasMore = false;
-let searchTermsStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+let searchTermsStatus = "idle"; // idle | loading | ok | empty | db_unavailable | cursor_error | error
 
 // Reports page state
 let latestReportMarkdown = "";
@@ -2011,6 +2011,13 @@ function _updateSearchTermsFilterNote() {
   noteEl.hidden = !(wasteFilter === "clean" || wasteFilter === "unanalyzed");
 }
 
+function _updateSearchTermsPaginationVisibility() {
+  const container = document.querySelector("#page-search-terms .pagination-actions");
+  const btn       = document.getElementById("search-terms-load-more-btn");
+  if (!container || !btn) return;
+  container.hidden = btn.hidden;
+}
+
 async function loadSearchTerms({ reset = false, cursor = null } = {}) {
   if (searchTermsStatus === "loading") return;
 
@@ -2023,9 +2030,11 @@ async function loadSearchTerms({ reset = false, cursor = null } = {}) {
     searchTermRows = [];
     searchTermsNextCursor = null;
     searchTermsHasMore = false;
+    renderSearchTermsKPIs([]);
     if (tableEl) tableEl.innerHTML =
       `<p class="empty-state" style="padding:var(--space-5)">Loading search terms…</p>`;
     if (loadMoreBtn) loadMoreBtn.hidden = true;
+    _updateSearchTermsPaginationVisibility();
   } else {
     if (loadMoreBtn) {
       loadMoreBtn.disabled = true;
@@ -2043,6 +2052,7 @@ async function loadSearchTerms({ reset = false, cursor = null } = {}) {
       renderSearchTermsKPIs([]);
       renderSearchTermsTable();
       if (loadMoreBtn) loadMoreBtn.hidden = true;
+      _updateSearchTermsPaginationVisibility();
       return;
     }
 
@@ -2076,17 +2086,22 @@ async function loadSearchTerms({ reset = false, cursor = null } = {}) {
         loadMoreBtn.hidden = true;
       }
     }
+    _updateSearchTermsPaginationVisibility();
 
   } catch (err) {
     // Distinguish invalid cursor (HTTP 400) from generic error
     const isCursorError = err && err.message && err.message.includes("Invalid cursor");
     searchTermsStatus = isCursorError ? "cursor_error" : "error";
     renderSearchTermsTable();
+    // On cursor errors: hide Load More — retrying with the same broken cursor won't help.
+    // On generic errors with no valid next cursor: also hide.
     if (loadMoreBtn) {
-      loadMoreBtn.hidden   = false;
+      const canLoadMore = searchTermsStatus !== "cursor_error" && !!searchTermsNextCursor;
+      loadMoreBtn.hidden   = !canLoadMore;
       loadMoreBtn.disabled = false;
       loadMoreBtn.textContent = "Load more";
     }
+    _updateSearchTermsPaginationVisibility();
   }
 }
 
@@ -3475,14 +3490,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (stWasteFilter) stWasteFilter.addEventListener("change", () => {
     _updateSearchTermsFilterNote();
-    // If switching to waste only, re-fetch from server; otherwise re-render from loaded rows.
-    const v = stWasteFilter.value;
-    if (v === "waste") {
-      loadSearchTerms({ reset: true });
-    } else {
-      renderSearchTermsKPIs(getVisibleSearchTermRows());
-      renderSearchTermsTable();
-    }
+    // Always refetch — switching away from waste requires a server request without waste_only,
+    // switching into waste requires waste_only=true. Client-side clean/unanalyzed filtering
+    // then applies on top of the freshly loaded base dataset.
+    loadSearchTerms({ reset: true });
   });
 
   // Enter key in query/campaign inputs triggers apply

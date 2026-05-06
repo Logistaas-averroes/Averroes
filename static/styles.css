@@ -2798,7 +2798,7 @@ a {
   border-top: 1px solid var(--border);
 }
 
-.pagination-actions:empty {
+.pagination-actions[hidden] {
   display: none;
 }
 
