@@ -1008,6 +1008,11 @@ Per-dataset sync state / watermark. Returns the latest known sync status for eac
   persisted locally: `windsor/search_terms` and `hubspot/contacts`. Other datasets may remain
   `unknown` until their raw-fact sync path is implemented. `unknown` does not mean failed; it means
   no successful tracked sync has been recorded yet.
+- **UI note (PR-ADS-045):** As of PR-ADS-045, this endpoint is rendered in the Health page
+  **Dataset Freshness** panel. The UI is read-only — it does not trigger sync, retry, backfill,
+  or any external API call. `unknown` means no tracked sync has been recorded; it is not
+  equivalent to `failed`. A display-only `stale` badge may be shown when the last successful
+  sync is more than 2 days old, but this does not change backend status.
 
 ---
 
@@ -1244,6 +1249,11 @@ GCLID coverage snapshot rows for the last N days.
 ```json
 { "days": 30, "rows": [], "db_unavailable": true }
 ```
+
+**UI note (PR-ADS-045):** As of PR-ADS-045, this endpoint may be rendered as an optional
+**GCLID Coverage** mini-panel on the Health page. The UI is read-only and shows only the
+most recent snapshot. If the endpoint is unavailable or returns an empty result, the panel
+is silently hidden. No external API calls are made.
 
 ---
 

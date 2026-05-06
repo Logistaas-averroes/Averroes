@@ -79,6 +79,10 @@ let latestReportMeta = null;
 let reportLoadStatus = "idle"; // idle | loading | ok | empty | error
 let reportCopyFeedbackTimer = null;
 
+// Dataset Freshness state
+let datasetFreshnessRows = [];
+let datasetFreshnessStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+
 // ── Utility helpers ────────────────────────────────────────────────────────
 
 function escapeHtml(str) {
@@ -2771,9 +2775,284 @@ async function loadHealth() {
     }
     el.innerHTML = `<p class="empty-state">Could not load readiness data. Admin access required.</p>`;
   }
+
+  // Load dataset freshness panel alongside readiness checks
+  loadDatasetFreshness();
+  loadGclidCoverage();
 }
 
-// ── Campaign Detail Drawer ─────────────────────────────────────────────────
+// ── Dataset Freshness ──────────────────────────────────────────────────────
+
+function datasetRelatedPage(source, dataset) {
+  const key = `${source}/${dataset}`;
+  const map = {
+    "windsor/search_terms": { page: "search-terms", label: "Search Terms" },
+    "windsor/keywords":     { page: "keywords",     label: "Keywords"     },
+    "windsor/geo":          { page: "geo",           label: "Geo"          },
+    "windsor/campaigns":    { page: "campaigns",     label: "Campaigns"    },
+    "hubspot/contacts":     { page: "leads",         label: "Lead Quality" },
+    "hubspot/deals":        { page: "deals",         label: "Deals"        },
+    "gclid/matches":        { page: "deals",         label: "Deals"        },
+  };
+  return map[key] || null;
+}
+
+// Derive display status — adds "stale" as a UI-only concept for old successes.
+function datasetDisplayStatus(row) {
+  if (row.status !== "success") return row.status || "unknown";
+  if (!row.last_successful_sync_at) return "success";
+  const ageDays = (Date.now() - new Date(row.last_successful_sync_at).getTime()) / 86400000;
+  // Treat as stale if last success > 2 days old (conservative single threshold for all datasets)
+  if (ageDays > 2) return "stale";
+  return "success";
+}
+
+function renderDatasetFreshnessLoading() {
+  const tableEl = document.getElementById("dataset-freshness-table");
+  const summaryEl = document.getElementById("dataset-freshness-summary");
+  if (summaryEl) summaryEl.innerHTML = "";
+  if (tableEl) tableEl.innerHTML = `<p class="empty-state"><span class="spinner"></span> Loading dataset freshness…</p>`;
+}
+
+function renderDatasetFreshness(data) {
+  const summaryEl = document.getElementById("dataset-freshness-summary");
+  const tableEl   = document.getElementById("dataset-freshness-table");
+  const helpEl    = document.getElementById("dataset-freshness-help");
+
+  if (!tableEl) return;
+
+  // DB unavailable
+  if (datasetFreshnessStatus === "db_unavailable") {
+    if (summaryEl) summaryEl.innerHTML = "";
+    tableEl.innerHTML = `<p class="empty-state freshness-help-note">Dataset freshness temporarily unavailable — database offline.</p>`;
+    if (helpEl) helpEl.hidden = true;
+    return;
+  }
+
+  // Error
+  if (datasetFreshnessStatus === "error") {
+    if (summaryEl) summaryEl.innerHTML = "";
+    tableEl.innerHTML = `<p class="empty-state">Could not load dataset freshness. Check API health or run status.</p>`;
+    if (helpEl) helpEl.hidden = true;
+    return;
+  }
+
+  // Empty
+  if (datasetFreshnessStatus === "empty") {
+    if (summaryEl) summaryEl.innerHTML = "";
+    tableEl.innerHTML = `<p class="empty-state">No dataset freshness records found yet.</p>`;
+    if (helpEl) helpEl.hidden = true;
+    return;
+  }
+
+  // Summary cards
+  const summary = (data && data.summary) ? data.summary : (() => {
+    const s = { total: 0, success: 0, failed: 0, running: 0, unknown: 0, stale: 0 };
+    for (const row of datasetFreshnessRows) {
+      s.total++;
+      const ds = datasetDisplayStatus(row);
+      if (ds === "success")      s.success++;
+      else if (ds === "failed")  s.failed++;
+      else if (ds === "running") s.running++;
+      else if (ds === "stale")   s.stale++;
+      else                       s.unknown++;
+    }
+    return s;
+  })();
+
+  // Compute stale count from rows since the API summary doesn't have it
+  let staleCount = 0;
+  for (const row of datasetFreshnessRows) {
+    if (datasetDisplayStatus(row) === "stale") staleCount++;
+  }
+  const freshCount = (summary.success || 0) - staleCount;
+
+  if (summaryEl) {
+    summaryEl.innerHTML = `
+      <div class="freshness-summary-card">
+        <div class="freshness-summary-card__value">${summary.total || 0}</div>
+        <div class="freshness-summary-card__label">Total Datasets</div>
+      </div>
+      <div class="freshness-summary-card freshness-summary-card--success">
+        <div class="freshness-summary-card__value">${freshCount}</div>
+        <div class="freshness-summary-card__label">Fresh</div>
+      </div>
+      ${staleCount > 0 ? `
+      <div class="freshness-summary-card freshness-summary-card--stale">
+        <div class="freshness-summary-card__value">${staleCount}</div>
+        <div class="freshness-summary-card__label">Possibly Stale</div>
+      </div>` : ""}
+      <div class="freshness-summary-card freshness-summary-card--failed">
+        <div class="freshness-summary-card__value">${summary.failed || 0}</div>
+        <div class="freshness-summary-card__label">Failed</div>
+      </div>
+      <div class="freshness-summary-card freshness-summary-card--running">
+        <div class="freshness-summary-card__value">${summary.running || 0}</div>
+        <div class="freshness-summary-card__label">Running</div>
+      </div>
+      <div class="freshness-summary-card freshness-summary-card--unknown">
+        <div class="freshness-summary-card__value">${summary.unknown || 0}</div>
+        <div class="freshness-summary-card__label">Unknown</div>
+      </div>`;
+  }
+
+  // Table rows
+  const rows = datasetFreshnessRows.map((row) => {
+    const ds = datasetDisplayStatus(row);
+    const badgeCls = {
+      success: "freshness-status-success",
+      failed:  "freshness-status-failed",
+      running: "freshness-status-running",
+      unknown: "freshness-status-unknown",
+      stale:   "freshness-status-stale",
+    }[ds] || "freshness-status-unknown";
+    const badgeLabel = {
+      success: "Fresh",
+      failed:  "Failed",
+      running: "Running",
+      unknown: "Unknown",
+      stale:   "Stale",
+    }[ds] || escapeHtml(ds);
+
+    const related = datasetRelatedPage(row.source, row.dataset);
+    const relatedCell = related
+      ? `<button class="freshness-related-link btn btn--ghost btn--sm" type="button" data-page="${escapeHtml(related.page)}">${escapeHtml(related.label)}</button>`
+      : `<span class="td--na">—</span>`;
+
+    return `
+      <tr>
+        <td>${escapeHtml(row.source || "—")}</td>
+        <td class="td--name">${escapeHtml((row.dataset || "—").replace(/_/g, " "))}</td>
+        <td><span class="freshness-status-badge ${badgeCls}">${badgeLabel}</span></td>
+        <td>${row.last_successful_sync_at ? escapeHtml(new Date(row.last_successful_sync_at).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })) : '<span class="td--na">—</span>'}</td>
+        <td>${row.last_source_date ? escapeHtml(row.last_source_date) : '<span class="td--na">—</span>'}</td>
+        <td>${row.last_batch_id != null ? escapeHtml(String(row.last_batch_id)) : '<span class="td--na">—</span>'}</td>
+        <td class="${row.error_message ? "" : "td--na"}">${row.error_message ? escapeHtml(row.error_message) : "—"}</td>
+        <td>${relatedCell}</td>
+      </tr>`;
+  }).join("");
+
+  tableEl.innerHTML = `
+    <div class="dataset-freshness-table-scroll">
+      <table class="data-table dataset-freshness-table" aria-label="Dataset freshness status">
+        <thead>
+          <tr>
+            <th>Source</th>
+            <th>Dataset</th>
+            <th>Status</th>
+            <th>Last Successful Sync</th>
+            <th>Last Source Date</th>
+            <th>Last Batch</th>
+            <th>Error</th>
+            <th>Related Page</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+
+  // Wire related-page buttons (use event delegation on the table wrapper)
+  tableEl.querySelectorAll(".freshness-related-link").forEach((btn) => {
+    btn.addEventListener("click", () => navigate(btn.dataset.page));
+  });
+
+  // Help notes
+  if (helpEl) {
+    helpEl.hidden = false;
+    helpEl.innerHTML = `
+      <strong>Unknown</strong> means no successful tracked sync has been recorded yet.
+      It does not necessarily mean the source failed.<br>
+      <strong>Failed</strong> means the last tracked local persistence attempt failed.
+      Previous successful watermarks are preserved when available.<br>
+      <strong>Stale</strong> is a display-only badge applied when the last successful sync
+      is more than 2 days old — it does not change backend status.`;
+  }
+}
+
+async function loadDatasetFreshness() {
+  datasetFreshnessStatus = "loading";
+  renderDatasetFreshnessLoading();
+
+  try {
+    const data = await fetchJSON("/api/datasets/freshness");
+
+    if (data.db_unavailable) {
+      datasetFreshnessStatus = "db_unavailable";
+      datasetFreshnessRows = [];
+      renderDatasetFreshness(data);
+      return;
+    }
+
+    datasetFreshnessRows = data.datasets || [];
+
+    if (!datasetFreshnessRows.length) {
+      datasetFreshnessStatus = "empty";
+    } else {
+      datasetFreshnessStatus = "ok";
+    }
+
+    renderDatasetFreshness(data);
+  } catch (err) {
+    if (err && err.message === "HTTP 401") return;
+    datasetFreshnessStatus = "error";
+    datasetFreshnessRows = [];
+    renderDatasetFreshness();
+  }
+}
+
+// ── GCLID Coverage (optional panel) ───────────────────────────────────────
+
+async function loadGclidCoverage() {
+  const panel  = document.getElementById("gclid-coverage-panel");
+  const bodyEl = document.getElementById("gclid-coverage-body");
+  if (!panel || !bodyEl) return;
+
+  try {
+    const days = getSelectedDays();
+    const data = await fetchJSON(`/api/gclid-coverage?days=${days}`);
+
+    if (data.db_unavailable) {
+      // Silently hide if unavailable
+      panel.hidden = true;
+      return;
+    }
+
+    const rows = data.rows || [];
+    if (!rows.length) {
+      panel.hidden = true;
+      return;
+    }
+
+    // Show only the most recent snapshot
+    const latest = rows[rows.length - 1];
+    panel.hidden = false;
+    bodyEl.innerHTML = `
+      <div class="freshness-summary-grid" style="margin-bottom:0">
+        <div class="freshness-summary-card">
+          <div class="freshness-summary-card__value">${fmt(latest.total_contacts)}</div>
+          <div class="freshness-summary-card__label">Total Contacts</div>
+        </div>
+        <div class="freshness-summary-card freshness-summary-card--success">
+          <div class="freshness-summary-card__value">${fmt(latest.contacts_with_gclid)}</div>
+          <div class="freshness-summary-card__label">With GCLID</div>
+        </div>
+        <div class="freshness-summary-card freshness-summary-card--unknown">
+          <div class="freshness-summary-card__value">${fmt(latest.contacts_without_gclid)}</div>
+          <div class="freshness-summary-card__label">Without GCLID</div>
+        </div>
+        <div class="freshness-summary-card freshness-summary-card--running">
+          <div class="freshness-summary-card__value">${latest.coverage_pct != null ? escapeHtml(latest.coverage_pct.toFixed(1)) + "%" : "—"}</div>
+          <div class="freshness-summary-card__label">Coverage</div>
+        </div>
+      </div>
+      <p style="font-size:12px;color:var(--text-muted);margin-top:var(--space-3)">
+        Snapshot date: ${fmt(latest.snapshot_date)}
+      </p>`;
+  } catch (_) {
+    // If endpoint missing or any error, silently hide the panel
+    if (panel) panel.hidden = true;
+  }
+}
 
 let _drawerOpenCampaign = null;  // campaign name string currently shown in drawer, or null
 let _drawerPreviousFocus = null; // element to restore focus to on close
@@ -3530,6 +3809,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const reportRefreshBtn = document.getElementById("report-refresh-btn");
   if (reportCopyBtn)    reportCopyBtn.addEventListener("click", copyLatestReport);
   if (reportRefreshBtn) reportRefreshBtn.addEventListener("click", loadReports);
+
+  // Wire up dataset freshness refresh button
+  const dfRefreshBtn = document.getElementById("dataset-freshness-refresh-btn");
+  if (dfRefreshBtn) dfRefreshBtn.addEventListener("click", loadDatasetFreshness);
 
   // Check auth and load initial page
   const isAuth = await checkAuth();

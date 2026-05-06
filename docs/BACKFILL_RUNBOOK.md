@@ -232,3 +232,13 @@ backfill remains manual, guarded, and is not yet implemented in execute mode.
 
 *This script writes only to local PostgreSQL when `--execute` is used.
 It never writes to Google Ads or HubSpot.*
+
+---
+
+## Dataset Freshness UI (PR-ADS-045)
+
+The Health page now shows a **Dataset Freshness** panel that reads from `sync_state`
+via `/api/datasets/freshness`. This is display-only: it surfaces the current watermark
+state for each tracked dataset. It does not trigger backfill, sync jobs, retries, or
+any external API call. Manual backfill remains separate and guarded; the UI provides no
+way to initiate a backfill from the browser.
