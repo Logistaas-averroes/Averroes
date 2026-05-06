@@ -19,6 +19,8 @@
 > remains future work — those datasets are either not pulled daily, not persisted as
 > raw source facts, or both.
 
+> **PR-ADS-044 update:** PR-ADS-044 implements the first GCLID attribution persistence layer by storing matched GCLID evidence in the new `gclid_attribution` PostgreSQL table and exposing it through a read-only `/api/gclid-attribution` endpoint. A `gclid_coverage_snapshots` table is also added to persist aggregate coverage statistics per run. The weekly and monthly schedulers now persist GCLID match output and track freshness via `sync_batches` / `sync_state` for `gclid/matches`. Dataset freshness for `gclid/matches` now updates only after successful DB persistence. OCT upload remains out of scope.
+
 ---
 
 ## 1. Executive Verdict

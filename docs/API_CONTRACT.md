@@ -1111,6 +1111,142 @@ HTTP 400.
 
 ---
 
+#### `GET /api/gclid-attribution`
+Paginated GCLID attribution rows for the last N days.
+
+**Auth:** Auth
+**Read-only:** Yes — no write to Google Ads, HubSpot, or any external system
+**Source:** `gclid_attribution` table (PR-ADS-044)
+
+**Query params:**
+
+| Param | Type | Default | Notes |
+|-------|------|---------|-------|
+| `days` | integer | 30 | Look-back window (1–365) |
+| `campaign` | string | — | Exact canonical campaign_name match |
+| `gclid` | string | — | Exact gclid value match |
+| `contact_id` | string | — | Exact contact_id match |
+| `deal_id` | string | — | Exact deal_id match |
+| `match_status` | string | — | Exact match_status match |
+| `limit` | integer | 100 | Page size (1–500) |
+| `cursor` | string | — | Opaque pagination cursor from previous response |
+
+**Pagination:** Cursor/keyset on `(created_at DESC, id DESC)`. Do not parse or construct the cursor — it is opaque. Use `pagination.next_cursor` from each response to fetch the next page.
+
+**Response 200:**
+```json
+{
+  "days": 30,
+  "rows": [
+    {
+      "id": 123,
+      "gclid": "abc123",
+      "contact_id": "987",
+      "deal_id": "456",
+      "company": "ABC Freight",
+      "country": "UAE",
+      "campaign_name": "global - competitors",
+      "keyword": "cargowise",
+      "match_type": "broad",
+      "search_term": "freight forwarding software",
+      "first_url": "https://...",
+      "contact_created_at": "2026-05-01T08:00:00+00:00",
+      "deal_created_at": "2026-05-03T08:00:00+00:00",
+      "deal_close_date": null,
+      "deal_stage": "appointmentscheduled",
+      "deal_stage_label": "Appointment Scheduled",
+      "deal_amount_usd": 2500.00,
+      "mql_status": "OPEN - Meeting Booked",
+      "status_category": "in_progress",
+      "match_status": "matched",
+      "match_source": "gclid",
+      "created_at": "2026-05-04T10:00:00+00:00"
+    }
+  ],
+  "pagination": {
+    "limit": 100,
+    "next_cursor": "opaque-token-or-null",
+    "has_more": false
+  },
+  "summary": {
+    "loaded_rows": 1,
+    "matched_rows": 1,
+    "url_fallback_rows": 0,
+    "unmatched_rows": 0,
+    "total_deal_amount_usd_loaded": 2500.00
+  }
+}
+```
+
+**Summary fields are loaded-page summary only** — they reflect the rows returned on the current page, not the total account coverage.
+
+**DB unavailable response:**
+```json
+{
+  "days": 30,
+  "rows": [],
+  "pagination": { "limit": 100, "next_cursor": null, "has_more": false },
+  "summary": {
+    "loaded_rows": 0,
+    "matched_rows": 0,
+    "url_fallback_rows": 0,
+    "unmatched_rows": 0,
+    "total_deal_amount_usd_loaded": 0
+  },
+  "db_unavailable": true
+}
+```
+
+**Invalid cursor response:**
+```json
+{ "detail": "Invalid cursor: ..." }
+```
+HTTP 400.
+
+**Important scope notes:**
+- Does not upload offline conversions.
+- Does not call Google Ads API.
+- Does not write to HubSpot.
+- Does not mutate CRM, deals, or any external system.
+- Future OCT workflows must be separate and human-approved.
+- Multiple deals for the same contact/GCLID are preserved as separate rows.
+- `summary` reflects current-page loaded rows only — not total database counts.
+
+---
+
+#### `GET /api/gclid-coverage`
+GCLID coverage snapshot rows for the last N days.
+
+**Auth:** Auth
+**Read-only:** Yes — no write to Google Ads, HubSpot, or any external system
+**Source:** `gclid_coverage_snapshots` table (PR-ADS-044)
+
+**Query params:** `days` (integer, default 30, max 365)
+
+**Response 200:**
+```json
+{
+  "days": 30,
+  "rows": [
+    {
+      "snapshot_date": "2026-05-04",
+      "total_contacts": 100,
+      "contacts_with_gclid": 80,
+      "contacts_without_gclid": 20,
+      "coverage_pct": 80.0,
+      "created_at": "2026-05-04T10:00:00+00:00"
+    }
+  ]
+}
+```
+
+**DB unavailable response:**
+```json
+{ "days": 30, "rows": [], "db_unavailable": true }
+```
+
+---
+
 ## DB Schema Notes (PR-ADS-039 / PR-ADS-040)
 
 ### `sync_batches`
@@ -1186,6 +1322,66 @@ Raw search-term fact table. Grain: `source_date` + `campaign_name` + `ad_group` 
 
 ---
 
+### `gclid_attribution` (PR-ADS-044)
+GCLID attribution evidence table. One row per matched GCLID evidence record. Multiple deals for the same contact/GCLID are preserved as separate rows. Deduplicated via `attribution_key` (SHA1 of key fields).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | SERIAL PK | |
+| `attribution_key` | TEXT NOT NULL UNIQUE | SHA1 of gclid\|contact_id\|deal_id\|campaign_name\|keyword\|match_status |
+| `run_id` | INTEGER (nullable FK → runs) | |
+| `sync_batch_id` | INTEGER (nullable FK → sync_batches) | |
+| `gclid` | TEXT NOT NULL | Google Click ID |
+| `contact_id` | TEXT | HubSpot contact ID |
+| `deal_id` | TEXT | HubSpot deal ID (nullable) |
+| `campaign_name` | TEXT | Canonical lowercase campaign name |
+| `keyword` | TEXT | |
+| `match_type` | TEXT | |
+| `search_term` | TEXT | |
+| `company` | TEXT | |
+| `country` | TEXT | |
+| `first_url` | TEXT | |
+| `contact_created_at` | TIMESTAMPTZ | |
+| `deal_created_at` | TIMESTAMPTZ | |
+| `deal_close_date` | TIMESTAMPTZ | |
+| `deal_stage` | TEXT | |
+| `deal_stage_label` | TEXT | |
+| `deal_amount_usd` | NUMERIC(12,2) | |
+| `mql_status` | TEXT | |
+| `status_category` | TEXT | qualified \| in_progress \| junk \| wrong_fit \| unknown |
+| `match_status` | TEXT | matched \| unmatched \| url_fallback \| unknown |
+| `match_source` | TEXT | gclid \| first_url \| crm_field \| unknown |
+| `created_at` | TIMESTAMPTZ | |
+| `updated_at` | TIMESTAMPTZ | Updated on every upsert |
+
+**Important:**
+- Multiple deals for the same contact/GCLID are preserved as separate rows via `attribution_key`.
+- Writer skips rows with blank/missing `gclid`.
+- Upsert preserves non-null existing values — null incoming fields do not overwrite stored data.
+
+---
+
+### `gclid_coverage_snapshots` (PR-ADS-044)
+One GCLID coverage snapshot per run, capturing aggregate coverage statistics.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | SERIAL PK | |
+| `run_id` | INTEGER (nullable FK → runs) | |
+| `sync_batch_id` | INTEGER (nullable FK → sync_batches) | |
+| `snapshot_date` | DATE NOT NULL | Defaults to CURRENT_DATE |
+| `total_contacts` | INTEGER | |
+| `contacts_with_gclid` | INTEGER | |
+| `contacts_without_gclid` | INTEGER | |
+| `coverage_pct` | NUMERIC(6,2) | |
+| `total_deals` | INTEGER | |
+| `matched_deals` | INTEGER | |
+| `unmatched_deals` | INTEGER | |
+| `raw_summary` | JSONB | Full coverage dict from run_gclid_match() |
+| `created_at` | TIMESTAMPTZ | |
+
+---
+
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/health` | Public | Liveness |
@@ -1216,6 +1412,8 @@ Raw search-term fact table. Grain: `source_date` + `campaign_name` + `ad_group` 
 | GET | `/api/action-queue` | Auth | Ranked human-review queue (DB, ?days=) |
 | GET | `/api/datasets/freshness` | Auth | Per-dataset sync state / watermark (sync_state table) |
 | GET | `/api/search-terms` | Auth | Paginated search-term fact rows (search_terms table, cursor pagination) |
+| GET | `/api/gclid-attribution` | Auth | Paginated GCLID attribution rows (gclid_attribution table, cursor pagination) |
+| GET | `/api/gclid-coverage` | Auth | GCLID coverage snapshots (gclid_coverage_snapshots table) |
 
 ---
 
