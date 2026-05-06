@@ -17,6 +17,8 @@ MQL status → status_category mapping:
   unknown      — everything else
 """
 
+import hashlib
+import json
 import logging
 import re
 from datetime import date, datetime, timezone
@@ -1060,3 +1062,269 @@ def _int_or_none(value) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# GCLID attribution writers (PR-ADS-044)
+# ---------------------------------------------------------------------------
+
+def _normalise_gclid_match_status(row: dict) -> str:
+    """Return a normalised match_status string for GCLID attribution rows.
+
+    Used consistently in both _make_attribution_key() and write_gclid_attribution()
+    so the dedupe key always matches the stored column value.
+
+    Priority:
+      1. Explicit match_status field (stripped, lowercased).
+      2. Boolean 'matched' flag from connectors.gclid_match output.
+      3. Default: "unknown".
+    """
+    raw = row.get("match_status")
+    if raw:
+        stripped = str(raw).strip().lower()
+        if stripped:
+            return stripped
+
+    matched_flag = row.get("matched")
+    if matched_flag is True:
+        return "matched"
+    if matched_flag is False:
+        return "unmatched"
+
+    return "unknown"
+
+
+def _make_attribution_key(row: dict) -> str:
+    """Generate a stable SHA1 dedupe key for a GCLID attribution row.
+
+    Key parts:
+      gclid | contact_id | (deal_id or first_url) | campaign_name | keyword | match_status
+
+    If deal_id is absent, fall back to including first_url to preserve
+    uniqueness across contact-only matches.
+    """
+    gclid        = (row.get("gclid") or "").strip()
+    contact_id   = (row.get("contact_id") or "").strip()
+    deal_id      = (row.get("deal_id") or "").strip()
+    campaign     = (row.get("campaign_name") or row.get("campaign") or "").strip()
+    keyword      = (row.get("keyword") or "").strip()
+    match_status = _normalise_gclid_match_status(row)
+    first_url    = (row.get("first_url") or "").strip()
+
+    if deal_id:
+        parts = f"{gclid}|{contact_id}|{deal_id}|{campaign}|{keyword}|{match_status}"
+    else:
+        parts = f"{gclid}|{contact_id}||{campaign}|{keyword}|{match_status}|{first_url}"
+
+    return hashlib.sha1(parts.encode("utf-8")).hexdigest()  # noqa: S324  # non-cryptographic dedup key
+
+
+def _parse_ts_or_none(value) -> Optional[str]:
+    """Return a datetime string suitable for psycopg2 TIMESTAMPTZ, or None.
+
+    Accepts ISO strings, datetime objects, or None.  Invalid values return None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        # Validate by parsing — raises if invalid
+        datetime.fromisoformat(text)
+        return text
+    except (ValueError, TypeError):
+        return None
+
+
+def write_gclid_attribution(
+    run_id: Optional[int],
+    matched_rows: list,
+    sync_batch_id: Optional[int] = None,
+) -> int:
+    """Upsert GCLID attribution rows into the gclid_attribution table.
+
+    Accepts rows from data/matched_gclid.json or from in-memory match output.
+    Skips rows with blank/missing gclid.
+    Multiple deals for the same contact/GCLID are preserved as separate rows.
+    Does not overwrite useful non-null values with nulls on conflict.
+    Returns count of upserted rows (attempted upserts for non-empty input).
+    Returns 0 on empty input or DB unavailable.
+    Never raises.
+    """
+    if not matched_rows:
+        return 0
+
+    rows = []
+    for raw in matched_rows:
+        gclid = (raw.get("gclid") or "").strip()
+        if not gclid:
+            log.warning("write_gclid_attribution: skipping row with blank gclid")
+            continue
+
+        # Resolve campaign_name — accept both 'campaign' and 'campaign_name' keys
+        raw_campaign = raw.get("campaign_name") or raw.get("campaign")
+        campaign_name: Optional[str] = None
+        if raw_campaign is not None:
+            normalized = str(raw_campaign).strip()
+            if normalized:
+                campaign_name = _canonicalise_campaign_name(normalized.lower())
+
+        mql_status = raw.get("mql_status")
+        status_category = raw.get("status_category") or _map_status_category(mql_status)
+
+        # Derive match_status using shared helper so the key and stored value always match.
+        match_status_value = _normalise_gclid_match_status(raw)
+
+        attribution_key = _make_attribution_key({
+            **raw,
+            "campaign_name": campaign_name,
+            "match_status": match_status_value,
+        })
+
+        rows.append((
+            attribution_key,
+            run_id,
+            sync_batch_id,
+            gclid,
+            raw.get("contact_id"),
+            raw.get("deal_id"),
+            campaign_name,
+            raw.get("keyword"),
+            raw.get("match_type"),
+            raw.get("search_term"),
+            raw.get("company"),
+            raw.get("country"),
+            raw.get("first_url"),
+            _parse_ts_or_none(raw.get("contact_created_at")),
+            _parse_ts_or_none(raw.get("deal_created_at")),
+            _parse_ts_or_none(raw.get("deal_close_date")),
+            raw.get("deal_stage"),
+            raw.get("deal_stage_label"),
+            _float_or_none(raw.get("deal_amount_usd") or raw.get("deal_amount")),
+            mql_status,
+            status_category,
+            match_status_value,
+            raw.get("match_source"),
+        ))
+
+    if not rows:
+        return 0
+
+    _upsert_sql = """
+        INSERT INTO gclid_attribution (
+            attribution_key, run_id, sync_batch_id,
+            gclid, contact_id, deal_id,
+            campaign_name, keyword, match_type, search_term,
+            company, country, first_url,
+            contact_created_at, deal_created_at, deal_close_date,
+            deal_stage, deal_stage_label, deal_amount_usd,
+            mql_status, status_category,
+            match_status, match_source
+        ) VALUES (
+            %s, %s, %s,
+            %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, %s,
+            %s, %s, %s,
+            %s, %s, %s,
+            %s, %s,
+            %s, %s
+        )
+        ON CONFLICT (attribution_key) DO UPDATE SET
+            -- Preserve existing run_id/sync_batch_id so that the original run context
+            -- is retained for audit trail continuity; only populate when NULL.
+            run_id           = COALESCE(gclid_attribution.run_id,        EXCLUDED.run_id),
+            sync_batch_id    = COALESCE(gclid_attribution.sync_batch_id, EXCLUDED.sync_batch_id),
+            campaign_name    = COALESCE(EXCLUDED.campaign_name,    gclid_attribution.campaign_name),
+            keyword          = COALESCE(EXCLUDED.keyword,          gclid_attribution.keyword),
+            match_type       = COALESCE(EXCLUDED.match_type,       gclid_attribution.match_type),
+            search_term      = COALESCE(EXCLUDED.search_term,      gclid_attribution.search_term),
+            company          = COALESCE(EXCLUDED.company,          gclid_attribution.company),
+            country          = COALESCE(EXCLUDED.country,          gclid_attribution.country),
+            first_url        = COALESCE(EXCLUDED.first_url,        gclid_attribution.first_url),
+            deal_stage       = COALESCE(EXCLUDED.deal_stage,       gclid_attribution.deal_stage),
+            deal_stage_label = COALESCE(EXCLUDED.deal_stage_label, gclid_attribution.deal_stage_label),
+            deal_amount_usd  = COALESCE(EXCLUDED.deal_amount_usd,  gclid_attribution.deal_amount_usd),
+            mql_status       = COALESCE(EXCLUDED.mql_status,       gclid_attribution.mql_status),
+            status_category  = COALESCE(EXCLUDED.status_category,  gclid_attribution.status_category),
+            match_status     = COALESCE(EXCLUDED.match_status,     gclid_attribution.match_status),
+            match_source     = COALESCE(EXCLUDED.match_source,     gclid_attribution.match_source),
+            updated_at       = NOW()
+    """
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(_upsert_sql, rows)
+                attempted = len(rows)
+        log.info(
+            "write_gclid_attribution: upserted %d rows (run_id=%s)",
+            attempted, run_id,
+        )
+        return attempted
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_gclid_attribution failed (run_id=%s): %s", run_id, exc)
+        return 0
+
+
+def write_gclid_coverage_snapshot(
+    run_id: Optional[int],
+    coverage: dict,
+    sync_batch_id: Optional[int] = None,
+) -> int:
+    """Insert one GCLID coverage snapshot row into gclid_coverage_snapshots.
+
+    Extracts known numeric fields from the coverage dict produced by
+    run_gclid_match() and stores the full dict as raw_summary JSONB.
+    Returns 1 on success, 0 on empty input or DB unavailable.
+    Never raises.
+    """
+    if not coverage:
+        return 0
+
+    total_contacts         = _int_or_none(coverage.get("total_paid_contacts"))
+    contacts_with_gclid    = _int_or_none(coverage.get("matched_to_windsor") or coverage.get("contacts_with_gclid"))
+    contacts_without_gclid = _int_or_none(coverage.get("contacts_without_gclid"))
+    coverage_pct           = _float_or_none(coverage.get("gclid_coverage_pct") or coverage.get("coverage_pct"))
+
+    try:
+        raw_summary = json.dumps(coverage)
+    except (TypeError, ValueError):
+        raw_summary = None
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO gclid_coverage_snapshots (
+                        run_id, sync_batch_id, snapshot_date,
+                        total_contacts, contacts_with_gclid, contacts_without_gclid,
+                        coverage_pct, raw_summary
+                    ) VALUES (%s, %s, CURRENT_DATE, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        run_id,
+                        sync_batch_id,
+                        total_contacts,
+                        contacts_with_gclid,
+                        contacts_without_gclid,
+                        coverage_pct,
+                        raw_summary,
+                    ),
+                )
+        log.info(
+            "write_gclid_coverage_snapshot: inserted snapshot (run_id=%s coverage_pct=%s)",
+            run_id, coverage_pct,
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_gclid_coverage_snapshot failed (run_id=%s): %s", run_id, exc)
+        return 0

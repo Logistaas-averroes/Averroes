@@ -43,6 +43,8 @@ Protected endpoints (require authenticated session):
   GET  /api/action-queue          — Ranked human-review queue based on campaign, waste, geo, keyword, and data signals (requires auth).
   GET  /api/datasets/freshness    — Per-dataset sync state / watermark from sync_state table (requires auth).
   GET  /api/search-terms          — Paginated search-term fact rows from search_terms table (requires auth).
+  GET  /api/gclid-attribution     — Paginated GCLID attribution rows from gclid_attribution table (requires auth).
+  GET  /api/gclid-coverage        — GCLID coverage snapshots from gclid_coverage_snapshots table (requires auth).
 """
 
 import base64
@@ -3053,4 +3055,302 @@ def api_search_terms(
             "dataset": "search_terms",
             "note":    _SEARCH_TERMS_DATA_QUALITY_NOTE,
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# GCLID Attribution endpoint — cursor-paginated, read-only, auth required. (PR-ADS-044)
+# ---------------------------------------------------------------------------
+
+_GCLID_ATTR_MAX_LIMIT    = 500
+_GCLID_ATTR_DEFAULT_DAYS = 30
+_GCLID_ATTR_MAX_DAYS     = 365
+
+
+def _encode_gclid_cursor(created_at: datetime, row_id: int) -> str:
+    """Encode a keyset cursor for gclid_attribution as URL-safe base64 JSON (no padding)."""
+    payload = json.dumps(
+        {"created_at": created_at.isoformat(), "id": int(row_id)},
+        separators=(",", ":"),
+    )
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_gclid_cursor(token: str):
+    """Decode a base64 JSON cursor for gclid_attribution.
+
+    Returns (created_at_as_datetime, id_int) or raises ValueError on invalid input.
+    """
+    try:
+        padded = token + ("=" * (-len(token) % 4))
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+        obj = json.loads(decoded.decode("utf-8"))
+
+        created_at = datetime.fromisoformat(str(obj["created_at"]))
+        row_id = int(obj["id"])
+
+        if row_id <= 0:
+            raise ValueError("cursor id must be positive")
+
+        return created_at, row_id
+    except Exception as exc:
+        raise ValueError(f"Invalid cursor: {exc}") from exc
+
+
+@app.get("/api/gclid-attribution")
+def api_gclid_attribution(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=_GCLID_ATTR_DEFAULT_DAYS, description="Number of days to look back (1–365)"),
+    campaign: str = Query(default=None, description="Filter by exact campaign_name"),
+    gclid: str = Query(default=None, description="Filter by exact gclid value"),
+    contact_id: str = Query(default=None, description="Filter by contact_id"),
+    deal_id: str = Query(default=None, description="Filter by deal_id"),
+    match_status: str = Query(default=None, description="Filter by match_status"),
+    limit: int = Query(default=100, description="Page size (1–500)"),
+    cursor: str = Query(default=None, description="Opaque pagination cursor from previous response"),
+) -> dict[str, Any]:
+    """Return paginated GCLID attribution rows for the last N days.
+
+    Uses cursor/keyset pagination on (created_at DESC, id DESC).
+    Auth required. Read-only.
+    Source: gclid_attribution table (PR-ADS-044).
+    Does not upload offline conversions. Does not write to Google Ads or HubSpot.
+    """
+    days  = max(1, min(_GCLID_ATTR_MAX_DAYS, days))
+    limit = max(1, min(_GCLID_ATTR_MAX_LIMIT, limit))
+
+    _safe_empty: dict[str, Any] = {
+        "days": days,
+        "rows": [],
+        "pagination": {
+            "limit":       limit,
+            "next_cursor": None,
+            "has_more":    False,
+        },
+        "summary": {
+            "loaded_rows":                 0,
+            "matched_rows":                0,
+            "url_fallback_rows":           0,
+            "unmatched_rows":              0,
+            "total_deal_amount_usd_loaded": 0,
+        },
+        "db_unavailable": True,
+    }
+
+    # ── Decode cursor ─────────────────────────────────────────────────────
+    cursor_ts:  datetime | None = None
+    cursor_id:  int | None      = None
+    if cursor:
+        try:
+            cursor_ts, cursor_id = _decode_gclid_cursor(cursor)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # ── Campaign name normalisation ───────────────────────────────────────
+    campaign_key: str | None = None
+    if campaign:
+        from db.writers import _canonicalise_campaign_name  # noqa: PLC0415
+        campaign_key = _canonicalise_campaign_name(campaign.strip().lower())
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _safe_empty
+
+            with conn.cursor() as cur:
+                conditions: list[str] = [
+                    "created_at >= NOW() - INTERVAL '1 day' * %s",
+                ]
+                params: list[Any] = [days]
+
+                if cursor_ts is not None and cursor_id is not None:
+                    conditions.append(
+                        "(created_at < %s OR (created_at = %s AND id < %s))"
+                    )
+                    params += [cursor_ts, cursor_ts, cursor_id]
+
+                if campaign_key is not None:
+                    conditions.append("campaign_name = %s")
+                    params.append(campaign_key)
+
+                if gclid:
+                    conditions.append("gclid = %s")
+                    params.append(gclid.strip())
+
+                if contact_id:
+                    conditions.append("contact_id = %s")
+                    params.append(contact_id.strip())
+
+                if deal_id:
+                    conditions.append("deal_id = %s")
+                    params.append(deal_id.strip())
+
+                if match_status:
+                    conditions.append("match_status = %s")
+                    params.append(match_status.strip())
+
+                where_sql = " AND ".join(conditions)
+                fetch_limit = limit + 1
+                params.append(fetch_limit)
+
+                query = (
+                    "SELECT"
+                    " id, gclid, contact_id, deal_id,"
+                    " campaign_name, keyword, match_type, search_term,"
+                    " company, country, first_url,"
+                    " contact_created_at, deal_created_at, deal_close_date,"
+                    " deal_stage, deal_stage_label, deal_amount_usd,"
+                    " mql_status, status_category,"
+                    " match_status, match_source,"
+                    " created_at"
+                    " FROM gclid_attribution"
+                    " WHERE " + where_sql +
+                    " ORDER BY created_at DESC, id DESC"
+                    " LIMIT %s"
+                )
+                cur.execute(query, params)
+                raw_rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/gclid-attribution] database error: %s", exc, exc_info=True)
+        return _safe_empty
+
+    has_more = len(raw_rows) > limit
+    page_rows = raw_rows[:limit]
+
+    out: list[dict] = []
+    matched_count      = 0
+    url_fallback_count = 0
+    unmatched_count    = 0
+    total_deal_amount  = 0.0
+
+    for row in page_rows:
+        r = dict(zip(cols, row))
+        ms = r.get("match_status") or ""
+        if ms == "matched":
+            matched_count += 1
+        elif ms == "url_fallback":
+            url_fallback_count += 1
+        elif ms == "unmatched":
+            unmatched_count += 1
+
+        amt = r.get("deal_amount_usd")
+        if amt is not None:
+            total_deal_amount += float(amt)
+
+        out.append({
+            "id":                    r["id"],
+            "gclid":                 r["gclid"],
+            "contact_id":            r["contact_id"],
+            "deal_id":               r["deal_id"],
+            "company":               r["company"],
+            "country":               r["country"],
+            "campaign_name":         r["campaign_name"],
+            "keyword":               r["keyword"],
+            "match_type":            r["match_type"],
+            "search_term":           r["search_term"],
+            "first_url":             r["first_url"],
+            "contact_created_at":    r["contact_created_at"].isoformat() if r["contact_created_at"] else None,
+            "deal_created_at":       r["deal_created_at"].isoformat() if r["deal_created_at"] else None,
+            "deal_close_date":       r["deal_close_date"].isoformat() if r["deal_close_date"] else None,
+            "deal_stage":            r["deal_stage"],
+            "deal_stage_label":      r["deal_stage_label"],
+            "deal_amount_usd":       round(float(r["deal_amount_usd"]), 2) if r["deal_amount_usd"] is not None else None,
+            "mql_status":            r["mql_status"],
+            "status_category":       r["status_category"],
+            "match_status":          r["match_status"],
+            "match_source":          r["match_source"],
+            "created_at":            r["created_at"].isoformat() if r["created_at"] else None,
+        })
+
+    # Build next cursor from last row on this page
+    next_cursor_token: str | None = None
+    if has_more and page_rows:
+        last = dict(zip(cols, page_rows[-1]))
+        if last.get("created_at"):
+            next_cursor_token = _encode_gclid_cursor(last["created_at"], int(last["id"]))
+
+    return {
+        "days": days,
+        "rows": out,
+        "pagination": {
+            "limit":       limit,
+            "next_cursor": next_cursor_token,
+            "has_more":    has_more,
+        },
+        "summary": {
+            "loaded_rows":                  len(out),
+            "matched_rows":                 matched_count,
+            "url_fallback_rows":            url_fallback_count,
+            "unmatched_rows":               unmatched_count,
+            "total_deal_amount_usd_loaded": round(total_deal_amount, 2),
+        },
+    }
+
+
+@app.get("/api/gclid-coverage")
+def api_gclid_coverage(
+    user: dict = Depends(require_auth),
+    days: int = Query(default=30, description="Number of days to look back (1–365)"),
+) -> dict[str, Any]:
+    """Return GCLID coverage snapshot rows for the last N days.
+
+    Auth required. Read-only.
+    Source: gclid_coverage_snapshots table (PR-ADS-044).
+    Does not write to Google Ads or HubSpot.
+    """
+    days = max(1, min(365, days))
+
+    _safe_empty: dict[str, Any] = {
+        "days": days,
+        "rows": [],
+        "db_unavailable": True,
+    }
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _safe_empty
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        snapshot_date,
+                        total_contacts,
+                        contacts_with_gclid,
+                        contacts_without_gclid,
+                        coverage_pct,
+                        created_at
+                    FROM gclid_coverage_snapshots
+                    WHERE snapshot_date >= CURRENT_DATE - %s
+                    ORDER BY snapshot_date DESC, id DESC
+                    """,
+                    (days,),
+                )
+                raw_rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/gclid-coverage] database error: %s", exc, exc_info=True)
+        return _safe_empty
+
+    out: list[dict] = []
+    for row in raw_rows:
+        r = dict(zip(cols, row))
+        out.append({
+            "snapshot_date":           str(r["snapshot_date"]) if r["snapshot_date"] else None,
+            "total_contacts":          r["total_contacts"],
+            "contacts_with_gclid":     r["contacts_with_gclid"],
+            "contacts_without_gclid":  r["contacts_without_gclid"],
+            "coverage_pct":            float(r["coverage_pct"]) if r["coverage_pct"] is not None else None,
+            "created_at":              r["created_at"].isoformat() if r["created_at"] else None,
+        })
+
+    return {
+        "days": days,
+        "rows": out,
     }

@@ -126,6 +126,67 @@ def run_weekly_report():
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write after Step 5 failed: %s", db_exc)
 
+        # Step 5b: GCLID match + DB persistence
+        print("Step 5b/6: Running GCLID match and persisting attribution...")
+        try:
+            from connectors.gclid_match import run_gclid_match, save_output as gclid_save
+            from datetime import date as _date
+            window_end = _date.today()
+            window_start = window_end
+
+            gclid_batch_id = db_writers.start_sync_batch(
+                source="gclid",
+                dataset="matches",
+                sync_type="weekly",
+                # window_start = window_end: GCLID match reads from JSON files
+                # already written by the connector steps above; the "window"
+                # is the run-date snapshot, not a date range fetch.
+                date_from=window_start,
+                date_to=window_end,
+                run_id=run_id,
+            )
+            try:
+                gclid_result = run_gclid_match()
+                gclid_save(gclid_result)
+                matched_rows = gclid_result.get("matched", [])
+                coverage = gclid_result.get("coverage", {})
+
+                row_count = db_writers.write_gclid_attribution(
+                    run_id=run_id,
+                    matched_rows=matched_rows,
+                    sync_batch_id=gclid_batch_id or None,
+                )
+
+                if matched_rows and row_count == 0:
+                    raise RuntimeError(
+                        "GCLID attribution persistence wrote 0 rows for non-empty match output"
+                    )
+
+                db_writers.write_gclid_coverage_snapshot(
+                    run_id=run_id,
+                    coverage=coverage,
+                    sync_batch_id=gclid_batch_id or None,
+                )
+
+                if gclid_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=gclid_batch_id,
+                        status="success",
+                        row_count=row_count,
+                        last_source_date=window_end,
+                    )
+                log.info("[weekly] GCLID attribution: %d rows persisted", row_count)
+            except Exception as gclid_exc:  # noqa: BLE001
+                if gclid_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=gclid_batch_id,
+                        status="failed",
+                        error_message=str(gclid_exc)[:1000],
+                    )
+                log.warning("[weekly] GCLID attribution persistence failed: %s", gclid_exc)
+        except Exception as gclid_import_exc:  # noqa: BLE001
+            log.warning("[weekly] GCLID match step failed: %s", gclid_import_exc)
+
         # Step 6: Generate weekly report via advisor (deterministic by default)
         print("Step 6/6: Generating weekly report (deterministic advisor)...")
         from analysis.advisor import generate_weekly_report
