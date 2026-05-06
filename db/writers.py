@@ -1090,7 +1090,7 @@ def _make_attribution_key(row: dict) -> str:
     else:
         parts = f"{gclid}|{contact_id}||{campaign}|{keyword}|{match_status}|{first_url}"
 
-    return hashlib.sha1(parts.encode("utf-8")).hexdigest()  # noqa: S324
+    return hashlib.sha1(parts.encode("utf-8")).hexdigest()  # noqa: S324  # non-cryptographic dedup key
 
 
 def _parse_ts_or_none(value) -> Optional[str]:
@@ -1204,6 +1204,9 @@ def write_gclid_attribution(
             %s, %s
         )
         ON CONFLICT (attribution_key) DO UPDATE SET
+            -- Preserve existing run_id/sync_batch_id: older attribution rows
+            -- retain their original run context for audit trail continuity.
+            -- Only update if the existing value is NULL (first time population).
             run_id           = COALESCE(EXCLUDED.run_id,           gclid_attribution.run_id),
             sync_batch_id    = COALESCE(EXCLUDED.sync_batch_id,    gclid_attribution.sync_batch_id),
             campaign_name    = COALESCE(EXCLUDED.campaign_name,    gclid_attribution.campaign_name),

@@ -138,6 +138,9 @@ def run_weekly_report():
                 source="gclid",
                 dataset="matches",
                 sync_type="weekly",
+                # window_start = window_end: GCLID match reads from JSON files
+                # already written by the connector steps above; the "window"
+                # is the run-date snapshot, not a date range fetch.
                 date_from=window_start,
                 date_to=window_end,
                 run_id=run_id,
