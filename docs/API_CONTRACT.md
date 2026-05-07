@@ -1383,6 +1383,8 @@ Read-only attribution quality signals derived from stored GCLID evidence. (PR-AD
 - The panel auto-reloads on filter apply, filter clear, refresh, and time-range change.
 - The `/api/gclid-attribution` page may display quality signals sourced from this endpoint.
 - UI is read-only — no action buttons are rendered.
+- As of PR-ADS-049, the Campaign Investigation Drawer uses this endpoint with the `campaign` filter to render compact attribution quality signals.
+- The drawer overlay is read-only and does not upload offline conversions, modify Google Ads, or update HubSpot.
 
 ---
 
