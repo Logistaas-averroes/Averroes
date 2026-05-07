@@ -5,7 +5,7 @@
 **Phase:** 1.5 — Search-Term Intelligence / Audit
 **Owner:** Youssef Awwad
 **Audit date:** 2026-05-07
-**Status:** Audit-only. No code changed. No schema changed. No API changed.
+**Status:** Originally audit-only at time of PR-ADS-054: no code changed, no schema changed, no API changed. Amended post-audit to note that PR-ADS-055 introduces one new read-only endpoint: `GET /api/search-terms/ngrams`.
 
 **Implementation note (PR-ADS-055):** PR-ADS-055 implements the first backend prototype described by this audit: a read-only factual n-gram metrics endpoint (`GET /api/search-terms/ngrams`). It does not implement scoring, UI, materialization, or negative keyword candidate generation.
 

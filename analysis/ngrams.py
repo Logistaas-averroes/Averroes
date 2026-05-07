@@ -61,8 +61,9 @@ _ARABIC_DIACRITICS_RE = re.compile(r"[\u064b-\u065f]")
 # Arabic alef variants → plain alef (U+0627)
 _ALEF_VARIANTS_RE = re.compile(r"[\u0622\u0623\u0625\u0671]")
 
-# Keep only Arabic letters, Latin letters, ASCII digits, and spaces.
-# This removes punctuation while preserving meaningful content.
+# Keep only Arabic letters, ASCII Latin letters, ASCII digits, and spaces.
+# Accented Latin characters are normalized to ASCII via NFKD before this step,
+# so this pattern is applied only after accent stripping.
 _KEEP_CHARS_RE = re.compile(r"[^\u0600-\u06ff\u0750-\u077fa-zA-Z0-9 ]")
 
 # Arabic script detection: any character in the main Arabic Unicode block
@@ -96,17 +97,29 @@ def normalize_search_term(text: str) -> str:
       3. Remove Arabic tatweel (U+0640)
       4. Remove Arabic diacritics (U+064B–U+065F)
       5. Normalize Arabic alef variants (أ إ آ ٱ → ا)
-      6. Remove non-letter/non-digit/non-space characters
-         (preserves Arabic and Latin letters, ASCII digits, spaces)
-      7. Normalize repeated spaces to a single space
-      8. Strip again
+      6. Strip Latin diacritics via NFKD decomposition (á→a, é→e, ñ→n, ü→u, etc.)
+         Arabic characters are unaffected because their combining marks were already
+         removed in steps 3–5 and Arabic letters do not decompose in NFKD.
+      7. Remove remaining non-letter/non-digit/non-space characters
+         (preserves Arabic and ASCII-Latin letters, digits, spaces)
+      8. Normalize repeated spaces to a single space
+      9. Strip again
     """
     if not text:
         return ""
     text = text.lower().strip()
+    # Arabic cleanup
     text = text.replace(_TATWEEL, "")
     text = _ARABIC_DIACRITICS_RE.sub("", text)
     text = _ALEF_VARIANTS_RE.sub("\u0627", text)  # ا
+    # Latin accent normalization: NFKD decomposes e.g. á → a + combining-acute;
+    # we then drop all combining characters, converting accented Latin letters to
+    # their ASCII base forms.  Arabic base characters in NFKD are unchanged because
+    # their diacritics were already stripped above.
+    text = "".join(
+        ch for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
     text = _KEEP_CHARS_RE.sub(" ", text)
     text = _MULTI_SPACE_RE.sub(" ", text)
     return text.strip()

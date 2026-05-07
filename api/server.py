@@ -3450,6 +3450,13 @@ def api_search_terms_ngrams(
     n_list = _parse_n_param(n)
     n_set  = set(n_list)
 
+    # ── Validate min_spend ────────────────────────────────────────────────
+    if min_spend < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="min_spend must be greater than or equal to 0.",
+        )
+
     # ── Resolve effective waste state ──────────────────────────────────────
     effective_state = _resolve_waste_state_param(waste_state)
 
@@ -3466,6 +3473,7 @@ def api_search_terms_ngrams(
             "waste_state": effective_state,
             "n":           n_list,
             "limit":       limit,
+            "min_spend":   float(min_spend),
         },
         "rows": [],
         "summary": {
@@ -3520,11 +3528,11 @@ def api_search_terms_ngrams(
 
                 where_sql = " AND ".join(conditions)
 
-                # Fetch source rows ordered by spend DESC, source_date DESC, id DESC
-                # then cap to avoid scanning a very large table.
+                # Fetch cap+1 rows so we can accurately detect whether additional
+                # rows existed beyond the cap.  We trim back to cap after the fetch.
                 # All user-supplied values are passed via parameterized %s.
                 # where_sql is built exclusively from static string literals above.
-                params.append(_NGRAMS_SOURCE_ROW_CAP)
+                params.append(_NGRAMS_SOURCE_ROW_CAP + 1)
                 query = (
                     "SELECT"
                     " search_term, campaign_name, ad_group, keyword, match_type,"
@@ -3541,6 +3549,11 @@ def api_search_terms_ngrams(
     except Exception as exc:  # noqa: BLE001
         log.error("[api/search-terms/ngrams] database error: %s", exc, exc_info=True)
         return _safe_empty
+
+    # ── Cap detection: fetch cap+1, detect overflow, trim ─────────────────
+    row_cap_applied = len(raw_rows) > _NGRAMS_SOURCE_ROW_CAP
+    if row_cap_applied:
+        raw_rows = raw_rows[:_NGRAMS_SOURCE_ROW_CAP]
 
     # ── Convert to dicts ──────────────────────────────────────────────────
     from analysis.ngrams import aggregate_ngrams  # noqa: PLC0415
@@ -3560,6 +3573,7 @@ def api_search_terms_ngrams(
         "waste_state": effective_state,
         "n":           n_list,
         "limit":       limit,
+        "min_spend":   float(min_spend),
     }
     if campaign_key is not None:
         filters_out["campaign"] = campaign_key
@@ -3567,8 +3581,6 @@ def api_search_terms_ngrams(
         filters_out["match_type"] = match_type.strip()
     if q:
         filters_out["q"] = q.strip()
-    if min_spend > 0:
-        filters_out["min_spend"] = min_spend
 
     # ── data_quality block ────────────────────────────────────────────────
     data_quality: dict[str, Any] = {
@@ -3576,7 +3588,7 @@ def api_search_terms_ngrams(
         "dataset": "ngrams",
         "note":    _NGRAMS_DATA_QUALITY_NOTE,
     }
-    if source_count >= _NGRAMS_SOURCE_ROW_CAP:
+    if row_cap_applied:
         data_quality["row_cap_applied"] = True
         data_quality["row_cap"]         = _NGRAMS_SOURCE_ROW_CAP
 
