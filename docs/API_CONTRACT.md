@@ -1038,7 +1038,8 @@ Paginated raw search-term fact rows for the last N days.
 | `campaign` | string | — | Exact canonical campaign_name match |
 | `match_type` | string | — | Case-insensitive contains match on match_type |
 | `q` | string | — | Case-insensitive contains search on search_term |
-| `waste_only` | boolean | false | Return only `is_flagged_waste IS TRUE` rows |
+| `waste_state` | string | all | Analysis-state filter. Allowed: `all`, `flagged`, `clean`, `unanalyzed`. Aliases: `waste`=`flagged`, `analyzed_clean`=`clean`, `unanalysed`=`unanalyzed`. Invalid values return HTTP 400. |
+| `waste_only` | boolean | false | Deprecated. Equivalent to `waste_state=flagged` when `waste_state` is not provided. Preserved for backward compatibility. |
 | `min_spend` | numeric | — | Minimum spend_usd |
 | `limit` | integer | 100 | Page size (1–500) |
 | `cursor` | string | — | Opaque pagination cursor from previous response |
@@ -1054,6 +1055,9 @@ Paginated raw search-term fact rows for the last N days.
 ```json
 {
   "days": 14,
+  "filters": {
+    "waste_state": "unanalyzed"
+  },
   "rows": [
     {
       "id": 12345,
@@ -1082,7 +1086,7 @@ Paginated raw search-term fact rows for the last N days.
   "data_quality": {
     "source": "windsor",
     "dataset": "search_terms",
-    "note": "Current Windsor connector is confirmed up to last_14d search-term window unless plan supports more."
+    "note": "is_flagged_waste is tri-state: null = not analyzed, true = flagged waste, false = analyzed clean. Current Windsor connector is confirmed up to last_14d search-term window unless plan supports more."
   }
 }
 ```
@@ -1091,12 +1095,16 @@ Paginated raw search-term fact rows for the last N days.
 ```json
 {
   "days": 14,
+  "filters": {
+    "waste_state": "all"
+  },
   "rows": [],
   "pagination": { "limit": 100, "next_cursor": null, "has_more": false },
   "data_quality": { "source": "windsor", "dataset": "search_terms", "status": "db_unavailable" },
   "db_unavailable": true
 }
 ```
+The `filters` object is returned whenever the request can be parsed, including DB-unavailable fallback responses. `waste_state` reflects the effective resolved state (e.g. `"unanalyzed"` if `?waste_state=unanalyzed` was sent).
 
 **Invalid cursor response:**
 ```json
@@ -1105,22 +1113,24 @@ Paginated raw search-term fact rows for the last N days.
 HTTP 400.
 
 **Important scope notes:**
-- This endpoint returns the full search-term universe — not just flagged waste terms. Use `?waste_only=true` to filter waste rows.
+- This endpoint returns the full search-term universe — not just flagged waste terms. Use `?waste_state=flagged` to filter waste rows.
 - Does not include HubSpot lead quality or SQL enrichment.
 - Does not infer negative keyword candidates.
 - Does not push negative keywords to Google Ads.
-- `is_flagged_waste` is nullable tri-state — null means not yet analysed, not that the term is clean.
+- `is_flagged_waste` is nullable tri-state — `null` means not yet analysed, `true` means flagged waste, `false` means analysed clean. Do not treat `null` as clean.
 - Historical range depends on Windsor plan/connector limitation (confirmed up to last_14d).
 - Cursor is opaque to callers — do not parse or modify it. Invalid cursors return HTTP 400.
 - The `q` parameter uses case-insensitive contains matching on `search_term`.
 - At scale, broad contains-search should be backed by PostgreSQL trigram indexing (`pg_trgm`).
   Without `pg_trgm`, `ILIKE '%term%'` can become slower on large datasets.
+- `waste_only=true` is preserved for backward compatibility and maps to `waste_state=flagged` when `waste_state` is not provided.
+- Invalid `waste_state` values return HTTP 400 with `{ "detail": "Invalid waste_state. Allowed values: all, flagged, clean, unanalyzed." }`.
 
-**Frontend usage (as of PR-ADS-043):**
+**Frontend usage (as of PR-ADS-052):**
 - Rendered by the Search Terms page in the SPA.
 - UI uses cursor pagination via `pagination.next_cursor` — Load More button appends rows.
 - KPI cards show counts and spend for currently loaded rows only, not the total database count.
-- `clean` / `unanalyzed` analysis-state filtering is client-side only (applied to loaded rows); `waste_only=true` is sent to the API.
+- All analysis-state filters (`flagged`, `clean`, `unanalyzed`) are applied server-side via `waste_state`. Client-side state filtering has been removed.
 - Page is read-only: no negative keyword push, no marking/editing waste state, no campaign actions.
 
 ---

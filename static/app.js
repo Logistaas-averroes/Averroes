@@ -2019,8 +2019,13 @@ function buildSearchTermsParams({ cursor = null } = {}) {
   if (matchType) params.set("match_type", matchType);
   if (minSpend)  params.set("min_spend", minSpend);
 
-  if (wasteFilter === "waste") params.set("waste_only", "true");
-  // clean / unanalyzed are frontend-filtered only — API does not support waste_state filter yet.
+  if (wasteFilter === "waste") {
+    params.set("waste_state", "flagged");
+  } else if (wasteFilter === "clean") {
+    params.set("waste_state", "clean");
+  } else if (wasteFilter === "unanalyzed") {
+    params.set("waste_state", "unanalyzed");
+  }
 
   if (cursor) params.set("cursor", cursor);
 
@@ -2028,22 +2033,26 @@ function buildSearchTermsParams({ cursor = null } = {}) {
 }
 
 function getVisibleSearchTermRows() {
-  const wasteFilter = document.getElementById("search-terms-waste-filter")?.value;
-
-  if (wasteFilter === "clean") {
-    return searchTermRows.filter((r) => r.is_flagged_waste === false);
-  }
-  if (wasteFilter === "unanalyzed") {
-    return searchTermRows.filter((r) => r.is_flagged_waste === null || r.is_flagged_waste === undefined);
-  }
-  return searchTermRows;
+  // Analysis-state filtering is backend-owned (PR-ADS-052).
+  // This helper filters only client-side visibility flags (hidden/visible) so
+  // downstream "no results match filter" branches stay reachable for future
+  // client-side visibility features without reintroducing waste-state filtering.
+  return (Array.isArray(searchTermRows) ? searchTermRows : []).filter((row) => {
+    if (!row || typeof row !== "object") return true;
+    if (row.hidden === true) return false;
+    if (row._hidden === true) return false;
+    if (row.visible === false) return false;
+    return true;
+  });
 }
 
 function _updateSearchTermsFilterNote() {
-  const noteEl      = document.getElementById("search-terms-filter-note");
-  const wasteFilter = document.getElementById("search-terms-waste-filter")?.value;
+  // As of PR-ADS-052, analysis-state filters are backend-applied, so no client-side caveat
+  // is needed. The note element is kept in the DOM but permanently hidden so it can be
+  // repurposed for future informational messages without an HTML change.
+  const noteEl = document.getElementById("search-terms-filter-note");
   if (!noteEl) return;
-  noteEl.hidden = !(wasteFilter === "clean" || wasteFilter === "unanalyzed");
+  noteEl.hidden = true;
 }
 
 function _updateSearchTermsPaginationVisibility() {
@@ -4561,9 +4570,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (stWasteFilter) stWasteFilter.addEventListener("change", () => {
     _updateSearchTermsFilterNote();
-    // Always refetch — switching away from waste requires a server request without waste_only,
-    // switching into waste requires waste_only=true. Client-side clean/unanalyzed filtering
-    // then applies on top of the freshly loaded base dataset.
+    // Always refetch — backend applies waste_state filter server-side.
     loadSearchTerms({ reset: true });
   });
 
