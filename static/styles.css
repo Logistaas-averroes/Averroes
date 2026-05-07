@@ -3297,7 +3297,7 @@ a {
   border-color: rgba(18, 158, 245, 0.25);
 }
 
-/* Waste state mix cell */
+/* N-gram state mix cell */
 .ngram-state-mix {
   display: inline-flex;
   gap: 4px;
@@ -3342,6 +3342,12 @@ a {
     max-width: 100%;
   }
 }
+
+@media (max-width: 768px) {
+  .gclid-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
 
   .gclid-controls .waste-search-input,
   .gclid-controls .waste-filter-select {
