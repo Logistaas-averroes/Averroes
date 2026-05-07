@@ -2004,7 +2004,8 @@ function qualityScoreBadge(qs) {
 // ── Search Terms Forensics page ────────────────────────────────────────────
 
 let searchTermsSummary = null;
-let searchTermsSummaryStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+let searchTermsSummaryStatus = "idle"; // idle | loading | ok | db_unavailable | error
+let _searchTermsSummaryReqId = 0;
 
 function buildSearchTermsParams({ cursor = null } = {}) {
   const params = new URLSearchParams();
@@ -2043,12 +2044,18 @@ function buildSearchTermsSummaryParams() {
 }
 
 async function loadSearchTermsSummary() {
+  _searchTermsSummaryReqId += 1;
+  const reqId = _searchTermsSummaryReqId;
+
   searchTermsSummaryStatus = "loading";
   renderSearchTermsKPIs();
 
   try {
     const params = buildSearchTermsSummaryParams();
     const data = await fetchJSON(`/api/search-terms/summary?${params.toString()}`);
+
+    // Discard response if a newer request has already been dispatched.
+    if (reqId !== _searchTermsSummaryReqId) return;
 
     if (data.db_unavailable) {
       searchTermsSummaryStatus = "db_unavailable";
@@ -2060,6 +2067,7 @@ async function loadSearchTermsSummary() {
 
     renderSearchTermsKPIs();
   } catch (err) {
+    if (reqId !== _searchTermsSummaryReqId) return;
     searchTermsSummaryStatus = "error";
     searchTermsSummary = null;
     renderSearchTermsKPIs();

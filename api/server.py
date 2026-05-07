@@ -3287,14 +3287,15 @@ def api_search_terms_summary(
 
                 total_terms       = int(total_terms or 0)
                 unique_terms      = int(unique_terms or 0)
-                total_spend       = round(float(total_spend or 0), 2)
                 total_clicks      = int(total_clicks or 0)
                 total_impressions = int(total_impressions or 0)
-                google_conversions = round(float(google_conversions or 0), 2)
+                # Keep raw floats for rate calculations; round only at serialisation.
+                raw_spend         = float(total_spend or 0)
+                raw_conversions   = float(google_conversions or 0)
 
-                avg_cpc_usd = round(total_spend / total_clicks, 4) if total_clicks > 0 else None
+                avg_cpc_usd = round(raw_spend / total_clicks, 4) if total_clicks > 0 else None
                 ctr_pct = round(total_clicks / total_impressions * 100, 4) if total_impressions > 0 else None
-                google_conv_rate = round(google_conversions / total_clicks * 100, 4) if total_clicks > 0 else None
+                google_conv_rate = round(raw_conversions / total_clicks * 100, 4) if total_clicks > 0 else None
 
                 # ── Query 2: analysis_state breakdown (base scope only) ────
                 cur.execute(
@@ -3345,10 +3346,10 @@ def api_search_terms_summary(
         "summary": {
             "total_terms":                   total_terms,
             "unique_search_terms":           unique_terms,
-            "total_spend_usd":               total_spend,
+            "total_spend_usd":               round(raw_spend, 2),
             "total_clicks":                  total_clicks,
             "total_impressions":             total_impressions,
-            "google_conversions":            google_conversions,
+            "google_conversions":            round(raw_conversions, 2),
             "avg_cpc_usd":                   avg_cpc_usd,
             "ctr_pct":                       ctr_pct,
             "google_conversion_rate_pct":    google_conv_rate,
