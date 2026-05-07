@@ -2852,9 +2852,21 @@ _SEARCH_TERMS_DEFAULT_DAYS = 14
 _SEARCH_TERMS_MAX_DAYS    = 90
 
 _SEARCH_TERMS_DATA_QUALITY_NOTE = (
-    "Current Windsor connector is confirmed up to last_14d search-term window "
-    "unless plan supports more."
+    "is_flagged_waste is tri-state: null = not analyzed, true = flagged waste, "
+    "false = analyzed clean. Current Windsor connector is confirmed up to last_14d "
+    "search-term window unless plan supports more."
 )
+
+# Allowed waste_state values and their canonical form.
+_WASTE_STATE_ALIASES: dict[str, str] = {
+    "all":           "all",
+    "flagged":       "flagged",
+    "waste":         "flagged",
+    "clean":         "clean",
+    "analyzed_clean": "clean",
+    "unanalyzed":    "unanalyzed",
+    "unanalysed":    "unanalyzed",
+}
 
 
 def _encode_keyset_cursor(payload: dict) -> str:
@@ -2910,7 +2922,16 @@ def api_search_terms(
     campaign: str = Query(default=None, description="Filter by exact campaign_name"),
     match_type: str = Query(default=None, description="Filter by match_type (contains, case-insensitive)"),
     q: str = Query(default=None, description="Case-insensitive contains search on search_term"),
-    waste_only: bool = Query(default=False, description="If true, return only is_flagged_waste = TRUE rows"),
+    waste_state: str = Query(
+        default=None,
+        description=(
+            "Filter by analysis state. "
+            "Allowed: all, flagged, clean, unanalyzed. "
+            "Aliases: waste=flagged, analyzed_clean=clean, unanalysed=unanalyzed. "
+            "Default: all."
+        ),
+    ),
+    waste_only: bool = Query(default=False, description="Deprecated. If true, equivalent to waste_state=flagged. Ignored when waste_state is provided."),
     min_spend: float = Query(default=None, description="Minimum spend_usd threshold"),
     limit: int = Query(default=100, description="Page size (1–500)"),
     cursor: str = Query(default=None, description="Opaque pagination cursor from previous response"),
@@ -2924,6 +2945,20 @@ def api_search_terms(
     # ── Clamp / validate params ────────────────────────────────────────────
     days  = max(1, min(_SEARCH_TERMS_MAX_DAYS, days))
     limit = max(1, min(_SEARCH_TERMS_MAX_LIMIT, limit))
+
+    # ── Resolve effective waste state ──────────────────────────────────────
+    # Precedence: waste_state (if provided) > waste_only > default all
+    if waste_state is not None:
+        effective_state = _WASTE_STATE_ALIASES.get(waste_state.lower())
+        if effective_state is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid waste_state. Allowed values: all, flagged, clean, unanalyzed.",
+            )
+    elif waste_only:
+        effective_state = "flagged"
+    else:
+        effective_state = "all"
 
     _safe_empty: dict[str, Any] = {
         "days": days,
@@ -2987,8 +3022,13 @@ def api_search_terms(
                     conditions.append("search_term ILIKE %s")
                     params.append(f"%{q.strip()}%")
 
-                if waste_only:
+                if effective_state == "flagged":
                     conditions.append("is_flagged_waste IS TRUE")
+                elif effective_state == "clean":
+                    conditions.append("is_flagged_waste IS FALSE")
+                elif effective_state == "unanalyzed":
+                    conditions.append("is_flagged_waste IS NULL")
+                # "all" — no additional condition
 
                 if min_spend is not None:
                     conditions.append("spend_usd >= %s")
@@ -3055,6 +3095,9 @@ def api_search_terms(
 
     return {
         "days": days,
+        "filters": {
+            "waste_state": effective_state,
+        },
         "rows": out,
         "pagination": {
             "limit":       limit,
