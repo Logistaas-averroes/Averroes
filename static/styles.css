@@ -2471,6 +2471,10 @@ a {
     grid-template-columns: repeat(2, 1fr);
   }
 
+  .drawer-attribution-kpis {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
   .drawer-section {
     padding: var(--space-4) var(--space-5);
   }
@@ -2870,13 +2874,14 @@ a {
 
 /* ── Campaign Drawer Attribution Section ────────────────────────────────── */
 
+/* Semantic wrapper for the attribution preview block inside the campaign drawer. */
 .drawer-attribution-section {
-  /* inherits .drawer-section padding/border */
+  /* inherits .drawer-section layout — kept for targeted JS selection and future styling */
 }
 
 .drawer-attribution-kpis {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: var(--space-3);
   margin-bottom: var(--space-2);
 }
