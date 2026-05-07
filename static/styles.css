@@ -2946,7 +2946,7 @@ a {
 }
 
 .gclid-quality-card__status {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -3027,7 +3027,7 @@ a {
 .gclid-quality-freshness-note {
   flex: 1 1 100%;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   margin-top: var(--space-1);
 }
 

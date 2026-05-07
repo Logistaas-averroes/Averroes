@@ -3516,6 +3516,9 @@ def api_attribution_quality(
 
             with conn.cursor() as cur:
                 # ── Aggregate counts from gclid_attribution ──────────────
+                # agg_conditions contains only programmer-supplied literal strings with %s
+                # placeholders; all user input (days, campaign_key) goes into agg_params.
+                # The WHERE clause is never built from raw request data.
                 agg_conditions: list[str] = [
                     "created_at >= NOW() - INTERVAL '1 day' * %s",
                 ]
