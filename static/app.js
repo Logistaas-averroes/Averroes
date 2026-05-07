@@ -3638,8 +3638,6 @@ async function openCampaignDrawer(campaignName) {
     // Attribution preview and quality failures must not block the drawer.
     campaignAttributionStatus = "loading";
     campaignAttributionRows = [];
-    campaignAttributionQualityStatus = "loading";
-    campaignAttributionQuality = null;
 
     const [detailResult, _attrResult, _qualityResult] = await Promise.allSettled([
       fetchJSON(
