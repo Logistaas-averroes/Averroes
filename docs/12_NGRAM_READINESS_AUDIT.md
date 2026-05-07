@@ -9,6 +9,8 @@
 
 **Implementation note (PR-ADS-055):** PR-ADS-055 implements the first backend prototype described by this audit: a read-only factual n-gram metrics endpoint (`GET /api/search-terms/ngrams`). It does not implement scoring, UI, materialization, or negative keyword candidate generation.
 
+**UI note (PR-ADS-056):** PR-ADS-056 adds the first read-only N-Gram UI page using the backend prototype endpoint. It does not add scoring, materialization, negative keyword candidates, or write actions.
+
 Depends on: PR-ADS-053
 Unblocks: PR-ADS-055 — N-Gram Analysis Backend Prototype
 
