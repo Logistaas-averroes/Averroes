@@ -144,7 +144,7 @@ Before tokenization, each `search_term` string should be normalized as follows:
 4. **Remove punctuation** where safe — commas, periods, exclamation marks, question marks, semicolons, colons
 5. **Preserve meaningful symbols** only where they carry semantic weight: `+` (broad-match modifier historical usage), `#` (if appearing in software/dev terms), `/` (if appearing in path-like terms), `-` (if used as a compound joiner and not a list separator)
 6. **Normalize Arabic diacritics** — remove tashkeel (harakat) if Arabic support is included; see Section 6 for full Arabic normalization rules
-7. **Normalize accented Latin characters** — normalize common accented characters (é → e, ñ → n) only if doing so does not break Spanish stopword matching or meaningful differentiation; document the decision either way
+7. **Normalize accented Latin characters** — language detection (Section 6) must be performed **before** accent normalization; once the language is determined, accented characters may be normalized for tokenization (é → e, ñ → n); normalizing before detection would destroy Spanish script signals used for language inference
 
 ### Token length filtering
 
@@ -222,10 +222,10 @@ Present in Middle Eastern market queries (Jordan, Gulf region, North Africa). Ar
 
 Implementing a full language detection library is **not required** in the first prototype.
 
-**Recommended first version — script-based inference:**
+**Recommended first version — script and character-based inference:**
 
 1. If the search term contains Arabic-script characters (Unicode block U+0600–U+06FF), classify as `arabic`
-2. If the search term contains Latin characters with Spanish-language stopword tokens, classify as `spanish`
+2. If the search term contains Spanish-specific characters (`ñ`, `¿`, `¡`) or common Spanish-only content words that are not language-neutral (`gratis`, `envios`, `logistica`, `flete`, `aduanas`), classify as `spanish` — **do not rely on stopwords for detection**, as this creates a circular dependency (you need the language to pick the stopword list, but you are using the stopword list to detect the language)
 3. Otherwise, classify as `english` (default)
 
 **Alternative acceptable approach:** Skip per-row language classification entirely in the first prototype and use a combined stopword list that includes English + Spanish + Arabic stopwords. Document this as a known simplification. Language classification can be added in PR-ADS-056 or PR-ADS-057.
@@ -293,7 +293,7 @@ For each n-gram identified, the analysis should compute the following metrics:
 | `unanalyzed_rows` | Count of rows where `is_flagged_waste IS NULL` |
 | `flagged_waste_spend_usd` | Sum of `spend_usd` where `is_flagged_waste = TRUE` |
 | `campaigns_sample` | Array of up to 5 distinct campaign names for display |
-| `search_terms_sample` | Array of up to 5 distinct raw search term strings for context |
+| `search_terms_sample` | Array of up to 5 distinct raw search term strings for context, selected by highest `spend_usd` descending |
 
 > **Important:** `google_conversions` are Google Ads platform conversion events. They are not HubSpot SQL-quality leads. A non-zero conversion count does not indicate pipeline quality. Any future CRM quality join must be explicitly designed and is out of scope for this phase and the next.
 
