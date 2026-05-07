@@ -2560,8 +2560,16 @@ async function loadGclidCoverageForAttribution() {
 
     const latest = rows.reduce((currentLatest, row) => {
       if (!currentLatest) return row;
-      const currentTs = new Date(currentLatest.created_at || currentLatest.snapshot_date || 0).getTime();
-      const rowTs = new Date(row.created_at || row.snapshot_date || 0).getTime();
+      const currentTs = (() => {
+        const value = currentLatest.created_at || currentLatest.snapshot_date;
+        const ts = value ? new Date(value).getTime() : NaN;
+        return Number.isFinite(ts) ? ts : -Infinity;
+      })();
+      const rowTs = (() => {
+        const value = row.created_at || row.snapshot_date;
+        const ts = value ? new Date(value).getTime() : NaN;
+        return Number.isFinite(ts) ? ts : -Infinity;
+      })();
       return rowTs > currentTs ? row : currentLatest;
     }, null);
 
