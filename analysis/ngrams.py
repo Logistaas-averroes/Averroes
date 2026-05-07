@@ -97,9 +97,10 @@ def normalize_search_term(text: str) -> str:
       3. Remove Arabic tatweel (U+0640)
       4. Remove Arabic diacritics (U+064B–U+065F)
       5. Normalize Arabic alef variants (أ إ آ ٱ → ا)
-      6. Strip Latin diacritics via NFKD decomposition (á→a, é→e, ñ→n, ü→u, etc.)
-         Arabic characters are unaffected because their combining marks were already
-         removed in steps 3–5 and Arabic letters do not decompose in NFKD.
+      6. Decompose Latin diacritics via NFKD and strip combining marks
+         (á→a, é→e, ñ→n, ü→u, etc.). Arabic characters are unaffected
+         because their combining marks were already removed in steps 3–5
+         and Arabic base letters do not decompose in NFKD.
       7. Remove remaining non-letter/non-digit/non-space characters
          (preserves Arabic and ASCII-Latin letters, digits, spaces)
       8. Normalize repeated spaces to a single space

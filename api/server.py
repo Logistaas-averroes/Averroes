@@ -3451,7 +3451,8 @@ def api_search_terms_ngrams(
     n_set  = set(n_list)
 
     # ── Validate min_spend ────────────────────────────────────────────────
-    if min_spend < 0:
+    import math as _math  # noqa: PLC0415
+    if _math.isnan(min_spend) or min_spend < 0:
         raise HTTPException(
             status_code=400,
             detail="min_spend must be greater than or equal to 0.",
