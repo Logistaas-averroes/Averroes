@@ -2928,10 +2928,6 @@ a {
 
 /* ── Attribution Quality (PR-ADS-048) ─────────────────────────────────────── */
 
-.gclid-quality-summary {
-  /* wrapper for cards + metric row */
-}
-
 .gclid-quality-cards {
   display: flex;
   flex-wrap: wrap;

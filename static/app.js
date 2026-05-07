@@ -2674,7 +2674,10 @@ function renderGclidQuality() {
     </div>`;
 }
 
-
+async function loadGclidCoverageForAttribution() {
+  gclidCoverageStatus = "loading";
+  gclidCoverageRows = [];
+  renderGclidCoverageCards();
 
   try {
     const data = await fetchJSON(`/api/gclid-coverage?days=${getSelectedDays()}`);
