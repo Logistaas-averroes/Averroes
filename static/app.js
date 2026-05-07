@@ -3680,15 +3680,29 @@ async function openCampaignDrawer(campaignName) {
     if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
     renderCampaignDrawer(detail);
 
-    loadCampaignAttributionPreview(campaignName, requestId).then(() => {
-      if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
-      renderCampaignDrawer(detail);
-    });
+    loadCampaignAttributionPreview(campaignName, requestId)
+      .then(() => {
+        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+        renderCampaignDrawer(detail);
+      })
+      .catch(() => {
+        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+        campaignAttributionStatus = "error";
+        campaignAttributionRows = [];
+        renderCampaignDrawer(detail);
+      });
 
-    loadCampaignAttributionQuality(campaignName, requestId).then(() => {
-      if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
-      renderCampaignDrawer(detail);
-    });
+    loadCampaignAttributionQuality(campaignName, requestId)
+      .then(() => {
+        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+        renderCampaignDrawer(detail);
+      })
+      .catch(() => {
+        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+        campaignAttributionQualityStatus = "error";
+        campaignAttributionQuality = null;
+        renderCampaignDrawer(detail);
+      });
   } catch (err) {
     if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
     if (bodyEl) {
