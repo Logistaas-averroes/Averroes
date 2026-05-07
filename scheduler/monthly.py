@@ -10,10 +10,11 @@ Set ADVISOR_MODE=claude to use Claude API (requires ANTHROPIC_API_KEY).
 
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from scheduler.delivery import deliver_report
 from scheduler.run_history import start_run, finish_run
+from scheduler.sync_utils import max_source_date, persistence_succeeded
 import db.writers as db_writers
 
 load_dotenv()
@@ -30,41 +31,6 @@ REQUIRED_DATA_FILES = [
     "data/ads_search_terms.json",
     "data/crm_contacts.json",
 ]
-
-
-def _parse_date_safe(value):
-    if value is None:
-        return None
-    if isinstance(value, date):
-        return value
-    try:
-        return date.fromisoformat(str(value)[:10].strip())
-    except (ValueError, TypeError):
-        return None
-
-
-def _max_source_date(rows, fallback_date):
-    dates = []
-    for row in rows or []:
-        props = row.get("properties") or {}
-        value = (
-            row.get("date") or row.get("source_date") or row.get("createdate")
-            or props.get("date") or props.get("source_date") or props.get("createdate")
-        )
-        parsed = _parse_date_safe(value)
-        if parsed:
-            dates.append(parsed)
-    return max(dates) if dates else fallback_date
-
-
-def _persistence_succeeded(expected_rows, written_count) -> bool:
-    expected_count = len(expected_rows or [])
-    if written_count is None:
-        return False
-    if expected_count == 0:
-        return written_count == 0
-    return written_count > 0
-
 
 def run_monthly_report():
     log.info("=" * 60)
@@ -176,12 +142,12 @@ def run_monthly_report():
                 search_term_rows=search_terms,
                 sync_batch_id=st_batch_id or None,
             )
-            if not _persistence_succeeded(search_terms, st_count):
+            if not persistence_succeeded(search_terms, st_count):
                 raise RuntimeError(
                     f"Monthly search_terms persistence failed or wrote 0 rows "
                     f"for {len(search_terms or [])} fetched rows"
                 )
-            last_source_date = _max_source_date(search_terms, fallback_date=window_end)
+            last_source_date = max_source_date(search_terms, fallback_date=window_end)
             if st_batch_id:
                 db_writers.finish_sync_batch(
                     batch_id=st_batch_id,

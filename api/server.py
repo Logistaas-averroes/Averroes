@@ -3081,7 +3081,7 @@ _GCLID_ATTR_MAX_DAYS     = 365
 def _encode_gclid_cursor(created_at: datetime, row_id: int) -> str:
     """Encode a keyset cursor for gclid_attribution as URL-safe base64 JSON (no padding)."""
     return _encode_keyset_cursor({
-        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+        "created_at": created_at.isoformat() if isinstance(created_at, datetime) else str(created_at),
         "id": int(row_id),
     })
 
