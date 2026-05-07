@@ -29,7 +29,12 @@ def max_source_date(rows, fallback_date):
 
 
 def persistence_succeeded(expected_rows, written_count) -> bool:
-    """Return True only when local DB persistence appears successful."""
+    """Return True only when local DB persistence appears successful.
+
+    Zero rows written is acceptable only when zero rows were fetched.
+    If rows were fetched, the write count must be positive.
+    A None write count is always treated as failure.
+    """
     expected_count = len(expected_rows or [])
     if written_count is None:
         return False

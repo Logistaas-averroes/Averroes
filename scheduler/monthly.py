@@ -126,7 +126,7 @@ def run_monthly_report():
         # Note: monthly pull_search_terms(days_back=30) maps to Windsor last_14d window;
         # do not claim full 30-day coverage — write whatever Windsor returns.
         try:
-            st_batch_id = 0
+            st_batch_id = None
             window_end = datetime.utcnow().date()
             window_start = window_end - timedelta(days=13)
             st_batch_id = db_writers.start_sync_batch(
