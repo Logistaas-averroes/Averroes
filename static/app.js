@@ -88,6 +88,8 @@ let gclidQualityData = null;
 // Campaign drawer attribution preview state
 let campaignAttributionRows = [];
 let campaignAttributionStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+let campaignAttributionQuality = null;
+let campaignAttributionQualityStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
 
 // GCLID Attribution page prefill (set when navigating from campaign drawer)
 let gclidAttributionPrefill = null;
@@ -3538,8 +3540,20 @@ async function loadGclidCoverage() {
 
 let _drawerOpenCampaign = null;  // campaign name string currently shown in drawer, or null
 let _drawerPreviousFocus = null; // element to restore focus to on close
+let activeCampaignDrawerName = null;
+let campaignAttributionQualityRequestId = 0;
 
-async function loadCampaignAttributionPreview(campaignName) {
+function isCurrentCampaignDrawerRequest(campaignName, requestId) {
+  if (activeCampaignDrawerName !== campaignName) return false;
+  if (requestId !== null && requestId !== campaignAttributionQualityRequestId) return false;
+  return true;
+}
+
+async function loadCampaignAttributionPreview(campaignName, requestId = null) {
+  if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+    return { status: "stale", rows: [], summary: null };
+  }
+
   campaignAttributionStatus = "loading";
   campaignAttributionRows = [];
 
@@ -3550,6 +3564,10 @@ async function loadCampaignAttributionPreview(campaignName) {
     params.set("campaign", campaignName);
 
     const data = await fetchJSON(`/api/gclid-attribution?${params.toString()}`);
+
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+      return { status: "stale", rows: [], summary: null };
+    }
 
     if (data.db_unavailable) {
       campaignAttributionStatus = "db_unavailable";
@@ -3567,15 +3585,60 @@ async function loadCampaignAttributionPreview(campaignName) {
       pagination: data.pagination || null,
     };
   } catch (_) {
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+      return { status: "stale", rows: [], summary: null };
+    }
     campaignAttributionStatus = "error";
     campaignAttributionRows = [];
     return { status: campaignAttributionStatus, rows: [], summary: null };
   }
 }
 
+async function loadCampaignAttributionQuality(campaignName, requestId = null) {
+  if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+    return { status: "stale", data: null };
+  }
+
+  campaignAttributionQualityStatus = "loading";
+  campaignAttributionQuality = null;
+
+  try {
+    const params = new URLSearchParams();
+    params.set("days", String(getSelectedDays()));
+    params.set("campaign", campaignName);
+
+    const data = await fetchJSON(`/api/attribution/quality?${params.toString()}`);
+
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+      return { status: "stale", data: null };
+    }
+
+    if (data.db_unavailable) {
+      campaignAttributionQualityStatus = "db_unavailable";
+      campaignAttributionQuality = null;
+      return { status: campaignAttributionQualityStatus, data: null };
+    }
+
+    campaignAttributionQuality = data;
+    campaignAttributionQualityStatus =
+      data && data.summary && Number(data.summary.loaded_scope_rows) > 0 ? "ok" : "empty";
+    return { status: campaignAttributionQualityStatus, data };
+  } catch (_) {
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+      return { status: "stale", data: null };
+    }
+    campaignAttributionQualityStatus = "error";
+    campaignAttributionQuality = null;
+    return { status: campaignAttributionQualityStatus, data: null };
+  }
+}
+
 async function openCampaignDrawer(campaignName) {
   if (!campaignName) return;
   _drawerOpenCampaign = campaignName;
+  activeCampaignDrawerName = campaignName;
+  campaignAttributionQualityRequestId += 1;
+  const requestId = campaignAttributionQualityRequestId;
 
   const overlay   = document.getElementById("campaign-drawer-overlay");
   const drawer    = document.getElementById("campaign-drawer");
@@ -3604,34 +3667,44 @@ async function openCampaignDrawer(campaignName) {
   document.addEventListener("keydown", _drawerKeyHandler);
 
   try {
-    // Fetch campaign detail and attribution preview in parallel.
-    // Attribution failure must not block the drawer.
+    // Campaign detail is primary payload. Attribution preview/quality are secondary.
     campaignAttributionStatus = "loading";
     campaignAttributionRows = [];
+    campaignAttributionQualityStatus = "loading";
+    campaignAttributionQuality = null;
 
-    const [detailResult, _attrResult] = await Promise.allSettled([
-      fetchJSON(
-        `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${getSelectedDays()}`
-      ),
-      loadCampaignAttributionPreview(campaignName),
-    ]);
+    const detail = await fetchJSON(
+      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${getSelectedDays()}`
+    );
 
-    // Guard stale response: drawer may have been closed or switched while fetching
-    if (_drawerOpenCampaign !== campaignName) return;
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+    renderCampaignDrawer(detail);
 
-    if (detailResult.status === "rejected") {
-      if (bodyEl) {
-        bodyEl.innerHTML = `
-          <div class="drawer-section">
-            <p class="drawer-empty">Could not load campaign detail — ${escapeHtml((detailResult.reason && detailResult.reason.message) || "network error")}.</p>
-          </div>`;
-      }
-      return;
-    }
+    loadCampaignAttributionPreview(campaignName, requestId)
+      .then(() => {
+        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+        renderCampaignDrawer(detail);
+      })
+      .catch(() => {
+        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+        campaignAttributionStatus = "error";
+        campaignAttributionRows = [];
+        renderCampaignDrawer(detail);
+      });
 
-    renderCampaignDrawer(detailResult.value);
+    loadCampaignAttributionQuality(campaignName, requestId)
+      .then(() => {
+        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+        renderCampaignDrawer(detail);
+      })
+      .catch(() => {
+        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+        campaignAttributionQualityStatus = "error";
+        campaignAttributionQuality = null;
+        renderCampaignDrawer(detail);
+      });
   } catch (err) {
-    if (_drawerOpenCampaign !== campaignName) return;
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
     if (bodyEl) {
       bodyEl.innerHTML = `
         <div class="drawer-section">
@@ -3643,6 +3716,7 @@ async function openCampaignDrawer(campaignName) {
 
 function closeCampaignDrawer() {
   _drawerOpenCampaign = null;
+  activeCampaignDrawerName = null;
   const overlay = document.getElementById("campaign-drawer-overlay");
   const drawer  = document.getElementById("campaign-drawer");
   if (overlay) { overlay.hidden = true; overlay.setAttribute("aria-hidden", "true"); }
@@ -3936,7 +4010,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             Copy waste terms from this campaign
           </button>
-          <p class="drawer-source-note" style="margin-top:var(--space-2)">Review-only — no push action.</p>
+          <p class="drawer-source-note" style="margin-top:var(--space-2)">Review-only — no action controls.</p>
         </div>
       </div>`;
   }
@@ -3977,6 +4051,66 @@ function _appendDrawerEvidenceSections(container, data, lq) {
       </div>`;
   }
 
+  function renderCampaignAttributionQualityOverlay() {
+    const headerHtml = `
+      <div class="drawer-attribution-quality">
+        <div class="drawer-attribution-quality__title">Attribution Quality</div>
+        <p class="drawer-attribution-quality__subtitle">Campaign-scoped evidence quality based on stored GCLID rows.</p>`;
+
+    if (campaignAttributionQualityStatus === "loading" || campaignAttributionQualityStatus === "idle") {
+      return `${headerHtml}<p class="drawer-empty">Loading attribution quality…</p></div>`;
+    }
+
+    if (campaignAttributionQualityStatus === "db_unavailable") {
+      return `${headerHtml}<p class="drawer-empty">Attribution quality temporarily unavailable — database offline.</p></div>`;
+    }
+
+    if (campaignAttributionQualityStatus === "error") {
+      return `${headerHtml}<p class="drawer-empty">Could not load attribution quality for this campaign.</p></div>`;
+    }
+
+    if (campaignAttributionQualityStatus === "empty" || !campaignAttributionQuality) {
+      return `${headerHtml}<p class="drawer-empty">No attribution quality signals available for this campaign in the selected window.</p></div>`;
+    }
+
+    const qualityData = campaignAttributionQuality || {};
+    const rates = qualityData.rates || {};
+    const signals = qualityData.signals || [];
+    const signalByKey = {};
+    signals.forEach((signal) => {
+      if (signal && signal.key) signalByKey[String(signal.key)] = signal;
+    });
+
+    const cards = [
+      { key: "match_strength", label: "Match Strength" },
+      { key: "url_fallback_reliance", label: "URL Fallback Reliance" },
+      { key: "deal_linkage", label: "Deal Linkage" },
+      { key: "freshness", label: "Freshness" },
+    ];
+
+    const cardsHtml = cards.map((card) => {
+      const sig = signalByKey[card.key] || {};
+      const statusCls = _gclidQualityStatusClass(sig.status || "unknown");
+      const statusLabel = _gclidQualityStatusLabel(sig.status || "unknown");
+      const detail = sig.detail || "No quality detail available for this signal.";
+      return `
+        <div class="gclid-quality-card drawer-attribution-quality-card ${statusCls}">
+          <div class="gclid-quality-card__status">${escapeHtml(statusLabel)}</div>
+          <div class="gclid-quality-card__label">${escapeHtml(card.label)}</div>
+          <div class="gclid-quality-card__detail">${escapeHtml(detail)}</div>
+        </div>`;
+    }).join("");
+
+    const fmtPct = (value) => (value == null ? "—" : `${Number(value).toFixed(0)}%`);
+    const metricsLine = `Matched ${fmtPct(rates.matched_rate_pct)} · URL fallback ${fmtPct(rates.url_fallback_rate_pct)} · Deal link ${fmtPct(rates.deal_link_rate_pct)} · Amount coverage ${fmtPct(rates.deal_amount_coverage_pct)}`;
+
+    return `
+      ${headerHtml}
+        <div class="drawer-attribution-quality-grid">${cardsHtml}</div>
+        <p class="drawer-attribution-quality-metrics">${escapeHtml(metricsLine)}</p>
+      </div>`;
+  }
+
   // ── GCLID Attribution Preview ──────────────────────────────────────────
   let attrHtml;
   if (campaignAttributionStatus === "loading") {
@@ -3984,18 +4118,21 @@ function _appendDrawerEvidenceSections(container, data, lq) {
       <div class="drawer-section drawer-attribution-section">
         <div class="drawer-section__title">GCLID Attribution</div>
         <p class="drawer-empty">Loading attribution evidence…</p>
+        ${renderCampaignAttributionQualityOverlay()}
       </div>`;
   } else if (campaignAttributionStatus === "db_unavailable") {
     attrHtml = `
       <div class="drawer-section drawer-attribution-section">
         <div class="drawer-section__title">GCLID Attribution</div>
         <p class="drawer-empty">GCLID attribution temporarily unavailable — database offline.</p>
+        ${renderCampaignAttributionQualityOverlay()}
       </div>`;
   } else if (campaignAttributionStatus === "error") {
     attrHtml = `
       <div class="drawer-section drawer-attribution-section">
         <div class="drawer-section__title">GCLID Attribution</div>
         <p class="drawer-empty">Could not load GCLID attribution for this campaign.</p>
+        ${renderCampaignAttributionQualityOverlay()}
       </div>`;
   } else if (campaignAttributionStatus === "empty" || !campaignAttributionRows.length) {
     attrHtml = `
@@ -4003,6 +4140,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
         <div class="drawer-section__title">GCLID Attribution</div>
         <p class="drawer-empty">No GCLID attribution rows found for this campaign in the selected window.</p>
         <p class="drawer-source-note" style="margin-top:var(--space-3)">Campaign-linked Google click IDs connected to HubSpot contacts/deals.</p>
+        ${renderCampaignAttributionQualityOverlay()}
         <div style="margin-top:var(--space-3)">
           <button class="btn btn--secondary drawer-gclid-fullpage-btn" type="button">View full GCLID Attribution page</button>
         </div>
@@ -4076,8 +4214,9 @@ function _appendDrawerEvidenceSections(container, data, lq) {
         </div>
         <p class="drawer-source-note" style="margin-top:var(--space-3)">
           Google click evidence · HubSpot deal/contact evidence · Loaded preview values only.
-          Not qualified · Not revenue proven · Not OCT ready.
+          Evidence context only · read-only view.
         </p>
+        ${renderCampaignAttributionQualityOverlay()}
         <div style="margin-top:var(--space-3)">
           <button class="btn btn--secondary drawer-gclid-fullpage-btn" type="button">View full GCLID Attribution page</button>
         </div>
