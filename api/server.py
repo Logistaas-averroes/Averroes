@@ -3506,7 +3506,7 @@ def api_search_terms_ngrams(
                     conditions.append("search_term ILIKE %s")
                     params.append(f"%{q.strip()}%")
 
-                if min_spend and min_spend > 0:
+                if min_spend > 0:
                     conditions.append("spend_usd >= %s")
                     params.append(min_spend)
 
@@ -3567,7 +3567,7 @@ def api_search_terms_ngrams(
         filters_out["match_type"] = match_type.strip()
     if q:
         filters_out["q"] = q.strip()
-    if min_spend and min_spend > 0:
+    if min_spend > 0:
         filters_out["min_spend"] = min_spend
 
     # ── data_quality block ────────────────────────────────────────────────
