@@ -114,7 +114,7 @@ Group recurring intent patterns for future reporting and editorial annotation. T
 
 ---
 
-## 4. Non-Goals
+## 4. Hard Boundaries / Prohibited Actions
 
 This audit and all implementations derived from it must respect the following hard boundaries:
 
@@ -153,7 +153,7 @@ After splitting on whitespace:
 - **Ignore single-character tokens** except in cases where the character carries established meaning (e.g., `+` as an operator)
 - **Ignore numeric-only tokens** unless the number appears to carry industry-relevant meaning (e.g., HS codes, container sizes — low priority for first prototype)
 - **Minimum token length:** `>= 2` characters for Latin scripts; `>= 2` characters for Arabic script (many meaningful Arabic words are 2–3 characters after normalization)
-- **Maximum token length for filtering:** no hard upper limit; very long tokens (> 30 characters) are likely URLs or malformed strings and should be excluded
+- **Maximum token length for filtering:** exclude tokens `> 30` characters in the first prototype; these are likely URLs, tracking fragments, or malformed strings
 
 ### N-gram lengths
 
@@ -385,7 +385,7 @@ Do not build the materialized table or scheduler integration in this audit PR.
 | `days` | integer | 14 | Date window in days from today |
 | `campaign` | string | (all) | Filter to specific campaign name |
 | `match_type` | string | (all) | Filter to specific match type |
-| `waste_state` | string | `all` | `all`, `waste`, `clean`, `unanalyzed` |
+| `waste_state` | string | `all` | `flagged`, `clean`, `unanalyzed`, `all` (`waste` accepted as an alias for `flagged`) |
 | `q` | string | (none) | Substring search filter on n-gram text |
 | `min_spend` | decimal | 0 | Minimum total spend threshold |
 | `n` | string | `1,2,3` | Comma-separated n-gram lengths to return |
@@ -423,9 +423,7 @@ Do not build the materialized table or scheduler integration in this audit PR.
       "unanalyzed_rows": 7,
       "flagged_waste_spend_usd": 310.00,
       "campaigns_sample": ["global - broad", "latam - broad"],
-      "search_terms_sample": ["software de logistica gratis", "sistema de envios gratis"],
-      "attention_status": "review",
-      "evidence_note": "Repeated term with spend and no Google conversions. Requires human review."
+      "search_terms_sample": ["software de logistica gratis", "sistema de envios gratis"]
     }
   ],
   "data_quality": {
@@ -443,6 +441,8 @@ Do not build the materialized table or scheduler integration in this audit PR.
 - No `create_negative` fields
 - No `recommended_negative` fields
 - No write-command fields of any kind
+
+> **Note:** `attention_status`, `review_status`, or evidence-label fields should be deferred until a later scoring/readiness PR. PR-ADS-055 should return factual n-gram metrics only.
 
 ---
 
@@ -463,10 +463,10 @@ CREATE TABLE IF NOT EXISTS search_term_ngrams (
     language            TEXT,
     row_count           INTEGER     DEFAULT 0,
     unique_search_terms INTEGER     DEFAULT 0,
-    total_spend_usd     NUMERIC(12, 2) DEFAULT 0,
+    total_spend_usd     NUMERIC(10, 2) DEFAULT 0,
     total_clicks        INTEGER     DEFAULT 0,
     total_impressions   INTEGER     DEFAULT 0,
-    google_conversions  NUMERIC(10, 2) DEFAULT 0,
+    google_conversions  NUMERIC(8, 2) DEFAULT 0,
     flagged_waste_rows  INTEGER     DEFAULT 0,
     clean_rows          INTEGER     DEFAULT 0,
     unanalyzed_rows     INTEGER     DEFAULT 0,
@@ -478,6 +478,8 @@ CREATE TABLE IF NOT EXISTS search_term_ngrams (
 ### Recommendation
 
 Do not build this table until after a prototype confirms value. The first implementation in PR-ADS-055 should use dynamic backend analysis or a temporary analysis module. If the prototype proves useful, PR-ADS-057 can introduce materialization.
+
+> **Note:** The numeric types above intentionally mirror current `search_terms` conventions unless a later volume/performance audit justifies wider precision.
 
 ---
 
