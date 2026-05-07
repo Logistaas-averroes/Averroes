@@ -3078,7 +3078,7 @@ _GCLID_ATTR_DEFAULT_DAYS = 30
 _GCLID_ATTR_MAX_DAYS     = 365
 
 
-def _encode_gclid_cursor(created_at: Any, row_id: int) -> str:
+def _encode_gclid_cursor(created_at: datetime | str, row_id: int) -> str:
     """Encode a keyset cursor for gclid_attribution.
 
     Accepts datetime-like values and falls back to str() for already-serialized timestamps.

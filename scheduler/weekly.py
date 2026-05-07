@@ -94,6 +94,7 @@ def run_weekly_report():
         try:
             st_batch_id = None
             window_end = datetime.utcnow().date()
+            # Inclusive 14-day search-term window: today plus the previous 13 days.
             window_start = window_end - timedelta(days=13)
             st_batch_id = db_writers.start_sync_batch(
                 source="windsor",
