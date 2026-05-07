@@ -1217,6 +1217,12 @@ HTTP 400.
 - Multiple deals for the same contact/GCLID are preserved as separate rows.
 - `summary` reflects current-page loaded rows only — not total database counts.
 
+**Frontend usage (as of PR-ADS-046):**
+- Rendered by the GCLID Attribution page in the SPA.
+- Page uses cursor pagination (`pagination.next_cursor`) and loads additional rows only when the operator clicks **Load more**.
+- KPI values on the page are loaded-page values unless explicitly labeled as coverage snapshot values.
+- UI is strictly read-only: it does not upload offline conversions and does not modify Google Ads, HubSpot, deals, or contacts.
+
 ---
 
 #### `GET /api/gclid-coverage`
@@ -1250,10 +1256,10 @@ GCLID coverage snapshot rows for the last N days.
 { "days": 30, "rows": [], "db_unavailable": true }
 ```
 
-**UI note (PR-ADS-045):** As of PR-ADS-045, this endpoint may be rendered as an optional
-**GCLID Coverage** mini-panel on the Health page. The UI is read-only and shows only the
-most recent snapshot. If the endpoint is unavailable or returns an empty result, the panel
-is silently hidden. No external API calls are made.
+**Frontend usage (as of PR-ADS-046):**
+- Rendered as a latest coverage snapshot on the GCLID Attribution page.
+- Coverage snapshots are local DB records, not live Google Ads status.
+- UI is read-only and resilient: if the endpoint is unavailable or empty, the page shows a safe unavailable/empty coverage state.
 
 ---
 
