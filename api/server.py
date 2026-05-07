@@ -3290,6 +3290,400 @@ def api_gclid_attribution(
     }
 
 
+# ---------------------------------------------------------------------------
+# Attribution Quality endpoint — read-only, auth required. (PR-ADS-048)
+# ---------------------------------------------------------------------------
+
+_ATTR_QUALITY_DEFAULT_DAYS = 30
+_ATTR_QUALITY_MAX_DAYS     = 365
+
+
+def _compute_attribution_quality_signals(
+    summary: dict,
+    freshness: "dict | None",
+) -> list:
+    """Derive read-only quality signal cards from attribution summary counts.
+
+    Signals are attribution evidence/completeness indicators only.
+    Does not recommend actions. Does not claim OCT readiness.
+    Forbidden language: OCT ready, upload, push, fix, guaranteed, qualified revenue.
+    """
+    signals: list = []
+    total = summary.get("loaded_scope_rows", 0)
+
+    if total == 0:
+        return [{
+            "key":      "no_attribution_rows",
+            "status":   "unknown",
+            "label":    "No attribution rows",
+            "detail":   "No GCLID attribution evidence is stored for this scope.",
+            "severity": "low",
+        }]
+
+    matched_rate      = summary.get("matched_rate_pct", 0.0) or 0.0
+    fallback_rate     = summary.get("url_fallback_rate_pct", 0.0) or 0.0
+    unmatched_rate    = summary.get("unmatched_rate_pct", 0.0) or 0.0
+    deal_link_rate    = summary.get("deal_link_rate_pct", 0.0) or 0.0
+    amount_cov        = summary.get("deal_amount_coverage_pct")
+    deals_linked      = summary.get("deals_linked", 0) or 0
+
+    # Signal: match_strength
+    if matched_rate >= 70:
+        ms_status, ms_label, ms_severity = "good",  "Strong match coverage",   "low"
+    elif matched_rate >= 40:
+        ms_status, ms_label, ms_severity = "watch", "Moderate match coverage", "medium"
+    else:
+        ms_status, ms_label, ms_severity = "weak",  "Weak match coverage",     "medium"
+
+    signals.append({
+        "key":      "match_strength",
+        "status":   ms_status,
+        "label":    ms_label,
+        "detail":   f"{matched_rate:.1f}% of loaded attribution rows are direct matched rows.",
+        "severity": ms_severity,
+    })
+
+    # Signal: url_fallback_reliance
+    if fallback_rate < 10:
+        uf_status, uf_label, uf_severity = "good",  "Low URL fallback reliance",  "low"
+    elif fallback_rate <= 25:
+        uf_status, uf_label, uf_severity = "watch", "URL fallback reliance",       "medium"
+    else:
+        uf_status, uf_label, uf_severity = "risk",  "High URL fallback reliance",  "high"
+
+    signals.append({
+        "key":      "url_fallback_reliance",
+        "status":   uf_status,
+        "label":    uf_label,
+        "detail":   (
+            f"{fallback_rate:.1f}% of rows rely on URL fallback rather than direct GCLID match. "
+            "URL fallback is weaker attribution evidence than direct GCLID."
+        ),
+        "severity": uf_severity,
+    })
+
+    # Signal: unmatched_rate
+    if unmatched_rate < 10:
+        um_status, um_label, um_severity = "good",  "Low unmatched rate",      "low"
+    elif unmatched_rate <= 25:
+        um_status, um_label, um_severity = "watch", "Elevated unmatched rate", "medium"
+    else:
+        um_status, um_label, um_severity = "risk",  "High unmatched rate",     "high"
+
+    signals.append({
+        "key":      "unmatched_rate",
+        "status":   um_status,
+        "label":    um_label,
+        "detail":   f"{unmatched_rate:.1f}% of rows have no matched contact or deal evidence.",
+        "severity": um_severity,
+    })
+
+    # Signal: deal_linkage
+    if deal_link_rate >= 40:
+        dl_status, dl_label, dl_severity = "good",  "Strong deal linkage",  "low"
+    elif deal_link_rate >= 15:
+        dl_status, dl_label, dl_severity = "watch", "Partial deal linkage", "medium"
+    else:
+        dl_status, dl_label, dl_severity = "weak",  "Thin deal linkage",    "medium"
+
+    signals.append({
+        "key":      "deal_linkage",
+        "status":   dl_status,
+        "label":    dl_label,
+        "detail":   (
+            f"{deal_link_rate:.1f}% of attribution rows are linked to a deal. "
+            "This is a data-completeness signal, not a sales-performance verdict."
+        ),
+        "severity": dl_severity,
+    })
+
+    # Signal: amount_coverage (only when deals are linked)
+    if deals_linked > 0 and amount_cov is not None:
+        if amount_cov >= 70:
+            ac_status, ac_label, ac_severity = "good",  "Good deal amount coverage",    "low"
+        elif amount_cov >= 30:
+            ac_status, ac_label, ac_severity = "watch", "Partial deal amount coverage", "medium"
+        else:
+            ac_status, ac_label, ac_severity = "weak",  "Thin deal amount coverage",    "medium"
+
+        signals.append({
+            "key":      "amount_coverage",
+            "status":   ac_status,
+            "label":    ac_label,
+            "detail":   f"{amount_cov:.1f}% of deal-linked rows have a deal amount populated.",
+            "severity": ac_severity,
+        })
+    else:
+        signals.append({
+            "key":      "amount_coverage",
+            "status":   "unknown",
+            "label":    "No deal amount data",
+            "detail":   "No deal-linked rows with amount data found for this scope.",
+            "severity": "low",
+        })
+
+    # Signal: freshness (from sync_state gclid/matches)
+    if freshness:
+        from datetime import timezone as _tz  # noqa: PLC0415
+
+        fst       = freshness.get("status") or "unknown"
+        last_sync = freshness.get("last_successful_sync_at")
+
+        if fst == "success" and last_sync:
+            now_utc = datetime.now(_tz.utc)
+            sync_dt = datetime.fromisoformat(str(last_sync).replace("Z", "+00:00"))
+            if sync_dt.tzinfo is None:
+                sync_dt = sync_dt.replace(tzinfo=_tz.utc)
+            age_hours = (now_utc - sync_dt).total_seconds() / 3600
+
+            if age_hours <= 48:
+                fr_status, fr_label, fr_severity = "good",  "Local warehouse is fresh",       "low"
+                fr_detail = (
+                    f"Last successful sync was {age_hours:.0f}h ago. "
+                    "Local warehouse freshness only."
+                )
+            else:
+                fr_status, fr_label, fr_severity = "watch", "Local warehouse may be stale", "medium"
+                fr_detail = (
+                    f"Last successful sync was {age_hours:.0f}h ago. "
+                    "Warrants review of local warehouse freshness."
+                )
+        elif fst == "failed":
+            fr_status, fr_label, fr_severity = "risk",    "Sync failure recorded",  "high"
+            fr_detail = (
+                "The last recorded sync attempt ended with an error. "
+                "Local warehouse freshness warrants review."
+            )
+        else:
+            fr_status, fr_label, fr_severity = "unknown", "Sync state unknown", "low"
+            fr_detail = (
+                "No tracked sync state found. "
+                "Local warehouse freshness cannot be assessed."
+            )
+
+        signals.append({
+            "key":      "freshness",
+            "status":   fr_status,
+            "label":    fr_label,
+            "detail":   fr_detail,
+            "severity": fr_severity,
+        })
+
+    return signals
+
+
+@app.get("/api/attribution/quality")
+def api_attribution_quality(
+    user: dict = Depends(require_auth),
+    days: int = Query(
+        default=_ATTR_QUALITY_DEFAULT_DAYS,
+        description="Number of days to look back (1–365)",
+    ),
+    campaign: str = Query(
+        default=None,
+        description="Optional exact canonical campaign name filter",
+    ),
+) -> dict[str, Any]:
+    """Return read-only attribution quality signals for the last N days.
+
+    Auth required. Read-only.
+    Source tables: gclid_attribution, sync_state, gclid_coverage_snapshots.
+    Does not call Google Ads APIs. Does not call HubSpot APIs.
+    Does not upload offline conversions. Does not write to any external system.
+    Signals are attribution evidence/completeness indicators only.
+    """
+    days = max(1, min(_ATTR_QUALITY_MAX_DAYS, days))
+
+    _safe_db_unavailable: dict[str, Any] = {
+        "days":           days,
+        "summary":        {},
+        "rates":          {},
+        "signals":        [],
+        "db_unavailable": True,
+    }
+
+    # Campaign name normalisation
+    campaign_key: str | None = None
+    if campaign:
+        from db.writers import _canonicalise_campaign_name  # noqa: PLC0415
+        campaign_key = _canonicalise_campaign_name(campaign.strip().lower())
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _safe_db_unavailable
+
+            with conn.cursor() as cur:
+                # ── Aggregate counts from gclid_attribution ──────────────
+                agg_conditions: list[str] = [
+                    "created_at >= NOW() - INTERVAL '1 day' * %s",
+                ]
+                agg_params: list[Any] = [days]
+
+                if campaign_key is not None:
+                    agg_conditions.append("campaign_name = %s")
+                    agg_params.append(campaign_key)
+
+                agg_where = " AND ".join(agg_conditions)
+
+                cur.execute(
+                    f"""
+                    SELECT
+                        COUNT(*)                                                              AS total_rows,
+                        COUNT(*) FILTER (WHERE match_status = 'matched')                     AS matched_rows,
+                        COUNT(*) FILTER (WHERE match_status = 'url_fallback')                AS url_fallback_rows,
+                        COUNT(*) FILTER (WHERE match_status = 'unmatched')                   AS unmatched_rows,
+                        COUNT(*) FILTER (
+                            WHERE match_status NOT IN ('matched', 'url_fallback', 'unmatched')
+                               OR match_status IS NULL
+                        )                                                                     AS unknown_rows,
+                        COUNT(*) FILTER (WHERE contact_id IS NOT NULL)                       AS contacts_linked,
+                        COUNT(*) FILTER (WHERE deal_id IS NOT NULL)                          AS deals_linked,
+                        COUNT(*) FILTER (
+                            WHERE deal_amount_usd IS NOT NULL AND deal_id IS NOT NULL
+                        )                                                                     AS rows_with_deal_amount,
+                        COALESCE(SUM(deal_amount_usd), 0)                                    AS total_deal_amount_usd,
+                        MAX(created_at)                                                       AS latest_attribution_at
+                    FROM gclid_attribution
+                    WHERE {agg_where}
+                    """,  # noqa: S608
+                    agg_params,
+                )
+                agg_row  = cur.fetchone()
+                agg_cols = [d[0] for d in cur.description]
+                agg      = dict(zip(agg_cols, agg_row)) if agg_row else {}
+
+                # ── Freshness from sync_state (gclid / matches) ───────────
+                cur.execute(
+                    """
+                    SELECT source, dataset, status,
+                           last_successful_sync_at, last_source_date
+                    FROM sync_state
+                    WHERE source = 'gclid' AND dataset = 'matches'
+                    LIMIT 1
+                    """,
+                )
+                sync_row  = cur.fetchone()
+                sync_cols = [d[0] for d in cur.description]
+                sync_data = dict(zip(sync_cols, sync_row)) if sync_row else None
+
+                # ── Latest coverage snapshot ──────────────────────────────
+                cur.execute(
+                    """
+                    SELECT snapshot_date,
+                           contacts_with_gclid,
+                           contacts_without_gclid,
+                           coverage_pct
+                    FROM gclid_coverage_snapshots
+                    ORDER BY snapshot_date DESC, id DESC
+                    LIMIT 1
+                    """,
+                )
+                cov_row  = cur.fetchone()
+                cov_cols = [d[0] for d in cur.description]
+                cov_data = dict(zip(cov_cols, cov_row)) if cov_row else None
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/attribution/quality] database error: %s", exc, exc_info=True)
+        return _safe_db_unavailable
+
+    total = int(agg.get("total_rows") or 0)
+
+    matched_rows          = int(agg.get("matched_rows")       or 0)
+    url_fallback_rows     = int(agg.get("url_fallback_rows")  or 0)
+    unmatched_rows        = int(agg.get("unmatched_rows")     or 0)
+    unknown_rows          = int(agg.get("unknown_rows")       or 0)
+    contacts_linked       = int(agg.get("contacts_linked")    or 0)
+    deals_linked          = int(agg.get("deals_linked")       or 0)
+    rows_with_deal_amount = int(agg.get("rows_with_deal_amount") or 0)
+    total_deal_amount     = float(agg.get("total_deal_amount_usd") or 0.0)
+    latest_attr_at        = agg.get("latest_attribution_at")
+
+    summary: dict[str, Any] = {
+        "loaded_scope_rows":     total,
+        "matched_rows":          matched_rows,
+        "url_fallback_rows":     url_fallback_rows,
+        "unmatched_rows":        unmatched_rows,
+        "unknown_rows":          unknown_rows,
+        "contacts_linked":       contacts_linked,
+        "deals_linked":          deals_linked,
+        "rows_with_deal_amount": rows_with_deal_amount,
+        "total_deal_amount_usd": round(total_deal_amount, 2),
+        "latest_attribution_at": latest_attr_at.isoformat() if latest_attr_at else None,
+    }
+
+    def _pct(n: int, d: int) -> "float | None":
+        return round(n / d * 100, 2) if d > 0 else None
+
+    rates: dict[str, Any] = {}
+    if total > 0:
+        rates["matched_rate_pct"]      = _pct(matched_rows, total)
+        rates["url_fallback_rate_pct"] = _pct(url_fallback_rows, total)
+        rates["unmatched_rate_pct"]    = _pct(unmatched_rows, total)
+        rates["deal_link_rate_pct"]    = _pct(deals_linked, total)
+        if deals_linked > 0:
+            rates["deal_amount_coverage_pct"] = _pct(rows_with_deal_amount, deals_linked)
+
+    # Flat dict used by signal helper (merge rates into summary for convenience)
+    summary_for_signals: dict[str, Any] = {
+        **summary,
+        "matched_rate_pct":         rates.get("matched_rate_pct", 0.0) or 0.0,
+        "url_fallback_rate_pct":    rates.get("url_fallback_rate_pct", 0.0) or 0.0,
+        "unmatched_rate_pct":       rates.get("unmatched_rate_pct", 0.0) or 0.0,
+        "deal_link_rate_pct":       rates.get("deal_link_rate_pct", 0.0) or 0.0,
+        "deal_amount_coverage_pct": rates.get("deal_amount_coverage_pct"),
+    }
+
+    # ── Freshness dict ─────────────────────────────────────────────────────
+    freshness: "dict[str, Any] | None" = None
+    if sync_data:
+        freshness = {
+            "source":                  sync_data["source"],
+            "dataset":                 sync_data["dataset"],
+            "status":                  sync_data["status"],
+            "last_successful_sync_at": (
+                sync_data["last_successful_sync_at"].isoformat()
+                if sync_data.get("last_successful_sync_at") else None
+            ),
+            "last_source_date": (
+                str(sync_data["last_source_date"])
+                if sync_data.get("last_source_date") else None
+            ),
+        }
+
+    # ── Coverage snapshot ──────────────────────────────────────────────────
+    coverage_snapshot: "dict[str, Any] | None" = None
+    if cov_data:
+        coverage_snapshot = {
+            "snapshot_date":          str(cov_data["snapshot_date"]) if cov_data.get("snapshot_date") else None,
+            "contacts_with_gclid":    cov_data.get("contacts_with_gclid"),
+            "contacts_without_gclid": cov_data.get("contacts_without_gclid"),
+            "coverage_pct":           float(cov_data["coverage_pct"]) if cov_data.get("coverage_pct") is not None else None,
+        }
+
+    signals = _compute_attribution_quality_signals(summary_for_signals, freshness)
+
+    scope: dict[str, Any] = {}
+    if campaign_key:
+        scope["campaign"] = campaign_key
+
+    result: dict[str, Any] = {
+        "days":    days,
+        "summary": summary,
+        "rates":   rates,
+        "signals": signals,
+    }
+    if scope:
+        result["scope"] = scope
+    if freshness:
+        result["freshness"] = freshness
+    if coverage_snapshot:
+        result["coverage_snapshot"] = coverage_snapshot
+
+    return result
+
+
 @app.get("/api/gclid-coverage")
 def api_gclid_coverage(
     user: dict = Depends(require_auth),

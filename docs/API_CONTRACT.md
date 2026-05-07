@@ -1269,6 +1269,123 @@ GCLID coverage snapshot rows for the last N days.
 
 ---
 
+#### `GET /api/attribution/quality`
+Read-only attribution quality signals derived from stored GCLID evidence. (PR-ADS-048)
+
+**Auth:** Auth
+**Read-only:** Yes — no write to Google Ads, HubSpot, or any external system
+**Source tables:** `gclid_attribution`, `sync_state` (gclid/matches row), `gclid_coverage_snapshots`
+**Does not:** call Google Ads APIs · call HubSpot APIs · upload offline conversions · mutate any record
+
+**Query params:**
+- `days` — integer, default 30, max 365
+- `campaign` — optional exact canonical campaign name filter (same normalisation as `/api/gclid-attribution`)
+
+**Response 200 (rows present):**
+```json
+{
+  "days": 30,
+  "scope": { "campaign": "global - competitors" },
+  "summary": {
+    "loaded_scope_rows": 42,
+    "matched_rows": 30,
+    "url_fallback_rows": 5,
+    "unmatched_rows": 7,
+    "unknown_rows": 0,
+    "contacts_linked": 25,
+    "deals_linked": 12,
+    "rows_with_deal_amount": 8,
+    "total_deal_amount_usd": 45000.00,
+    "latest_attribution_at": "2026-05-06T07:00:00+00:00"
+  },
+  "rates": {
+    "matched_rate_pct": 71.43,
+    "url_fallback_rate_pct": 11.90,
+    "unmatched_rate_pct": 16.67,
+    "deal_link_rate_pct": 28.57,
+    "deal_amount_coverage_pct": 66.67
+  },
+  "signals": [
+    {
+      "key": "match_strength",
+      "status": "good",
+      "label": "Strong match coverage",
+      "detail": "71.4% of loaded attribution rows are direct matched rows.",
+      "severity": "low"
+    },
+    {
+      "key": "url_fallback_reliance",
+      "status": "watch",
+      "label": "URL fallback reliance",
+      "detail": "11.9% of rows rely on URL fallback rather than direct GCLID match. URL fallback is weaker attribution evidence than direct GCLID.",
+      "severity": "medium"
+    }
+  ],
+  "freshness": {
+    "source": "gclid",
+    "dataset": "matches",
+    "status": "success",
+    "last_successful_sync_at": "2026-05-06T07:00:00+00:00",
+    "last_source_date": "2026-05-05"
+  },
+  "coverage_snapshot": {
+    "snapshot_date": "2026-05-06",
+    "contacts_with_gclid": 120,
+    "contacts_without_gclid": 30,
+    "coverage_pct": 80.0
+  }
+}
+```
+
+**Response 200 (no rows in scope):**
+```json
+{
+  "days": 30,
+  "summary": { "loaded_scope_rows": 0, ... },
+  "rates": {},
+  "signals": [
+    {
+      "key": "no_attribution_rows",
+      "status": "unknown",
+      "label": "No attribution rows",
+      "detail": "No GCLID attribution evidence is stored for this scope.",
+      "severity": "low"
+    }
+  ]
+}
+```
+
+**DB unavailable response:**
+```json
+{ "days": 30, "summary": {}, "rates": {}, "signals": [], "db_unavailable": true }
+```
+
+**Signal keys and semantics:**
+
+| Signal key | Status values | Basis | Notes |
+|---|---|---|---|
+| `match_strength` | good / watch / weak / unknown | `matched_rate_pct` ≥70 / 40–70 / <40 | Evidence/completeness only |
+| `url_fallback_reliance` | good / watch / risk | `url_fallback_rate_pct` <10 / 10–25 / >25 | URL fallback is weaker evidence, not automatically bad |
+| `unmatched_rate` | good / watch / risk | `unmatched_rate_pct` <10 / 10–25 / >25 | Evidence completeness only |
+| `deal_linkage` | good / watch / weak | `deal_link_rate_pct` ≥40 / 15–40 / <15 | Data-completeness signal, not sales verdict |
+| `amount_coverage` | good / watch / weak / unknown | `deal_amount_coverage_pct` ≥70 / 30–70 / <30 / no deals | Data-completeness signal only |
+| `freshness` | good / watch / risk / unknown | sync_state age ≤48h / >48h / failed / missing | Local warehouse freshness only — not live platform status |
+| `no_attribution_rows` | unknown | loaded_scope_rows == 0 | Placeholder when no data exists |
+
+**Forbidden language in `detail` and UI labels:**
+- OCT ready · upload · push · fix · guaranteed · qualified revenue · proven ROI
+
+**Allowed language:**
+- attribution evidence · match coverage · URL fallback reliance · deal linkage · amount coverage · warrants review · local warehouse freshness
+
+**Frontend usage (as of PR-ADS-048):**
+- Rendered as the "Attribution Quality" panel on the GCLID Attribution page above the evidence table.
+- The panel auto-reloads on filter apply, filter clear, refresh, and time-range change.
+- The `/api/gclid-attribution` page may display quality signals sourced from this endpoint.
+- UI is read-only — no action buttons are rendered.
+
+---
+
 ## DB Schema Notes (PR-ADS-039 / PR-ADS-040)
 
 ### `sync_batches`
@@ -1436,6 +1553,7 @@ One GCLID coverage snapshot per run, capturing aggregate coverage statistics.
 | GET | `/api/search-terms` | Auth | Paginated search-term fact rows (search_terms table, cursor pagination) |
 | GET | `/api/gclid-attribution` | Auth | Paginated GCLID attribution rows (gclid_attribution table, cursor pagination) |
 | GET | `/api/gclid-coverage` | Auth | GCLID coverage snapshots (gclid_coverage_snapshots table) |
+| GET | `/api/attribution/quality` | Auth | Read-only attribution quality signals (gclid_attribution + sync_state + gclid_coverage_snapshots) |
 
 ---
 

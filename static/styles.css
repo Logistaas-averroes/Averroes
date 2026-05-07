@@ -2926,6 +2926,122 @@ a {
   border-color: var(--c-neutral-border);
 }
 
+/* ── Attribution Quality (PR-ADS-048) ─────────────────────────────────────── */
+
+.gclid-quality-summary {
+  /* wrapper for cards + metric row */
+}
+
+.gclid-quality-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.gclid-quality-card {
+  flex: 1 1 180px;
+  min-width: 160px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  border-left-width: 3px;
+}
+
+.gclid-quality-card__status {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: var(--space-1);
+}
+
+.gclid-quality-card__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-1);
+  line-height: 1.3;
+}
+
+.gclid-quality-card__detail {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* Status colour modifiers */
+.gclid-quality-status-good {
+  border-left-color: var(--c-success);
+  background: var(--c-success-bg);
+}
+.gclid-quality-status-good .gclid-quality-card__status {
+  color: var(--c-success);
+}
+
+.gclid-quality-status-watch {
+  border-left-color: var(--c-warning);
+  background: var(--c-warning-bg);
+}
+.gclid-quality-status-watch .gclid-quality-card__status {
+  color: var(--c-warning);
+}
+
+.gclid-quality-status-weak {
+  border-left-color: var(--c-neutral);
+  background: var(--c-neutral-bg);
+}
+.gclid-quality-status-weak .gclid-quality-card__status {
+  color: var(--c-neutral);
+}
+
+.gclid-quality-status-risk {
+  border-left-color: var(--c-danger);
+  background: var(--c-danger-bg);
+}
+.gclid-quality-status-risk .gclid-quality-card__status {
+  color: var(--c-danger);
+}
+
+.gclid-quality-status-unknown {
+  border-left-color: var(--c-neutral-border);
+  background: var(--c-neutral-bg);
+}
+.gclid-quality-status-unknown .gclid-quality-card__status {
+  color: var(--c-neutral);
+}
+
+/* Compact metrics row below the cards */
+.gclid-quality-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.gclid-quality-metrics strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.gclid-quality-freshness-note {
+  flex: 1 1 100%;
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: var(--space-1);
+}
+
+@media (max-width: 768px) {
+  .gclid-quality-card {
+    flex: 1 1 140px;
+    min-width: 130px;
+  }
+}
+
 /* ── Dataset Freshness ────────────────────────────────────────────────────── */
 
 .freshness-summary-grid {
