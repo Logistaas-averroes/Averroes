@@ -2502,10 +2502,13 @@ function ngramLanguageBadge(language) {
 }
 
 function ngramWasteStateMix(flagged, clean, unanalyzed) {
+  const hasValue = (v) => v !== null && v !== undefined && Number.isFinite(Number(v));
+
   const parts = [];
-  if (flagged)    parts.push(`<span class="ngram-state-flagged">${flagged}F</span>`);
-  if (clean)      parts.push(`<span class="ngram-state-clean">${clean}C</span>`);
-  if (unanalyzed) parts.push(`<span class="ngram-state-unanalyzed">${unanalyzed}U</span>`);
+  if (hasValue(flagged))    parts.push(`<span class="ngram-state-flagged">${escapeHtml(String(Number(flagged)))}F</span>`);
+  if (hasValue(clean))      parts.push(`<span class="ngram-state-clean">${escapeHtml(String(Number(clean)))}C</span>`);
+  if (hasValue(unanalyzed)) parts.push(`<span class="ngram-state-unanalyzed">${escapeHtml(String(Number(unanalyzed)))}U</span>`);
+
   return parts.length
     ? `<span class="ngram-state-mix">${parts.join(" / ")}</span>`
     : `<span class="td--na">—</span>`;
@@ -2520,7 +2523,7 @@ function renderNgramsKPIs(data) {
       <div class="kpi-card"><div class="kpi-card__label">N-Grams Returned</div><div class="kpi-card__value">…</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Source Rows Analyzed</div><div class="kpi-card__value">…</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Unique Search Terms</div><div class="kpi-card__value">…</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Total Spend in Results</div><div class="kpi-card__value">…</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Highest N-Gram Spend</div><div class="kpi-card__value">…</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Row Cap</div><div class="kpi-card__value">…</div></div>`;
     return;
   }
@@ -2530,7 +2533,7 @@ function renderNgramsKPIs(data) {
       <div class="kpi-card"><div class="kpi-card__label">N-Grams Returned</div><div class="kpi-card__value">—</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Source Rows Analyzed</div><div class="kpi-card__value">—</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Unique Search Terms</div><div class="kpi-card__value">—</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Total Spend in Results</div><div class="kpi-card__value">—</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Highest N-Gram Spend</div><div class="kpi-card__value">—</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Row Cap</div><div class="kpi-card__value">—</div><div class="kpi-subtext">N-gram analysis temporarily unavailable — database offline.</div></div>`;
     return;
   }
@@ -2540,14 +2543,14 @@ function renderNgramsKPIs(data) {
       <div class="kpi-card"><div class="kpi-card__label">N-Grams Returned</div><div class="kpi-card__value">—</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Source Rows Analyzed</div><div class="kpi-card__value">—</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Unique Search Terms</div><div class="kpi-card__value">—</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Total Spend in Results</div><div class="kpi-card__value">—</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Highest N-Gram Spend</div><div class="kpi-card__value">—</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Row Cap</div><div class="kpi-card__value">—</div><div class="kpi-subtext">Could not load n-gram analysis.</div></div>`;
     return;
   }
 
   const s  = ngramSummary || {};
   const dq = (data && data.data_quality) || {};
-  const totalSpend = ngramRows.reduce((acc, r) => acc + (r.total_spend_usd || 0), 0);
+  const maxNgramSpend = ngramRows.reduce((max, r) => Math.max(max, Number(r.total_spend_usd || 0)), 0);
   const rowCapLabel = dq.row_cap_applied ? "Applied" : "Not applied";
 
   kpiGrid.innerHTML = `
@@ -2564,8 +2567,9 @@ function renderNgramsKPIs(data) {
       <div class="kpi-card__value">${s.unique_search_terms_analyzed != null ? s.unique_search_terms_analyzed.toLocaleString() : "—"}</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-card__label">Total Spend in Results</div>
-      <div class="kpi-card__value">${fmtDollar(totalSpend)}</div>
+      <div class="kpi-card__label">Highest N-Gram Spend</div>
+      <div class="kpi-card__value">${fmtDollar(maxNgramSpend)}</div>
+      <div class="kpi-subtext">Top returned n-gram</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-card__label">Row Cap</div>
