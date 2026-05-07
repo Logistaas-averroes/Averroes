@@ -108,7 +108,7 @@ def run_weekly_report():
             st_count = db_writers.write_search_terms(
                 run_id=run_id,
                 search_term_rows=search_terms,
-                sync_batch_id=st_batch_id,
+                sync_batch_id=st_batch_id or None,
             )
             if not persistence_succeeded(search_terms, st_count):
                 raise RuntimeError(
