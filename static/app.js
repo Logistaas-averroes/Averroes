@@ -3540,8 +3540,20 @@ async function loadGclidCoverage() {
 
 let _drawerOpenCampaign = null;  // campaign name string currently shown in drawer, or null
 let _drawerPreviousFocus = null; // element to restore focus to on close
+let activeCampaignDrawerName = null;
+let campaignAttributionQualityRequestId = 0;
 
-async function loadCampaignAttributionPreview(campaignName) {
+function isCurrentCampaignDrawerRequest(campaignName, requestId) {
+  if (activeCampaignDrawerName !== campaignName) return false;
+  if (requestId !== null && requestId !== campaignAttributionQualityRequestId) return false;
+  return true;
+}
+
+async function loadCampaignAttributionPreview(campaignName, requestId = null) {
+  if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+    return { status: "stale", rows: [], summary: null };
+  }
+
   campaignAttributionStatus = "loading";
   campaignAttributionRows = [];
 
@@ -3552,6 +3564,10 @@ async function loadCampaignAttributionPreview(campaignName) {
     params.set("campaign", campaignName);
 
     const data = await fetchJSON(`/api/gclid-attribution?${params.toString()}`);
+
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+      return { status: "stale", rows: [], summary: null };
+    }
 
     if (data.db_unavailable) {
       campaignAttributionStatus = "db_unavailable";
@@ -3569,13 +3585,20 @@ async function loadCampaignAttributionPreview(campaignName) {
       pagination: data.pagination || null,
     };
   } catch (_) {
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+      return { status: "stale", rows: [], summary: null };
+    }
     campaignAttributionStatus = "error";
     campaignAttributionRows = [];
     return { status: campaignAttributionStatus, rows: [], summary: null };
   }
 }
 
-async function loadCampaignAttributionQuality(campaignName) {
+async function loadCampaignAttributionQuality(campaignName, requestId = null) {
+  if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+    return { status: "stale", data: null };
+  }
+
   campaignAttributionQualityStatus = "loading";
   campaignAttributionQuality = null;
 
@@ -3585,6 +3608,10 @@ async function loadCampaignAttributionQuality(campaignName) {
     params.set("campaign", campaignName);
 
     const data = await fetchJSON(`/api/attribution/quality?${params.toString()}`);
+
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+      return { status: "stale", data: null };
+    }
 
     if (data.db_unavailable) {
       campaignAttributionQualityStatus = "db_unavailable";
@@ -3597,6 +3624,9 @@ async function loadCampaignAttributionQuality(campaignName) {
       data && data.summary && Number(data.summary.loaded_scope_rows) > 0 ? "ok" : "empty";
     return { status: campaignAttributionQualityStatus, data };
   } catch (_) {
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+      return { status: "stale", data: null };
+    }
     campaignAttributionQualityStatus = "error";
     campaignAttributionQuality = null;
     return { status: campaignAttributionQualityStatus, data: null };
@@ -3606,6 +3636,9 @@ async function loadCampaignAttributionQuality(campaignName) {
 async function openCampaignDrawer(campaignName) {
   if (!campaignName) return;
   _drawerOpenCampaign = campaignName;
+  activeCampaignDrawerName = campaignName;
+  campaignAttributionQualityRequestId += 1;
+  const requestId = campaignAttributionQualityRequestId;
 
   const overlay   = document.getElementById("campaign-drawer-overlay");
   const drawer    = document.getElementById("campaign-drawer");
@@ -3634,35 +3667,30 @@ async function openCampaignDrawer(campaignName) {
   document.addEventListener("keydown", _drawerKeyHandler);
 
   try {
-    // Fetch campaign detail, attribution preview, and quality in parallel.
-    // Attribution preview and quality failures must not block the drawer.
+    // Campaign detail is primary payload. Attribution preview/quality are secondary.
     campaignAttributionStatus = "loading";
     campaignAttributionRows = [];
+    campaignAttributionQualityStatus = "loading";
+    campaignAttributionQuality = null;
 
-    const [detailResult, _attrResult, _qualityResult] = await Promise.allSettled([
-      fetchJSON(
-        `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${getSelectedDays()}`
-      ),
-      loadCampaignAttributionPreview(campaignName),
-      loadCampaignAttributionQuality(campaignName),
-    ]);
+    const detail = await fetchJSON(
+      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${getSelectedDays()}`
+    );
 
-    // Guard stale response: drawer may have been closed or switched while fetching
-    if (_drawerOpenCampaign !== campaignName) return;
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+    renderCampaignDrawer(detail);
 
-    if (detailResult.status === "rejected") {
-      if (bodyEl) {
-        bodyEl.innerHTML = `
-          <div class="drawer-section">
-            <p class="drawer-empty">Could not load campaign detail — ${escapeHtml((detailResult.reason && detailResult.reason.message) || "network error")}.</p>
-          </div>`;
-      }
-      return;
-    }
+    loadCampaignAttributionPreview(campaignName, requestId).then(() => {
+      if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+      renderCampaignDrawer(detail);
+    });
 
-    renderCampaignDrawer(detailResult.value);
+    loadCampaignAttributionQuality(campaignName, requestId).then(() => {
+      if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+      renderCampaignDrawer(detail);
+    });
   } catch (err) {
-    if (_drawerOpenCampaign !== campaignName) return;
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
     if (bodyEl) {
       bodyEl.innerHTML = `
         <div class="drawer-section">
@@ -3674,6 +3702,7 @@ async function openCampaignDrawer(campaignName) {
 
 function closeCampaignDrawer() {
   _drawerOpenCampaign = null;
+  activeCampaignDrawerName = null;
   const overlay = document.getElementById("campaign-drawer-overlay");
   const drawer  = document.getElementById("campaign-drawer");
   if (overlay) { overlay.hidden = true; overlay.setAttribute("aria-hidden", "true"); }
@@ -4052,8 +4081,8 @@ function _appendDrawerEvidenceSections(container, data, lq) {
       const detail = sig.detail || "No quality detail available for this signal.";
       return `
         <div class="gclid-quality-card drawer-attribution-quality-card ${statusCls}">
-          <div class="gclid-quality-card__label">${escapeHtml(card.label)}</div>
           <div class="gclid-quality-card__status">${escapeHtml(statusLabel)}</div>
+          <div class="gclid-quality-card__label">${escapeHtml(card.label)}</div>
           <div class="gclid-quality-card__detail">${escapeHtml(detail)}</div>
         </div>`;
     }).join("");

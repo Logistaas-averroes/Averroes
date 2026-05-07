@@ -2916,7 +2916,7 @@ a {
   gap: var(--space-3);
 }
 
-.drawer-attribution-quality-card {
+.gclid-quality-card.drawer-attribution-quality-card {
   min-width: 0;
 }
 
