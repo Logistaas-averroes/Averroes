@@ -2037,7 +2037,10 @@ function getVisibleSearchTermRows() {
 }
 
 function _updateSearchTermsFilterNote() {
-  const noteEl      = document.getElementById("search-terms-filter-note");
+  // As of PR-ADS-052, analysis-state filters are backend-applied, so no client-side caveat
+  // is needed. The note element is kept in the DOM but permanently hidden so it can be
+  // repurposed for future informational messages without an HTML change.
+  const noteEl = document.getElementById("search-terms-filter-note");
   if (!noteEl) return;
   noteEl.hidden = true;
 }

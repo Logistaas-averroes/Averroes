@@ -2858,6 +2858,8 @@ _SEARCH_TERMS_DATA_QUALITY_NOTE = (
 )
 
 # Allowed waste_state values and their canonical form.
+# Note: aliases use both American ("analyzed_clean") and British ("unanalysed") spellings
+# intentionally to match the mixed spelling conventions in the existing codebase (PR-ADS-040).
 _WASTE_STATE_ALIASES: dict[str, str] = {
     "all":           "all",
     "flagged":       "flagged",
