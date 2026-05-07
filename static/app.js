@@ -81,6 +81,10 @@ let gclidStatus = "idle"; // idle | loading | ok | empty | db_unavailable | curs
 let gclidCoverageRows = [];
 let gclidCoverageStatus = "idle"; // idle | loading | ok | empty | unavailable
 
+// GCLID Attribution quality state (PR-ADS-048)
+let gclidQualityStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+let gclidQualityData = null;
+
 // Campaign drawer attribution preview state
 let campaignAttributionRows = [];
 let campaignAttributionStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
@@ -416,6 +420,7 @@ function loadPage(page) {
       }
       loadGclidAttribution({ reset: true });
       loadGclidCoverageForAttribution();
+      loadGclidQuality();
       break;
     case "opportunities": loadOpportunities(); break;
     case "scheduler":     loadScheduler();     break;
@@ -2560,6 +2565,115 @@ async function loadGclidAttribution({ reset = false, cursor = null } = {}) {
   }
 }
 
+// ── GCLID Attribution Quality (PR-ADS-048) ──────────────────────────────────
+
+async function loadGclidQuality({ campaign = null } = {}) {
+  gclidQualityStatus = "loading";
+  renderGclidQuality();
+
+  const params = new URLSearchParams();
+  params.set("days", String(getSelectedDays()));
+
+  const campaignFilter =
+    campaign || document.getElementById("gclid-filter-campaign")?.value.trim();
+  if (campaignFilter) params.set("campaign", campaignFilter);
+
+  try {
+    const data = await fetchJSON(`/api/attribution/quality?${params.toString()}`);
+    gclidQualityData = data;
+    gclidQualityStatus = data.db_unavailable ? "db_unavailable" : "ok";
+    renderGclidQuality();
+  } catch (_) {
+    gclidQualityStatus = "error";
+    gclidQualityData = null;
+    renderGclidQuality();
+  }
+}
+
+function _gclidQualityStatusClass(status) {
+  const map = {
+    good:    "gclid-quality-status-good",
+    watch:   "gclid-quality-status-watch",
+    weak:    "gclid-quality-status-weak",
+    risk:    "gclid-quality-status-risk",
+    unknown: "gclid-quality-status-unknown",
+  };
+  return map[(status || "unknown").toLowerCase()] || map.unknown;
+}
+
+function _gclidQualityStatusLabel(status) {
+  const map = {
+    good:    "Good",
+    watch:   "Watch",
+    weak:    "Weak",
+    risk:    "Risk",
+    unknown: "Unknown",
+  };
+  return map[(status || "unknown").toLowerCase()] || "Unknown";
+}
+
+function renderGclidQuality() {
+  const container = document.getElementById("gclid-quality-summary");
+  if (!container) return;
+
+  if (gclidQualityStatus === "loading" || gclidQualityStatus === "idle") {
+    container.innerHTML = `<p class="empty-state">Loading attribution quality…</p>`;
+    return;
+  }
+
+  if (gclidQualityStatus === "db_unavailable") {
+    container.innerHTML = `<p class="empty-state">Attribution quality temporarily unavailable — database offline.</p>`;
+    return;
+  }
+
+  if (gclidQualityStatus === "error" || !gclidQualityData) {
+    container.innerHTML = `<p class="empty-state">Could not load attribution quality signals.</p>`;
+    return;
+  }
+
+  const data    = gclidQualityData;
+  const summary = data.summary || {};
+  const rates   = data.rates   || {};
+  const signals = data.signals || [];
+  const fresh   = data.freshness || null;
+
+  // ── Signal cards ──────────────────────────────────────────────────────────
+  const signalCardsHtml = signals.map((sig) => {
+    const cls   = _gclidQualityStatusClass(sig.status);
+    const label = _gclidQualityStatusLabel(sig.status);
+    return `
+      <div class="gclid-quality-card ${cls}">
+        <div class="gclid-quality-card__status">${escapeHtml(label)}</div>
+        <div class="gclid-quality-card__label">${escapeHtml(sig.label || "")}</div>
+        <div class="gclid-quality-card__detail">${escapeHtml(sig.detail || "")}</div>
+      </div>`;
+  }).join("");
+
+  // ── Compact metrics row ───────────────────────────────────────────────────
+  const totalRows  = summary.loaded_scope_rows != null ? summary.loaded_scope_rows : "—";
+  const matchedPct = rates.matched_rate_pct   != null ? `${Number(rates.matched_rate_pct).toFixed(1)}%`   : "—";
+  const fallbackPct = rates.url_fallback_rate_pct != null ? `${Number(rates.url_fallback_rate_pct).toFixed(1)}%` : "—";
+  const unmatchedPct = rates.unmatched_rate_pct != null ? `${Number(rates.unmatched_rate_pct).toFixed(1)}%` : "—";
+  const dealLinkPct  = rates.deal_link_rate_pct != null ? `${Number(rates.deal_link_rate_pct).toFixed(1)}%`  : "—";
+  const amountCovPct = rates.deal_amount_coverage_pct != null ? `${Number(rates.deal_amount_coverage_pct).toFixed(1)}%` : "—";
+
+  const freshnessNote = fresh
+    ? `<span class="gclid-quality-freshness-note">Local warehouse freshness: ${escapeHtml(fresh.status || "unknown")}${fresh.last_successful_sync_at ? ` · last sync ${escapeHtml(fmtDate(fresh.last_successful_sync_at))}` : ""}</span>`
+    : "";
+
+  container.innerHTML = `
+    <div class="gclid-quality-cards">${signalCardsHtml}</div>
+    <div class="gclid-quality-metrics">
+      <span><strong>${totalRows}</strong> scope rows</span>
+      <span><strong>${matchedPct}</strong> matched</span>
+      <span><strong>${unmatchedPct}</strong> unmatched</span>
+      <span><strong>${fallbackPct}</strong> URL fallback</span>
+      <span><strong>${dealLinkPct}</strong> deal-linked</span>
+      <span><strong>${amountCovPct}</strong> amount coverage</span>
+      ${freshnessNote}
+    </div>`;
+}
+
 async function loadGclidCoverageForAttribution() {
   gclidCoverageStatus = "loading";
   gclidCoverageRows = [];
@@ -4332,7 +4446,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const gclidRefreshBtn = document.getElementById("gclid-refresh-btn");
   const gclidLoadMoreBtn = document.getElementById("gclid-load-more-btn");
 
-  if (gclidApplyBtn) gclidApplyBtn.addEventListener("click", () => loadGclidAttribution({ reset: true }));
+  if (gclidApplyBtn) gclidApplyBtn.addEventListener("click", () => {
+    loadGclidAttribution({ reset: true });
+    loadGclidQuality();
+  });
   if (gclidClearBtn) gclidClearBtn.addEventListener("click", () => {
     if (gclidInput) gclidInput.value = "";
     if (gclidCampaign) gclidCampaign.value = "";
@@ -4340,10 +4457,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (gclidDeal) gclidDeal.value = "";
     if (gclidStatusSel) gclidStatusSel.value = "";
     loadGclidAttribution({ reset: true });
+    loadGclidQuality();
   });
   if (gclidRefreshBtn) gclidRefreshBtn.addEventListener("click", () => {
     loadGclidAttribution({ reset: true });
     loadGclidCoverageForAttribution();
+    loadGclidQuality();
   });
   if (gclidLoadMoreBtn) {
     gclidLoadMoreBtn.addEventListener("click", () => loadGclidAttribution({ reset: false, cursor: gclidNextCursor }));
