@@ -3084,7 +3084,7 @@ def _encode_gclid_cursor(created_at: datetime | str, row_id: int) -> str:
     Accepts datetime-like values and falls back to str() for already-serialized timestamps.
     """
     return _encode_keyset_cursor({
-        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+        "created_at": created_at.isoformat() if isinstance(created_at, datetime) else str(created_at),
         "id": int(row_id),
     })
 

@@ -1,5 +1,7 @@
 from datetime import date
 
+_DATE_KEYS = ("date", "source_date", "createdate")
+
 
 def _parse_date_safe(value):
     """Parse a date-like value to datetime.date, or return None."""
@@ -18,9 +20,13 @@ def max_source_date(rows, fallback_date):
     dates = []
     for row in rows or []:
         props = row.get("properties") or {}
-        value = (
-            row.get("date") or row.get("source_date") or row.get("createdate")
-            or props.get("date") or props.get("source_date") or props.get("createdate")
+        value = next(
+            (
+                row.get(key) or props.get(key)
+                for key in _DATE_KEYS
+                if row.get(key) or props.get(key)
+            ),
+            None,
         )
         parsed = _parse_date_safe(value)
         if parsed:
