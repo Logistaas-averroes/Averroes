@@ -2003,6 +2003,9 @@ function qualityScoreBadge(qs) {
 
 // ── Search Terms Forensics page ────────────────────────────────────────────
 
+let searchTermsSummary = null;
+let searchTermsSummaryStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+
 function buildSearchTermsParams({ cursor = null } = {}) {
   const params = new URLSearchParams();
   params.set("days", String(getSelectedDays()));
@@ -2030,6 +2033,37 @@ function buildSearchTermsParams({ cursor = null } = {}) {
   if (cursor) params.set("cursor", cursor);
 
   return params;
+}
+
+function buildSearchTermsSummaryParams() {
+  const params = buildSearchTermsParams({ cursor: null });
+  params.delete("limit");
+  params.delete("cursor");
+  return params;
+}
+
+async function loadSearchTermsSummary() {
+  searchTermsSummaryStatus = "loading";
+  renderSearchTermsKPIs();
+
+  try {
+    const params = buildSearchTermsSummaryParams();
+    const data = await fetchJSON(`/api/search-terms/summary?${params.toString()}`);
+
+    if (data.db_unavailable) {
+      searchTermsSummaryStatus = "db_unavailable";
+      searchTermsSummary = data;
+    } else {
+      searchTermsSummaryStatus = "ok";
+      searchTermsSummary = data;
+    }
+
+    renderSearchTermsKPIs();
+  } catch (err) {
+    searchTermsSummaryStatus = "error";
+    searchTermsSummary = null;
+    renderSearchTermsKPIs();
+  }
 }
 
 function getVisibleSearchTermRows() {
@@ -2074,7 +2108,11 @@ async function loadSearchTerms({ reset = false, cursor = null } = {}) {
     searchTermRows = [];
     searchTermsNextCursor = null;
     searchTermsHasMore = false;
-    renderSearchTermsKPIs([]);
+    // Reset summary state and fire summary loader in parallel with the table load.
+    searchTermsSummary = null;
+    searchTermsSummaryStatus = "idle";
+    renderSearchTermsKPIs();
+    loadSearchTermsSummary();
     if (tableEl) tableEl.innerHTML =
       `<p class="empty-state" style="padding:var(--space-5)">Loading search terms…</p>`;
     if (loadMoreBtn) loadMoreBtn.hidden = true;
@@ -2093,7 +2131,6 @@ async function loadSearchTerms({ reset = false, cursor = null } = {}) {
     if (data.db_unavailable) {
       searchTermsStatus = "db_unavailable";
       searchTermRows = [];
-      renderSearchTermsKPIs([]);
       renderSearchTermsTable();
       if (loadMoreBtn) loadMoreBtn.hidden = true;
       _updateSearchTermsPaginationVisibility();
@@ -2118,7 +2155,6 @@ async function loadSearchTerms({ reset = false, cursor = null } = {}) {
       searchTermsStatus = "ok";
     }
 
-    renderSearchTermsKPIs(getVisibleSearchTermRows());
     renderSearchTermsTable();
 
     if (loadMoreBtn) {
@@ -2149,37 +2185,125 @@ async function loadSearchTerms({ reset = false, cursor = null } = {}) {
   }
 }
 
-function renderSearchTermsKPIs(rows) {
+function renderSearchTermsKPIs() {
   const kpiGrid = document.getElementById("search-terms-kpis");
   if (!kpiGrid) return;
 
-  const totalTerms    = rows.length;
-  const totalSpend    = rows.reduce((s, r) => s + (r.spend_usd   || 0), 0);
-  const totalClicks   = rows.reduce((s, r) => s + (r.clicks      || 0), 0);
-  const flaggedWaste  = rows.filter((r) => r.is_flagged_waste === true).length;
-  const unanalyzed    = rows.filter((r) => r.is_flagged_waste === null || r.is_flagged_waste === undefined).length;
-  const avgCPC        = totalClicks > 0 ? totalSpend / totalClicks : null;
+  // Loading state — show skeleton cards
+  if (searchTermsSummaryStatus === "loading" || searchTermsSummaryStatus === "idle") {
+    kpiGrid.innerHTML = `
+      <div class="kpi-card">
+        <div class="kpi-card__label">Matching Terms</div>
+        <div class="kpi-card__value">…</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Matching Spend</div>
+        <div class="kpi-card__value">…</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Flagged Waste</div>
+        <div class="kpi-card__value">…</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Unanalyzed</div>
+        <div class="kpi-card__value">…</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Avg CPC</div>
+        <div class="kpi-card__value">…</div>
+      </div>`;
+    return;
+  }
+
+  // DB unavailable state
+  if (searchTermsSummaryStatus === "db_unavailable") {
+    kpiGrid.innerHTML = `
+      <div class="kpi-card">
+        <div class="kpi-card__label">Matching Terms</div>
+        <div class="kpi-card__value">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Matching Spend</div>
+        <div class="kpi-card__value">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Flagged Waste</div>
+        <div class="kpi-card__value">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Unanalyzed</div>
+        <div class="kpi-card__value">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Avg CPC</div>
+        <div class="kpi-card__value">—</div>
+        <div class="kpi-subtext">Search-term summary unavailable — database offline.</div>
+      </div>`;
+    return;
+  }
+
+  // Error state
+  if (searchTermsSummaryStatus === "error") {
+    kpiGrid.innerHTML = `
+      <div class="kpi-card">
+        <div class="kpi-card__label">Matching Terms</div>
+        <div class="kpi-card__value">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Matching Spend</div>
+        <div class="kpi-card__value">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Flagged Waste</div>
+        <div class="kpi-card__value">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Unanalyzed</div>
+        <div class="kpi-card__value">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Avg CPC</div>
+        <div class="kpi-card__value">—</div>
+        <div class="kpi-subtext">Could not load search-term summary.</div>
+      </div>`;
+    return;
+  }
+
+  // Success — render from backend summary
+  const s     = searchTermsSummary?.summary     || {};
+  const state = searchTermsSummary?.analysis_state || {};
+
+  const flaggedRows    = state.flagged?.rows    ?? 0;
+  const flaggedSpend   = state.flagged?.spend_usd ?? 0;
+  const unanalyzedRows  = state.unanalyzed?.rows  ?? 0;
+  const unanalyzedSpend = state.unanalyzed?.spend_usd ?? 0;
+  const avgCPC         = s.avg_cpc_usd ?? null;
 
   kpiGrid.innerHTML = `
     <div class="kpi-card">
-      <div class="kpi-card__label">Loaded Terms</div>
-      <div class="kpi-card__value">${totalTerms}</div>
+      <div class="kpi-card__label">Matching Terms</div>
+      <div class="kpi-card__value">${s.total_terms ?? 0}</div>
+      <div class="kpi-subtext">${s.unique_search_terms ?? 0} unique</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-card__label">Loaded Spend</div>
-      <div class="kpi-card__value">${fmtDollar(totalSpend)}</div>
+      <div class="kpi-card__label">Matching Spend</div>
+      <div class="kpi-card__value">${fmtDollar(s.total_spend_usd ?? 0)}</div>
+      <div class="kpi-subtext">${s.total_clicks ?? 0} clicks</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-card__label">Flagged Waste</div>
-      <div class="kpi-card__value">${flaggedWaste}</div>
+      <div class="kpi-card__value">${flaggedRows}</div>
+      <div class="kpi-subtext">${fmtDollar(flaggedSpend)}</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-card__label">Unanalyzed</div>
-      <div class="kpi-card__value">${unanalyzed}</div>
+      <div class="kpi-card__value">${unanalyzedRows}</div>
+      <div class="kpi-subtext">${fmtDollar(unanalyzedSpend)}</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-card__label">Avg CPC</div>
-      <div class="kpi-card__value">${avgCPC !== null ? "$" + avgCPC.toFixed(2) : "—"}</div>
+      <div class="kpi-card__value">${avgCPC !== null ? "$" + Number(avgCPC).toFixed(2) : "—"}</div>
+      <div class="kpi-subtext">${s.total_clicks ?? 0} clicks</div>
     </div>`;
 }
 

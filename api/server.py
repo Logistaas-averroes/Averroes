@@ -2871,6 +2871,25 @@ _WASTE_STATE_ALIASES: dict[str, str] = {
 }
 
 
+def _resolve_waste_state_param(waste_state: str | None, waste_only: bool = False) -> str:
+    """Resolve the effective waste-state filter from request parameters.
+
+    Precedence: waste_state (if provided) > waste_only flag > default 'all'.
+    Raises HTTPException(400) on unrecognised waste_state values.
+    """
+    if waste_state is not None:
+        effective = _WASTE_STATE_ALIASES.get(waste_state.lower())
+        if effective is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid waste_state. Allowed values: all, flagged, clean, unanalyzed.",
+            )
+        return effective
+    if waste_only:
+        return "flagged"
+    return "all"
+
+
 def _encode_keyset_cursor(payload: dict) -> str:
     """Encode a keyset cursor as URL-safe base64 JSON (no padding)."""
     raw = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
@@ -2949,18 +2968,7 @@ def api_search_terms(
     limit = max(1, min(_SEARCH_TERMS_MAX_LIMIT, limit))
 
     # ── Resolve effective waste state ──────────────────────────────────────
-    # Precedence: waste_state (if provided) > waste_only > default all
-    if waste_state is not None:
-        effective_state = _WASTE_STATE_ALIASES.get(waste_state.lower())
-        if effective_state is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid waste_state. Allowed values: all, flagged, clean, unanalyzed.",
-            )
-    elif waste_only:
-        effective_state = "flagged"
-    else:
-        effective_state = "all"
+    effective_state = _resolve_waste_state_param(waste_state, waste_only)
 
     _safe_empty: dict[str, Any] = {
         "days": days,
@@ -3118,8 +3126,244 @@ def api_search_terms(
 
 
 # ---------------------------------------------------------------------------
-# GCLID Attribution endpoint — cursor-paginated, read-only, auth required. (PR-ADS-044)
+# Search Terms summary endpoint — aggregate, read-only, auth required. (PR-ADS-053)
 # ---------------------------------------------------------------------------
+
+_SEARCH_TERMS_SUMMARY_DATA_QUALITY_NOTE = (
+    "Summary is computed from stored search_terms rows in PostgreSQL. "
+    "Google conversions are platform conversions, not HubSpot SQLs."
+)
+
+
+@app.get("/api/search-terms/summary")
+def api_search_terms_summary(
+    user: dict = Depends(require_auth),
+    days: int = Query(
+        default=_SEARCH_TERMS_DEFAULT_DAYS,
+        description="Number of days to look back (1–90)",
+    ),
+    campaign: str = Query(default=None, description="Filter by exact campaign_name"),
+    match_type: str = Query(default=None, description="Filter by match_type (contains, case-insensitive)"),
+    q: str = Query(default=None, description="Case-insensitive contains search on search_term"),
+    waste_state: str = Query(
+        default=None,
+        description=(
+            "Filter by analysis state. "
+            "Allowed: all, flagged, clean, unanalyzed. "
+            "Aliases: waste=flagged, analyzed_clean=clean, unanalysed=unanalyzed. "
+            "Default: all. "
+            "The summary object reflects this filter. "
+            "The analysis_state breakdown always covers all states within base filters."
+        ),
+    ),
+    waste_only: bool = Query(default=False, description="Deprecated. If true, equivalent to waste_state=flagged. Ignored when waste_state is provided."),
+    min_spend: float = Query(default=None, description="Minimum spend_usd threshold"),
+) -> dict[str, Any]:
+    """Return aggregate summary counts for the selected filter/window.
+
+    The `summary` object respects all filters including waste_state.
+    The `analysis_state` breakdown respects base filters but ignores the selected
+    waste_state so callers can see the full flagged/clean/unanalyzed distribution
+    within the selected campaign/query/match/spend/date scope.
+
+    No cursor. No pagination. Auth required. Read-only.
+    Source: search_terms table (PR-ADS-040).
+    Does not write to Google Ads or HubSpot.
+    """
+    # ── Clamp / validate params ────────────────────────────────────────────
+    days = max(1, min(_SEARCH_TERMS_MAX_DAYS, days))
+
+    # ── Resolve effective waste state ──────────────────────────────────────
+    effective_state = _resolve_waste_state_param(waste_state, waste_only)
+
+    _zero_summary: dict[str, Any] = {
+        "total_terms": 0,
+        "unique_search_terms": 0,
+        "total_spend_usd": 0.0,
+        "total_clicks": 0,
+        "total_impressions": 0,
+        "google_conversions": 0.0,
+        "avg_cpc_usd": None,
+        "ctr_pct": None,
+        "google_conversion_rate_pct": None,
+    }
+    _zero_state: dict[str, Any] = {
+        "flagged":    {"rows": 0, "spend_usd": 0.0},
+        "clean":      {"rows": 0, "spend_usd": 0.0},
+        "unanalyzed": {"rows": 0, "spend_usd": 0.0},
+    }
+
+    _safe_empty: dict[str, Any] = {
+        "days": days,
+        "filters": {
+            "waste_state": effective_state,
+        },
+        "summary": _zero_summary,
+        "analysis_state": _zero_state,
+        "data_quality": {
+            "source":  "windsor",
+            "dataset": "search_terms",
+            "status":  "db_unavailable",
+        },
+        "db_unavailable": True,
+    }
+
+    # ── Campaign name normalisation ────────────────────────────────────────
+    campaign_key: str | None = None
+    if campaign:
+        from db.writers import _canonicalise_campaign_name  # noqa: PLC0415
+        campaign_key = _canonicalise_campaign_name(campaign.strip().lower())
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _safe_empty
+
+            with conn.cursor() as cur:
+                # ── Build base WHERE clauses (no waste_state) ─────────────
+                # Used for the analysis_state breakdown so all three buckets
+                # are always visible even when the user filters by one state.
+                base_conditions: list[str] = [
+                    "source_date >= NOW() - INTERVAL '1 day' * %s",
+                ]
+                base_params: list[Any] = [days]
+
+                if campaign_key is not None:
+                    base_conditions.append("campaign_name = %s")
+                    base_params.append(campaign_key)
+
+                if match_type:
+                    base_conditions.append("match_type ILIKE %s")
+                    base_params.append(f"%{match_type.strip()}%")
+
+                if q:
+                    base_conditions.append("search_term ILIKE %s")
+                    base_params.append(f"%{q.strip()}%")
+
+                if min_spend is not None:
+                    base_conditions.append("spend_usd >= %s")
+                    base_params.append(min_spend)
+
+                base_where_sql = " AND ".join(base_conditions)
+
+                # ── Build filtered WHERE clauses (with waste_state) ────────
+                # Used for the top-line summary so it honours the selected state.
+                filtered_conditions = list(base_conditions)
+                filtered_params = list(base_params)
+
+                if effective_state == "flagged":
+                    filtered_conditions.append("is_flagged_waste IS TRUE")
+                elif effective_state == "clean":
+                    filtered_conditions.append("is_flagged_waste IS FALSE")
+                elif effective_state == "unanalyzed":
+                    filtered_conditions.append("is_flagged_waste IS NULL")
+                # "all" — no additional condition
+
+                filtered_where_sql = " AND ".join(filtered_conditions)
+
+                # ── Query 1: top-line summary (filtered scope) ─────────────
+                # All user-supplied values go through parameterised %s.
+                # where_sql is assembled exclusively from static string literals.
+                cur.execute(
+                    "SELECT"
+                    "  COUNT(*) AS total_terms,"
+                    "  COUNT(DISTINCT search_term) AS unique_search_terms,"
+                    "  COALESCE(SUM(spend_usd), 0) AS total_spend_usd,"
+                    "  COALESCE(SUM(clicks), 0) AS total_clicks,"
+                    "  COALESCE(SUM(impressions), 0) AS total_impressions,"
+                    "  COALESCE(SUM(conversions), 0) AS google_conversions"
+                    " FROM search_terms"
+                    " WHERE " + filtered_where_sql,
+                    filtered_params,
+                )
+                summary_row = cur.fetchone()
+                if summary_row is None:
+                    return _safe_empty
+                (
+                    total_terms, unique_terms, total_spend,
+                    total_clicks, total_impressions, google_conversions,
+                ) = summary_row
+
+                total_terms       = int(total_terms or 0)
+                unique_terms      = int(unique_terms or 0)
+                total_spend       = round(float(total_spend or 0), 2)
+                total_clicks      = int(total_clicks or 0)
+                total_impressions = int(total_impressions or 0)
+                google_conversions = round(float(google_conversions or 0), 2)
+
+                avg_cpc_usd = round(total_spend / total_clicks, 4) if total_clicks > 0 else None
+                ctr_pct = round(total_clicks / total_impressions * 100, 4) if total_impressions > 0 else None
+                google_conv_rate = round(google_conversions / total_clicks * 100, 4) if total_clicks > 0 else None
+
+                # ── Query 2: analysis_state breakdown (base scope only) ────
+                cur.execute(
+                    "SELECT"
+                    "  is_flagged_waste,"
+                    "  COUNT(*) AS rows,"
+                    "  COALESCE(SUM(spend_usd), 0) AS spend_usd"
+                    " FROM search_terms"
+                    " WHERE " + base_where_sql +
+                    " GROUP BY is_flagged_waste",
+                    base_params,
+                )
+                state_rows = cur.fetchall()
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/search-terms/summary] database error: %s", exc, exc_info=True)
+        return _safe_empty
+
+    # Map tri-state rows onto the three named buckets
+    analysis_state: dict[str, Any] = {
+        "flagged":    {"rows": 0, "spend_usd": 0.0},
+        "clean":      {"rows": 0, "spend_usd": 0.0},
+        "unanalyzed": {"rows": 0, "spend_usd": 0.0},
+    }
+    for flagged_val, row_count, spend_val in state_rows:
+        row_count = int(row_count or 0)
+        spend_val = round(float(spend_val or 0), 2)
+        if flagged_val is True:
+            analysis_state["flagged"] = {"rows": row_count, "spend_usd": spend_val}
+        elif flagged_val is False:
+            analysis_state["clean"] = {"rows": row_count, "spend_usd": spend_val}
+        else:
+            analysis_state["unanalyzed"] = {"rows": row_count, "spend_usd": spend_val}
+
+    filters_out: dict[str, Any] = {"waste_state": effective_state}
+    if campaign_key is not None:
+        filters_out["campaign"] = campaign_key
+    if match_type:
+        filters_out["match_type"] = match_type.strip()
+    if q:
+        filters_out["q"] = q.strip()
+    if min_spend is not None:
+        filters_out["min_spend"] = min_spend
+
+    return {
+        "days": days,
+        "filters": filters_out,
+        "summary": {
+            "total_terms":                   total_terms,
+            "unique_search_terms":           unique_terms,
+            "total_spend_usd":               total_spend,
+            "total_clicks":                  total_clicks,
+            "total_impressions":             total_impressions,
+            "google_conversions":            google_conversions,
+            "avg_cpc_usd":                   avg_cpc_usd,
+            "ctr_pct":                       ctr_pct,
+            "google_conversion_rate_pct":    google_conv_rate,
+        },
+        "analysis_state": analysis_state,
+        "data_quality": {
+            "source":  "windsor",
+            "dataset": "search_terms",
+            "note":    _SEARCH_TERMS_SUMMARY_DATA_QUALITY_NOTE,
+        },
+        "db_unavailable": False,
+    }
+
+
+
 
 _GCLID_ATTR_MAX_LIMIT    = 500
 _GCLID_ATTR_DEFAULT_DAYS = 30

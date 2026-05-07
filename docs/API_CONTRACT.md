@@ -1126,12 +1126,108 @@ HTTP 400.
 - `waste_only=true` is preserved for backward compatibility and maps to `waste_state=flagged` when `waste_state` is not provided.
 - Invalid `waste_state` values return HTTP 400 with `{ "detail": "Invalid waste_state. Allowed values: all, flagged, clean, unanalyzed." }`.
 
-**Frontend usage (as of PR-ADS-052):**
-- Rendered by the Search Terms page in the SPA.
+**Frontend usage (as of PR-ADS-053):**
+- As of PR-ADS-053, Search Terms KPI cards use `/api/search-terms/summary`. The table remains cursor-paginated via `/api/search-terms`.
 - UI uses cursor pagination via `pagination.next_cursor` — Load More button appends rows.
-- KPI cards show counts and spend for currently loaded rows only, not the total database count.
+- KPI cards show backend summary counts and spend for the selected filter/window.
+- Load More only appends table rows; it does not reload or alter the KPI summary.
 - All analysis-state filters (`flagged`, `clean`, `unanalyzed`) are applied server-side via `waste_state`. Client-side state filtering has been removed.
 - Page is read-only: no negative keyword push, no marking/editing waste state, no campaign actions.
+
+---
+
+#### `GET /api/search-terms/summary`
+Aggregate summary counts for the selected filter/window.
+
+**Auth:** Auth
+**Read-only:** Yes — no write to Google Ads, HubSpot, or any external system
+**Source:** `search_terms` table (PR-ADS-040)
+**No pagination** — returns a single aggregate response for the entire filtered scope.
+
+**Query params:**
+
+| Param | Type | Default | Notes |
+|-------|------|---------|-------|
+| `days` | integer | 14 | Look-back window (1–90) |
+| `campaign` | string | — | Exact canonical campaign_name match |
+| `match_type` | string | — | Case-insensitive contains match on match_type |
+| `q` | string | — | Case-insensitive contains search on search_term |
+| `waste_state` | string | all | Analysis-state filter. Allowed: `all`, `flagged`, `clean`, `unanalyzed`. Aliases: `waste`=`flagged`, `analyzed_clean`=`clean`, `unanalysed`=`unanalyzed`. Invalid values return HTTP 400. |
+| `waste_only` | boolean | false | Deprecated. Equivalent to `waste_state=flagged` when `waste_state` is not provided. |
+| `min_spend` | numeric | — | Minimum spend_usd |
+
+**Filter behaviour:**
+
+- The `summary` object respects `waste_state` — it reflects totals for the selected filter/window.
+- The `analysis_state` breakdown respects base filters (days, campaign, match_type, q, min_spend) but **ignores** the selected `waste_state`, so callers can see the full flagged/clean/unanalyzed distribution within the selected scope even when `waste_state` is set to a single bucket.
+
+**Response 200:**
+```json
+{
+  "days": 14,
+  "filters": {
+    "campaign": "global - competitors",
+    "match_type": "broad",
+    "q": "gratis",
+    "min_spend": 10,
+    "waste_state": "all"
+  },
+  "summary": {
+    "total_terms": 128,
+    "unique_search_terms": 94,
+    "total_spend_usd": 2480.50,
+    "total_clicks": 410,
+    "total_impressions": 18200,
+    "google_conversions": 17.0,
+    "avg_cpc_usd": 6.05,
+    "ctr_pct": 2.25,
+    "google_conversion_rate_pct": 4.15
+  },
+  "analysis_state": {
+    "flagged":    { "rows": 22, "spend_usd": 610.25 },
+    "clean":      { "rows": 36, "spend_usd": 740.10 },
+    "unanalyzed": { "rows": 70, "spend_usd": 1130.15 }
+  },
+  "data_quality": {
+    "source": "windsor",
+    "dataset": "search_terms",
+    "note": "Summary is computed from stored search_terms rows in PostgreSQL. Google conversions are platform conversions, not HubSpot SQLs."
+  },
+  "db_unavailable": false
+}
+```
+
+**DB unavailable response:**
+```json
+{
+  "days": 14,
+  "filters": { "waste_state": "all" },
+  "summary": {
+    "total_terms": 0,
+    "unique_search_terms": 0,
+    "total_spend_usd": 0,
+    "total_clicks": 0,
+    "total_impressions": 0,
+    "google_conversions": 0,
+    "avg_cpc_usd": null,
+    "ctr_pct": null,
+    "google_conversion_rate_pct": null
+  },
+  "analysis_state": {
+    "flagged":    { "rows": 0, "spend_usd": 0 },
+    "clean":      { "rows": 0, "spend_usd": 0 },
+    "unanalyzed": { "rows": 0, "spend_usd": 0 }
+  },
+  "data_quality": { "source": "windsor", "dataset": "search_terms", "status": "db_unavailable" },
+  "db_unavailable": true
+}
+```
+
+**Important scope notes:**
+- Google conversions are platform conversions, not HubSpot SQLs.
+- Does not classify search terms, mark rows clean or waste, or write to any external system.
+- `avg_cpc_usd`, `ctr_pct`, and `google_conversion_rate_pct` are `null` when the denominator is zero.
+- Invalid `waste_state` values return HTTP 400 with `{ "detail": "Invalid waste_state. Allowed values: all, flagged, clean, unanalyzed." }`.
 
 ---
 
@@ -1573,6 +1669,7 @@ One GCLID coverage snapshot per run, capturing aggregate coverage statistics.
 | GET | `/api/action-queue` | Auth | Ranked human-review queue (DB, ?days=) |
 | GET | `/api/datasets/freshness` | Auth | Per-dataset sync state / watermark (sync_state table) |
 | GET | `/api/search-terms` | Auth | Paginated search-term fact rows (search_terms table, cursor pagination) |
+| GET | `/api/search-terms/summary` | Auth | Aggregate summary counts for selected filter/window (search_terms table, no pagination) |
 | GET | `/api/gclid-attribution` | Auth | Paginated GCLID attribution rows (gclid_attribution table, cursor pagination) |
 | GET | `/api/gclid-coverage` | Auth | GCLID coverage snapshots (gclid_coverage_snapshots table) |
 | GET | `/api/attribution/quality` | Auth | Read-only attribution quality signals (gclid_attribution + sync_state + gclid_coverage_snapshots) |
