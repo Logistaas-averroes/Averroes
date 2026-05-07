@@ -3363,7 +3363,9 @@ def api_search_terms_summary(
     }
 
 
-
+# ---------------------------------------------------------------------------
+# GCLID Attribution endpoint — cursor-paginated, read-only, auth required. (PR-ADS-044)
+# ---------------------------------------------------------------------------
 
 _GCLID_ATTR_MAX_LIMIT    = 500
 _GCLID_ATTR_DEFAULT_DAYS = 30
