@@ -16,6 +16,8 @@ local PostgreSQL database for the Logistaas Ads Intelligence System.
 
 - Backfill is **manual**. No scheduler, cron job, or Render startup command calls
   these scripts.
+- The UI does **not** trigger backfill. This runbook does not imply automatic sync
+  execution from the browser, a scheduler, or infrastructure startup.
 - Backfill writes **only to local PostgreSQL**. It never writes to Google Ads,
   HubSpot, or any external platform.
 - Backfill populates PostgreSQL with historical source facts for offline analysis.
@@ -142,10 +144,11 @@ backfill depends on GCLID coverage in contact records.
 
 | Dataset   | Status                      | Notes |
 |-----------|-----------------------------|-------|
-| `matches` | Future (table not available) | gclid_attribution table planned for PR-ADS-044 |
+| `matches` | Table available; execution deferred | Historical backfill execution remains future work |
 
-GCLID attribution backfill is deferred until the `gclid_attribution` table is
-created (PR-ADS-044).
+The `gclid_attribution` table is now available and stores local GCLID attribution
+evidence. Historical GCLID backfill execution remains future work and is not
+triggered by this runbook.
 
 ---
 
@@ -226,7 +229,9 @@ grep -r "backfill" render.yaml
 Daily sync (PR-ADS-042) is separate from historical backfill. The daily scheduler
 covers only a short recent overlap window (last 1–2 days) and updates `sync_state`
 for supported datasets (`windsor/search_terms`, `hubspot/contacts`). Historical
-backfill remains manual, guarded, and is not yet implemented in execute mode.
+backfill remains manual, guarded, and is not yet implemented in execute mode. The
+UI does not trigger backfill, and this runbook does not imply automatic sync
+execution.
 
 ---
 

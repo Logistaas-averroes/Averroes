@@ -2839,6 +2839,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]
             "running": status_counts["running"],
             "unknown": status_counts["unknown"],
         },
+        "db_unavailable": False,
     }
 
 
@@ -2856,35 +2857,45 @@ _SEARCH_TERMS_DATA_QUALITY_NOTE = (
 )
 
 
-def _encode_cursor(source_date: date, row_id: int) -> str:
+def _encode_keyset_cursor(payload: dict) -> str:
     """Encode a keyset cursor as URL-safe base64 JSON (no padding)."""
-    payload = json.dumps(
-        {"source_date": str(source_date), "id": int(row_id)},
-        separators=(",", ":"),
-    )
-    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    raw = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def _decode_cursor(token: str):
-    """Decode a base64 JSON cursor.
-
-    Returns (source_date_as_date, id_int) or raises ValueError on invalid input.
-    Validates that source_date is a proper ISO date so that a corrupt/tampered
-    cursor always returns HTTP 400 — never an incorrect db_unavailable response.
-    """
+def _decode_keyset_cursor(token: str) -> dict:
+    """Decode a base64 JSON cursor payload or raise ValueError."""
     try:
-        # Restore base64 padding using the standard formula
         padded = token + ("=" * (-len(token) % 4))
         decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
-        obj = json.loads(decoded.decode("utf-8"))
+        payload = json.loads(decoded.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("cursor payload must be an object")
+        return payload
+    except Exception as exc:
+        raise ValueError(f"Invalid cursor: {exc}") from exc
 
-        source_date = date.fromisoformat(str(obj["source_date"]))
-        row_id = int(obj["id"])
+
+def _encode_search_terms_cursor(source_date: date, row_id: int) -> str:
+    return _encode_keyset_cursor({
+        "source_date": str(source_date),
+        "id": int(row_id),
+    })
+
+
+def _decode_search_terms_cursor(token: str):
+    """Decode a validated search-terms cursor."""
+    try:
+        payload = _decode_keyset_cursor(token)
+        source_date = date.fromisoformat(str(payload["source_date"]))
+        row_id = int(payload["id"])
 
         if row_id <= 0:
             raise ValueError("cursor id must be positive")
 
         return source_date, row_id
+    except ValueError:
+        raise
     except Exception as exc:
         raise ValueError(f"Invalid cursor: {exc}") from exc
 
@@ -2935,7 +2946,7 @@ def api_search_terms(
     cursor_id:   int | None  = None
     if cursor:
         try:
-            cursor_date, cursor_id = _decode_cursor(cursor)
+            cursor_date, cursor_id = _decode_search_terms_cursor(cursor)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -3040,7 +3051,7 @@ def api_search_terms(
     next_cursor: str | None = None
     if has_more and page_rows:
         last = dict(zip(cols, page_rows[-1]))
-        next_cursor = _encode_cursor(str(last["source_date"]), int(last["id"]))
+        next_cursor = _encode_search_terms_cursor(last["source_date"], int(last["id"]))
 
     return {
         "days": days,
@@ -3069,11 +3080,10 @@ _GCLID_ATTR_MAX_DAYS     = 365
 
 def _encode_gclid_cursor(created_at: datetime, row_id: int) -> str:
     """Encode a keyset cursor for gclid_attribution as URL-safe base64 JSON (no padding)."""
-    payload = json.dumps(
-        {"created_at": created_at.isoformat(), "id": int(row_id)},
-        separators=(",", ":"),
-    )
-    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    return _encode_keyset_cursor({
+        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+        "id": int(row_id),
+    })
 
 
 def _decode_gclid_cursor(token: str):
@@ -3082,17 +3092,16 @@ def _decode_gclid_cursor(token: str):
     Returns (created_at_as_datetime, id_int) or raises ValueError on invalid input.
     """
     try:
-        padded = token + ("=" * (-len(token) % 4))
-        decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
-        obj = json.loads(decoded.decode("utf-8"))
-
-        created_at = datetime.fromisoformat(str(obj["created_at"]))
-        row_id = int(obj["id"])
+        payload = _decode_keyset_cursor(token)
+        created_at = datetime.fromisoformat(str(payload["created_at"]).replace("Z", "+00:00"))
+        row_id = int(payload["id"])
 
         if row_id <= 0:
             raise ValueError("cursor id must be positive")
 
         return created_at, row_id
+    except ValueError:
+        raise
     except Exception as exc:
         raise ValueError(f"Invalid cursor: {exc}") from exc
 

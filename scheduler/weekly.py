@@ -10,7 +10,7 @@ Set ADVISOR_MODE=claude to use Claude API (requires ANTHROPIC_API_KEY).
 
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 from scheduler.delivery import deliver_report
 from scheduler.run_history import start_run, finish_run
@@ -19,6 +19,40 @@ import db.writers as db_writers
 log = logging.getLogger(__name__)
 
 load_dotenv()
+
+
+def _parse_date_safe(value):
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10].strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _max_source_date(rows, fallback_date):
+    dates = []
+    for row in rows or []:
+        props = row.get("properties") or {}
+        value = (
+            row.get("date") or row.get("source_date") or row.get("createdate")
+            or props.get("date") or props.get("source_date") or props.get("createdate")
+        )
+        parsed = _parse_date_safe(value)
+        if parsed:
+            dates.append(parsed)
+    return max(dates) if dates else fallback_date
+
+
+def _persistence_succeeded(expected_rows, written_count) -> bool:
+    expected_count = len(expected_rows or [])
+    if written_count is None:
+        return False
+    if expected_count == 0:
+        return written_count == 0
+    return written_count > 0
 
 
 def run_weekly_report():
@@ -92,9 +126,44 @@ def run_weekly_report():
 
         # Write search term rows to database
         try:
-            st_count = db_writers.write_search_terms(run_id, search_terms)
+            st_batch_id = 0
+            window_end = datetime.utcnow().date()
+            window_start = window_end - timedelta(days=13)
+            st_batch_id = db_writers.start_sync_batch(
+                source="windsor",
+                dataset="search_terms",
+                sync_type="weekly",
+                date_from=window_start,
+                date_to=window_end,
+                run_id=run_id,
+            )
+
+            st_count = db_writers.write_search_terms(
+                run_id=run_id,
+                search_term_rows=search_terms,
+                sync_batch_id=st_batch_id or None,
+            )
+            if not _persistence_succeeded(search_terms, st_count):
+                raise RuntimeError(
+                    f"Weekly search_terms persistence failed or wrote 0 rows "
+                    f"for {len(search_terms or [])} fetched rows"
+                )
+            last_source_date = _max_source_date(search_terms, fallback_date=window_end)
+            if st_batch_id:
+                db_writers.finish_sync_batch(
+                    batch_id=st_batch_id,
+                    status="success",
+                    row_count=st_count,
+                    last_source_date=last_source_date,
+                )
             log.info("[weekly] Wrote %d search term rows to database", st_count)
         except Exception as db_exc:  # noqa: BLE001
+            if st_batch_id:
+                db_writers.finish_sync_batch(
+                    batch_id=st_batch_id,
+                    status="failed",
+                    error_message=str(db_exc)[:1000],
+                )
             log.error("[weekly] DB write search terms failed: %s", db_exc)
 
         # Step 3: Waste detection
