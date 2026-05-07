@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "geo", "keywords", "leads", "deals", "opportunities", "scheduler", "health", "action-queue"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue"];
 
 // Deal pipeline stages (Phase 1 read-only reference)
 const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
@@ -72,6 +72,14 @@ let searchTermRows = [];
 let searchTermsNextCursor = null;
 let searchTermsHasMore = false;
 let searchTermsStatus = "idle"; // idle | loading | ok | empty | db_unavailable | cursor_error | error
+
+// GCLID Attribution page state
+let gclidRows = [];
+let gclidNextCursor = null;
+let gclidHasMore = false;
+let gclidStatus = "idle"; // idle | loading | ok | empty | db_unavailable | cursor_error | error
+let gclidCoverageRows = [];
+let gclidCoverageStatus = "idle"; // idle | loading | ok | empty | unavailable
 
 // Reports page state
 let latestReportMarkdown = "";
@@ -393,6 +401,10 @@ function loadPage(page) {
     case "keywords":      loadKeywords();      break;
     case "leads":         loadLeads();         break;
     case "deals":         loadDeals();         break;
+    case "gclid-attribution":
+      loadGclidAttribution({ reset: true });
+      loadGclidCoverageForAttribution();
+      break;
     case "opportunities": loadOpportunities(); break;
     case "scheduler":     loadScheduler();     break;
     case "health":        loadHealth();        break;
@@ -2239,6 +2251,329 @@ function renderSearchTermsTable() {
   tableEl.innerHTML = `<div class="search-terms-table-scroll"><table class="data-table">${thead}<tbody>${tbody}</tbody></table></div>`;
 }
 
+// ── GCLID Attribution page ───────────────────────────────────────────────────
+
+function buildGclidAttributionParams({ cursor = null } = {}) {
+  const params = new URLSearchParams();
+  params.set("days", String(getSelectedDays()));
+  params.set("limit", "100");
+
+  const gclid = document.getElementById("gclid-filter-gclid")?.value.trim();
+  const campaign = document.getElementById("gclid-filter-campaign")?.value.trim();
+  const contactId = document.getElementById("gclid-filter-contact")?.value.trim();
+  const dealId = document.getElementById("gclid-filter-deal")?.value.trim();
+  const matchStatus = document.getElementById("gclid-filter-status")?.value;
+
+  if (gclid) params.set("gclid", gclid);
+  if (campaign) params.set("campaign", campaign);
+  if (contactId) params.set("contact_id", contactId);
+  if (dealId) params.set("deal_id", dealId);
+  if (matchStatus) params.set("match_status", matchStatus);
+  if (cursor) params.set("cursor", cursor);
+
+  return params;
+}
+
+function _updateGclidAttributionPaginationVisibility() {
+  const container = document.querySelector("#page-gclid-attribution .pagination-actions");
+  const btn = document.getElementById("gclid-load-more-btn");
+  if (!container || !btn) return;
+  container.hidden = btn.hidden;
+}
+
+function gclidStatusBadge(matchStatus) {
+  const normalized = (matchStatus || "unknown").toLowerCase();
+  const map = {
+    matched: { label: "Matched", cls: "gclid-status-matched" },
+    url_fallback: { label: "URL Fallback", cls: "gclid-status-url-fallback" },
+    unmatched: { label: "Unmatched", cls: "gclid-status-unmatched" },
+    unknown: { label: "Unknown", cls: "gclid-status-unknown" },
+  };
+  const value = map[normalized] || map.unknown;
+  return `<span class="gclid-status-badge ${value.cls}">${value.label}</span>`;
+}
+
+function renderGclidAttributionKPIs(rows) {
+  const kpiGrid = document.getElementById("gclid-attribution-kpis");
+  if (!kpiGrid) return;
+
+  const loadedRows = rows.length;
+  const matchedRows = rows.filter((r) => (r.match_status || "").toLowerCase() === "matched").length;
+  const fallbackRows = rows.filter((r) => (r.match_status || "").toLowerCase() === "url_fallback").length;
+  const unmatchedRows = rows.filter((r) => (r.match_status || "").toLowerCase() === "unmatched").length;
+  const loadedDealAmount = rows.reduce((sum, r) => sum + (Number(r.deal_amount_usd) || 0), 0);
+
+  kpiGrid.innerHTML = `
+    <div class="kpi-card">
+      <div class="kpi-card__label">Loaded Rows</div>
+      <div class="kpi-card__value">${loadedRows}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Matched Rows</div>
+      <div class="kpi-card__value">${matchedRows}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">URL Fallback Rows</div>
+      <div class="kpi-card__value">${fallbackRows}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Unmatched Rows</div>
+      <div class="kpi-card__value">${unmatchedRows}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Loaded Deal Amount</div>
+      <div class="kpi-card__value">${fmtDollar(loadedDealAmount)}</div>
+    </div>`;
+}
+
+function renderGclidCoverageCards() {
+  const kpiGrid = document.getElementById("gclid-coverage-kpis");
+  if (!kpiGrid) return;
+
+  if (gclidCoverageStatus === "unavailable") {
+    kpiGrid.innerHTML = `
+      <div class="kpi-card">
+        <div class="kpi-card__label">Coverage Snapshot</div>
+        <div class="kpi-card__value">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Status</div>
+        <div class="kpi-card__value">Unavailable</div>
+      </div>`;
+    return;
+  }
+
+  if (gclidCoverageStatus === "empty") {
+    kpiGrid.innerHTML = `
+      <div class="kpi-card">
+        <div class="kpi-card__label">Coverage Snapshot</div>
+        <div class="kpi-card__value">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-card__label">Status</div>
+        <div class="kpi-card__value">No snapshot</div>
+      </div>`;
+    return;
+  }
+
+  const latest = gclidCoverageRows[0] || {};
+  const coveragePct = Number(latest.coverage_pct);
+
+  kpiGrid.innerHTML = `
+    <div class="kpi-card">
+      <div class="kpi-card__label">Contacts With GCLID</div>
+      <div class="kpi-card__value">${fmt(latest.contacts_with_gclid)}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Contacts Without GCLID</div>
+      <div class="kpi-card__value">${fmt(latest.contacts_without_gclid)}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Coverage %</div>
+      <div class="kpi-card__value">${Number.isFinite(coveragePct) ? escapeHtml(coveragePct.toFixed(1)) + "%" : "—"}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Matched Deals</div>
+      <div class="kpi-card__value">${fmt(latest.matched_deals)}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Snapshot Date</div>
+      <div class="kpi-card__value">${fmt(latest.snapshot_date)}</div>
+    </div>`;
+}
+
+function renderGclidAttributionTable() {
+  const tableEl = document.getElementById("gclid-attribution-table");
+  if (!tableEl) return;
+
+  if (gclidStatus === "db_unavailable") {
+    tableEl.innerHTML = `
+      <div class="waste-empty-state">
+        <p class="empty-state">GCLID attribution temporarily unavailable — database offline.</p>
+      </div>`;
+    return;
+  }
+
+  if (gclidStatus === "cursor_error") {
+    tableEl.innerHTML = `
+      <div class="waste-empty-state">
+        <p class="empty-state">Could not load the next page. Refresh and try again.</p>
+      </div>`;
+    return;
+  }
+
+  if (gclidStatus === "error") {
+    tableEl.innerHTML = `
+      <div class="waste-empty-state">
+        <p class="empty-state">Could not load GCLID attribution. Check API health or run status.</p>
+      </div>`;
+    return;
+  }
+
+  if (!gclidRows.length) {
+    tableEl.innerHTML = `
+      <div class="waste-empty-state">
+        <p class="empty-state">No GCLID attribution rows found for the selected filters.</p>
+        <p class="waste-empty-subtext">Rows appear after the GCLID matching pipeline persists attribution evidence locally.</p>
+      </div>`;
+    return;
+  }
+
+  const thead = `
+    <thead>
+      <tr>
+        <th>GCLID</th>
+        <th>Match Status</th>
+        <th>Company</th>
+        <th>Country</th>
+        <th>Contact ID</th>
+        <th>Deal ID</th>
+        <th>Deal Stage</th>
+        <th class="td--num">Deal Amount</th>
+        <th>Campaign</th>
+        <th>Keyword</th>
+        <th>Match Type</th>
+        <th>Search Term</th>
+        <th>First URL</th>
+        <th>Contact Created</th>
+        <th>Deal Created</th>
+      </tr>
+    </thead>`;
+
+  const tbody = gclidRows.map((r) => `
+    <tr>
+      <td class="td--name">${escapeHtml(r.gclid || "—")}</td>
+      <td>${gclidStatusBadge(r.match_status)}</td>
+      <td>${escapeHtml(r.company || "—")}</td>
+      <td>${escapeHtml(r.country || "—")}</td>
+      <td>${escapeHtml(r.contact_id || "—")}</td>
+      <td>${escapeHtml(r.deal_id || "—")}</td>
+      <td>${escapeHtml(r.deal_stage_label || r.deal_stage || "—")}</td>
+      <td class="td--num">${r.deal_amount_usd != null ? fmtDollar(r.deal_amount_usd) : "—"}</td>
+      <td>${escapeHtml(r.campaign_name || "—")}</td>
+      <td>${escapeHtml(r.keyword || "—")}</td>
+      <td>${escapeHtml(r.match_type || "—")}</td>
+      <td>${escapeHtml(r.search_term || "—")}</td>
+      <td>${escapeHtml(r.first_url || "—")}</td>
+      <td>${fmtDate(r.contact_created_at)}</td>
+      <td>${fmtDate(r.deal_created_at)}</td>
+    </tr>`).join("");
+
+  tableEl.innerHTML = `<div class="gclid-table-scroll"><table class="data-table">${thead}<tbody>${tbody}</tbody></table></div>`;
+}
+
+async function loadGclidAttribution({ reset = false, cursor = null } = {}) {
+  if (gclidStatus === "loading") return;
+
+  gclidStatus = "loading";
+
+  const tableEl = document.getElementById("gclid-attribution-table");
+  const loadMoreBtn = document.getElementById("gclid-load-more-btn");
+
+  if (reset) {
+    gclidRows = [];
+    gclidNextCursor = null;
+    gclidHasMore = false;
+    renderGclidAttributionKPIs([]);
+    if (tableEl) {
+      tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading GCLID attribution…</p>`;
+    }
+    if (loadMoreBtn) loadMoreBtn.hidden = true;
+    _updateGclidAttributionPaginationVisibility();
+  } else if (loadMoreBtn) {
+    loadMoreBtn.disabled = true;
+    loadMoreBtn.textContent = "Loading…";
+  }
+
+  try {
+    const params = buildGclidAttributionParams({ cursor });
+    const data = await fetchJSON(`/api/gclid-attribution?${params.toString()}`);
+
+    if (data.db_unavailable) {
+      gclidStatus = "db_unavailable";
+      gclidRows = [];
+      gclidNextCursor = null;
+      gclidHasMore = false;
+      renderGclidAttributionKPIs([]);
+      renderGclidAttributionTable();
+      if (loadMoreBtn) loadMoreBtn.hidden = true;
+      _updateGclidAttributionPaginationVisibility();
+      return;
+    }
+
+    const newRows = data.rows || [];
+    const pagination = data.pagination || {};
+
+    gclidRows = reset ? newRows : gclidRows.concat(newRows);
+    gclidNextCursor = pagination.next_cursor || null;
+    gclidHasMore = !!pagination.has_more;
+    gclidStatus = gclidRows.length ? "ok" : "empty";
+
+    renderGclidAttributionKPIs(gclidRows);
+    renderGclidAttributionTable();
+
+    if (loadMoreBtn) {
+      if (gclidHasMore) {
+        loadMoreBtn.hidden = false;
+        loadMoreBtn.disabled = false;
+        loadMoreBtn.textContent = "Load more";
+      } else {
+        loadMoreBtn.hidden = true;
+      }
+    }
+    _updateGclidAttributionPaginationVisibility();
+  } catch (err) {
+    const isCursorError = err && err.message && err.message.includes("Invalid cursor");
+    gclidStatus = isCursorError ? "cursor_error" : "error";
+    renderGclidAttributionTable();
+    if (loadMoreBtn) {
+      const canLoadMore = gclidStatus !== "cursor_error" && !!gclidNextCursor;
+      loadMoreBtn.hidden = !canLoadMore;
+      loadMoreBtn.disabled = false;
+      loadMoreBtn.textContent = "Load more";
+    }
+    _updateGclidAttributionPaginationVisibility();
+  }
+}
+
+async function loadGclidCoverageForAttribution() {
+  gclidCoverageStatus = "loading";
+  gclidCoverageRows = [];
+  renderGclidCoverageCards();
+
+  try {
+    const data = await fetchJSON(`/api/gclid-coverage?days=${getSelectedDays()}`);
+    if (data.db_unavailable) {
+      gclidCoverageStatus = "unavailable";
+      gclidCoverageRows = [];
+      renderGclidCoverageCards();
+      return;
+    }
+
+    const rows = data.rows || [];
+    if (!rows.length) {
+      gclidCoverageStatus = "empty";
+      gclidCoverageRows = [];
+      renderGclidCoverageCards();
+      return;
+    }
+
+    const latest = [...rows].sort((a, b) => {
+      const aTs = new Date(a.created_at || a.snapshot_date || 0).getTime();
+      const bTs = new Date(b.created_at || b.snapshot_date || 0).getTime();
+      return bTs - aTs;
+    })[0];
+
+    gclidCoverageStatus = "ok";
+    gclidCoverageRows = latest ? [latest] : [];
+    renderGclidCoverageCards();
+  } catch (_) {
+    gclidCoverageStatus = "unavailable";
+    gclidCoverageRows = [];
+    renderGclidCoverageCards();
+  }
+}
+
 async function loadKeywords() {
   const tableEl   = document.getElementById("kw-table-body");
   const summaryEl = document.getElementById("kw-matchtype-summary");
@@ -3781,6 +4116,39 @@ document.addEventListener("DOMContentLoaded", async () => {
   [stQueryInput, stCampaignInput].forEach((el) => {
     if (el) el.addEventListener("keydown", (e) => {
       if (e.key === "Enter") loadSearchTerms({ reset: true });
+    });
+  });
+
+  // Wire up GCLID attribution controls
+  const gclidInput      = document.getElementById("gclid-filter-gclid");
+  const gclidCampaign   = document.getElementById("gclid-filter-campaign");
+  const gclidContact    = document.getElementById("gclid-filter-contact");
+  const gclidDeal       = document.getElementById("gclid-filter-deal");
+  const gclidStatusSel  = document.getElementById("gclid-filter-status");
+  const gclidApplyBtn   = document.getElementById("gclid-apply-btn");
+  const gclidClearBtn   = document.getElementById("gclid-clear-btn");
+  const gclidRefreshBtn = document.getElementById("gclid-refresh-btn");
+  const gclidLoadMoreBtn = document.getElementById("gclid-load-more-btn");
+
+  if (gclidApplyBtn) gclidApplyBtn.addEventListener("click", () => loadGclidAttribution({ reset: true }));
+  if (gclidClearBtn) gclidClearBtn.addEventListener("click", () => {
+    if (gclidInput) gclidInput.value = "";
+    if (gclidCampaign) gclidCampaign.value = "";
+    if (gclidContact) gclidContact.value = "";
+    if (gclidDeal) gclidDeal.value = "";
+    if (gclidStatusSel) gclidStatusSel.value = "";
+    loadGclidAttribution({ reset: true });
+  });
+  if (gclidRefreshBtn) gclidRefreshBtn.addEventListener("click", () => {
+    loadGclidAttribution({ reset: true });
+    loadGclidCoverageForAttribution();
+  });
+  if (gclidLoadMoreBtn) {
+    gclidLoadMoreBtn.addEventListener("click", () => loadGclidAttribution({ reset: false, cursor: gclidNextCursor }));
+  }
+  [gclidInput, gclidCampaign, gclidContact, gclidDeal].forEach((el) => {
+    if (el) el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") loadGclidAttribution({ reset: true });
     });
   });
 
