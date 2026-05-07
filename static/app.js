@@ -81,6 +81,13 @@ let gclidStatus = "idle"; // idle | loading | ok | empty | db_unavailable | curs
 let gclidCoverageRows = [];
 let gclidCoverageStatus = "idle"; // idle | loading | ok | empty | unavailable
 
+// Campaign drawer attribution preview state
+let campaignAttributionRows = [];
+let campaignAttributionStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+
+// GCLID Attribution page prefill (set when navigating from campaign drawer)
+let gclidAttributionPrefill = null;
+
 // Reports page state
 let latestReportMarkdown = "";
 let latestReportMeta = null;
@@ -402,6 +409,11 @@ function loadPage(page) {
     case "leads":         loadLeads();         break;
     case "deals":         loadDeals();         break;
     case "gclid-attribution":
+      if (gclidAttributionPrefill) {
+        const campaignInput = document.getElementById("gclid-filter-campaign");
+        if (campaignInput) campaignInput.value = gclidAttributionPrefill.campaign || "";
+        gclidAttributionPrefill = null;
+      }
       loadGclidAttribution({ reset: true });
       loadGclidCoverageForAttribution();
       break;
@@ -2293,6 +2305,18 @@ function gclidStatusBadge(matchStatus) {
   return `<span class="gclid-status-badge ${value.cls}">${value.label}</span>`;
 }
 
+function _gclidMiniStatusBadge(matchStatus) {
+  const normalized = (matchStatus || "unknown").toLowerCase();
+  const map = {
+    matched: { label: "Matched", cls: "gclid-mini-status-matched" },
+    url_fallback: { label: "URL Fallback", cls: "gclid-mini-status-url-fallback" },
+    unmatched: { label: "Unmatched", cls: "gclid-mini-status-unmatched" },
+    unknown: { label: "Unknown", cls: "gclid-mini-status-unknown" },
+  };
+  const value = map[normalized] || map.unknown;
+  return `<span class="gclid-mini-status-badge ${value.cls}">${value.label}</span>`;
+}
+
 function renderGclidAttributionKPIs(rows) {
   const kpiGrid = document.getElementById("gclid-attribution-kpis");
   if (!kpiGrid) return;
@@ -3401,6 +3425,40 @@ async function loadGclidCoverage() {
 let _drawerOpenCampaign = null;  // campaign name string currently shown in drawer, or null
 let _drawerPreviousFocus = null; // element to restore focus to on close
 
+async function loadCampaignAttributionPreview(campaignName) {
+  campaignAttributionStatus = "loading";
+  campaignAttributionRows = [];
+
+  try {
+    const params = new URLSearchParams();
+    params.set("days", String(getSelectedDays()));
+    params.set("limit", "5");
+    params.set("campaign", campaignName);
+
+    const data = await fetchJSON(`/api/gclid-attribution?${params.toString()}`);
+
+    if (data.db_unavailable) {
+      campaignAttributionStatus = "db_unavailable";
+      campaignAttributionRows = [];
+      return { status: campaignAttributionStatus, rows: [], summary: data.summary || null };
+    }
+
+    campaignAttributionRows = data.rows || [];
+    campaignAttributionStatus = campaignAttributionRows.length ? "ok" : "empty";
+
+    return {
+      status: campaignAttributionStatus,
+      rows: campaignAttributionRows,
+      summary: data.summary || null,
+      pagination: data.pagination || null,
+    };
+  } catch (_) {
+    campaignAttributionStatus = "error";
+    campaignAttributionRows = [];
+    return { status: campaignAttributionStatus, rows: [], summary: null };
+  }
+}
+
 async function openCampaignDrawer(campaignName) {
   if (!campaignName) return;
   _drawerOpenCampaign = campaignName;
@@ -3432,13 +3490,32 @@ async function openCampaignDrawer(campaignName) {
   document.addEventListener("keydown", _drawerKeyHandler);
 
   try {
-    // Preferred query-param endpoint (avoids routing issues with '/' in names)
-    const data = await fetchJSON(
-      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${getSelectedDays()}`
-    );
+    // Fetch campaign detail and attribution preview in parallel.
+    // Attribution failure must not block the drawer.
+    campaignAttributionStatus = "loading";
+    campaignAttributionRows = [];
+
+    const [detailResult, _attrResult] = await Promise.allSettled([
+      fetchJSON(
+        `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${getSelectedDays()}`
+      ),
+      loadCampaignAttributionPreview(campaignName),
+    ]);
+
     // Guard stale response: drawer may have been closed or switched while fetching
     if (_drawerOpenCampaign !== campaignName) return;
-    renderCampaignDrawer(data);
+
+    if (detailResult.status === "rejected") {
+      if (bodyEl) {
+        bodyEl.innerHTML = `
+          <div class="drawer-section">
+            <p class="drawer-empty">Could not load campaign detail — ${escapeHtml((detailResult.reason && detailResult.reason.message) || "network error")}.</p>
+          </div>`;
+      }
+      return;
+    }
+
+    renderCampaignDrawer(detailResult.value);
   } catch (err) {
     if (_drawerOpenCampaign !== campaignName) return;
     if (bodyEl) {
@@ -3786,6 +3863,113 @@ function _appendDrawerEvidenceSections(container, data, lq) {
       </div>`;
   }
 
+  // ── GCLID Attribution Preview ──────────────────────────────────────────
+  let attrHtml;
+  if (campaignAttributionStatus === "loading") {
+    attrHtml = `
+      <div class="drawer-section drawer-attribution-section">
+        <div class="drawer-section__title">GCLID Attribution</div>
+        <p class="drawer-empty">Loading attribution evidence…</p>
+      </div>`;
+  } else if (campaignAttributionStatus === "db_unavailable") {
+    attrHtml = `
+      <div class="drawer-section drawer-attribution-section">
+        <div class="drawer-section__title">GCLID Attribution</div>
+        <p class="drawer-empty">GCLID attribution temporarily unavailable — database offline.</p>
+      </div>`;
+  } else if (campaignAttributionStatus === "error") {
+    attrHtml = `
+      <div class="drawer-section drawer-attribution-section">
+        <div class="drawer-section__title">GCLID Attribution</div>
+        <p class="drawer-empty">Could not load GCLID attribution for this campaign.</p>
+      </div>`;
+  } else if (campaignAttributionStatus === "empty" || !campaignAttributionRows.length) {
+    attrHtml = `
+      <div class="drawer-section drawer-attribution-section">
+        <div class="drawer-section__title">GCLID Attribution</div>
+        <p class="drawer-empty">No GCLID attribution rows found for this campaign in the selected window.</p>
+        <p class="drawer-source-note" style="margin-top:var(--space-3)">Campaign-linked Google click IDs connected to HubSpot contacts/deals.</p>
+        <div style="margin-top:var(--space-3)">
+          <button class="btn btn--secondary drawer-gclid-fullpage-btn" type="button">View full GCLID Attribution page</button>
+        </div>
+      </div>`;
+  } else {
+    // Compute preview KPIs from loaded rows
+    const attrRows = campaignAttributionRows;
+    const attrLoaded    = attrRows.length;
+    const attrMatched   = attrRows.filter((r) => (r.match_status || "").toLowerCase() === "matched").length;
+    const attrFallback  = attrRows.filter((r) => (r.match_status || "").toLowerCase() === "url_fallback").length;
+    const attrUnmatched = attrRows.filter((r) => (r.match_status || "").toLowerCase() === "unmatched").length;
+    const attrDealAmt   = attrRows.reduce((s, r) => s + (Number(r.deal_amount_usd) || 0), 0);
+
+    const attrKpiHtml = `
+      <div class="drawer-attribution-kpis">
+        <div class="drawer-kpi">
+          <div class="drawer-kpi__label">Loaded Rows</div>
+          <div class="drawer-kpi__value">${attrLoaded}</div>
+        </div>
+        <div class="drawer-kpi">
+          <div class="drawer-kpi__label">Matched Rows</div>
+          <div class="drawer-kpi__value">${attrMatched}</div>
+        </div>
+        <div class="drawer-kpi">
+          <div class="drawer-kpi__label">URL Fallback</div>
+          <div class="drawer-kpi__value">${attrFallback}</div>
+        </div>
+        <div class="drawer-kpi">
+          <div class="drawer-kpi__label">Unmatched</div>
+          <div class="drawer-kpi__value">${attrUnmatched}</div>
+        </div>
+        <div class="drawer-kpi">
+          <div class="drawer-kpi__label">Loaded Deal Amount</div>
+          <div class="drawer-kpi__value">${fmtDollar(attrDealAmt)}</div>
+        </div>
+      </div>`;
+
+    const attrTableRows = attrRows.map((r) => `
+      <tr>
+        <td>${_gclidMiniStatusBadge(r.match_status)}</td>
+        <td class="td--name">${escapeHtml(r.company || "—")}</td>
+        <td>${escapeHtml(r.deal_id || "—")}</td>
+        <td>${escapeHtml(r.deal_stage_label || r.deal_stage || "—")}</td>
+        <td>${r.deal_amount_usd != null ? fmtDollar(r.deal_amount_usd) : "—"}</td>
+        <td>${escapeHtml(r.keyword || "—")}</td>
+        <td>${escapeHtml(r.search_term || "—")}</td>
+        <td>${fmtDate(r.contact_created_at)}</td>
+      </tr>`).join("");
+
+    attrHtml = `
+      <div class="drawer-section drawer-attribution-section">
+        <div class="drawer-section__title">GCLID Attribution</div>
+        <p class="drawer-source-note" style="margin-bottom:var(--space-3)">Campaign-linked Google click IDs connected to HubSpot contacts/deals.</p>
+        ${attrKpiHtml}
+        <div class="drawer-attribution-table" style="margin-top:var(--space-4)">
+          <table class="drawer-table">
+            <thead>
+              <tr>
+                <th>Match Status</th>
+                <th>Company</th>
+                <th>Deal ID</th>
+                <th>Deal Stage</th>
+                <th>Deal Amount</th>
+                <th>Keyword</th>
+                <th>Search Term</th>
+                <th>Contact Created</th>
+              </tr>
+            </thead>
+            <tbody>${attrTableRows}</tbody>
+          </table>
+        </div>
+        <p class="drawer-source-note" style="margin-top:var(--space-3)">
+          Google click evidence · HubSpot deal/contact evidence · Loaded preview values only.
+          Not qualified · Not revenue proven · Not OCT ready.
+        </p>
+        <div style="margin-top:var(--space-3)">
+          <button class="btn btn--secondary drawer-gclid-fullpage-btn" type="button">View full GCLID Attribution page</button>
+        </div>
+      </div>`;
+  }
+
   // ── Data source footer ─────────────────────────────────────────────────
   const src = data.data_sources || {};
   const footerHtml = `
@@ -3798,12 +3982,23 @@ function _appendDrawerEvidenceSections(container, data, lq) {
       </p>
     </div>`;
 
-  container.insertAdjacentHTML("beforeend", lqHtml + countryHtml + kwHtml + wasteHtml + leadsHtml + footerHtml);
+  container.insertAdjacentHTML("beforeend", lqHtml + countryHtml + kwHtml + wasteHtml + leadsHtml + attrHtml + footerHtml);
 
   // Wire up waste copy button if present (must happen after DOM insertion)
   const wcBtn = container.querySelector("#drawer-waste-copy-btn");
   if (wcBtn) {
     wcBtn.addEventListener("click", () => copyDrawerWasteTerms(data.waste_terms || [], wcBtn));
+  }
+
+  // Wire up "View full GCLID Attribution page" button
+  const gclidFullBtn = container.querySelector(".drawer-gclid-fullpage-btn");
+  if (gclidFullBtn) {
+    const _campName = _drawerOpenCampaign;
+    gclidFullBtn.addEventListener("click", () => {
+      if (_campName) gclidAttributionPrefill = { campaign: _campName };
+      closeCampaignDrawer();
+      navigate("gclid-attribution");
+    });
   }
 }
 
