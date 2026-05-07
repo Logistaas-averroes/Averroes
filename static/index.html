@@ -714,6 +714,30 @@
           <p class="page-subtitle">Readiness checks — environment, config, modules</p>
         </header>
         <div id="health-body"><p class="empty-state">Loading readiness data…</p></div>
+
+        <!-- Dataset Freshness panel -->
+        <div class="panel" id="dataset-freshness-panel" style="margin-top:var(--space-6)">
+          <div class="panel__header" style="display:flex;align-items:center;justify-content:space-between">
+            <span>Dataset Freshness</span>
+            <button id="dataset-freshness-refresh-btn" class="btn btn--ghost btn--sm" type="button" aria-label="Refresh dataset freshness">Refresh</button>
+          </div>
+          <div class="panel__body">
+            <div id="dataset-freshness-summary" class="freshness-summary-grid"></div>
+            <div class="dataset-freshness-table-wrap">
+              <div id="dataset-freshness-table"></div>
+            </div>
+            <div id="dataset-freshness-help" class="freshness-help-note" hidden></div>
+          </div>
+        </div>
+
+        <!-- GCLID Coverage mini-panel (optional — hidden if endpoint unavailable) -->
+        <div class="panel" id="gclid-coverage-panel" style="margin-top:var(--space-4)" hidden>
+          <div class="panel__header">GCLID Coverage</div>
+          <div class="panel__body">
+            <div id="gclid-coverage-body"><p class="empty-state">Loading GCLID coverage…</p></div>
+          </div>
+        </div>
+
       </section>
 
     </div><!-- /.main-content -->
