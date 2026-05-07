@@ -2558,18 +2558,16 @@ async function loadGclidCoverageForAttribution() {
       return;
     }
 
+    const snapshotTs = (row) => {
+      const value = row?.created_at || row?.snapshot_date;
+      const ts = value ? new Date(value).getTime() : NaN;
+      return Number.isFinite(ts) ? ts : -Infinity;
+    };
+
     const latest = rows.reduce((currentLatest, row) => {
       if (!currentLatest) return row;
-      const currentTs = (() => {
-        const value = currentLatest.created_at || currentLatest.snapshot_date;
-        const ts = value ? new Date(value).getTime() : NaN;
-        return Number.isFinite(ts) ? ts : -Infinity;
-      })();
-      const rowTs = (() => {
-        const value = row.created_at || row.snapshot_date;
-        const ts = value ? new Date(value).getTime() : NaN;
-        return Number.isFinite(ts) ? ts : -Infinity;
-      })();
+      const currentTs = snapshotTs(currentLatest);
+      const rowTs = snapshotTs(row);
       return rowTs > currentTs ? row : currentLatest;
     }, null);
 
