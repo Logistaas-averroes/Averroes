@@ -20,7 +20,7 @@ Unblocks: PR-ADS-051 — Data Foundation Cleanup Patch
 
 ### Are there blocking issues?
 
-**No blocking issues.** All 🔴 Blocking rows in the risk register below are absent — no blocking defects were found. The highest severity items are 🟠 High and are addressable in PR-ADS-051.
+**No blocking issues.** All 🔴 Blocking rows in the risk register below are absent — no blocking defects were found. The remaining 🟠 High item is cursor helper duplication between `/api/search-terms` and `/api/gclid-attribution`, addressable in PR-ADS-051.
 
 ### Is the system ready for the next feature phase?
 
@@ -261,7 +261,7 @@ Unblocks: PR-ADS-051 — Data Foundation Cleanup Patch
 - **Cursor pagination:** `(source_date DESC, id DESC)` — matches `idx_search_terms_cursor` ✅
 - **Invalid cursor:** raises `HTTPException(status_code=400)` ✅
 - **DB unavailable:** returns `_safe_empty` with `"db_unavailable": true` ✅
-- **Query params:** `days`, `campaign`, `match_type`, `q`, `waste_only`, `min_spend`, `limit`, `cursor` — all documented in `API_CONTRACT.md`? **Risk:** API_CONTRACT.md does not yet document `/api/search-terms`. 🟠 High.
+- **Query params:** `days`, `campaign`, `match_type`, `q`, `waste_only`, `min_spend`, `limit`, `cursor` — all documented in `API_CONTRACT.md` ✅
 - **Loaded-page summary:** `pagination.has_more` and `pagination.next_cursor` correctly reflect page state ✅
 - **Waste-only filter:** `is_flagged_waste IS TRUE` — correctly excludes NULL (unanalysed) and FALSE (clean) ✅
 
@@ -273,7 +273,7 @@ Unblocks: PR-ADS-051 — Data Foundation Cleanup Patch
 - **Invalid cursor:** raises `HTTPException(status_code=400)` ✅
 - **DB unavailable:** returns `_safe_empty` with `"db_unavailable": true` ✅
 - **Query params:** `days`, `campaign`, `gclid`, `contact_id`, `deal_id`, `match_status`, `limit`, `cursor`
-- **Risk:** API_CONTRACT.md does not yet document `/api/gclid-attribution`. 🟠 High.
+- **Risk:** API_CONTRACT.md documents all query params, response shape, and pagination for this endpoint ✅
 - **Summary block:** `loaded_rows`, `matched_rows`, `url_fallback_rows`, `unmatched_rows`, `total_deal_amount_usd_loaded` — all scoped to loaded page, not total table ✅
 - **Labels note:** key `total_deal_amount_usd_loaded` name explicitly encodes "loaded" scope ✅
 
@@ -284,7 +284,7 @@ Unblocks: PR-ADS-051 — Data Foundation Cleanup Patch
 - **Pagination:** none (returns all rows in the date window) — acceptable for a time-series snapshot endpoint ✅
 - **DB unavailable:** returns `{"days": days, "rows": [], "db_unavailable": true}` ✅
 - **DATE predicate:** `WHERE snapshot_date >= CURRENT_DATE - %s` — correct for DATE column ✅
-- **Risk:** API_CONTRACT.md does not document `/api/gclid-coverage`. 🟠 High.
+- **Contract:** endpoint documented in `API_CONTRACT.md` ✅
 
 ### `/api/attribution/quality` (`api/server.py` lines 3475–3687)
 
@@ -294,14 +294,14 @@ Unblocks: PR-ADS-051 — Data Foundation Cleanup Patch
 - **DB unavailable:** returns `{"days": days, "summary": {}, "rates": {}, "signals": [], "db_unavailable": true}` ✅
 - **OCT language:** none detected; explicit comment at line 3309: "Forbidden language: OCT ready, upload, push, fix, guaranteed, qualified revenue" ✅
 - **Signal labels:** "Local warehouse is fresh" / "Local warehouse may be stale" — honest; does not claim external API freshness ✅
-- **Risk:** API_CONTRACT.md does not document `/api/attribution/quality`. 🟠 High.
+- **Contract:** endpoint documented in `API_CONTRACT.md` ✅
 
 ### `/api/campaign-detail` (existing, referenced by PR-ADS-047/049)
 
 - **Auth:** `require_auth` ✅
 - **Read-only:** yes ✅
 - **Attribution preview:** added as part of drawer — reads from `gclid_attribution` for the given campaign ✅
-- **Risk:** API_CONTRACT.md coverage of campaign-detail should be verified after PR-ADS-047 additions.
+- **Risk:** `API_CONTRACT.md` response shape for `/api/campaign-detail` does not yet include the gclid attribution preview rows or attribution quality signals added in PR-ADS-047/049. 🟡 Medium — add in PR-ADS-051.
 
 ### Existing endpoints `/api/waste`, `/api/keywords`, `/api/geo`
 
@@ -312,11 +312,11 @@ Unblocks: PR-ADS-051 — Data Foundation Cleanup Patch
 
 | Endpoint | Pagination | DB Unavailable | Auth | Risk | Recommended Fix |
 |----------|------------|----------------|------|------|-----------------|
-| `/api/datasets/freshness` | N/A | ✅ db_unavailable | ✅ | db_unavailable absent on success | Minor: omit key consistently |
-| `/api/search-terms` | ✅ cursor (source_date, id) | ✅ db_unavailable | ✅ | Not documented in API_CONTRACT.md | Add to API_CONTRACT.md in PR-ADS-051 |
-| `/api/gclid-attribution` | ✅ cursor (created_at, id) | ✅ db_unavailable | ✅ | Not documented in API_CONTRACT.md | Add to API_CONTRACT.md in PR-ADS-051 |
-| `/api/gclid-coverage` | None (time-series) | ✅ db_unavailable | ✅ | Not documented in API_CONTRACT.md | Add to API_CONTRACT.md in PR-ADS-051 |
-| `/api/attribution/quality` | N/A | ✅ db_unavailable | ✅ | Not documented in API_CONTRACT.md | Add to API_CONTRACT.md in PR-ADS-051 |
+| `/api/datasets/freshness` | N/A | ✅ db_unavailable | ✅ | db_unavailable absent on success path | Minor: omit key consistently |
+| `/api/search-terms` | ✅ cursor (source_date, id) | ✅ db_unavailable | ✅ | None | None |
+| `/api/gclid-attribution` | ✅ cursor (created_at, id) | ✅ db_unavailable | ✅ | None | None |
+| `/api/gclid-coverage` | None (time-series) | ✅ db_unavailable | ✅ | None | None |
+| `/api/attribution/quality` | N/A | ✅ db_unavailable | ✅ | None | None |
 | `/api/waste` | None | ✅ db_unavailable | ✅ | None | None |
 | `/api/keywords` | None | ✅ db_unavailable | ✅ | None | None |
 | `/api/geo` | None | ✅ db_unavailable | ✅ | None | None |
@@ -461,9 +461,9 @@ A search was performed across all files changed in PR-ADS-039 through PR-ADS-049
 
 ### `docs/API_CONTRACT.md`
 
-- **Endpoints documented:** `/api/campaigns`, `/api/leads`, `/api/deals`, `/api/waste`, `/api/runs`, `/api/geo`, `/api/keywords`, `/api/leads/country-summary`, `/api/campaign-detail` ✅
-- **Missing:** `/api/datasets/freshness`, `/api/search-terms`, `/api/gclid-attribution`, `/api/gclid-coverage`, `/api/attribution/quality` — **all four new endpoints from PR-ADS-039 through PR-ADS-048 are not yet documented in API_CONTRACT.md**. 🟠 High.
-- `/api/campaign-detail` — verify it reflects PR-ADS-047 attribution preview additions.
+- **Endpoints documented:** `/api/campaigns`, `/api/leads`, `/api/deals`, `/api/waste`, `/api/runs`, `/api/geo`, `/api/keywords`, `/api/leads/country-summary`, `/api/campaign-detail`, `/api/datasets/freshness`, `/api/search-terms`, `/api/gclid-attribution`, `/api/gclid-coverage`, `/api/attribution/quality` ✅
+- All five endpoints added in PR-ADS-039 through PR-ADS-048 are documented in `docs/API_CONTRACT.md`. No contract gap. ✅
+- `/api/campaign-detail` response in `API_CONTRACT.md` does not yet include the attribution preview section added in PR-ADS-047 (gclid attribution rows, attribution quality signals from PR-ADS-049). The response shape in the contract is missing those fields. 🟡 Medium — add to PR-ADS-051.
 
 ### `docs/BACKFILL_RUNBOOK.md`
 
@@ -486,7 +486,7 @@ A search was performed across all files changed in PR-ADS-039 through PR-ADS-049
 ### Tri-State Flag Documentation
 
 - Schema comment at lines 246–247 and 263–268 documents the tri-state correctly ✅
-- `docs/API_CONTRACT.md` does not mention `is_flagged_waste` because `/api/search-terms` is not yet documented — another reason to add the endpoint to the contract. 🟠 High (same item as above).
+- `docs/API_CONTRACT.md` documents `/api/search-terms` with full `is_flagged_waste` tri-state semantics (null = not analysed, true = flagged waste, false = analysed clean) — contract is aligned with schema ✅
 
 ### Freshness: unknown vs failed
 
@@ -504,7 +504,8 @@ A search was performed across all files changed in PR-ADS-039 through PR-ADS-049
 
 | Risk | Severity | Evidence | Recommended PR |
 |------|----------|----------|----------------|
-| New endpoints not documented in API_CONTRACT.md (`/api/search-terms`, `/api/gclid-attribution`, `/api/gclid-coverage`, `/api/attribution/quality`) | 🟠 High | API_CONTRACT.md reviewed; none of the four new endpoints are present | PR-ADS-051 |
+| API contract documentation for PR-ADS-039–PR-ADS-048 endpoints (`/api/datasets/freshness`, `/api/search-terms`, `/api/gclid-attribution`, `/api/gclid-coverage`, `/api/attribution/quality`) | 🟢 Resolved | All five endpoints are documented in `docs/API_CONTRACT.md` — prior audit finding was based on an incomplete review | None |
+| `/api/campaign-detail` contract missing attribution preview response fields (PR-ADS-047/049 additions) | 🟡 Medium | `API_CONTRACT.md` campaign-detail response shape does not include gclid attribution preview rows or quality signals added in PR-ADS-047/049 | PR-ADS-051 |
 | Duplicated cursor helper logic between `/api/search-terms` and `/api/gclid-attribution` | 🟠 High | `_encode_cursor` / `_decode_cursor` and `_encode_gclid_cursor` / `_decode_gclid_cursor` are structurally identical with different field names | PR-ADS-051 |
 | `write_search_terms` / `write_gclid_attribution` return attempted-upsert count, not confirmed-write count | 🟡 Medium | `executemany` with `ON CONFLICT` makes `cur.rowcount` unreliable; writers use `len(rows)` — documented in docstrings but not explicit in scheduler error-checking | PR-ADS-051 (add doc note) |
 | Search term ILIKE without pg_trgm extension is a sequential scan | 🟡 Medium | Schema comment at lines 312–318 acknowledges this; no trigram index created | PR-ADS-054 or document as known limitation in PR-ADS-051 |
@@ -526,9 +527,9 @@ Surgical fixes from this audit only. No schema changes. No new features.
 
 **Candidate fixes:**
 1. **Shared cursor helper** — extract `_encode_keyset_cursor(fields: dict) -> str` and `_decode_keyset_cursor(token: str, field_specs: dict) -> dict` to eliminate the duplicate implementations in `/api/search-terms` and `/api/gclid-attribution`.
-2. **API_CONTRACT.md additions** — document `/api/datasets/freshness`, `/api/search-terms`, `/api/gclid-attribution`, `/api/gclid-coverage`, `/api/attribution/quality` with full request/response shapes, pagination notes, and DB-unavailable shapes.
-3. **BACKFILL_RUNBOOK.md correction** — update stale "gclid_attribution table not yet available" note in section 5 to reflect PR-ADS-044 implementation.
-4. **Weekly/monthly search_terms sync tracking** — add `start_sync_batch` / `finish_sync_batch` around `write_search_terms` calls in weekly and monthly schedulers, consistent with daily pattern. (Or document the intentional gap.)
+2. **BACKFILL_RUNBOOK.md correction** — update stale "gclid_attribution table not yet available" note in section 5 to reflect PR-ADS-044 implementation.
+3. **Weekly/monthly search_terms sync tracking** — add `start_sync_batch` / `finish_sync_batch` around `write_search_terms` calls in weekly and monthly schedulers, consistent with daily pattern. (Or document the intentional gap.)
+4. **API_CONTRACT.md: campaign-detail attribution fields** — add the gclid attribution preview and attribution quality signal sections to the documented `/api/campaign-detail` response shape.
 5. **Minor index note** — add a comment recommending `DROP INDEX idx_gclid_attr_created` if the composite cursor index renders it redundant (confirm with EXPLAIN ANALYZE first).
 6. **pg_trgm documentation** — add a `docs/` note or runbook entry explaining the trigram extension install path for operators who want to enable fast `?q=` search on large search_terms tables.
 
@@ -554,7 +555,7 @@ GET /api/search-terms?waste_state=flagged|clean|unanalysed|all
 
 **Still read-only.** The view would show recent rows from `sync_batches` for each dataset — useful for debugging sync failures.
 
-**Prerequisite:** PR-ADS-051 must add API_CONTRACT.md entry for `/api/datasets/freshness` first.
+**Prerequisite:** PR-ADS-051 corrections to BACKFILL_RUNBOOK.md and sync tracking should be completed first.
 
 ---
 
