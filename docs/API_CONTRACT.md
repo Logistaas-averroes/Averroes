@@ -1217,6 +1217,12 @@ HTTP 400.
 - Multiple deals for the same contact/GCLID are preserved as separate rows.
 - `summary` reflects current-page loaded rows only — not total database counts.
 
+**Frontend usage (as of PR-ADS-047):**
+- As of PR-ADS-047, the Campaign Investigation Drawer uses this endpoint with the `campaign` filter to display a read-only attribution preview.
+- The preview is limited (`limit=5`) and loaded-page scoped. It does not upload offline conversions, mutate Google Ads, or update HubSpot.
+- Campaign drawer fetches attribution in parallel with campaign detail; attribution failure is non-fatal and does not block the drawer.
+- A "View full GCLID Attribution page" button navigates to the full GCLID Attribution page and pre-fills the campaign filter.
+
 **Frontend usage (as of PR-ADS-046):**
 - Rendered by the GCLID Attribution page in the SPA.
 - Page uses cursor pagination (`pagination.next_cursor`) and loads additional rows only when the operator clicks **Load more**.
