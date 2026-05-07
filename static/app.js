@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue"];
 
 // Deal pipeline stages (Phase 1 read-only reference)
 const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
@@ -410,6 +410,7 @@ function loadPage(page) {
     case "campaigns":     loadCampaigns();                          break;
     case "waste":         loadWaste();                              break;
     case "search-terms":  loadSearchTerms({ reset: true });         break;
+    case "ngrams":        loadNgrams();                             break;
     case "geo":           loadGeo();                                break;
     case "keywords":      loadKeywords();      break;
     case "leads":         loadLeads();         break;
@@ -2409,6 +2410,250 @@ function renderSearchTermsTable() {
   }).join("");
 
   tableEl.innerHTML = `<div class="search-terms-table-scroll"><table class="data-table">${thead}<tbody>${tbody}</tbody></table></div>`;
+}
+
+// ── N-Gram Intelligence page ───────────────────────────────────────────────
+
+let ngramRows = [];
+let ngramSummary = null;
+let ngramStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+
+function buildNgramParams() {
+  const params = new URLSearchParams();
+  params.set("days", String(getSelectedDays()));
+  params.set("limit", "100");
+
+  const q         = document.getElementById("ngrams-query")?.value.trim();
+  const campaign  = document.getElementById("ngrams-campaign")?.value.trim();
+  const matchType = document.getElementById("ngrams-match-type")?.value;
+  const wasteState = document.getElementById("ngrams-waste-state")?.value;
+  const n         = document.getElementById("ngrams-length")?.value;
+  const minSpend  = document.getElementById("ngrams-min-spend")?.value;
+
+  if (q)          params.set("q", q);
+  if (campaign)   params.set("campaign", campaign);
+  if (matchType)  params.set("match_type", matchType);
+  if (wasteState) params.set("waste_state", wasteState);
+  if (n)          params.set("n", n);
+  if (minSpend)   params.set("min_spend", minSpend);
+
+  return params;
+}
+
+async function loadNgrams() {
+  ngramStatus = "loading";
+  renderNgramsKPIs();
+  renderNgramsTable();
+
+  try {
+    const params = buildNgramParams();
+    const data = await fetchJSON(`/api/search-terms/ngrams?${params.toString()}`);
+
+    if (data.db_unavailable) {
+      ngramStatus = "db_unavailable";
+      ngramRows = [];
+      ngramSummary = data.summary || null;
+      renderNgramsKPIs(data);
+      renderNgramsTable();
+      return;
+    }
+
+    ngramRows   = data.rows    || [];
+    ngramSummary = data.summary || null;
+    ngramStatus = ngramRows.length ? "ok" : "empty";
+
+    renderNgramsKPIs(data);
+    renderNgramsTable(data);
+  } catch (err) {
+    ngramStatus  = "error";
+    ngramRows    = [];
+    ngramSummary = null;
+    renderNgramsKPIs();
+    renderNgramsTable();
+  }
+}
+
+function clearNgramFilters() {
+  ["ngrams-query", "ngrams-campaign", "ngrams-min-spend"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+
+  const matchType = document.getElementById("ngrams-match-type");
+  if (matchType) matchType.value = "";
+
+  const wasteState = document.getElementById("ngrams-waste-state");
+  if (wasteState) wasteState.value = "";
+
+  const n = document.getElementById("ngrams-length");
+  if (n) n.value = "1,2,3";
+
+  loadNgrams();
+}
+
+function ngramLanguageBadge(language) {
+  const map = {
+    arabic:           { label: "Arabic",     cls: "ngram-language-badge--arabic" },
+    spanish:          { label: "Spanish",    cls: "ngram-language-badge--spanish" },
+    english_or_latin: { label: "EN / Latin", cls: "ngram-language-badge--english" },
+  };
+  const entry = map[(language || "").toLowerCase()] || { label: escapeHtml(language || "—"), cls: "" };
+  return `<span class="ngram-language-badge ${entry.cls}">${entry.label}</span>`;
+}
+
+function ngramWasteStateMix(flagged, clean, unanalyzed) {
+  const hasValue = (v) => v !== null && v !== undefined && Number.isFinite(Number(v));
+
+  const parts = [];
+  if (hasValue(flagged))    parts.push(`<span class="ngram-state-flagged">${escapeHtml(String(Number(flagged)))}F</span>`);
+  if (hasValue(clean))      parts.push(`<span class="ngram-state-clean">${escapeHtml(String(Number(clean)))}C</span>`);
+  if (hasValue(unanalyzed)) parts.push(`<span class="ngram-state-unanalyzed">${escapeHtml(String(Number(unanalyzed)))}U</span>`);
+
+  return parts.length
+    ? `<span class="ngram-state-mix">${parts.join(" / ")}</span>`
+    : `<span class="td--na">—</span>`;
+}
+
+function renderNgramsKPIs(data) {
+  const kpiGrid = document.getElementById("ngrams-kpis");
+  if (!kpiGrid) return;
+
+  if (ngramStatus === "loading" || ngramStatus === "idle") {
+    kpiGrid.innerHTML = `
+      <div class="kpi-card"><div class="kpi-card__label">N-Grams Returned</div><div class="kpi-card__value">…</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Source Rows Analyzed</div><div class="kpi-card__value">…</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Unique Search Terms</div><div class="kpi-card__value">…</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Highest N-Gram Spend</div><div class="kpi-card__value">…</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Row Cap</div><div class="kpi-card__value">…</div></div>`;
+    return;
+  }
+
+  if (ngramStatus === "db_unavailable") {
+    kpiGrid.innerHTML = `
+      <div class="kpi-card"><div class="kpi-card__label">N-Grams Returned</div><div class="kpi-card__value">—</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Source Rows Analyzed</div><div class="kpi-card__value">—</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Unique Search Terms</div><div class="kpi-card__value">—</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Highest N-Gram Spend</div><div class="kpi-card__value">—</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Row Cap</div><div class="kpi-card__value">—</div><div class="kpi-subtext">N-gram analysis temporarily unavailable — database offline.</div></div>`;
+    return;
+  }
+
+  if (ngramStatus === "error") {
+    kpiGrid.innerHTML = `
+      <div class="kpi-card"><div class="kpi-card__label">N-Grams Returned</div><div class="kpi-card__value">—</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Source Rows Analyzed</div><div class="kpi-card__value">—</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Unique Search Terms</div><div class="kpi-card__value">—</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Highest N-Gram Spend</div><div class="kpi-card__value">—</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Row Cap</div><div class="kpi-card__value">—</div><div class="kpi-subtext">Could not load n-gram analysis.</div></div>`;
+    return;
+  }
+
+  const s  = ngramSummary || {};
+  const dq = (data && data.data_quality) || {};
+  const maxNgramSpend = ngramRows.reduce((max, r) => Math.max(max, Number(r.total_spend_usd || 0)), 0);
+  const rowCapLabel = dq.row_cap_applied ? "Applied" : "Not applied";
+
+  kpiGrid.innerHTML = `
+    <div class="kpi-card">
+      <div class="kpi-card__label">N-Grams Returned</div>
+      <div class="kpi-card__value">${s.ngrams_returned ?? ngramRows.length}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Source Rows Analyzed</div>
+      <div class="kpi-card__value">${s.source_rows_analyzed != null ? s.source_rows_analyzed.toLocaleString() : "—"}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Unique Search Terms</div>
+      <div class="kpi-card__value">${s.unique_search_terms_analyzed != null ? s.unique_search_terms_analyzed.toLocaleString() : "—"}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Highest N-Gram Spend</div>
+      <div class="kpi-card__value">${fmtDollar(maxNgramSpend)}</div>
+      <div class="kpi-subtext">Top returned n-gram</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">Row Cap</div>
+      <div class="kpi-card__value">${escapeHtml(rowCapLabel)}</div>
+      ${dq.row_cap_applied && dq.row_cap ? `<div class="kpi-subtext">Cap: ${dq.row_cap.toLocaleString()} rows</div>` : ""}
+    </div>`;
+}
+
+function renderNgramsTable(data) {
+  const tableEl = document.getElementById("ngrams-table");
+  if (!tableEl) return;
+
+  if (ngramStatus === "loading" || ngramStatus === "idle") {
+    tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading n-gram patterns…</p>`;
+    return;
+  }
+
+  if (ngramStatus === "db_unavailable") {
+    tableEl.innerHTML = `<div class="waste-empty-state"><p class="empty-state">N-gram analysis temporarily unavailable — database offline.</p></div>`;
+    return;
+  }
+
+  if (ngramStatus === "error") {
+    tableEl.innerHTML = `<div class="waste-empty-state"><p class="empty-state">Could not load n-gram analysis. Check API health or filters.</p></div>`;
+    return;
+  }
+
+  if (ngramRows.length === 0) {
+    tableEl.innerHTML = `<div class="waste-empty-state"><p class="empty-state">No n-grams found for the selected filters.</p></div>`;
+    return;
+  }
+
+  const thead = `
+    <thead>
+      <tr>
+        <th>N-Gram</th>
+        <th class="td--num">N</th>
+        <th>Language</th>
+        <th class="td--num">Row Count</th>
+        <th class="td--num">Unique Terms</th>
+        <th class="td--num">Campaigns</th>
+        <th class="td--num">Spend</th>
+        <th class="td--num">Clicks</th>
+        <th class="td--num">Impressions</th>
+        <th class="td--num">Google Conv.</th>
+        <th>Flagged / Clean / Unanalyzed</th>
+        <th class="td--num">Flagged Spend</th>
+        <th>Campaign Samples</th>
+        <th>Search-Term Samples</th>
+      </tr>
+    </thead>`;
+
+  const tbody = ngramRows.map((r) => {
+    const campaignSamples = (r.campaigns_sample || []).slice(0, 5);
+    const termSamples     = (r.search_terms_sample || []).slice(0, 3);
+
+    const campaignChips = campaignSamples.length
+      ? campaignSamples.map((c) => `<span class="ngram-chip">${escapeHtml(c)}</span>`).join("")
+      : `<span class="td--na">—</span>`;
+
+    const termList = termSamples.length
+      ? `<ul class="ngram-sample-list">${termSamples.map((t) => `<li>"${escapeHtml(t)}"</li>`).join("")}</ul>`
+      : `<span class="td--na">—</span>`;
+
+    return `
+      <tr>
+        <td class="td--name">${escapeHtml(r.ngram || "—")}</td>
+        <td class="td--num">${r.n != null ? r.n : "—"}</td>
+        <td>${ngramLanguageBadge(r.language)}</td>
+        <td class="td--num">${r.row_count != null ? r.row_count : "—"}</td>
+        <td class="td--num">${r.unique_search_terms != null ? r.unique_search_terms : "—"}</td>
+        <td class="td--num">${r.campaigns_count != null ? r.campaigns_count : "—"}</td>
+        <td class="td--num">${r.total_spend_usd != null ? fmtDollar(r.total_spend_usd) : "—"}</td>
+        <td class="td--num">${r.total_clicks != null ? r.total_clicks : "—"}</td>
+        <td class="td--num">${r.total_impressions != null ? r.total_impressions.toLocaleString() : "—"}</td>
+        <td class="td--num">${r.google_conversions != null ? r.google_conversions.toFixed(1) : "—"}</td>
+        <td>${ngramWasteStateMix(r.flagged_waste_rows, r.clean_rows, r.unanalyzed_rows)}</td>
+        <td class="td--num">${r.flagged_waste_spend_usd != null ? fmtDollar(r.flagged_waste_spend_usd) : "—"}</td>
+        <td><div class="ngram-chips-wrap">${campaignChips}</div></td>
+        <td>${termList}</td>
+      </tr>`;
+  }).join("");
+
+  tableEl.innerHTML = `<div class="ngrams-table-scroll"><table class="data-table">${thead}<tbody>${tbody}</tbody></table></div>`;
 }
 
 // ── GCLID Attribution page ───────────────────────────────────────────────────
@@ -4710,6 +4955,22 @@ document.addEventListener("DOMContentLoaded", async () => {
   [stQueryInput, stCampaignInput].forEach((el) => {
     if (el) el.addEventListener("keydown", (e) => {
       if (e.key === "Enter") loadSearchTerms({ reset: true });
+    });
+  });
+
+  // Wire up n-gram controls
+  const ngramRefreshBtn = document.getElementById("ngrams-refresh-btn");
+  const ngramApplyBtn   = document.getElementById("ngrams-apply-btn");
+  const ngramClearBtn   = document.getElementById("ngrams-clear-btn");
+
+  if (ngramRefreshBtn) ngramRefreshBtn.addEventListener("click", loadNgrams);
+  if (ngramApplyBtn)   ngramApplyBtn.addEventListener("click",   loadNgrams);
+  if (ngramClearBtn)   ngramClearBtn.addEventListener("click",   clearNgramFilters);
+
+  ["ngrams-query", "ngrams-campaign", "ngrams-min-spend"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") loadNgrams();
     });
   });
 

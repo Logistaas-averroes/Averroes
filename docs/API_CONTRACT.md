@@ -1342,6 +1342,11 @@ Read-only n-gram analysis over stored `search_terms` rows. (PR-ADS-055)
 - The `n` parameter accepts `1`, `2`, `3` only. Values of `0`, `4+`, or non-integer strings return HTTP 400.
 - No cursor needed — endpoint returns aggregated rows with `limit` cap.
 
+**Frontend usage (PR-ADS-056):**
+As of PR-ADS-056, this endpoint is rendered by the N-Grams page in the SPA.
+The page is read-only and displays factual n-gram metrics only.
+It does not create negative keyword candidates, push changes, or provide recommendations.
+
 ---
 
 #### `GET /api/gclid-attribution`

@@ -3209,6 +3209,140 @@ a {
   }
 }
 
+/* ── N-Gram Intelligence page ─────────────────────────────────────────────── */
+
+.ngrams-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-2);
+}
+
+.ngrams-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.ngrams-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* N-gram chips (campaign sample pills) */
+.ngram-chip {
+  display: inline-block;
+  background: var(--c-neutral-bg);
+  color: var(--text-secondary);
+  border: 1px solid var(--c-neutral-border);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.ngram-chips-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 220px;
+}
+
+/* Search-term sample list */
+.ngram-sample-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  max-width: 260px;
+}
+
+.ngram-sample-list li {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.6;
+}
+
+/* Language badge */
+.ngram-language-badge {
+  display: inline-block;
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: capitalize;
+  background: var(--c-neutral-bg);
+  color: var(--text-secondary);
+  border: 1px solid var(--c-neutral-border);
+}
+
+.ngram-language-badge--arabic {
+  background: #fef3c7;
+  color: #b45309;
+  border-color: rgba(180, 83, 9, 0.2);
+}
+
+.ngram-language-badge--spanish {
+  background: #dcfce7;
+  color: #15803d;
+  border-color: rgba(21, 128, 61, 0.2);
+}
+
+.ngram-language-badge--english {
+  background: rgba(18, 158, 245, 0.1);
+  color: var(--brand-sky-accent);
+  border-color: rgba(18, 158, 245, 0.25);
+}
+
+/* N-gram state mix cell */
+.ngram-state-mix {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ngram-state-flagged {
+  color: var(--c-danger);
+  font-weight: 600;
+}
+
+.ngram-state-clean {
+  color: var(--c-success);
+  font-weight: 600;
+}
+
+.ngram-state-unanalyzed {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+@media (max-width: 768px) {
+  .ngrams-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ngrams-controls .waste-search-input,
+  .ngrams-controls .waste-filter-select {
+    min-width: 0;
+    width: 100%;
+    flex: none;
+  }
+
+  .ngram-chips-wrap {
+    max-width: 100%;
+  }
+
+  .ngram-sample-list {
+    max-width: 100%;
+  }
+}
+
 @media (max-width: 768px) {
   .gclid-controls {
     flex-direction: column;
