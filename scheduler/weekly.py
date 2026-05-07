@@ -94,7 +94,7 @@ def run_weekly_report():
         try:
             st_batch_id = None
             window_end = datetime.utcnow().date()
-            # Inclusive 14-day search-term window: today plus the previous 13 days.
+            # Inclusive 14-day search-term window: today minus 13 days through today.
             window_start = window_end - timedelta(days=13)
             st_batch_id = db_writers.start_sync_batch(
                 source="windsor",
@@ -113,7 +113,7 @@ def run_weekly_report():
             if not persistence_succeeded(search_terms, st_count):
                 raise RuntimeError(
                     f"Weekly search_terms persistence failed or wrote 0 rows "
-                    f"for {len(search_terms or [])} fetched rows"
+                    f"for non-empty fetch ({len(search_terms or [])} rows)"
                 )
             last_source_date = max_source_date(search_terms, fallback_date=window_end)
             if st_batch_id:

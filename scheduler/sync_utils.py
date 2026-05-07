@@ -20,15 +20,11 @@ def max_source_date(rows, fallback_date):
     dates = []
     for row in rows or []:
         props = row.get("properties") or {}
-        value = next(
-            (
-                candidate
-                for key in _DATE_KEYS
-                for candidate in (row.get(key) or props.get(key),)
-                if candidate
-            ),
-            None,
-        )
+        value = None
+        for key in _DATE_KEYS:
+            value = row.get(key) or props.get(key)
+            if value:
+                break
         parsed = _parse_date_safe(value)
         if parsed:
             dates.append(parsed)

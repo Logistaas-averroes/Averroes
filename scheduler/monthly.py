@@ -129,7 +129,7 @@ def run_monthly_report():
             st_batch_id = None
             window_end = datetime.utcnow().date()
             # Windsor search terms still map to an inclusive 14-day window:
-            # today plus the previous 13 days, even on the monthly scheduler.
+            # today minus 13 days through today, even on the monthly scheduler.
             window_start = window_end - timedelta(days=13)
             st_batch_id = db_writers.start_sync_batch(
                 source="windsor",
@@ -147,7 +147,7 @@ def run_monthly_report():
             if not persistence_succeeded(search_terms, st_count):
                 raise RuntimeError(
                     f"Monthly search_terms persistence failed or wrote 0 rows "
-                    f"for {len(search_terms or [])} fetched rows"
+                    f"for non-empty fetch ({len(search_terms or [])} rows)"
                 )
             last_source_date = max_source_date(search_terms, fallback_date=window_end)
             if st_batch_id:

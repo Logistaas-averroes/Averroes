@@ -3102,6 +3102,7 @@ def _decode_gclid_cursor(token: str):
         except ValueError:
             if not created_at_raw.endswith("Z"):
                 raise
+            # Support legacy cursors serialized with a trailing UTC "Z".
             created_at = datetime.fromisoformat(created_at_raw[:-1] + "+00:00")
         row_id = int(payload["id"])
 
