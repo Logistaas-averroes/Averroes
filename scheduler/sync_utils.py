@@ -22,9 +22,10 @@ def max_source_date(rows, fallback_date):
         props = row.get("properties") or {}
         value = next(
             (
-                row.get(key) or props.get(key)
+                candidate
                 for key in _DATE_KEYS
-                if row.get(key) or props.get(key)
+                for candidate in (row.get(key) or props.get(key),)
+                if candidate
             ),
             None,
         )

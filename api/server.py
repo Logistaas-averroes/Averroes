@@ -3096,7 +3096,13 @@ def _decode_gclid_cursor(token: str):
     """
     try:
         payload = _decode_keyset_cursor(token)
-        created_at = datetime.fromisoformat(str(payload["created_at"]).replace("Z", "+00:00"))
+        created_at_raw = str(payload["created_at"])
+        try:
+            created_at = datetime.fromisoformat(created_at_raw)
+        except ValueError:
+            if not created_at_raw.endswith("Z"):
+                raise
+            created_at = datetime.fromisoformat(created_at_raw[:-1] + "+00:00")
         row_id = int(payload["id"])
 
         if row_id <= 0:
