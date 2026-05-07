@@ -1231,6 +1231,119 @@ Aggregate summary counts for the selected filter/window.
 
 ---
 
+#### `GET /api/search-terms/ngrams`
+Read-only n-gram analysis over stored `search_terms` rows. (PR-ADS-055)
+
+**Auth:** Auth
+**Read-only:** Yes — no write to Google Ads, HubSpot, or any external system
+**Source:** `search_terms` table — same source as `/api/search-terms`
+**Prototype:** Yes — dynamic analysis over a filtered recent window. May be performance-hardened in a later phase.
+
+**Query params:**
+
+| Param | Type | Default | Notes |
+|-------|------|---------|-------|
+| `days` | integer | 14 | Look-back window (1–30, max 30 in prototype) |
+| `campaign` | string | — | Exact canonical campaign_name match |
+| `match_type` | string | — | Case-insensitive contains match on match_type |
+| `waste_state` | string | all | Analysis-state filter. Allowed: `all`, `flagged`, `clean`, `unanalyzed`. Aliases: `waste`=`flagged`, `analyzed_clean`=`clean`, `unanalysed`=`unanalyzed`. Invalid values return HTTP 400. |
+| `q` | string | — | Case-insensitive contains search on `search_term` (applied before tokenization) |
+| `min_spend` | numeric | 0 | Row-level minimum spend_usd filter |
+| `n` | string | `1,2,3` | Comma-separated n-gram lengths. Allowed values: `1`, `2`, `3`. Invalid values return HTTP 400. |
+| `limit` | integer | 100 | Max aggregated n-gram rows to return (1–250) |
+
+**Source row ordering:** Source rows are fetched ordered by `spend_usd DESC`, `source_date DESC`, `id DESC` before the prototype row cap (10,000 rows). This ensures economically significant data is prioritised when the cap applies.
+
+**Response 200:**
+```json
+{
+  "days": 14,
+  "filters": {
+    "campaign": "global - broad",
+    "match_type": "broad",
+    "waste_state": "all",
+    "q": null,
+    "min_spend": 0,
+    "n": [1, 2, 3],
+    "limit": 100
+  },
+  "rows": [
+    {
+      "ngram": "gratis",
+      "n": 1,
+      "language": "spanish",
+      "row_count": 18,
+      "unique_search_terms": 12,
+      "campaigns_count": 3,
+      "ad_groups_count": 5,
+      "keywords_count": 6,
+      "total_spend_usd": 420.50,
+      "total_clicks": 70,
+      "total_impressions": 3100,
+      "google_conversions": 0.0,
+      "avg_cpc_usd": 6.01,
+      "ctr_pct": 2.26,
+      "google_conversion_rate_pct": 0.0,
+      "flagged_waste_rows": 11,
+      "clean_rows": 0,
+      "unanalyzed_rows": 7,
+      "flagged_waste_spend_usd": 310.00,
+      "campaigns_sample": ["global - broad", "latam - broad"],
+      "search_terms_sample": ["software de logistica gratis", "sistema de envios gratis"]
+    }
+  ],
+  "summary": {
+    "ngrams_returned": 100,
+    "source_rows_analyzed": 2500,
+    "unique_search_terms_analyzed": 900
+  },
+  "data_quality": {
+    "source": "search_terms",
+    "dataset": "ngrams",
+    "note": "N-gram analysis is read-only. Google conversions are platform conversions, not HubSpot SQLs. No negative keyword candidates are created."
+  },
+  "db_unavailable": false
+}
+```
+
+**`data_quality.row_cap_applied`** — present and `true` only when the 10,000-row prototype cap was applied. In that case `data_quality.row_cap` is also included.
+
+**DB unavailable response:**
+```json
+{
+  "days": 14,
+  "filters": { "waste_state": "all", "n": [1, 2, 3], "limit": 100 },
+  "rows": [],
+  "summary": { "ngrams_returned": 0, "source_rows_analyzed": 0, "unique_search_terms_analyzed": 0 },
+  "data_quality": { "source": "search_terms", "dataset": "ngrams", "status": "db_unavailable" },
+  "db_unavailable": true
+}
+```
+
+**Invalid `n` response:** HTTP 400 — `{ "detail": "Invalid n. Allowed values: 1, 2, 3." }`
+
+**Invalid `waste_state` response:** HTTP 400 — `{ "detail": "Invalid waste_state. Allowed values: all, flagged, clean, unanalyzed." }`
+
+**`language` field values:** `arabic`, `spanish`, `english_or_latin` — lightweight script/language heuristic on the n-gram phrase.
+
+**Sorting:** Aggregated rows are sorted `total_spend_usd DESC`, `row_count DESC`, `ngram ASC`. Spend-first surfaces economically meaningful patterns.
+
+**Important scope notes:**
+- Auth required — same session cookie as `/api/search-terms`.
+- Read-only. No writes to Google Ads, HubSpot, or any external system.
+- Source is `search_terms` table only. No HubSpot join.
+- Does **not** return `attention_status`, `review_status`, `evidence_note`, `severity`, `score`, `negative_candidate`, `recommended_action`, or any scoring/recommendation field.
+- Does **not** create negative keyword candidates.
+- Does **not** push negative keywords.
+- `google_conversions` are Google Ads platform conversions — **not** HubSpot SQLs.
+- `search_terms_sample` contains up to 5 raw search terms with the highest `spend_usd` that contain the n-gram.
+- `campaigns_sample` contains up to 5 campaign names observed for the n-gram.
+- Prototype max window is 30 days. A larger window or materialization may be added in a later phase.
+- The `n` parameter accepts `1`, `2`, `3` only. Values of `0`, `4+`, or non-integer strings return HTTP 400.
+- No cursor needed — endpoint returns aggregated rows with `limit` cap.
+
+---
+
 #### `GET /api/gclid-attribution`
 Paginated GCLID attribution rows for the last N days.
 
@@ -1670,6 +1783,7 @@ One GCLID coverage snapshot per run, capturing aggregate coverage statistics.
 | GET | `/api/datasets/freshness` | Auth | Per-dataset sync state / watermark (sync_state table) |
 | GET | `/api/search-terms` | Auth | Paginated search-term fact rows (search_terms table, cursor pagination) |
 | GET | `/api/search-terms/summary` | Auth | Aggregate summary counts for selected filter/window (search_terms table, no pagination) |
+| GET | `/api/search-terms/ngrams` | Auth | Read-only n-gram analysis over stored search_terms (aggregated, no pagination) |
 | GET | `/api/gclid-attribution` | Auth | Paginated GCLID attribution rows (gclid_attribution table, cursor pagination) |
 | GET | `/api/gclid-coverage` | Auth | GCLID coverage snapshots (gclid_coverage_snapshots table) |
 | GET | `/api/attribution/quality` | Auth | Read-only attribution quality signals (gclid_attribution + sync_state + gclid_coverage_snapshots) |

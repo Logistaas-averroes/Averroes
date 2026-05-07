@@ -43,6 +43,7 @@ Protected endpoints (require authenticated session):
   GET  /api/action-queue          — Ranked human-review queue based on campaign, waste, geo, keyword, and data signals (requires auth).
   GET  /api/datasets/freshness    — Per-dataset sync state / watermark from sync_state table (requires auth).
   GET  /api/search-terms          — Paginated search-term fact rows from search_terms table (requires auth).
+  GET  /api/search-terms/ngrams   — Read-only n-gram analysis over stored search_terms (requires auth).
   GET  /api/gclid-attribution     — Paginated GCLID attribution rows from gclid_attribution table (requires auth).
   GET  /api/gclid-coverage        — GCLID coverage snapshots from gclid_coverage_snapshots table (requires auth).
 """
@@ -3360,6 +3361,235 @@ def api_search_terms_summary(
             "dataset": "search_terms",
             "note":    _SEARCH_TERMS_SUMMARY_DATA_QUALITY_NOTE,
         },
+        "db_unavailable": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Search Terms N-Gram endpoint — aggregated, read-only, auth required. (PR-ADS-055)
+# ---------------------------------------------------------------------------
+
+_NGRAMS_DEFAULT_DAYS  = 14
+_NGRAMS_MAX_DAYS      = 30
+_NGRAMS_DEFAULT_LIMIT = 100
+_NGRAMS_MAX_LIMIT     = 250
+_NGRAMS_SOURCE_ROW_CAP = 10_000
+
+_NGRAMS_DATA_QUALITY_NOTE = (
+    "N-gram analysis is read-only. "
+    "Google conversions are platform conversions, not HubSpot SQLs. "
+    "No negative keyword candidates are created."
+)
+
+
+def _parse_n_param(raw: str) -> list[int]:
+    """Parse the ``n`` query parameter into a validated list of n-gram lengths.
+
+    Accepted inputs: "1", "2", "3", or comma-separated combinations thereof.
+    Raises HTTPException(400) for invalid or out-of-range values.
+    """
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    result: list[int] = []
+    for part in parts:
+        if not part.isdigit():
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid n. Allowed values: 1, 2, 3.",
+            )
+        val = int(part)
+        if val not in (1, 2, 3):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid n. Allowed values: 1, 2, 3.",
+            )
+        if val not in result:
+            result.append(val)
+    if not result:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid n. Allowed values: 1, 2, 3.",
+        )
+    return sorted(result)
+
+
+@app.get("/api/search-terms/ngrams")
+def api_search_terms_ngrams(
+    user: dict = Depends(require_auth),
+    days: int = Query(
+        default=_NGRAMS_DEFAULT_DAYS,
+        description="Number of days to look back (1–30 for prototype)",
+    ),
+    campaign: str = Query(default=None, description="Filter by exact campaign_name"),
+    match_type: str = Query(default=None, description="Filter by match_type (contains, case-insensitive)"),
+    waste_state: str = Query(
+        default=None,
+        description=(
+            "Filter by analysis state. "
+            "Allowed: all, flagged, clean, unanalyzed. "
+            "Aliases: waste=flagged, analyzed_clean=clean, unanalysed=unanalyzed. "
+            "Default: all."
+        ),
+    ),
+    q: str = Query(default=None, description="Case-insensitive contains search on search_term (pre-tokenization filter)"),
+    min_spend: float = Query(default=0.0, description="Row-level minimum spend_usd filter"),
+    n: str = Query(default="1,2,3", description="Comma-separated n-gram lengths. Allowed: 1, 2, 3."),
+    limit: int = Query(default=_NGRAMS_DEFAULT_LIMIT, description="Max n-gram rows to return (1–250)"),
+) -> dict[str, Any]:
+    """Return aggregated n-gram metrics over stored search_terms rows.
+
+    Auth required. Read-only. No writes to Google Ads or HubSpot.
+    Source: search_terms table.
+    Does not return scoring, attention_status, recommendations, or
+    negative keyword candidates.
+    """
+    # ── Clamp / validate params ────────────────────────────────────────────
+    days  = max(1, min(_NGRAMS_MAX_DAYS, days))
+    limit = max(1, min(_NGRAMS_MAX_LIMIT, limit))
+
+    # ── Validate n ────────────────────────────────────────────────────────
+    n_list = _parse_n_param(n)
+    n_set  = set(n_list)
+
+    # ── Resolve effective waste state ──────────────────────────────────────
+    effective_state = _resolve_waste_state_param(waste_state)
+
+    # ── Campaign name normalisation ────────────────────────────────────────
+    campaign_key: str | None = None
+    if campaign:
+        from db.writers import _canonicalise_campaign_name  # noqa: PLC0415
+        campaign_key = _canonicalise_campaign_name(campaign.strip().lower())
+
+    # ── Safe empty fallback ────────────────────────────────────────────────
+    _safe_empty: dict[str, Any] = {
+        "days": days,
+        "filters": {
+            "waste_state": effective_state,
+            "n":           n_list,
+            "limit":       limit,
+        },
+        "rows": [],
+        "summary": {
+            "ngrams_returned":           0,
+            "source_rows_analyzed":      0,
+            "unique_search_terms_analyzed": 0,
+        },
+        "data_quality": {
+            "source":  "search_terms",
+            "dataset": "ngrams",
+            "status":  "db_unavailable",
+        },
+        "db_unavailable": True,
+    }
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _safe_empty
+
+            with conn.cursor() as cur:
+                # ── Build WHERE clauses ───────────────────────────────────
+                conditions: list[str] = [
+                    "source_date >= NOW() - INTERVAL '1 day' * %s",
+                ]
+                params: list[Any] = [days]
+
+                if campaign_key is not None:
+                    conditions.append("campaign_name = %s")
+                    params.append(campaign_key)
+
+                if match_type:
+                    conditions.append("match_type ILIKE %s")
+                    params.append(f"%{match_type.strip()}%")
+
+                if q:
+                    conditions.append("search_term ILIKE %s")
+                    params.append(f"%{q.strip()}%")
+
+                if min_spend and min_spend > 0:
+                    conditions.append("spend_usd >= %s")
+                    params.append(min_spend)
+
+                if effective_state == "flagged":
+                    conditions.append("is_flagged_waste IS TRUE")
+                elif effective_state == "clean":
+                    conditions.append("is_flagged_waste IS FALSE")
+                elif effective_state == "unanalyzed":
+                    conditions.append("is_flagged_waste IS NULL")
+                # "all" — no additional condition
+
+                where_sql = " AND ".join(conditions)
+
+                # Fetch source rows ordered by spend DESC, source_date DESC, id DESC
+                # then cap to avoid scanning a very large table.
+                # All user-supplied values are passed via parameterized %s.
+                # where_sql is built exclusively from static string literals above.
+                params.append(_NGRAMS_SOURCE_ROW_CAP)
+                query = (
+                    "SELECT"
+                    " search_term, campaign_name, ad_group, keyword, match_type,"
+                    " spend_usd, clicks, impressions, conversions, is_flagged_waste"
+                    " FROM search_terms"
+                    " WHERE " + where_sql +
+                    " ORDER BY spend_usd DESC NULLS LAST, source_date DESC, id DESC"
+                    " LIMIT %s"
+                )
+                cur.execute(query, params)
+                raw_rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/search-terms/ngrams] database error: %s", exc, exc_info=True)
+        return _safe_empty
+
+    # ── Convert to dicts ──────────────────────────────────────────────────
+    from analysis.ngrams import aggregate_ngrams  # noqa: PLC0415
+
+    source_dicts = [dict(zip(cols, row)) for row in raw_rows]
+    source_count = len(source_dicts)
+    unique_terms  = len({r.get("search_term") for r in source_dicts if r.get("search_term")})
+
+    # ── Aggregate ─────────────────────────────────────────────────────────
+    all_ngrams = aggregate_ngrams(source_dicts, n_set)
+
+    # Apply limit to the aggregated results
+    returned_ngrams = all_ngrams[:limit]
+
+    # ── Build filters dict for response ──────────────────────────────────
+    filters_out: dict[str, Any] = {
+        "waste_state": effective_state,
+        "n":           n_list,
+        "limit":       limit,
+    }
+    if campaign_key is not None:
+        filters_out["campaign"] = campaign_key
+    if match_type:
+        filters_out["match_type"] = match_type.strip()
+    if q:
+        filters_out["q"] = q.strip()
+    if min_spend and min_spend > 0:
+        filters_out["min_spend"] = min_spend
+
+    # ── data_quality block ────────────────────────────────────────────────
+    data_quality: dict[str, Any] = {
+        "source":  "search_terms",
+        "dataset": "ngrams",
+        "note":    _NGRAMS_DATA_QUALITY_NOTE,
+    }
+    if source_count >= _NGRAMS_SOURCE_ROW_CAP:
+        data_quality["row_cap_applied"] = True
+        data_quality["row_cap"]         = _NGRAMS_SOURCE_ROW_CAP
+
+    return {
+        "days": days,
+        "filters": filters_out,
+        "rows": returned_ngrams,
+        "summary": {
+            "ngrams_returned":              len(returned_ngrams),
+            "source_rows_analyzed":         source_count,
+            "unique_search_terms_analyzed": unique_terms,
+        },
+        "data_quality":   data_quality,
         "db_unavailable": False,
     }
 

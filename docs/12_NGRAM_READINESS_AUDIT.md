@@ -7,6 +7,8 @@
 **Audit date:** 2026-05-07
 **Status:** Audit-only. No code changed. No schema changed. No API changed.
 
+**Implementation note (PR-ADS-055):** PR-ADS-055 implements the first backend prototype described by this audit: a read-only factual n-gram metrics endpoint (`GET /api/search-terms/ngrams`). It does not implement scoring, UI, materialization, or negative keyword candidate generation.
+
 Depends on: PR-ADS-053
 Unblocks: PR-ADS-055 — N-Gram Analysis Backend Prototype
 
