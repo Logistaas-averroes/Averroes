@@ -7,65 +7,15 @@ Fast path: anomaly detection, spend spikes, new junk terms, CRM delta.
 import logging
 import os
 import json
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from scheduler.run_history import start_run, finish_run
+from scheduler.sync_utils import max_source_date, persistence_succeeded
 import db.writers as db_writers
 
 load_dotenv()
 
 log = logging.getLogger(__name__)
-
-
-def _parse_date_safe(value):
-    """Parse a date-like value to datetime.date, or return None."""
-    if value is None:
-        return None
-    if isinstance(value, date):
-        return value
-    try:
-        return date.fromisoformat(str(value)[:10].strip())
-    except (ValueError, TypeError):
-        return None
-
-
-def _max_source_date(rows, fallback_date):
-    """Return the maximum source date found in rows, or fallback_date.
-
-    Checks top-level keys and nested 'properties' for date / source_date /
-    createdate fields (to support both Windsor and HubSpot row shapes).
-    """
-    dates = []
-    for row in rows or []:
-        props = row.get("properties") or {}
-        value = (
-            row.get("date") or row.get("source_date") or row.get("createdate")
-            or props.get("date") or props.get("source_date") or props.get("createdate")
-        )
-        parsed = _parse_date_safe(value)
-        if parsed:
-            dates.append(parsed)
-    return max(dates) if dates else fallback_date
-
-
-def _persistence_succeeded(expected_rows, written_count) -> bool:
-    """Return True only when local DB persistence appears successful.
-
-    Rules:
-    - If no rows were fetched, a write count of 0 is acceptable (empty sync).
-    - If rows were fetched, written_count must be > 0.
-    - None is treated as failure.
-
-    Callers must use this helper to distinguish a legitimate zero-row sync
-    (nothing to write) from a failed persistence event (rows fetched but not stored).
-    """
-    expected_count = len(expected_rows or [])
-    if written_count is None:
-        return False
-    if expected_count == 0:
-        return written_count == 0
-    return written_count > 0
-
 
 def run_daily_pulse():
     print(f"\n{'='*60}")
@@ -107,12 +57,12 @@ def run_daily_pulse():
             )
             try:
                 contacts_written = db_writers.write_leads(run_id, contacts)
-                if not _persistence_succeeded(contacts, contacts_written):
+                if not persistence_succeeded(contacts, contacts_written):
                     raise RuntimeError(
                         f"HubSpot contacts persistence failed or wrote 0 rows "
                         f"for {len(contacts or [])} fetched contacts"
                     )
-                last_contact_date = _max_source_date(contacts, fallback_date=today)
+                last_contact_date = max_source_date(contacts, fallback_date=today)
                 if contacts_batch_id:
                     db_writers.finish_sync_batch(
                         batch_id=contacts_batch_id,
@@ -158,13 +108,13 @@ def run_daily_pulse():
             st_count = db_writers.write_search_terms(
                 run_id, search_terms, sync_batch_id=st_batch_id or None,
             )
-            if not _persistence_succeeded(search_terms, st_count):
+            if not persistence_succeeded(search_terms, st_count):
                 raise RuntimeError(
                     f"Windsor search_terms persistence failed or wrote 0 rows "
                     f"for {len(search_terms or [])} fetched rows"
                 )
             log.info("[daily] Wrote %d search term rows to database", st_count)
-            last_st_date = _max_source_date(search_terms, fallback_date=today)
+            last_st_date = max_source_date(search_terms, fallback_date=today)
             if st_batch_id:
                 db_writers.finish_sync_batch(
                     batch_id=st_batch_id,

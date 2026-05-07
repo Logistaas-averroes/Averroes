@@ -7,6 +7,13 @@
 **Audit date:** 2026-05-07
 **Status:** Audit-only. No code changed. No schema changed. No API changed.
 
+**Cleanup patch status:** PR-ADS-051 implements the first cleanup patch from this audit:
+- shared cursor helper
+- weekly/monthly `search_terms` sync tracking
+- dataset freshness response consistency
+- stale backfill runbook GCLID wording fix
+- search-term contains-search limitation documentation
+
 Depends on: PR-ADS-049
 Unblocks: PR-ADS-051 — Data Foundation Cleanup Patch
 

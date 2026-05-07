@@ -10,10 +10,11 @@ Set ADVISOR_MODE=claude to use Claude API (requires ANTHROPIC_API_KEY).
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from scheduler.delivery import deliver_report
 from scheduler.run_history import start_run, finish_run
+from scheduler.sync_utils import max_source_date, persistence_succeeded
 import db.writers as db_writers
 
 load_dotenv()
@@ -30,7 +31,6 @@ REQUIRED_DATA_FILES = [
     "data/ads_search_terms.json",
     "data/crm_contacts.json",
 ]
-
 
 def run_monthly_report():
     log.info("=" * 60)
@@ -126,9 +126,45 @@ def run_monthly_report():
         # Note: monthly pull_search_terms(days_back=30) maps to Windsor last_14d window;
         # do not claim full 30-day coverage — write whatever Windsor returns.
         try:
-            st_count = db_writers.write_search_terms(run_id, search_terms)
+            st_batch_id = None
+            window_end = datetime.utcnow().date()
+            # Windsor search terms still map to an inclusive 14-day window:
+            # today minus 13 days through today, even on the monthly scheduler.
+            window_start = window_end - timedelta(days=13)
+            st_batch_id = db_writers.start_sync_batch(
+                source="windsor",
+                dataset="search_terms",
+                sync_type="monthly",
+                date_from=window_start,
+                date_to=window_end,
+                run_id=run_id,
+            )
+            st_count = db_writers.write_search_terms(
+                run_id=run_id,
+                search_term_rows=search_terms,
+                sync_batch_id=st_batch_id or None,
+            )
+            if not persistence_succeeded(search_terms, st_count):
+                raise RuntimeError(
+                    f"Monthly search_terms persistence failed or wrote 0 rows "
+                    f"for non-empty fetch ({len(search_terms or [])} rows)"
+                )
+            last_source_date = max_source_date(search_terms, fallback_date=window_end)
+            if st_batch_id:
+                db_writers.finish_sync_batch(
+                    batch_id=st_batch_id,
+                    status="success",
+                    row_count=st_count,
+                    last_source_date=last_source_date,
+                )
             log.info("Wrote %d search term rows to database (run_id=%s)", st_count, run_id)
         except Exception as db_exc:  # noqa: BLE001
+            if st_batch_id:
+                db_writers.finish_sync_batch(
+                    batch_id=st_batch_id,
+                    status="failed",
+                    error_message=str(db_exc)[:1000],
+                )
             log.error("DB write search terms failed: %s", db_exc)
 
     except Exception as e:

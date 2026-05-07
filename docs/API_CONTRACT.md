@@ -961,7 +961,8 @@ Per-dataset sync state / watermark. Returns the latest known sync status for eac
     "failed": 1,
     "running": 0,
     "unknown": 3
-  }
+  },
+  "db_unavailable": false
 }
 ```
 
@@ -983,7 +984,8 @@ Per-dataset sync state / watermark. Returns the latest known sync status for eac
     "failed": 0,
     "running": 0,
     "unknown": 7
-  }
+  },
+  "db_unavailable": false
 }
 ```
 
@@ -1004,10 +1006,15 @@ Per-dataset sync state / watermark. Returns the latest known sync status for eac
 - `last_batch_id` links to the `sync_batches` row for the last successful sync.
 - Datasets not yet in `sync_state` are returned with `status: "unknown"` and all watermark fields null.
 - Extra `sync_state` rows beyond the known dataset list are appended after the known pairs.
-- As of PR-ADS-042, the daily scheduler updates freshness for datasets that are both fetched and
-  persisted locally: `windsor/search_terms` and `hubspot/contacts`. Other datasets may remain
-  `unknown` until their raw-fact sync path is implemented. `unknown` does not mean failed; it means
-  no successful tracked sync has been recorded yet.
+- Success responses include `db_unavailable: false`; failure-safe responses include `db_unavailable: true`.
+- Freshness updates only after local persistence succeeds. Scheduler tracking reflects stored local facts,
+  not a successful upstream fetch by itself.
+- Batch writer row counts may represent attempted upserts, not confirmed physical inserts. Schedulers treat
+  non-empty fetched data with zero written rows as failed freshness and must not mark the dataset fresh.
+- As of PR-ADS-051, tracked raw-fact freshness includes `windsor/search_terms` on daily/weekly/monthly runs,
+  `hubspot/contacts` on daily runs, and `gclid/matches` on weekly/monthly runs. Other datasets may remain
+  `unknown` until their raw-fact sync path is implemented. `unknown` does not mean failed; it means no
+  successful tracked sync has been recorded yet.
 - **UI note (PR-ADS-045):** As of PR-ADS-045, this endpoint is rendered in the Health page
   **Dataset Freshness** panel. The UI is read-only — it does not trigger sync, retry, backfill,
   or any external API call. `unknown` means no tracked sync has been recorded; it is not
@@ -1036,7 +1043,7 @@ Paginated raw search-term fact rows for the last N days.
 | `limit` | integer | 100 | Page size (1–500) |
 | `cursor` | string | — | Opaque pagination cursor from previous response |
 
-**Pagination:** Cursor/keyset on `(source_date DESC, id DESC)`. Do not parse or construct the cursor — it is opaque. Use `pagination.next_cursor` from each response to fetch the next page.
+**Pagination:** Cursor/keyset on `(source_date DESC, id DESC)`. Cursor values are opaque keyset cursors. Clients must not parse, modify, or construct them. Use `pagination.next_cursor` from each response to fetch the next page.
 
 **`is_flagged_waste` tri-state:**
 - `null` — not analysed yet
@@ -1104,8 +1111,10 @@ HTTP 400.
 - Does not push negative keywords to Google Ads.
 - `is_flagged_waste` is nullable tri-state — null means not yet analysed, not that the term is clean.
 - Historical range depends on Windsor plan/connector limitation (confirmed up to last_14d).
-- Cursor is opaque to callers — do not parse or construct it.
-- `?q=` filtering uses ILIKE (sequential scan until pg_trgm extension is enabled on the DB).
+- Cursor is opaque to callers — do not parse or modify it. Invalid cursors return HTTP 400.
+- The `q` parameter uses case-insensitive contains matching on `search_term`.
+- At scale, broad contains-search should be backed by PostgreSQL trigram indexing (`pg_trgm`).
+  Without `pg_trgm`, `ILIKE '%term%'` can become slower on large datasets.
 
 **Frontend usage (as of PR-ADS-043):**
 - Rendered by the Search Terms page in the SPA.
@@ -1136,7 +1145,7 @@ Paginated GCLID attribution rows for the last N days.
 | `limit` | integer | 100 | Page size (1–500) |
 | `cursor` | string | — | Opaque pagination cursor from previous response |
 
-**Pagination:** Cursor/keyset on `(created_at DESC, id DESC)`. Do not parse or construct the cursor — it is opaque. Use `pagination.next_cursor` from each response to fetch the next page.
+**Pagination:** Cursor/keyset on `(created_at DESC, id DESC)`. Cursor values are opaque keyset cursors. Clients must not parse, modify, or construct them. Use `pagination.next_cursor` from each response to fetch the next page.
 
 **Response 200:**
 ```json
@@ -1216,6 +1225,7 @@ HTTP 400.
 - Future OCT workflows must be separate and human-approved.
 - Multiple deals for the same contact/GCLID are preserved as separate rows.
 - `summary` reflects current-page loaded rows only — not total database counts.
+- Invalid cursors return HTTP 400.
 
 **Frontend usage (as of PR-ADS-047):**
 - As of PR-ADS-047, the Campaign Investigation Drawer uses this endpoint with the `campaign` filter to display a read-only attribution preview.
