@@ -2964,6 +2964,9 @@ def api_search_terms(
 
     _safe_empty: dict[str, Any] = {
         "days": days,
+        "filters": {
+            "waste_state": effective_state,
+        },
         "rows": [],
         "pagination": {
             "limit":       limit,

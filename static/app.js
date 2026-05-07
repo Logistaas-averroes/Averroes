@@ -2033,7 +2033,17 @@ function buildSearchTermsParams({ cursor = null } = {}) {
 }
 
 function getVisibleSearchTermRows() {
-  return searchTermRows;
+  // Analysis-state filtering is backend-owned (PR-ADS-052).
+  // This helper filters only client-side visibility flags (hidden/visible) so
+  // downstream "no results match filter" branches stay reachable for future
+  // client-side visibility features without reintroducing waste-state filtering.
+  return (Array.isArray(searchTermRows) ? searchTermRows : []).filter((row) => {
+    if (!row || typeof row !== "object") return true;
+    if (row.hidden === true) return false;
+    if (row._hidden === true) return false;
+    if (row.visible === false) return false;
+    return true;
+  });
 }
 
 function _updateSearchTermsFilterNote() {

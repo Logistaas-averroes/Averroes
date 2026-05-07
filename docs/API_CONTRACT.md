@@ -1095,12 +1095,16 @@ Paginated raw search-term fact rows for the last N days.
 ```json
 {
   "days": 14,
+  "filters": {
+    "waste_state": "all"
+  },
   "rows": [],
   "pagination": { "limit": 100, "next_cursor": null, "has_more": false },
   "data_quality": { "source": "windsor", "dataset": "search_terms", "status": "db_unavailable" },
   "db_unavailable": true
 }
 ```
+The `filters` object is returned whenever the request can be parsed, including DB-unavailable fallback responses. `waste_state` reflects the effective resolved state (e.g. `"unanalyzed"` if `?waste_state=unanalyzed` was sent).
 
 **Invalid cursor response:**
 ```json
