@@ -2370,7 +2370,7 @@ function renderGclidCoverageCards() {
     </div>
     <div class="kpi-card">
       <div class="kpi-card__label">Coverage %</div>
-      <div class="kpi-card__value">${Number.isFinite(coveragePct) ? escapeHtml(coveragePct.toFixed(1)) + "%" : "—"}</div>
+      <div class="kpi-card__value">${Number.isFinite(coveragePct) ? `${coveragePct.toFixed(1)}%` : "—"}</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-card__label">Matched Deals</div>
