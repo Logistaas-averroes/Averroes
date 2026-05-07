@@ -2999,7 +2999,7 @@ a {
     padding: var(--space-3) var(--space-2);
   }
 
-.freshness-summary-card__value {
+  .freshness-summary-card__value {
     font-size: 18px;
   }
 }
@@ -3016,9 +3016,7 @@ a {
     width: 100%;
     flex: none;
   }
-}
 
-@media (max-width: 768px) {
   .search-terms-controls {
     flex-direction: column;
     align-items: stretch;

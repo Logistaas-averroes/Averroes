@@ -2558,11 +2558,12 @@ async function loadGclidCoverageForAttribution() {
       return;
     }
 
-    const latest = [...rows].sort((a, b) => {
-      const aTs = new Date(a.created_at || a.snapshot_date || 0).getTime();
-      const bTs = new Date(b.created_at || b.snapshot_date || 0).getTime();
-      return bTs - aTs;
-    })[0];
+    const latest = rows.reduce((currentLatest, row) => {
+      if (!currentLatest) return row;
+      const currentTs = new Date(currentLatest.created_at || currentLatest.snapshot_date || 0).getTime();
+      const rowTs = new Date(row.created_at || row.snapshot_date || 0).getTime();
+      return rowTs > currentTs ? row : currentLatest;
+    }, null);
 
     gclidCoverageStatus = "ok";
     gclidCoverageRows = latest ? [latest] : [];
