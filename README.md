@@ -58,54 +58,58 @@ Required variables:
 ### 4. Run your first daily pulse
 
 ```bash
-python scheduler/daily.py
+python -m scheduler.daily
 ```
 
 ---
 
 ## Project Structure
 
-```
+```txt
 logistaas-ads-intelligence/
-├── connectors/
-│   ├── windsor_pull.py       # Google Ads data via Windsor.ai
-│   ├── hubspot_pull.py       # CRM contacts, deals, GCLIDs
-│   ├── gclid_match.py        # Match clicks to pipeline
-│   └── oct_uploader.py       # Feed deal data back to Google Ads
-├── engine/
-│   ├── signal_check.py       # Brand vs non-brand, integrity audit
-│   ├── ngram_analysis.py     # Search term forensics
-│   ├── campaign_classifier.py # FIX / HOLD / SCALE / CUT
-│   └── lead_quality.py       # MQL vs SQL vs junk scoring
-├── doctrine/
-│   └── advisor.py            # Claude API doctrine engine
-├── scheduler/
-│   ├── daily.py              # 6am GMT daily pulse
-│   ├── weekly.py             # Monday 7am weekly report
-│   └── monthly.py            # 1st of month strategy
-├── api/
-│   └── server.py             # FastAPI — on-demand triggers
-├── config/
-│   ├── logistaas_config.yaml # Markets, tiers, thresholds
-│   └── patterns.yaml         # Intent mismatch pattern library
-├── docs/
-│   └── DOCTRINE.md           # Avverros doctrine rules (system prompt source)
-├── data/                     # Runtime data (gitignored)
-├── outputs/                  # Generated reports (gitignored)
-├── .env.example
-├── requirements.txt
-└── render.yaml               # Render.com deployment config
+├── api/                         # FastAPI app, auth, read-only endpoints, admin-gated run triggers
+├── analysis/                    # Read-only analysis logic: waste, lead quality, campaign truth, N-Grams, advisor output
+├── connectors/                  # Read-only data pulls from Windsor.ai and HubSpot; no analysis or decisions
+├── config/                      # Thresholds, junk patterns, N-Gram stopwords
+├── db/                          # Local persistence schema and writers
+├── docs/                        # Doctrine, roadmap, governance, audits, PR workflow
+├── scheduler/                   # Daily, weekly, monthly orchestration
+├── scripts/                     # Healthcheck, validation, readiness, benchmarks
+├── static/                      # Static dashboard UI
+├── tests/                       # Pytest suite
+├── outputs/                     # Generated reports; runtime only
+└── runtime_logs/                # Run history logs; runtime only
 ```
+
+Core architecture rule:
+
+```
+connectors/ → fetch only
+analysis/   → analyze only
+scheduler/  → orchestrate only
+api/        → expose read-only data and admin-gated run triggers
+static/     → display only
+config/     → decision thresholds and patterns
+```
+
+> **Phase 1 remains read-only.** The system does not write to Google Ads, does not write
+> to HubSpot, does not push negative keywords, does not upload offline conversions, and
+> does not change bids or budgets.
 
 ---
 
 ## Deployment on Render
 
 1. Push this repo to GitHub
-2. Go to render.com → New → Web Service → Connect your repo
-3. Set all environment variables in the Render dashboard
-4. Render auto-deploys on every push to `main`
-5. Cron jobs are defined in `render.yaml` — no manual setup needed
+2. Go to render.com → New → Blueprint → Connect your repo
+3. Render will detect `render.yaml` and preview **one web service**
+4. Set all environment variables in the Render dashboard
+5. Render auto-deploys on every push to `main`
+
+The Phase 1 deployment is a **single Render web service**. Render cron jobs are not
+required — scheduled daily, weekly, and monthly jobs run inside the FastAPI process
+via in-app APScheduler (introduced in PR-ADS-019). See `docs/DEPLOYMENT.md` for full
+deployment topology and environment variable reference.
 
 ---
 
@@ -133,5 +137,3 @@ The system will never:
 | `hs_analytics_source_data_2` | Keyword (UTM) |
 | `ip_country` | Lead geography |
 | `lifecyclestage` | Funnel position |
-
-Deal stages mapped to OCT values — see `config/logistaas_config.yaml`.

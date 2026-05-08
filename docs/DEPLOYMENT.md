@@ -15,6 +15,29 @@ endpoints, and all Phase 1 scheduled jobs (daily, weekly, monthly).
 
 ---
 
+## Post-PR-ADS-019 Deployment Topology
+
+The production deployment uses a single Render web service.
+
+Render cron workers are not required for Phase 1. Scheduled daily, weekly, and monthly
+jobs are registered inside the FastAPI process through in-app APScheduler.
+
+Expected model:
+
+- one Render web service
+- FastAPI serves API endpoints and static dashboard
+- APScheduler registers daily, weekly, and monthly jobs inside the service
+- manual run triggers are exposed through admin-gated `/run/daily`, `/run/weekly`, and `/run/monthly`
+- all scheduled and manual runs remain read-only with respect to Google Ads and HubSpot
+
+> **Do not reintroduce separate Render cron jobs** unless a future architecture PR
+> explicitly changes the deployment model.
+
+Manual run triggers may write local output files, runtime logs, and local database rows.
+They must not write to Google Ads or HubSpot.
+
+---
+
 ## Architecture
 
 ```
@@ -473,9 +496,9 @@ make daily
 make weekly
 make monthly
 # or directly:
-python scheduler/daily.py
-python scheduler/weekly.py
-python scheduler/monthly.py
+python -m scheduler.daily
+python -m scheduler.weekly
+python -m scheduler.monthly
 ```
 
 ### Makefile command reference

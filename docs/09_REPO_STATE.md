@@ -53,6 +53,21 @@
 
 ---
 
+## Current Architecture Snapshot
+
+As of PR-ADS-063 audit, the active architecture is:
+
+- `connectors/` fetches data only.
+- `analysis/` performs local read-only analysis only.
+- `scheduler/` orchestrates daily, weekly, and monthly runs.
+- `api/` exposes FastAPI endpoints and admin-gated run triggers.
+- `static/` renders the dashboard UI.
+- `config/` owns thresholds, junk patterns, and N-Gram stopwords.
+- `db/` stores local application data only.
+- No Google Ads or HubSpot write path exists in Phase 1.
+
+---
+
 ## Built but Broken (do not call until fixed)
 
 All previously broken references in `scheduler/daily.py` were fixed in PR-ADS-013.

@@ -1,3 +1,8 @@
+> **Historical note:**
+> This document reflects an early PR skeleton and may contain legacy architecture references.
+> The current architecture is governed by `README.md`, `docs/04_PHASE_ROADMAP.md`,
+> `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md`, and the latest full system audit.
+
 # 📐 Logistaas Ads Intelligence System
 ## PR-ADS-001 — Connector Validation & GCLID Match Engine (Phase 1 Foundation)
 
