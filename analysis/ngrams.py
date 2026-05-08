@@ -24,33 +24,235 @@ Scope boundary:
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from collections import defaultdict
+from functools import lru_cache
+from pathlib import Path
+
+import yaml
+
+
+logger = logging.getLogger(__name__)
+
+# Path to the stopword/protected-token config file (resolved relative to this module).
+_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "ngram_stopwords.yaml"
+
+# ---------------------------------------------------------------------------
+# Default stopwords / protected tokens — used as safe fallback if config is
+# missing or invalid.  These mirror the values in config/ngram_stopwords.yaml.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_STOPWORDS: dict[str, set[str]] = {
+    "english": {
+        "a", "an", "the", "and", "or", "but", "of", "in", "on", "at", "to",
+        "for", "with", "by", "from", "as", "is", "are", "was", "were", "be",
+        "it", "its", "this", "that", "these", "those", "my", "your", "our",
+        "their", "his", "her", "we", "i", "you", "he", "she", "they",
+        "do", "does", "did", "not", "no", "can", "will", "would", "should",
+        "have", "has", "had", "been", "get", "got", "go", "going",
+        "near",
+    },
+    "spanish": {
+        "de", "la", "el", "en", "y", "a", "los", "las", "un", "una",
+        "con", "por", "para", "que", "del", "al", "se", "su", "lo", "le",
+        "es", "si", "ya", "hay", "mas", "como",
+    },
+    "arabic": {
+        "من", "في", "على", "الى", "عن", "مع", "و", "أو", "ال",
+        "هذا", "هذه",
+    },
+}
+
+_DEFAULT_PROTECTED_TOKENS: set[str] = {
+    "freight", "forwarding", "logistics", "logistic", "shipping", "shipment",
+    "cargo", "customs", "warehouse", "warehousing", "software", "system",
+    "platform", "erp", "tms", "wms",
+    "free", "gratis", "job", "jobs", "hiring", "vacancy", "vacancies",
+    "student", "students", "course", "courses", "training",
+    "certification", "certificate",
+}
 
 
 # ---------------------------------------------------------------------------
-# Stopwords — lightweight set covering common high-frequency noise tokens
-# that add no signal to n-gram patterns.  Business/waste-signal tokens are
-# intentionally excluded so that "free", "gratis", "job", "jobs", "student",
-# "training", "freight", "logistics", "shipping", "software" all survive.
+# Config loading
 # ---------------------------------------------------------------------------
 
-_STOPWORDS: frozenset[str] = frozenset({
-    # English articles / prepositions / conjunctions
-    "a", "an", "the", "and", "or", "but", "of", "in", "on", "at", "to",
-    "for", "with", "by", "from", "as", "is", "are", "was", "were", "be",
-    "it", "its", "this", "that", "these", "those", "my", "your", "our",
-    "their", "his", "her", "we", "i", "you", "he", "she", "they",
-    "do", "does", "did", "not", "no", "can", "will", "would", "should",
-    "have", "has", "had", "been", "get", "got", "go", "going",
-    # Spanish articles / prepositions / conjunctions
-    "de", "la", "el", "en", "y", "a", "los", "las", "un", "una",
-    "con", "por", "para", "que", "del", "al", "se", "su", "lo", "le",
-    "es", "si", "ya", "hay", "mas", "como",
-    # Arabic stopwords (transliterated common forms — already normalized)
-    # Arabic-script stopwords are handled by character-level filtering below
-})
+@lru_cache(maxsize=1)
+def load_ngram_stopword_config() -> dict:
+    """Load n-gram stopword config from ``config/ngram_stopwords.yaml``.
+
+    Falls back to safe defaults if the config file is missing or invalid.
+    This function must never call external services.
+    """
+    try:
+        with open(_CONFIG_PATH, "r", encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+    except FileNotFoundError:
+        logger.warning(
+            "ngram_stopwords.yaml not found at %s — using built-in defaults",
+            _CONFIG_PATH,
+        )
+        return _build_default_config()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to load ngram_stopwords.yaml (%s) — using built-in defaults", exc
+        )
+        return _build_default_config()
+
+    warnings = validate_ngram_config(raw)
+    if warnings:
+        for w in warnings:
+            logger.warning("ngram_stopwords.yaml validation: %s", w)
+
+    if _ngram_config_has_fatal_errors(raw):
+        logger.warning(
+            "ngram_stopwords.yaml has fatal shape errors — falling back to built-in defaults"
+        )
+        return _build_default_config()
+
+    return raw if isinstance(raw, dict) else _build_default_config()
+
+
+def _build_default_config() -> dict:
+    """Return a config dict constructed from the built-in defaults."""
+    return {
+        "version": 1,
+        "stopwords": {lang: list(words) for lang, words in _DEFAULT_STOPWORDS.items()},
+        "protected_tokens": {
+            "business_terms": [
+                t for t in _DEFAULT_PROTECTED_TOKENS
+                if t not in {
+                    "free", "gratis", "job", "jobs", "hiring", "vacancy",
+                    "vacancies", "student", "students", "course", "courses",
+                    "training", "certification", "certificate",
+                }
+            ],
+            "waste_signal_terms": [
+                t for t in _DEFAULT_PROTECTED_TOKENS
+                if t in {
+                    "free", "gratis", "job", "jobs", "hiring", "vacancy",
+                    "vacancies", "student", "students", "course", "courses",
+                    "training", "certification", "certificate",
+                }
+            ],
+        },
+    }
+
+
+def _ngram_config_has_fatal_errors(config: object) -> bool:
+    """Return True if the config has shape errors that would produce empty token sets."""
+    if not isinstance(config, dict):
+        return True
+    if not isinstance(config.get("stopwords"), dict):
+        return True
+    if not isinstance(config.get("protected_tokens"), (dict, list)):
+        return True
+    return False
+
+
+def validate_ngram_config(config: dict) -> list[str]:
+    """Validate the shape of a loaded ngram stopword config dict.
+
+    Returns a list of warning/error strings (empty = valid).
+    """
+    warnings: list[str] = []
+
+    if not isinstance(config, dict):
+        return ["config root is not a dict"]
+
+    if "version" not in config:
+        warnings.append("missing 'version' key")
+
+    stopwords = config.get("stopwords")
+    if not isinstance(stopwords, dict):
+        warnings.append("missing or invalid 'stopwords' mapping")
+    else:
+        for lang, tokens in stopwords.items():
+            if not isinstance(tokens, list):
+                warnings.append(f"stopwords.{lang} must be a list")
+            else:
+                for idx, tok in enumerate(tokens):
+                    normalized = normalize_search_term(str(tok or ""))
+                    if not normalized:
+                        warnings.append(
+                            f"stopwords.{lang}[{idx}] is blank after normalization"
+                        )
+
+    protected = config.get("protected_tokens")
+    if not isinstance(protected, (dict, list)):
+        warnings.append("missing or invalid 'protected_tokens' mapping/list")
+    elif isinstance(protected, dict):
+        for category, values in protected.items():
+            if not isinstance(values, list):
+                warnings.append(f"protected_tokens.{category} must be a list")
+            else:
+                for idx, tok in enumerate(values):
+                    normalized = normalize_search_term(str(tok or ""))
+                    if not normalized:
+                        warnings.append(
+                            f"protected_tokens.{category}[{idx}] is blank after normalization"
+                        )
+    else:
+        # protected is a list
+        for idx, tok in enumerate(protected):
+            normalized = normalize_search_term(str(tok or ""))
+            if not normalized:
+                warnings.append(f"protected_tokens[{idx}] is blank after normalization")
+
+    return warnings
+
+
+@lru_cache(maxsize=1)
+def get_stopword_tokens() -> frozenset[str]:
+    """Return the combined stopword set from all languages in config.
+
+    The result is cached — rebuilding only happens if the underlying config
+    cache is cleared.  Tokens are normalized via ``normalize_search_term``;
+    empty results are discarded.
+    """
+    config = load_ngram_stopword_config()
+    stopwords_cfg = config.get("stopwords") or {}
+    result: set[str] = set()
+
+    if isinstance(stopwords_cfg, dict):
+        for tokens in stopwords_cfg.values():
+            if isinstance(tokens, list):
+                for tok in tokens:
+                    normalized = normalize_search_term(str(tok or ""))
+                    if normalized:
+                        result.add(normalized)
+    return frozenset(result)
+
+
+@lru_cache(maxsize=1)
+def get_protected_tokens() -> frozenset[str]:
+    """Return the combined protected-token set from config.
+
+    The result is cached — rebuilding only happens if the underlying config
+    cache is cleared.  Tokens are normalized via ``normalize_search_term``;
+    empty results are discarded.  Protected tokens override stopwords in
+    tokenization.
+    """
+    config = load_ngram_stopword_config()
+    protected_cfg = config.get("protected_tokens") or {}
+    result: set[str] = set()
+
+    if isinstance(protected_cfg, dict):
+        for tokens in protected_cfg.values():
+            if isinstance(tokens, list):
+                for tok in tokens:
+                    normalized = normalize_search_term(str(tok or ""))
+                    if normalized:
+                        result.add(normalized)
+    elif isinstance(protected_cfg, list):
+        for tok in protected_cfg:
+            normalized = normalize_search_term(str(tok or ""))
+            if normalized:
+                result.add(normalized)
+
+    return frozenset(result)
 
 # Arabic tatweel (U+0640) — decorative elongation character, no semantic value
 _TATWEEL = "\u0640"
@@ -172,15 +374,20 @@ def tokenize_search_term(text: str) -> list[str]:
       4. Exclude numeric-only tokens  (e.g. "2024", "100")
       5. Exclude single-character tokens  (single Arabic/Latin char = noise)
       6. Exclude tokens longer than 30 characters  (URLs, hashes, garbage)
-      7. Exclude stopwords
+      7. Exclude stopwords (from config/ngram_stopwords.yaml), unless the
+         token is also a protected token — protected tokens always survive.
 
     Business/waste-signal tokens (freight, gratis, free, job, jobs, student,
-    training, logistics, shipping, software) are not in the stopword list and
-    will always survive this filter.
+    training, logistics, shipping, software) are in the protected-token list
+    and will always survive this filter even if accidentally listed under
+    stopwords.
     """
     normalized = normalize_search_term(text)
     if not normalized:
         return []
+
+    stopwords = get_stopword_tokens()
+    protected = get_protected_tokens()
 
     tokens: list[str] = []
     for tok in normalized.split():
@@ -192,7 +399,7 @@ def tokenize_search_term(text: str) -> list[str]:
             continue
         if len(tok) > 30:
             continue
-        if tok in _STOPWORDS:
+        if tok in stopwords and tok not in protected:
             continue
         tokens.append(tok)
 

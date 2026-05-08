@@ -1,0 +1,147 @@
+# config/ngram_stopwords.yaml
+#
+# N-Gram stopword and protected-token configuration.
+#
+# This file controls token filtering for read-only n-gram analysis.
+# It must never be used to generate or push negative keywords directly.
+#
+# Protected tokens are intentionally preserved even if they appear in a stopword list.
+# This prevents core business or waste-signal terms from being accidentally removed.
+
+version: 1
+
+stopwords:
+  english:
+    - the
+    - a
+    - an
+    - for
+    - to
+    - in
+    - of
+    - and
+    - or
+    - with
+    - by
+    - from
+    - near
+    - at
+    - "on"
+    - as
+    - is
+    - are
+    - be
+    - this
+    - that
+    - but
+    - was
+    - were
+    - it
+    - its
+    - these
+    - those
+    - my
+    - your
+    - our
+    - their
+    - his
+    - her
+    - we
+    - i
+    - you
+    - he
+    - she
+    - they
+    - do
+    - does
+    - did
+    - not
+    - "no"
+    - can
+    - will
+    - would
+    - should
+    - have
+    - has
+    - had
+    - been
+    - get
+    - got
+    - go
+    - going
+
+  spanish:
+    - de
+    - del
+    - para
+    - el
+    - la
+    - los
+    - las
+    - en
+    - con
+    - por
+    - y
+    - o
+    - un
+    - una
+    - al
+    - que
+    - se
+    - su
+    - lo
+    - le
+    - es
+    - si
+    - ya
+    - hay
+    - mas
+    - como
+
+  arabic:
+    - من
+    - في
+    - على
+    - الى
+    - عن
+    - مع
+    - و
+    - أو
+    - ال
+    - هذا
+    - هذه
+
+protected_tokens:
+  business_terms:
+    - freight
+    - forwarding
+    - logistics
+    - logistic
+    - shipping
+    - shipment
+    - cargo
+    - customs
+    - warehouse
+    - warehousing
+    - software
+    - system
+    - platform
+    - erp
+    - tms
+    - wms
+
+  waste_signal_terms:
+    - free
+    - gratis
+    - job
+    - jobs
+    - hiring
+    - vacancy
+    - vacancies
+    - student
+    - students
+    - course
+    - courses
+    - training
+    - certification
+    - certificate

@@ -1300,7 +1300,7 @@ Read-only n-gram analysis over stored `search_terms` rows. (PR-ADS-055)
   "data_quality": {
     "source": "search_terms",
     "dataset": "ngrams",
-    "note": "N-gram analysis is read-only. Google conversions are platform conversions, not HubSpot SQLs. No negative keyword candidates are created."
+    "note": "N-gram analysis is read-only. Google conversions are platform conversions, not HubSpot SQLs. No negative keyword candidates are created. N-gram tokenization uses config/ngram_stopwords.yaml for stopwords and protected tokens. Protected tokens are preserved even if present in a stopword list. The endpoint remains read-only and does not generate negative keyword candidates."
   },
   "db_unavailable": false
 }

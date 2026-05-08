@@ -67,7 +67,7 @@ Results are sorted by `total_spend_usd DESC → row_count DESC → ngram ASC` (P
 
 ### Stopword logic
 
-Stopwords are a hardcoded `frozenset` in `analysis/ngrams.py` (lines 39–53). They cover common English articles/prepositions/conjunctions and Spanish function words. Arabic text currently undergoes character-level normalization, including tatweel, diacritic, and alef-form normalization. There is not yet a separate Arabic stopword word-list/filtering step for tokens such as من, في, على, or إلى.
+Stopwords are loaded from `config/ngram_stopwords.yaml` via `get_stopword_tokens()`. They cover common English articles/prepositions/conjunctions, Spanish function words, and Arabic token-level stopwords (من, في, على, الى, عن, مع, and others). Arabic processing includes two distinct stages: character-level normalization before tokenization (tatweel removal, diacritic stripping, alef-form normalization) and token-level stopword filtering after tokenization. As of PR-ADS-060, Arabic stopword filtering operates at both the character level (normalization) and the token level (stopword list).
 
 **Business/waste-signal tokens that are intentionally not stopworded** (verified in source):
 `freight`, `forwarding`, `logistics`, `shipping`, `software`, `system`, `cargo`, `customs`, `warehouse`, `gratis`, `free`, `job`, `jobs`, `student`, `training`.
@@ -338,16 +338,13 @@ CREATE INDEX IF NOT EXISTS idx_search_term_ngrams_spend
 
 ## 8. Stopword Config Strategy
 
-### Current state (verified in `analysis/ngrams.py` lines 39–53)
+### Current state (as of PR-ADS-060)
 
-Stopwords are a hardcoded `frozenset` (`_STOPWORDS`) containing:
-- English articles, prepositions, conjunctions, auxiliary verbs (~50 tokens)
-- Spanish articles, prepositions, conjunctions (~25 tokens)
-- Arabic-script tokens are handled via character-level normalization (diacritics, alef variants, tatweel removal) rather than token-level stopwords
+As of PR-ADS-060, stopwords and protected tokens are loaded from `config/ngram_stopwords.yaml`. The analyzer falls back to safe defaults if the config is unavailable. Arabic token-level stopwords are now represented in config (من, في, على, إلى, عن, مع, and others). The hardcoded `_STOPWORDS` frozenset has been removed; all token filtering is now config-driven via `get_stopword_tokens()` and `get_protected_tokens()`.
 
 ### Recommended future config
 
-Moving stopwords to YAML configuration would allow tuning without code changes:
+The config file `config/ngram_stopwords.yaml` is now the authoritative source for stopwords and protected tokens. Tuning stopwords no longer requires code changes:
 
 ```yaml
 # config/ngram_stopwords.yaml
@@ -389,7 +386,7 @@ These are explicitly documented in `analysis/ngrams.py` (lines 35–37 and 177�
 
 ### Recommendation
 
-PR-ADS-058 or a dedicated PR-ADS-057B can migrate stopwords to YAML config if the business needs language tuning. No behavior change beyond externalized config. Keep the protected token list documented and enforced in the config schema.
+PR-ADS-060 has migrated stopwords to `config/ngram_stopwords.yaml`. Protected tokens are now enforced in config and override stopwords at tokenization time.
 
 ---
 

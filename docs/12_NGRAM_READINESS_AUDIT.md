@@ -11,6 +11,8 @@
 
 **UI note (PR-ADS-056):** PR-ADS-056 adds the first read-only N-Gram UI page using the backend prototype endpoint. It does not add scoring, materialization, negative keyword candidates, or write actions.
 
+**Config note (PR-ADS-060):** PR-ADS-060 moves n-gram stopwords and protected tokens into `config/ngram_stopwords.yaml`. This supports safer future candidate governance but does not generate candidates, scoring, recommendations, or write actions.
+
 Depends on: PR-ADS-053
 Unblocks: PR-ADS-055 — N-Gram Analysis Backend Prototype
 
