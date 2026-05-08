@@ -2417,6 +2417,8 @@ function renderSearchTermsTable() {
 let ngramRows = [];
 let ngramSummary = null;
 let ngramStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+let ngramRequestId = 0;
+let ngramIsLoading = false;
 
 function buildNgramParams() {
   const params = new URLSearchParams();
@@ -2441,13 +2443,19 @@ function buildNgramParams() {
 }
 
 async function loadNgrams() {
+  if (ngramIsLoading) return;
+  ngramIsLoading = true;
+  const requestId = ++ngramRequestId;
   ngramStatus = "loading";
+  setNgramControlsDisabled(true);
   renderNgramsKPIs();
   renderNgramsTable();
 
   try {
     const params = buildNgramParams();
     const data = await fetchJSON(`/api/search-terms/ngrams?${params.toString()}`);
+
+    if (requestId !== ngramRequestId) return;
 
     if (data.db_unavailable) {
       ngramStatus = "db_unavailable";
@@ -2465,12 +2473,40 @@ async function loadNgrams() {
     renderNgramsKPIs(data);
     renderNgramsTable(data);
   } catch (err) {
+    if (requestId !== ngramRequestId) return;
     ngramStatus  = "error";
     ngramRows    = [];
     ngramSummary = null;
     renderNgramsKPIs();
     renderNgramsTable();
+  } finally {
+    if (requestId === ngramRequestId) {
+      ngramIsLoading = false;
+      setNgramControlsDisabled(false);
+    }
   }
+}
+
+function setNgramControlsDisabled(disabled) {
+  const applyBtn = document.getElementById("ngrams-apply-btn");
+  if (applyBtn) {
+    applyBtn.disabled = disabled;
+    applyBtn.textContent = disabled ? "Loading…" : "Apply filters";
+  }
+
+  [
+    "ngrams-refresh-btn",
+    "ngrams-clear-btn",
+    "ngrams-query",
+    "ngrams-campaign",
+    "ngrams-match-type",
+    "ngrams-waste-state",
+    "ngrams-length",
+    "ngrams-min-spend",
+  ].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = disabled;
+  });
 }
 
 function clearNgramFilters() {
@@ -2489,6 +2525,24 @@ function clearNgramFilters() {
   if (n) n.value = "1,2,3";
 
   loadNgrams();
+}
+
+function renderNgramDataQualityNote(data) {
+  const dq = (data && data.data_quality) || {};
+  if (dq.row_cap_applied) {
+    return `
+      <div class="ngram-data-quality-warning">
+        Row cap applied: analysis used the top ${escapeHtml(String(dq.row_cap || "configured"))}
+        source rows by spend/date. Narrow filters or date range for a more complete view.
+      </div>
+    `;
+  }
+
+  return `
+    <div class="ngram-data-quality-note">
+      N-gram results are factual pattern metrics from stored search terms. No negative keyword candidates are created.
+    </div>
+  `;
 }
 
 function ngramLanguageBadge(language) {
@@ -2653,7 +2707,7 @@ function renderNgramsTable(data) {
       </tr>`;
   }).join("");
 
-  tableEl.innerHTML = `<div class="ngrams-table-scroll"><table class="data-table">${thead}<tbody>${tbody}</tbody></table></div>`;
+  tableEl.innerHTML = renderNgramDataQualityNote(data) + `<div class="ngrams-table-scroll"><table class="data-table">${thead}<tbody>${tbody}</tbody></table></div>`;
 }
 
 // ── GCLID Attribution page ───────────────────────────────────────────────────

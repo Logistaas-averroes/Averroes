@@ -3343,6 +3343,26 @@ a {
   }
 }
 
+/* ── N-Gram data quality notes ────────────────────────────────────────────── */
+
+.ngram-data-quality-warning {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--c-warning-bg);
+  border: 1px solid var(--c-warning-border);
+  font-size: 0.9rem;
+}
+
+.ngram-data-quality-note {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--c-neutral-bg);
+  border: 1px solid var(--c-neutral-border);
+  font-size: 0.9rem;
+}
+
 @media (max-width: 768px) {
   .gclid-controls {
     flex-direction: column;

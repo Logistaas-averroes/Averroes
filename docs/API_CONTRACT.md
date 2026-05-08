@@ -1328,6 +1328,8 @@ Read-only n-gram analysis over stored `search_terms` rows. (PR-ADS-055)
 
 **Sorting:** Aggregated rows are sorted `total_spend_usd DESC`, `row_count DESC`, `ngram ASC`. Spend-first surfaces economically meaningful patterns.
 
+**UI row-cap visibility (PR-ADS-061):** The N-Gram UI surfaces `data_quality.row_cap_applied` when present. Operators should narrow filters/date range when the row cap is applied.
+
 **Important scope notes:**
 - Auth required — same session cookie as `/api/search-terms`.
 - Read-only. No writes to Google Ads, HubSpot, or any external system.
