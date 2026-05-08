@@ -1466,6 +1466,20 @@ a {
   margin-top: 1px;
 }
 
+/* ── Read-only notice banner ─────────────────────────────────────────────── */
+.read-only-notice {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--brand-sky-accent);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  line-height: 1.5;
+}
+
 /* ── KV detail list ───────────────────────────────────────────────────────── */
 .kv-list {
   display: grid;

@@ -168,7 +168,7 @@ Negative keywords are permanent decisions. Adding the wrong negative can kill re
 
 ## PR Roadmap (Current Build Status)
 
-> **Source of truth:** This table reflects the actual repository state as of PR-ADS-015.
+> **Source of truth:** This table reflects the actual repository state as of PR-ADS-062.
 > Do NOT infer roadmap from memory. Always read this file directly.
 
 ### Completed PRs
@@ -185,7 +185,40 @@ Negative keywords are permanent decisions. Adding the wrong negative can kill re
 | PR-ADS-012 | Repository reality sync + docs | ✅ Complete | 1 |
 | PR-ADS-013 | Broken reference fix (`scheduler/daily.py`) | ✅ Complete | 1 |
 | PR-ADS-014 | Phase 1 Operational Readiness Pack | ✅ Complete | 1 |
-| PR-ADS-015 | Phase 1 Production Readiness Audit (this PR) | ✅ Complete | 1 |
+| PR-ADS-015 | Phase 1 Production Readiness Audit | ✅ Complete | 1 |
+
+---
+
+### N-Gram Intelligence Block — ✅ Completed
+
+The N-Gram Intelligence block is now complete as a read-only analysis layer.
+
+| PR | Description | Status |
+|----|-------------|--------|
+| PR-ADS-054 | N-Gram Readiness Audit | ✅ Complete |
+| PR-ADS-055 | Read-only N-Gram backend endpoint | ✅ Complete |
+| PR-ADS-056 | Read-only N-Gram UI page | ✅ Complete |
+| PR-ADS-057 | N-Gram Performance Hardening Audit | ✅ Complete |
+| PR-ADS-058 / 058A | Negative Candidate Readiness Audit | ✅ Complete |
+| PR-ADS-060 | N-Gram Stopword Config | ✅ Complete |
+| PR-ADS-061 | Benchmark script, UI in-flight guard, and row-cap visibility | ✅ Complete |
+| PR-ADS-062 | Final validation and doctrine closeout | ✅ Complete |
+
+**Governance:**
+N-Gram Intelligence identifies candidate terms for human review only.
+It does not push negative keywords, modify Google Ads, modify HubSpot, pause campaigns, change bids, or write to any external platform.
+
+Any future negative keyword push workflow remains blocked until the six-month read-only governance review is complete and explicitly approved. See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md`.
+
+**Do not open more N-Gram feature PRs unless a real bug is found.**
+
+**Next roadmap options after this closeout (read-only only):**
+- Weekly/monthly report integration of N-Gram findings.
+- Dashboard/report UX polish.
+- Advisor language hardening.
+- Production monitoring polish.
+
+---
 
 ### Phase 1 Completion Gate — ✅ PASSED
 
@@ -204,11 +237,11 @@ All Phase 1 build PRs are complete.  The system is in the **4-week validation pe
 | PR-ADS-008 | `connectors/oct_uploader.py` | OCT uploader — dry-run only, no live Google Ads writes | ⬜ Phase 2 gate |
 | PR-ADS-009 | OCT live activation | First live OCT upload after explicit human approval | ⬜ Phase 2 gate |
 
-### Phase 3+ (future)
+### Phase 3+ (future — blocked until six-month governance review)
 
 | PR | Module | Description | Status |
 |----|--------|-------------|--------|
-| PR-ADS-010 | `connectors/negative_pusher.py` | Negative keyword push with human approval gate | ⬜ Phase 3 |
+| PR-ADS-010 | `connectors/negative_pusher.py` | Negative keyword push with human approval gate — **blocked until six-month read-only governance review is passed** | ⬜ Phase 3 |
 | PR-ADS-011 | `api/server.py` | FastAPI on-demand endpoints | ⬜ Phase 4 |
 | PR-ADS-016 | Frontend | Next.js war room dashboard | ⬜ Phase 4 |
 | PR-ADS-017 | Meta Ads | Windsor.ai Meta connector + unified analysis | ⬜ Phase 4 |
