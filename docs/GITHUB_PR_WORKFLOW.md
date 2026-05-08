@@ -60,7 +60,7 @@ Expected result: only governance/docs references should appear. No UI/API/adviso
 Also check for unsafe HTTP methods near N-Gram routes:
 
 ```bash
-grep -R "POST\|PUT\|PATCH\|DELETE" api webapp src | grep -i "ngram\|negative"
+grep -R "POST\|PUT\|PATCH\|DELETE" api static scripts | grep -i "ngram\|negative"
 ```
 
 Expected result: no mutation endpoint for N-Gram or negative candidates.

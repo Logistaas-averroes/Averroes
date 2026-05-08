@@ -111,7 +111,7 @@ def print_run_summary(run_num: int, result: dict, url: str) -> None:
         print(f"  row_cap:                   {dq.get('row_cap', '—')}")
         print("  NOTE: Results are capped and directional. Treat as a representative sample only.")
     print(f"  db_unavailable:            {data.get('db_unavailable', False)}")
-    print("  read_only:                 confirmed — no external writes performed")
+    print("  read_only:                 GET request only (no client-side writes)")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

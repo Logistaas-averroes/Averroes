@@ -1473,7 +1473,7 @@ a {
   color: var(--text-muted);
   background: var(--surface-alt);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
+  border-left: 3px solid var(--brand-sky-accent);
   border-radius: var(--radius-md);
   padding: var(--space-3) var(--space-4);
   margin-bottom: var(--space-4);
