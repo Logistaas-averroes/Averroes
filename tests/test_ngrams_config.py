@@ -83,15 +83,15 @@ def test_protected_token_survives_if_also_stopword() -> None:
         sw = set()
         for tokens in synthetic_config["stopwords"].values():
             for t in tokens:
-                n = _ng.normalize_search_term(t)
-                if n:
-                    sw.add(n)
+                normalized = _ng.normalize_search_term(t)
+                if normalized:
+                    sw.add(normalized)
         protected = set()
         for tokens in synthetic_config["protected_tokens"].values():
             for t in tokens:
-                n = _ng.normalize_search_term(t)
-                if n:
-                    protected.add(n)
+                normalized = _ng.normalize_search_term(t)
+                if normalized:
+                    protected.add(normalized)
 
         assert "free" in sw, "test setup: 'free' must be in synthetic stopwords"
         assert "free" in protected, "test setup: 'free' must be in synthetic protected"
@@ -200,8 +200,11 @@ if __name__ == "__main__":
         try:
             t()
             print(f"  PASS  {t.__name__}")
-        except Exception as exc:  # noqa: BLE001
+        except (AssertionError, TypeError, ValueError, AttributeError, KeyError) as exc:
             print(f"  FAIL  {t.__name__}: {exc}")
+            failed += 1
+        except Exception as exc:  # noqa: BLE001 — catch-all for unexpected errors
+            print(f"  ERROR {t.__name__}: {type(exc).__name__}: {exc}")
             failed += 1
     print(f"\n{len(tests) - failed}/{len(tests)} tests passed.")
     sys.exit(1 if failed else 0)

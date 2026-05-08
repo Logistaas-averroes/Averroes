@@ -52,7 +52,7 @@ _DEFAULT_STOPWORDS: dict[str, set[str]] = {
         "their", "his", "her", "we", "i", "you", "he", "she", "they",
         "do", "does", "did", "not", "no", "can", "will", "would", "should",
         "have", "has", "had", "been", "get", "got", "go", "going",
-        "near", "from",
+        "near",
     },
     "spanish": {
         "de", "la", "el", "en", "y", "a", "los", "las", "un", "una",
