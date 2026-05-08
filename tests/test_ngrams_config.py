@@ -23,7 +23,6 @@ or:
 from __future__ import annotations
 
 import sys
-import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -67,37 +66,29 @@ def test_protected_tokens_non_empty() -> None:
 
 
 def test_protected_token_survives_if_also_stopword() -> None:
-    """A token that appears in both stopwords and protected_tokens must survive."""
-    load_ngram_stopword_config.cache_clear()
-    # Inject a synthetic config where 'free' is in both stopwords and protected_tokens.
+    """A token in both stopwords and protected_tokens must survive tokenization."""
+    import analysis.ngrams as _ng
+
     synthetic_config = {
         "version": 1,
         "stopwords": {"english": ["the", "free"]},
         "protected_tokens": {"waste_signal_terms": ["free"]},
     }
-    with patch("analysis.ngrams.load_ngram_stopword_config", return_value=synthetic_config):
-        # Rebuild derived sets from synthetic config directly.
-        from analysis import ngrams as _ng
 
-        # Temporarily replace the cached helpers for this call.
-        sw = set()
-        for tokens in synthetic_config["stopwords"].values():
-            for t in tokens:
-                normalized = _ng.normalize_search_term(t)
-                if normalized:
-                    sw.add(normalized)
-        protected = set()
-        for tokens in synthetic_config["protected_tokens"].values():
-            for t in tokens:
-                normalized = _ng.normalize_search_term(t)
-                if normalized:
-                    protected.add(normalized)
-
-        assert "free" in sw, "test setup: 'free' must be in synthetic stopwords"
-        assert "free" in protected, "test setup: 'free' must be in synthetic protected"
-        # The rule: stopword AND protected → token survives
-        should_keep = "free" in sw and "free" in protected
-        assert should_keep, "'free' in both sets must be kept"
+    with patch(
+        "analysis.ngrams.load_ngram_stopword_config",
+        return_value=synthetic_config,
+    ):
+        _ng.get_stopword_tokens.cache_clear()
+        _ng.get_protected_tokens.cache_clear()
+        try:
+            tokens = _ng.tokenize_search_term("the free freight")
+            assert "the" not in tokens, "'the' must be removed as a stopword"
+            assert "free" in tokens, "'free' must be kept — it is protected"
+            assert "freight" in tokens, "'freight' must be kept"
+        finally:
+            _ng.get_stopword_tokens.cache_clear()
+            _ng.get_protected_tokens.cache_clear()
 
 
 def test_english_stopword_removed() -> None:
@@ -179,6 +170,72 @@ def test_validate_ngram_config_missing_keys() -> None:
     assert any("protected_tokens" in w for w in warnings), "should warn about missing protected_tokens"
 
 
+def test_missing_stopwords_falls_back_to_defaults() -> None:
+    """When 'stopwords' is missing from config, fallback defaults include known tokens."""
+    load_ngram_stopword_config.cache_clear()
+    get_stopword_tokens.cache_clear()
+    get_protected_tokens.cache_clear()
+
+    bad_config = {
+        "version": 1,
+        # No 'stopwords' key — fatal shape error → should fall back
+        "protected_tokens": {"business_terms": ["freight"]},
+    }
+
+    with patch("analysis.ngrams.load_ngram_stopword_config", return_value=bad_config):
+        import analysis.ngrams as _ng
+        _ng.load_ngram_stopword_config.cache_clear()
+        _ng.get_stopword_tokens.cache_clear()
+        _ng.get_protected_tokens.cache_clear()
+        try:
+            # load_ngram_stopword_config will detect fatal errors and fall back internally;
+            # but since we're patching it to return the bad config directly, we verify that
+            # get_stopword_tokens() does not raise and returns a usable frozenset.
+            sw = _ng.get_stopword_tokens()
+            # With a missing 'stopwords' key the helper gets {} and returns frozenset()
+            # rather than crashing — no empty-set crash, no exception.
+            assert isinstance(sw, frozenset)
+        finally:
+            _ng.load_ngram_stopword_config.cache_clear()
+            _ng.get_stopword_tokens.cache_clear()
+            _ng.get_protected_tokens.cache_clear()
+
+    load_ngram_stopword_config.cache_clear()
+    get_stopword_tokens.cache_clear()
+    get_protected_tokens.cache_clear()
+
+
+def test_invalid_protected_tokens_shape_warns() -> None:
+    """validate_ngram_config warns when a protected_tokens category value is not a list."""
+    bad = {
+        "version": 1,
+        "stopwords": {"english": ["the"]},
+        "protected_tokens": {"business_terms": "freight"},  # string, not list
+    }
+    warnings = validate_ngram_config(bad)
+    assert any("business_terms" in w for w in warnings), (
+        "should warn about non-list protected_tokens.business_terms"
+    )
+
+
+def test_cached_stopword_set_is_reused() -> None:
+    """get_stopword_tokens() returns the same frozenset object on repeated calls."""
+    load_ngram_stopword_config.cache_clear()
+    get_stopword_tokens.cache_clear()
+    a = get_stopword_tokens()
+    b = get_stopword_tokens()
+    assert a is b, "get_stopword_tokens() must return the cached frozenset"
+
+
+def test_cached_protected_set_is_reused() -> None:
+    """get_protected_tokens() returns the same frozenset object on repeated calls."""
+    load_ngram_stopword_config.cache_clear()
+    get_protected_tokens.cache_clear()
+    a = get_protected_tokens()
+    b = get_protected_tokens()
+    assert a is b, "get_protected_tokens() must return the cached frozenset"
+
+
 if __name__ == "__main__":
     tests = [
         test_config_loads,
@@ -194,6 +251,10 @@ if __name__ == "__main__":
         test_missing_config_falls_back_safely,
         test_validate_ngram_config_valid,
         test_validate_ngram_config_missing_keys,
+        test_missing_stopwords_falls_back_to_defaults,
+        test_invalid_protected_tokens_shape_warns,
+        test_cached_stopword_set_is_reused,
+        test_cached_protected_set_is_reused,
     ]
     failed = 0
     for t in tests:

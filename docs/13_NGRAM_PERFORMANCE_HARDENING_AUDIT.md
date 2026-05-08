@@ -67,7 +67,7 @@ Results are sorted by `total_spend_usd DESC → row_count DESC → ngram ASC` (P
 
 ### Stopword logic
 
-Stopwords are loaded from `config/ngram_stopwords.yaml` via `get_stopword_tokens()`. They cover common English articles/prepositions/conjunctions, Spanish function words, and Arabic token-level stopwords (من, في, على, إلى, عن, مع, and others). Arabic text also continues to undergo character-level normalization (tatweel, diacritic, and alef-form removal) before tokenization. As of PR-ADS-060, Arabic stopword filtering operates at both the character level and the token level.
+Stopwords are loaded from `config/ngram_stopwords.yaml` via `get_stopword_tokens()`. They cover common English articles/prepositions/conjunctions, Spanish function words, and Arabic token-level stopwords (من, في, على, الى, عن, مع, and others). Arabic processing includes two distinct stages: character-level normalization before tokenization (tatweel removal, diacritic stripping, alef-form normalization) and token-level stopword filtering after tokenization. As of PR-ADS-060, Arabic stopword filtering operates at both the character level (normalization) and the token level (stopword list).
 
 **Business/waste-signal tokens that are intentionally not stopworded** (verified in source):
 `freight`, `forwarding`, `logistics`, `shipping`, `software`, `system`, `cargo`, `customs`, `warehouse`, `gratis`, `free`, `job`, `jobs`, `student`, `training`.

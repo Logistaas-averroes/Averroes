@@ -60,7 +60,7 @@ _DEFAULT_STOPWORDS: dict[str, set[str]] = {
         "es", "si", "ya", "hay", "mas", "como",
     },
     "arabic": {
-        "من", "في", "على", "الى", "إلى", "عن", "مع", "و", "أو", "ال",
+        "من", "في", "على", "الى", "عن", "مع", "و", "أو", "ال",
         "هذا", "هذه",
     },
 }
@@ -105,7 +105,12 @@ def load_ngram_stopword_config() -> dict:
     if warnings:
         for w in warnings:
             logger.warning("ngram_stopwords.yaml validation: %s", w)
-        # Validation warnings are non-fatal; continue with what we got.
+
+    if _ngram_config_has_fatal_errors(raw):
+        logger.warning(
+            "ngram_stopwords.yaml has fatal shape errors — falling back to built-in defaults"
+        )
+        return _build_default_config()
 
     return raw if isinstance(raw, dict) else _build_default_config()
 
@@ -136,6 +141,17 @@ def _build_default_config() -> dict:
     }
 
 
+def _ngram_config_has_fatal_errors(config: object) -> bool:
+    """Return True if the config has shape errors that would produce empty token sets."""
+    if not isinstance(config, dict):
+        return True
+    if not isinstance(config.get("stopwords"), dict):
+        return True
+    if not isinstance(config.get("protected_tokens"), (dict, list)):
+        return True
+    return False
+
+
 def validate_ngram_config(config: dict) -> list[str]:
     """Validate the shape of a loaded ngram stopword config dict.
 
@@ -150,35 +166,51 @@ def validate_ngram_config(config: dict) -> list[str]:
         warnings.append("missing 'version' key")
 
     stopwords = config.get("stopwords")
-    if stopwords is None:
-        warnings.append("missing 'stopwords' key")
-    elif not isinstance(stopwords, dict):
-        warnings.append("'stopwords' must be a dict of language → list")
+    if not isinstance(stopwords, dict):
+        warnings.append("missing or invalid 'stopwords' mapping")
     else:
         for lang, tokens in stopwords.items():
             if not isinstance(tokens, list):
                 warnings.append(f"stopwords.{lang} must be a list")
             else:
-                empty = [t for t in tokens if not str(t).strip()]
-                if empty:
-                    warnings.append(
-                        f"stopwords.{lang} contains {len(empty)} empty token(s)"
-                    )
+                for idx, tok in enumerate(tokens):
+                    normalized = normalize_search_term(str(tok or ""))
+                    if not normalized:
+                        warnings.append(
+                            f"stopwords.{lang}[{idx}] is blank after normalization"
+                        )
 
     protected = config.get("protected_tokens")
-    if protected is None:
-        warnings.append("missing 'protected_tokens' key")
-    elif not isinstance(protected, (dict, list)):
-        warnings.append("'protected_tokens' must be a dict or list")
+    if not isinstance(protected, (dict, list)):
+        warnings.append("missing or invalid 'protected_tokens' mapping/list")
+    elif isinstance(protected, dict):
+        for category, values in protected.items():
+            if not isinstance(values, list):
+                warnings.append(f"protected_tokens.{category} must be a list")
+            else:
+                for idx, tok in enumerate(values):
+                    normalized = normalize_search_term(str(tok or ""))
+                    if not normalized:
+                        warnings.append(
+                            f"protected_tokens.{category}[{idx}] is blank after normalization"
+                        )
+    else:
+        # protected is a list
+        for idx, tok in enumerate(protected):
+            normalized = normalize_search_term(str(tok or ""))
+            if not normalized:
+                warnings.append(f"protected_tokens[{idx}] is blank after normalization")
 
     return warnings
 
 
-def get_stopword_tokens() -> set[str]:
+@lru_cache(maxsize=1)
+def get_stopword_tokens() -> frozenset[str]:
     """Return the combined stopword set from all languages in config.
 
-    Tokens are normalized via ``normalize_search_term`` where non-empty
-    after normalization; empty results are discarded.
+    The result is cached — rebuilding only happens if the underlying config
+    cache is cleared.  Tokens are normalized via ``normalize_search_term``;
+    empty results are discarded.
     """
     config = load_ngram_stopword_config()
     stopwords_cfg = config.get("stopwords") or {}
@@ -188,17 +220,20 @@ def get_stopword_tokens() -> set[str]:
         for tokens in stopwords_cfg.values():
             if isinstance(tokens, list):
                 for tok in tokens:
-                    normalized = normalize_search_term(str(tok))
+                    normalized = normalize_search_term(str(tok or ""))
                     if normalized:
                         result.add(normalized)
-    return result
+    return frozenset(result)
 
 
-def get_protected_tokens() -> set[str]:
+@lru_cache(maxsize=1)
+def get_protected_tokens() -> frozenset[str]:
     """Return the combined protected-token set from config.
 
-    Tokens are normalized via ``normalize_search_term``; empty results are
-    discarded.  Protected tokens override stopwords in tokenization.
+    The result is cached — rebuilding only happens if the underlying config
+    cache is cleared.  Tokens are normalized via ``normalize_search_term``;
+    empty results are discarded.  Protected tokens override stopwords in
+    tokenization.
     """
     config = load_ngram_stopword_config()
     protected_cfg = config.get("protected_tokens") or {}
@@ -208,16 +243,16 @@ def get_protected_tokens() -> set[str]:
         for tokens in protected_cfg.values():
             if isinstance(tokens, list):
                 for tok in tokens:
-                    normalized = normalize_search_term(str(tok))
+                    normalized = normalize_search_term(str(tok or ""))
                     if normalized:
                         result.add(normalized)
     elif isinstance(protected_cfg, list):
         for tok in protected_cfg:
-            normalized = normalize_search_term(str(tok))
+            normalized = normalize_search_term(str(tok or ""))
             if normalized:
                 result.add(normalized)
 
-    return result
+    return frozenset(result)
 
 # Arabic tatweel (U+0640) — decorative elongation character, no semantic value
 _TATWEEL = "\u0640"

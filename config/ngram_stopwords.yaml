@@ -26,7 +26,7 @@ stopwords:
     - from
     - near
     - at
-    - on
+    - "on"
     - as
     - is
     - are
@@ -56,7 +56,7 @@ stopwords:
     - does
     - did
     - not
-    - no
+    - "no"
     - can
     - will
     - would
@@ -103,7 +103,6 @@ stopwords:
     - في
     - على
     - الى
-    - إلى
     - عن
     - مع
     - و
