@@ -67,7 +67,6 @@ python -m scheduler.daily
 
 ```txt
 logistaas-ads-intelligence/
-│
 ├── api/                         # FastAPI app, auth, read-only endpoints, admin-gated run triggers
 ├── analysis/                    # Read-only analysis logic: waste, lead quality, campaign truth, N-Grams, advisor output
 ├── connectors/                  # Read-only data pulls from Windsor.ai and HubSpot; no analysis or decisions
