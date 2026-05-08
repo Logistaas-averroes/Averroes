@@ -14,6 +14,8 @@ Unblocks: PR-ADS-059 — N-Gram Stopword Config; later PR-ADS-061 — Negative C
 
 ## 1. Executive Verdict
 
+> **Governance note:** This audit is governed by `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md`. During the six-month read-only period, no negative candidate workflow may write to Google Ads or HubSpot. The system may advise only; the user manually implements any decisions outside the system.
+
 ### Is the system ready to generate negative keyword candidates?
 
 **No.** The system has factual visibility into search-term patterns — stored `search_terms`, waste flags, n-gram evidence, and performance metrics — but factual evidence of repetition is not the same as a negative keyword decision. The current evidence layer lacks the safeguards, governance, and review workflow needed to translate pattern data into candidates.

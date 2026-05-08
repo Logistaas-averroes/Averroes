@@ -6,6 +6,8 @@
 
 ## 0. Purpose
 
+For the first six months of production use, the system is advisor-only. It may analyze and recommend, but the user executes all changes manually outside the system. See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full governance policy.
+
 This system exists to expose the gap between:
 
 * What Google Ads reports
