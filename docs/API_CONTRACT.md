@@ -1838,6 +1838,14 @@ Always send `credentials: 'same-origin'` so the session cookie travels with the 
 
 ---
 
+## Six-Month Read-Only Governance
+
+All endpoints in Phase 1 / Phase 1.5 are read-only with respect to external platforms. Local PostgreSQL writes may occur for imported data, reports, sync state, and analysis evidence, but no endpoint may write to Google Ads or HubSpot during the governance period.
+
+See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
+
+---
+
 ## Forbidden Endpoints (Phase 1)
 
 These endpoints **must not exist** in Phase 1. Adding them is a doctrine violation.
