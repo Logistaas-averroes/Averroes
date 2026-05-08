@@ -67,7 +67,7 @@ Results are sorted by `total_spend_usd DESC → row_count DESC → ngram ASC` (P
 
 ### Stopword logic
 
-Stopwords are a hardcoded `frozenset` in `analysis/ngrams.py` (lines 39–53). They cover common English articles/prepositions/conjunctions and Spanish function words. Arabic stopwords are handled at the character-level normalization stage rather than as token lookups.
+Stopwords are a hardcoded `frozenset` in `analysis/ngrams.py` (lines 39–53). They cover common English articles/prepositions/conjunctions and Spanish function words. Arabic text currently undergoes character-level normalization, including tatweel, diacritic, and alef-form normalization. There is not yet a separate Arabic stopword word-list/filtering step for tokens such as من, في, على, or إلى.
 
 **Business/waste-signal tokens that are intentionally not stopworded** (verified in source):
 `freight`, `forwarding`, `logistics`, `shipping`, `software`, `system`, `cargo`, `customs`, `warehouse`, `gratis`, `free`, `job`, `jobs`, `student`, `training`.
@@ -133,7 +133,7 @@ search_terms table
 | n=1,2,3 triples output work | Requesting all three n lengths triples the tokenization pass relative to a single-n request. |
 | Repeated UI Apply clicks re-run full aggregation | Each click triggers a full DB query + Python aggregation. There is no debounce on the Apply button and no response caching. |
 | Multiple concurrent users amplify CPU | Each simultaneous request runs an independent Python aggregation in the server process. On Render free/starter tier (shared single-process), this can saturate the CPU. |
-| Language detection runs on phrases, not source rows | `detect_script_or_language` is called once per unique output n-gram, not once per source row. This is already efficient — the phrase set is much smaller than the source row count. No optimization needed here. |
+| Language detection runs on phrases, not source rows | `detect_script_or_language` is called once per unique output n-gram, not once per source row. This is efficient from a performance standpoint because the phrase set is usually smaller than the source row count. A future shift to row-level detection would be for better source-level attribution/accuracy propagation, not because phrase-level detection is currently a performance bottleneck. |
 
 ---
 
@@ -168,7 +168,7 @@ Before changing the architecture, measure actual endpoint performance at real da
 ```bash
 # Set BASE_URL and TOKEN in your shell before running
 time curl -s "$BASE_URL/api/search-terms/ngrams?days=14&n=1,2,3&limit=100" \
-  -H "Cookie: session_token=$TOKEN" > /tmp/ngrams_14d.json
+  -H "Cookie: ads_session=$TOKEN" > /tmp/ngrams_14d.json
 
 # Inspect summary
 python3 -c "import json,sys; d=json.load(open('/tmp/ngrams_14d.json')); print(d['summary'], d.get('data_quality', {}))"
