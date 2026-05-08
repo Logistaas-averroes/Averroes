@@ -2443,8 +2443,8 @@ function buildNgramParams() {
 }
 
 async function loadNgrams() {
-  const requestId = ++ngramRequestId;
   ngramIsLoading = true;
+  const requestId = ++ngramRequestId;
   ngramStatus = "loading";
   setNgramControlsDisabled(true);
   renderNgramsKPIs();
