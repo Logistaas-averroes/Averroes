@@ -300,6 +300,7 @@
           <h1 class="page-title">Action Queue</h1>
           <p class="page-subtitle">Ranked human-review items based on campaign, waste, geo, keyword, and data-quality signals.</p>
         </header>
+        <p id="run-meta-action_queue" class="run-meta" data-section="action_queue"></p>
         <div class="kpi-grid" id="action-queue-kpis">
           <div class="kpi-card">
             <div class="kpi-card__label">Total Review Items</div>
@@ -377,6 +378,7 @@
           <h1 class="page-title">Campaigns</h1>
           <p class="page-subtitle">Campaign truth table — spend, quality, and verdict</p>
         </header>
+        <p id="run-meta-campaigns" class="run-meta" data-section="campaigns"></p>
         <div class="verdict-count-grid" id="camp-verdict-grid">
           <div class="verdict-count-card verdict-count-card--scale">
             <div class="verdict-count-card__num" id="vc-scale">—</div>
@@ -409,6 +411,7 @@
           <h1 class="page-title">Waste Terms</h1>
           <p class="page-subtitle">Search terms flagged as wasted spend, grouped by junk signal and campaign evidence.</p>
         </header>
+        <p id="run-meta-waste" class="run-meta" data-section="waste"></p>
         <div class="kpi-grid">
           <div class="kpi-card">
             <div class="kpi-card__label">Flagged Waste Spend</div>
@@ -468,6 +471,7 @@
           <h1 class="page-title">Search Terms</h1>
           <p class="page-subtitle">Full Google Ads/Windsor search-term forensics. Read-only evidence view.</p>
         </header>
+        <p id="run-meta-search_terms" class="run-meta" data-section="search_terms"></p>
 
         <div id="search-terms-kpis" class="kpi-grid"></div>
 
@@ -529,6 +533,7 @@
           <h1 class="page-title">N-Gram Intelligence</h1>
           <p class="page-subtitle">Recurring word and phrase patterns from stored search terms. Read-only analysis — candidate terms for human review only.</p>
         </header>
+        <p id="run-meta-ngrams" class="run-meta" data-section="ngrams"></p>
 
         <div class="read-only-notice" role="note">
           Read-only analysis. These are candidate patterns for human review only. The system does not push negative keywords or modify Google Ads.
@@ -593,6 +598,7 @@
           <h1 class="page-title">Geo Intelligence</h1>
           <p class="page-subtitle">Country-level ad performance and HubSpot lead quality, shown side by side.</p>
         </header>
+        <p id="run-meta-geo" class="run-meta" data-section="geo"></p>
         <div class="kpi-grid" id="geo-kpi-grid">
           <div class="kpi-card">
             <div class="kpi-card__label">Countries Active</div>
@@ -656,6 +662,7 @@
           <h1 class="page-title">Keywords</h1>
           <p class="page-subtitle">Keyword performance from Google Ads/Windsor. This view shows ad-platform metrics only — not HubSpot lead quality.</p>
         </header>
+        <p id="run-meta-keywords" class="run-meta" data-section="keywords"></p>
         <div class="kpi-grid">
           <div class="kpi-card">
             <div class="kpi-card__label">Keyword Spend</div>
@@ -720,6 +727,7 @@
           <h1 class="page-title">Lead Quality</h1>
           <p class="page-subtitle">Contact qualification breakdown by campaign</p>
         </header>
+        <p id="run-meta-lead_quality" class="run-meta" data-section="lead_quality"></p>
         <div class="kpi-grid">
           <div class="kpi-card">
             <div class="kpi-card__label">Total Contacts</div>
@@ -756,6 +764,7 @@
           <h1 class="page-title">Deals</h1>
           <p class="page-subtitle">GCLID-matched deal pipeline</p>
         </header>
+        <p id="run-meta-deals" class="run-meta" data-section="deals"></p>
         <div class="panel">
           <div class="panel__header">Pipeline Stages</div>
           <div class="panel__body" id="deals-funnel-body"><p class="empty-state">Loading deals…</p></div>
@@ -774,6 +783,7 @@
           <h1 class="page-title">GCLID Attribution</h1>
           <p class="page-subtitle">Read-only attribution forensics linking click evidence to contacts and deals.</p>
         </header>
+        <p id="run-meta-gclid_attribution" class="run-meta" data-section="gclid_attribution"></p>
 
         <div id="gclid-coverage-kpis" class="kpi-grid"></div>
         <p class="gclid-coverage-note">Coverage cards show local DB snapshots only, not live Google Ads status.</p>
@@ -844,6 +854,7 @@
           <h1 class="page-title">In Progress Leads</h1>
           <p class="page-subtitle">Contacts still moving through MDR review — meeting booked, pending meeting, or connecting.</p>
         </header>
+        <p id="run-meta-in_progress_leads" class="run-meta" data-section="in_progress_leads"></p>
         <div id="opps-body"><p class="empty-state">Loading in-progress leads…</p></div>
       </section>
 
@@ -853,6 +864,7 @@
           <h1 class="page-title">Scheduler</h1>
           <p class="page-subtitle">In-app APScheduler — job status and manual triggers</p>
         </header>
+        <p id="run-meta-scheduler" class="run-meta" data-section="scheduler"></p>
         <div class="sched-grid" id="sched-jobs-grid"><p class="empty-state">Loading scheduler…</p></div>
         <div class="run-feedback" id="sched-feedback" hidden></div>
       </section>
@@ -863,6 +875,7 @@
           <h1 class="page-title">System Health</h1>
           <p class="page-subtitle">Readiness checks — environment, config, modules</p>
         </header>
+        <p id="run-meta-health" class="run-meta" data-section="health"></p>
         <div id="health-body"><p class="empty-state">Loading readiness data…</p></div>
 
         <!-- Dataset Freshness panel -->

@@ -38,9 +38,19 @@ const DEFAULT_UI_THRESHOLDS = {
     strong_min: 8,
     medium_min: 5,
   },
+  freshness: {
+    stale_after_days: 2,
+  },
 };
 
 let uiThresholds = DEFAULT_UI_THRESHOLDS;
+
+// Config-driven stale threshold (days). Updated from /api/config/ui-thresholds.
+// Default matches config/thresholds.yaml ui.freshness.stale_after_days.
+let _staleAfterDays = 2;
+
+// Latest run record fetched by loadDataFreshness() — shared with renderRunMeta().
+let _latestRunForMeta = null;
 
 // ── Session state ──────────────────────────────────────────────────────────
 
@@ -260,7 +270,14 @@ async function loadUiThresholds() {
         ...DEFAULT_UI_THRESHOLDS.quality_score,
         ...(data.quality_score || {}),
       },
+      freshness: {
+        ...DEFAULT_UI_THRESHOLDS.freshness,
+        ...(data.freshness || {}),
+      },
     };
+    // Update the config-driven stale threshold used by the freshness bar and per-page strips.
+    const sad = uiThresholds.freshness && uiThresholds.freshness.stale_after_days;
+    if (typeof sad === "number" && sad >= 1) _staleAfterDays = sad;
   } catch (err) {
     console.warn("[loadUiThresholds] failed, using defaults:", err);
     uiThresholds = DEFAULT_UI_THRESHOLDS;
@@ -500,6 +517,9 @@ async function loadDataFreshness() {
     return;
   }
 
+  // Store run metadata for use by per-page freshness strips.
+  _latestRunForMeta = latestRun;
+
   const status     = normalizeRunStatus(latestRun);
   const runType    = latestRun.run_type || "unknown";
   const timestamp  = latestRun.finished_at || latestRun.started_at;
@@ -514,12 +534,59 @@ async function loadDataFreshness() {
   } else if (status === "running") {
     statusEl.textContent = `Latest run in progress · ${runType} · ${dateStr}`;
     statusEl.className   = "freshness-status freshness-warning";
-  } else if (ageDays > 2) {
+  } else if (ageDays > _staleAfterDays) {
     statusEl.textContent = `Latest recorded run is stale · ${dateStr} · ${runType} · ${status}`;
     statusEl.className   = "freshness-status freshness-warning";
   } else {
     statusEl.textContent = `Latest recorded run · ${dateStr} · ${runType} · ${status}`;
     statusEl.className   = "freshness-status freshness-ok";
+  }
+}
+
+// ── Per-page freshness strip helper ───────────────────────────────────────
+
+// Render a compact freshness line beneath a page header using the latest run
+// data fetched by loadDataFreshness().  sectionKey matches the data-section
+// attribute on the placeholder <p id="run-meta-{sectionKey}">.
+//
+// Sections that depend on weekly/monthly data (campaigns, waste, keywords,
+// geo, lead_quality, deals, gclid_attribution, action_queue, search_terms,
+// ngrams, in_progress_leads) use the latest run of any type because the global
+// freshness bar already shows the latest run.  If no run data is available the
+// strip shows a neutral unavailability note — it never shows false-fresh state.
+function renderRunMeta(sectionKey) {
+  const el = document.getElementById(`run-meta-${sectionKey}`);
+  if (!el) return;
+
+  if (!_latestRunForMeta) {
+    el.textContent = "Freshness unavailable. Run a weekly analysis or check Health.";
+    el.className   = "run-meta";
+    return;
+  }
+
+  const run       = _latestRunForMeta;
+  const status    = normalizeRunStatus(run);
+  const runType   = run.run_type || "unknown";
+  const timestamp = run.finished_at || run.started_at;
+  const dateStr   = fmtDate(timestamp);
+  const ageDays   = timestamp
+    ? Math.floor((Date.now() - new Date(timestamp).getTime()) / 86400000)
+    : Infinity;
+
+  const isStale = ageDays > _staleAfterDays || status === "failed";
+
+  if (status === "failed") {
+    el.textContent = `Data source: latest ${runType} analysis · Finished: ${dateStr} · Last run failed — check Scheduler`;
+    el.className   = "run-meta is-stale";
+  } else if (status === "running") {
+    el.textContent = `Data source: latest ${runType} analysis · Run in progress · ${dateStr}`;
+    el.className   = "run-meta";
+  } else if (isStale) {
+    el.textContent = `Data source: latest ${runType} analysis · Finished: ${dateStr} · Stale`;
+    el.className   = "run-meta is-stale";
+  } else {
+    el.textContent = `Data source: latest ${runType} analysis · Finished: ${dateStr} · Fresh`;
+    el.className   = "run-meta is-fresh";
   }
 }
 
@@ -1137,6 +1204,7 @@ function renderRunHistoryItem(run) {
 // ── Campaigns page ─────────────────────────────────────────────────────────
 
 async function loadCampaigns() {
+  renderRunMeta("campaigns");
   const tableEl = document.getElementById("camp-table-body");
   const scaleEl = document.getElementById("vc-scale");
   const fixEl   = document.getElementById("vc-fix");
@@ -1262,6 +1330,7 @@ function junkCategoryBadge(cat) {
 }
 
 async function loadWaste() {
+  renderRunMeta("waste");
   const days = getSelectedDays();
 
   const tableEl = document.getElementById("waste-table-body");
@@ -1450,6 +1519,7 @@ function copyWasteTerms() {
 // ── Lead Quality page ──────────────────────────────────────────────────────
 
 async function loadLeads() {
+  renderRunMeta("lead_quality");
   const tableEl    = document.getElementById("leads-table-body");
   const totalEl    = document.getElementById("leads-total");
   const sqlsEl     = document.getElementById("leads-sqls");
@@ -1572,6 +1642,7 @@ async function loadLeads() {
 // ── Deals page ─────────────────────────────────────────────────────────────
 
 async function loadDeals() {
+  renderRunMeta("deals");
   const funnelEl = document.getElementById("deals-funnel-body");
   const tableEl  = document.getElementById("deals-table-body");
   const EMPTY    = "No GCLID-matched deals found yet. Deals appear here once HubSpot deal attribution is active.";
@@ -1673,6 +1744,7 @@ function normalizeCountryKey(country) {
 // ── Geo Intelligence page ──────────────────────────────────────────────────
 
 async function loadGeo() {
+  renderRunMeta("geo");
   const tableEl = document.getElementById("geo-table-body");
   const mapEl   = document.getElementById("geo-map");
   const mapFallbackEl = document.getElementById("geo-map-fallback");
@@ -2108,6 +2180,8 @@ function _updateSearchTermsPaginationVisibility() {
 async function loadSearchTerms({ reset = false, cursor = null } = {}) {
   if (searchTermsStatus === "loading") return;
 
+  if (reset) renderRunMeta("search_terms");
+
   searchTermsStatus = "loading";
 
   const tableEl   = document.getElementById("search-terms-table");
@@ -2444,6 +2518,7 @@ function buildNgramParams() {
 
 async function loadNgrams() {
   if (ngramIsLoading) return;
+  renderRunMeta("ngrams");
   ngramIsLoading = true;
   const requestId = ++ngramRequestId;
   ngramStatus = "loading";
@@ -2936,6 +3011,8 @@ function renderGclidAttributionTable() {
 async function loadGclidAttribution({ reset = false, cursor = null } = {}) {
   if (gclidStatus === "loading") return;
 
+  if (reset) renderRunMeta("gclid_attribution");
+
   gclidStatus = "loading";
 
   const tableEl = document.getElementById("gclid-attribution-table");
@@ -3162,6 +3239,7 @@ async function loadGclidCoverageForAttribution() {
 }
 
 async function loadKeywords() {
+  renderRunMeta("keywords");
   const tableEl   = document.getElementById("kw-table-body");
   const summaryEl = document.getElementById("kw-matchtype-summary");
   if (summaryEl) summaryEl.innerHTML = "";
@@ -3468,6 +3546,7 @@ const ACTIVE_MDR_STATUSES = new Set([
 ]);
 
 async function loadOpportunities() {
+  renderRunMeta("in_progress_leads");
   const el = document.getElementById("opps-body");
   if (!el) return;
 
@@ -3539,6 +3618,7 @@ async function loadOpportunities() {
 // ── Scheduler page ─────────────────────────────────────────────────────────
 
 async function loadScheduler() {
+  renderRunMeta("scheduler");
   const gridEl = document.getElementById("sched-jobs-grid");
   if (gridEl) gridEl.innerHTML = `<p class="empty-state">Loading scheduler…</p>`;
 
@@ -3644,6 +3724,7 @@ function showSchedFeedback(type, msg) {
 // ── System Health page ─────────────────────────────────────────────────────
 
 async function loadHealth() {
+  renderRunMeta("health");
   const el = document.getElementById("health-body");
   if (!el) return;
 
@@ -3889,7 +3970,7 @@ function renderDatasetFreshness(data) {
       <strong>Failed</strong> means the last tracked local persistence attempt failed.
       Previous successful watermarks are preserved when available.<br>
       <strong>Stale</strong> is a display-only badge applied when the last successful sync
-      is more than 2 days old — it does not change backend status.`;
+      is more than ${_staleAfterDays} day${_staleAfterDays === 1 ? "" : "s"} old — it does not change backend status.`;
   }
 }
 
@@ -4733,6 +4814,7 @@ const QUEUE_TYPE_LABELS = {
 };
 
 async function loadActionQueue() {
+  renderRunMeta("action_queue");
   const listEl = document.getElementById("action-queue-list");
   if (listEl) listEl.innerHTML = `<p class="empty-state">Loading action queue…</p>`;
 

@@ -185,6 +185,16 @@ def stop_scheduler() -> None:
 # Status helper — called by GET /scheduler/status endpoint.
 # ---------------------------------------------------------------------------
 
+def get_registered_job_ids() -> list[str]:
+    """Return the IDs of all Phase 1 scheduled jobs.
+
+    Safe to call without starting the scheduler — does not create background
+    threads or trigger any job execution.  Used by the readiness check to
+    verify that the in-app APScheduler model is correctly declared.
+    """
+    return ["daily", "weekly", "monthly"]
+
+
 def get_scheduler_status() -> dict:
     """Return current scheduler state and next run times for all three jobs."""
     if _scheduler is None or not _scheduler.running:

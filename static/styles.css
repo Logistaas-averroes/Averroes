@@ -1625,6 +1625,14 @@ a {
   white-space: nowrap;
 }
 
+.run-meta.is-stale {
+  color: var(--c-warning);
+}
+
+.run-meta.is-fresh {
+  color: var(--text-muted);
+}
+
 .run-error-message {
   font-size: 12px;
   color: var(--c-danger);
