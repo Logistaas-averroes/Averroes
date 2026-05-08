@@ -12,6 +12,20 @@ Unblocks: PR-ADS-058 — Negative Candidate Readiness Audit
 
 ---
 
+## PR-ADS-061 Implementation Note
+
+PR-ADS-061 adds lightweight benchmark tooling and UI in-flight/row-cap visibility for the n-gram endpoint. It does not add cache, materialization, scoring, recommendations, candidates, or external writes.
+
+**Changes shipped:**
+
+- `scripts/benchmark_ngrams.py` — local/operator benchmark script (stdlib only, read-only, uses `ads_session` cookie, calls existing endpoint)
+- `static/app.js` — in-flight request guard (`ngramRequestId` / `ngramIsLoading`); `setNgramControlsDisabled` disables Apply/Refresh/Clear/inputs while a request is active and shows "Loading…" on the Apply button; stale responses are silently ignored; `renderNgramDataQualityNote` surfaces `data_quality.row_cap_applied` above the n-gram table
+- `static/styles.css` — `.ngram-data-quality-warning` (amber) and `.ngram-data-quality-note` (slate) styles
+
+**Six-month governance:** Preserved. No external writes. No candidate generation. No schema change. No new API endpoint.
+
+---
+
 ## 1. Executive Verdict
 
 ### Is the current dynamic n-gram prototype safe to keep?
