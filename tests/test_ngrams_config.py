@@ -171,38 +171,26 @@ def test_validate_ngram_config_missing_keys() -> None:
 
 
 def test_missing_stopwords_falls_back_to_defaults() -> None:
-    """When 'stopwords' is missing from config, fallback defaults include known tokens."""
-    load_ngram_stopword_config.cache_clear()
-    get_stopword_tokens.cache_clear()
-    get_protected_tokens.cache_clear()
+    """When 'stopwords' is missing from config, get_stopword_tokens() does not raise."""
+    import analysis.ngrams as _ng
 
     bad_config = {
         "version": 1,
-        # No 'stopwords' key — fatal shape error → should fall back
+        # No 'stopwords' key — fatal shape error → load_ngram_stopword_config falls back,
+        # but here we patch it to return the bad dict and verify get_stopword_tokens
+        # handles the missing key gracefully (returns frozenset without raising).
         "protected_tokens": {"business_terms": ["freight"]},
     }
 
     with patch("analysis.ngrams.load_ngram_stopword_config", return_value=bad_config):
-        import analysis.ngrams as _ng
-        _ng.load_ngram_stopword_config.cache_clear()
         _ng.get_stopword_tokens.cache_clear()
         _ng.get_protected_tokens.cache_clear()
         try:
-            # load_ngram_stopword_config will detect fatal errors and fall back internally;
-            # but since we're patching it to return the bad config directly, we verify that
-            # get_stopword_tokens() does not raise and returns a usable frozenset.
             sw = _ng.get_stopword_tokens()
-            # With a missing 'stopwords' key the helper gets {} and returns frozenset()
-            # rather than crashing — no empty-set crash, no exception.
             assert isinstance(sw, frozenset)
         finally:
-            _ng.load_ngram_stopword_config.cache_clear()
             _ng.get_stopword_tokens.cache_clear()
             _ng.get_protected_tokens.cache_clear()
-
-    load_ngram_stopword_config.cache_clear()
-    get_stopword_tokens.cache_clear()
-    get_protected_tokens.cache_clear()
 
 
 def test_invalid_protected_tokens_shape_warns() -> None:
