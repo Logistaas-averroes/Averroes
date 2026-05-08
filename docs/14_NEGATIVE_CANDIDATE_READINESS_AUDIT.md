@@ -568,6 +568,7 @@ Candidate generation must not begin until all of the following are satisfied:
 
 - [ ] N-gram endpoint performance is acceptable or hardened for the expected data volume
 - [ ] Stopwords are configurable and managed outside application code
+- [x] **PR-ADS-060:** Stopwords and protected tokens are now loaded from `config/ngram_stopwords.yaml`. The analyzer falls back to safe defaults if the config is unavailable. This satisfies the first configuration prerequisite. This does not unblock candidate generation by itself; human review workflow, candidate architecture, evidence thresholds, and no-push safeguards are still required.
 - [ ] Protected business tokens (e.g., `freight`, `logistics`, `forwarding`) are documented in config and excluded from candidate surfacing
 - [ ] Search-term exact candidates are designed separately from n-gram candidates
 - [ ] Campaign-level scope is enforced as the default

@@ -82,6 +82,7 @@ def validate_yaml(failures: list) -> None:
     yaml_files = [
         "config/thresholds.yaml",
         "config/junk_patterns.yaml",
+        "config/ngram_stopwords.yaml",
     ]
     if os.path.isfile("render.yaml"):
         yaml_files.append("render.yaml")
