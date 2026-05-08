@@ -8,7 +8,7 @@
 **Status:** Audit-only. No code changed. No schema changed. No API changed.
 
 Depends on: PR-ADS-057 / PR-ADS-057A
-Unblocks: PR-ADS-059 — N-Gram Stopword Config OR Negative Candidate Review Architecture
+Unblocks: PR-ADS-059 — N-Gram Stopword Config; later PR-ADS-061 — Negative Candidate Architecture Spec
 
 ---
 
@@ -42,7 +42,7 @@ Full requirements are in Section 5.
 Either:
 
 - **PR-ADS-059** — N-Gram Stopword Config (move stopwords and protected tokens to configuration; no candidate generation)
-- **PR-ADS-060** — Negative Candidate Architecture Spec (docs-only; no implementation)
+- **PR-ADS-061** — Negative Candidate Architecture Spec (docs-only; no implementation)
 
 Both options are read-only or audit-only and do not unblock any Google Ads writes.
 
@@ -224,9 +224,12 @@ The following actions are explicitly prohibited in this PR and in any system bui
 - "push negative"
 - "block this term"
 - "exclude now"
-- "apply"
+- "apply negative"
+- "apply exclusion"
 - "kill"
 - "recommended action: exclude"
+
+Normal filtering UI language such as "Apply filters" is allowed. The prohibition applies to language that implies applying, pushing, or executing negative keyword changes.
 
 **Permitted language for candidate review context:**
 
@@ -434,14 +437,20 @@ The following schema is provided for architecture planning purposes. **Do not im
 CREATE TABLE IF NOT EXISTS negative_candidate_reviews (
   id SERIAL PRIMARY KEY,
 
-  candidate_type TEXT NOT NULL,         -- search_term | ngram | pattern
+  candidate_type TEXT NOT NULL
+    CHECK (candidate_type IN ('search_term', 'ngram', 'pattern')),
+
   candidate_text TEXT NOT NULL,
 
-  source_scope TEXT NOT NULL DEFAULT 'campaign',
+  source_scope TEXT NOT NULL DEFAULT 'campaign'
+    CHECK (source_scope IN ('campaign', 'ad_group')),
+
   campaign_name TEXT,
   ad_group TEXT,
 
-  proposed_negative_type TEXT,          -- exact | phrase
+  proposed_negative_type TEXT
+    CHECK (proposed_negative_type IN ('exact', 'phrase')),
+
   evidence_summary JSONB,
   examples JSONB,
 
@@ -452,7 +461,9 @@ CREATE TABLE IF NOT EXISTS negative_candidate_reviews (
 
   hubspot_quality_summary JSONB,
 
-  review_status TEXT NOT NULL DEFAULT 'needs_review',
+  review_status TEXT NOT NULL DEFAULT 'needs_review'
+    CHECK (review_status IN ('needs_review', 'approved_for_later', 'rejected', 'archived')),
+
   reviewer_note TEXT,
   reviewed_by TEXT,
   reviewed_at TIMESTAMPTZ,
@@ -466,8 +477,11 @@ CREATE TABLE IF NOT EXISTS negative_candidate_reviews (
 
 - This table is future-only. Do not create it now.
 - The review table is not a push queue. No row in this table should ever trigger a Google Ads write.
-- `review_status` must be constrained to the approved states from Section 8.3.
-- `source_scope` defaults to `campaign`. Account-level scope should be blocked in the application layer.
+- `review_status` is constrained to the approved states from Section 8.3 via CHECK constraint.
+- `source_scope` is constrained to `campaign` and `ad_group`. Account-level scope is excluded from the first design; it requires a separate governance gate.
+- `proposed_negative_type` is constrained to `exact` and `phrase`. Broad negatives are excluded from the first design.
+- `candidate_type` is constrained to `search_term`, `ngram`, and `pattern`.
+- These CHECK constraints are design guidance for a future schema PR. They must not be implemented in this PR.
 
 ---
 
@@ -572,25 +586,31 @@ The recommended path from this audit is:
 - No UI changes unless docs only
 - Unblocks: cleaner n-gram signal for any future candidate work
 
-### PR-ADS-060 — Negative Candidate Architecture Spec
+### PR-ADS-060 — N-Gram Benchmark / UI Performance Polish
+
+- If needed from PR-ADS-057 performance audit findings
+- Performance/readiness work only
+- No candidate generation
+
+### PR-ADS-061 — Negative Candidate Architecture Spec
 
 - Docs-only
 - Define candidate tables, APIs, UI, and review workflow in detail
 - No implementation
-- Unblocks: PR-ADS-061
+- Unblocks: PR-ADS-062
 
-### PR-ADS-061 — Negative Candidate Read-Only Prototype
+### PR-ADS-062 — Negative Candidate Read-Only Prototype
 
 - Generate local candidate evidence only (no push)
 - No approval actions
 - No Google Ads writes
 - Review table may be created for local storage only
 
-### PR-ADS-062 — Candidate Review UI
+### PR-ADS-063 — Candidate Review UI
 
 - Local review only (mark reviewed, reject, archive)
 - No Google Ads writes
-- Requires review table from PR-ADS-061
+- Requires review table from PR-ADS-062
 
 ### Phase 3+ — Google Ads Push (Explicit Approval Only)
 
@@ -620,7 +640,7 @@ If n-gram endpoint performance degrades before PR-ADS-059 is complete:
 | Competitor strategy misclassification | High | Competitor terms may be high-intent conquesting, not waste | Human review required; no automated competitor exclusions |
 | Google conversion ≠ sales quality | High | Platform conversions do not reflect HubSpot lead quality or deal creation | Separate Google and HubSpot evidence; never use conversions as sole qualifier |
 | Account-level negative overreach | Critical | Account-level negatives affect all campaigns; one error has wide blast radius | Block account-level candidates until separate governance gate exists |
-| Accidental push language in UI | High | Labels like "add negative" or "apply" create implicit user expectations of push capability | Explicit forbidden-language list enforced in UI and API response contracts |
+| Accidental push language in UI | High | Labels like "add negative" or "apply negative" create implicit user expectations of push capability | Explicit forbidden-language list enforced in UI and API response contracts |
 | AI-hallucinated recommendations | High | LLM-generated action text may suggest blocking terms without evidence | No AI-generated action text in candidate UI or API responses |
 | Insufficient audit trail | Medium | Without reviewer identity and timestamp, decisions cannot be reviewed or reversed | Audit fields required on every candidate record (`reviewed_by`, `reviewed_at`, `reviewer_note`) |
 | No rollback mechanism | High | Negative keywords applied to Google Ads cannot be automatically reversed | No Google Ads writes until rollback mechanism is defined and tested |
