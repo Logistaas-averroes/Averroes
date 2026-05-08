@@ -3349,8 +3349,8 @@ a {
   margin: 12px 0;
   padding: 10px 12px;
   border-radius: 10px;
-  background: rgba(245, 158, 11, 0.12);
-  border: 1px solid rgba(245, 158, 11, 0.3);
+  background: var(--c-warning-bg);
+  border: 1px solid var(--c-warning-border);
   font-size: 0.9rem;
 }
 
@@ -3358,8 +3358,8 @@ a {
   margin: 12px 0;
   padding: 10px 12px;
   border-radius: 10px;
-  background: rgba(148, 163, 184, 0.12);
-  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: var(--c-neutral-bg);
+  border: 1px solid var(--c-neutral-border);
   font-size: 0.9rem;
 }
 

@@ -2443,6 +2443,7 @@ function buildNgramParams() {
 }
 
 async function loadNgrams() {
+  if (ngramIsLoading) return;
   ngramIsLoading = true;
   const requestId = ++ngramRequestId;
   ngramStatus = "loading";

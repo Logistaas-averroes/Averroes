@@ -15,6 +15,13 @@ Usage:
         --n 1,2,3 \\
         --limit 100
 
+The token can also be supplied via the ADS_SESSION environment variable
+to avoid exposing it in shell history or process listings:
+
+    ADS_SESSION="<value>" python -m scripts.benchmark_ngrams \\
+        --base-url "$BASE_URL" \\
+        --days 14
+
 Rules:
   - Standard-library only (no third-party dependencies).
   - No direct DB access.
@@ -27,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import time
 import urllib.error
@@ -105,19 +113,24 @@ def main() -> int:
         description="Benchmark the Logistaas N-Gram endpoint (read-only).",
     )
     parser.add_argument("--base-url",    required=True,  help="Base URL of the app (e.g. https://app.example.com)")
-    parser.add_argument("--token",       required=True,  help="ads_session cookie value")
+    parser.add_argument("--token",       default=None,   help="ads_session cookie value. Falls back to ADS_SESSION env var if not provided.")
     parser.add_argument("--days",        type=int,  default=14,      help="Look-back window in days (default: 14)")
     parser.add_argument("--n",           default="1,2,3",            help="Comma-separated n-gram lengths (default: 1,2,3)")
     parser.add_argument("--limit",       type=int,  default=100,     help="Max n-gram rows to return (default: 100)")
     parser.add_argument("--campaign",    default=None,               help="Filter by campaign name")
     parser.add_argument("--match-type",  dest="match_type", default=None, help="Filter by match type")
     parser.add_argument("--waste-state", dest="waste_state", default=None, help="Filter by waste state (all|flagged|clean|unanalyzed)")
-    parser.add_argument("--min-spend",   dest="min_spend", type=float, default=None, help="Minimum spend filter (default: 0)")
+    parser.add_argument("--min-spend",   dest="min_spend", type=float, default=None, help="Minimum spend filter (omitted when not provided; server applies no minimum by default)")
     parser.add_argument("--q",           default=None,               help="Search term substring filter")
     parser.add_argument("--runs",        type=int,  default=1,       help="Number of benchmark runs (default: 1)")
     parser.add_argument("--output",      default=None,               help="Optional path to write JSON report")
 
     args = parser.parse_args()
+
+    token = args.token or os.environ.get("ADS_SESSION")
+    if not token:
+        print("ERROR: Provide --token or set the ADS_SESSION environment variable.")
+        return 1
 
     if args.runs < 1:
         print("ERROR: --runs must be >= 1")
@@ -133,7 +146,7 @@ def main() -> int:
 
     for i in range(1, args.runs + 1):
         try:
-            result = fetch_once(url, args.token)
+            result = fetch_once(url, token)
         except urllib.error.HTTPError as exc:
             print(f"\nRun {i}: HTTP {exc.code} — {exc.reason}")
             return 1
