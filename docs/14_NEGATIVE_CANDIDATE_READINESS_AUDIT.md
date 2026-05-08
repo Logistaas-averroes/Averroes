@@ -8,7 +8,7 @@
 **Status:** Audit-only. No code changed. No schema changed. No API changed.
 
 Depends on: PR-ADS-057 / PR-ADS-057A
-Unblocks: PR-ADS-059 — N-Gram Stopword Config; later PR-ADS-061 — Negative Candidate Architecture Spec
+Unblocks: PR-ADS-060 — N-Gram Stopword Config; later PR-ADS-062 — Negative Candidate Architecture Spec
 
 ---
 
@@ -43,10 +43,12 @@ Full requirements are in Section 5.
 
 Either:
 
-- **PR-ADS-059** — N-Gram Stopword Config (move stopwords and protected tokens to configuration; no candidate generation)
-- **PR-ADS-061** — Negative Candidate Architecture Spec (docs-only; no implementation)
+- **PR-ADS-060** — N-Gram Stopword Config (move stopwords and protected tokens to configuration; no candidate generation)
+- **PR-ADS-062** — Negative Candidate Architecture Spec (docs-only; no implementation)
 
 Both options are read-only or audit-only and do not unblock any Google Ads writes.
+
+PR-ADS-059 is reserved for the Six-Month Read-Only Governance Lock and therefore is no longer used for stopword configuration.
 
 ### Summary verdict
 
@@ -581,38 +583,38 @@ Candidate generation must not begin until all of the following are satisfied:
 
 The recommended path from this audit is:
 
-### PR-ADS-059 — N-Gram Stopword Config
+### PR-ADS-060 — N-Gram Stopword Config
 
 - Move stopwords and protected tokens to a config file
 - No negative candidates
 - No UI changes unless docs only
 - Unblocks: cleaner n-gram signal for any future candidate work
 
-### PR-ADS-060 — N-Gram Benchmark / UI Performance Polish
+### PR-ADS-061 — N-Gram Benchmark / UI Performance Polish
 
 - If needed from PR-ADS-057 performance audit findings
 - Performance/readiness work only
 - No candidate generation
 
-### PR-ADS-061 — Negative Candidate Architecture Spec
+### PR-ADS-062 — Negative Candidate Architecture Spec
 
 - Docs-only
 - Define candidate tables, APIs, UI, and review workflow in detail
 - No implementation
-- Unblocks: PR-ADS-062
+- Unblocks: PR-ADS-063
 
-### PR-ADS-062 — Negative Candidate Read-Only Prototype
+### PR-ADS-063 — Negative Candidate Read-Only Prototype
 
 - Generate local candidate evidence only (no push)
 - No approval actions
 - No Google Ads writes
 - Review table may be created for local storage only
 
-### PR-ADS-063 — Candidate Review UI
+### PR-ADS-064 — Candidate Review UI
 
 - Local review only (mark reviewed, reject, archive)
 - No Google Ads writes
-- Requires review table from PR-ADS-062
+- Requires review table from PR-ADS-063
 
 ### Phase 3+ — Google Ads Push (Explicit Approval Only)
 
@@ -624,7 +626,7 @@ The recommended path from this audit is:
 
 ### Alternative path (if performance is a blocker)
 
-If n-gram endpoint performance degrades before PR-ADS-059 is complete:
+If n-gram endpoint performance degrades before PR-ADS-060 is complete:
 
 - Delay candidate architecture
 - Build benchmark and caching infrastructure first (see PR-ADS-057 recommendations)
