@@ -559,7 +559,7 @@ function renderRunMeta(sectionKey) {
   if (!el) return;
 
   if (!_latestRunForMeta) {
-    el.textContent = "Freshness unavailable. Run a weekly analysis or check Health.";
+    el.textContent = "Freshness unavailable. Trigger a weekly analysis from the Scheduler page or check System Health.";
     el.className   = "run-meta";
     return;
   }

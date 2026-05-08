@@ -10,10 +10,10 @@ Checks:
   3. Required documentation files exist (including PHASE1_PRODUCTION_READINESS.md).
   4. Makefile exists and contains all expected targets.
   5. In-app APScheduler registration (daily, weekly, monthly jobs).
-     NOTE: render.yaml cron-job check was removed in PR-ADS-065.  The current
-     architecture uses a single Render web service with in-app APScheduler
-     (api/scheduler.py, added in PR-ADS-019).  Render cron workers are
-     intentionally absent — they are not required and must NOT be re-enabled.
+     NOTE: The current deployment model is a single Render web service with
+     in-app APScheduler (api/scheduler.py).  Render cron workers are
+     intentionally absent — they are not required and must NOT be re-enabled
+     while in-app scheduling is active, as that would cause duplicate runs.
   6. Scheduler source files exist.
   7. No forbidden Phase 1 write-back modules are present.
   8. scripts/healthcheck.py logic runs without critical failure.
@@ -205,7 +205,7 @@ _REQUIRED_APSCHEDULER_JOBS = {"daily", "weekly", "monthly"}
 
 
 def check_apscheduler(failures: list) -> None:
-    _header("APScheduler — In-App Job Registration (PR-ADS-019 architecture)")
+    _header("APScheduler — In-App Job Registration")
 
     if not os.path.isfile("api/scheduler.py"):
         _fail("api/scheduler.py", "file not found")
