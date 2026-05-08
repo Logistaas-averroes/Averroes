@@ -527,15 +527,19 @@
       <section id="page-ngrams" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">N-Gram Intelligence</h1>
-          <p class="page-subtitle">Recurring word and phrase patterns from stored search terms. Read-only evidence view.</p>
+          <p class="page-subtitle">Recurring word and phrase patterns from stored search terms. Read-only analysis — candidate terms for human review only.</p>
         </header>
+
+        <div class="read-only-notice" role="note">
+          Read-only analysis. These are candidate patterns for human review only. The system does not push negative keywords or modify Google Ads.
+        </div>
 
         <div id="ngrams-kpis" class="kpi-grid"></div>
 
         <div class="panel">
           <div class="panel__header search-terms-panel-header">
             <div>
-              <span>N-Gram Patterns</span>
+              <span>Candidate Terms for Manual Review</span>
             </div>
             <div class="ngrams-actions">
               <button id="ngrams-refresh-btn" type="button" class="btn btn--secondary waste-copy-btn">Refresh</button>
@@ -579,7 +583,7 @@
 
         <p class="grace-note">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          This page is read-only evidence. It does not create negative keyword candidates, push changes, pause campaigns, or modify bids/budgets.
+          Read-only analysis. These are candidate terms for manual review only. The system does not push negative keywords, modify Google Ads, pause campaigns, or change bids/budgets. This analysis may be capped by available rows — treat results as directional when a row cap is shown.
         </p>
       </section>
 

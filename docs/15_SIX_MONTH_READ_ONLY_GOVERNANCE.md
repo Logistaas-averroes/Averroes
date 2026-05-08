@@ -270,3 +270,30 @@ This document reinforces:
 - PR-ADS-040 — Search Terms persistence boundaries
 
 If any future document conflicts with this governance lock, this document wins until the six-month review gate is explicitly passed.
+
+---
+
+## 13. N-Gram Intelligence and Negative Candidate Governance
+
+N-Gram Intelligence is permitted only as a read-only diagnostic feature.
+
+**Allowed:**
+
+- Analyze stored search terms.
+- Group recurring words or phrases into n-grams.
+- Estimate spend exposure per pattern.
+- Surface candidate terms for human review.
+- Display row caps, source limitations, and data-quality notes.
+
+**Forbidden:**
+
+- Pushing negative keywords to Google Ads.
+- Creating or modifying Google Ads shared negative lists.
+- Pausing campaigns, ad groups, keywords, or search terms.
+- Writing candidate decisions back to Google Ads or HubSpot.
+- Using language that implies automatic execution.
+
+**Required language:**
+All N-Gram outputs must describe results as "review candidates", "manual review items", or "human decision required". The system may surface patterns and spend evidence. It must not suggest that any action will be taken automatically.
+
+Any future negative keyword push workflow remains blocked until the six-month read-only governance review is complete and explicitly approved. See `docs/04_PHASE_ROADMAP.md` for the N-Gram Intelligence block closeout status.

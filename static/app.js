@@ -2533,14 +2533,14 @@ function renderNgramDataQualityNote(data) {
     return `
       <div class="ngram-data-quality-warning">
         Row cap applied: analysis used the top ${escapeHtml(String(dq.row_cap || "configured"))}
-        source rows by spend/date. Narrow filters or date range for a more complete view.
+        source rows by spend/date. Treat results as directional. Narrow filters or date range for a more complete view.
       </div>
     `;
   }
 
   return `
     <div class="ngram-data-quality-note">
-      N-gram results are factual pattern metrics from stored search terms. No negative keyword candidates are created.
+      These are candidate patterns for human review only. N-gram results are factual pattern metrics from stored search terms. No negative keywords are pushed and no changes are made to Google Ads.
     </div>
   `;
 }

@@ -114,6 +114,10 @@ ls outputs/example.md    # exists, non-empty
 - [ ] `data/` and `outputs/` are gitignored — nothing committed there
 - [ ] Brand and non-brand data never mixed in any analysis output
 - [ ] Phase 1: zero write operations to Google Ads, HubSpot, or any external service
+- [ ] If this PR touches N-Gram or negative candidates, outputs remain review-only
+- [ ] No wording implies automatic negative keyword push
+- [ ] No Google Ads shared negative list write path added
+- [ ] Six-month read-only governance still respected (see `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md`)
 
 ---
 

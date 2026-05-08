@@ -270,6 +270,28 @@ Every report must:
 
 ---
 
+## 12a. N-Gram Output Rules
+
+N-Gram findings are diagnostic, not executable.
+
+The system may say:
+
+- "This term warrants review."
+- "This pattern is a candidate for human review."
+- "This phrase appears in wasted spend evidence."
+
+The system must not say:
+
+- "Add this as a negative keyword."
+- "Push this negative."
+- "Block this term."
+- "Pause this keyword."
+- "Apply this recommendation."
+
+All negative keyword language must remain advisory until the six-month read-only governance lock is lifted and a separate approved workflow exists. See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md`.
+
+---
+
 ## 13. Forbidden Behavior
 
 * No recommendations without data

@@ -7,6 +7,12 @@ PR-ADS-061 — N-Gram Benchmark / UI Performance Polish
 Measures response time and summarises metadata from the existing
 GET /api/search-terms/ngrams endpoint.  Read-only; no external writes.
 
+IMPORTANT — Validation scope:
+This benchmark validates response stability and runtime only.
+It does not validate that any candidate term should be applied as a
+negative keyword.  N-Gram outputs are candidates for human review only;
+no automated action is taken based on benchmark results.
+
 Usage:
     python -m scripts.benchmark_ngrams \\
         --base-url "$BASE_URL" \\
@@ -103,7 +109,9 @@ def print_run_summary(run_num: int, result: dict, url: str) -> None:
     print(f"  row_cap_applied:           {dq.get('row_cap_applied', False)}")
     if dq.get("row_cap_applied"):
         print(f"  row_cap:                   {dq.get('row_cap', '—')}")
+        print("  NOTE: Results are capped and directional. Treat as a representative sample only.")
     print(f"  db_unavailable:            {data.get('db_unavailable', False)}")
+    print("  read_only:                 confirmed — no external writes performed")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
