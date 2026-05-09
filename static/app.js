@@ -175,8 +175,8 @@ function fmtDollar(n) {
 function downloadCSV(filename, headers, rowData) {
   const escape = (v) => {
     const s = v === null || v === undefined ? "" : String(v);
-    // Quote fields that contain commas, quotes, or newlines
-    if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+    // Quote fields that contain commas, quotes, newlines, or carriage returns (RFC 4180)
+    if (s.includes(",") || s.includes('"') || s.includes("\n") || s.includes("\r")) {
       return '"' + s.replace(/"/g, '""') + '"';
     }
     return s;
