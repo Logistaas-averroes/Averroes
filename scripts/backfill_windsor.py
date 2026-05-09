@@ -1,105 +1,291 @@
 """
 scripts/backfill_windsor.py
 
-Windsor backfill skeleton — Logistaas Ads Intelligence System.
-Roadmap ID: PR-ADS-041 | Phase: 1.5 Data Foundation
+Google Ads (Windsor.ai) historical backfill — Logistaas Ads Intelligence System.
+Roadmap ID: PR-ADS-071 | Phase: 1 — Read-Only Intelligence / Roadmap V4.0
 
 Supported datasets:
-    campaigns    — Google Ads campaign performance
+    campaigns    — Google Ads campaign performance (all campaigns, active and paused)
     keywords     — Keyword-level performance
     geo          — Geographic performance
-    search_terms — Search term report (limitation: connector confirmed only up to last_14d)
-
-In this PR, execution mode is a safe skeleton only.
-Connector rewrites are NOT performed here.
-Execute mode exits with code 3 (not yet implemented) to avoid silent data-loss or
-incorrect writes.
+    search_terms — Unsupported by current connector (date_preset limitation)
 
 NEVER writes to Google Ads.
 NEVER called by any scheduler or Render startup command.
 """
 
+import logging
 from datetime import date
 from typing import Optional
 
+log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Dry-run / planning helpers (called by scripts/backfill.py in all modes)
-# ---------------------------------------------------------------------------
-
-#: Datasets this module handles.
 SUPPORTED_DATASETS = frozenset({"campaigns", "keywords", "geo", "search_terms"})
 
-#: Datasets that are confirmed to accept explicit date ranges via the Windsor connector.
-#: search_terms is excluded because the connector uses a date_preset, not date_from/date_to.
-CONNECTOR_DATE_RANGE_READY = frozenset({"campaigns", "keywords", "geo"})
-
-
-def dataset_warnings(dataset: Optional[str] = None) -> list[str]:
-    """
-    Return known limitation strings for the given Windsor dataset (or all if None).
-    Used by the planner and dry-run output.
-    """
-    warnings = []
-    targets = {dataset} if dataset else SUPPORTED_DATASETS
-
-    if "search_terms" in targets:
-        warnings.append(
-            "WARNING: Windsor search terms are currently limited by connector "
-            "date_preset to last_14d.\n"
-            "  Historical search-term backfill requires Windsor API/plan verification.\n"
-            "  Do not assume search_terms backfill will return data older than 14 days."
-        )
-
-    return warnings
-
-
-def describe_chunks(
-    dataset: str,
-    chunks: list[tuple[date, date]],
-) -> None:
-    """Print a human-readable chunk description for a Windsor dataset."""
-    print(f"\n  [windsor / {dataset}]  {len(chunks)} chunk(s)")
-    for i, (cf, ct) in enumerate(chunks, 1):
-        print(f"    Chunk {i:3d}: {cf}  →  {ct}")
-
-    for w in dataset_warnings(dataset):
-        print(f"\n  ⚠  {w}")
+# search_terms cannot be reliably backfilled — Windsor uses date_preset, not date_from/date_to
+_SEARCH_TERMS_NOTE = (
+    "unsupported_by_current_connector: Windsor search_terms connector uses date_preset "
+    "and cannot accept explicit date_from/date_to for historical backfill."
+)
 
 
 # ---------------------------------------------------------------------------
-# Execute entry point (skeleton — not yet implemented)
+# Per-dataset pull helpers
 # ---------------------------------------------------------------------------
 
-def run_windsor_backfill(
+def _pull_campaigns(date_from: date, date_to: date) -> list:
+    try:
+        from connectors.windsor_pull import pull_campaign_performance_range
+        return pull_campaign_performance_range(str(date_from), str(date_to))
+    except Exception as exc:  # noqa: BLE001
+        log.error("pull_campaign_performance_range failed (%s→%s): %s", date_from, date_to, exc)
+        return []
+
+
+def _pull_keywords(date_from: date, date_to: date) -> list:
+    try:
+        from connectors.windsor_pull import pull_keyword_performance_range
+        return pull_keyword_performance_range(str(date_from), str(date_to))
+    except Exception as exc:  # noqa: BLE001
+        log.error("pull_keyword_performance_range failed (%s→%s): %s", date_from, date_to, exc)
+        return []
+
+
+def _pull_geo(date_from: date, date_to: date) -> list:
+    try:
+        from connectors.windsor_pull import pull_geo_performance_range
+        return pull_geo_performance_range(str(date_from), str(date_to))
+    except Exception as exc:  # noqa: BLE001
+        log.error("pull_geo_performance_range failed (%s→%s): %s", date_from, date_to, exc)
+        return []
+
+
+_PULL_FN = {
+    "campaigns": _pull_campaigns,
+    "keywords":  _pull_keywords,
+    "geo":       _pull_geo,
+}
+
+
+# ---------------------------------------------------------------------------
+# Per-dataset write helpers
+# ---------------------------------------------------------------------------
+
+def _write_campaigns(run_id: int, rows: list) -> int:
+    try:
+        from db.writers import write_campaigns
+        return write_campaigns(run_id, rows)
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_campaigns failed: %s", exc)
+        return 0
+
+
+def _write_keywords(run_id: int, rows: list) -> int:
+    try:
+        from db.writers import write_keywords
+        return write_keywords(run_id, rows)
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_keywords failed: %s", exc)
+        return 0
+
+
+def _write_geo(run_id: int, rows: list) -> int:
+    try:
+        from db.writers import write_geo
+        return write_geo(run_id, rows)
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_geo failed: %s", exc)
+        return 0
+
+
+_WRITE_FN = {
+    "campaigns": _write_campaigns,
+    "keywords":  _write_keywords,
+    "geo":       _write_geo,
+}
+
+# Maps dataset name to sync_state dataset key used in sync_batches
+_SYNC_DATASET_KEY = {
+    "campaigns": "campaigns",
+    "keywords":  "keywords",
+    "geo":       "geo",
+}
+
+
+# ---------------------------------------------------------------------------
+# Backfill run record helpers
+# ---------------------------------------------------------------------------
+
+def _create_backfill_run() -> Optional[int]:
+    """Create a 'backfill' run record in the runs table and return its id."""
+    try:
+        from datetime import datetime, timezone
+        from db.writers import write_run
+        run_id = write_run({
+            "run_type":            "backfill",
+            "started_at":          datetime.now(timezone.utc),
+            "finished_at":         None,
+            "status":              "running",
+            "delivery_attempted":  False,
+            "delivery_success":    None,
+        })
+        return run_id
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not create backfill run record: %s", exc)
+        return None
+
+
+def _finish_backfill_run(run_id: Optional[int], status: str) -> None:
+    if run_id is None:
+        return
+    try:
+        from datetime import datetime, timezone
+        from db.writers import update_run
+        update_run(run_id, {
+            "finished_at": datetime.now(timezone.utc),
+            "status":      status,
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not finish backfill run record (run_id=%s): %s", run_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def run_google_ads_backfill(
     dataset: str,
     chunks: list[tuple[date, date]],
-) -> int:
+    dry_run: bool = False,
+    verbose: bool = False,
+) -> dict:
+    """Execute Google Ads (Windsor) backfill for the given dataset and date chunks.
+
+    For search_terms: returns immediately with unsupported_by_current_connector status.
+    For campaigns/keywords/geo: calls Windsor connector with explicit date_from/date_to,
+    writes results via db/writers.py, and records sync_batches for each chunk.
+
+    Returns a result dict with rows_pulled, rows_written, status, chunks_completed, errors.
+    NEVER writes to Google Ads.
     """
-    Execute Windsor backfill for the given dataset and date chunks.
+    result: dict = {
+        "rows_pulled":       0,
+        "rows_written":      0,
+        "status":            "success",
+        "chunks_completed":  0,
+        "errors":            [],
+    }
 
-    Current status (PR-ADS-041):
-        Execute mode for Windsor is a skeleton only.
-        The existing Windsor connector uses date_preset parameters.
-        A connector rewrite to accept explicit date_from / date_to is required
-        before safe per-chunk execution can be implemented.
+    if dataset == "search_terms":
+        result["status"] = "unsupported_by_current_connector"
+        result["note"]   = _SEARCH_TERMS_NOTE
+        print(f"\n  [google_ads/search_terms]  SKIPPED — {_SEARCH_TERMS_NOTE}", flush=True)
+        return result
 
-    Future implementation notes:
-        - For campaigns / keywords / geo: call the Windsor connector with
-          explicit date_from and date_to once the connector supports it.
-        - Write results using db/writers.py per-dataset writers.
-        - Record a sync_batches row (status 'success' or 'failed').
-        - Update sync_state watermark.
-        - search_terms: verify Windsor plan supports date ranges > 14 days
-          before implementing.
+    if dataset not in SUPPORTED_DATASETS:
+        msg = f"Unknown dataset '{dataset}' for google_ads source."
+        result["status"] = "error"
+        result["errors"].append(msg)
+        log.error(msg)
+        return result
 
-    Returns:
-        3 — not yet implemented (expected in PR-ADS-041)
-    """
-    print(
-        f"\n  [windsor / {dataset}]  Execute mode is not implemented in PR-ADS-041.\n"
-        f"  Connector rewrite required to support explicit date_from / date_to.\n"
-        f"  This is planned for a future PR.\n"
-        f"  Exit code: 3"
-    )
-    return 3
+    pull_fn  = _PULL_FN.get(dataset)
+    write_fn = _WRITE_FN.get(dataset)
+    sync_key = _SYNC_DATASET_KEY.get(dataset, dataset)
+
+    if pull_fn is None or write_fn is None:
+        msg = f"No pull/write function registered for dataset '{dataset}'."
+        result["status"] = "error"
+        result["errors"].append(msg)
+        return result
+
+    print(f"\n  [google_ads/{dataset}]  {len(chunks)} chunk(s)  {'DRY RUN' if dry_run else 'local persistence enabled'}", flush=True)
+
+    # Create one backfill run record to scope all writes for this dataset invocation
+    run_id: Optional[int] = None
+    if not dry_run:
+        run_id = _create_backfill_run()
+        if run_id is None:
+            log.warning("Proceeding without run_id — DB writes will be skipped by writers.")
+
+    for i, (chunk_from, chunk_to) in enumerate(chunks, 1):
+        if verbose or True:  # always show chunk progress
+            print(f"    Chunk {i:3d}/{len(chunks)}: {chunk_from}  →  {chunk_to}", end="", flush=True)
+
+        if dry_run:
+            print("  [dry-run]", flush=True)
+            result["chunks_completed"] += 1
+            continue
+
+        # Start sync batch
+        batch_id = 0
+        try:
+            from db.writers import start_sync_batch
+            batch_id = start_sync_batch(
+                source="windsor",
+                dataset=sync_key,
+                sync_type="backfill",
+                date_from=chunk_from,
+                date_to=chunk_to,
+                run_id=run_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("start_sync_batch failed for chunk %s→%s: %s", chunk_from, chunk_to, exc)
+
+        # Pull data
+        rows: list = []
+        pull_error: Optional[str] = None
+        try:
+            rows = pull_fn(chunk_from, chunk_to)
+        except Exception as exc:  # noqa: BLE001
+            pull_error = str(exc)
+            log.error("Pull failed for %s %s→%s: %s", dataset, chunk_from, chunk_to, exc)
+
+        rows_pulled  = len(rows)
+        rows_written = 0
+
+        if pull_error is None and rows:
+            rows_written = write_fn(run_id, rows)
+
+        result["rows_pulled"]  += rows_pulled
+        result["rows_written"] += rows_written
+
+        # Finish sync batch
+        if batch_id:
+            try:
+                from db.writers import finish_sync_batch
+                if pull_error:
+                    finish_sync_batch(
+                        batch_id, "failed",
+                        error_message=pull_error[:500],
+                    )
+                else:
+                    finish_sync_batch(
+                        batch_id, "success",
+                        row_count=rows_written,
+                        last_source_date=chunk_to,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("finish_sync_batch failed for batch_id=%s: %s", batch_id, exc)
+
+        if pull_error:
+            result["errors"].append(
+                f"{dataset} {chunk_from}→{chunk_to}: {pull_error}"
+            )
+            print(f"  ERROR: {pull_error}", flush=True)
+        else:
+            print(f"  pulled={rows_pulled:>6}  written={rows_written:>6}", flush=True)
+            result["chunks_completed"] += 1
+
+    # Finish the backfill run record
+    if not dry_run:
+        run_status = "success" if not result["errors"] else "failed"
+        _finish_backfill_run(run_id, run_status)
+
+    if result["errors"] and result["chunks_completed"] == 0:
+        result["status"] = "failed"
+    elif result["errors"]:
+        result["status"] = "partial"
+
+    return result
+
