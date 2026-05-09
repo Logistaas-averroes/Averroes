@@ -19,7 +19,6 @@ Run with:
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -45,7 +44,7 @@ _GRACE_DAYS = _THRESHOLDS["lead_quality"]["early_lead_grace_days"]  # 7
 # The function runs off-process, but we test the exact formula inline.
 # ---------------------------------------------------------------------------
 
-def _compute_junk_rate(statuses: list[str | None], now: datetime | None = None) -> float | None:
+def _compute_junk_rate(statuses: list[str | None]) -> float | None:
     """Compute junk rate from a list of HubSpot MQL statuses.
 
     Intentionally mirrors the denominator logic in run_lead_quality() in analysis/core.py.
@@ -54,12 +53,9 @@ def _compute_junk_rate(statuses: list[str | None], now: datetime | None = None) 
 
     Denominator: verdicted = qualified + in_progress + junk + wrong_fit
     OPEN - Connecting is excluded (not yet verdicted by MDR).
+    Grace-period behavior is covered separately via the threshold constant tests.
     Returns None if verdicted == 0.
     """
-    if now is None:
-        now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=_GRACE_DAYS)
-
     qualified = 0
     in_progress = 0
     junk = 0

@@ -173,7 +173,9 @@ def test_hold_fires_when_junk_rate_below_both_thresholds_but_no_sqls() -> None:
 
 def test_cut_fires_for_confirmed_cut_market() -> None:
     """CUT must fire when the campaign matches a confirmed cut market."""
-    # "venezuela" is the only confirmed cut market
+    assert _CONFIRMED_CUT_MARKETS, (
+        "confirmed_cut_markets must not be empty for CUT-market regression test"
+    )
     cut_market = next(iter(_CONFIRMED_CUT_MARKETS))  # "venezuela"
     v = _verdict(spend=100, sqls=0, junk_rate=None, campaign=cut_market)
     assert v["state"] == "CUT", (

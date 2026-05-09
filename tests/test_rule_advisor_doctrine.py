@@ -16,7 +16,6 @@ Run with:
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -26,13 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from analysis.rule_advisor import (
     _build_campaign_truth_table,
-    _build_data_gaps,
     _build_executive_summary,
     _build_human_review_items,
-    _build_lead_quality_breakdown,
     _build_ngram_findings_block,
     _build_phase1_reminder,
-    _build_waste_detection_summary,
     _FORBIDDEN_NGRAM_PHRASES,
     generate_deterministic_report,
 )
