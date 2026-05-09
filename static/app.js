@@ -167,6 +167,19 @@ function fmtDollar(n) {
 }
 
 /**
+ * Neutralize formula-injection: prefix cells that start with =, +, -, or @ with a
+ * single quote so spreadsheet apps don't interpret them as formulas.
+ * Does not mutate UI data — called only during serialisation.
+ */
+function sanitizeCsvCell(value) {
+  const s = value === null || value === undefined ? "" : String(value);
+  if (/^\s*[=+\-@]/.test(s)) {
+    return "'" + s;
+  }
+  return s;
+}
+
+/**
  * Trigger a CSV download in the browser.
  * @param {string} filename - The suggested download filename (e.g. "ngrams.csv").
  * @param {string[]} headers - Column header labels.
@@ -174,7 +187,7 @@ function fmtDollar(n) {
  */
 function downloadCSV(filename, headers, rowData) {
   const escape = (v) => {
-    const s = v === null || v === undefined ? "" : String(v);
+    const s = sanitizeCsvCell(v);
     // Quote fields that contain commas, quotes, newlines, or carriage returns (RFC 4180)
     if (s.includes(",") || s.includes('"') || s.includes("\n") || s.includes("\r")) {
       return '"' + s.replace(/"/g, '""') + '"';
@@ -183,7 +196,8 @@ function downloadCSV(filename, headers, rowData) {
   };
   const lines = [headers.map(escape).join(",")];
   rowData.forEach((row) => lines.push(row.map(escape).join(",")));
-  const csv  = lines.join("\r\n");
+  // Prepend UTF-8 BOM so Excel on Windows decodes non-Latin text (e.g. Arabic) correctly
+  const csv  = "\ufeff" + lines.join("\r\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement("a");
@@ -4159,11 +4173,11 @@ async function loadGclidCoverage() {
 let _drawerOpenCampaign = null;  // campaign name string currently shown in drawer, or null
 let _drawerPreviousFocus = null; // element to restore focus to on close
 let activeCampaignDrawerName = null;
-let campaignAttributionQualityRequestId = 0;
+let campaignDrawerRequestId = 0;
 
 function isCurrentCampaignDrawerRequest(campaignName, requestId) {
   if (activeCampaignDrawerName !== campaignName) return false;
-  if (requestId !== null && requestId !== campaignAttributionQualityRequestId) return false;
+  if (requestId !== null && requestId !== campaignDrawerRequestId) return false;
   return true;
 }
 
@@ -4295,8 +4309,8 @@ async function openCampaignDrawer(campaignName) {
   if (!campaignName) return;
   _drawerOpenCampaign = campaignName;
   activeCampaignDrawerName = campaignName;
-  campaignAttributionQualityRequestId += 1;
-  const requestId = campaignAttributionQualityRequestId;
+  campaignDrawerRequestId += 1;
+  const requestId = campaignDrawerRequestId;
 
   const overlay   = document.getElementById("campaign-drawer-overlay");
   const drawer    = document.getElementById("campaign-drawer");
