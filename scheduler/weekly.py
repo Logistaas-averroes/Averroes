@@ -227,11 +227,7 @@ def run_weekly_report():
         print("Step 6/6: Generating weekly report (deterministic advisor)...")
         from analysis.advisor import generate_weekly_report
         from analysis.rule_advisor import compute_ngram_findings
-        ngram_findings = None
-        try:
-            ngram_findings = compute_ngram_findings(search_terms)
-        except Exception as ngram_exc:  # noqa: BLE001
-            log.warning("[weekly] N-Gram computation failed (non-fatal): %s", ngram_exc)
+        ngram_findings = compute_ngram_findings(search_terms)
         report_path = generate_weekly_report(ngram_data=ngram_findings)
 
         print(f"\n{'='*60}")

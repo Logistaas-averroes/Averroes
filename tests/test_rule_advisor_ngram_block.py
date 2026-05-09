@@ -7,11 +7,14 @@ Tests:
   - N-Gram block renders when data is provided.
   - Missing N-Gram data (None) does not crash report generation.
   - Row-cap note appears when row_cap_applied is True.
+  - Row-cap note uses the effective row_cap from ngram_data, not the constant.
   - Forbidden imperative words do not appear in the N-Gram block.
   - All three sub-tables render when data supports them.
   - Flagged-waste table is omitted when no flagged rows exist.
   - compute_ngram_findings returns None for empty/None input.
-  - compute_ngram_findings normalises Windsor field names.
+  - compute_ngram_findings normalizes Windsor field names.
+  - compute_ngram_findings includes row_cap in the returned dict.
+  - _normalize_rows_for_ngrams preserves legitimate zero values.
 
 Run with:
   python -m pytest tests/test_rule_advisor_ngram_block.py -v
@@ -28,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from analysis.rule_advisor import (
     _build_ngram_findings_block,
+    _normalize_rows_for_ngrams,
     compute_ngram_findings,
     _NGRAM_ROW_CAP,
     _FORBIDDEN_NGRAM_PHRASES,
@@ -271,6 +275,72 @@ def test_compute_ngram_findings_row_cap_flag() -> None:
     )
 
 
+def test_normalize_rows_zero_spend_preserved() -> None:
+    """A legitimate spend_usd=0.0 must not fall back to a non-zero 'spend' field."""
+    row = {"search_term": "freight", "spend_usd": 0.0, "spend": 99.99}
+    result = _normalize_rows_for_ngrams([row])
+    assert result[0]["spend_usd"] == 0.0, (
+        "spend_usd=0.0 must be preserved even when 'spend' has a non-zero value"
+    )
+
+
+def test_normalize_rows_zero_clicks_preserved() -> None:
+    """A legitimate clicks=0 must not be silently replaced by a non-zero fallback."""
+    row = {"search_term": "freight", "clicks": 0}
+    result = _normalize_rows_for_ngrams([row])
+    assert result[0]["clicks"] == 0, "clicks=0 must be preserved"
+
+
+def test_normalize_rows_zero_impressions_preserved() -> None:
+    """A legitimate impressions=0 must not be silently replaced."""
+    row = {"search_term": "freight", "impressions": 0}
+    result = _normalize_rows_for_ngrams([row])
+    assert result[0]["impressions"] == 0, "impressions=0 must be preserved"
+
+
+def test_normalize_rows_zero_conversions_preserved() -> None:
+    """A legitimate conversions=0.0 must not be silently replaced."""
+    row = {"search_term": "freight", "conversions": 0.0}
+    result = _normalize_rows_for_ngrams([row])
+    assert result[0]["conversions"] == 0.0, "conversions=0.0 must be preserved"
+
+
+def test_normalize_rows_spend_fallback_when_spend_usd_absent() -> None:
+    """When spend_usd is absent (None), the 'spend' field must be used."""
+    row = {"search_term": "freight", "spend_usd": None, "spend": 55.5}
+    result = _normalize_rows_for_ngrams([row])
+    assert result[0]["spend_usd"] == 55.5, (
+        "'spend' must be used as fallback when spend_usd is None"
+    )
+
+
+def test_ngram_block_row_cap_note_uses_custom_cap() -> None:
+    """Row-cap note must display the effective row_cap from ngram_data, not the constant."""
+    custom_cap = 250
+    data = {
+        "findings": _SAMPLE_FINDINGS,
+        "row_cap": custom_cap,
+        "row_cap_applied": True,
+        "total_rows_analyzed": custom_cap,
+    }
+    block = _build_ngram_findings_block(data)
+    assert str(custom_cap) in block, (
+        f"Row-cap note must show the effective cap ({custom_cap}), not the default constant"
+    )
+    assert str(_NGRAM_ROW_CAP) not in block or str(custom_cap) in block, (
+        "If the default constant appears it must be because cap equals the default"
+    )
+
+
+def test_compute_ngram_findings_includes_row_cap_in_result() -> None:
+    """compute_ngram_findings must include 'row_cap' in its returned dict."""
+    rows = [{"search_term": "freight forwarding", "spend_usd": 10.0}]
+    result = compute_ngram_findings(rows, row_cap=500)
+    assert result is not None
+    assert "row_cap" in result, "Result dict must contain 'row_cap'"
+    assert result["row_cap"] == 500, "row_cap must equal the parameter passed to the function"
+
+
 # ---------------------------------------------------------------------------
 # Direct runner
 # ---------------------------------------------------------------------------
@@ -291,6 +361,13 @@ if __name__ == "__main__":
         test_compute_ngram_findings_returns_none_for_empty_list,
         test_compute_ngram_findings_normalises_windsor_fields,
         test_compute_ngram_findings_row_cap_flag,
+        test_normalize_rows_zero_spend_preserved,
+        test_normalize_rows_zero_clicks_preserved,
+        test_normalize_rows_zero_impressions_preserved,
+        test_normalize_rows_zero_conversions_preserved,
+        test_normalize_rows_spend_fallback_when_spend_usd_absent,
+        test_ngram_block_row_cap_note_uses_custom_cap,
+        test_compute_ngram_findings_includes_row_cap_in_result,
     ]
     failed = 0
     for t in tests:

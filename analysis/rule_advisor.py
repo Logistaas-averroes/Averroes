@@ -28,11 +28,14 @@ Rules:
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 OUTPUT_DIR = "outputs"
 CONFIG_DIR = "config"
@@ -461,8 +464,20 @@ _FORBIDDEN_NGRAM_PHRASES = (
 )
 
 
+def _first_not_none(*values, default=0):
+    """Return the first value that is not None, or default if all are None."""
+    for v in values:
+        if v is not None:
+            return v
+    return default
+
+
 def _normalize_rows_for_ngrams(rows: list) -> list:
-    """Map Windsor connector field names to the keys expected by aggregate_ngrams."""
+    """Map Windsor connector field names to the keys expected by aggregate_ngrams.
+
+    Uses _first_not_none for numeric fields so that a legitimate 0 / 0.0 value
+    is preserved and does not accidentally fall back to an alternative field.
+    """
     normalized = []
     for r in rows:
         normalized.append({
@@ -470,10 +485,10 @@ def _normalize_rows_for_ngrams(rows: list) -> list:
             "campaign_name":    r.get("campaign_name") or r.get("campaign") or "",
             "ad_group":         r.get("ad_group") or "",
             "keyword":          r.get("keyword") or "",
-            "spend_usd":        r.get("spend_usd") or r.get("spend") or 0,
-            "clicks":           r.get("clicks") or 0,
-            "impressions":      r.get("impressions") or 0,
-            "conversions":      r.get("conversions") or 0,
+            "spend_usd":        _first_not_none(r.get("spend_usd"), r.get("spend"), default=0),
+            "clicks":           _first_not_none(r.get("clicks"), default=0),
+            "impressions":      _first_not_none(r.get("impressions"), default=0),
+            "conversions":      _first_not_none(r.get("conversions"), default=0),
             "is_flagged_waste": r.get("is_flagged_waste"),
         })
     return normalized
@@ -490,8 +505,9 @@ def compute_ngram_findings(
     transparently so callers do not need to pre-process the raw pull output.
 
     Returns a dict with keys:
-        findings           list[dict]  — sorted by total_spend_usd DESC
-        row_cap_applied    bool        — True if input was capped at row_cap
+        findings            list[dict]  — sorted by total_spend_usd DESC
+        row_cap             int         — effective cap applied to this run
+        row_cap_applied     bool        — True if input was capped at row_cap
         total_rows_analyzed int
 
     Returns None if search_terms is empty or None, or if aggregation fails.
@@ -507,11 +523,12 @@ def compute_ngram_findings(
         findings = aggregate_ngrams(normalized, {1, 2, 3})
         return {
             "findings":             findings,
+            "row_cap":              row_cap,
             "row_cap_applied":      row_cap_applied,
             "total_rows_analyzed":  len(rows_to_analyze),
         }
     except Exception as exc:  # noqa: BLE001
-        print(f"N-Gram computation failed (non-fatal): {exc}")
+        log.warning("N-Gram computation failed (non-fatal): %s", exc)
         return None
 
 
@@ -558,11 +575,12 @@ def _build_ngram_findings_block(ngram_data: dict | None) -> str:
 
     findings = ngram_data.get("findings") or []
     row_cap_applied = ngram_data.get("row_cap_applied", False)
+    row_cap = ngram_data.get("row_cap", _NGRAM_ROW_CAP)
     total_rows = ngram_data.get("total_rows_analyzed", 0)
 
     if row_cap_applied:
         lines.append(
-            f"> ⚠️ **Note:** N-Gram analysis was row-capped at {_NGRAM_ROW_CAP} rows "
+            f"> ⚠️ **Note:** N-Gram analysis was row-capped at {row_cap} rows "
             "(dataset contained more rows). "
             "Treat these findings as directional, not complete.\n"
         )
