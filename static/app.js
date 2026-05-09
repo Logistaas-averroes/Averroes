@@ -3942,7 +3942,7 @@ function datasetRelatedPage(source, dataset) {
     "windsor/campaigns":    { page: "campaigns",     label: "Campaigns"    },
     "hubspot/contacts":     { page: "leads",         label: "Lead Quality" },
     "hubspot/deals":        { page: "deals",         label: "Deals"        },
-    "gclid/matches":        { page: "deals",         label: "Deals"        },
+    "gclid/matches":        { page: "gclid-attribution", label: "GCLID Attribution" },
   };
   return map[key] || null;
 }
