@@ -214,6 +214,100 @@ def pull_geo_performance(days_back: int = 30) -> list:
     return _request_with_retry(params, "geo")
 
 
+def pull_campaign_performance_range(date_from: str, date_to: str) -> list:
+    """Pull campaign-level performance for an explicit date range.
+
+    Used by the historical backfill framework (PR-ADS-071).
+    Accepts ISO date strings (YYYY-MM-DD).
+    Reads all campaigns (active and paused) — Windsor returns all status by default.
+    NEVER writes to Google Ads.
+    """
+    params = {
+        "api_key": WINDSOR_API_KEY,
+        "date_from": str(date_from),
+        "date_to": str(date_to),
+        "fields": ",".join([
+            "date",
+            "campaign",
+            "campaign_id",
+            "spend",
+            "clicks",
+            "impressions",
+            "conversions",
+            "cpc",
+            "cpm",
+            "ctr",
+            "conversion_rate",
+        ]),
+        "data_source": "google_ads",
+        "account_id": WINDSOR_ACCOUNT_ID,
+    }
+    return _request_with_retry(
+        params, f"campaign range ({date_from}→{date_to})"
+    )
+
+
+def pull_keyword_performance_range(date_from: str, date_to: str) -> list:
+    """Pull keyword-level performance for an explicit date range.
+
+    Used by the historical backfill framework (PR-ADS-071).
+    NEVER writes to Google Ads.
+    """
+    params = {
+        "api_key": WINDSOR_API_KEY,
+        "date_from": str(date_from),
+        "date_to": str(date_to),
+        "fields": ",".join([
+            "date",
+            "campaign",
+            "campaign_id",
+            "ad_group",
+            "keyword",
+            "match_type",
+            "quality_score",
+            "spend",
+            "clicks",
+            "impressions",
+            "conversions",
+            "cpc",
+        ]),
+        "data_source": "google_ads",
+        "account_id": WINDSOR_ACCOUNT_ID,
+        "segment": "keyword",
+    }
+    return _request_with_retry(
+        params, f"keyword range ({date_from}→{date_to})"
+    )
+
+
+def pull_geo_performance_range(date_from: str, date_to: str) -> list:
+    """Pull geographic performance for an explicit date range.
+
+    Used by the historical backfill framework (PR-ADS-071).
+    NEVER writes to Google Ads.
+    """
+    params = {
+        "api_key": WINDSOR_API_KEY,
+        "date_from": str(date_from),
+        "date_to": str(date_to),
+        "fields": ",".join([
+            "date",
+            "campaign",
+            "country",
+            "spend",
+            "clicks",
+            "impressions",
+            "conversions",
+        ]),
+        "data_source": "google_ads",
+        "account_id": WINDSOR_ACCOUNT_ID,
+        "segment": "geo",
+    }
+    return _request_with_retry(
+        params, f"geo range ({date_from}→{date_to})"
+    )
+
+
 def get_account_summary(campaigns: list) -> dict:
     """Aggregate totals across all campaign data."""
     total_spend = sum(float(r.get("spend", 0) or 0) for r in campaigns)

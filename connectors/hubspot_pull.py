@@ -156,6 +156,90 @@ def pull_paid_search_contacts(days_back: int = 90) -> list:
     return contacts
 
 
+def pull_paid_search_contacts_in_range(date_from: str, date_to: str) -> list:
+    """Pull paid-search contacts created within an explicit date range.
+
+    Used by the historical backfill framework (PR-ADS-071).
+    Filters by hs_analytics_source = PAID_SEARCH and createdate GTE/LTE.
+    Paginates using the HubSpot CRM search API cursor.
+    NEVER writes to HubSpot.
+    """
+    client = get_client()
+
+    # HubSpot createdate is millisecond epoch timestamps
+    from datetime import timezone, time as _time
+    from datetime import date as _date
+
+    def _to_ms(d: str, start: bool) -> int:
+        """Convert ISO date to millisecond epoch (start-of-day or end-of-day UTC)."""
+        parsed = _date.fromisoformat(d)
+        if start:
+            dt = datetime.combine(parsed, _time.min, tzinfo=timezone.utc)
+        else:
+            dt = datetime.combine(parsed, _time.max, tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+
+    from_ms = _to_ms(str(date_from), start=True)
+    to_ms   = _to_ms(str(date_to),   start=False)
+
+    contacts = []
+    after = None
+
+    while True:
+        try:
+            response = client.crm.contacts.search_api.do_search(
+                public_object_search_request={
+                    "filterGroups": [
+                        {
+                            "filters": [
+                                {
+                                    "propertyName": "hs_analytics_source",
+                                    "operator": "EQ",
+                                    "value": "PAID_SEARCH",
+                                },
+                                {
+                                    "propertyName": "createdate",
+                                    "operator": "GTE",
+                                    "value": str(from_ms),
+                                },
+                                {
+                                    "propertyName": "createdate",
+                                    "operator": "LTE",
+                                    "value": str(to_ms),
+                                },
+                            ]
+                        }
+                    ],
+                    "properties": CONTACT_PROPERTIES,
+                    "limit": 100,
+                    "after": after,
+                }
+            )
+            contacts.extend([c.to_dict() for c in response.results])
+
+            if response.paging and response.paging.next:
+                after = response.paging.next.after
+            else:
+                break
+
+        except ApiException as exc:
+            if exc.status == 429:
+                wait = INITIAL_BACKOFF_SECONDS * 2
+                logger.warning(
+                    "HubSpot rate limited during backfill pagination — waiting %ds", wait
+                )
+                time.sleep(wait)
+                continue
+            logger.error("HubSpot API error during backfill: %s", exc)
+            break
+
+    logger.info(
+        "Pulled %d paid search contacts (range %s → %s)",
+        len(contacts), date_from, date_to,
+    )
+    return contacts
+
+
 def pull_deals_with_gclid(contacts: list) -> list:
     """
     For contacts that have a GCLID, pull their associated deals.
