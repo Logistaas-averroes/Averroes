@@ -48,7 +48,7 @@ _MIN_JUNK_FOR_FIX   = _FIX_T["min_junk_pct"]                   # 25
 # Helper
 # ---------------------------------------------------------------------------
 
-def _verdict(spend, sqls, junk_rate, campaign="acme freight"):
+def _verdict(spend: float, sqls: int, junk_rate: float | None, campaign: str = "acme freight") -> dict:
     return determine_verdict(
         spend=spend,
         confirmed_sqls=sqls,

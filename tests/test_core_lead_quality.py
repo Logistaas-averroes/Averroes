@@ -48,9 +48,12 @@ _GRACE_DAYS = _THRESHOLDS["lead_quality"]["early_lead_grace_days"]  # 7
 def _compute_junk_rate(statuses: list[str | None], now: datetime | None = None) -> float | None:
     """Compute junk rate from a list of HubSpot MQL statuses.
 
-    Mirrors the denominator logic in run_lead_quality():
-      verdicted = qualified + in_progress + junk + wrong_fit
-      (OPEN - Connecting is excluded)
+    Intentionally mirrors the denominator logic in run_lead_quality() in analysis/core.py.
+    This duplication is deliberate: it protects the classification formula as a regression
+    guard. If the production logic changes, this test may catch the divergence.
+
+    Denominator: verdicted = qualified + in_progress + junk + wrong_fit
+    OPEN - Connecting is excluded (not yet verdicted by MDR).
     Returns None if verdicted == 0.
     """
     if now is None:

@@ -404,17 +404,18 @@ def test_ngram_block_mentions_human_review() -> None:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def outputs_dir(tmp_path, monkeypatch):
-    """Set up a temporary outputs/ and config/ layout for generate_deterministic_report.
+def test_workspace(tmp_path, monkeypatch):
+    """Set up a temporary workspace for generate_deterministic_report.
 
-    Changes the working directory so relative paths in the module resolve to tmp_path.
-    Writes minimal JSON fixtures to outputs/ and symlinks config/ to the real config.
+    Creates outputs/ with JSON fixtures and config/ (copied from the real config),
+    then changes the working directory so the module's relative paths resolve here.
+    All file I/O is isolated to tmp_path — no writes to the real repository.
     """
-    # Create outputs dir
+    import shutil
+
+    # Create outputs dir with fixture JSON files
     out = tmp_path / "outputs"
     out.mkdir()
-
-    # Write minimal fixture files
     (out / "waste_report.json").write_text(
         json.dumps(_SAMPLE_WASTE), encoding="utf-8"
     )
@@ -425,23 +426,23 @@ def outputs_dir(tmp_path, monkeypatch):
         json.dumps(_SAMPLE_CAMPAIGN_TRUTH), encoding="utf-8"
     )
 
-    # Symlink config → real config directory (read-only, no writes)
+    # Copy config dir so tests work on any platform (avoids symlink permission issues)
     real_config = Path(__file__).resolve().parents[1] / "config"
-    (tmp_path / "config").symlink_to(real_config)
+    shutil.copytree(str(real_config), str(tmp_path / "config"))
 
     # chdir so module-level relative paths work
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
 
-def test_full_report_generates_without_error(outputs_dir) -> None:
+def test_full_report_generates_without_error(test_workspace) -> None:
     """generate_deterministic_report must produce a report file without raising."""
     result = generate_deterministic_report("weekly", ngram_data=_SAMPLE_NGRAM_DATA)
     assert result is not None, "generate_deterministic_report must return a path, not None"
     assert Path(result).exists(), f"Report file must exist at {result}"
 
 
-def test_full_report_has_no_forbidden_instructions(outputs_dir) -> None:
+def test_full_report_has_no_forbidden_instructions(test_workspace) -> None:
     """Full generated report must not contain forbidden active instructions."""
     report_path = generate_deterministic_report("weekly", ngram_data=_SAMPLE_NGRAM_DATA)
     assert report_path is not None
@@ -452,7 +453,7 @@ def test_full_report_has_no_forbidden_instructions(outputs_dir) -> None:
         )
 
 
-def test_full_report_contains_advisory_language(outputs_dir) -> None:
+def test_full_report_contains_advisory_language(test_workspace) -> None:
     """Full generated report must contain advisory language."""
     report_path = generate_deterministic_report("weekly", ngram_data=_SAMPLE_NGRAM_DATA)
     assert report_path is not None
@@ -463,7 +464,7 @@ def test_full_report_contains_advisory_language(outputs_dir) -> None:
     )
 
 
-def test_full_report_cpql_na_for_zero_sql_campaigns(outputs_dir) -> None:
+def test_full_report_cpql_na_for_zero_sql_campaigns(test_workspace) -> None:
     """Full report must show CPQL as N/A for campaigns with 0 confirmed SQLs."""
     report_path = generate_deterministic_report("weekly", ngram_data=_SAMPLE_NGRAM_DATA)
     assert report_path is not None
@@ -476,7 +477,7 @@ def test_full_report_cpql_na_for_zero_sql_campaigns(outputs_dir) -> None:
             )
 
 
-def test_full_report_ngram_block_is_read_only(outputs_dir) -> None:
+def test_full_report_ngram_block_is_read_only(test_workspace) -> None:
     """Full report must include the N-Gram block with read-only label."""
     report_path = generate_deterministic_report("weekly", ngram_data=_SAMPLE_NGRAM_DATA)
     assert report_path is not None
@@ -485,7 +486,7 @@ def test_full_report_ngram_block_is_read_only(outputs_dir) -> None:
     assert "Read-Only" in text, "N-Gram section must be labeled Read-Only"
 
 
-def test_full_report_ngram_block_has_no_forbidden_ngram_phrases(outputs_dir) -> None:
+def test_full_report_ngram_block_has_no_forbidden_ngram_phrases(test_workspace) -> None:
     """Full report N-Gram section must not contain forbidden N-Gram phrases."""
     report_path = generate_deterministic_report("weekly", ngram_data=_SAMPLE_NGRAM_DATA)
     assert report_path is not None
