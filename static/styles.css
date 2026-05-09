@@ -1521,6 +1521,39 @@ a {
   flex-shrink: 0;
 }
 
+/* ── Monitoring warning banner ────────────────────────────────────────────── */
+.monitoring-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px var(--space-8);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  border-bottom: 1px solid transparent;
+}
+
+.monitoring-banner--yellow {
+  background: var(--c-warning-bg);
+  color: var(--c-warning);
+  border-color: var(--c-warning-border);
+}
+
+.monitoring-banner--red {
+  background: var(--c-danger-bg);
+  color: var(--c-danger);
+  border-color: var(--c-danger-border);
+}
+
+.monitoring-banner__icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.monitoring-banner__text {
+  flex: 1;
+}
+
 /* ── Data freshness bar ───────────────────────────────────────────────────── */
 .data-freshness-bar {
   display: flex;
@@ -1710,6 +1743,9 @@ a {
     padding: 6px var(--space-4);
   }
 
+  .monitoring-banner {
+    padding: 6px var(--space-4);
+  }
   .kpi-grid {
     grid-template-columns: repeat(2, 1fr);
   }

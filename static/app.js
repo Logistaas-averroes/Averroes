@@ -355,6 +355,7 @@ function showApp(user) {
   // Start with sidebar health check and data freshness
   loadSidebarHealth();
   loadDataFreshness();
+  loadMonitoringStatus();
 }
 
 function applySidebarUser(user) {
@@ -602,6 +603,44 @@ async function loadDataFreshness() {
     statusEl.textContent = `Latest recorded run · ${dateStr} · ${runType} · ${status}`;
     statusEl.className   = "freshness-status freshness-ok";
   }
+}
+
+// ── Monitoring status banner ────────────────────────────────────────────────
+
+async function loadMonitoringStatus() {
+  const bannerEl = document.getElementById("monitoring-banner");
+  const textEl   = document.getElementById("monitoring-banner-text");
+  if (!bannerEl || !textEl) return;
+
+  // Hide by default; only show when warnings are present.
+  bannerEl.hidden = true;
+  bannerEl.className = "monitoring-banner";
+
+  let data = null;
+  try {
+    data = await fetchJSON("/api/monitoring/status");
+  } catch (_) {
+    // Monitoring endpoint unavailable — fail silently; do not block the UI.
+    return;
+  }
+
+  if (!data || data.severity === "green" || !data.warnings || data.warnings.length === 0) {
+    return;
+  }
+
+  const isAdmin = _currentUser && _currentUser.role === "admin";
+  const severity = data.severity || "yellow";
+
+  let message;
+  if (isAdmin) {
+    message = "Monitoring warning: " + data.warnings.join(" ") + " Check Scheduler / System Health.";
+  } else {
+    message = "Monitoring warning: Recent automated analysis may be stale. Contact your administrator.";
+  }
+
+  textEl.textContent = message;
+  bannerEl.className = `monitoring-banner monitoring-banner--${severity === "red" ? "red" : "yellow"}`;
+  bannerEl.hidden = false;
 }
 
 // ── Per-page freshness strip helper ───────────────────────────────────────
