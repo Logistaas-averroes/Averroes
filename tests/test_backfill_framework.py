@@ -21,6 +21,7 @@ from __future__ import annotations
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -467,3 +468,161 @@ class TestUnsafeWording:
             assert pattern not in src, (
                 f"Unsafe wording found in scripts/backfill_hubspot.py: '{pattern}'"
             )
+
+
+class TestReviewFixes:
+    def _install_fake_db_writers(self, monkeypatch, start_sync_batch=11):
+        fake_db_writers = ModuleType("db.writers")
+        fake_db_writers.start_sync_batch = MagicMock(return_value=start_sync_batch)
+        fake_db_writers.finish_sync_batch = MagicMock()
+        fake_db_writers.write_run = MagicMock(return_value=123)
+        fake_db_writers.update_run = MagicMock()
+        monkeypatch.setitem(sys.modules, "db.writers", fake_db_writers)
+        return fake_db_writers
+
+    def test_cli_help_does_not_show_include_inactive_campaigns(self, capsys):
+        with pytest.raises(SystemExit):
+            parse_args(["--help"])
+        captured = capsys.readouterr()
+        assert "--include-inactive-campaigns" not in captured.out
+
+    def test_unsupported_dataset_is_skipped_and_runner_not_called(self, capsys):
+        from scripts.backfill import run_backfill_plan
+
+        plan = [{
+            "source": "google_ads",
+            "dataset": "search_terms",
+            "chunks": [(date(2024, 1, 1), date(2024, 1, 31))],
+            "notes": ["unsupported_by_current_connector: test-note"],
+        }]
+        args = SimpleNamespace(
+            source="google_ads",
+            date_from="2024-01-01",
+            date_to="2024-01-31",
+            chunk="monthly",
+            dry_run=False,
+            verbose=False,
+        )
+
+        with patch("scripts.backfill_windsor.run_google_ads_backfill") as mock_windsor:
+            summary = run_backfill_plan(plan, args)
+
+        mock_windsor.assert_not_called()
+        captured = capsys.readouterr()
+        assert captured.out.count("SKIPPED") == 1
+        assert summary["datasets"]["google_ads/search_terms"]["status"] == "unsupported_by_current_connector"
+
+    def test_windsor_pull_exception_marks_chunk_failed(self, monkeypatch):
+        from scripts.backfill_windsor import run_google_ads_backfill
+
+        fake_db_writers = self._install_fake_db_writers(monkeypatch)
+        with patch("scripts.backfill_windsor._create_backfill_run", return_value=123), \
+             patch.dict(
+                 "scripts.backfill_windsor._PULL_FN",
+                 {"campaigns": MagicMock(side_effect=RuntimeError("api-down"))},
+                 clear=False,
+             ):
+            result = run_google_ads_backfill(
+                dataset="campaigns",
+                chunks=[(date(2024, 1, 1), date(2024, 1, 31))],
+                dry_run=False,
+            )
+
+        assert result["status"] == "failed"
+        assert result["chunks_completed"] == 0
+        assert any("api-down" in err for err in result["errors"])
+        finish_call = fake_db_writers.finish_sync_batch.call_args
+        assert finish_call is not None
+        assert finish_call.args[1] == "failed"
+
+    def test_windsor_missing_run_id_fails_fast(self):
+        from scripts.backfill_windsor import run_google_ads_backfill
+
+        pull_mock = MagicMock()
+        with patch("scripts.backfill_windsor._create_backfill_run", return_value=None), \
+             patch.dict("scripts.backfill_windsor._PULL_FN", {"campaigns": pull_mock}, clear=False):
+            result = run_google_ads_backfill(
+                dataset="campaigns",
+                chunks=[(date(2024, 1, 1), date(2024, 1, 31))],
+                dry_run=False,
+            )
+
+        pull_mock.assert_not_called()
+        assert result["status"] == "failed"
+        assert any("Failed to create backfill run" in err for err in result["errors"])
+
+    def test_windsor_rows_pulled_but_zero_written_marks_failed(self, monkeypatch):
+        from scripts.backfill_windsor import run_google_ads_backfill
+
+        fake_db_writers = self._install_fake_db_writers(monkeypatch)
+        rows = [{"source_date": "2024-01-15"}]
+        with patch("scripts.backfill_windsor._create_backfill_run", return_value=123), \
+             patch.dict("scripts.backfill_windsor._PULL_FN", {"campaigns": MagicMock(return_value=rows)}, clear=False), \
+             patch.dict("scripts.backfill_windsor._WRITE_FN", {"campaigns": MagicMock(return_value=0)}, clear=False):
+            result = run_google_ads_backfill(
+                dataset="campaigns",
+                chunks=[(date(2024, 1, 1), date(2024, 1, 31))],
+                dry_run=False,
+            )
+
+        assert result["status"] == "failed"
+        assert result["chunks_completed"] == 0
+        assert any("Persistence failed or incomplete" in err for err in result["errors"])
+        finish_call = fake_db_writers.finish_sync_batch.call_args
+        assert finish_call is not None
+        assert finish_call.args[1] == "failed"
+
+    def test_hubspot_pull_exception_marks_chunk_failed(self, monkeypatch):
+        from scripts.backfill_hubspot import run_hubspot_backfill
+
+        fake_db_writers = self._install_fake_db_writers(monkeypatch)
+        with patch("scripts.backfill_hubspot._create_backfill_run", return_value=123), \
+             patch("scripts.backfill_hubspot._pull_contacts_in_range", side_effect=RuntimeError("hubspot-down")):
+            result = run_hubspot_backfill(
+                dataset="contacts",
+                chunks=[(date(2024, 1, 1), date(2024, 1, 31))],
+                dry_run=False,
+            )
+
+        assert result["status"] == "failed"
+        assert result["chunks_completed"] == 0
+        assert any("hubspot-down" in err for err in result["errors"])
+        finish_call = fake_db_writers.finish_sync_batch.call_args
+        assert finish_call is not None
+        assert finish_call.args[1] == "failed"
+
+    def test_hubspot_missing_run_id_fails_fast(self):
+        from scripts.backfill_hubspot import run_hubspot_backfill
+
+        with patch("scripts.backfill_hubspot._create_backfill_run", return_value=None), \
+             patch("scripts.backfill_hubspot._pull_contacts_in_range") as mock_pull:
+            result = run_hubspot_backfill(
+                dataset="contacts",
+                chunks=[(date(2024, 1, 1), date(2024, 1, 31))],
+                dry_run=False,
+            )
+
+        mock_pull.assert_not_called()
+        assert result["status"] == "failed"
+        assert any("Failed to create backfill run" in err for err in result["errors"])
+
+    def test_hubspot_rows_pulled_but_zero_written_marks_failed(self, monkeypatch):
+        from scripts.backfill_hubspot import run_hubspot_backfill
+
+        fake_db_writers = self._install_fake_db_writers(monkeypatch)
+        rows = [{"createdate": "2024-01-15"}]
+        with patch("scripts.backfill_hubspot._create_backfill_run", return_value=123), \
+             patch("scripts.backfill_hubspot._pull_contacts_in_range", return_value=rows), \
+             patch("scripts.backfill_hubspot._write_contacts", return_value=0):
+            result = run_hubspot_backfill(
+                dataset="contacts",
+                chunks=[(date(2024, 1, 1), date(2024, 1, 31))],
+                dry_run=False,
+            )
+
+        assert result["status"] == "failed"
+        assert result["chunks_completed"] == 0
+        assert any("Persistence failed or incomplete" in err for err in result["errors"])
+        finish_call = fake_db_writers.finish_sync_batch.call_args
+        assert finish_call is not None
+        assert finish_call.args[1] == "failed"

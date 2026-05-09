@@ -134,16 +134,6 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Stop after N chunks per dataset (optional safety cap).",
     )
     parser.add_argument(
-        "--include-inactive-campaigns",
-        dest="include_inactive_campaigns",
-        action="store_true",
-        default=True,
-        help=(
-            "Include paused and historical campaigns (default: True). "
-            "Windsor returns all campaigns by default."
-        ),
-    )
-    parser.add_argument(
         "--verbose",
         dest="verbose",
         action="store_true",
@@ -354,17 +344,19 @@ def run_backfill_plan(plan: list[dict], args: argparse.Namespace) -> dict:
             }
             continue
 
-        if entry.get("notes"):
-            for note in entry["notes"]:
-                if note.startswith("unsupported_by_current_connector"):
-                    print(f"\n  [{ds_key}]  SKIPPED — {note}", flush=True)
-                    summary["datasets"][ds_key] = {
-                        "rows_pulled":  0,
-                        "rows_written": 0,
-                        "status":       "unsupported_by_current_connector",
-                        "note":         note,
-                    }
-                    continue
+        unsupported_note = next(
+            (note for note in entry.get("notes", []) if note.startswith("unsupported_by_current_connector")),
+            None,
+        )
+        if unsupported_note:
+            print(f"\n  [{ds_key}]  SKIPPED — {unsupported_note}", flush=True)
+            summary["datasets"][ds_key] = {
+                "rows_pulled":  0,
+                "rows_written": 0,
+                "status":       "unsupported_by_current_connector",
+                "note":         unsupported_note,
+            }
+            continue
 
         ds_result = fn(
             dataset=dataset,

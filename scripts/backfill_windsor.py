@@ -34,30 +34,18 @@ _SEARCH_TERMS_NOTE = (
 # ---------------------------------------------------------------------------
 
 def _pull_campaigns(date_from: date, date_to: date) -> list:
-    try:
-        from connectors.windsor_pull import pull_campaign_performance_range
-        return pull_campaign_performance_range(str(date_from), str(date_to))
-    except Exception as exc:  # noqa: BLE001
-        log.error("pull_campaign_performance_range failed (%s→%s): %s", date_from, date_to, exc)
-        return []
+    from connectors.windsor_pull import pull_campaign_performance_range
+    return pull_campaign_performance_range(str(date_from), str(date_to))
 
 
 def _pull_keywords(date_from: date, date_to: date) -> list:
-    try:
-        from connectors.windsor_pull import pull_keyword_performance_range
-        return pull_keyword_performance_range(str(date_from), str(date_to))
-    except Exception as exc:  # noqa: BLE001
-        log.error("pull_keyword_performance_range failed (%s→%s): %s", date_from, date_to, exc)
-        return []
+    from connectors.windsor_pull import pull_keyword_performance_range
+    return pull_keyword_performance_range(str(date_from), str(date_to))
 
 
 def _pull_geo(date_from: date, date_to: date) -> list:
-    try:
-        from connectors.windsor_pull import pull_geo_performance_range
-        return pull_geo_performance_range(str(date_from), str(date_to))
-    except Exception as exc:  # noqa: BLE001
-        log.error("pull_geo_performance_range failed (%s→%s): %s", date_from, date_to, exc)
-        return []
+    from connectors.windsor_pull import pull_geo_performance_range
+    return pull_geo_performance_range(str(date_from), str(date_to))
 
 
 _PULL_FN = {
@@ -206,7 +194,11 @@ def run_google_ads_backfill(
     if not dry_run:
         run_id = _create_backfill_run()
         if run_id is None:
-            log.warning("Proceeding without run_id — DB writes will be skipped by writers.")
+            msg = f"Failed to create backfill run for google_ads/{dataset}; aborting chunk processing."
+            result["status"] = "failed"
+            result["errors"].append(msg)
+            log.error(msg)
+            return result
 
     for i, (chunk_from, chunk_to) in enumerate(chunks, 1):
         print(f"    Chunk {i:3d}/{len(chunks)}: {chunk_from}  →  {chunk_to}", end="", flush=True)
@@ -234,6 +226,8 @@ def run_google_ads_backfill(
         # Pull data
         rows: list = []
         pull_error: Optional[str] = None
+        persistence_error: Optional[str] = None
+        persisted = False
         try:
             rows = pull_fn(chunk_from, chunk_to)
         except Exception as exc:  # noqa: BLE001
@@ -245,6 +239,15 @@ def run_google_ads_backfill(
 
         if pull_error is None and rows:
             rows_written = write_fn(run_id, rows)
+        if pull_error is None:
+            from scheduler.sync_utils import persistence_succeeded
+
+            persisted = persistence_succeeded(rows, rows_written)
+            if not persisted:
+                persistence_error = (
+                    "Persistence failed or incomplete: "
+                    f"pulled={len(rows)}, written={rows_written}"
+                )
 
         result["rows_pulled"]  += rows_pulled
         result["rows_written"] += rows_written
@@ -253,16 +256,24 @@ def run_google_ads_backfill(
         if batch_id:
             try:
                 from db.writers import finish_sync_batch
+                from scheduler.sync_utils import max_source_date
                 if pull_error:
                     finish_sync_batch(
                         batch_id, "failed",
                         error_message=pull_error[:500],
                     )
-                else:
+                elif persisted:
                     finish_sync_batch(
                         batch_id, "success",
                         row_count=rows_written,
-                        last_source_date=chunk_to,
+                        last_source_date=max_source_date(rows, fallback_date=chunk_to),
+                    )
+                else:
+                    finish_sync_batch(
+                        batch_id,
+                        "failed",
+                        row_count=rows_written,
+                        error_message=persistence_error[:500],
                     )
             except Exception as exc:  # noqa: BLE001
                 log.warning("finish_sync_batch failed for batch_id=%s: %s", batch_id, exc)
@@ -272,6 +283,11 @@ def run_google_ads_backfill(
                 f"{dataset} {chunk_from}→{chunk_to}: {pull_error}"
             )
             print(f"  ERROR: {pull_error}", flush=True)
+        elif persistence_error:
+            result["errors"].append(
+                f"{dataset} {chunk_from}→{chunk_to}: {persistence_error}"
+            )
+            print(f"  ERROR: {persistence_error}", flush=True)
         else:
             print(f"  pulled={rows_pulled:>6}  written={rows_written:>6}", flush=True)
             result["chunks_completed"] += 1
@@ -287,4 +303,3 @@ def run_google_ads_backfill(
         result["status"] = "partial"
 
     return result
-

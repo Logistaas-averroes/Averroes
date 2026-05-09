@@ -36,22 +36,14 @@ SUPPORTED_DATASETS = frozenset({"contacts", "deals"})
 
 def _pull_contacts_in_range(date_from: date, date_to: date) -> list:
     """Pull paid-search contacts created in [date_from, date_to]."""
-    try:
-        from connectors.hubspot_pull import pull_paid_search_contacts_in_range
-        return pull_paid_search_contacts_in_range(str(date_from), str(date_to))
-    except Exception as exc:  # noqa: BLE001
-        log.error("pull_paid_search_contacts_in_range failed (%s→%s): %s", date_from, date_to, exc)
-        return []
+    from connectors.hubspot_pull import pull_paid_search_contacts_in_range
+    return pull_paid_search_contacts_in_range(str(date_from), str(date_to))
 
 
 def _pull_deals_for_contacts(contacts: list) -> list:
     """Pull deals for GCLID-linked contacts (read-only)."""
-    try:
-        from connectors.hubspot_pull import pull_deals_with_gclid
-        return pull_deals_with_gclid(contacts)
-    except Exception as exc:  # noqa: BLE001
-        log.error("pull_deals_with_gclid failed: %s", exc)
-        return []
+    from connectors.hubspot_pull import pull_deals_with_gclid
+    return pull_deals_with_gclid(contacts)
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +160,11 @@ def run_hubspot_backfill(
     if not dry_run:
         run_id = _create_backfill_run()
         if run_id is None:
-            log.warning("Proceeding without run_id — DB writes will be skipped by writers.")
+            msg = f"Failed to create backfill run for hubspot/{dataset}; aborting chunk processing."
+            result["status"] = "failed"
+            result["errors"].append(msg)
+            log.error(msg)
+            return result
 
     for i, (chunk_from, chunk_to) in enumerate(chunks, 1):
         print(f"    Chunk {i:3d}/{len(chunks)}: {chunk_from}  →  {chunk_to}", end="", flush=True)
@@ -196,25 +192,37 @@ def run_hubspot_backfill(
         rows_pulled  = 0
         rows_written = 0
         pull_error: Optional[str] = None
+        persistence_error: Optional[str] = None
+        rows: list = []
+        persisted = False
 
         try:
             if dataset == "contacts":
-                contacts = _pull_contacts_in_range(chunk_from, chunk_to)
-                rows_pulled = len(contacts)
-                if contacts:
-                    rows_written = _write_contacts(run_id, contacts)
+                rows = _pull_contacts_in_range(chunk_from, chunk_to)
+                rows_pulled = len(rows)
+                if rows:
+                    rows_written = _write_contacts(run_id, rows)
 
             elif dataset == "deals":
                 # Pull contacts first (to get GCLID-linked contacts), then deals
                 contacts = _pull_contacts_in_range(chunk_from, chunk_to)
-                deals    = _pull_deals_for_contacts(contacts) if contacts else []
-                rows_pulled = len(deals)
-                if deals:
-                    rows_written = _write_deals(run_id, deals)
+                rows = _pull_deals_for_contacts(contacts) if contacts else []
+                rows_pulled = len(rows)
+                if rows:
+                    rows_written = _write_deals(run_id, rows)
 
         except Exception as exc:  # noqa: BLE001
             pull_error = str(exc)
             log.error("Backfill failed for hubspot/%s %s→%s: %s", dataset, chunk_from, chunk_to, exc)
+        if pull_error is None:
+            from scheduler.sync_utils import persistence_succeeded
+
+            persisted = persistence_succeeded(rows, rows_written)
+            if not persisted:
+                persistence_error = (
+                    "Persistence failed or incomplete: "
+                    f"pulled={len(rows)}, written={rows_written}"
+                )
 
         result["rows_pulled"]  += rows_pulled
         result["rows_written"] += rows_written
@@ -223,16 +231,24 @@ def run_hubspot_backfill(
         if batch_id:
             try:
                 from db.writers import finish_sync_batch
+                from scheduler.sync_utils import max_source_date
                 if pull_error:
                     finish_sync_batch(
                         batch_id, "failed",
                         error_message=pull_error[:500],
                     )
-                else:
+                elif persisted:
                     finish_sync_batch(
                         batch_id, "success",
                         row_count=rows_written,
-                        last_source_date=chunk_to,
+                        last_source_date=max_source_date(rows, fallback_date=chunk_to),
+                    )
+                else:
+                    finish_sync_batch(
+                        batch_id,
+                        "failed",
+                        row_count=rows_written,
+                        error_message=persistence_error[:500],
                     )
             except Exception as exc:  # noqa: BLE001
                 log.warning("finish_sync_batch failed for batch_id=%s: %s", batch_id, exc)
@@ -242,6 +258,11 @@ def run_hubspot_backfill(
                 f"hubspot/{dataset} {chunk_from}→{chunk_to}: {pull_error}"
             )
             print(f"  ERROR: {pull_error}", flush=True)
+        elif persistence_error:
+            result["errors"].append(
+                f"hubspot/{dataset} {chunk_from}→{chunk_to}: {persistence_error}"
+            )
+            print(f"  ERROR: {persistence_error}", flush=True)
         else:
             print(f"  pulled={rows_pulled:>6}  written={rows_written:>6}", flush=True)
             result["chunks_completed"] += 1
@@ -256,4 +277,3 @@ def run_hubspot_backfill(
         result["status"] = "partial"
 
     return result
-

@@ -100,7 +100,6 @@ python -m scripts.backfill --source hubspot --from 2026-04-01 --to 2026-04-07 \
 | `--chunk monthly\|weekly`      | monthly  | Chunking strategy |
 | `--dry-run`                    | false    | Print plan only; no API calls; no DB writes |
 | `--max-chunks N`               | none     | Safety cap on chunks per dataset |
-| `--include-inactive-campaigns` | true     | Include paused/historical campaigns |
 | `--verbose`                    | false    | Print extra detail per chunk |
 
 ---
@@ -156,8 +155,11 @@ for testing or resuming a partial backfill safely.
 
 The backfill is designed to be safe to re-run:
 
-- **search_terms** — uses `ON CONFLICT DO UPDATE` in the writer; true upsert,
-  safe to re-run multiple times.
+- **search_terms** — not currently backfilled by this framework because the
+  current Windsor connector uses `date_preset` rather than explicit
+  `date_from`/`date_to` for historical ranges. The existing writer may support
+  safe re-runs if connector support is added later, but search_terms are
+  skipped by PR-ADS-071.
 - **campaigns, keywords, geo, leads, deals** — each backfill run creates a new
   `run_id` record in the `runs` table. Re-running creates a new run with fresh
   data. Historical data from prior runs is preserved.
