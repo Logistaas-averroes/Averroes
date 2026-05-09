@@ -4375,10 +4375,17 @@ def _load_monitoring_thresholds() -> tuple[dict[str, int], int]:
 
 
 def _read_jsonl_runs() -> list[dict]:
-    """Read all run records from the JSONL file, newest first."""
+    """Read the most recent run records from the JSONL file, newest first.
+
+    Bounded to the last 1000 lines to keep memory usage constant as the
+    file grows — sufficient for monitoring lookback purposes.
+    """
     if not _RUN_HISTORY_FILE.is_file():
         return []
-    records: list[dict] = []
+    from collections import deque  # noqa: PLC0415
+    # Bounded deque: keeps only the last 1000 records as the file is appended
+    # chronologically, so the tail contains the most recent runs.
+    bounded: deque = deque(maxlen=1000)
     try:
         with _RUN_HISTORY_FILE.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -4386,14 +4393,13 @@ def _read_jsonl_runs() -> list[dict]:
                 if not line:
                     continue
                 try:
-                    records.append(json.loads(line))
+                    bounded.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
     except OSError:
         pass
-    # JSONL records are appended chronologically; reverse for newest-first.
-    records.reverse()
-    return records
+    # bounded contains the last N records in chronological order; reverse for newest-first.
+    return list(reversed(bounded))
 
 
 @app.get("/api/monitoring/status")

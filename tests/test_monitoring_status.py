@@ -21,8 +21,6 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from api.monitoring import compute_monitoring_status as _compute_monitoring_status

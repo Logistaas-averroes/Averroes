@@ -631,9 +631,9 @@ async function loadMonitoringStatus() {
   const isAdmin = _currentUser && _currentUser.role === "admin";
   const severity = data.severity || "yellow";
 
-    message = isAdmin
-      ? `Monitoring warning: ${data.warnings.join(" ")} Check Scheduler / System Health.`
-      : "Monitoring warning: Recent automated analysis may be stale. Contact your administrator.";
+  const message = isAdmin
+    ? `Monitoring warning: ${data.warnings.join(" ")} Check Scheduler / System Health.`
+    : "Monitoring warning: Recent automated analysis may be stale. Contact your administrator.";
 
   textEl.textContent = message;
   bannerEl.className = `monitoring-banner monitoring-banner--${severity === "red" ? "red" : "yellow"}`;
