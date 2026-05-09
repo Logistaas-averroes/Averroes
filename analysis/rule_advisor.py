@@ -28,11 +28,14 @@ Rules:
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 OUTPUT_DIR = "outputs"
 CONFIG_DIR = "config"
@@ -430,7 +433,7 @@ def _build_human_review_items(waste, lead_quality, campaign_truth) -> str:
 
 def _build_phase1_reminder() -> str:
     return (
-        "## 7. Phase 1 Read-Only Reminder\n\n"
+        "## 8. Phase 1 Read-Only Reminder\n\n"
         "This report was generated automatically from structured analysis data. "
         "**No actions have been taken automatically.**\n\n"
         "- No Google Ads campaigns have been paused, modified, or created.\n"
@@ -444,14 +447,208 @@ def _build_phase1_reminder() -> str:
     )
 
 
+# ── N-Gram section ───────────────────────────────────────────────────────────
+
+# Maximum search_terms rows fed into aggregate_ngrams per report run.
+_NGRAM_ROW_CAP = 1000
+
+# Forbidden action phrases — must never appear in the N-Gram section.
+_FORBIDDEN_NGRAM_PHRASES = (
+    "push negative",
+    "apply negative",
+    "pause campaign",
+    "block term",
+    "recommended negative",
+    "change bid",
+    "change budget",
+)
+
+
+def _first_not_none(*values, default=0):
+    """Return the first value that is not None, or default if all are None."""
+    for v in values:
+        if v is not None:
+            return v
+    return default
+
+
+def _normalize_rows_for_ngrams(rows: list) -> list:
+    """Map Windsor connector field names to the keys expected by aggregate_ngrams.
+
+    Uses _first_not_none for numeric fields so that a legitimate 0 / 0.0 value
+    is preserved and does not accidentally fall back to an alternative field.
+    """
+    normalized = []
+    for r in rows:
+        normalized.append({
+            "search_term":      r.get("search_term") or r.get("term") or "",
+            "campaign_name":    r.get("campaign_name") or r.get("campaign") or "",
+            "ad_group":         r.get("ad_group") or "",
+            "keyword":          r.get("keyword") or "",
+            "spend_usd":        _first_not_none(r.get("spend_usd"), r.get("spend"), default=0),
+            "clicks":           _first_not_none(r.get("clicks"), default=0),
+            "impressions":      _first_not_none(r.get("impressions"), default=0),
+            "conversions":      _first_not_none(r.get("conversions"), default=0),
+            "is_flagged_waste": r.get("is_flagged_waste"),
+        })
+    return normalized
+
+
+def compute_ngram_findings(
+    search_terms: list | None,
+    row_cap: int = _NGRAM_ROW_CAP,
+) -> dict | None:
+    """Compute N-Gram findings from raw search_terms rows.
+
+    This is a read-only, in-memory computation. No external calls. No DB writes.
+    Field names from the Windsor connector (campaign, spend) are normalised
+    transparently so callers do not need to pre-process the raw pull output.
+
+    Returns a dict with keys:
+        findings            list[dict]  — sorted by total_spend_usd DESC
+        row_cap             int         — effective cap applied to this run
+        row_cap_applied     bool        — True if input was capped at row_cap
+        total_rows_analyzed int
+
+    Returns None if search_terms is empty or None, or if aggregation fails.
+    """
+    if not search_terms:
+        return None
+
+    try:
+        from analysis.ngrams import aggregate_ngrams  # noqa: PLC0415
+        row_cap_applied = len(search_terms) > row_cap
+        rows_to_analyze = search_terms[:row_cap] if row_cap_applied else search_terms
+        normalized = _normalize_rows_for_ngrams(rows_to_analyze)
+        findings = aggregate_ngrams(normalized, {1, 2, 3})
+        return {
+            "findings":             findings,
+            "row_cap":              row_cap,
+            "row_cap_applied":      row_cap_applied,
+            "total_rows_analyzed":  len(rows_to_analyze),
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("N-Gram computation failed (non-fatal): %s", exc)
+        return None
+
+
+def _ngram_pattern_table(rows: list) -> list[str]:
+    """Render one N-Gram findings markdown table (header + data rows)."""
+    lines = [
+        "| Pattern | N | Rows | Spend | Clicks | Flagged Waste Rows | Clean Rows | Unanalyzed Rows |",
+        "|---------|---|------|-------|--------|--------------------|------------|-----------------|",
+    ]
+    for r in rows:
+        lines.append(
+            f"| `{r['ngram']}` | {r['n']} | {r['row_count']} | "
+            f"{_fmt_usd(r['total_spend_usd'])} | {r['total_clicks']} | "
+            f"{r['flagged_waste_rows']} | {r['clean_rows']} | {r['unanalyzed_rows']} |"
+        )
+    return lines
+
+
+def _build_ngram_findings_block(ngram_data: dict | None) -> str:
+    """Render the read-only N-Gram findings section for weekly/monthly reports.
+
+    Rules:
+    - No action language (push negative, apply negative, pause campaign, etc.).
+    - Missing data renders a safe fallback message; does not raise.
+    - Row-cap note is included when row_cap_applied is True.
+    """
+    lines = ["## 7. N-Gram Findings — Read-Only Candidate Patterns\n"]
+
+    lines.append(
+        "> **Read-Only — For Human Review Only.** "
+        "These are recurring search-term patterns identified as directional evidence. "
+        "This system does not add negative keywords, modify Google Ads, suspend campaigns, "
+        "or alter bids or budgets. "
+        "All findings are candidate patterns only and require human review before any action.\n"
+    )
+
+    if ngram_data is None:
+        lines.append(
+            "_N-Gram findings were unavailable for this report. "
+            "This does not imply search-term patterns are clean; "
+            "it only means the current report has no N-Gram dataset available._\n"
+        )
+        return "\n".join(lines) + "\n"
+
+    findings = ngram_data.get("findings") or []
+    row_cap_applied = ngram_data.get("row_cap_applied", False)
+    row_cap = ngram_data.get("row_cap", _NGRAM_ROW_CAP)
+    total_rows = ngram_data.get("total_rows_analyzed", 0)
+
+    if row_cap_applied:
+        lines.append(
+            f"> ⚠️ **Note:** N-Gram analysis was row-capped at {row_cap} rows "
+            "(dataset contained more rows). "
+            "Treat these findings as directional, not complete.\n"
+        )
+
+    lines.append(
+        f"**Search terms analyzed:** {total_rows}  |  "
+        f"**Distinct patterns found:** {len(findings)}\n"
+    )
+
+    if not findings:
+        lines.append("_No recurring patterns found in the current search-term dataset._\n")
+        return "\n".join(lines) + "\n"
+
+    # Table 1 — Top 10 by recurrence (row_count DESC)
+    by_row_count = sorted(
+        findings,
+        key=lambda r: (-r["row_count"], -r["total_spend_usd"], r["ngram"]),
+    )[:10]
+    lines.append("### Top Candidate Patterns by Recurrence (warrants review)\n")
+    lines.extend(_ngram_pattern_table(by_row_count))
+    lines.append("")
+
+    # Table 2 — Top 10 by estimated spend exposure
+    by_spend = sorted(
+        findings,
+        key=lambda r: (-r["total_spend_usd"], -r["row_count"], r["ngram"]),
+    )[:10]
+    lines.append(
+        "### Top Candidate Patterns by Estimated Spend Exposure (directional evidence)\n"
+    )
+    lines.extend(_ngram_pattern_table(by_spend))
+    lines.append("")
+
+    # Table 3 — Top 10 with highest flagged-waste concentration (only if any flagged waste)
+    has_flagged = any(r["flagged_waste_rows"] > 0 for r in findings)
+    if has_flagged:
+        by_waste = sorted(
+            [r for r in findings if r["flagged_waste_rows"] > 0],
+            key=lambda r: (-r["flagged_waste_rows"], -r["total_spend_usd"], r["ngram"]),
+        )[:10]
+        lines.append(
+            "### Candidate Patterns with High Flagged-Waste Concentration (warrants review)\n"
+        )
+        lines.extend(_ngram_pattern_table(by_waste))
+        lines.append("")
+
+    lines.append(
+        "> All patterns above are candidate patterns for human review only. "
+        "No recommendation is made to add any pattern as a negative keyword. "
+        "These are factual, read-only findings based on recurring search-term data.\n"
+    )
+
+    return "\n".join(lines) + "\n"
+
+
 # ── Main report generator ─────────────────────────────────────────────────────
 
-def generate_deterministic_report(report_type: str = "weekly") -> str | None:
+def generate_deterministic_report(
+    report_type: str = "weekly",
+    ngram_data: dict | None = None,
+) -> str | None:
     """
     Generate a deterministic markdown report from structured analysis outputs.
 
     Args:
         report_type: "weekly" or "monthly"
+        ngram_data:  Optional N-Gram findings dict produced by compute_ngram_findings().
+                     If None the N-Gram section renders a safe unavailable message.
 
     Returns:
         Path to the generated report file, or None if no analysis data found.
@@ -505,6 +702,8 @@ def generate_deterministic_report(report_type: str = "weekly") -> str | None:
         _build_data_gaps(waste, lead_quality, campaign_truth),
         "---\n",
         _build_human_review_items(waste, lead_quality, campaign_truth),
+        "---\n",
+        _build_ngram_findings_block(ngram_data),
         "---\n",
         _build_phase1_reminder(),
     ]

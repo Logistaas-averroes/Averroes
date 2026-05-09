@@ -226,7 +226,9 @@ def run_weekly_report():
         # Step 6: Generate weekly report via advisor (deterministic by default)
         print("Step 6/6: Generating weekly report (deterministic advisor)...")
         from analysis.advisor import generate_weekly_report
-        report_path = generate_weekly_report()
+        from analysis.rule_advisor import compute_ngram_findings
+        ngram_findings = compute_ngram_findings(search_terms)
+        report_path = generate_weekly_report(ngram_data=ngram_findings)
 
         print(f"\n{'='*60}")
         print(f"Weekly report complete — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
