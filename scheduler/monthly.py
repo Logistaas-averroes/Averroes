@@ -95,11 +95,45 @@ def run_monthly_report():
         )
 
         # Write run record + leads + deals to database
+        run_date = datetime.utcnow().date()
         try:
             run_id = db_writers.write_run(run_record)
             if run_id is not None:
-                db_writers.write_leads(run_id, contacts)
+                # Track HubSpot contacts monthly sync (freshness watermark)
+                contacts_batch_id = db_writers.start_sync_batch(
+                    source="hubspot",
+                    dataset="contacts",
+                    sync_type="monthly",
+                    date_from=run_date - timedelta(days=30),
+                    date_to=run_date,
+                    run_id=run_id,
+                )
+                contacts_written = db_writers.write_leads(run_id, contacts)
+                if contacts_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=contacts_batch_id,
+                        status="success",
+                        row_count=contacts_written,
+                        last_source_date=run_date,
+                    )
+
+                # Track HubSpot deals monthly sync (freshness watermark)
+                deals_batch_id = db_writers.start_sync_batch(
+                    source="hubspot",
+                    dataset="deals",
+                    sync_type="monthly",
+                    date_from=run_date - timedelta(days=30),
+                    date_to=run_date,
+                    run_id=run_id,
+                )
                 db_writers.write_deals(run_id, deals)
+                if deals_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=deals_batch_id,
+                        status="success",
+                        row_count=len(deals or []),
+                        last_source_date=run_date,
+                    )
             else:
                 log.error("DB write after Step 2: write_run returned no run_id; skipping child writes")
         except Exception as db_exc:  # noqa: BLE001
@@ -109,16 +143,46 @@ def run_monthly_report():
         # Write geo rows to database
         try:
             if run_id is not None:
+                geo_batch_id = db_writers.start_sync_batch(
+                    source="windsor",
+                    dataset="geo",
+                    sync_type="monthly",
+                    date_from=run_date - timedelta(days=30),
+                    date_to=run_date,
+                    run_id=run_id,
+                )
                 geo_count = db_writers.write_geo(run_id, geos)
                 log.info("Wrote %d geo rows to database (run_id=%s)", geo_count, run_id)
+                if geo_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=geo_batch_id,
+                        status="success",
+                        row_count=geo_count,
+                        last_source_date=run_date,
+                    )
         except Exception as db_exc:  # noqa: BLE001
             log.error("DB write geo failed: %s", db_exc)
 
         # Write keyword rows to database
         try:
             if run_id is not None:
+                kw_batch_id = db_writers.start_sync_batch(
+                    source="windsor",
+                    dataset="keywords",
+                    sync_type="monthly",
+                    date_from=run_date - timedelta(days=30),
+                    date_to=run_date,
+                    run_id=run_id,
+                )
                 kw_count = db_writers.write_keywords(run_id, keywords)
                 log.info("Wrote %d keyword rows to database (run_id=%s)", kw_count, run_id)
+                if kw_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=kw_batch_id,
+                        status="success",
+                        row_count=kw_count,
+                        last_source_date=run_date,
+                    )
         except Exception as db_exc:  # noqa: BLE001
             log.error("DB write keywords failed: %s", db_exc)
 
@@ -258,10 +322,26 @@ def run_monthly_report():
         campaign_truth = run_campaign_truth()
         log.info("Step 5/6 END: Campaign truth table complete")
 
-        # Write campaigns to database
+        # Write campaigns to database (with freshness tracking)
         try:
             if run_id is not None and campaign_truth:
-                db_writers.write_campaigns(run_id, campaign_truth.get("campaigns", []))
+                campaign_rows = campaign_truth.get("campaigns", [])
+                campaigns_batch_id = db_writers.start_sync_batch(
+                    source="windsor",
+                    dataset="campaigns",
+                    sync_type="monthly",
+                    date_from=run_date - timedelta(days=30),
+                    date_to=run_date,
+                    run_id=run_id,
+                )
+                db_writers.write_campaigns(run_id, campaign_rows)
+                if campaigns_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=campaigns_batch_id,
+                        status="success",
+                        row_count=len(campaign_rows),
+                        last_source_date=run_date,
+                    )
         except Exception as db_exc:  # noqa: BLE001
             log.error("DB write after Step 5 failed: %s", db_exc)
 
