@@ -480,6 +480,10 @@ async function loadDataFreshness() {
   statusEl.textContent = "Checking data freshness…";
   statusEl.className   = "freshness-status";
 
+  // Reset shared run metadata so per-page strips never show stale data from a
+  // previous call if this one ends on an early-return path (DB offline, no run).
+  _latestRunForMeta = null;
+
   // Freshness is global — always use a fixed 90d window, not the reporting filter.
   let latestRun     = null;
   let dbUnavailable = false;
@@ -559,7 +563,7 @@ function renderRunMeta(sectionKey) {
   if (!el) return;
 
   if (!_latestRunForMeta) {
-    el.textContent = "Freshness unavailable. Trigger a weekly analysis from the Scheduler page or check System Health.";
+    el.textContent = "Freshness unavailable. Recent run information is not available. Refresh the page or contact your administrator if this persists.";
     el.className   = "run-meta";
     return;
   }

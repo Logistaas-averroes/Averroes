@@ -217,8 +217,16 @@ def check_apscheduler(failures: list) -> None:
     # it does not spawn any threads or connect to any external service.
     # Use spec_from_file_location so the import succeeds regardless of whether
     # the repo root is on sys.path (the script may be run as scripts/phase1_readiness.py).
+    spec = importlib.util.spec_from_file_location("api.scheduler", "api/scheduler.py")
+    if spec is None:
+        _fail("api.scheduler import", "unable to create module spec from api/scheduler.py")
+        failures.append("apscheduler:import-failed")
+        return
+    if spec.loader is None:
+        _fail("api.scheduler import", "module spec for api/scheduler.py has no loader")
+        failures.append("apscheduler:import-failed")
+        return
     try:
-        spec = importlib.util.spec_from_file_location("api.scheduler", "api/scheduler.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     except Exception as exc:

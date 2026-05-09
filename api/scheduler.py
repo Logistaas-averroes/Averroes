@@ -40,7 +40,15 @@ _TZ = ZoneInfo("Asia/Amman")
 # runs and manual runs share the same lock and cannot overlap.
 # ---------------------------------------------------------------------------
 
-_job_state: dict[str, bool] = {"daily": False, "weekly": False, "monthly": False}
+# ---------------------------------------------------------------------------
+# Canonical job IDs — single source of truth for all three Phase 1 jobs.
+# Used by _job_state, start_scheduler(), get_registered_job_ids(), and
+# get_scheduler_status() to avoid duplication that could cause drift.
+# ---------------------------------------------------------------------------
+
+JOB_IDS: tuple[str, str, str] = ("daily", "weekly", "monthly")
+
+_job_state: dict[str, bool] = {job_id: False for job_id in JOB_IDS}
 _run_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
@@ -192,7 +200,7 @@ def get_registered_job_ids() -> list[str]:
     threads or trigger any job execution.  Used by the readiness check to
     verify that the in-app APScheduler model is correctly declared.
     """
-    return ["daily", "weekly", "monthly"]
+    return list(JOB_IDS)
 
 
 def get_scheduler_status() -> dict:
@@ -202,12 +210,12 @@ def get_scheduler_status() -> dict:
             "status": "not_running",
             "jobs": [
                 {"job": job_id, "schedule": _SCHEDULE_DESCRIPTIONS[job_id], "next_run": None}
-                for job_id in ("daily", "weekly", "monthly")
+                for job_id in JOB_IDS
             ],
         }
 
     jobs = []
-    for job_id in ("daily", "weekly", "monthly"):
+    for job_id in JOB_IDS:
         job = _scheduler.get_job(job_id)
         next_run: str | None = None
         if job and job.next_run_time:
