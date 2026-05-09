@@ -104,6 +104,13 @@ let campaignAttributionQualityStatus = "idle"; // idle | loading | ok | empty | 
 // GCLID Attribution page prefill (set when navigating from campaign drawer)
 let gclidAttributionPrefill = null;
 
+// N-Gram page prefill (set when navigating from campaign drawer)
+let ngramsPrefill = null;
+
+// Campaign drawer N-Gram drilldown state
+let drawerNgramRows = [];
+let drawerNgramStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+
 // Reports page state
 let latestReportMarkdown = "";
 let latestReportMeta = null;
@@ -157,6 +164,35 @@ function fmtDollar(n) {
   if (n === null || n === undefined) return "—";
   if (n >= 1000) return "$" + (n / 1000).toFixed(1) + "k";
   return "$" + n.toFixed(0);
+}
+
+/**
+ * Trigger a CSV download in the browser.
+ * @param {string} filename - The suggested download filename (e.g. "ngrams.csv").
+ * @param {string[]} headers - Column header labels.
+ * @param {(string|number|null|undefined)[][]} rowData - 2-D array of values, one sub-array per row.
+ */
+function downloadCSV(filename, headers, rowData) {
+  const escape = (v) => {
+    const s = v === null || v === undefined ? "" : String(v);
+    // Quote fields that contain commas, quotes, or newlines
+    if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  };
+  const lines = [headers.map(escape).join(",")];
+  rowData.forEach((row) => lines.push(row.map(escape).join(",")));
+  const csv  = lines.join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
 }
 
 function verdictBadge(verdict) {
@@ -427,7 +463,14 @@ function loadPage(page) {
     case "campaigns":     loadCampaigns();                          break;
     case "waste":         loadWaste();                              break;
     case "search-terms":  loadSearchTerms({ reset: true });         break;
-    case "ngrams":        loadNgrams();                             break;
+    case "ngrams":
+      if (ngramsPrefill) {
+        const ngramCampaignInput = document.getElementById("ngrams-campaign");
+        if (ngramCampaignInput) ngramCampaignInput.value = ngramsPrefill.campaign || "";
+        ngramsPrefill = null;
+      }
+      loadNgrams();
+      break;
     case "geo":           loadGeo();                                break;
     case "keywords":      loadKeywords();      break;
     case "leads":         loadLeads();         break;
@@ -2789,6 +2832,56 @@ function renderNgramsTable(data) {
   tableEl.innerHTML = renderNgramDataQualityNote(data) + `<div class="ngrams-table-scroll"><table class="data-table">${thead}<tbody>${tbody}</tbody></table></div>`;
 }
 
+function downloadNgramsCSV() {
+  if (!ngramRows.length) return;
+  const headers = [
+    "N-Gram", "N", "Language", "Row Count", "Unique Search Terms", "Campaigns",
+    "Spend USD", "Clicks", "Impressions", "Google Conv.", "Flagged Rows", "Clean Rows",
+    "Unanalyzed Rows", "Flagged Spend USD",
+  ];
+  const rows = ngramRows.map((r) => [
+    r.ngram, r.n, r.language, r.row_count, r.unique_search_terms, r.campaigns_count,
+    r.total_spend_usd, r.total_clicks, r.total_impressions, r.google_conversions,
+    r.flagged_waste_rows, r.clean_rows, r.unanalyzed_rows, r.flagged_waste_spend_usd,
+  ]);
+  const days = getSelectedDays();
+  downloadCSV(`ngrams_${days}d.csv`, headers, rows);
+}
+
+function downloadSearchTermsCSV() {
+  if (!searchTermRows.length) return;
+  const headers = [
+    "Source Date", "Search Term", "Waste State", "Campaign", "Ad Group",
+    "Keyword", "Match Type", "Spend USD", "Clicks", "Impressions",
+    "Google Conv.", "Junk Category", "Matched Pattern",
+  ];
+  const stateLabel = (v) => v === true ? "flagged" : v === false ? "clean" : "unanalyzed";
+  const rows = searchTermRows.map((r) => [
+    r.source_date, r.search_term, stateLabel(r.is_flagged_waste),
+    r.campaign_name, r.ad_group, r.keyword, r.match_type,
+    r.spend_usd, r.clicks, r.impressions, r.conversions,
+    r.junk_category || "", r.matched_pattern || "",
+  ]);
+  const days = getSelectedDays();
+  downloadCSV(`search_terms_${days}d.csv`, headers, rows);
+}
+
+function downloadWasteCSV() {
+  const items = getFilteredWasteTerms();
+  if (!items.length) return;
+  const headers = [
+    "Search Term", "Campaign", "Spend USD", "Junk Category",
+    "Matched Pattern", "CRM Junk Confirmed", "Run Date",
+  ];
+  const rows = items.map((t) => [
+    t.search_term, t.campaign_name, t.spend_usd,
+    t.junk_category || "", t.matched_pattern || "",
+    t.crm_junk_confirmed, t.run_date,
+  ]);
+  const days = getSelectedDays();
+  downloadCSV(`waste_terms_${days}d.csv`, headers, rows);
+}
+
 // ── GCLID Attribution page ───────────────────────────────────────────────────
 
 function buildGclidAttributionParams({ cursor = null } = {}) {
@@ -4158,6 +4251,46 @@ async function loadCampaignAttributionQuality(campaignName, requestId = null) {
   }
 }
 
+async function loadCampaignDrawerNgrams(campaignName, requestId = null) {
+  if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+    return { status: "stale", rows: [] };
+  }
+
+  drawerNgramStatus = "loading";
+  drawerNgramRows   = [];
+
+  try {
+    const params = new URLSearchParams();
+    params.set("days",     String(getSelectedDays()));
+    params.set("campaign", campaignName);
+    params.set("limit",    "20");
+
+    const data = await fetchJSON(`/api/search-terms/ngrams?${params.toString()}`);
+
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+      return { status: "stale", rows: [] };
+    }
+
+    if (data.db_unavailable) {
+      drawerNgramStatus = "db_unavailable";
+      drawerNgramRows   = [];
+      return { status: drawerNgramStatus, rows: [] };
+    }
+
+    drawerNgramRows   = data.rows || [];
+    drawerNgramStatus = drawerNgramRows.length ? "ok" : "empty";
+    return { status: drawerNgramStatus, rows: drawerNgramRows };
+  } catch (_) {
+    if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) {
+      return { status: "stale", rows: [] };
+    }
+    drawerNgramStatus = "error";
+    drawerNgramRows   = [];
+    return { status: drawerNgramStatus, rows: [] };
+  }
+}
+
+
 async function openCampaignDrawer(campaignName) {
   if (!campaignName) return;
   _drawerOpenCampaign = campaignName;
@@ -4192,11 +4325,13 @@ async function openCampaignDrawer(campaignName) {
   document.addEventListener("keydown", _drawerKeyHandler);
 
   try {
-    // Campaign detail is primary payload. Attribution preview/quality are secondary.
+    // Campaign detail is primary payload. Attribution preview/quality/ngrams are secondary.
     campaignAttributionStatus = "loading";
     campaignAttributionRows = [];
     campaignAttributionQualityStatus = "loading";
     campaignAttributionQuality = null;
+    drawerNgramStatus = "loading";
+    drawerNgramRows   = [];
 
     const detail = await fetchJSON(
       `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${getSelectedDays()}`
@@ -4226,6 +4361,18 @@ async function openCampaignDrawer(campaignName) {
         if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
         campaignAttributionQualityStatus = "error";
         campaignAttributionQuality = null;
+        renderCampaignDrawer(detail);
+      });
+
+    loadCampaignDrawerNgrams(campaignName, requestId)
+      .then(() => {
+        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+        renderCampaignDrawer(detail);
+      })
+      .catch(() => {
+        if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
+        drawerNgramStatus = "error";
+        drawerNgramRows   = [];
         renderCampaignDrawer(detail);
       });
   } catch (err) {
@@ -4748,6 +4895,70 @@ function _appendDrawerEvidenceSections(container, data, lq) {
       </div>`;
   }
 
+  // ── N-Gram Drilldown ──────────────────────────────────────────────────
+  let ngramDrawerHtml;
+  if (drawerNgramStatus === "loading" || drawerNgramStatus === "idle") {
+    ngramDrawerHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">N-Gram Patterns</div>
+        <p class="drawer-empty">Loading n-gram patterns…</p>
+      </div>`;
+  } else if (drawerNgramStatus === "db_unavailable") {
+    ngramDrawerHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">N-Gram Patterns</div>
+        <p class="drawer-empty">N-gram analysis temporarily unavailable — database offline.</p>
+      </div>`;
+  } else if (drawerNgramStatus === "error") {
+    ngramDrawerHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">N-Gram Patterns</div>
+        <p class="drawer-empty">Could not load n-gram patterns for this campaign.</p>
+      </div>`;
+  } else if (drawerNgramStatus === "empty" || !drawerNgramRows.length) {
+    ngramDrawerHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">N-Gram Patterns</div>
+        <p class="drawer-empty">No n-gram patterns found for this campaign in the selected window.</p>
+        <div style="margin-top:var(--space-3)">
+          <button class="btn btn--secondary drawer-ngrams-fullpage-btn" type="button">View N-Gram Intelligence page</button>
+        </div>
+      </div>`;
+  } else {
+    const ngramTableRows = drawerNgramRows.map((r) => `
+      <tr>
+        <td class="td--name">${escapeHtml(r.ngram || "—")}</td>
+        <td class="td--num">${r.n != null ? r.n : "—"}</td>
+        <td class="td--num">${r.row_count != null ? r.row_count : "—"}</td>
+        <td class="td--num">${r.total_spend_usd != null ? fmtDollar(r.total_spend_usd) : "—"}</td>
+        <td class="td--num">${r.total_clicks != null ? r.total_clicks : "—"}</td>
+        <td>${ngramWasteStateMix(r.flagged_waste_rows, r.clean_rows, r.unanalyzed_rows)}</td>
+      </tr>`).join("");
+    ngramDrawerHtml = `
+      <div class="drawer-section">
+        <div class="drawer-section__title">N-Gram Patterns</div>
+        <p class="drawer-source-note" style="margin-bottom:var(--space-3)">Top recurring word patterns from this campaign's search terms. Read-only — candidate patterns for human review only.</p>
+        <div class="drawer-attribution-table">
+          <table class="drawer-table">
+            <thead>
+              <tr>
+                <th>N-Gram</th>
+                <th class="td--num">N</th>
+                <th class="td--num">Rows</th>
+                <th class="td--num">Spend</th>
+                <th class="td--num">Clicks</th>
+                <th>Flagged / Clean / Unanalyzed</th>
+              </tr>
+            </thead>
+            <tbody>${ngramTableRows}</tbody>
+          </table>
+        </div>
+        <div style="margin-top:var(--space-3)">
+          <button class="btn btn--secondary drawer-ngrams-fullpage-btn" type="button">View N-Gram Intelligence page</button>
+        </div>
+      </div>`;
+  }
+
   // ── Data source footer ─────────────────────────────────────────────────
   const src = data.data_sources || {};
   const footerHtml = `
@@ -4760,7 +4971,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
       </p>
     </div>`;
 
-  container.insertAdjacentHTML("beforeend", lqHtml + countryHtml + kwHtml + wasteHtml + leadsHtml + attrHtml + footerHtml);
+  container.insertAdjacentHTML("beforeend", lqHtml + countryHtml + kwHtml + wasteHtml + leadsHtml + attrHtml + ngramDrawerHtml + footerHtml);
 
   // Wire up waste copy button if present (must happen after DOM insertion)
   const wcBtn = container.querySelector("#drawer-waste-copy-btn");
@@ -4776,6 +4987,17 @@ function _appendDrawerEvidenceSections(container, data, lq) {
       if (_campName) gclidAttributionPrefill = { campaign: _campName };
       closeCampaignDrawer();
       navigate("gclid-attribution");
+    });
+  }
+
+  // Wire up "View N-Gram Intelligence page" button
+  const ngramsFullBtn = container.querySelector(".drawer-ngrams-fullpage-btn");
+  if (ngramsFullBtn) {
+    const _campName = _drawerOpenCampaign;
+    ngramsFullBtn.addEventListener("click", () => {
+      if (_campName) ngramsPrefill = { campaign: _campName };
+      closeCampaignDrawer();
+      navigate("ngrams");
     });
   }
 }
@@ -5052,10 +5274,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   const wasteCatSel  = document.getElementById("waste-filter-category");
   const wasteCampSel = document.getElementById("waste-filter-campaign");
   const wasteCopyBtn = document.getElementById("waste-copy-btn");
-  if (wasteSearch)  wasteSearch.addEventListener("input",  applyWasteFilters);
-  if (wasteCatSel)  wasteCatSel.addEventListener("change", applyWasteFilters);
-  if (wasteCampSel) wasteCampSel.addEventListener("change", applyWasteFilters);
-  if (wasteCopyBtn) wasteCopyBtn.addEventListener("click", copyWasteTerms);
+  const wasteExportBtn = document.getElementById("waste-export-csv-btn");
+  if (wasteSearch)   wasteSearch.addEventListener("input",  applyWasteFilters);
+  if (wasteCatSel)   wasteCatSel.addEventListener("change", applyWasteFilters);
+  if (wasteCampSel)  wasteCampSel.addEventListener("change", applyWasteFilters);
+  if (wasteCopyBtn)  wasteCopyBtn.addEventListener("click", copyWasteTerms);
+  if (wasteExportBtn) wasteExportBtn.addEventListener("click", downloadWasteCSV);
 
   // Wire up geo search
   const geoSearch = document.getElementById("geo-search");
@@ -5069,6 +5293,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const stRefreshBtn    = document.getElementById("search-terms-refresh-btn");
   const stLoadMoreBtn   = document.getElementById("search-terms-load-more-btn");
   const stWasteFilter   = document.getElementById("search-terms-waste-filter");
+  const stExportBtn     = document.getElementById("search-terms-export-csv-btn");
 
   if (stApplyBtn) stApplyBtn.addEventListener("click", () => loadSearchTerms({ reset: true }));
   if (stClearBtn) stClearBtn.addEventListener("click", () => {
@@ -5090,6 +5315,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Always refetch — backend applies waste_state filter server-side.
     loadSearchTerms({ reset: true });
   });
+  if (stExportBtn) stExportBtn.addEventListener("click", downloadSearchTermsCSV);
 
   // Enter key in query/campaign inputs triggers apply
   [stQueryInput, stCampaignInput].forEach((el) => {
@@ -5102,10 +5328,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   const ngramRefreshBtn = document.getElementById("ngrams-refresh-btn");
   const ngramApplyBtn   = document.getElementById("ngrams-apply-btn");
   const ngramClearBtn   = document.getElementById("ngrams-clear-btn");
+  const ngramExportBtn  = document.getElementById("ngrams-export-csv-btn");
 
   if (ngramRefreshBtn) ngramRefreshBtn.addEventListener("click", loadNgrams);
   if (ngramApplyBtn)   ngramApplyBtn.addEventListener("click",   loadNgrams);
   if (ngramClearBtn)   ngramClearBtn.addEventListener("click",   clearNgramFilters);
+  if (ngramExportBtn)  ngramExportBtn.addEventListener("click",  downloadNgramsCSV);
 
   ["ngrams-query", "ngrams-campaign", "ngrams-min-spend"].forEach((id) => {
     const el = document.getElementById(id);
