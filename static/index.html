@@ -224,6 +224,12 @@
         <span id="freshness-status" class="freshness-status freshness-empty" role="status" aria-live="polite" aria-atomic="true"></span>
       </div>
 
+      <!-- Monitoring warning banner — hidden when healthy, shown for stale/failed runs -->
+      <div id="monitoring-banner" class="monitoring-banner" hidden role="status" aria-live="polite" aria-atomic="true">
+        <span class="monitoring-banner__icon" aria-hidden="true">⚠</span>
+        <span id="monitoring-banner-text" class="monitoring-banner__text"></span>
+      </div>
+
       <!-- Dashboard -->
       <section id="page-dashboard" class="page" hidden>
         <header class="page-header">

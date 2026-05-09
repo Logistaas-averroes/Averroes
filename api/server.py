@@ -46,6 +46,7 @@ Protected endpoints (require authenticated session):
   GET  /api/search-terms/ngrams   — Read-only n-gram analysis over stored search_terms (requires auth).
   GET  /api/gclid-attribution     — Paginated GCLID attribution rows from gclid_attribution table (requires auth).
   GET  /api/gclid-coverage        — GCLID coverage snapshots from gclid_coverage_snapshots table (requires auth).
+  GET  /api/monitoring/status     — Read-only monitoring summary: stale/failure state per run type (requires auth).
 """
 
 import base64
@@ -80,6 +81,11 @@ from api.scheduler import (
     get_scheduler_status,
     start_scheduler,
     stop_scheduler,
+)
+from api.monitoring import (
+    compute_monitoring_status as _compute_monitoring_status,
+    STALE_DAYS_DEFAULT as _MONITORING_STALE_DAYS_DEFAULT,
+    CONSECUTIVE_FAILURE_WARNING_DEFAULT as _MONITORING_CONSECUTIVE_FAILURE_WARNING_DEFAULT,
 )
 
 log = logging.getLogger(__name__)
@@ -4324,3 +4330,133 @@ def api_gclid_coverage(
         "days": days,
         "rows": out,
     }
+
+
+# ---------------------------------------------------------------------------
+# Monitoring status endpoint — read-only, auth required. (PR-ADS-069)
+# ---------------------------------------------------------------------------
+
+# Lookback window used to query runs for monitoring purposes.
+_MONITORING_LOOKBACK_DAYS = 90
+
+
+def _load_monitoring_thresholds() -> tuple[dict[str, int], int]:
+    """Load monitoring stale thresholds from config/thresholds.yaml.
+
+    Returns:
+        (stale_after_days_map, consecutive_failure_warning)
+    Falls back to api.monitoring defaults for any missing or invalid value.
+    """
+    stale = dict(_MONITORING_STALE_DAYS_DEFAULT)
+    consec = _MONITORING_CONSECUTIVE_FAILURE_WARNING_DEFAULT
+    try:
+        with _CONFIG_THRESHOLDS.open(encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh) or {}
+        mon = (raw.get("ui", {}) or {}).get("monitoring", {}) or {}
+        sad = mon.get("stale_after_days", {}) or {}
+        for run_type in ("daily", "weekly", "monthly"):
+            raw_val = sad.get(run_type)
+            try:
+                v = int(raw_val)
+                if v >= 1:
+                    stale[run_type] = v
+            except (TypeError, ValueError):
+                pass
+        raw_consec = mon.get("consecutive_failure_warning")
+        try:
+            v = int(raw_consec)
+            if v >= 1:
+                consec = v
+        except (TypeError, ValueError):
+            pass
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[monitoring/status] could not load thresholds config: %s", exc)
+    return stale, consec
+
+
+def _read_jsonl_runs() -> list[dict]:
+    """Read the most recent run records from the JSONL file, newest first.
+
+    Bounded to the last 1000 lines to keep memory usage constant as the
+    file grows — sufficient for monitoring lookback purposes.
+    """
+    if not _RUN_HISTORY_FILE.is_file():
+        return []
+    from collections import deque  # noqa: PLC0415
+    # Bounded deque: keeps only the last 1000 records as the file is appended
+    # chronologically, so the tail contains the most recent runs.
+    bounded: deque = deque(maxlen=1000)
+    try:
+        with _RUN_HISTORY_FILE.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    bounded.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    except OSError:
+        pass
+    # bounded contains the last N records in chronological order; reverse for newest-first.
+    return list(reversed(bounded))
+
+
+@app.get("/api/monitoring/status")
+def api_monitoring_status(user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Return read-only monitoring summary for scheduled run health.
+
+    Computes per-run-type state (daily/weekly/monthly):
+      - last_success_at, last_status, consecutive_failures, stale.
+    Derives severity (green/yellow/red) and a human-readable warnings list.
+
+    Auth required. Read-only. No external calls. No mutations.
+    Phase 1 read-only — no writes to any external system.
+    """
+    stale_after_days, consecutive_failure_warning = _load_monitoring_thresholds()
+
+    runs: list[dict] = []
+    db_unavailable = False
+
+    from db.connection import get_conn  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                db_unavailable = True
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        # PostgreSQL-specific interval syntax: INTERVAL '1 day' * N
+                        """
+                        SELECT run_type, started_at, finished_at, status
+                        FROM runs
+                        WHERE started_at >= NOW() - INTERVAL '1 day' * %s
+                        ORDER BY started_at DESC
+                        """,
+                        (_MONITORING_LOOKBACK_DAYS,),
+                    )
+                    rows = cur.fetchall()
+                    cols = [d[0] for d in cur.description]
+                    for row in rows:
+                        r = dict(zip(cols, row))
+                        r["started_at"] = (
+                            r["started_at"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            if r.get("started_at") else None
+                        )
+                        r["finished_at"] = (
+                            r["finished_at"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            if r.get("finished_at") else None
+                        )
+                        runs.append(r)
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/monitoring/status] database error: %s", exc, exc_info=True)
+        db_unavailable = True
+
+    # Fall back to JSONL run history when the DB is offline.
+    if db_unavailable or not runs:
+        runs = _read_jsonl_runs()
+
+    result = _compute_monitoring_status(runs, stale_after_days, consecutive_failure_warning)
+    if db_unavailable:
+        result["db_unavailable"] = True
+    return result
