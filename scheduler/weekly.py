@@ -94,7 +94,7 @@ def run_weekly_report():
                     date_to=run_date,
                     run_id=run_id,
                 )
-                db_writers.write_deals(run_id, deals)
+                db_writers.write_deals(run_id, deals)  # returns None — use input len for row_count
                 if deals_batch_id:
                     db_writers.finish_sync_batch(
                         batch_id=deals_batch_id,
