@@ -13,7 +13,9 @@ Required HubSpot field canonical names preserved:
     hs_analytics_source, hs_analytics_source_data_1, hs_analytics_source_data_2,
     hs_analytics_first_url, ip_country, mql___mdr_comments, createdate, company
 
-Note on MQL status spelling: DICARDED (one R) is the canonical HubSpot value.
+Note on MQL status spelling: DICARDED (one R, not two) is the canonical HubSpot mql_status
+value as confirmed from the live Logistaas account. Do not change to DISCARDED — see db/writers.py
+_JUNK set which preserves this exact spelling.
 
 NEVER writes to HubSpot.
 NEVER called by any scheduler or Render startup command.

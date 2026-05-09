@@ -209,8 +209,7 @@ def run_google_ads_backfill(
             log.warning("Proceeding without run_id — DB writes will be skipped by writers.")
 
     for i, (chunk_from, chunk_to) in enumerate(chunks, 1):
-        if verbose or True:  # always show chunk progress
-            print(f"    Chunk {i:3d}/{len(chunks)}: {chunk_from}  →  {chunk_to}", end="", flush=True)
+        print(f"    Chunk {i:3d}/{len(chunks)}: {chunk_from}  →  {chunk_to}", end="", flush=True)
 
         if dry_run:
             print("  [dry-run]", flush=True)
