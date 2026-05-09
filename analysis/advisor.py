@@ -22,7 +22,7 @@ from pathlib import Path
 
 # Deterministic advisor — imported at module level so it is always available
 # without requiring ANTHROPIC_API_KEY.
-from analysis.rule_advisor import generate_deterministic_report
+from analysis.rule_advisor import generate_deterministic_report, compute_ngram_findings
 
 
 def _get_advisor_mode() -> str:
@@ -179,20 +179,23 @@ Do not recommend actions not directly supported by the numbers.
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def generate_weekly_report() -> str | None:
+def generate_weekly_report(ngram_data: dict | None = None) -> str | None:
     """
     Generate the weekly report.
 
     Uses deterministic mode by default (ADVISOR_MODE=deterministic or unset).
     Falls back to Claude API only when ADVISOR_MODE=claude.
+
+    Args:
+        ngram_data: Optional N-Gram findings dict from compute_ngram_findings().
     """
     mode = _get_advisor_mode()
     if mode == "claude":
         return _claude_report("weekly")
-    return generate_deterministic_report("weekly")
+    return generate_deterministic_report("weekly", ngram_data=ngram_data)
 
 
-def generate_monthly_report() -> str | None:
+def generate_monthly_report(ngram_data: dict | None = None) -> str | None:
     """
     Generate the monthly report.
 
@@ -200,11 +203,14 @@ def generate_monthly_report() -> str | None:
     Falls back to Claude API only when ADVISOR_MODE=claude.
 
     Returns the report file path on success, or None if analysis data is missing.
+
+    Args:
+        ngram_data: Optional N-Gram findings dict from compute_ngram_findings().
     """
     mode = _get_advisor_mode()
     if mode == "claude":
         return _claude_report("monthly")
-    return generate_deterministic_report("monthly")
+    return generate_deterministic_report("monthly", ngram_data=ngram_data)
 
 
 if __name__ == "__main__":

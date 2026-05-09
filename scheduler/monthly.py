@@ -345,7 +345,13 @@ def run_monthly_report():
     log.info("Step 6/6 START: Generating monthly report (deterministic advisor)...")
     try:
         from analysis.advisor import generate_monthly_report
-        report_path = generate_monthly_report()
+        from analysis.rule_advisor import compute_ngram_findings
+        ngram_findings = None
+        try:
+            ngram_findings = compute_ngram_findings(search_terms)
+        except Exception as ngram_exc:  # noqa: BLE001
+            log.warning("N-Gram computation failed (non-fatal): %s", ngram_exc)
+        report_path = generate_monthly_report(ngram_data=ngram_findings)
     except Exception as e:
         log.error(f"Step 6/6 FAILED: Advisor error — {e}")
         finish_run(
