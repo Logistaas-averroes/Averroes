@@ -213,7 +213,7 @@ def test_compute_ngram_findings_returns_none_for_empty_list() -> None:
 
 
 def test_compute_ngram_findings_normalises_windsor_fields() -> None:
-    """Windsor field names (campaign, spend) are normalised before aggregation."""
+    """Windsor field names (campaign, spend) are normalized before aggregation."""
     windsor_rows = [
         {
             "search_term": "freight forwarding software",
