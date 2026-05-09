@@ -78,11 +78,15 @@ def run_weekly_report():
                 )
                 contacts_written = db_writers.write_leads(run_id, contacts)
                 if contacts_batch_id:
+                    contacts_persisted = persistence_succeeded(contacts, contacts_written)
                     db_writers.finish_sync_batch(
                         batch_id=contacts_batch_id,
-                        status="success",
+                        status="success" if contacts_persisted else "failed",
                         row_count=contacts_written,
-                        last_source_date=run_date,
+                        last_source_date=max_source_date(contacts, fallback_date=run_date),
+                        error_message=None if contacts_persisted else (
+                            f"write_leads returned 0 for {len(contacts or [])} fetched contacts"
+                        ),
                     )
 
                 # Track HubSpot deals weekly sync (freshness watermark)
@@ -94,13 +98,17 @@ def run_weekly_report():
                     date_to=run_date,
                     run_id=run_id,
                 )
-                db_writers.write_deals(run_id, deals)  # returns None — use input len for row_count
+                deals_written = db_writers.write_deals(run_id, deals)
                 if deals_batch_id:
+                    deals_persisted = persistence_succeeded(deals, deals_written)
                     db_writers.finish_sync_batch(
                         batch_id=deals_batch_id,
-                        status="success",
-                        row_count=len(deals or []),
-                        last_source_date=run_date,
+                        status="success" if deals_persisted else "failed",
+                        row_count=deals_written,
+                        last_source_date=max_source_date(deals, fallback_date=run_date),
+                        error_message=None if deals_persisted else (
+                            f"write_deals returned 0 for {len(deals or [])} fetched deals"
+                        ),
                     )
             else:
                 log.error("[weekly] DB write after Step 2: write_run returned no run_id")
@@ -122,11 +130,15 @@ def run_weekly_report():
                 geo_count = db_writers.write_geo(run_id, geos)
                 log.info("[weekly] Wrote %d geo rows to database", geo_count)
                 if geo_batch_id:
+                    geo_persisted = persistence_succeeded(geos, geo_count)
                     db_writers.finish_sync_batch(
                         batch_id=geo_batch_id,
-                        status="success",
+                        status="success" if geo_persisted else "failed",
                         row_count=geo_count,
-                        last_source_date=run_date,
+                        last_source_date=max_source_date(geos, fallback_date=run_date),
+                        error_message=None if geo_persisted else (
+                            f"write_geo returned 0 for {len(geos or [])} fetched rows"
+                        ),
                     )
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write geo failed: %s", db_exc)
@@ -145,11 +157,15 @@ def run_weekly_report():
                 kw_count = db_writers.write_keywords(run_id, keywords)
                 log.info("[weekly] Wrote %d keyword rows to database", kw_count)
                 if kw_batch_id:
+                    kw_persisted = persistence_succeeded(keywords, kw_count)
                     db_writers.finish_sync_batch(
                         batch_id=kw_batch_id,
-                        status="success",
+                        status="success" if kw_persisted else "failed",
                         row_count=kw_count,
-                        last_source_date=run_date,
+                        last_source_date=max_source_date(keywords, fallback_date=run_date),
+                        error_message=None if kw_persisted else (
+                            f"write_keywords returned 0 for {len(keywords or [])} fetched rows"
+                        ),
                     )
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write keywords failed: %s", db_exc)
@@ -231,13 +247,17 @@ def run_weekly_report():
                     date_to=run_date,
                     run_id=run_id,
                 )
-                db_writers.write_campaigns(run_id, campaign_rows)
+                campaigns_written = db_writers.write_campaigns(run_id, campaign_rows)
                 if campaigns_batch_id:
+                    campaigns_persisted = persistence_succeeded(campaign_rows, campaigns_written)
                     db_writers.finish_sync_batch(
                         batch_id=campaigns_batch_id,
-                        status="success",
-                        row_count=len(campaign_rows),
+                        status="success" if campaigns_persisted else "failed",
+                        row_count=campaigns_written,
                         last_source_date=run_date,
+                        error_message=None if campaigns_persisted else (
+                            f"write_campaigns returned 0 for {len(campaign_rows)} truth-table rows"
+                        ),
                     )
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write after Step 5 failed: %s", db_exc)

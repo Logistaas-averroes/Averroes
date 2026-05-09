@@ -235,18 +235,21 @@ def update_run(run_id: int, run_data: dict) -> None:
         log.error("update_run failed (run_id=%s): %s", run_id, exc)
 
 
-def write_campaigns(run_id: int, campaigns: list) -> None:
+def write_campaigns(run_id: int, campaigns: list) -> int:
     """Insert campaign rows for this run.
 
     Each item in *campaigns* should be a dict produced by analysis/core.py
     (campaign truth table output).  Missing keys default to None.
+    Returns count of rows inserted (0 for empty input, DB unavailable, or write
+    failure).  Use persistence_succeeded() in the scheduler to distinguish a
+    legitimate zero-row sync from a failed write.
     Never raises.
     """
     if run_id is None:
         log.debug("write_campaigns skipped — run_id is None")
-        return
+        return 0
     if not campaigns:
-        return
+        return 0
     run_date = _today()
     rows = []
     for c in campaigns:
@@ -280,7 +283,7 @@ def write_campaigns(run_id: int, campaigns: list) -> None:
     try:
         with get_conn() as conn:
             if conn is None:
-                return
+                return 0
             with conn.cursor() as cur:
                 cur.executemany(
                     """
@@ -293,8 +296,10 @@ def write_campaigns(run_id: int, campaigns: list) -> None:
                     rows,
                 )
         log.info("Wrote %d campaign rows to database (run_id=%s)", len(rows), run_id)
+        return len(rows)
     except Exception as exc:  # noqa: BLE001
         log.error("write_campaigns failed (run_id=%s): %s", run_id, exc)
+        return 0
 
 
 def write_leads(run_id: int, contacts: list) -> int:
@@ -480,18 +485,21 @@ def write_geo(run_id: int, geo_rows: list) -> int:
         return 0
 
 
-def write_deals(run_id: int, deals: list) -> None:
+def write_deals(run_id: int, deals: list) -> int:
     """Insert deal rows for this run.
 
     Each item in *deals* should be a dict produced by hubspot_pull.py
     (pull_deals_with_gclid output).
+    Returns count of rows inserted (0 for empty input, DB unavailable, or write
+    failure).  Use persistence_succeeded() in the scheduler to distinguish a
+    legitimate zero-row sync from a failed write.
     Never raises.
     """
     if run_id is None:
         log.debug("write_deals skipped — run_id is None")
-        return
+        return 0
     if not deals:
-        return
+        return 0
     run_date = _today()
     rows = []
     for d in deals:
@@ -512,7 +520,7 @@ def write_deals(run_id: int, deals: list) -> None:
     try:
         with get_conn() as conn:
             if conn is None:
-                return
+                return 0
             with conn.cursor() as cur:
                 cur.executemany(
                     """
@@ -525,8 +533,10 @@ def write_deals(run_id: int, deals: list) -> None:
                     rows,
                 )
         log.info("Wrote %d deal rows to database (run_id=%s)", len(rows), run_id)
+        return len(rows)
     except Exception as exc:  # noqa: BLE001
         log.error("write_deals failed (run_id=%s): %s", run_id, exc)
+        return 0
 
 
 def write_keywords(run_id: int, keyword_rows: list) -> int:
