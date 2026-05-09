@@ -82,3 +82,5 @@ ui:
   quality_score:
     strong_min: 8
     medium_min: 5
+  freshness:
+    stale_after_days: 2

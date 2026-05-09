@@ -9,7 +9,11 @@ Checks:
   2. Required configuration files exist.
   3. Required documentation files exist (including PHASE1_PRODUCTION_READINESS.md).
   4. Makefile exists and contains all expected targets.
-  5. render.yaml exists and contains the three cron job definitions.
+  5. In-app APScheduler registration (daily, weekly, monthly jobs).
+     NOTE: The current deployment model is a single Render web service with
+     in-app APScheduler (api/scheduler.py).  Render cron workers are
+     intentionally absent — they are not required and must NOT be re-enabled
+     while in-app scheduling is active, as that would cause duplicate runs.
   6. Scheduler source files exist.
   7. No forbidden Phase 1 write-back modules are present.
   8. scripts/healthcheck.py logic runs without critical failure.
@@ -171,6 +175,7 @@ _REQUIRED_MAKEFILE_TARGETS = [
     "monthly",
     "validate",
     "readiness",
+    "verify-deploy",
     "runs",
 ]
 
@@ -194,31 +199,62 @@ def check_makefile_targets(failures: list) -> None:
             failures.append(f"makefile-target:{target}")
 
 
-# ── 5. render.yaml cron job definitions ──────────────────────────────────────
+# ── 5. APScheduler in-app job registration ───────────────────────────────────
 
-_REQUIRED_RENDER_PATTERNS = [
-    ("daily cron",   r"scheduler/daily\.py"),
-    ("weekly cron",  r"scheduler/weekly\.py"),
-    ("monthly cron", r"scheduler/monthly\.py"),
-]
+_REQUIRED_APSCHEDULER_JOBS = {"daily", "weekly", "monthly"}
 
 
-def check_render_yaml(failures: list) -> None:
-    _header("render.yaml — Cron Job Definitions")
-    if not os.path.isfile("render.yaml"):
-        _fail("render.yaml", "file not found")
-        failures.append("file:render.yaml")
+def check_apscheduler(failures: list) -> None:
+    _header("APScheduler — In-App Job Registration")
+
+    if not os.path.isfile("api/scheduler.py"):
+        _fail("api/scheduler.py", "file not found")
+        failures.append("file:api/scheduler.py")
         return
 
-    with open("render.yaml") as fh:
-        content = fh.read()
+    # Import the scheduler module without starting the background scheduler.
+    # The module-level code only sets up constants and a None _scheduler handle;
+    # it does not spawn any threads or connect to any external service.
+    # Use spec_from_file_location so the import succeeds regardless of whether
+    # the repo root is on sys.path (the script may be run as scripts/phase1_readiness.py).
+    spec = importlib.util.spec_from_file_location("api.scheduler", "api/scheduler.py")
+    if spec is None:
+        _fail("api.scheduler import", "unable to create module spec from api/scheduler.py")
+        failures.append("apscheduler:import-failed")
+        return
+    if spec.loader is None:
+        _fail("api.scheduler import", "module spec for api/scheduler.py has no loader")
+        failures.append("apscheduler:import-failed")
+        return
+    try:
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as exc:
+        _fail("api.scheduler import", str(exc))
+        failures.append("apscheduler:import-failed")
+        return
 
-    for label, pattern in _REQUIRED_RENDER_PATTERNS:
-        if re.search(pattern, content):
-            _pass(f"render.yaml: {label}")
+    _pass("api.scheduler", "imported successfully")
+
+    if not hasattr(mod, "get_registered_job_ids"):
+        _fail("api.scheduler.get_registered_job_ids()", "helper not found in module")
+        failures.append("apscheduler:no-helper")
+        return
+
+    try:
+        job_ids = set(mod.get_registered_job_ids())
+    except Exception as exc:
+        _fail("api.scheduler.get_registered_job_ids()", str(exc))
+        failures.append("apscheduler:get-ids-failed")
+        return
+
+    missing = _REQUIRED_APSCHEDULER_JOBS - job_ids
+    for job_id in sorted(_REQUIRED_APSCHEDULER_JOBS):
+        if job_id in missing:
+            _fail(f"APScheduler job: {job_id}", "not registered")
+            failures.append(f"apscheduler:missing-job:{job_id}")
         else:
-            _fail(f"render.yaml: {label}", f"pattern '{pattern}' not found")
-            failures.append(f"render:{label}")
+            _pass(f"APScheduler job: {job_id}", "registered")
 
 
 # ── 6. Scheduler source files ─────────────────────────────────────────────────
@@ -365,7 +401,7 @@ def main() -> int:
     check_config_files(critical_failures)
     check_docs(critical_failures)
     check_makefile_targets(critical_failures)
-    check_render_yaml(critical_failures)
+    check_apscheduler(critical_failures)
     check_source_files(critical_failures)
     check_no_forbidden_modules(critical_failures)
     check_healthcheck(critical_failures)

@@ -40,7 +40,15 @@ _TZ = ZoneInfo("Asia/Amman")
 # runs and manual runs share the same lock and cannot overlap.
 # ---------------------------------------------------------------------------
 
-_job_state: dict[str, bool] = {"daily": False, "weekly": False, "monthly": False}
+# ---------------------------------------------------------------------------
+# Canonical job IDs — single source of truth for all three Phase 1 jobs.
+# Used by _job_state, start_scheduler(), get_registered_job_ids(), and
+# get_scheduler_status() to avoid duplication that could cause drift.
+# ---------------------------------------------------------------------------
+
+JOB_IDS: tuple[str, str, str] = ("daily", "weekly", "monthly")
+
+_job_state: dict[str, bool] = {job_id: False for job_id in JOB_IDS}
 _run_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
@@ -185,6 +193,16 @@ def stop_scheduler() -> None:
 # Status helper — called by GET /scheduler/status endpoint.
 # ---------------------------------------------------------------------------
 
+def get_registered_job_ids() -> list[str]:
+    """Return the IDs of all Phase 1 scheduled jobs.
+
+    Safe to call without starting the scheduler — does not create background
+    threads or trigger any job execution.  Used by the readiness check to
+    verify that the in-app APScheduler model is correctly declared.
+    """
+    return list(JOB_IDS)
+
+
 def get_scheduler_status() -> dict:
     """Return current scheduler state and next run times for all three jobs."""
     if _scheduler is None or not _scheduler.running:
@@ -192,12 +210,12 @@ def get_scheduler_status() -> dict:
             "status": "not_running",
             "jobs": [
                 {"job": job_id, "schedule": _SCHEDULE_DESCRIPTIONS[job_id], "next_run": None}
-                for job_id in ("daily", "weekly", "monthly")
+                for job_id in JOB_IDS
             ],
         }
 
     jobs = []
-    for job_id in ("daily", "weekly", "monthly"):
+    for job_id in JOB_IDS:
         job = _scheduler.get_job(job_id)
         next_run: str | None = None
         if job and job.next_run_time:

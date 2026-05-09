@@ -1539,6 +1539,9 @@ _UI_THRESHOLDS_DEFAULTS: dict[str, Any] = {
         "strong_min": 8,
         "medium_min": 5,
     },
+    "freshness": {
+        "stale_after_days": 2,
+    },
 }
 
 
@@ -1580,6 +1583,7 @@ def _load_ui_thresholds() -> dict[str, Any]:
         junk_rate     = ui_section.get("junk_rate",     {}) or {}
         spend         = ui_section.get("spend",         {}) or {}
         quality_score = ui_section.get("quality_score", {}) or {}
+        freshness     = ui_section.get("freshness",     {}) or {}
 
         # ── junk_rate ──────────────────────────────────────────────────────
         low_pct,  fb_low  = _validate_num(junk_rate.get("low_pct"),  defaults["junk_rate"]["low_pct"],  lo=0, hi=100)
@@ -1615,6 +1619,15 @@ def _load_ui_thresholds() -> dict[str, Any]:
             medium_min = float(defaults["quality_score"]["medium_min"])
             using_defaults = True
 
+        # ── freshness ──────────────────────────────────────────────────────
+        stale_after_days, fb_sad = _validate_num(
+            freshness.get("stale_after_days"),
+            defaults["freshness"]["stale_after_days"],
+            lo=1,
+        )
+        if fb_sad:
+            using_defaults = True
+
     except Exception as exc:  # noqa: BLE001
         log.warning("[/api/config/ui-thresholds] YAML load failed, using defaults: %s", exc)
         return {**_UI_THRESHOLDS_DEFAULTS, "using_defaults": True}
@@ -1630,6 +1643,9 @@ def _load_ui_thresholds() -> dict[str, Any]:
         "quality_score": {
             "strong_min": _int_if_whole(strong_min),
             "medium_min": _int_if_whole(medium_min),
+        },
+        "freshness": {
+            "stale_after_days": _int_if_whole(stale_after_days),
         },
     }
     if using_defaults:
