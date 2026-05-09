@@ -143,7 +143,7 @@ def compute_monitoring_status(
 
     if any_repeated_failure:
         severity = "red"
-    elif any_stale or warnings:
+    elif any_stale:
         severity = "yellow"
     else:
         severity = "green"

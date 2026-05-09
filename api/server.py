@@ -4420,6 +4420,7 @@ def api_monitoring_status(user: dict = Depends(require_auth)) -> dict[str, Any]:
             else:
                 with conn.cursor() as cur:
                     cur.execute(
+                        # PostgreSQL-specific interval syntax: INTERVAL '1 day' * N
                         """
                         SELECT run_type, started_at, finished_at, status
                         FROM runs
