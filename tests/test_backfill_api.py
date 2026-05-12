@@ -41,6 +41,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.backfill import run_backfill_from_options
 
+# Unsafe wording that must never appear in API responses.
+_UNSAFE_API_PHRASES = [
+    "push negative", "apply negative", "pause campaign",
+    "send to google ads", "send to hubspot", "upload conversion",
+    "change bid", "change budget",
+]
+
+
+@pytest.fixture(autouse=True)
+def _set_test_env():
+    """Ensure required env vars are present for all tests in this module."""
+    import os
+    os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
+    os.environ.setdefault("APP_ENV", "development")
+
 
 # ---------------------------------------------------------------------------
 # run_backfill_from_options — input validation
@@ -242,13 +257,8 @@ def _set_admin_session(client):
     a real AUTH_USERS_JSON environment variable.
     """
     from api.auth import set_session
-    from fastapi.responses import JSONResponse
-
-    # Build a temporary Response object to get the cookie value.
     from starlette.responses import Response as StarletteResponse
-    import os
-    os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
-    os.environ.setdefault("APP_ENV", "development")
+
     r = StarletteResponse()
     set_session(r, "testadmin", "admin")
     cookie_header = r.headers.get("set-cookie", "")
@@ -269,9 +279,6 @@ class TestBackfillRunEndpoint:
         assert res.status_code in (401, 403)
 
     def test_invalid_source_returns_422(self, client):
-        import os
-        os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
-        os.environ.setdefault("APP_ENV", "development")
         cookie_val = _set_admin_session(client)
         cookies = {"ads_session": cookie_val} if cookie_val else {}
 
@@ -288,9 +295,6 @@ class TestBackfillRunEndpoint:
         assert res.status_code == 422
 
     def test_invalid_date_range_returns_422(self, client):
-        import os
-        os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
-        os.environ.setdefault("APP_ENV", "development")
         cookie_val = _set_admin_session(client)
         cookies = {"ads_session": cookie_val} if cookie_val else {}
 
@@ -307,9 +311,6 @@ class TestBackfillRunEndpoint:
         assert res.status_code == 422
 
     def test_invalid_chunk_returns_422(self, client):
-        import os
-        os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
-        os.environ.setdefault("APP_ENV", "development")
         cookie_val = _set_admin_session(client)
         cookies = {"ads_session": cookie_val} if cookie_val else {}
 
@@ -327,9 +328,6 @@ class TestBackfillRunEndpoint:
         assert res.status_code == 422
 
     def test_dry_run_calls_helper_with_dry_run_true(self, client):
-        import os
-        os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
-        os.environ.setdefault("APP_ENV", "development")
         cookie_val = _set_admin_session(client)
         if not cookie_val:
             pytest.skip("Could not create session cookie")
@@ -371,9 +369,6 @@ class TestBackfillRunEndpoint:
         assert mock_fn.call_args.kwargs.get("dry_run") is True
 
     def test_response_contains_required_fields(self, client):
-        import os
-        os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
-        os.environ.setdefault("APP_ENV", "development")
         cookie_val = _set_admin_session(client)
         if not cookie_val:
             pytest.skip("Could not create session cookie")
@@ -412,9 +407,6 @@ class TestBackfillRunEndpoint:
 
     def test_response_wording_safe(self, client):
         """API response must not contain unsafe action wording."""
-        import os
-        os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
-        os.environ.setdefault("APP_ENV", "development")
         cookie_val = _set_admin_session(client)
         if not cookie_val:
             pytest.skip("Could not create session cookie")
@@ -435,12 +427,7 @@ class TestBackfillRunEndpoint:
             pytest.skip("Session cookie not accepted in test environment")
 
         body = res.text.lower()
-        unsafe_phrases = [
-            "push negative", "apply negative", "pause campaign",
-            "send to google ads", "send to hubspot", "upload conversion",
-            "change bid", "change budget",
-        ]
-        for phrase in unsafe_phrases:
+        for phrase in _UNSAFE_API_PHRASES:
             assert phrase not in body, f"unsafe phrase found in response: {phrase!r}"
 
 
@@ -450,9 +437,6 @@ class TestBackfillStatusEndpoint:
         assert res.status_code in (401, 403)
 
     def test_authenticated_returns_running_and_latest(self, client):
-        import os
-        os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
-        os.environ.setdefault("APP_ENV", "development")
         cookie_val = _set_admin_session(client)
         if not cookie_val:
             pytest.skip("Could not create session cookie")

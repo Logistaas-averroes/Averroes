@@ -4505,7 +4505,7 @@ def api_backfill_run(body: BackfillRunRequest, request: Request) -> dict[str, An
     """
     Trigger a historical backfill run.
 
-    Admin-only. Local DB writes only (when dry_run=false).
+    Admin-only. Local DB writes only (when dry_run=False).
     NEVER writes to Google Ads or HubSpot.
 
     Requires admin session or ADMIN_API_TOKEN.

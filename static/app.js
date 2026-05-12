@@ -3918,7 +3918,7 @@ async function runBackfillFromUI(e) {
     showBackfillError(errorEl, "Date to is required.");
     return;
   }
-  if (dateFrom > dateTo) {
+  if (new Date(dateFrom) > new Date(dateTo)) {
     showBackfillError(errorEl, "Date from must be on or before date to.");
     return;
   }
