@@ -192,6 +192,14 @@
             <span class="nav-item__label">System Health</span>
           </a>
         </li>
+        <li id="nav-backfill-item">
+          <a class="nav-item" data-page="backfill" href="#" role="button" tabindex="0" aria-label="Historical Backfill">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            </span>
+            <span class="nav-item__label">Historical Backfill</span>
+          </a>
+        </li>
       </ul>
 
       <div class="sidebar__footer">
@@ -919,6 +927,101 @@
           </div>
         </div>
 
+      </section>
+
+      <!-- Historical Backfill (admin-only) -->
+      <section id="page-backfill" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Historical Backfill</h1>
+          <p class="page-subtitle">Admin-only manual trigger for the historical data ingestion framework.</p>
+        </header>
+
+        <div class="read-only-notice" role="note">
+          This pulls historical data into the local system only. It does not modify Google Ads, HubSpot, campaigns, bids, budgets, contacts, deals, or negative keywords.
+        </div>
+
+        <div class="panel" id="backfill-panel">
+          <div class="panel__header">
+            <span class="panel__header-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            </span>
+            Run Backfill
+          </div>
+          <div class="panel__body">
+            <form id="backfill-form" class="backfill-form" novalidate>
+
+              <div class="backfill-form__row">
+                <div class="backfill-form__field">
+                  <label for="backfill-source" class="backfill-form__label">Source</label>
+                  <select id="backfill-source" class="waste-filter-select backfill-form__select" aria-label="Backfill source">
+                    <option value="all">All (Google Ads + HubSpot)</option>
+                    <option value="google_ads">Google Ads — Windsor</option>
+                    <option value="hubspot">HubSpot</option>
+                  </select>
+                </div>
+                <div class="backfill-form__field">
+                  <label for="backfill-chunk" class="backfill-form__label">Chunk size</label>
+                  <select id="backfill-chunk" class="waste-filter-select backfill-form__select" aria-label="Chunk size">
+                    <option value="monthly">Monthly (recommended)</option>
+                    <option value="weekly">Weekly</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="backfill-form__row">
+                <div class="backfill-form__field">
+                  <label for="backfill-date-from" class="backfill-form__label">Date from <span class="backfill-form__required">*</span></label>
+                  <input type="date" id="backfill-date-from" class="backfill-form__input" aria-label="Backfill start date" required />
+                </div>
+                <div class="backfill-form__field">
+                  <label for="backfill-date-to" class="backfill-form__label">Date to <span class="backfill-form__required">*</span></label>
+                  <input type="date" id="backfill-date-to" class="backfill-form__input" aria-label="Backfill end date" required />
+                </div>
+                <div class="backfill-form__field backfill-form__field--narrow">
+                  <label for="backfill-max-chunks" class="backfill-form__label">Max chunks</label>
+                  <input type="number" id="backfill-max-chunks" class="backfill-form__input" min="1" step="1" placeholder="No limit" aria-label="Maximum chunks per dataset (optional)" />
+                </div>
+              </div>
+
+              <div class="backfill-form__row backfill-form__row--check">
+                <label class="backfill-form__checkbox-label">
+                  <input type="checkbox" id="backfill-dry-run" checked />
+                  <span>Dry run — print plan only; no API calls; no database writes</span>
+                </label>
+              </div>
+
+              <div class="backfill-form__error" id="backfill-form-error" hidden></div>
+
+              <div class="backfill-form__actions">
+                <button type="submit" id="backfill-run-btn" class="btn btn--primary">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                  Run Backfill
+                </button>
+              </div>
+
+            </form>
+          </div>
+        </div>
+
+        <div class="run-feedback" id="backfill-feedback" hidden></div>
+
+        <!-- Latest Backfill Summary -->
+        <div class="panel" id="backfill-summary-panel" hidden>
+          <div class="panel__header">
+            <span class="panel__header-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+            </span>
+            Latest Backfill Summary
+          </div>
+          <div class="panel__body" id="backfill-summary-body">
+            <p class="empty-state">No backfill run recorded this session.</p>
+          </div>
+        </div>
+
+        <p class="grace-note">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          This panel calls the same backfill framework as the CLI (<code>python -m scripts.backfill</code>). Dry run is always safe — it prints the plan with no API calls and no database writes. Use local persistence mode only after verifying the plan with dry run.
+        </p>
       </section>
 
     </div><!-- /.main-content -->
