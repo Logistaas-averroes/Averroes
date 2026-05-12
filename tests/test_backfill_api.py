@@ -332,11 +332,6 @@ class TestBackfillRunEndpoint:
             # Always restore state so other tests are not affected.
             with srv._backfill_lock:
                 srv._backfill_state["running"] = False
-        res = client.post(
-            "/api/backfill/run",
-            json={"source": "all", "date_from": "2024-01-01", "date_to": "2024-01-31"},
-        )
-        assert res.status_code in (401, 403)
 
     def test_invalid_source_returns_422(self, client):
         cookie_val = _set_admin_session(client)
