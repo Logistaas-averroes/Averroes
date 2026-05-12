@@ -514,9 +514,16 @@ def _patch_all_datasets_success(
     )
 
     # HubSpot connector
+    # contacts_pull is used by both the hubspot/contacts sync and as the
+    # contact-fetch step within the hubspot/deals sync.
+    contacts_pull_fn = contacts_pull or _default_pull
+    if deals_contacts_pull is not None:
+        # When a separate deals-contacts pull is specified, use it only if no
+        # contacts_pull override was given.
+        contacts_pull_fn = contacts_pull or deals_contacts_pull or _default_pull
     monkeypatch.setattr(
         "connectors.hubspot_pull.pull_paid_search_contacts_in_range",
-        contacts_pull or (deals_contacts_pull if deals_contacts_pull else _default_pull),
+        contacts_pull_fn,
     )
     monkeypatch.setattr(
         "connectors.hubspot_pull.pull_deals_with_gclid",

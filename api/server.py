@@ -567,12 +567,24 @@ def run_incremental_sync(request: Request) -> dict[str, Any]:
         result = run_daily_incremental_sync(run_reason="manual")
         finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         log.info("[run/incremental-sync] succeeded, finished at %s", finished_at)
+        # Strip per-dataset error strings before returning to client; admin can
+        # inspect detailed errors via logs.  Status fields are safe to surface.
+        safe_datasets = {
+            k: {ek: ev for ek, ev in v.items() if ek != "error"}
+            for k, v in result.get("datasets", {}).items()
+        }
         return {
             "status": "success",
             "job": "daily_incremental_sync",
             "started_at": started_at,
             "finished_at": finished_at,
-            "result": result,
+            "result": {
+                "status": result.get("status"),
+                "run_type": result.get("run_type"),
+                "lookback": result.get("lookback"),
+                "datasets": safe_datasets,
+                "error_count": len(result.get("errors", [])),
+            },
         }
     except Exception as exc:  # noqa: BLE001
         finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
