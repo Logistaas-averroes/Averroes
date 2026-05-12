@@ -46,7 +46,7 @@ _TZ = ZoneInfo("Asia/Amman")
 # get_scheduler_status() to avoid duplication that could cause drift.
 # ---------------------------------------------------------------------------
 
-JOB_IDS: tuple[str, str, str] = ("daily", "weekly", "monthly")
+JOB_IDS: tuple[str, str, str, str] = ("daily", "weekly", "monthly", "daily_incremental_sync")
 
 _job_state: dict[str, bool] = {job_id: False for job_id in JOB_IDS}
 _run_lock = threading.Lock()
@@ -62,6 +62,7 @@ _SCHEDULE_DESCRIPTIONS: dict[str, str] = {
     "daily": "06:00 Asia/Amman (03:00 UTC)",
     "weekly": "Monday 07:00 Asia/Amman (04:00 UTC)",
     "monthly": "1st of month 08:00 Asia/Amman (05:00 UTC)",
+    "daily_incremental_sync": "09:00 Asia/Amman (06:00 UTC)",
 }
 
 
@@ -129,6 +130,29 @@ def _run_monthly_scheduled() -> None:
             _job_state["monthly"] = False
 
 
+def _run_daily_incremental_sync_scheduled() -> None:
+    """Scheduled wrapper for the daily incremental sync (9 AM Asia/Amman)."""
+    with _run_lock:
+        if _job_state["daily_incremental_sync"]:
+            log.warning(
+                "[scheduler/daily_incremental_sync] skipped — already running "
+                "(manual or previous scheduled run still active)"
+            )
+            return
+        _job_state["daily_incremental_sync"] = True
+
+    log.info("[scheduler/daily_incremental_sync] started (scheduled)")
+    try:
+        from scheduler.incremental_sync import run_daily_incremental_sync  # noqa: PLC0415
+        run_daily_incremental_sync(run_reason="scheduled")
+        log.info("[scheduler/daily_incremental_sync] succeeded")
+    except Exception as exc:  # noqa: BLE001
+        log.error("[scheduler/daily_incremental_sync] failed: %s", exc, exc_info=True)
+    finally:
+        with _run_lock:
+            _job_state["daily_incremental_sync"] = False
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle helpers — called by api/server.py lifespan handler.
 # ---------------------------------------------------------------------------
@@ -173,9 +197,20 @@ def start_scheduler() -> None:
         misfire_grace_time=3600,
     )
 
+    # Daily incremental sync — every day at 09:00 Asia/Amman.
+    _scheduler.add_job(
+        _run_daily_incremental_sync_scheduled,
+        trigger=CronTrigger(hour=9, minute=0, timezone=_TZ),
+        id="daily_incremental_sync",
+        name="Daily Incremental Sync",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
     _scheduler.start()
     log.info(
-        "[scheduler] started — daily 06:00, weekly Mon 07:00, monthly 1st 08:00 (Asia/Amman / UTC+3)"
+        "[scheduler] started — daily 06:00, weekly Mon 07:00, monthly 1st 08:00, "
+        "daily_incremental_sync 09:00 (Asia/Amman / UTC+3)"
     )
 
 
