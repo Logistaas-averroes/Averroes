@@ -2899,6 +2899,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]
         r = dict(zip(cols, row))
         key = (r["source"], r["dataset"])
         db_map[key] = {
+            "dataset_key":             f"{r['source']}/{r['dataset']}",
             "source":                  r["source"],
             "dataset":                 r["dataset"],
             "status":                  r["status"],
@@ -2920,6 +2921,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]
             datasets.append(db_map[key])
         else:
             datasets.append({
+                "dataset_key":             f"{source}/{dataset}",
                 "source":                  source,
                 "dataset":                 dataset,
                 "status":                  "unknown",

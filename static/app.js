@@ -52,6 +52,34 @@ let _staleAfterDays = 2;
 // Latest run record fetched by loadDataFreshness() — shared with renderRunMeta().
 let _latestRunForMeta = null;
 
+// ── Dataset-to-page mapping (PR-ADS-074) ──────────────────────────────────
+//
+// Maps each page's sectionKey (used as the run-meta-{sectionKey} element ID)
+// to the canonical dataset keys that power it.  Keys are "source/dataset"
+// strings matching the sync_state table values returned by /api/datasets/freshness.
+//
+// Derived pages (ngrams, waste) share their source dataset (windsor/search_terms)
+// because no separate freshness record exists for the derived output.
+const PAGE_DATASET_MAP = {
+  campaigns:         ["windsor/campaigns"],
+  waste:             ["windsor/search_terms"],   // waste_terms derived from search_terms
+  search_terms:      ["windsor/search_terms"],
+  ngrams:            ["windsor/search_terms"],   // n-grams derived from search_terms
+  geo:               ["windsor/geo"],
+  keywords:          ["windsor/keywords"],
+  lead_quality:      ["hubspot/contacts"],
+  deals:             ["hubspot/deals"],
+  gclid_attribution: ["gclid/matches"],
+  in_progress_leads: ["hubspot/contacts"],
+  action_queue:      ["windsor/campaigns", "hubspot/contacts", "hubspot/deals"],
+  reports:           ["windsor/campaigns", "hubspot/contacts", "hubspot/deals", "windsor/search_terms"],
+};
+
+// Pages whose output is derived/computed from the source datasets above rather
+// than being a direct read of the synced table.  Strip copy uses "Derived from"
+// wording for these rather than "Dataset freshness:".
+const DERIVED_DATASET_PAGES = new Set(["ngrams", "waste"]);
+
 // ── Session state ──────────────────────────────────────────────────────────
 
 let _currentUser   = null;  // { username, role } or null
@@ -120,6 +148,10 @@ let reportCopyFeedbackTimer = null;
 // Dataset Freshness state
 let datasetFreshnessRows = [];
 let datasetFreshnessStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
+
+// Per-dataset freshness cache — populated by loadDatasetFreshness() and used by
+// renderPageDatasetFreshness().  Keyed by "source/dataset" (e.g. "windsor/campaigns").
+let _datasetFreshnessByKey = {};
 
 // ── Utility helpers ────────────────────────────────────────────────────────
 
@@ -359,6 +391,10 @@ function showApp(user) {
   loadSidebarHealth();
   loadDataFreshness();
   loadMonitoringStatus();
+  // Pre-fetch dataset freshness cache so per-page strips are ready before the
+  // user navigates to any data page.  loadDatasetFreshness() guards against
+  // missing DOM elements so it is safe to call outside the Health page.
+  loadDatasetFreshness();
 }
 
 function applySidebarUser(user) {
@@ -696,7 +732,140 @@ function renderRunMeta(sectionKey) {
   }
 }
 
-// ── Reports page ───────────────────────────────────────────────────────────
+// ── Per-page dataset-level freshness strip (PR-ADS-074) ───────────────────
+//
+// Renders a compact dataset-specific freshness line into the run-meta-{sectionKey}
+// placeholder for the given page.  Uses _datasetFreshnessByKey (populated by
+// loadDatasetFreshness()) and PAGE_DATASET_MAP to show the exact dataset(s) that
+// power each page rather than the generic latest-run timestamp.
+//
+// Falls back to renderRunMeta() when the cache is not yet populated so that
+// pages always show something even on first load.
+//
+// Status labels are intentionally consistent with the System Health dataset
+// freshness table: Fresh / Stale / Failed / Running / Unknown.
+
+function _sourceDisplayName(source) {
+  const names = { windsor: "Windsor", hubspot: "HubSpot", gclid: "GCLID" };
+  return names[source] || escapeHtml(source);
+}
+
+function _datasetDisplayName(key) {
+  const labels = {
+    "windsor/campaigns":    "Campaign data",
+    "windsor/search_terms": "Search-term data",
+    "windsor/keywords":     "Keyword data",
+    "windsor/geo":          "Geo data",
+    "hubspot/contacts":     "Contacts data",
+    "hubspot/deals":        "Deals data",
+    "gclid/matches":        "Attribution data",
+  };
+  return labels[key] || escapeHtml(key);
+}
+
+// Returns the human-readable "Derived from …" prefix for derived pages.
+function _derivedPageLabel(sectionKey) {
+  const labels = {
+    ngrams: "Derived from search terms",
+    waste:  "Derived from search terms",
+  };
+  return labels[sectionKey] || "Derived dataset";
+}
+
+function renderPageDatasetFreshness(sectionKey) {
+  const el = document.getElementById(`run-meta-${sectionKey}`);
+  if (!el) return;
+
+  const datasetKeys = PAGE_DATASET_MAP[sectionKey];
+  // No mapping → fall back to run-based strip (e.g. scheduler, health).
+  if (!datasetKeys) {
+    renderRunMeta(sectionKey);
+    return;
+  }
+
+  // Cache not yet populated → fall back to run-based strip.  After
+  // loadDatasetFreshness() resolves it calls renderPageDatasetFreshness for
+  // the visible page, so this is only ever a brief fallback.
+  if (Object.keys(_datasetFreshnessByKey).length === 0) {
+    renderRunMeta(sectionKey);
+    return;
+  }
+
+  const isDerived = DERIVED_DATASET_PAGES.has(sectionKey);
+
+  // ── Single-dataset pages ──────────────────────────────────────────────────
+  if (datasetKeys.length === 1) {
+    const key           = datasetKeys[0];
+    const row           = _datasetFreshnessByKey[key];
+    const displayStatus = row ? datasetDisplayStatus(row) : "unknown";
+    const source        = row ? (row.source || "") : "";
+    const dsName        = _datasetDisplayName(key);
+    const dateStr       = (row && row.last_successful_sync_at)
+      ? fmtDate(row.last_successful_sync_at) : null;
+
+    const prefix = isDerived ? _derivedPageLabel(sectionKey) : `Dataset freshness: ${dsName}`;
+
+    if (!row || displayStatus === "unknown") {
+      el.textContent = `${prefix} · Unknown (freshness unverified)`;
+      el.className   = "run-meta";
+      return;
+    }
+
+    if (displayStatus === "success") {
+      const syncPart = dateStr ? ` synced ${dateStr}` : "";
+      el.textContent = `${prefix}${syncPart} · Source: ${_sourceDisplayName(source)} · Fresh`;
+      el.className   = "run-meta is-fresh";
+    } else if (displayStatus === "stale") {
+      const syncPart = dateStr ? ` last synced ${dateStr}` : "";
+      el.textContent = `${prefix}${syncPart} · Source: ${_sourceDisplayName(source)} · Stale`;
+      el.className   = "run-meta is-stale";
+    } else if (displayStatus === "failed") {
+      el.textContent = `${prefix} · Latest sync failed · Check System Health · Failed`;
+      el.className   = "run-meta is-stale";
+    } else if (displayStatus === "running") {
+      el.textContent = `${prefix} · Sync in progress · Source: ${_sourceDisplayName(source)} · Running`;
+      el.className   = "run-meta";
+    } else {
+      el.textContent = `${prefix} · Unknown (freshness unverified)`;
+      el.className   = "run-meta";
+    }
+    return;
+  }
+
+  // ── Multi-dataset pages ───────────────────────────────────────────────────
+  const statuses = datasetKeys.map((key) => {
+    const row = _datasetFreshnessByKey[key];
+    return row ? datasetDisplayStatus(row) : "unknown";
+  });
+
+  const freshCount   = statuses.filter((s) => s === "success").length;
+  const staleCount   = statuses.filter((s) => s === "stale").length;
+  const failedCount  = statuses.filter((s) => s === "failed").length;
+  const runningCount = statuses.filter((s) => s === "running").length;
+  const unknownCount = statuses.filter((s) => s === "unknown").length;
+  const totalCount   = datasetKeys.length;
+
+  const statusLabel = {
+    success: "Fresh", stale: "Stale", failed: "Failed", running: "Running", unknown: "Unknown",
+  };
+  const detail = datasetKeys.map((key, i) => {
+    return `${_datasetDisplayName(key)}: ${statusLabel[statuses[i]] || "Unknown"}`;
+  }).join(" · ");
+
+  const sourceWord  = totalCount === 1 ? "source" : "sources";
+  const summaryParts = [`Dataset freshness: ${totalCount} ${sourceWord}`];
+  if (freshCount  > 0) summaryParts.push(`${freshCount} fresh`);
+  if (staleCount  > 0) summaryParts.push(`${staleCount} stale`);
+  if (failedCount > 0) summaryParts.push(`${failedCount} failed`);
+  if (runningCount > 0) summaryParts.push(`${runningCount} running`);
+  if (unknownCount > 0) summaryParts.push(`${unknownCount} unknown`);
+  const summary = summaryParts.join(" · ");
+
+  el.textContent = `${summary} · ${detail}`;
+  el.className   = (failedCount > 0 || staleCount > 0)
+    ? "run-meta is-stale"
+    : (freshCount === totalCount ? "run-meta is-fresh" : "run-meta");
+}
 
 function updateReportActionButtons() {
   const copyBtn    = document.getElementById("report-copy-btn");
@@ -1310,7 +1479,7 @@ function renderRunHistoryItem(run) {
 // ── Campaigns page ─────────────────────────────────────────────────────────
 
 async function loadCampaigns() {
-  renderRunMeta("campaigns");
+  renderPageDatasetFreshness("campaigns");
   const tableEl = document.getElementById("camp-table-body");
   const scaleEl = document.getElementById("vc-scale");
   const fixEl   = document.getElementById("vc-fix");
@@ -1436,7 +1605,7 @@ function junkCategoryBadge(cat) {
 }
 
 async function loadWaste() {
-  renderRunMeta("waste");
+  renderPageDatasetFreshness("waste");
   const days = getSelectedDays();
 
   const tableEl = document.getElementById("waste-table-body");
@@ -1625,7 +1794,7 @@ function copyWasteTerms() {
 // ── Lead Quality page ──────────────────────────────────────────────────────
 
 async function loadLeads() {
-  renderRunMeta("lead_quality");
+  renderPageDatasetFreshness("lead_quality");
   const tableEl    = document.getElementById("leads-table-body");
   const totalEl    = document.getElementById("leads-total");
   const sqlsEl     = document.getElementById("leads-sqls");
@@ -1748,7 +1917,7 @@ async function loadLeads() {
 // ── Deals page ─────────────────────────────────────────────────────────────
 
 async function loadDeals() {
-  renderRunMeta("deals");
+  renderPageDatasetFreshness("deals");
   const funnelEl = document.getElementById("deals-funnel-body");
   const tableEl  = document.getElementById("deals-table-body");
   const EMPTY    = "No GCLID-matched deals found yet. Deals appear here once HubSpot deal attribution is active.";
@@ -1850,7 +2019,7 @@ function normalizeCountryKey(country) {
 // ── Geo Intelligence page ──────────────────────────────────────────────────
 
 async function loadGeo() {
-  renderRunMeta("geo");
+  renderPageDatasetFreshness("geo");
   const tableEl = document.getElementById("geo-table-body");
   const mapEl   = document.getElementById("geo-map");
   const mapFallbackEl = document.getElementById("geo-map-fallback");
@@ -2286,7 +2455,7 @@ function _updateSearchTermsPaginationVisibility() {
 async function loadSearchTerms({ reset = false, cursor = null } = {}) {
   if (searchTermsStatus === "loading") return;
 
-  if (reset) renderRunMeta("search_terms");
+  if (reset) renderPageDatasetFreshness("search_terms");
 
   searchTermsStatus = "loading";
 
@@ -2624,7 +2793,7 @@ function buildNgramParams() {
 
 async function loadNgrams() {
   if (ngramIsLoading) return;
-  renderRunMeta("ngrams");
+  renderPageDatasetFreshness("ngrams");
   ngramIsLoading = true;
   const requestId = ++ngramRequestId;
   ngramStatus = "loading";
@@ -3167,7 +3336,7 @@ function renderGclidAttributionTable() {
 async function loadGclidAttribution({ reset = false, cursor = null } = {}) {
   if (gclidStatus === "loading") return;
 
-  if (reset) renderRunMeta("gclid_attribution");
+  if (reset) renderPageDatasetFreshness("gclid_attribution");
 
   gclidStatus = "loading";
 
@@ -3395,7 +3564,7 @@ async function loadGclidCoverageForAttribution() {
 }
 
 async function loadKeywords() {
-  renderRunMeta("keywords");
+  renderPageDatasetFreshness("keywords");
   const tableEl   = document.getElementById("kw-table-body");
   const summaryEl = document.getElementById("kw-matchtype-summary");
   if (summaryEl) summaryEl.innerHTML = "";
@@ -3702,7 +3871,7 @@ const ACTIVE_MDR_STATUSES = new Set([
 ]);
 
 async function loadOpportunities() {
-  renderRunMeta("in_progress_leads");
+  renderPageDatasetFreshness("in_progress_leads");
   const el = document.getElementById("opps-body");
   if (!el) return;
 
@@ -4168,13 +4337,14 @@ function datasetRelatedPage(source, dataset) {
 
 // Derive display status — adds "stale" as a UI-only concept for old successes.
 // Threshold is display-only; it does not change backend sync_state.
-const DATASET_STALE_THRESHOLD_DAYS = 2;
+// Uses config-driven _staleAfterDays (updated from /api/config/ui-thresholds)
+// so dataset-level strips and the System Health table share the same threshold.
 
 function datasetDisplayStatus(row) {
   if (row.status !== "success") return row.status || "unknown";
   if (!row.last_successful_sync_at) return "success";
   const ageDays = (Date.now() - new Date(row.last_successful_sync_at).getTime()) / 86400000;
-  if (ageDays > DATASET_STALE_THRESHOLD_DAYS) return "stale";
+  if (ageDays > _staleAfterDays) return "stale";
   return "success";
 }
 
@@ -4350,11 +4520,19 @@ async function loadDatasetFreshness() {
     if (data.db_unavailable) {
       datasetFreshnessStatus = "db_unavailable";
       datasetFreshnessRows = [];
+      _datasetFreshnessByKey = {};
       renderDatasetFreshness(data);
       return;
     }
 
     datasetFreshnessRows = data.datasets || [];
+
+    // Populate per-key lookup used by renderPageDatasetFreshness().
+    _datasetFreshnessByKey = {};
+    for (const row of datasetFreshnessRows) {
+      const key = `${row.source}/${row.dataset}`;
+      _datasetFreshnessByKey[key] = row;
+    }
 
     if (!datasetFreshnessRows.length) {
       datasetFreshnessStatus = "empty";
@@ -4363,10 +4541,21 @@ async function loadDatasetFreshness() {
     }
 
     renderDatasetFreshness(data);
+
+    // Re-render the current page's freshness strip now that the cache is
+    // populated.  This resolves the race where renderPageDatasetFreshness()
+    // fell back to renderRunMeta() on fast first navigation.
+    if (_currentPage) {
+      const sectionKey = _currentPage.replace(/-/g, "_");
+      if (PAGE_DATASET_MAP[sectionKey]) {
+        renderPageDatasetFreshness(sectionKey);
+      }
+    }
   } catch (err) {
     if (err && err.message === "HTTP 401") return;
     datasetFreshnessStatus = "error";
     datasetFreshnessRows = [];
+    _datasetFreshnessByKey = {};
     renderDatasetFreshness();
   }
 }
@@ -5309,7 +5498,7 @@ const QUEUE_TYPE_LABELS = {
 };
 
 async function loadActionQueue() {
-  renderRunMeta("action_queue");
+  renderPageDatasetFreshness("action_queue");
   const listEl = document.getElementById("action-queue-list");
   if (listEl) listEl.innerHTML = `<p class="empty-state">Loading action queue…</p>`;
 
