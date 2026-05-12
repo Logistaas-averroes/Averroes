@@ -4074,11 +4074,17 @@ function renderBackfillSummary(run) {
       <dt>Finished</dt>    <dd>${run.finished_at ? fmtDate(run.finished_at) : "—"}</dd>
     </dl>
     ${dsRows ? `<div class="backfill-summary__datasets">${dsRows}</div>` : ""}
-    ${Array.isArray(summary.errors) && summary.errors.length > 0 ? `
-      <div class="run-feedback run-feedback--error" style="margin-top:var(--space-4)">
-        <strong>Errors (${summary.errors.length}):</strong><br>
-        ${summary.errors.map((e) => escapeHtml(String(e))).join("<br>")}
-      </div>` : ""}`;
+    ${(() => {
+      // Collect all errors: summary.errors first, then top-level run.error if not already present.
+      const errs = Array.isArray(summary.errors) ? [...summary.errors] : [];
+      if (run.error && !errs.includes(run.error)) errs.push(run.error);
+      return errs.length > 0
+        ? `<div class="run-feedback run-feedback--error" style="margin-top:var(--space-4)">
+             <strong>Errors (${errs.length}):</strong><br>
+             ${errs.map((e) => escapeHtml(String(e))).join("<br>")}
+           </div>`
+        : "";
+    })()}`;
 }
 
 // ── System Health page ─────────────────────────────────────────────────────

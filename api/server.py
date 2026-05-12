@@ -201,6 +201,10 @@ class BackfillRunRequest(BaseModel):
 # _backfill_state["running"] prevents duplicate concurrent runs (double-run
 # protection).  _backfill_state["latest"] stores the most recent run result
 # for the GET /api/backfill/status endpoint.
+#
+# Process-local guard only. This is sufficient for the current single-worker
+# Render deployment. If the service moves to multiple workers/instances,
+# replace with a DB-backed advisory lock.
 # ---------------------------------------------------------------------------
 
 _backfill_lock: threading.Lock = threading.Lock()
@@ -4591,6 +4595,7 @@ def api_backfill_run(body: BackfillRunRequest, request: Request) -> dict[str, An
     except Exception as exc:  # noqa: BLE001
         finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         log.error("[api/backfill/run] failed: %s", exc, exc_info=True)
+        _err_msg = f"{type(exc).__name__}: backfill execution failed"
         err_result: dict[str, Any] = {
             "status": "failed",
             "dry_run": body.dry_run,
@@ -4600,7 +4605,14 @@ def api_backfill_run(body: BackfillRunRequest, request: Request) -> dict[str, An
             "chunk": body.chunk,
             "started_at": started_at,
             "finished_at": finished_at,
-            "error": f"{type(exc).__name__}: backfill execution failed",
+            "error": _err_msg,
+            "summary": {
+                "status": "failed",
+                "chunks_total": 0,
+                "chunks_completed": 0,
+                "datasets": {},
+                "errors": [_err_msg],
+            },
         }
         with _backfill_lock:
             _backfill_state["latest"] = err_result

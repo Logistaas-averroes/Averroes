@@ -13,13 +13,14 @@ Covers:
   - run_backfill_from_options: invalid max_chunks rejected
   - run_backfill_from_options: dry_run=True returns plan without calling runners
   - run_backfill_from_options: dry_run=False calls run_backfill_plan
-  - POST /api/backfill/run: unauthenticated request rejected
-  - POST /api/backfill/run: non-admin request rejected
-  - POST /api/backfill/run: invalid source rejected
-  - POST /api/backfill/run: invalid date range rejected
+  - POST /api/backfill/run: unauthenticated request rejected (401/403)
+  - POST /api/backfill/run: non-admin (viewer) request rejected (403)
+  - POST /api/backfill/run: invalid source rejected (422)
+  - POST /api/backfill/run: invalid date range rejected (422)
+  - POST /api/backfill/run: invalid chunk rejected (422)
   - POST /api/backfill/run: dry_run=True calls helper with dry_run=True
   - POST /api/backfill/run: response contains summary
-  - POST /api/backfill/run: 409 when already running
+  - POST /api/backfill/run: 409 when backfill already running
   - GET /api/backfill/status: unauthenticated request rejected
   - GET /api/backfill/status: authenticated request returns running/latest
   - No unsafe action wording in API response
@@ -32,7 +33,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -270,8 +271,67 @@ def _set_admin_session(client):
     return None
 
 
+def _set_viewer_session(client):
+    """Inject a fake signed session cookie for a viewer (non-admin) user."""
+    from api.auth import set_session
+    from starlette.responses import Response as StarletteResponse
+
+    r = StarletteResponse()
+    set_session(r, "testviewer", "viewer")
+    cookie_header = r.headers.get("set-cookie", "")
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if part.startswith("ads_session="):
+            return part.split("=", 1)[1]
+    return None
+
+
 class TestBackfillRunEndpoint:
     def test_unauthenticated_returns_401_or_403(self, client):
+        res = client.post(
+            "/api/backfill/run",
+            json={"source": "all", "date_from": "2024-01-01", "date_to": "2024-01-31"},
+        )
+        assert res.status_code in (401, 403)
+
+    def test_non_admin_viewer_returns_403(self, client):
+        """Authenticated viewer (non-admin) must be rejected with 403."""
+        cookie_val = _set_viewer_session(client)
+        if not cookie_val:
+            pytest.skip("Could not create viewer session cookie")
+
+        res = client.post(
+            "/api/backfill/run",
+            json={"source": "all", "date_from": "2024-01-01", "date_to": "2024-01-31", "dry_run": True},
+            cookies={"ads_session": cookie_val},
+        )
+        assert res.status_code == 403
+
+    def test_already_running_returns_409(self, client):
+        """Concurrent backfill attempt must be rejected with 409."""
+        cookie_val = _set_admin_session(client)
+        if not cookie_val:
+            pytest.skip("Could not create session cookie")
+
+        import api.server as srv
+
+        # Simulate an in-flight run by setting running=True directly.
+        with srv._backfill_lock:
+            srv._backfill_state["running"] = True
+
+        try:
+            res = client.post(
+                "/api/backfill/run",
+                json={"source": "all", "date_from": "2024-01-01", "date_to": "2024-01-31", "dry_run": True},
+                cookies={"ads_session": cookie_val},
+            )
+            if res.status_code == 401:
+                pytest.skip("Session cookie not accepted in test environment")
+            assert res.status_code == 409
+        finally:
+            # Always restore state so other tests are not affected.
+            with srv._backfill_lock:
+                srv._backfill_state["running"] = False
         res = client.post(
             "/api/backfill/run",
             json={"source": "all", "date_from": "2024-01-01", "date_to": "2024-01-31"},

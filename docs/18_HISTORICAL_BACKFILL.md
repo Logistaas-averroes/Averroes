@@ -267,7 +267,10 @@ The dashboard button does not modify Google Ads or HubSpot.
    API triggers the backfill framework. Data is pulled from Windsor/HubSpot and written
    to the local PostgreSQL database only. No external writes.
 3. **Double-run protection:** The Run Backfill button is disabled while a run is in
-   progress. The server returns HTTP 409 if a concurrent run is attempted.
+   progress. The server returns HTTP 409 if a concurrent run is attempted. The lock
+   is process-local (in-memory `threading.Lock`), which is sufficient for the current
+   single-worker Render deployment. If the service moves to multiple workers or
+   instances, a DB-backed advisory lock should replace this mechanism.
 4. **Progress / summary:** The Latest Backfill Summary panel shows the result after
    each run, including per-dataset status, rows pulled/written, and any errors.
 5. **Dataset freshness refresh:** A successful non-dry-run backfill automatically
