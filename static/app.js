@@ -4286,8 +4286,8 @@ function _hiMovementArrow(dir) {
   if (!dir) return "—";
   if (dir === "up")    return "↑";
   if (dir === "down")  return "↓";
-  if (dir === "better") return "↓ better";
-  if (dir === "worse")  return "↑ worse";
+  if (dir === "better") return "improved";
+  if (dir === "worse")  return "worsened";
   if (dir === "insufficient_data" || dir === "no_recent_activity" || dir === "new_activity") return "—";
   return escapeHtml(dir);
 }
