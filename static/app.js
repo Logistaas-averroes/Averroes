@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence"];
 
 // Deal pipeline stages (Phase 1 read-only reference)
 const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
@@ -152,6 +152,11 @@ let datasetFreshnessStatus = "idle"; // idle | loading | ok | empty | db_unavail
 // Per-dataset freshness cache — populated by loadDatasetFreshness() and used by
 // renderPageDatasetFreshness().  Keyed by "source/dataset" (e.g. "windsor/campaigns").
 let _datasetFreshnessByKey = {};
+
+// Historical Intelligence page state
+let hiRows = [];
+let hiSummary = null;
+let hiStatus = "idle"; // idle | loading | ok | empty | insufficient_data | db_unavailable | error
 
 // ── Utility helpers ────────────────────────────────────────────────────────
 
@@ -549,6 +554,7 @@ function loadPage(page) {
     case "health":        loadHealth();        break;
     case "action-queue":  loadActionQueue();   break;
     case "backfill":      loadBackfillStatus(); break;
+    case "historical-intelligence": loadHistoricalIntelligence(); break;
   }
 }
 
@@ -4256,6 +4262,157 @@ function renderBackfillSummary(run) {
     })()}`;
 }
 
+// ── Historical Intelligence page ──────────────────────────────────────────
+
+const _HI_TREND_LABELS = {
+  improving:          "Improving",
+  deteriorating:      "Deteriorating",
+  stable:             "Stable",
+  insufficient_data:  "Insufficient Data",
+  new_activity:       "New Activity",
+  no_recent_activity: "No Recent Activity",
+};
+
+const _HI_TREND_CLASS = {
+  improving:          "badge--ok",
+  deteriorating:      "badge--error",
+  stable:             "badge--neutral",
+  insufficient_data:  "badge--neutral",
+  new_activity:       "badge--neutral",
+  no_recent_activity: "badge--neutral",
+};
+
+function _hiMovementArrow(dir) {
+  if (!dir) return "—";
+  if (dir === "up")    return "↑";
+  if (dir === "down")  return "↓";
+  if (dir === "better") return "↓ better";
+  if (dir === "worse")  return "↑ worse";
+  if (dir === "insufficient_data" || dir === "no_recent_activity" || dir === "new_activity") return "—";
+  return escapeHtml(dir);
+}
+
+async function loadHistoricalIntelligence() {
+  const bodyEl       = document.getElementById("hi-trend-body");
+  const kpiImproving = document.getElementById("hi-kpi-improving");
+  const kpiDeter     = document.getElementById("hi-kpi-deteriorating");
+  const kpiStable    = document.getElementById("hi-kpi-stable");
+  const kpiInsuf     = document.getElementById("hi-kpi-insufficient");
+
+  const entitySel  = document.getElementById("hi-entity-select");
+  const curSel     = document.getElementById("hi-current-days-select");
+  const prevSel    = document.getElementById("hi-previous-days-select");
+
+  const entity      = entitySel  ? entitySel.value  : "campaigns";
+  const currentDays = curSel     ? curSel.value      : "30";
+  const previousDays = prevSel   ? prevSel.value     : "30";
+
+  if (bodyEl) {
+    bodyEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)"><span class="spinner"></span> Loading historical intelligence…</p>`;
+  }
+  hiStatus = "loading";
+
+  const url = `/api/historical-intelligence?entity=${encodeURIComponent(entity)}&current_days=${encodeURIComponent(currentDays)}&previous_days=${encodeURIComponent(previousDays)}&limit=50`;
+
+  try {
+    const data = await fetchJSON(url);
+    hiStatus  = data.status || "ok";
+    hiRows    = data.rows   || [];
+    hiSummary = data.summary || null;
+
+    // KPI cards
+    const sum = hiSummary || {};
+    if (kpiImproving) kpiImproving.textContent = sum.improving          ?? "—";
+    if (kpiDeter)     kpiDeter.textContent     = sum.deteriorating      ?? "—";
+    if (kpiStable)    kpiStable.textContent    = sum.stable             ?? "—";
+    if (kpiInsuf)     kpiInsuf.textContent     = (sum.insufficient_data ?? 0)
+                                                 + (sum.new_activity ?? 0)
+                                                 + (sum.no_recent_activity ?? 0);
+
+    _renderHistoricalTable(entity);
+
+  } catch (err) {
+    hiStatus = "error";
+    hiRows   = [];
+    hiSummary = null;
+    if (kpiImproving) kpiImproving.textContent = "—";
+    if (kpiDeter)     kpiDeter.textContent     = "—";
+    if (kpiStable)    kpiStable.textContent    = "—";
+    if (kpiInsuf)     kpiInsuf.textContent     = "—";
+    if (bodyEl) {
+      if (err && err.message === "HTTP 401") {
+        showLogin();
+        return;
+      }
+      const msg = err && err.message === "HTTP 403"
+        ? "Access denied."
+        : "Failed to load historical intelligence. Please try again.";
+      bodyEl.innerHTML = `<p class="empty-state run-feedback--error" style="padding:var(--space-5)">${escapeHtml(msg)}</p>`;
+    }
+  }
+}
+
+function _renderHistoricalTable(entity) {
+  const bodyEl = document.getElementById("hi-trend-body");
+  if (!bodyEl) return;
+
+  if (hiStatus === "insufficient_data" || !hiRows || hiRows.length === 0) {
+    bodyEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Insufficient historical data. At least two comparable periods are required before trend signals can be computed.</p>`;
+    return;
+  }
+
+  const isGeo = entity === "geo";
+
+  const headerCols = isGeo
+    ? ["Country", "Campaign", "Trend", "Spend Movement", "Human Review Note"]
+    : ["Campaign", "Trend", "Spend Movement", "SQL Movement", "Junk Rate Movement", "CPQL Movement", "Human Review Note"];
+
+  const headerHtml = headerCols.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+
+  const rowsHtml = hiRows.map((row) => {
+    const trendLabel = _HI_TREND_LABELS[row.trend_status] || escapeHtml(row.trend_status || "—");
+    const trendCls   = _HI_TREND_CLASS[row.trend_status]  || "badge--neutral";
+    const trendBadge = `<span class="badge ${trendCls}"><span class="dot"></span>${escapeHtml(trendLabel)}</span>`;
+
+    const mv  = row.movement || {};
+    const cur = row.current  || {};
+    const prev = row.previous || {};
+
+    const spendMove   = _hiMovementArrow(mv.spend);
+    const sqlMove     = _hiMovementArrow(mv.sqls);
+    const junkMove    = _hiMovementArrow(mv.junk_rate);
+    const cpqlMove    = _hiMovementArrow(mv.cpql);
+    const note        = escapeHtml(row.human_review_note || "—");
+
+    if (isGeo) {
+      return `<tr>
+        <td>${escapeHtml(row.country || "—")}</td>
+        <td>${escapeHtml(row.campaign_name || "—")}</td>
+        <td>${trendBadge}</td>
+        <td>${spendMove}</td>
+        <td class="hi-note">${note}</td>
+      </tr>`;
+    }
+    return `<tr>
+      <td>${escapeHtml(row.campaign_name || "—")}</td>
+      <td>${trendBadge}</td>
+      <td>${spendMove}</td>
+      <td>${sqlMove}</td>
+      <td>${junkMove}</td>
+      <td>${cpqlMove}</td>
+      <td class="hi-note">${note}</td>
+    </tr>`;
+  }).join("");
+
+  bodyEl.innerHTML = `
+    <div style="overflow-x:auto">
+      <table class="data-table">
+        <thead><tr>${headerHtml}</tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>`;
+}
+
 // ── System Health page ─────────────────────────────────────────────────────
 
 async function loadHealth() {
@@ -5873,6 +6030,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Wire up backfill form
   const backfillForm = document.getElementById("backfill-form");
   if (backfillForm) backfillForm.addEventListener("submit", runBackfillFromUI);
+
+  // Wire up historical intelligence controls
+  const hiRefreshBtn = document.getElementById("hi-refresh-btn");
+  if (hiRefreshBtn) hiRefreshBtn.addEventListener("click", loadHistoricalIntelligence);
+  const hiEntitySel   = document.getElementById("hi-entity-select");
+  const hiCurSel      = document.getElementById("hi-current-days-select");
+  const hiPrevSel     = document.getElementById("hi-previous-days-select");
+  if (hiEntitySel)  hiEntitySel.addEventListener("change", loadHistoricalIntelligence);
+  if (hiCurSel)     hiCurSel.addEventListener("change",    loadHistoricalIntelligence);
+  if (hiPrevSel)    hiPrevSel.addEventListener("change",   loadHistoricalIntelligence);
 
   // Check auth and load initial page
   const isAuth = await checkAuth();
