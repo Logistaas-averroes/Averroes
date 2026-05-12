@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill"];
 
 // Deal pipeline stages (Phase 1 read-only reference)
 const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
@@ -352,6 +352,9 @@ function showApp(user) {
   // Show/hide System Health nav item
   const healthNav = document.getElementById("nav-health-item");
   if (healthNav) healthNav.hidden = user.role !== "admin";
+  // Show/hide Historical Backfill nav item
+  const backfillNav = document.getElementById("nav-backfill-item");
+  if (backfillNav) backfillNav.hidden = user.role !== "admin";
   // Start with sidebar health check and data freshness
   loadSidebarHealth();
   loadDataFreshness();
@@ -451,6 +454,11 @@ function navigate(page) {
     navigate("dashboard");
     return;
   }
+  // Role enforcement: backfill page is admin-only
+  if (page === "backfill" && (!_currentUser || _currentUser.role !== "admin")) {
+    navigate("dashboard");
+    return;
+  }
 
   // Hide all pages
   PAGES.forEach((p) => {
@@ -504,6 +512,7 @@ function loadPage(page) {
     case "scheduler":     loadScheduler();     break;
     case "health":        loadHealth();        break;
     case "action-queue":  loadActionQueue();   break;
+    case "backfill":      loadBackfillStatus(); break;
   }
 }
 
@@ -3868,6 +3877,216 @@ function showSchedFeedback(type, msg) {
   el.textContent = msg;
 }
 
+// ── Historical Backfill page (admin-only) ──────────────────────────────────
+
+async function loadBackfillStatus() {
+  // Populate the Latest Backfill Summary panel with the server-side state.
+  try {
+    const data = await fetchJSON("/api/backfill/status");
+    if (data && data.latest) {
+      renderBackfillSummary(data.latest);
+    }
+  } catch (e) {
+    if (e.message !== "HTTP 401" && e.message !== "HTTP 403") {
+      // Non-fatal — the summary panel stays hidden until a run is triggered.
+    }
+  }
+}
+
+async function runBackfillFromUI(e) {
+  e.preventDefault();
+
+  const sourceEl     = document.getElementById("backfill-source");
+  const dateFromEl   = document.getElementById("backfill-date-from");
+  const dateToEl     = document.getElementById("backfill-date-to");
+  const chunkEl      = document.getElementById("backfill-chunk");
+  const maxChunksEl  = document.getElementById("backfill-max-chunks");
+  const dryRunEl     = document.getElementById("backfill-dry-run");
+  const runBtn       = document.getElementById("backfill-run-btn");
+  const errorEl      = document.getElementById("backfill-form-error");
+  const feedbackEl   = document.getElementById("backfill-feedback");
+
+  // Client-side validation
+  const dateFrom = dateFromEl ? dateFromEl.value.trim() : "";
+  const dateTo   = dateToEl   ? dateToEl.value.trim()   : "";
+
+  if (!dateFrom) {
+    showBackfillError(errorEl, "Date from is required.");
+    return;
+  }
+  if (!dateTo) {
+    showBackfillError(errorEl, "Date to is required.");
+    return;
+  }
+  if (new Date(dateFrom) > new Date(dateTo)) {
+    showBackfillError(errorEl, "Date from must be on or before date to.");
+    return;
+  }
+
+  const maxChunksRaw = maxChunksEl ? maxChunksEl.value.trim() : "";
+  const maxChunks    = maxChunksRaw ? parseInt(maxChunksRaw, 10) : null;
+  if (maxChunks !== null && (isNaN(maxChunks) || maxChunks < 1)) {
+    showBackfillError(errorEl, "Max chunks must be a positive integer when provided.");
+    return;
+  }
+
+  if (errorEl) errorEl.hidden = true;
+
+  const dryRun = dryRunEl ? dryRunEl.checked : true;
+  const source = sourceEl ? sourceEl.value : "all";
+  const chunk  = chunkEl  ? chunkEl.value  : "monthly";
+
+  // Confirm before non-dry-run run
+  if (!dryRun) {
+    const confirmed = window.confirm(
+      "This will pull historical data from external sources and write it to the local database only.\n\n" +
+      "It will NOT modify Google Ads or HubSpot.\n\n" +
+      "Continue?"
+    );
+    if (!confirmed) return;
+  }
+
+  // Disable button and show loading state
+  if (runBtn) { runBtn.disabled = true; runBtn.textContent = "Running…"; }
+  if (feedbackEl) {
+    feedbackEl.hidden = false;
+    feedbackEl.className = "run-feedback run-feedback--loading";
+    feedbackEl.innerHTML = `<span class="spinner"></span> ${dryRun ? "Running dry run" : "Running backfill — local writes only"} — this may take a moment…`;
+  }
+
+  try {
+    const body = { source, date_from: dateFrom, date_to: dateTo, chunk, dry_run: dryRun };
+    if (maxChunks !== null) body.max_chunks = maxChunks;
+
+    const res  = await fetch("/api/backfill/run", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (res.ok && data.status === "success") {
+      if (feedbackEl) {
+        feedbackEl.className = "run-feedback run-feedback--success";
+        feedbackEl.textContent = `Backfill ${dryRun ? "dry run" : "run"} completed. Finished at ${escapeHtml(data.finished_at || "—")}.`;
+      }
+      renderBackfillSummary(data);
+      // Refresh dataset freshness after a successful non-dry-run
+      if (!dryRun) loadDataFreshness();
+    } else if (res.status === 409) {
+      if (feedbackEl) {
+        feedbackEl.className = "run-feedback run-feedback--error";
+        feedbackEl.textContent = "A backfill run is already in progress. Please wait.";
+      }
+    } else if (res.status === 401) {
+      showLogin();
+    } else if (res.status === 403) {
+      if (feedbackEl) {
+        feedbackEl.className = "run-feedback run-feedback--error";
+        feedbackEl.textContent = "Access denied — admin role required.";
+      }
+    } else {
+      const errMsg = data.detail || data.error || "Unknown error";
+      if (feedbackEl) {
+        feedbackEl.className = "run-feedback run-feedback--error";
+        feedbackEl.textContent = `Backfill failed: ${escapeHtml(errMsg)}`;
+      }
+    }
+  } catch (err) {
+    if (feedbackEl) {
+      feedbackEl.className = "run-feedback run-feedback--error";
+      feedbackEl.textContent = `Request failed: ${escapeHtml(err.message)}`;
+    }
+  } finally {
+    if (runBtn) {
+      runBtn.disabled = false;
+      runBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Run Backfill`;
+    }
+  }
+}
+
+function showBackfillError(el, msg) {
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = false;
+}
+
+function renderBackfillSummary(run) {
+  const panelEl  = document.getElementById("backfill-summary-panel");
+  const bodyEl   = document.getElementById("backfill-summary-body");
+  if (!panelEl || !bodyEl) return;
+
+  panelEl.hidden = false;
+
+  if (!run) {
+    bodyEl.innerHTML = `<p class="empty-state">No run data available.</p>`;
+    return;
+  }
+
+  const summary = run.summary || {};
+  const datasets = summary.datasets || {};
+  const mode = run.dry_run ? "Dry run — no database writes" : "Local persistence — writes to local DB only";
+  const status = run.status === "success" ? "success" : (run.status || "unknown");
+
+  const dsRows = Object.entries(datasets).map(([key, ds]) => {
+    const st  = escapeHtml(ds.status || "unknown");
+    const cls = ds.status === "success" ? "badge--ok"
+              : ds.status === "dry_run" || ds.status === "unsupported_by_current_connector" ? "badge--neutral"
+              : "badge--error";
+    const pulled    = ds.rows_pulled  != null ? ds.rows_pulled  : "—";
+    const written   = ds.rows_written != null ? ds.rows_written : "—";
+    const chunksPl  = ds.chunks_planned != null ? ds.chunks_planned : null;
+    const plannedTxt = chunksPl != null
+      ? `${chunksPl} chunk${chunksPl !== 1 ? "s" : ""} planned`
+      : "";
+    const note = ds.note ? `<div class="backfill-summary__ds-note">${escapeHtml(ds.note)}</div>` : "";
+
+    let metaStats;
+    if (run.dry_run) {
+      metaStats = plannedTxt
+        ? `<span class="backfill-summary__ds-stat">${escapeHtml(plannedTxt)}</span>`
+        : "";
+    } else {
+      metaStats = `<span class="backfill-summary__ds-stat">pulled: ${escapeHtml(String(pulled))}</span>`
+        + `<span class="backfill-summary__ds-stat">written: ${escapeHtml(String(written))}</span>`;
+    }
+
+    return `
+      <div class="backfill-summary__ds-row">
+        <div class="backfill-summary__ds-key">${escapeHtml(key)}</div>
+        <div class="backfill-summary__ds-meta">
+          <span class="badge ${cls}"><span class="dot"></span>${st}</span>
+          ${metaStats}
+        </div>
+        ${note}
+      </div>`;
+  }).join("");
+
+  bodyEl.innerHTML = `
+    <dl class="kv-list" style="margin-bottom:var(--space-4)">
+      <dt>Status</dt>      <dd>${statusBadge(status)}</dd>
+      <dt>Source</dt>      <dd>${escapeHtml(run.source || "—")}</dd>
+      <dt>Date range</dt>  <dd>${escapeHtml(run.date_from || "—")} → ${escapeHtml(run.date_to || "—")}</dd>
+      <dt>Chunk</dt>       <dd>${escapeHtml(run.chunk || "—")}</dd>
+      <dt>Mode</dt>        <dd>${escapeHtml(mode)}</dd>
+      <dt>Chunks</dt>      <dd>${escapeHtml(String(summary.chunks_completed ?? "—"))} / ${escapeHtml(String(summary.chunks_total ?? "—"))} completed</dd>
+      <dt>Finished</dt>    <dd>${run.finished_at ? fmtDate(run.finished_at) : "—"}</dd>
+    </dl>
+    ${dsRows ? `<div class="backfill-summary__datasets">${dsRows}</div>` : ""}
+    ${(() => {
+      // Collect all errors: summary.errors first, then top-level run.error if not already present.
+      const errs = Array.isArray(summary.errors) ? [...summary.errors] : [];
+      if (run.error && !errs.includes(run.error)) errs.push(run.error);
+      return errs.length > 0
+        ? `<div class="run-feedback run-feedback--error" style="margin-top:var(--space-4)">
+             <strong>Errors (${errs.length}):</strong><br>
+             ${errs.map((e) => escapeHtml(String(e))).join("<br>")}
+           </div>`
+        : "";
+    })()}`;
+}
+
 // ── System Health page ─────────────────────────────────────────────────────
 
 async function loadHealth() {
@@ -5461,6 +5680,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Wire up dataset freshness refresh button
   const dfRefreshBtn = document.getElementById("dataset-freshness-refresh-btn");
   if (dfRefreshBtn) dfRefreshBtn.addEventListener("click", loadDatasetFreshness);
+
+  // Wire up backfill form
+  const backfillForm = document.getElementById("backfill-form");
+  if (backfillForm) backfillForm.addEventListener("submit", runBackfillFromUI);
 
   // Check auth and load initial page
   const isAuth = await checkAuth();

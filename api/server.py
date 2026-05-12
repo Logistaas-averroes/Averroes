@@ -47,6 +47,8 @@ Protected endpoints (require authenticated session):
   GET  /api/gclid-attribution     — Paginated GCLID attribution rows from gclid_attribution table (requires auth).
   GET  /api/gclid-coverage        — GCLID coverage snapshots from gclid_coverage_snapshots table (requires auth).
   GET  /api/monitoring/status     — Read-only monitoring summary: stale/failure state per run type (requires auth).
+  POST /api/backfill/run          — Trigger admin-only historical backfill (requires admin or ADMIN_API_TOKEN).
+  GET  /api/backfill/status       — Latest backfill run state and summary (requires auth).
 """
 
 import base64
@@ -55,10 +57,11 @@ import importlib
 import json
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -177,6 +180,35 @@ def _latest_report_path() -> Path | None:
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+# ---------------------------------------------------------------------------
+# Backfill request schema
+# ---------------------------------------------------------------------------
+
+class BackfillRunRequest(BaseModel):
+    source: str = "all"
+    date_from: str
+    date_to: str
+    chunk: str = "monthly"
+    dry_run: bool = True
+    max_chunks: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
+# In-memory backfill run state.
+# _backfill_lock guards _backfill_state against concurrent access.
+# _backfill_state["running"] prevents duplicate concurrent runs (double-run
+# protection).  _backfill_state["latest"] stores the most recent run result
+# for the GET /api/backfill/status endpoint.
+#
+# Process-local guard only. This is sufficient for the current single-worker
+# Render deployment. If the service moves to multiple workers/instances,
+# replace with a DB-backed advisory lock.
+# ---------------------------------------------------------------------------
+
+_backfill_lock: threading.Lock = threading.Lock()
+_backfill_state: dict[str, Any] = {"running": False, "latest": None}
 
 
 # ---------------------------------------------------------------------------
@@ -4460,3 +4492,150 @@ def api_monitoring_status(user: dict = Depends(require_auth)) -> dict[str, Any]:
     if db_unavailable:
         result["db_unavailable"] = True
     return result
+
+
+# ---------------------------------------------------------------------------
+# Historical Backfill endpoints — admin-gated, local DB writes only.
+# These endpoints call the same backfill framework as the CLI (scripts/backfill.py).
+# They NEVER write to Google Ads or HubSpot.
+# ---------------------------------------------------------------------------
+
+_VALID_BACKFILL_SOURCES = {"all", "google_ads", "hubspot"}
+_VALID_BACKFILL_CHUNKS = {"monthly", "weekly"}
+
+
+@app.post("/api/backfill/run")
+def api_backfill_run(body: BackfillRunRequest, request: Request) -> dict[str, Any]:
+    """
+    Trigger a historical backfill run.
+
+    Admin-only. Local DB writes only (when dry_run=False).
+    NEVER writes to Google Ads or HubSpot.
+
+    Requires admin session or ADMIN_API_TOKEN.
+    Returns 409 if a backfill is already running.
+    Returns 422 on invalid parameters.
+    """
+    check_admin_or_token(request)
+
+    # Validate request body before acquiring the lock
+    if body.source not in _VALID_BACKFILL_SOURCES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"source must be one of {sorted(_VALID_BACKFILL_SOURCES)}, got {body.source!r}",
+        )
+    if body.chunk not in _VALID_BACKFILL_CHUNKS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"chunk must be 'monthly' or 'weekly', got {body.chunk!r}",
+        )
+    if body.max_chunks is not None and body.max_chunks < 1:
+        raise HTTPException(status_code=422, detail="max_chunks must be >= 1 when provided")
+
+    try:
+        from_date = date.fromisoformat(body.date_from)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"date_from '{body.date_from}' is not a valid ISO date (YYYY-MM-DD)",
+        )
+    try:
+        to_date = date.fromisoformat(body.date_to)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"date_to '{body.date_to}' is not a valid ISO date (YYYY-MM-DD)",
+        )
+    if from_date > to_date:
+        raise HTTPException(status_code=422, detail="date_from must be before or equal to date_to")
+
+    with _backfill_lock:
+        if _backfill_state["running"]:
+            raise HTTPException(status_code=409, detail="backfill already running")
+        _backfill_state["running"] = True
+
+    started_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    log.info(
+        "[api/backfill/run] started at %s  source=%s  %s→%s  chunk=%s  dry_run=%s",
+        started_at, body.source, body.date_from, body.date_to, body.chunk, body.dry_run,
+    )
+
+    try:
+        from scripts.backfill import run_backfill_from_options  # noqa: PLC0415
+        summary = run_backfill_from_options(
+            source=body.source,
+            date_from=body.date_from,
+            date_to=body.date_to,
+            chunk=body.chunk,
+            dry_run=body.dry_run,
+            max_chunks=body.max_chunks,
+        )
+        finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        log.info("[api/backfill/run] succeeded, finished at %s", finished_at)
+        result: dict[str, Any] = {
+            "status": "success",
+            "dry_run": body.dry_run,
+            "source": body.source,
+            "date_from": body.date_from,
+            "date_to": body.date_to,
+            "chunk": body.chunk,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "summary": summary,
+        }
+        with _backfill_lock:
+            _backfill_state["latest"] = result
+        return result
+
+    except ValueError as exc:
+        finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        log.warning("[api/backfill/run] validation error: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    except Exception as exc:  # noqa: BLE001
+        finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        log.error("[api/backfill/run] failed: %s", exc, exc_info=True)
+        _err_msg = f"{type(exc).__name__}: backfill execution failed"
+        err_result: dict[str, Any] = {
+            "status": "failed",
+            "dry_run": body.dry_run,
+            "source": body.source,
+            "date_from": body.date_from,
+            "date_to": body.date_to,
+            "chunk": body.chunk,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "error": _err_msg,
+            "summary": {
+                "status": "failed",
+                "chunks_total": 0,
+                "chunks_completed": 0,
+                "datasets": {},
+                "errors": [_err_msg],
+            },
+        }
+        with _backfill_lock:
+            _backfill_state["latest"] = err_result
+        raise HTTPException(
+            status_code=500,
+            detail=f"Backfill failed: {type(exc).__name__}",
+        ) from exc
+
+    finally:
+        with _backfill_lock:
+            _backfill_state["running"] = False
+
+
+@app.get("/api/backfill/status")
+def api_backfill_status(user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """
+    Return current backfill run state and the latest run summary.
+
+    Requires auth (any role). Read-only. No external calls. No mutations.
+    Phase 1 read-only externally confirmed.
+    """
+    with _backfill_lock:
+        return {
+            "running": _backfill_state["running"],
+            "latest": _backfill_state["latest"],
+        }

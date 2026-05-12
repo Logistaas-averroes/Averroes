@@ -50,7 +50,6 @@ This framework is explicitly forbidden from the following actions:
 - Pushing negative keywords
 - Uploading offline conversion tracking (OCT)
 - Triggering any scheduler or Render startup process
-- Adding a dashboard backfill button (planned for PR-ADS-072)
 - Running automatically on a schedule (manual only)
 
 ---
@@ -225,12 +224,80 @@ use explicit `date_from`/`date_to` and work correctly.
 
 - No external write paths are added in this framework.
 - No secrets are printed in backfill output or summary files.
-- Backfill is manual only — it is not scheduled, not triggered by the UI, and not
-  called by any Render startup command.
-- The UI admin backfill button is deferred to PR-ADS-072.
+- Backfill is manual only — it is not scheduled and not called by any Render startup command.
+- The admin dashboard backfill panel (PR-ADS-072) calls this same framework via the API.
 - Local DB writes happen only when the command is run explicitly without `--dry-run`.
 
 ---
 
+## Admin Dashboard Backfill Control
+
+The dashboard exposes an admin-only Historical Backfill panel that calls the same
+backfill framework as the CLI.
+
+### Access
+
+Only users with the `admin` role see the Historical Backfill nav item and page.
+Non-admin users are redirected to the dashboard if they attempt to access it directly.
+
+### What it supports
+
+- Source selection: All / Google Ads–Windsor / HubSpot
+- Date range (from / to)
+- Chunk size: Monthly (recommended) / Weekly
+- Max chunks per dataset (optional safety cap)
+- Dry run checkbox (checked by default — always safe)
+- Local persistence mode (unchecked dry run; requires confirmation)
+- Latest backfill summary display
+
+### Read-only governance
+
+The dashboard button does not modify Google Ads or HubSpot.
+
+> This pulls historical data into the local system only. It does not modify Google Ads,
+> HubSpot, campaigns, bids, budgets, contacts, deals, or negative keywords.
+
+### Behaviour
+
+1. **Dry run (default):** The button calls the API with `dry_run=true`. The framework
+   builds the chunk plan and returns the planned datasets without making any API calls
+   or DB writes. Fully safe.
+2. **Local persistence mode:** The user unchecks "Dry run" and clicks Run Backfill. A
+   browser confirmation dialog states the local-only write intent. On confirmation the
+   API triggers the backfill framework. Data is pulled from Windsor/HubSpot and written
+   to the local PostgreSQL database only. No external writes.
+3. **Double-run protection:** The Run Backfill button is disabled while a run is in
+   progress. The server returns HTTP 409 if a concurrent run is attempted. The lock
+   is process-local (in-memory `threading.Lock`), which is sufficient for the current
+   single-worker Render deployment. If the service moves to multiple workers or
+   instances, a DB-backed advisory lock should replace this mechanism.
+4. **Progress / summary:** The Latest Backfill Summary panel shows the result after
+   each run, including per-dataset status, rows pulled/written, and any errors.
+5. **Dataset freshness refresh:** A successful non-dry-run backfill automatically
+   refreshes the dataset freshness bar.
+
+### API endpoints added (PR-ADS-072)
+
+| Method | Path                  | Auth required      | Description |
+|--------|-----------------------|--------------------|-------------|
+| POST   | `/api/backfill/run`   | admin or API token | Trigger backfill |
+| GET    | `/api/backfill/status`| any authenticated  | Latest run state |
+
+### Validation commands (with dashboard)
+
+```bash
+# Check unauthenticated access is rejected (expect 401 or 403)
+curl -X POST http://localhost:8000/api/backfill/run
+
+# Status endpoint also requires auth
+curl http://localhost:8000/api/backfill/status
+
+# Run tests
+pytest tests/test_backfill_api.py -v
+```
+
+---
+
 *PR-ADS-071 — Manual Historical Backfill Framework*
+*PR-ADS-072 — Admin Backfill Button + Progress Visibility*
 *Phase 1 read-only externally confirmed.*

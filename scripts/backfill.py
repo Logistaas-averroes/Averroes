@@ -374,6 +374,99 @@ def run_backfill_plan(plan: list[dict], args: argparse.Namespace) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Programmatic entry point (API / non-CLI callers)
+# ---------------------------------------------------------------------------
+
+def run_backfill_from_options(
+    source: str,
+    date_from: str,
+    date_to: str,
+    chunk: str = "monthly",
+    dry_run: bool = True,
+    max_chunks: Optional[int] = None,
+) -> dict:
+    """Run backfill from a non-CLI caller (e.g. the admin API endpoint).
+
+    Validates all inputs and raises ValueError on bad parameters.
+    Returns a summary dict in the same shape as run_backfill_plan().
+
+    Data flow: external sources → read-only pull → local DB (dry_run=False only).
+    NEVER writes to Google Ads or HubSpot.
+    """
+    if source not in VALID_SOURCES:
+        raise ValueError(
+            f"source must be one of {sorted(VALID_SOURCES)!r}, got {source!r}"
+        )
+    if chunk not in ("monthly", "weekly"):
+        raise ValueError(f"chunk must be 'monthly' or 'weekly', got {chunk!r}")
+    if max_chunks is not None and max_chunks < 1:
+        raise ValueError("max_chunks must be >= 1 when provided")
+
+    try:
+        from_date = date.fromisoformat(date_from)
+    except ValueError:
+        raise ValueError(
+            f"date_from '{date_from}' is not a valid ISO date (YYYY-MM-DD)"
+        )
+    try:
+        to_date = date.fromisoformat(date_to)
+    except ValueError:
+        raise ValueError(
+            f"date_to '{date_to}' is not a valid ISO date (YYYY-MM-DD)"
+        )
+    if from_date > to_date:
+        raise ValueError("date_from must be before or equal to date_to")
+
+    import argparse as _argparse
+    args = _argparse.Namespace(
+        source=source,
+        date_from=date_from,
+        date_to=date_to,
+        chunk=chunk,
+        dry_run=dry_run,
+        max_chunks=max_chunks,
+        verbose=False,
+    )
+
+    plan = build_backfill_plan(args)
+
+    if dry_run:
+        # In dry-run mode return the plan summary without making any API calls
+        # or DB writes.
+        datasets: dict = {}
+        for entry in plan:
+            ds_key = f"{entry['source']}/{entry['dataset']}"
+            note = entry["notes"][0] if entry.get("notes") else None
+            status = (
+                "unsupported_by_current_connector"
+                if note and note.startswith("unsupported_by_current_connector")
+                else "dry_run"
+            )
+            datasets[ds_key] = {
+                "rows_pulled": 0,
+                "rows_written": 0,
+                "status": status,
+                "chunks_planned": len(entry["chunks"]),
+                "note": note,
+            }
+        return {
+            "source": source,
+            "date_from": date_from,
+            "date_to": date_to,
+            "chunk": chunk,
+            "dry_run": True,
+            "chunks_total": sum(len(e["chunks"]) for e in plan),
+            "chunks_completed": 0,
+            "datasets": datasets,
+            "errors": [],
+        }
+
+    summary = run_backfill_plan(plan, args)
+    write_summary(summary)
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Summary output
 # ---------------------------------------------------------------------------
 
