@@ -4034,16 +4034,30 @@ function renderBackfillSummary(run) {
     const cls = ds.status === "success" ? "badge--ok"
               : ds.status === "dry_run" || ds.status === "unsupported_by_current_connector" ? "badge--neutral"
               : "badge--error";
-    const pulled  = ds.rows_pulled  != null ? ds.rows_pulled  : "—";
-    const written = ds.rows_written != null ? ds.rows_written : "—";
-    const planned = ds.chunks_planned != null ? ` (${ds.chunks_planned} chunk${ds.chunks_planned !== 1 ? "s" : ""} planned)` : "";
-    const note    = ds.note ? `<div class="backfill-summary__ds-note">${escapeHtml(ds.note)}</div>` : "";
+    const pulled    = ds.rows_pulled  != null ? ds.rows_pulled  : "—";
+    const written   = ds.rows_written != null ? ds.rows_written : "—";
+    const chunksPl  = ds.chunks_planned != null ? ds.chunks_planned : null;
+    const plannedTxt = chunksPl != null
+      ? `${chunksPl} chunk${chunksPl !== 1 ? "s" : ""} planned`
+      : "";
+    const note = ds.note ? `<div class="backfill-summary__ds-note">${escapeHtml(ds.note)}</div>` : "";
+
+    let metaStats;
+    if (run.dry_run) {
+      metaStats = plannedTxt
+        ? `<span class="backfill-summary__ds-stat">${escapeHtml(plannedTxt)}</span>`
+        : "";
+    } else {
+      metaStats = `<span class="backfill-summary__ds-stat">pulled: ${escapeHtml(String(pulled))}</span>`
+        + `<span class="backfill-summary__ds-stat">written: ${escapeHtml(String(written))}</span>`;
+    }
+
     return `
       <div class="backfill-summary__ds-row">
         <div class="backfill-summary__ds-key">${escapeHtml(key)}</div>
         <div class="backfill-summary__ds-meta">
           <span class="badge ${cls}"><span class="dot"></span>${st}</span>
-          ${run.dry_run ? `<span class="backfill-summary__ds-stat">${escapeHtml(String(planned).replace(/^\s*\(|\)$/g, ""))} planned</span>` : `<span class="backfill-summary__ds-stat">pulled: ${escapeHtml(String(pulled))}</span><span class="backfill-summary__ds-stat">written: ${escapeHtml(String(written))}</span>`}
+          ${metaStats}
         </div>
         ${note}
       </div>`;
