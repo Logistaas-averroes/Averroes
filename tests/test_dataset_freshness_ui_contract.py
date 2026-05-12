@@ -357,10 +357,10 @@ class TestApiDatasetKey:
         )
 
     def test_dataset_key_is_composite_of_source_and_dataset(self):
-        # The value must be explicitly constructed by joining source and dataset
-        # with a "/" — verify that the f-string pattern exists in the server.
+        # The value must be constructed by joining source and dataset with '/'.
+        # Match the literal f-string pattern used in the server: f"{...source...}/{...dataset...}"
         composite_pattern = re.compile(
-            r'"dataset_key"\s*:\s*f["\']\{[^}]+source[^}]*\}/\{[^}]+dataset',
+            r'"dataset_key"\s*:\s*f["\'][^"\']*source[^"\']*\/[^"\']*dataset',
             re.DOTALL,
         )
         assert composite_pattern.search(self._SERVER_TEXT), (

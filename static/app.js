@@ -812,14 +812,12 @@ function renderPageDatasetFreshness(sectionKey) {
     }
 
     if (displayStatus === "success") {
-      el.textContent = dateStr
-        ? `${prefix} synced ${dateStr} · Source: ${_sourceDisplayName(source)} · Fresh`
-        : `${prefix} · Source: ${_sourceDisplayName(source)} · Fresh`;
+      const syncPart = dateStr ? ` synced ${dateStr}` : "";
+      el.textContent = `${prefix}${syncPart} · Source: ${_sourceDisplayName(source)} · Fresh`;
       el.className   = "run-meta is-fresh";
     } else if (displayStatus === "stale") {
-      el.textContent = dateStr
-        ? `${prefix} last synced ${dateStr} · Source: ${_sourceDisplayName(source)} · Stale`
-        : `${prefix} · Source: ${_sourceDisplayName(source)} · Stale`;
+      const syncPart = dateStr ? ` last synced ${dateStr}` : "";
+      el.textContent = `${prefix}${syncPart} · Source: ${_sourceDisplayName(source)} · Stale`;
       el.className   = "run-meta is-stale";
     } else if (displayStatus === "failed") {
       el.textContent = `${prefix} · Latest sync failed · Check System Health · Failed`;
