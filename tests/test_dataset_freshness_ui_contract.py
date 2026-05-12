@@ -189,6 +189,23 @@ class TestMultiDatasetPages:
         assert "windsor/campaigns" in keys, "action_queue must include windsor/campaigns"
         assert "hubspot/contacts" in keys, "action_queue must include hubspot/contacts"
 
+    def test_multi_dataset_summary_tracks_running_and_unknown(self):
+        """Multi-dataset summary must include running and unknown counts, not just fresh/stale/failed."""
+        match = re.search(
+            r"function renderPageDatasetFreshness\(.+?(?=\nfunction |\nconst |\nasync function |\Z)",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert match, "renderPageDatasetFreshness not found"
+        fn_text = match.group(0)
+        # The multi-dataset block must count runningCount and unknownCount
+        assert "runningCount" in fn_text, (
+            "Multi-dataset summary must track runningCount (not only fresh/stale/failed)"
+        )
+        assert "unknownCount" in fn_text, (
+            "Multi-dataset summary must track unknownCount (not only fresh/stale/failed)"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: renderPageDatasetFreshness function exists in app.js
@@ -231,6 +248,7 @@ class TestStatusLabelConsistency:
         assert "Fresh" in fn_text, "renderPageDatasetFreshness must use 'Fresh' label"
         assert "Stale" in fn_text, "renderPageDatasetFreshness must use 'Stale' label"
         assert "Failed" in fn_text, "renderPageDatasetFreshness must use 'Failed' label"
+        assert "Running" in fn_text, "renderPageDatasetFreshness must use 'Running' label"
         assert "Unknown" in fn_text, "renderPageDatasetFreshness must use 'Unknown' label"
 
     def test_no_ok_label_in_page_strips(self):
@@ -339,9 +357,15 @@ class TestApiDatasetKey:
         )
 
     def test_dataset_key_is_composite_of_source_and_dataset(self):
-        # The value should be constructed as f"{source}/{dataset}"
-        assert 'f"{' in self._SERVER_TEXT or '"dataset_key"' in self._SERVER_TEXT, (
-            "dataset_key should be a composite 'source/dataset' string"
+        # The value must be explicitly constructed by joining source and dataset
+        # with a "/" — verify that the f-string pattern exists in the server.
+        composite_pattern = re.compile(
+            r'"dataset_key"\s*:\s*f["\']\{[^}]+source[^}]*\}/\{[^}]+dataset',
+            re.DOTALL,
+        )
+        assert composite_pattern.search(self._SERVER_TEXT), (
+            "api/server.py must construct dataset_key as an f-string combining "
+            "source and dataset separated by '/' (e.g. f\"{source}/{dataset}\")"
         )
 
 
@@ -399,4 +423,44 @@ class TestCachePopulation:
         fn_text = match.group(0)
         assert "_datasetFreshnessByKey" in fn_text, (
             "loadDatasetFreshness must populate _datasetFreshnessByKey"
+        )
+
+    def test_page_strip_rerendered_after_cache_loads(self):
+        """After populating cache, loadDatasetFreshness must re-render the visible page strip."""
+        match = re.search(
+            r"async function loadDatasetFreshness\(\).+?(?=\nasync function |\nfunction |\Z)",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert match, "loadDatasetFreshness function not found"
+        fn_text = match.group(0)
+        # Must call renderPageDatasetFreshness after the cache is populated
+        assert "renderPageDatasetFreshness(" in fn_text, (
+            "loadDatasetFreshness must call renderPageDatasetFreshness() after populating "
+            "the cache so fast-navigated pages upgrade from run-meta to dataset-level strips"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: Config-driven stale threshold
+# ---------------------------------------------------------------------------
+
+class TestConfigDrivenThreshold:
+    """datasetDisplayStatus must use _staleAfterDays, not a hardcoded constant."""
+
+    def test_no_hardcoded_dataset_stale_threshold_constant(self):
+        assert "DATASET_STALE_THRESHOLD_DAYS" not in _APP_JS_TEXT, (
+            "DATASET_STALE_THRESHOLD_DAYS should not exist; use _staleAfterDays instead"
+        )
+
+    def test_dataset_display_status_uses_stale_after_days(self):
+        match = re.search(
+            r"function datasetDisplayStatus\(.+?(?=\nfunction |\nconst |\nasync function |\Z)",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert match, "datasetDisplayStatus function not found"
+        fn_text = match.group(0)
+        assert "_staleAfterDays" in fn_text, (
+            "datasetDisplayStatus must use _staleAfterDays (config-driven), not a hardcoded constant"
         )

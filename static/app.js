@@ -783,9 +783,9 @@ function renderPageDatasetFreshness(sectionKey) {
     return;
   }
 
-  // Cache not yet populated → fall back to run-based strip and re-render once
-  // loadDatasetFreshness() completes (it will call renderDatasetFreshness which
-  // does not touch per-page strips, but that is fine — the fallback is safe).
+  // Cache not yet populated → fall back to run-based strip.  After
+  // loadDatasetFreshness() resolves it calls renderPageDatasetFreshness for
+  // the visible page, so this is only ever a brief fallback.
   if (Object.keys(_datasetFreshnessByKey).length === 0) {
     renderRunMeta(sectionKey);
     return;
@@ -806,25 +806,29 @@ function renderPageDatasetFreshness(sectionKey) {
     const prefix = isDerived ? _derivedPageLabel(sectionKey) : `Dataset freshness: ${dsName}`;
 
     if (!row || displayStatus === "unknown") {
-      el.textContent = `${prefix} · No successful sync recorded yet · Data may still exist, but freshness is unverified`;
+      el.textContent = `${prefix} · Unknown (freshness unverified)`;
       el.className   = "run-meta";
       return;
     }
 
     if (displayStatus === "success") {
-      el.textContent = `${prefix} synced ${dateStr} · Source: ${_sourceDisplayName(source)} · Fresh`;
+      el.textContent = dateStr
+        ? `${prefix} synced ${dateStr} · Source: ${_sourceDisplayName(source)} · Fresh`
+        : `${prefix} · Source: ${_sourceDisplayName(source)} · Fresh`;
       el.className   = "run-meta is-fresh";
     } else if (displayStatus === "stale") {
-      el.textContent = `${prefix} last synced ${dateStr} · Source: ${_sourceDisplayName(source)} · Stale`;
+      el.textContent = dateStr
+        ? `${prefix} last synced ${dateStr} · Source: ${_sourceDisplayName(source)} · Stale`
+        : `${prefix} · Source: ${_sourceDisplayName(source)} · Stale`;
       el.className   = "run-meta is-stale";
     } else if (displayStatus === "failed") {
-      el.textContent = `${prefix} · Latest sync failed · Check System Health`;
+      el.textContent = `${prefix} · Latest sync failed · Check System Health · Failed`;
       el.className   = "run-meta is-stale";
     } else if (displayStatus === "running") {
-      el.textContent = `${prefix} · Sync in progress · Source: ${_sourceDisplayName(source)}`;
+      el.textContent = `${prefix} · Sync in progress · Source: ${_sourceDisplayName(source)} · Running`;
       el.className   = "run-meta";
     } else {
-      el.textContent = `${prefix} · Freshness unverified`;
+      el.textContent = `${prefix} · Unknown (freshness unverified)`;
       el.className   = "run-meta";
     }
     return;
@@ -836,10 +840,12 @@ function renderPageDatasetFreshness(sectionKey) {
     return row ? datasetDisplayStatus(row) : "unknown";
   });
 
-  const freshCount  = statuses.filter((s) => s === "success").length;
-  const staleCount  = statuses.filter((s) => s === "stale").length;
-  const failedCount = statuses.filter((s) => s === "failed").length;
-  const totalCount  = datasetKeys.length;
+  const freshCount   = statuses.filter((s) => s === "success").length;
+  const staleCount   = statuses.filter((s) => s === "stale").length;
+  const failedCount  = statuses.filter((s) => s === "failed").length;
+  const runningCount = statuses.filter((s) => s === "running").length;
+  const unknownCount = statuses.filter((s) => s === "unknown").length;
+  const totalCount   = datasetKeys.length;
 
   const statusLabel = {
     success: "Fresh", stale: "Stale", failed: "Failed", running: "Running", unknown: "Unknown",
@@ -849,7 +855,13 @@ function renderPageDatasetFreshness(sectionKey) {
   }).join(" · ");
 
   const sourceWord  = totalCount === 1 ? "source" : "sources";
-  const summary     = `Dataset freshness: ${totalCount} ${sourceWord} · ${freshCount} fresh · ${staleCount} stale · ${failedCount} failed`;
+  const summaryParts = [`Dataset freshness: ${totalCount} ${sourceWord}`];
+  if (freshCount  > 0) summaryParts.push(`${freshCount} fresh`);
+  if (staleCount  > 0) summaryParts.push(`${staleCount} stale`);
+  if (failedCount > 0) summaryParts.push(`${failedCount} failed`);
+  if (runningCount > 0) summaryParts.push(`${runningCount} running`);
+  if (unknownCount > 0) summaryParts.push(`${unknownCount} unknown`);
+  const summary = summaryParts.join(" · ");
 
   el.textContent = `${summary} · ${detail}`;
   el.className   = (failedCount > 0 || staleCount > 0)
@@ -4327,13 +4339,14 @@ function datasetRelatedPage(source, dataset) {
 
 // Derive display status — adds "stale" as a UI-only concept for old successes.
 // Threshold is display-only; it does not change backend sync_state.
-const DATASET_STALE_THRESHOLD_DAYS = 2;
+// Uses config-driven _staleAfterDays (updated from /api/config/ui-thresholds)
+// so dataset-level strips and the System Health table share the same threshold.
 
 function datasetDisplayStatus(row) {
   if (row.status !== "success") return row.status || "unknown";
   if (!row.last_successful_sync_at) return "success";
   const ageDays = (Date.now() - new Date(row.last_successful_sync_at).getTime()) / 86400000;
-  if (ageDays > DATASET_STALE_THRESHOLD_DAYS) return "stale";
+  if (ageDays > _staleAfterDays) return "stale";
   return "success";
 }
 
@@ -4530,6 +4543,16 @@ async function loadDatasetFreshness() {
     }
 
     renderDatasetFreshness(data);
+
+    // Re-render the current page's freshness strip now that the cache is
+    // populated.  This resolves the race where renderPageDatasetFreshness()
+    // fell back to renderRunMeta() on fast first navigation.
+    if (_currentPage) {
+      const sectionKey = _currentPage.replace(/-/g, "_");
+      if (PAGE_DATASET_MAP[sectionKey]) {
+        renderPageDatasetFreshness(sectionKey);
+      }
+    }
   } catch (err) {
     if (err && err.message === "HTTP 401") return;
     datasetFreshnessStatus = "error";
