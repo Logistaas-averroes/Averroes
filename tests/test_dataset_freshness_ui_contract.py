@@ -68,6 +68,8 @@ DERIVED_PAGES: set[str] = {"ngrams", "waste"}
 def _extract_page_dataset_map() -> dict[str, list[str]]:
     """Return the PAGE_DATASET_MAP keys found in app.js."""
     # Find the block: const PAGE_DATASET_MAP = { ... };
+    # Use a non-greedy match; the map only contains string arrays (no nested {}),
+    # so stopping at the first } after the opening { is reliable.
     match = re.search(
         r"const\s+PAGE_DATASET_MAP\s*=\s*\{([^}]+)\}",
         _APP_JS_TEXT,
@@ -220,7 +222,7 @@ class TestStatusLabelConsistency:
     def test_fresh_label_appears_in_render_function(self):
         # Extract just the renderPageDatasetFreshness function block.
         match = re.search(
-            r"function renderPageDatasetFreshness\(.+?(?=\nfunction |\nconst |\nasync function )",
+            r"function renderPageDatasetFreshness\(.+?(?=\nfunction |\nconst |\nasync function |\Z)",
             _APP_JS_TEXT,
             re.DOTALL,
         )
@@ -234,7 +236,7 @@ class TestStatusLabelConsistency:
     def test_no_ok_label_in_page_strips(self):
         """Page strips must not use 'ok' as a status label (use 'Fresh' instead)."""
         match = re.search(
-            r"function renderPageDatasetFreshness\(.+?(?=\nfunction |\nconst |\nasync function )",
+            r"function renderPageDatasetFreshness\(.+?(?=\nfunction |\nconst |\nasync function |\Z)",
             _APP_JS_TEXT,
             re.DOTALL,
         )
@@ -256,7 +258,7 @@ class TestUnknownWording:
 
     def test_unknown_rendered_as_unverified(self):
         match = re.search(
-            r"function renderPageDatasetFreshness\(.+?(?=\nfunction |\nconst |\nasync function )",
+            r"function renderPageDatasetFreshness\(.+?(?=\nfunction |\nconst |\nasync function |\Z)",
             _APP_JS_TEXT,
             re.DOTALL,
         )
@@ -291,7 +293,7 @@ class TestNoUnsafeActionWording:
 
     def _get_freshness_function_text(self) -> str:
         match = re.search(
-            r"function renderPageDatasetFreshness\(.+?(?=\nfunction |\nconst |\nasync function )",
+            r"function renderPageDatasetFreshness\(.+?(?=\nfunction |\nconst |\nasync function |\Z)",
             _APP_JS_TEXT,
             re.DOTALL,
         )
@@ -389,7 +391,7 @@ class TestCachePopulation:
     def test_cache_populated_in_load_function(self):
         # Find loadDatasetFreshness function body
         match = re.search(
-            r"async function loadDatasetFreshness\(\).+?(?=\nasync function |\nfunction )",
+            r"async function loadDatasetFreshness\(\).+?(?=\nasync function |\nfunction |\Z)",
             _APP_JS_TEXT,
             re.DOTALL,
         )

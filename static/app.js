@@ -795,32 +795,32 @@ function renderPageDatasetFreshness(sectionKey) {
 
   // ── Single-dataset pages ──────────────────────────────────────────────────
   if (datasetKeys.length === 1) {
-    const key    = datasetKeys[0];
-    const row    = _datasetFreshnessByKey[key];
-    const ds     = row ? datasetDisplayStatus(row) : "unknown";
-    const source = row ? (row.source || "") : "";
-    const dsName = _datasetDisplayName(key);
-    const dateStr = (row && row.last_successful_sync_at)
+    const key           = datasetKeys[0];
+    const row           = _datasetFreshnessByKey[key];
+    const displayStatus = row ? datasetDisplayStatus(row) : "unknown";
+    const source        = row ? (row.source || "") : "";
+    const dsName        = _datasetDisplayName(key);
+    const dateStr       = (row && row.last_successful_sync_at)
       ? fmtDate(row.last_successful_sync_at) : null;
 
     const prefix = isDerived ? _derivedPageLabel(sectionKey) : `Dataset freshness: ${dsName}`;
 
-    if (!row || ds === "unknown") {
+    if (!row || displayStatus === "unknown") {
       el.textContent = `${prefix} · No successful sync recorded yet · Data may still exist, but freshness is unverified`;
       el.className   = "run-meta";
       return;
     }
 
-    if (ds === "success") {
+    if (displayStatus === "success") {
       el.textContent = `${prefix} synced ${dateStr} · Source: ${_sourceDisplayName(source)} · Fresh`;
       el.className   = "run-meta is-fresh";
-    } else if (ds === "stale") {
+    } else if (displayStatus === "stale") {
       el.textContent = `${prefix} last synced ${dateStr} · Source: ${_sourceDisplayName(source)} · Stale`;
       el.className   = "run-meta is-stale";
-    } else if (ds === "failed") {
+    } else if (displayStatus === "failed") {
       el.textContent = `${prefix} · Latest sync failed · Check System Health`;
       el.className   = "run-meta is-stale";
-    } else if (ds === "running") {
+    } else if (displayStatus === "running") {
       el.textContent = `${prefix} · Sync in progress · Source: ${_sourceDisplayName(source)}`;
       el.className   = "run-meta";
     } else {
@@ -848,7 +848,8 @@ function renderPageDatasetFreshness(sectionKey) {
     return `${_datasetDisplayName(key)}: ${statusLabel[statuses[i]] || "Unknown"}`;
   }).join(" · ");
 
-  const summary = `Dataset freshness: ${totalCount} source${totalCount === 1 ? "" : "s"} · ${freshCount} fresh · ${staleCount} stale · ${failedCount} failed`;
+  const sourceWord  = totalCount === 1 ? "source" : "sources";
+  const summary     = `Dataset freshness: ${totalCount} ${sourceWord} · ${freshCount} fresh · ${staleCount} stale · ${failedCount} failed`;
 
   el.textContent = `${summary} · ${detail}`;
   el.className   = (failedCount > 0 || staleCount > 0)
