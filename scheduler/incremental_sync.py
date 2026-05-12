@@ -33,7 +33,9 @@ Public entry point:
 """
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import db.writers as db_writers
 from scheduler.sync_utils import max_source_date, persistence_succeeded
@@ -41,12 +43,41 @@ from scheduler.sync_utils import max_source_date, persistence_succeeded
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Config defaults (overridden by callers or config/thresholds.yaml consumers)
+# Config loading — reads sync.daily_incremental from config/thresholds.yaml.
+# Falls back to hard-coded defaults if config is unavailable at import time.
 # ---------------------------------------------------------------------------
 
-DEFAULT_LOOKBACK_ADS = 14
-DEFAULT_LOOKBACK_HUBSPOT_CONTACTS = 14
-DEFAULT_LOOKBACK_HUBSPOT_DEALS = 30
+_CONFIG_FALLBACK_ADS = 14
+_CONFIG_FALLBACK_HUBSPOT_CONTACTS = 14
+_CONFIG_FALLBACK_HUBSPOT_DEALS = 30
+
+
+def _load_sync_config() -> dict:
+    """Load sync.daily_incremental from config/thresholds.yaml.
+
+    Returns the lookback_days sub-dict.  Falls back to hard-coded defaults
+    if the config file is unavailable or the key is missing, so the module
+    always has safe values regardless of deployment state.
+    """
+    try:
+        import yaml  # noqa: PLC0415
+        config_path = Path(__file__).resolve().parents[1] / "config" / "thresholds.yaml"
+        with config_path.open() as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get("sync", {}).get("daily_incremental", {}).get("lookback_days", {})
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+_SYNC_CONFIG = _load_sync_config()
+
+DEFAULT_LOOKBACK_ADS = int(_SYNC_CONFIG.get("ads", _CONFIG_FALLBACK_ADS))
+DEFAULT_LOOKBACK_HUBSPOT_CONTACTS = int(
+    _SYNC_CONFIG.get("hubspot_contacts", _CONFIG_FALLBACK_HUBSPOT_CONTACTS)
+)
+DEFAULT_LOOKBACK_HUBSPOT_DEALS = int(
+    _SYNC_CONFIG.get("hubspot_deals", _CONFIG_FALLBACK_HUBSPOT_DEALS)
+)
 
 # search_terms uses preset-only querying (no explicit date range supported
 # by Windsor.ai connector); document as such and skip reliably.
@@ -83,7 +114,7 @@ def run_daily_incremental_sync(
       - windsor/search_terms — skipped; connector does not support explicit
                                date ranges reliably (documents as unsupported)
       - hubspot/contacts    (explicit date range via createdate filter)
-      - hubspot/deals       (via GCLID contacts pulled in the contact window)
+      - hubspot/deals       (via GCLID contacts pulled in the deals window)
       - gclid/matches       — skipped; no incremental DB path yet
 
     Each dataset failure is isolated: one failed dataset does not abort the
@@ -95,8 +126,9 @@ def run_daily_incremental_sync(
 
     NEVER writes to Google Ads, HubSpot, or any external platform.
     """
-    started_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    today = datetime.now(tz=timezone.utc).date()
+    now = datetime.now(tz=timezone.utc)
+    started_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    today = now.date()
 
     date_from_ads = today - timedelta(days=lookback_days_ads)
     date_from_contacts = today - timedelta(days=lookback_days_hubspot_contacts)
@@ -383,10 +415,10 @@ def _sync_hubspot_contacts(
 def _sync_hubspot_deals(
     *, date_from, date_to, errors: list
 ) -> dict:
-    """Pull and persist hubspot/deals for contacts created in the given window.
+    """Pull and persist hubspot/deals for contacts created in the deals window.
 
     Deals are fetched via GCLID contacts (pull_deals_with_gclid).  Only
-    contacts within the rolling date window are queried; this avoids a
+    contacts within the deals rolling window are queried; this avoids a
     full-history scan every day.
 
     Limitation: deals without a GCLID contact in the window are not captured

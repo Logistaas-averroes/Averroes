@@ -44,7 +44,10 @@ Timezone: `Asia/Amman` (UTC+3 year-round; Jordan suspended DST in 2022).
 
 Schedule is registered in `api/scheduler.py` via APScheduler `CronTrigger`.
 
-Config is owned by `config/thresholds.yaml` under `sync.daily_incremental`.
+Lookback windows are read at module import time from
+`config/thresholds.yaml` (`sync.daily_incremental.lookback_days`).
+If the config file is unavailable, hard-coded safe defaults (14/14/30 days)
+are used so the scheduler always has valid values.
 
 ## Datasets Synced
 

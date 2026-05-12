@@ -573,13 +573,14 @@ def run_incremental_sync(request: Request) -> dict[str, Any]:
             k: {ek: ev for ek, ev in v.items() if ek != "error"}
             for k, v in result.get("datasets", {}).items()
         }
+        result_status = result.get("status") or "unknown"
         return {
-            "status": "success",
+            "status": result_status,
             "job": "daily_incremental_sync",
             "started_at": started_at,
             "finished_at": finished_at,
             "result": {
-                "status": result.get("status"),
+                "status": result_status,
                 "run_type": result.get("run_type"),
                 "lookback": result.get("lookback"),
                 "datasets": safe_datasets,

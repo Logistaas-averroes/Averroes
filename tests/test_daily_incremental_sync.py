@@ -12,6 +12,8 @@ Covers:
   - Zero rows from successful pull marks success with row_count=0
   - Unsupported datasets are skipped and documented
   - Scheduler job ID registered
+  - POST /run/incremental-sync returns honest top-level status
+  - Config lookback values wired into runtime defaults
   - No unsafe external action wording in module source
 
 Run with:
@@ -38,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # ---------------------------------------------------------------------------
 
 def _fake_rows(n: int) -> list[dict]:
-    """Return n fake Windsor/HubSpot rows with a source_date field."""
+    """Return n fake Windsor/HubSpot rows with a date field."""
     today = date.today().isoformat()
     return [{"date": today, "campaign": f"test-campaign-{i}", "spend": 1.0} for i in range(n)]
 
@@ -424,6 +426,148 @@ class TestSchedulerRegistration:
         assert "daily_incremental_sync" in _SCHEDULE_DESCRIPTIONS
         assert "09:00" in _SCHEDULE_DESCRIPTIONS["daily_incremental_sync"]
         assert "Asia/Amman" in _SCHEDULE_DESCRIPTIONS["daily_incremental_sync"]
+
+
+# ---------------------------------------------------------------------------
+# API endpoint — POST /run/incremental-sync status propagation
+# ---------------------------------------------------------------------------
+
+class TestApiEndpointStatus:
+    """POST /run/incremental-sync must surface the sync result status honestly."""
+
+    def _make_app_client(self):
+        """Return a FastAPI TestClient with auth bypassed for admin."""
+        from fastapi.testclient import TestClient
+        from api.server import app
+        from api import auth as _auth
+
+        client = TestClient(app, raise_server_exceptions=False)
+        # Inject a fake admin session so check_admin_or_token passes
+        client.cookies.set("ads_session", "fake-admin-session")
+        return client
+
+    def _mock_check_admin(self, monkeypatch):
+        """Bypass auth check for all /run/* tests."""
+        monkeypatch.setattr(
+            "api.server.check_admin_or_token",
+            lambda *a, **kw: None,
+        )
+
+    def test_returns_partial_status_when_sync_partial(self, monkeypatch):
+        self._mock_check_admin(monkeypatch)
+        monkeypatch.setattr(
+            "scheduler.incremental_sync.run_daily_incremental_sync",
+            lambda **kw: {
+                "status": "partial",
+                "run_type": "daily_incremental_sync",
+                "datasets": {"windsor/campaigns": {"status": "failed"}},
+                "errors": ["windsor/campaigns: test error"],
+                "lookback": {},
+            },
+        )
+        from fastapi.testclient import TestClient
+        from api.server import app
+        client = TestClient(app, raise_server_exceptions=False)
+        res = client.post("/run/incremental-sync")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["status"] == "partial"
+        assert body["result"]["status"] == "partial"
+
+    def test_returns_failed_status_when_sync_failed(self, monkeypatch):
+        self._mock_check_admin(monkeypatch)
+        monkeypatch.setattr(
+            "scheduler.incremental_sync.run_daily_incremental_sync",
+            lambda **kw: {
+                "status": "failed",
+                "run_type": "daily_incremental_sync",
+                "datasets": {
+                    "windsor/campaigns": {"status": "failed"},
+                    "windsor/keywords":  {"status": "failed"},
+                },
+                "errors": ["windsor/campaigns: error", "windsor/keywords: error"],
+                "lookback": {},
+            },
+        )
+        from fastapi.testclient import TestClient
+        from api.server import app
+        client = TestClient(app, raise_server_exceptions=False)
+        res = client.post("/run/incremental-sync")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["status"] == "failed"
+        assert body["result"]["status"] == "failed"
+
+    def test_returns_success_status_when_sync_success(self, monkeypatch):
+        self._mock_check_admin(monkeypatch)
+        monkeypatch.setattr(
+            "scheduler.incremental_sync.run_daily_incremental_sync",
+            lambda **kw: {
+                "status": "success",
+                "run_type": "daily_incremental_sync",
+                "datasets": {"windsor/campaigns": {"status": "success", "rows_pulled": 5, "rows_written": 5}},
+                "errors": [],
+                "lookback": {"ads_days": 14},
+            },
+        )
+        from fastapi.testclient import TestClient
+        from api.server import app
+        client = TestClient(app, raise_server_exceptions=False)
+        res = client.post("/run/incremental-sync")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["status"] == "success"
+        assert body["result"]["status"] == "success"
+
+    def test_raw_error_strings_not_in_response(self, monkeypatch):
+        """Per-dataset 'error' field must be stripped from the API response."""
+        self._mock_check_admin(monkeypatch)
+        monkeypatch.setattr(
+            "scheduler.incremental_sync.run_daily_incremental_sync",
+            lambda **kw: {
+                "status": "partial",
+                "run_type": "daily_incremental_sync",
+                "datasets": {
+                    "windsor/campaigns": {
+                        "status": "failed",
+                        "error": "SomeException: raw stack detail SECRET",
+                    }
+                },
+                "errors": ["windsor/campaigns: SomeException: raw stack detail SECRET"],
+                "lookback": {},
+            },
+        )
+        from fastapi.testclient import TestClient
+        from api.server import app
+        client = TestClient(app, raise_server_exceptions=False)
+        res = client.post("/run/incremental-sync")
+        body_text = res.text
+        # Raw error string must not appear in the response body
+        assert "raw stack detail SECRET" not in body_text
+
+
+# ---------------------------------------------------------------------------
+# Config wiring — runtime defaults sourced from config/thresholds.yaml
+# ---------------------------------------------------------------------------
+
+class TestConfigWiring:
+    """DEFAULT_LOOKBACK_* constants must match config/thresholds.yaml values."""
+
+    def test_defaults_match_config(self):
+        import yaml
+        config_path = Path(__file__).resolve().parents[1] / "config" / "thresholds.yaml"
+        with config_path.open() as f:
+            cfg = yaml.safe_load(f)
+        lookback = cfg["sync"]["daily_incremental"]["lookback_days"]
+
+        import importlib
+        import scheduler.incremental_sync as sync_mod
+        # Reload to pick up current config
+        importlib.reload(sync_mod)
+
+        assert sync_mod.DEFAULT_LOOKBACK_ADS == lookback["ads"]
+        assert sync_mod.DEFAULT_LOOKBACK_HUBSPOT_CONTACTS == lookback["hubspot_contacts"]
+        assert sync_mod.DEFAULT_LOOKBACK_HUBSPOT_DEALS == lookback["hubspot_deals"]
 
 
 # ---------------------------------------------------------------------------
