@@ -70,6 +70,17 @@ accounts:
 confirmed_cut_markets:
   - venezuela
 
+sync:
+  daily_incremental:
+    enabled: true
+    schedule_hour: 9
+    schedule_minute: 0
+    timezone: Asia/Amman
+    lookback_days:
+      ads: 14
+      hubspot_contacts: 14
+      hubspot_deals: 30
+
 # UI-safe display thresholds — consumed by GET /api/config/ui-thresholds
 # These values drive frontend visual classification only.
 # Do not change analysis thresholds above.

@@ -33,6 +33,7 @@ Protected endpoints (require authenticated session):
   POST /run/daily           — Trigger daily run (requires admin or ADMIN_API_TOKEN).
   POST /run/weekly          — Trigger weekly run (requires admin or ADMIN_API_TOKEN).
   POST /run/monthly         — Trigger monthly run (requires admin or ADMIN_API_TOKEN).
+  POST /run/incremental-sync — Trigger daily incremental sync manually (requires admin or ADMIN_API_TOKEN).
   GET  /api/geo                    — Windsor geo performance by country/campaign (requires auth).
   GET  /api/keywords               — Windsor keyword performance by campaign/ad group/keyword (requires auth).
   GET  /api/leads/country-summary  — HubSpot lead quality aggregated by country (requires auth).
@@ -541,6 +542,64 @@ def run_monthly(request: Request) -> dict[str, Any]:
     finally:
         with _run_lock:
             _job_state["monthly"] = False
+
+
+@app.post("/run/incremental-sync")
+def run_incremental_sync(request: Request) -> dict[str, Any]:
+    """Trigger the daily incremental sync manually. Requires admin session or ADMIN_API_TOKEN.
+
+    Reads recent data from Windsor.ai and HubSpot and writes only to the
+    local database.  Does not modify Google Ads, HubSpot, campaigns, bids,
+    budgets, contacts, deals, or negative keywords.
+    """
+    check_admin_or_token(request)
+
+    with _run_lock:
+        if _job_state["daily_incremental_sync"]:
+            raise HTTPException(status_code=409, detail="job already running")
+        _job_state["daily_incremental_sync"] = True
+
+    started_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    log.info("[run/incremental-sync] started at %s", started_at)
+
+    try:
+        from scheduler.incremental_sync import run_daily_incremental_sync  # noqa: PLC0415
+        result = run_daily_incremental_sync(run_reason="manual")
+        finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        log.info("[run/incremental-sync] succeeded, finished at %s", finished_at)
+        # Strip per-dataset error strings before returning to client; admin can
+        # inspect detailed errors via logs.  Status fields are safe to surface.
+        safe_datasets = {
+            k: {ek: ev for ek, ev in v.items() if ek != "error"}
+            for k, v in result.get("datasets", {}).items()
+        }
+        result_status = result.get("status") or "unknown"
+        return {
+            "status": result_status,
+            "job": "daily_incremental_sync",
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "result": {
+                "status": result_status,
+                "run_type": result.get("run_type"),
+                "lookback": result.get("lookback"),
+                "datasets": safe_datasets,
+                "error_count": len(result.get("errors", [])),
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        log.error("[run/incremental-sync] failed: %s", exc, exc_info=True)
+        return {
+            "status": "failed",
+            "job": "daily_incremental_sync",
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "error": f"{type(exc).__name__}: scheduler execution failed",
+        }
+    finally:
+        with _run_lock:
+            _job_state["daily_incremental_sync"] = False
 
 
 # ---------------------------------------------------------------------------
