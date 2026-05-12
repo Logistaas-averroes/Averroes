@@ -33,7 +33,6 @@ Public entry point:
 """
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -60,12 +59,15 @@ def _load_sync_config() -> dict:
     always has safe values regardless of deployment state.
     """
     try:
-        import yaml  # noqa: PLC0415
+        import yaml  # noqa: PLC0415  # local import — yaml is optional at module load
         config_path = Path(__file__).resolve().parents[1] / "config" / "thresholds.yaml"
         with config_path.open() as f:
             cfg = yaml.safe_load(f)
         return cfg.get("sync", {}).get("daily_incremental", {}).get("lookback_days", {})
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[incremental_sync] config load failed — using hard-coded lookback defaults: %s", exc
+        )
         return {}
 
 

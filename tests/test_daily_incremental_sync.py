@@ -435,17 +435,6 @@ class TestSchedulerRegistration:
 class TestApiEndpointStatus:
     """POST /run/incremental-sync must surface the sync result status honestly."""
 
-    def _make_app_client(self):
-        """Return a FastAPI TestClient with auth bypassed for admin."""
-        from fastapi.testclient import TestClient
-        from api.server import app
-        from api import auth as _auth
-
-        client = TestClient(app, raise_server_exceptions=False)
-        # Inject a fake admin session so check_admin_or_token passes
-        client.cookies.set("ads_session", "fake-admin-session")
-        return client
-
     def _mock_check_admin(self, monkeypatch):
         """Bypass auth check for all /run/* tests."""
         monkeypatch.setattr(
