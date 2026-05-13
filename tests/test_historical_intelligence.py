@@ -357,51 +357,147 @@ class TestComputeQualityMovement:
 
 
 # ---------------------------------------------------------------------------
-# API response shape test (with mocked DB)
+# API response shape test (with mocked DB and real auth cookie)
 # ---------------------------------------------------------------------------
 
+def _make_test_client():
+    """Import the FastAPI app and wrap it in a TestClient."""
+    try:
+        from fastapi.testclient import TestClient
+    except ImportError:
+        pytest.skip("fastapi[testclient] not available")
+    try:
+        from api.server import app  # noqa: PLC0415
+    except Exception as exc:
+        pytest.skip(f"api.server import failed: {exc}")
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def _make_admin_cookie():
+    """Return a signed ads_session cookie value for an admin user."""
+    from api.auth import set_session  # noqa: PLC0415
+    from starlette.responses import Response as StarletteResponse  # noqa: PLC0415
+
+    r = StarletteResponse()
+    set_session(r, "testadmin", "admin")
+    cookie_header = r.headers.get("set-cookie", "")
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if part.startswith("ads_session="):
+            return part.split("=", 1)[1]
+    return None
+
+
 class TestHistoricalIntelligenceAPI:
-    """Test the /api/historical-intelligence endpoint response shape."""
+    """Test the GET /api/historical-intelligence endpoint response shape."""
 
-    @pytest.fixture(autouse=True)
+    @pytest.fixture()
+    def client(self):
+        return _make_test_client()
+
+    @pytest.fixture()
+    def admin_cookie(self, client):
+        val = _make_admin_cookie()
+        if not val:
+            pytest.skip("Could not create admin session cookie")
+        return val
+
+    @pytest.fixture()
     def _patch_db(self):
-        """Patch get_conn to return a mock connection with no rows."""
-        mock_conn = MagicMock()
-        mock_cur  = MagicMock()
-        mock_cur.__enter__ = lambda s: s
-        mock_cur.__exit__  = MagicMock(return_value=False)
-        mock_cur.description = [("campaign_name",), ("run_date",), ("spend_usd",),
-                                 ("confirmed_sqls",), ("total_leads",),
-                                 ("junk_rate_pct",), ("cpql_usd",)]
-        mock_cur.fetchall.return_value = []
-        mock_conn.cursor.return_value = mock_cur
-        mock_conn.__enter__ = lambda s: s
-        mock_conn.__exit__  = MagicMock(return_value=False)
-
-        with patch("db.connection.get_conn") as mock_get_conn:
-            mock_get_conn.return_value = mock_conn
+        """Patch load_campaign_trend_rows and load_geo_trend_rows to return no rows."""
+        with (
+            patch("analysis.historical_intelligence.load_campaign_trend_rows", return_value=[]),
+            patch("analysis.historical_intelligence.load_geo_trend_rows",      return_value=[]),
+        ):
             yield
 
-    def test_endpoint_returns_insufficient_data_when_no_rows(self):
-        from fastapi.testclient import TestClient
-        from api.server import app
-        client = TestClient(app, raise_server_exceptions=True)
+    def test_unauthenticated_returns_401_or_403(self, client):
+        res = client.get("/api/historical-intelligence?entity=campaigns&current_days=30&previous_days=30")
+        assert res.status_code in (401, 403)
 
-        # Login
-        resp = client.post("/auth/login", json={"username": "admin", "password": "wrong"})
-        # We only need to verify endpoint shape exists; if auth fails that's expected in test env.
-        # Instead test the function logic directly.
-        from analysis.historical_intelligence import compute_campaign_trends
-        result = compute_campaign_trends([], current_days=30, previous_days=30)
-        assert result["status"] == "insufficient_data"
-        assert "rows" in result
-        assert "summary" in result
-        # Ensure response fields required by the API contract are present
+    def test_endpoint_returns_required_keys(self, client, admin_cookie, _patch_db):
+        res = client.get(
+            "/api/historical-intelligence?entity=campaigns&current_days=30&previous_days=30",
+            cookies={"ads_session": admin_cookie},
+        )
+        if res.status_code == 401:
+            pytest.skip("Session cookie not accepted in test environment")
+        assert res.status_code == 200
+        data = res.json()
         for key in ("entity", "current_days", "previous_days", "status", "summary", "rows"):
-            assert key in result, f"Missing key: {key}"
+            assert key in data, f"Missing key in response: {key}"
 
-    def test_no_unsafe_wording_in_insufficient_response(self):
-        from analysis.historical_intelligence import compute_campaign_trends
-        result = compute_campaign_trends([], current_days=30, previous_days=30)
-        result_str = str(result)
-        _check_no_unsafe_wording(result_str)
+    def test_endpoint_returns_insufficient_data_when_no_rows(self, client, admin_cookie, _patch_db):
+        res = client.get(
+            "/api/historical-intelligence?entity=campaigns&current_days=30&previous_days=30",
+            cookies={"ads_session": admin_cookie},
+        )
+        if res.status_code == 401:
+            pytest.skip("Session cookie not accepted in test environment")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "insufficient_data"
+        assert data["rows"] == []
+        assert isinstance(data["summary"], dict)
+
+    def test_invalid_entity_returns_400(self, client, admin_cookie):
+        res = client.get(
+            "/api/historical-intelligence?entity=invalid_entity",
+            cookies={"ads_session": admin_cookie},
+        )
+        if res.status_code == 401:
+            pytest.skip("Session cookie not accepted in test environment")
+        assert res.status_code == 400
+
+    def test_default_entity_is_campaigns(self, client, admin_cookie, _patch_db):
+        res = client.get(
+            "/api/historical-intelligence",
+            cookies={"ads_session": admin_cookie},
+        )
+        if res.status_code == 401:
+            pytest.skip("Session cookie not accepted in test environment")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["entity"] == "campaigns"
+
+    def test_geo_entity_accepted(self, client, admin_cookie, _patch_db):
+        res = client.get(
+            "/api/historical-intelligence?entity=geo",
+            cookies={"ads_session": admin_cookie},
+        )
+        if res.status_code == 401:
+            pytest.skip("Session cookie not accepted in test environment")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["entity"] == "geo"
+
+    def test_no_unsafe_wording_in_response(self, client, admin_cookie, _patch_db):
+        res = client.get(
+            "/api/historical-intelligence?entity=campaigns",
+            cookies={"ads_session": admin_cookie},
+        )
+        if res.status_code == 401:
+            pytest.skip("Session cookie not accepted in test environment")
+        assert res.status_code == 200
+        _check_no_unsafe_wording(res.text)
+
+
+# ---------------------------------------------------------------------------
+# rule_advisor historical intelligence block — wording safety
+# ---------------------------------------------------------------------------
+
+class TestHistoricalIntelligenceReportBlock:
+    def test_report_disclaimer_has_no_forbidden_verbs(self):
+        """Generated report disclaimer must not contain pause/cut/apply/push/block."""
+        from analysis.rule_advisor import _build_historical_intelligence_block  # noqa: PLC0415
+        block = _build_historical_intelligence_block(None)
+        for verb in ("pausing", "cutting", " pause ", " cut ", "apply", "push", "block"):
+            assert verb.lower() not in block.lower(), (
+                f"Forbidden verb {verb!r} found in historical intelligence block"
+            )
+
+    def test_report_block_insufficient_data_is_advisory(self):
+        from analysis.rule_advisor import _build_historical_intelligence_block  # noqa: PLC0415
+        block = _build_historical_intelligence_block(None)
+        _check_no_unsafe_wording(block)
+

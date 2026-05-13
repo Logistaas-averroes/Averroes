@@ -4748,9 +4748,14 @@ def api_historical_intelligence(
     Phase 1 read-only externally confirmed.
     """
     # ── Parameter sanitisation ─────────────────────────────────────────────
-    entity = entity.strip().lower() if entity else _HI_ENTITY_CAMPAIGNS
-    if entity not in _HI_VALID_ENTITIES:
+    entity = entity.strip().lower() if entity else ""
+    if not entity:
         entity = _HI_ENTITY_CAMPAIGNS
+    elif entity not in _HI_VALID_ENTITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported entity '{entity}'. Expected one of: {', '.join(sorted(_HI_VALID_ENTITIES))}.",
+        )
 
     current_days  = max(1, min(_HI_MAX_DAYS, current_days))
     previous_days = max(1, min(_HI_MAX_DAYS, previous_days))

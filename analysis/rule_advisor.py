@@ -636,7 +636,7 @@ def _build_historical_intelligence_block(hi_data: dict | None) -> str:
 
     lines.append(
         "> All signals above are directional evidence for human review. "
-        "Historical Intelligence does not recommend pausing, cutting, or modifying any campaign.\n"
+        "Historical Intelligence does not recommend making any campaign changes.\n"
     )
 
     return "\n".join(lines) + "\n"

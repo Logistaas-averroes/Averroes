@@ -4286,6 +4286,7 @@ function _hiMovementArrow(dir) {
   if (!dir) return "—";
   if (dir === "up")    return "↑";
   if (dir === "down")  return "↓";
+  if (dir === "stable") return "—";
   if (dir === "better") return "improved";
   if (dir === "worse")  return "worsened";
   if (dir === "insufficient_data" || dir === "no_recent_activity" || dir === "new_activity") return "—";
@@ -4322,14 +4323,12 @@ async function loadHistoricalIntelligence() {
 
     // KPI cards
     const sum = hiSummary || {};
-    if (kpiImproving) kpiImproving.textContent = sum.improving          ?? "—";
-    if (kpiDeter)     kpiDeter.textContent     = sum.deteriorating      ?? "—";
-    if (kpiStable)    kpiStable.textContent    = sum.stable             ?? "—";
-    if (kpiInsuf)     kpiInsuf.textContent     = (sum.insufficient_data ?? 0)
-                                                 + (sum.new_activity ?? 0)
-                                                 + (sum.no_recent_activity ?? 0);
+    if (kpiImproving) kpiImproving.textContent = sum.improving     ?? "—";
+    if (kpiDeter)     kpiDeter.textContent     = sum.deteriorating ?? "—";
+    if (kpiStable)    kpiStable.textContent    = sum.stable        ?? "—";
+    if (kpiInsuf)     kpiInsuf.textContent     = sum.insufficient_data ?? "—";
 
-    _renderHistoricalTable(entity);
+    _renderHistoricalTable(entity, data);
 
   } catch (err) {
     hiStatus = "error";
@@ -4352,12 +4351,20 @@ async function loadHistoricalIntelligence() {
   }
 }
 
-function _renderHistoricalTable(entity) {
+function _renderHistoricalTable(entity, data) {
   const bodyEl = document.getElementById("hi-trend-body");
   if (!bodyEl) return;
 
+  if (data && data.db_unavailable) {
+    bodyEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Historical Intelligence is unavailable because the local database is offline.</p>`;
+    return;
+  }
+
   if (hiStatus === "insufficient_data" || !hiRows || hiRows.length === 0) {
-    bodyEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Insufficient historical data. At least two comparable periods are required before trend signals can be computed.</p>`;
+    const msg = (data && data.message)
+      ? data.message
+      : "Insufficient historical data. At least two comparable periods are required before trend signals can be computed.";
+    bodyEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">${escapeHtml(msg)}</p>`;
     return;
   }
 
