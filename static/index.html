@@ -200,6 +200,14 @@
             <span class="nav-item__label">Historical Backfill</span>
           </a>
         </li>
+        <li>
+          <a class="nav-item" data-page="historical-intelligence" href="#" role="button" tabindex="0" aria-label="Historical Intelligence">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="19" r="2"/></svg>
+            </span>
+            <span class="nav-item__label">Historical Intelligence</span>
+          </a>
+        </li>
       </ul>
 
       <div class="sidebar__footer">
@@ -1021,6 +1029,76 @@
         <p class="grace-note">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           This panel calls the same backfill framework as the CLI (<code>python -m scripts.backfill</code>). Dry run is always safe — it prints the plan with no API calls and no database writes. Use local persistence mode only after verifying the plan with dry run.
+        </p>
+      </section>
+
+      <!-- Historical Intelligence -->
+      <section id="page-historical-intelligence" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Historical Intelligence</h1>
+          <p class="page-subtitle">Read-only historical trend analysis. These signals are for human review and do not modify Google Ads or HubSpot.</p>
+        </header>
+
+        <!-- Period controls -->
+        <div class="action-queue-controls" id="hi-controls">
+          <select id="hi-entity-select" class="waste-filter-select" aria-label="Entity to analyze">
+            <option value="campaigns">Campaigns</option>
+            <option value="geo">Geo</option>
+          </select>
+          <select id="hi-current-days-select" class="waste-filter-select" aria-label="Current period">
+            <option value="14">Current: 14 days</option>
+            <option value="30" selected>Current: 30 days</option>
+            <option value="60">Current: 60 days</option>
+            <option value="90">Current: 90 days</option>
+          </select>
+          <select id="hi-previous-days-select" class="waste-filter-select" aria-label="Previous period">
+            <option value="14">Previous: 14 days</option>
+            <option value="30" selected>Previous: 30 days</option>
+            <option value="60">Previous: 60 days</option>
+            <option value="90">Previous: 90 days</option>
+          </select>
+          <button id="hi-refresh-btn" class="btn btn--secondary" type="button">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            Refresh
+          </button>
+        </div>
+
+        <!-- Summary KPI cards -->
+        <div class="kpi-grid" id="hi-kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-card__label">Improving</div>
+            <div class="kpi-card__value" id="hi-kpi-improving">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">Deteriorating</div>
+            <div class="kpi-card__value" id="hi-kpi-deteriorating">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">Stable</div>
+            <div class="kpi-card__value" id="hi-kpi-stable">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__label">Insufficient Data</div>
+            <div class="kpi-card__value" id="hi-kpi-insufficient">—</div>
+          </div>
+        </div>
+
+        <!-- Trend table -->
+        <div class="panel">
+          <div class="panel__header">
+            <span class="panel__header-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            </span>
+            Trend Signals
+          </div>
+          <div class="panel__body panel__body--flush" id="hi-trend-body">
+            <p class="empty-state" style="padding:var(--space-5)">Loading historical intelligence…</p>
+          </div>
+        </div>
+
+        <p class="grace-note">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Historical Intelligence reads local data only. It does not modify Google Ads, HubSpot, campaigns, bids, budgets, contacts, deals, or negative keywords.
         </p>
       </section>
 

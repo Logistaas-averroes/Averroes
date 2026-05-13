@@ -547,6 +547,101 @@ def _ngram_pattern_table(rows: list) -> list[str]:
     return lines
 
 
+def _build_historical_intelligence_block(hi_data: dict | None) -> str:
+    """Render the read-only Historical Intelligence section for weekly/monthly reports.
+
+    Shows top 5 deteriorating and top 5 improving campaigns.
+    Advisory language only — no action instructions.
+    """
+    lines = ["## 9. Historical Intelligence — Read-Only Trend Signals\n"]
+    lines.append(
+        "> These trends compare recent performance against the previous comparable period. "
+        "They are directional signals for human review only. "
+        "This system does not modify Google Ads, HubSpot, campaigns, bids, budgets, "
+        "contacts, deals, or negative keywords.\n"
+    )
+
+    if hi_data is None or hi_data.get("status") == "insufficient_data":
+        lines.append(
+            "_Historical intelligence is unavailable for this report period. "
+            "At least two comparable periods are required before trend signals can be computed._\n"
+        )
+        return "\n".join(lines) + "\n"
+
+    rows = hi_data.get("rows") or []
+    if not rows:
+        lines.append(
+            "_No campaign trend rows available for this report period._\n"
+        )
+        return "\n".join(lines) + "\n"
+
+    deteriorating = [r for r in rows if r.get("trend_status") == "deteriorating"][:5]
+    improving     = [r for r in rows if r.get("trend_status") == "improving"][:5]
+
+    summary = hi_data.get("summary", {})
+    lines.append(
+        f"**Period:** current {hi_data.get('current_days', 30)} days vs "
+        f"previous {hi_data.get('previous_days', 30)} days  \n"
+        f"**Improving:** {summary.get('improving', 0)} · "
+        f"**Deteriorating:** {summary.get('deteriorating', 0)} · "
+        f"**Stable:** {summary.get('stable', 0)} · "
+        f"**Insufficient data:** {summary.get('insufficient_data', 0)}\n"
+    )
+
+    if deteriorating:
+        lines.append("### Top Deteriorating Campaigns (warrants human review)\n")
+        lines.append(
+            "| Campaign | Spend Movement | SQL Movement | Junk Rate Movement | Review Note |"
+        )
+        lines.append(
+            "|----------|---------------|-------------|-------------------|-------------|"
+        )
+        for r in deteriorating:
+            mv   = r.get("movement", {})
+            note = r.get("human_review_note", "")
+            lines.append(
+                f"| {r.get('campaign_name', '—')} "
+                f"| {mv.get('spend', '—')} "
+                f"| {mv.get('sqls', '—')} "
+                f"| {mv.get('junk_rate', '—')} "
+                f"| {note} |"
+            )
+        lines.append("")
+
+    if improving:
+        lines.append("### Top Improving Campaigns (warrants continued monitoring)\n")
+        lines.append(
+            "| Campaign | Spend Movement | SQL Movement | Junk Rate Movement | Review Note |"
+        )
+        lines.append(
+            "|----------|---------------|-------------|-------------------|-------------|"
+        )
+        for r in improving:
+            mv   = r.get("movement", {})
+            note = r.get("human_review_note", "")
+            lines.append(
+                f"| {r.get('campaign_name', '—')} "
+                f"| {mv.get('spend', '—')} "
+                f"| {mv.get('sqls', '—')} "
+                f"| {mv.get('junk_rate', '—')} "
+                f"| {note} |"
+            )
+        lines.append("")
+
+    if not deteriorating and not improving:
+        lines.append(
+            "_No campaigns with clear trend signals in this period. "
+            "Most campaigns are either stable or have insufficient data._\n"
+        )
+
+    lines.append(
+        "> All signals above are directional evidence for human review. "
+        "Historical Intelligence does not recommend making any campaign changes.\n"
+    )
+
+    return "\n".join(lines) + "\n"
+
+
 def _build_ngram_findings_block(ngram_data: dict | None) -> str:
     """Render the read-only N-Gram findings section for weekly/monthly reports.
 
@@ -641,14 +736,20 @@ def _build_ngram_findings_block(ngram_data: dict | None) -> str:
 def generate_deterministic_report(
     report_type: str = "weekly",
     ngram_data: dict | None = None,
+    historical_intelligence: dict | None = None,
 ) -> str | None:
     """
     Generate a deterministic markdown report from structured analysis outputs.
 
     Args:
-        report_type: "weekly" or "monthly"
-        ngram_data:  Optional N-Gram findings dict produced by compute_ngram_findings().
-                     If None the N-Gram section renders a safe unavailable message.
+        report_type:             "weekly" or "monthly"
+        ngram_data:              Optional N-Gram findings dict produced by
+                                 compute_ngram_findings().  If None the N-Gram
+                                 section renders a safe unavailable message.
+        historical_intelligence: Optional campaign trend dict produced by
+                                 analysis.historical_intelligence.compute_campaign_trends().
+                                 If None the Historical Intelligence section renders
+                                 a safe unavailable message.
 
     Returns:
         Path to the generated report file, or None if no analysis data found.
@@ -704,6 +805,8 @@ def generate_deterministic_report(
         _build_human_review_items(waste, lead_quality, campaign_truth),
         "---\n",
         _build_ngram_findings_block(ngram_data),
+        "---\n",
+        _build_historical_intelligence_block(historical_intelligence),
         "---\n",
         _build_phase1_reminder(),
     ]
