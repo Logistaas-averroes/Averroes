@@ -154,12 +154,15 @@ Output confirmed:
 
 Mutation grep confirmed zero external write paths:
 
-```
-grep -R "mutate|requests.post|httpx.post|PATCH|DELETE" connectors scripts ... | grep -i "google|hubspot|ads|deal..."
+```bash
+grep -R -E "mutate|GoogleAdsClient.*mutate|requests\.post|httpx\.post|PATCH|DELETE" \
+  connectors scripts scheduler db api analysis static | \
+  grep -i -E "google|hubspot|ads|deal|contact|campaign|keyword|budget|negative|conversion"
 ```
 
-Result: Only `db/schema.py` and `db/writers.py` local DELETE statements (for
-data replacement, not external writes).
+Result: No external write paths found. Only local DB maintenance statements:
+- `db/writers.py`: `DELETE FROM keywords WHERE run_id = %s` — local table cleanup during upsert (safe)
+- `db/schema.py`: Two `DELETE FROM campaigns` examples in schema seed comments (safe, local only)
 
 ### 2.9 No Negative Keyword / OCT Behavior
 
@@ -618,7 +621,7 @@ No page says `"sync to Google Ads"`, `"upload"` (in a write context), `"push cha
 
 Command run:
 ```bash
-grep -R "push negative|apply negative|pause campaign|block term|send to Google Ads|send to HubSpot|upload conversion|change bid|change budget|pausing|cutting" \
+grep -R -E "push negative|apply negative|pause campaign|block term|send to Google Ads|send to HubSpot|upload conversion|change bid|change budget|pausing|cutting" \
   analysis api static docs tests scripts scheduler connectors db \
   --include="*.py" --include="*.js" --include="*.html" --include="*.md"
 ```
@@ -640,17 +643,18 @@ Results classification:
 
 Command run:
 ```bash
-grep -R "mutate|GoogleAdsClient.*mutate|requests.post|httpx.post|PATCH|DELETE" \
+grep -R -E "mutate|GoogleAdsClient.*mutate|requests\.post|httpx\.post|PATCH|DELETE" \
   connectors scripts scheduler db api analysis static | \
-  grep -i "google|hubspot|ads|deal|contact|campaign|keyword|budget|negative"
+  grep -i -E "google|hubspot|ads|deal|contact|campaign|keyword|budget|negative|conversion"
 ```
 
 Results:
-- `db/writers.py`: `DELETE FROM keywords WHERE run_id = %s` — local DB table cleanup (safe)
-- `db/schema.py`: Two `DELETE FROM campaigns` examples in schema comments (safe, local only)
+- `db/writers.py`: `DELETE FROM keywords WHERE run_id = %s` — local DB table cleanup (safe, not an external write)
+- `db/schema.py`: Two `DELETE FROM campaigns` examples in schema seed comments (safe, local only)
 
-**Result: No external write path. No Google Ads mutation. No HubSpot mutation.
-No negative keyword push. No OCT upload.**
+**Result: No external write paths found. No Google Ads mutation. No HubSpot mutation.
+No negative keyword push. No OCT upload. All matches are local DB maintenance
+statements or schema seed examples — classified as safe.**
 
 ### 11.3 Phase 1 Governance Lock
 
