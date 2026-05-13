@@ -4361,9 +4361,8 @@ function _renderHistoricalTable(entity, data) {
   }
 
   if (hiStatus === "insufficient_data" || !hiRows || hiRows.length === 0) {
-    const msg = (data && data.message)
-      ? data.message
-      : "Insufficient historical data. At least two comparable periods are required before trend signals can be computed.";
+    const _fallback = "Insufficient historical data. At least two comparable periods are required before trend signals can be computed.";
+    const msg = (data && typeof data.message === "string" && data.message) ? data.message : _fallback;
     bodyEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">${escapeHtml(msg)}</p>`;
     return;
   }

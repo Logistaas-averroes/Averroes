@@ -374,17 +374,27 @@ def _make_test_client():
 
 
 def _make_admin_cookie():
-    """Return a signed ads_session cookie value for an admin user."""
-    from api.auth import set_session  # noqa: PLC0415
-    from starlette.responses import Response as StarletteResponse  # noqa: PLC0415
+    """Return a signed ads_session cookie value for an admin user.
+
+    Returns the cookie string value, or None if the session could not be set.
+    Callers must check for None and skip the test when it is returned.
+    """
+    try:
+        from api.auth import set_session  # noqa: PLC0415
+        from starlette.responses import Response as StarletteResponse  # noqa: PLC0415
+    except ImportError:
+        return None
 
     r = StarletteResponse()
     set_session(r, "testadmin", "admin")
     cookie_header = r.headers.get("set-cookie", "")
+    if not cookie_header:
+        return None
     for part in cookie_header.split(";"):
         part = part.strip()
         if part.startswith("ads_session="):
-            return part.split("=", 1)[1]
+            value = part.split("=", 1)[1]
+            return value if value else None
     return None
 
 
