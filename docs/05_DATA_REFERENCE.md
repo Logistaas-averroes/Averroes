@@ -136,7 +136,58 @@ These deals are used to validate the OCT dry-run in Phase 1:
 
 **Search term level (requires paid plan — verify active):** `search_term`, `matched_keyword`, `match_type`, `spend`, `clicks`, `conversions`
 
+> **Note:** `matched_keyword` and `match_type` are not confirmed in the MCP contract below. The confirmed MCP extraction fields are the definitive list for 60-day search-term pulls.
+
 **Geo level:** `country`, `spend`, `clicks`, `impressions`, `conversions`
+
+---
+
+## Windsor.ai MCP Search-Term Contract — Confirmed May 2026
+
+**Status:** Confirmed working from live account.
+**Account:** `305-973-4490`
+**Connector:** `google_ads`
+**Date preset:** `last_60d`
+**Returned volume:** ~45,292 rows across 10 campaigns
+
+### Required get_data request
+
+Fields array:
+
+- `search_term`
+- `campaign`
+- `ad_group`
+- `impressions`
+- `clicks`
+- `spend`
+- `conversions`
+
+### Response shape
+
+The MCP response returns a list containing a `text` key. The `text` value is a JSON string.
+
+```python
+raw_response = get_data(...)
+text_payload = raw_response[0]["text"]
+rows = json.loads(text_payload)
+```
+
+### Critical rules
+
+- Field name is exactly `search_term`.
+- Do not use `search_term_text`, `query`, or `search_query`.
+- `ad_group` may return a Google Ads resource path, e.g. `customers/3059734490/adGroups/175677406221`
+- To get only the ad group ID: `ad_group_id = row["ad_group"].split("/")[-1]`
+
+### Output meaning
+
+Each row represents one search-term / campaign / ad-group combination with metrics.
+
+### Runtime availability
+
+MCP get_data is **not** available at app runtime (no MCP client in Render deployment).
+The REST API connector (`pull_search_terms()`) uses `date_preset=last_60d` for the same data.
+For MCP-extracted payloads, use `_parse_windsor_mcp_response()` in `connectors/windsor_pull.py`.
 
 ---
 

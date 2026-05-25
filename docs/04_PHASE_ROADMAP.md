@@ -203,6 +203,7 @@ The N-Gram Intelligence block is now complete as a read-only analysis layer.
 | PR-ADS-060 | N-Gram Stopword Config | ✅ Complete |
 | PR-ADS-061 | Benchmark script, UI in-flight guard, and row-cap visibility | ✅ Complete |
 | PR-ADS-062 | Final validation and doctrine closeout | ✅ Complete |
+| PR-ADS-063 | Windsor search-term contract audit + parser/docs sync | 🔨 In progress | 1 |
 
 **Governance:**
 N-Gram Intelligence identifies candidate terms for human review only.
@@ -217,6 +218,8 @@ Any future negative keyword push workflow remains blocked until the six-month re
 - Dashboard/report UX polish.
 - Advisor language hardening.
 - Production monitoring polish.
+
+**Note (PR-ADS-063):** Search-term forensics now uses the confirmed 60-day Windsor contract where supported. This improves waste detection and N-Gram confidence without adding any write actions.
 
 ---
 

@@ -69,6 +69,32 @@ If you find yourself adding business logic to a scheduler — stop.
 
 ---
 
+## Critical Windsor Search-Term Contract
+
+Do not guess Windsor search-term field names.
+
+Confirmed:
+- `search_term`
+- `campaign`
+- `ad_group`
+- `impressions`
+- `clicks`
+- `spend`
+- `conversions`
+
+Forbidden guesses:
+- `query`
+- `search_query`
+- `search_term_text`
+
+The MCP response requires double parsing:
+1. Read `raw_response[0]["text"]`
+2. Run `json.loads()` on that string
+
+`ad_group` may be a full resource path. Split by `/` and take the last segment only when an ad group ID is needed.
+
+---
+
 ## Config Rules
 
 All thresholds from `config/thresholds.yaml`. All patterns from `config/junk_patterns.yaml`. Nothing hardcoded in Python.
@@ -112,7 +138,7 @@ Timezone:           Asia/Amman (UTC+3)
 > **Do NOT assume the roadmap from memory.**
 > Always read `docs/04_PHASE_ROADMAP.md` directly to identify the current active PR.
 
-**Currently building:** PR-ADS-012 — Repository Reality Sync & Roadmap Correction
+**Currently building:** PR-ADS-063 — Windsor Search-Term Contract Audit, Parser Fix & Docs Sync
 
 This PR:
 - Updates roadmap in `docs/04_PHASE_ROADMAP.md` to reflect actual repo state

@@ -113,22 +113,129 @@ def pull_campaign_performance(days_back: int = 30) -> list:
     return _request_with_retry(params, "campaign")
 
 
-def pull_search_terms(days_back: int = 14) -> list:
+def _parse_windsor_mcp_response(raw_response: object) -> list:
     """
-    Pull actual search terms that triggered ads.
-    This is the raw material for N-gram analysis.
-    Requires Windsor.ai paid plan.
+    Parse Windsor MCP get_data response.
 
-    Uses date_preset (not date_from/date_to) — the confirmed working query pattern.
-    The segment=search_term parameter is rejected by Windsor with 400 BAD REQUEST.
-    days_back is mapped to Windsor presets: ≤1 → last_1d, ≤7 → last_7d, else → last_14d.
+    Confirmed shape (May 2026):
+    [
+      {
+        "text": "[{...}, {...}]"
+      }
+    ]
+
+    Returns row dicts.
+
+    Also handles:
+    - Already-parsed list of row dicts (passthrough).
+    - Dict with "data" key (standard REST response shape).
+    - Logs clear error if malformed.
+    """
+    if not raw_response:
+        logger.error("_parse_windsor_mcp_response: empty response")
+        return []
+
+    # Case 1: list with text field (MCP double-parse shape)
+    if (
+        isinstance(raw_response, list)
+        and len(raw_response) > 0
+        and isinstance(raw_response[0], dict)
+        and "text" in raw_response[0]
+    ):
+        text_payload = raw_response[0]["text"]
+        try:
+            parsed = json.loads(text_payload)
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.error(
+                "_parse_windsor_mcp_response: failed to parse text payload: %s", exc
+            )
+            return []
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict) and "data" in parsed:
+            return parsed["data"]
+        logger.error(
+            "_parse_windsor_mcp_response: parsed text is neither list nor dict with data"
+        )
+        return []
+
+    # Case 2: already a list of row dicts (e.g. search_term key present)
+    if (
+        isinstance(raw_response, list)
+        and len(raw_response) > 0
+        and isinstance(raw_response[0], dict)
+        and "search_term" in raw_response[0]
+    ):
+        return raw_response
+
+    # Case 3: dict with data key (standard REST)
+    if isinstance(raw_response, dict) and "data" in raw_response:
+        return raw_response["data"]
+
+    logger.error(
+        "_parse_windsor_mcp_response: unrecognised response shape: %s",
+        type(raw_response).__name__,
+    )
+    return []
+
+
+def _normalize_search_term_row(row: dict) -> dict:
+    """
+    Normalize a single search-term row from Windsor.
+
+    Extracts ad_group_id from Google Ads resource path if present:
+      customers/3059734490/adGroups/175677406221 → 175677406221
+    """
+    ad_group_raw = row.get("ad_group")
+    ad_group_id = (
+        ad_group_raw.split("/")[-1]
+        if isinstance(ad_group_raw, str) and "/" in ad_group_raw
+        else ad_group_raw
+    )
+
+    return {
+        "search_term": row.get("search_term"),
+        "campaign": row.get("campaign"),
+        "ad_group": ad_group_raw,
+        "ad_group_id": ad_group_id,
+        "impressions": row.get("impressions"),
+        "clicks": row.get("clicks"),
+        "spend": row.get("spend"),
+        "conversions": row.get("conversions"),
+    }
+
+
+def pull_search_terms(days_back: int = 60) -> list:
+    """
+    Pull search-term universe from Windsor.ai REST API.
+
+    Confirmed Windsor MCP contract (May 2026):
+        connector: google_ads
+        account_id: 305-973-4490
+        date_preset: last_60d
+        fields: search_term, campaign, ad_group, impressions, clicks, spend, conversions
+
+    Important:
+    - `search_term` is exact field name.
+    - `ad_group` may be a Google Ads resource path.
+    - Do not use `search_term_text`, `query`, or `search_query`.
+
+    Runtime note:
+    - MCP get_data is not available at app runtime (no MCP client in deployment).
+    - This function uses the Windsor REST API with date_preset.
+    - For MCP-extracted payloads, use `_parse_windsor_mcp_response()` to parse.
+
+    days_back mapping to Windsor presets:
+        ≤1 → last_1d, ≤7 → last_7d, ≤14 → last_14d, else → last_60d
     """
     if days_back <= 1:
         date_preset = "last_1d"
     elif days_back <= 7:
         date_preset = "last_7d"
-    else:
+    elif days_back <= 14:
         date_preset = "last_14d"
+    else:
+        date_preset = "last_60d"
 
     params = {
         "api_key": WINDSOR_API_KEY,
@@ -136,21 +243,34 @@ def pull_search_terms(days_back: int = 14) -> list:
         "date_preset": date_preset,
         "data_source": "google_ads",
         "fields": ",".join([
-            "date",
             "search_term",
             "campaign",
-            "campaign_id",
             "ad_group",
-            "keyword",
-            "match_type",
-            "spend",
-            "clicks",
             "impressions",
+            "clicks",
+            "spend",
             "conversions",
         ]),
     }
 
     return _request_with_retry(params, "search term")
+
+
+def pull_search_terms_mcp_payload(raw_response: object) -> list:
+    """
+    Parse and normalize a Windsor MCP search-term payload.
+
+    This is for operator/agent use when MCP extraction has been run externally
+    and the raw response needs to be parsed into normalized rows.
+
+    TODO: Integrate runtime MCP client when available in deployment.
+
+    Usage:
+        raw = get_data(...)  # MCP call outside this app
+        rows = pull_search_terms_mcp_payload(raw)
+    """
+    parsed = _parse_windsor_mcp_response(raw_response)
+    return [_normalize_search_term_row(row) for row in parsed]
 
 
 def pull_keyword_performance(days_back: int = 30) -> list:
@@ -350,7 +470,7 @@ if __name__ == "__main__":
     )
     logger.info("Pulling Google Ads data via Windsor.ai...")
     campaigns = pull_campaign_performance(days_back=30)
-    search_terms = pull_search_terms(days_back=14)
+    search_terms = pull_search_terms(days_back=60)
     keywords = pull_keyword_performance(days_back=30)
     geos = pull_geo_performance(days_back=30)
 
