@@ -191,20 +191,41 @@ def run_weekly_report():
                 search_term_rows=search_terms,
                 sync_batch_id=st_batch_id or None,
             )
-            if not persistence_succeeded(search_terms, st_count):
+
+            # PR-ADS-065: Distinguish empty pull from write failure
+            fetched_count = len(search_terms or [])
+            if fetched_count == 0:
+                # Windsor returned nothing — mark as success_empty (not a crash, but suspicious)
+                if st_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=st_batch_id,
+                        status="success_empty",
+                        row_count=0,
+                        last_source_date=window_end,
+                        error_message=(
+                            "Windsor returned zero search-term rows for last_60d; "
+                            "evidence pipeline unavailable."
+                        ),
+                    )
+                log.warning(
+                    "[weekly] Windsor search-term pull returned 0 rows; "
+                    "marking sync as success_empty"
+                )
+            elif not persistence_succeeded(search_terms, st_count):
                 raise RuntimeError(
-                    f"Weekly search_terms persistence failed or wrote 0 rows "
-                    f"for non-empty fetch ({len(search_terms or [])} rows)"
+                    f"Weekly search_terms persistence failed: "
+                    f"fetched {fetched_count} rows but wrote {st_count}"
                 )
-            last_source_date = max_source_date(search_terms, fallback_date=window_end)
-            if st_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=st_batch_id,
-                    status="success",
-                    row_count=st_count,
-                    last_source_date=last_source_date,
-                )
-            log.info("[weekly] Wrote %d search term rows to database", st_count)
+            else:
+                last_source_date = max_source_date(search_terms, fallback_date=window_end)
+                if st_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=st_batch_id,
+                        status="success",
+                        row_count=st_count,
+                        last_source_date=last_source_date,
+                    )
+                log.info("[weekly] Wrote %d search term rows to database", st_count)
         except Exception as db_exc:  # noqa: BLE001
             if st_batch_id:
                 db_writers.finish_sync_batch(

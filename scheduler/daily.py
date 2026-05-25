@@ -108,20 +108,37 @@ def run_daily_pulse():
             st_count = db_writers.write_search_terms(
                 run_id, search_terms, sync_batch_id=st_batch_id or None,
             )
-            if not persistence_succeeded(search_terms, st_count):
+            # PR-ADS-065: Distinguish empty pull from write failure
+            fetched_count = len(search_terms or [])
+            if fetched_count == 0:
+                # Windsor returned nothing for daily 1-day window — mark success_empty
+                if st_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=st_batch_id,
+                        status="success_empty",
+                        row_count=0,
+                        last_source_date=today,
+                        error_message=(
+                            "Windsor returned zero search-term rows for daily pull; "
+                            "this may be normal for a 1-day window or may indicate issues."
+                        ),
+                    )
+                log.info("[daily] Windsor search-term daily pull returned 0 rows (success_empty)")
+            elif not persistence_succeeded(search_terms, st_count):
                 raise RuntimeError(
-                    f"Windsor search_terms persistence failed or wrote 0 rows "
-                    f"for {len(search_terms or [])} fetched rows"
+                    f"Windsor search_terms persistence failed: "
+                    f"fetched {fetched_count} rows but wrote {st_count}"
                 )
-            log.info("[daily] Wrote %d search term rows to database", st_count)
-            last_st_date = max_source_date(search_terms, fallback_date=today)
-            if st_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=st_batch_id,
-                    status="success",
-                    row_count=st_count,
-                    last_source_date=last_st_date,
-                )
+            else:
+                log.info("[daily] Wrote %d search term rows to database", st_count)
+                last_st_date = max_source_date(search_terms, fallback_date=today)
+                if st_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=st_batch_id,
+                        status="success",
+                        row_count=st_count,
+                        last_source_date=last_st_date,
+                    )
         except Exception as exc:  # noqa: BLE001
             if st_batch_id:
                 db_writers.finish_sync_batch(

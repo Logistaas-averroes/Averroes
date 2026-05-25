@@ -205,6 +205,37 @@ def _normalize_search_term_row(row: dict) -> dict:
     }
 
 
+def normalize_search_term_rows(rows: list[dict]) -> list[dict]:
+    """Normalize raw Windsor REST search-term rows.
+
+    Requirements (PR-ADS-065):
+    - Preserve search_term (exact field name)
+    - Preserve campaign
+    - Preserve raw ad_group
+    - Add ad_group_id if resource path exists
+    - Preserve impressions/clicks/spend/conversions
+    - Do NOT map query/search_query/search_term_text to search_term
+    - Skip or flag rows with blank search_term
+
+    Returns list of normalized dicts.
+    """
+    normalized = []
+    skipped_blank = 0
+    for row in rows or []:
+        norm = _normalize_search_term_row(row)
+        st = norm.get("search_term")
+        if not st or (isinstance(st, str) and not st.strip()):
+            skipped_blank += 1
+            continue
+        normalized.append(norm)
+    if skipped_blank > 0:
+        logger.warning(
+            "normalize_search_term_rows: skipped %d rows with blank/missing search_term",
+            skipped_blank,
+        )
+    return normalized
+
+
 def pull_search_terms(days_back: int = 60) -> list:
     """
     Pull search-term universe from Windsor.ai REST API.
@@ -239,6 +270,11 @@ def pull_search_terms(days_back: int = 60) -> list:
     else:
         date_preset = "last_60d"
 
+    logger.info(
+        "Windsor search-term pull started: date_preset=%s, account_id=%s",
+        date_preset, WINDSOR_ACCOUNT_ID,
+    )
+
     params = {
         "api_key": WINDSOR_API_KEY,
         "account_id": WINDSOR_ACCOUNT_ID,
@@ -258,6 +294,20 @@ def pull_search_terms(days_back: int = 60) -> list:
     rows = _request_with_retry(params, f"search term ({date_preset})")
 
     if rows:
+        logger.info(
+            "Windsor search-term pull returned %d rows", len(rows),
+        )
+        if rows and isinstance(rows[0], dict):
+            sample_keys = sorted(rows[0].keys())
+            logger.info("Windsor search-term sample keys: %s", sample_keys)
+            has_search_term = "search_term" in rows[0]
+            logger.info("Windsor search-term sample search_term present: %s", has_search_term)
+            if not has_search_term:
+                logger.error(
+                    "Windsor search-term rows returned WITHOUT search_term field. "
+                    "Keys found: %s. This is a contract violation.",
+                    sample_keys,
+                )
         return rows
 
     if date_preset == "last_60d":
@@ -270,13 +320,30 @@ def pull_search_terms(days_back: int = 60) -> list:
         legacy_rows = _request_with_retry(legacy_params, "search term (last_14d)")
         if not legacy_rows:
             logger.warning(
-                "Windsor search-term REST fallback also returned no rows "
-                "(last_60d then last_14d)"
+                "WARNING: Windsor search-term pull returned 0 rows for last_60d AND last_14d. "
+                "This is suspicious for an active account and should not be treated as "
+                "healthy evidence."
             )
+        else:
+            logger.info(
+                "Windsor search-term pull (last_14d fallback) returned %d rows",
+                len(legacy_rows),
+            )
+            if legacy_rows and isinstance(legacy_rows[0], dict):
+                sample_keys = sorted(legacy_rows[0].keys())
+                logger.info("Windsor search-term sample keys: %s", sample_keys)
+                if "search_term" not in legacy_rows[0]:
+                    logger.error(
+                        "Windsor search-term rows returned WITHOUT search_term field. "
+                        "Keys found: %s. This is a contract violation.",
+                        sample_keys,
+                    )
         return legacy_rows
 
     logger.warning(
-        "Windsor search-term REST request returned no rows (date_preset=%s)",
+        "WARNING: Windsor search-term pull returned 0 rows (date_preset=%s). "
+        "This is suspicious for an active account and should not be treated as "
+        "healthy evidence.",
         date_preset,
     )
     return []

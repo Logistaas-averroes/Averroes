@@ -2715,8 +2715,15 @@ function renderSearchTermsTable() {
     if (searchTermsStatus === "empty" || searchTermRows.length === 0) {
       tableEl.innerHTML = `
         <div class="waste-empty-state">
-          <p class="empty-state">No search terms found for the selected filters.</p>
-          <p class="waste-empty-subtext">Search terms appear after Windsor search-term pulls are persisted locally. Current connector coverage is confirmed up to the recent search-term window.</p>
+          <p class="empty-state">No search-term rows are stored for this window.</p>
+          <p class="waste-empty-subtext">
+            This does not mean the account is clean. It means the Search Terms evidence pipeline
+            has no data for the selected window.<br><br>
+            <strong>Check:</strong><br>
+            1. Scheduler → latest weekly/daily run<br>
+            2. System Health → search_terms freshness<br>
+            3. Reality Audit → search_terms verdict
+          </p>
         </div>`;
     } else {
       tableEl.innerHTML =

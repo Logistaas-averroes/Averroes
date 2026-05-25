@@ -190,6 +190,19 @@ The REST API connector (`pull_search_terms()`) attempts `date_preset=last_60d` a
 **MCP get_data is confirmed; REST runtime parity must be validated.**
 For MCP-extracted payloads, use `_parse_windsor_mcp_response()` in `connectors/windsor_pull.py`.
 
+### Pipeline verification (PR-ADS-065)
+
+The Search Terms pipeline now includes explicit logging and verification:
+
+- **Connector** (`pull_search_terms()`): Logs date_preset, row count, sample keys, search_term presence.
+  Warns loudly if zero rows. Errors if search_term field is missing.
+- **Normalizer** (`normalize_search_term_rows()`): Skips blank search_term rows, preserves field contract.
+- **DB Writer** (`write_search_terms()`): Logs input/prepared/skipped/written counts.
+  Errors if all rows skipped due to missing field.
+- **Scheduler**: Marks zero-row pulls as `status="success_empty"` (not clean success).
+  Fetched > 0 but written = 0 is marked as failed.
+- **Verification script**: `scripts/verify_search_terms_pipeline.py --days 60 --db-only --pretty`
+
 ---
 
 ## UTM Parameters in First-Click URL

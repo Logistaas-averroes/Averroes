@@ -630,10 +630,13 @@ def write_search_terms(
     Never raises.
     """
     if not search_term_rows:
+        log.info("write_search_terms: input_rows=0, nothing to write")
         return 0
 
     today = _today()
     rows = []
+    input_rows = len(search_term_rows)
+    skipped_blank_search_term = 0
 
     for raw in search_term_rows:
         # ── Resolve source_date ──────────────────────────────────────────
@@ -656,7 +659,7 @@ def write_search_terms(
         raw_term = raw.get("search_term") or raw.get("term")
         search_term = str(raw_term).strip() if raw_term is not None else ""
         if not search_term:
-            log.warning("write_search_terms: skipping row with blank search_term")
+            skipped_blank_search_term += 1
             continue
 
         # ── Campaign name ────────────────────────────────────────────────
@@ -701,6 +704,20 @@ def write_search_terms(
             sync_batch_id,
         ))
 
+    prepared_rows = len(rows)
+    log.info(
+        "write_search_terms: input=%d prepared=%d skipped_blank=%d",
+        input_rows, prepared_rows, skipped_blank_search_term,
+    )
+
+    if skipped_blank_search_term == input_rows and input_rows > 0:
+        log.error(
+            "write_search_terms: ALL %d search-term rows skipped because "
+            "search_term field is missing/blank. This likely indicates a "
+            "field mapping issue in the Windsor connector.",
+            input_rows,
+        )
+
     if not rows:
         return 0
 
@@ -742,7 +759,10 @@ def write_search_terms(
                 # attempted-upsert count.
                 attempted = len(rows)
         log.info(
-            "write_search_terms: upserted %d rows (run_id=%s)", attempted, run_id
+            "write_search_terms: upserted %d rows (run_id=%s) "
+            "[input=%d prepared=%d skipped_blank=%d written=%d]",
+            attempted, run_id, input_rows, prepared_rows,
+            skipped_blank_search_term, attempted,
         )
         return attempted
     except Exception as exc:  # noqa: BLE001

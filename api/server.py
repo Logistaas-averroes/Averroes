@@ -3223,6 +3223,29 @@ def api_search_terms(
         last = dict(zip(cols, page_rows[-1]))
         next_cursor = _encode_search_terms_cursor(last["source_date"], int(last["id"]))
 
+    # PR-ADS-065: Enhanced data_quality block
+    is_empty = len(out) == 0
+    data_quality: dict[str, Any] = {
+        "source": "windsor",
+        "dataset": "search_terms",
+        "table": "search_terms",
+        "days": days,
+        "rows_in_window": len(out),
+        "is_empty": is_empty,
+        "note": _SEARCH_TERMS_DATA_QUALITY_NOTE,
+        "warning": (
+            "No search-term rows found for this window. "
+            "Check Windsor pull and sync_batches."
+            if is_empty else None
+        ),
+    }
+    # Compute latest_source_date from returned rows
+    if out:
+        source_dates = [r["source_date"] for r in out if r.get("source_date")]
+        data_quality["latest_source_date"] = max(source_dates) if source_dates else None
+    else:
+        data_quality["latest_source_date"] = None
+
     return {
         "days": days,
         "filters": {
@@ -3234,11 +3257,7 @@ def api_search_terms(
             "next_cursor": next_cursor,
             "has_more":    has_more,
         },
-        "data_quality": {
-            "source":  "windsor",
-            "dataset": "search_terms",
-            "note":    _SEARCH_TERMS_DATA_QUALITY_NOTE,
-        },
+        "data_quality": data_quality,
     }
 
 
@@ -3457,6 +3476,23 @@ def api_search_terms_summary(
     if min_spend is not None:
         filters_out["min_spend"] = min_spend
 
+    # PR-ADS-065: Enhanced data_quality for summary
+    is_empty = total_terms == 0
+    data_quality_out: dict[str, Any] = {
+        "source": "windsor",
+        "dataset": "search_terms",
+        "table": "search_terms",
+        "days": days,
+        "rows_in_window": total_terms,
+        "is_empty": is_empty,
+        "note": _SEARCH_TERMS_SUMMARY_DATA_QUALITY_NOTE,
+        "warning": (
+            "No search-term rows found for this window. "
+            "Check Windsor pull and sync_batches."
+            if is_empty else None
+        ),
+    }
+
     return {
         "days": days,
         "filters": filters_out,
@@ -3472,11 +3508,7 @@ def api_search_terms_summary(
             "google_conversion_rate_pct":    google_conv_rate,
         },
         "analysis_state": analysis_state,
-        "data_quality": {
-            "source":  "windsor",
-            "dataset": "search_terms",
-            "note":    _SEARCH_TERMS_SUMMARY_DATA_QUALITY_NOTE,
-        },
+        "data_quality": data_quality_out,
         "db_unavailable": False,
     }
 
