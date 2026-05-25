@@ -149,7 +149,7 @@ def compute_verdict(
 
     # Has rows — check staleness.
     if rows_in_window > 0 and latest_date is not None:
-        from datetime import date as _date
+        from datetime import date as _date  # noqa: PLC0415
 
         if hasattr(latest_date, "date"):
             latest_as_date = latest_date.date()
@@ -159,9 +159,7 @@ def compute_verdict(
             latest_as_date = None
 
         if latest_as_date is not None:
-            from datetime import date as _dt
-
-            age_days = (_dt.today() - latest_as_date).days
+            age_days = (_date.today() - latest_as_date).days
             if age_days > stale_threshold:
                 return (
                     Verdict.STALE,
@@ -242,17 +240,25 @@ def _table_exists(cur, table: str) -> bool:
 
 def _count_rows(cur, table: str, date_col: str, days: int) -> int:
     """Count rows in table within the last N days."""
-    # Use different date comparison based on column type.
-    cur.execute(
-        f"SELECT COUNT(*) FROM {table} WHERE {date_col} >= CURRENT_DATE - INTERVAL '%s days'",  # noqa: S608
-        (days,),
+    from psycopg2 import sql  # noqa: PLC0415
+
+    query = sql.SQL("SELECT COUNT(*) FROM {} WHERE {} >= CURRENT_DATE - INTERVAL %s").format(
+        sql.Identifier(table),
+        sql.Identifier(date_col),
     )
+    cur.execute(query, (f"{days} days",))
     return cur.fetchone()[0]
 
 
 def _latest_date(cur, table: str, date_col: str):
     """Get the maximum date value from a table."""
-    cur.execute(f"SELECT MAX({date_col}) FROM {table}")  # noqa: S608
+    from psycopg2 import sql  # noqa: PLC0415
+
+    query = sql.SQL("SELECT MAX({}) FROM {}").format(
+        sql.Identifier(date_col),
+        sql.Identifier(table),
+    )
+    cur.execute(query)
     result = cur.fetchone()
     return result[0] if result else None
 
