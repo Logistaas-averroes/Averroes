@@ -6,11 +6,12 @@ PR-ADS-063 — Windsor Search-Term Contract Audit, Parser Fix & Docs Sync.
 """
 
 import json
-import pytest
+from unittest.mock import patch
 
 from connectors.windsor_pull import (
     _parse_windsor_mcp_response,
     _normalize_search_term_row,
+    pull_search_terms,
     pull_search_terms_mcp_payload,
 )
 
@@ -194,3 +195,30 @@ class TestAlreadyParsedList:
         assert rows[0]["search_term"] == "cargowise pricing"
         assert rows[0]["ad_group_id"] == "175677406221"
         assert rows[0]["spend"] == 7.5
+
+
+class TestSearchTermRestFallback:
+    """REST last_60d is an attempted fallback and may downgrade to last_14d."""
+
+    def test_last_60d_empty_falls_back_to_last_14d(self):
+        with patch(
+            "connectors.windsor_pull._request_with_retry",
+            side_effect=[[], [{"search_term": "fallback term"}]],
+        ) as mocked:
+            rows = pull_search_terms(days_back=60)
+
+        assert rows == [{"search_term": "fallback term"}]
+        assert mocked.call_count == 2
+        assert mocked.call_args_list[0].args[0]["date_preset"] == "last_60d"
+        assert mocked.call_args_list[1].args[0]["date_preset"] == "last_14d"
+
+    def test_non_60d_window_does_not_trigger_legacy_fallback(self):
+        with patch(
+            "connectors.windsor_pull._request_with_retry",
+            return_value=[],
+        ) as mocked:
+            rows = pull_search_terms(days_back=7)
+
+        assert rows == []
+        assert mocked.call_count == 1
+        assert mocked.call_args_list[0].args[0]["date_preset"] == "last_7d"

@@ -92,6 +92,7 @@ The MCP response requires double parsing:
 2. Run `json.loads()` on that string
 
 `ad_group` may be a full resource path. Split by `/` and take the last segment only when an ad group ID is needed.
+MCP `get_data` is the confirmed contract; REST runtime parity with MCP must be validated.
 
 ---
 

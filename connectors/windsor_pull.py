@@ -222,7 +222,9 @@ def pull_search_terms(days_back: int = 60) -> list:
 
     Runtime note:
     - MCP get_data is not available at app runtime (no MCP client in deployment).
-    - This function uses the Windsor REST API with date_preset.
+    - This function attempts Windsor REST `date_preset=last_60d` as runtime fallback.
+    - REST parity with the confirmed MCP 60-day universe is not guaranteed unless
+      validated in the current runtime/account.
     - For MCP-extracted payloads, use `_parse_windsor_mcp_response()` to parse.
 
     days_back mapping to Windsor presets:
@@ -253,7 +255,31 @@ def pull_search_terms(days_back: int = 60) -> list:
         ]),
     }
 
-    return _request_with_retry(params, "search term")
+    rows = _request_with_retry(params, f"search term ({date_preset})")
+
+    if rows:
+        return rows
+
+    if date_preset == "last_60d":
+        logger.warning(
+            "Windsor search-term REST fallback last_60d returned no rows; "
+            "falling back to legacy last_14d behavior"
+        )
+        legacy_params = dict(params)
+        legacy_params["date_preset"] = "last_14d"
+        legacy_rows = _request_with_retry(legacy_params, "search term (last_14d fallback)")
+        if not legacy_rows:
+            logger.warning(
+                "Windsor search-term REST fallback also returned no rows "
+                "(last_60d then last_14d)"
+            )
+        return legacy_rows
+
+    logger.warning(
+        "Windsor search-term REST request returned no rows (date_preset=%s)",
+        date_preset,
+    )
+    return []
 
 
 def pull_search_terms_mcp_payload(raw_response: object) -> list:

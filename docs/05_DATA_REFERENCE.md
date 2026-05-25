@@ -186,7 +186,8 @@ Each row represents one search-term / campaign / ad-group combination with metri
 ### Runtime availability
 
 MCP get_data is **not** available at app runtime (no MCP client in Render deployment).
-The REST API connector (`pull_search_terms()`) uses `date_preset=last_60d` for the same data.
+The REST API connector (`pull_search_terms()`) attempts `date_preset=last_60d` as runtime fallback and falls back to `last_14d` if empty.
+**MCP get_data is confirmed; REST runtime parity must be validated.**
 For MCP-extracted payloads, use `_parse_windsor_mcp_response()` in `connectors/windsor_pull.py`.
 
 ---
