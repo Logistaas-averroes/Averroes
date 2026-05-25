@@ -301,7 +301,7 @@ def pull_search_terms(days_back: int = 60) -> list:
             sample_keys = sorted(rows[0].keys())
             logger.info("Windsor search-term sample keys: %s", sample_keys)
             has_search_term = "search_term" in rows[0]
-            logger.info("Windsor search-term sample search_term present: %s", has_search_term)
+            logger.info("Windsor search-term sample has search_term field: %s", has_search_term)
             if not has_search_term:
                 logger.error(
                     "Windsor search-term rows returned WITHOUT search_term field. "
