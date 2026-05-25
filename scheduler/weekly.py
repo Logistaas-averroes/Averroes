@@ -42,7 +42,7 @@ def run_weekly_report():
             save_output as windsor_save,
         )
         campaigns = pull_campaign_performance(days_back=30)
-        search_terms = pull_search_terms(days_back=14)  # 14-day window: Windsor search term data is unreliable beyond 14 days
+        search_terms = pull_search_terms(days_back=60)  # Windsor MCP contract uses date_preset=last_60d
         keywords = pull_keyword_performance(days_back=30)
         geos = pull_geo_performance(days_back=30)
         windsor_save(campaigns, search_terms, keywords, geos)
@@ -174,8 +174,9 @@ def run_weekly_report():
         try:
             st_batch_id = None
             window_end = datetime.utcnow().date()
-            # Inclusive 14-day search-term window: today minus 13 days through today.
-            window_start = window_end - timedelta(days=13)
+            # Windsor MCP search-term contract uses date_preset=last_60d.
+            # Rows may not include a source date unless `date` is explicitly requested.
+            window_start = window_end - timedelta(days=59)
             st_batch_id = db_writers.start_sync_batch(
                 source="windsor",
                 dataset="search_terms",

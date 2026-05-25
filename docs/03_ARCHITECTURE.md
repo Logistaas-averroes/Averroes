@@ -49,6 +49,8 @@ data/ads_*.json        data/crm_*.json
 
 ### `connectors/windsor_pull.py`
 - Fetches campaign performance, search terms, keyword data, geo data from Windsor.ai
+- Search-term extraction must follow the confirmed Windsor MCP contract where runtime MCP is available.
+- Connector output remains raw row data only; analysis happens downstream.
 - Writes to `data/` directory
 - Does nothing else. No analysis. No decisions.
 

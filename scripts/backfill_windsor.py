@@ -8,7 +8,9 @@ Supported datasets:
     campaigns    — Google Ads campaign performance (all campaigns, active and paused)
     keywords     — Keyword-level performance
     geo          — Geographic performance
-    search_terms — Unsupported by current connector (date_preset limitation)
+    search_terms — Supported only for confirmed rolling preset extraction (`last_60d`).
+                   Arbitrary date_from/date_to historical backfill remains unsupported
+                   unless Windsor confirms explicit range support for search terms.
 
 NEVER writes to Google Ads.
 NEVER called by any scheduler or Render startup command.
@@ -22,10 +24,14 @@ log = logging.getLogger(__name__)
 
 SUPPORTED_DATASETS = frozenset({"campaigns", "keywords", "geo", "search_terms"})
 
-# search_terms cannot be reliably backfilled — Windsor uses date_preset, not date_from/date_to
+# search_terms cannot be reliably backfilled with arbitrary date ranges.
+# The confirmed working extraction uses date_preset=last_60d (~45,292 rows).
+# Arbitrary date_from/date_to historical backfill remains unsupported unless
+# Windsor confirms explicit range support for search terms.
 _SEARCH_TERMS_NOTE = (
-    "unsupported_by_current_connector: Windsor search_terms connector uses date_preset "
-    "and cannot accept explicit date_from/date_to for historical backfill."
+    "Rolling preset extraction (last_60d) is confirmed and available via pull_search_terms(). "
+    "Arbitrary date_from/date_to historical backfill remains unsupported — Windsor search_terms "
+    "connector uses date_preset and cannot accept explicit date ranges."
 )
 
 
