@@ -49,6 +49,9 @@
 | `static/styles.css` | Dashboard styles | PR-ADS-025B: .time-range-bar, .time-range-btn styles appended |
 | `scripts/verify_live_deployment.py` | Live deployment verifier | Updated in PR-ADS-021: checks `/health` is public; checks protected endpoints return 401 when unauthenticated; optional login test via `TEST_USERNAME`/`TEST_PASSWORD` |
 | `docs/API_CONTRACT.md` | API endpoint contract | PR-ADS-025C: /api/leads response/example updated to include source_type. Valid source_type enum remains documented here in repo state: paid_search, organic_search, referral, direct, email, other. Single source of truth for every endpoint in api/server.py |
+| `docs/23_PRODUCTION_REALITY_AND_UX_AUDIT.md` | Production reality map and UX navigation diagnosis | PR-ADS-064: Full audit of every sidebar page, endpoint, DB table, scheduler, and data pipeline. Search Terms pipeline investigation. UX restructure recommendation. |
+| `scripts/audit_production_reality.py` | Read-only diagnostic script for production data trust | PR-ADS-064: Checks row counts, freshness, verdicts per dataset. Flags FRESH_BUT_EMPTY. No external API calls, no mutations. |
+| `tests/test_production_reality_audit.py` | Unit tests for audit script verdict logic | PR-ADS-064: Tests compute_verdict() and compute_pipeline_blockers() pure functions |
 
 **Phase 1 state:** Read-only. Deterministic advisor active. Internal auth active. Claude API optional.
 
@@ -121,6 +124,7 @@ No files are currently in a broken state.
 | PR-ADS-025F | Campaign truth table merge — Windsor spend + HubSpot SQLs unified per run, junk filter, one-time DB cleanup | 🔄 In Progress |
 | PR-ADS-025F-FIX | Copilot fixes — lq aggregate, legacy key shim, race-safe TRUNCATE | 🔄 In Progress |
 | PR-ADS-025B | Dashboard live data — markdown parser removed, /api/* DB calls, time range selector | 🔄 In Progress |
+| PR-ADS-064 | Full Production Reality Audit & UX Navigation Diagnosis — audit doc, diagnostic script, admin endpoint | 🔨 In Progress |
 | **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 

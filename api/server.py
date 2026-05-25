@@ -4813,3 +4813,30 @@ def api_historical_intelligence(
     # Apply row limit
     result["rows"] = result.get("rows", [])[:limit]
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SYSTEM REALITY AUDIT (PR-ADS-064)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/api/system/reality-audit")
+def api_system_reality_audit(
+    request: Request,
+    days: int = Query(default=60, description="Time window in days (1–90)"),
+) -> dict[str, Any]:
+    """Return a read-only production reality audit diagnostic.
+
+    Admin only. Checks row counts, freshness status, and verdicts for every
+    major dataset table. Identifies pipeline blockers and trust issues.
+
+    Does NOT call Google Ads, HubSpot, Windsor, or any external service.
+    Does NOT mutate any data.
+    Phase 1 read-only. PR-ADS-064.
+    """
+    check_admin_or_token(request)
+
+    days = max(1, min(90, days))
+
+    from scripts.audit_production_reality import run_audit  # noqa: PLC0415
+    return run_audit(days=days)
