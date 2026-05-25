@@ -267,7 +267,7 @@ def pull_search_terms(days_back: int = 60) -> list:
         )
         legacy_params = dict(params)
         legacy_params["date_preset"] = "last_14d"
-        legacy_rows = _request_with_retry(legacy_params, "search term (last_14d fallback)")
+        legacy_rows = _request_with_retry(legacy_params, "search term (last_14d)")
         if not legacy_rows:
             logger.warning(
                 "Windsor search-term REST fallback also returned no rows "

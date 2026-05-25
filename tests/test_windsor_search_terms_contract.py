@@ -204,13 +204,15 @@ class TestSearchTermRestFallback:
         with patch(
             "connectors.windsor_pull._request_with_retry",
             side_effect=[[], [{"search_term": "fallback term"}]],
-        ) as mocked:
+        ) as mocked, patch("connectors.windsor_pull.logger.warning") as mock_warning:
             rows = pull_search_terms(days_back=60)
 
         assert rows == [{"search_term": "fallback term"}]
         assert mocked.call_count == 2
         assert mocked.call_args_list[0].args[0]["date_preset"] == "last_60d"
         assert mocked.call_args_list[1].args[0]["date_preset"] == "last_14d"
+        mock_warning.assert_called_once()
+        assert "falling back to legacy last_14d behavior" in mock_warning.call_args.args[0]
 
     def test_non_60d_window_does_not_trigger_legacy_fallback(self):
         with patch(
