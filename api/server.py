@@ -4852,7 +4852,7 @@ def api_system_reality_audit(
     from db.connection import get_conn  # noqa: PLC0415
     from scripts.audit_production_reality import run_audit  # noqa: PLC0415
     with get_conn() as conn:
-        audit = run_audit(days=days, conn=conn, allow_direct_connect=False)
+        audit = run_audit(days=days, conn=conn)
 
     with _reality_audit_cache_lock:
         _reality_audit_cache[days] = {

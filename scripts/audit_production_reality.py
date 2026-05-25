@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 log = logging.getLogger(__name__)
+_CONN_UNSET = object()
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -347,7 +348,7 @@ def _get_latest_run(cur, existing_tables: set[str] | None = None) -> dict | None
 # ─── Main audit logic ──────────────────────────────────────────────────────
 
 
-def run_audit(days: int = 60, conn=None, *, allow_direct_connect: bool = True) -> dict[str, Any]:
+def run_audit(days: int = 60, conn=_CONN_UNSET) -> dict[str, Any]:
     """Run the full production reality audit. Returns structured result dict."""
     result: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -359,8 +360,8 @@ def run_audit(days: int = 60, conn=None, *, allow_direct_connect: bool = True) -
         "db_available": False,
     }
 
-    owns_connection = conn is None
-    if conn is None and allow_direct_connect:
+    owns_connection = conn is _CONN_UNSET
+    if conn is _CONN_UNSET:
         conn = _get_connection()
 
     if conn is None:
