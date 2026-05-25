@@ -1848,6 +1848,84 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
 
 ---
 
+## System Reality Audit (PR-ADS-064)
+
+### `GET /api/system/reality-audit`
+
+**Auth:** Admin only (session with admin role, or `ADMIN_API_TOKEN` Bearer header)  
+**Purpose:** Read-only production reality diagnostic. Reports row counts, freshness status, and verdicts for every major dataset table.  
+**Added:** PR-ADS-064
+
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `days` | int | 60 | Time window in days (1–90) |
+
+#### Response Shape
+
+```json
+{
+  "generated_at": "2026-05-25T12:00:00+00:00",
+  "days": 60,
+  "db_available": true,
+  "latest_run": {
+    "run_type": "weekly",
+    "status": "success",
+    "started_at": "2026-05-25T00:01:00+00:00",
+    "finished_at": "2026-05-25T00:05:00+00:00"
+  },
+  "datasets": {
+    "search_terms": {
+      "dataset": "search_terms",
+      "rows_7d": 0,
+      "rows_14d": 0,
+      "rows_30d": 0,
+      "rows_60d": 0,
+      "latest_date": null,
+      "freshness_status": "success",
+      "source": "windsor",
+      "last_sync_type": "weekly/daily",
+      "last_sync_status": "success",
+      "verdict": "FRESH_BUT_EMPTY",
+      "reason": "Sync status says 'success' but table has zero rows in 60d window"
+    }
+  },
+  "sync_state": {},
+  "pipeline_blockers": [
+    {
+      "page": "Search Terms",
+      "blocker": "search_terms table: FRESH_BUT_EMPTY — ..."
+    },
+    {
+      "page": "N-Grams",
+      "blocker": "Depends on search_terms table which is empty/broken"
+    }
+  ]
+}
+```
+
+#### Verdicts
+
+| Verdict | Meaning |
+|---------|---------|
+| `OK` | Data present and within freshness threshold |
+| `RUNNING` | Sync is currently in progress (data may still be loading) |
+| `FRESH_BUT_EMPTY` | Sync says success but table has zero rows |
+| `STALE` | Latest date exceeds staleness threshold |
+| `EMPTY_VALID` | No sync expected and table is empty |
+| `MISSING_TABLE` | Table does not exist in the database |
+| `DB_UNAVAILABLE` | Database connection failed |
+| `BROKEN` | Exception or inconsistent state |
+
+#### Notes
+
+- **Read-only.** No external API calls. No data mutation.
+- Equivalent to running `python scripts/audit_production_reality.py --days 60 --json`
+- Admin/manual diagnostic endpoint. Responses are short-TTL cached in API to reduce DB load from repeated polling.
+
+---
+
 ## Forbidden Endpoints (Phase 1)
 
 These endpoints **must not exist** in Phase 1. Adding them is a doctrine violation.
