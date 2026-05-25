@@ -43,6 +43,21 @@ TABLES: dict[str, str] = {
     "gclid_coverage_snapshots": "snapshot_date",
 }
 
+# sync_state key mapping for audited tables.
+# Keys use "source/dataset" to match sync_state UNIQUE(source, dataset).
+TABLE_TO_SYNC_DATASET_KEY: dict[str, str | None] = {
+    "runs": None,
+    "campaigns": "windsor/campaigns",
+    "leads": "hubspot/contacts",
+    "deals": "hubspot/deals",
+    "keywords": "windsor/keywords",
+    "geo": "windsor/geo",
+    "search_terms": "windsor/search_terms",
+    "waste_terms": None,
+    "gclid_attribution": "gclid/matches",
+    "gclid_coverage_snapshots": "gclid/coverage",
+}
+
 # External source for each dataset (informational only).
 DATASET_SOURCE: dict[str, str] = {
     "runs": "internal",
@@ -93,6 +108,7 @@ SEARCH_TERMS_DEPENDENTS = {"waste_terms", "ngrams"}
 
 class Verdict:
     OK = "OK"
+    RUNNING = "RUNNING"
     FRESH_BUT_EMPTY = "FRESH_BUT_EMPTY"
     STALE = "STALE"
     EMPTY_VALID = "EMPTY_VALID"
@@ -125,6 +141,11 @@ def compute_verdict(
     """
     if stale_threshold is None:
         stale_threshold = STALE_THRESHOLD_DAYS.get(table, 8)
+
+    if sync_status == "running":
+        if rows_in_window > 0:
+            return (Verdict.RUNNING, "Sync currently running; partial data may still be loading")
+        return (Verdict.RUNNING, "Sync currently running and table has zero rows so far")
 
     # Fresh sync but zero rows → suspicious.
     if rows_in_window == 0 and sync_status in ("success", "fresh"):
@@ -173,7 +194,11 @@ def compute_verdict(
     return (Verdict.BROKEN, "Unexpected state")
 
 
-def compute_pipeline_blockers(dataset_results: dict[str, dict]) -> list[dict[str, str]]:
+def compute_pipeline_blockers(
+    dataset_results: dict[str, dict],
+    *,
+    db_available: bool = True,
+) -> list[dict[str, str]]:
     """Identify pipeline blockers based on dataset verdicts.
 
     If search_terms is empty/broken, downstream pages (N-Grams, Waste Terms)
@@ -183,10 +208,22 @@ def compute_pipeline_blockers(dataset_results: dict[str, dict]) -> list[dict[str
     """
     blockers: list[dict[str, str]] = []
 
+    if not db_available:
+        blockers.append({
+            "page": "System",
+            "blocker": "Database unavailable — audit data cannot be trusted",
+        })
+
     st = dataset_results.get("search_terms", {})
     st_verdict = st.get("verdict", "")
 
-    if st_verdict in (Verdict.FRESH_BUT_EMPTY, Verdict.MISSING_TABLE, Verdict.BROKEN, Verdict.STALE):
+    if st_verdict in (
+        Verdict.FRESH_BUT_EMPTY,
+        Verdict.MISSING_TABLE,
+        Verdict.BROKEN,
+        Verdict.STALE,
+        Verdict.DB_UNAVAILABLE,
+    ):
         blockers.append({
             "page": "Search Terms",
             "blocker": f"search_terms table: {st_verdict} — {st.get('reason', 'unknown')}",
@@ -238,6 +275,12 @@ def _table_exists(cur, table: str) -> bool:
     return cur.fetchone()[0]
 
 
+def _existing_tables(cur) -> set[str]:
+    """Return all table names in the current schema."""
+    cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+    return {row[0] for row in cur.fetchall()}
+
+
 def _count_rows(cur, table: str, date_col: str, days: int) -> int:
     """Count rows in table within the last N days."""
     from psycopg2 import sql  # noqa: PLC0415
@@ -263,9 +306,11 @@ def _latest_date(cur, table: str, date_col: str):
     return result[0] if result else None
 
 
-def _get_sync_state(cur) -> dict[str, dict]:
-    """Fetch sync_state rows as a dict keyed by dataset name."""
-    if not _table_exists(cur, "sync_state"):
+def _get_sync_state(cur, existing_tables: set[str] | None = None) -> dict[str, dict]:
+    """Fetch sync_state rows as a dict keyed by source/dataset."""
+    if existing_tables is not None and "sync_state" not in existing_tables:
+        return {}
+    if existing_tables is None and not _table_exists(cur, "sync_state"):
         return {}
     cur.execute(
         """
@@ -279,13 +324,15 @@ def _get_sync_state(cur) -> dict[str, dict]:
     result = {}
     for row in rows:
         r = dict(zip(cols, row))
-        result[r["dataset"]] = r
+        result[f"{r['source']}/{r['dataset']}"] = r
     return result
 
 
-def _get_latest_run(cur) -> dict | None:
+def _get_latest_run(cur, existing_tables: set[str] | None = None) -> dict | None:
     """Get the most recent run record."""
-    if not _table_exists(cur, "runs"):
+    if existing_tables is not None and "runs" not in existing_tables:
+        return None
+    if existing_tables is None and not _table_exists(cur, "runs"):
         return None
     cur.execute(
         "SELECT run_type, status, started_at, finished_at FROM runs ORDER BY started_at DESC LIMIT 1"
@@ -300,7 +347,7 @@ def _get_latest_run(cur) -> dict | None:
 # ─── Main audit logic ──────────────────────────────────────────────────────
 
 
-def run_audit(days: int = 60) -> dict[str, Any]:
+def run_audit(days: int = 60, conn=None, *, allow_direct_connect: bool = True) -> dict[str, Any]:
     """Run the full production reality audit. Returns structured result dict."""
     result: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -312,7 +359,10 @@ def run_audit(days: int = 60) -> dict[str, Any]:
         "db_available": False,
     }
 
-    conn = _get_connection()
+    owns_connection = conn is None
+    if conn is None and allow_direct_connect:
+        conn = _get_connection()
+
     if conn is None:
         # Mark all as DB_UNAVAILABLE.
         for table in TABLES:
@@ -330,16 +380,21 @@ def run_audit(days: int = 60) -> dict[str, Any]:
                 "verdict": Verdict.DB_UNAVAILABLE,
                 "reason": "Database connection unavailable",
             }
-        result["pipeline_blockers"] = compute_pipeline_blockers(result["datasets"])
+        result["pipeline_blockers"] = compute_pipeline_blockers(
+            result["datasets"],
+            db_available=False,
+        )
         return result
 
     result["db_available"] = True
 
     try:
         cur = conn.cursor()
+        cur.execute("SET TRANSACTION READ ONLY")
+        existing_tables = _existing_tables(cur)
 
         # Get latest run.
-        latest_run = _get_latest_run(cur)
+        latest_run = _get_latest_run(cur, existing_tables)
         if latest_run:
             result["latest_run"] = {
                 "run_type": latest_run["run_type"],
@@ -349,7 +404,7 @@ def run_audit(days: int = 60) -> dict[str, Any]:
             }
 
         # Get sync state.
-        sync_state = _get_sync_state(cur)
+        sync_state = _get_sync_state(cur, existing_tables)
         result["sync_state"] = {
             k: {
                 "source": v.get("source"),
@@ -363,7 +418,7 @@ def run_audit(days: int = 60) -> dict[str, Any]:
 
         # Audit each table.
         for table, date_col in TABLES.items():
-            if not _table_exists(cur, table):
+            if table not in existing_tables:
                 result["datasets"][table] = {
                     "dataset": table,
                     "rows_7d": 0,
@@ -390,10 +445,8 @@ def run_audit(days: int = 60) -> dict[str, Any]:
             latest_dt = _latest_date(cur, table, date_col)
 
             # Sync status for this dataset.
-            sync_info = sync_state.get(table) or sync_state.get(
-                # Fallback: search_terms might be stored as "search_terms" in sync_state.
-                table.replace("_", "-"), {}
-            )
+            sync_key = TABLE_TO_SYNC_DATASET_KEY.get(table)
+            sync_info = sync_state.get(sync_key, {}) if sync_key else {}
             sync_status = sync_info.get("status") if sync_info else None
 
             # Use the requested window for verdict.
@@ -427,6 +480,7 @@ def run_audit(days: int = 60) -> dict[str, Any]:
                 "source": DATASET_SOURCE.get(table, "unknown"),
                 "last_sync_type": DATASET_SYNC_TYPE.get(table, "unknown"),
                 "last_sync_status": sync_status,
+                "sync_dataset_key": sync_key,
                 "verdict": verdict,
                 "reason": reason,
             }
@@ -436,9 +490,13 @@ def run_audit(days: int = 60) -> dict[str, Any]:
         log.error("Audit query error: %s", exc)
         result["error"] = str(exc)
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
 
-    result["pipeline_blockers"] = compute_pipeline_blockers(result["datasets"])
+    result["pipeline_blockers"] = compute_pipeline_blockers(
+        result["datasets"],
+        db_available=result["db_available"],
+    )
     return result
 
 
@@ -474,6 +532,7 @@ def format_pretty(audit: dict[str, Any]) -> str:
         verdict = info.get("verdict", "UNKNOWN")
         icon = {
             "OK": "✅",
+            "RUNNING": "🏃",
             "FRESH_BUT_EMPTY": "⚠️ ",
             "STALE": "⏰",
             "EMPTY_VALID": "🔲",
@@ -509,7 +568,7 @@ def format_pretty(audit: dict[str, Any]) -> str:
         lines.append("-" * 60)
         for ds, info in sync_state.items():
             lines.append(
-                f"  {info.get('source', '?')}/{ds}: "
+                f"  {ds}: "
                 f"status={info.get('status', '?')} "
                 f"last_sync={info.get('last_successful_sync_at', 'never')}"
             )

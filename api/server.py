@@ -4819,6 +4819,10 @@ def api_historical_intelligence(
 # SYSTEM REALITY AUDIT (PR-ADS-064)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_REALITY_AUDIT_CACHE_TTL_SECONDS = 60
+_reality_audit_cache_lock = threading.Lock()
+_reality_audit_cache: dict[int, dict[str, Any]] = {}
+
 
 @app.get("/api/system/reality-audit")
 def api_system_reality_audit(
@@ -4829,6 +4833,7 @@ def api_system_reality_audit(
 
     Admin only. Checks row counts, freshness status, and verdicts for every
     major dataset table. Identifies pipeline blockers and trust issues.
+    Intended for manual/admin diagnostics, not high-frequency polling.
 
     Does NOT call Google Ads, HubSpot, Windsor, or any external service.
     Does NOT mutate any data.
@@ -4838,5 +4843,20 @@ def api_system_reality_audit(
 
     days = max(1, min(90, days))
 
+    now_ts = datetime.now(timezone.utc).timestamp()
+    with _reality_audit_cache_lock:
+        cached = _reality_audit_cache.get(days)
+        if cached and now_ts < cached["expires_at"]:
+            return cached["data"]
+
+    from db.connection import get_conn  # noqa: PLC0415
     from scripts.audit_production_reality import run_audit  # noqa: PLC0415
-    return run_audit(days=days)
+    with get_conn() as conn:
+        audit = run_audit(days=days, conn=conn, allow_direct_connect=False)
+
+    with _reality_audit_cache_lock:
+        _reality_audit_cache[days] = {
+            "expires_at": now_ts + _REALITY_AUDIT_CACHE_TTL_SECONDS,
+            "data": audit,
+        }
+    return audit

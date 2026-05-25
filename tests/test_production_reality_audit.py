@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.audit_production_reality import (
     Verdict,
+    _get_sync_state,
     compute_pipeline_blockers,
     compute_verdict,
 )
@@ -93,6 +94,18 @@ class TestComputeVerdict:
         )
         assert verdict == Verdict.STALE
         assert "old" in reason.lower()
+
+    def test_running_when_sync_in_progress_and_empty(self):
+        """Verdict is RUNNING when sync is active and rows are still zero."""
+        verdict, reason = compute_verdict(
+            table="search_terms",
+            rows_in_window=0,
+            latest_date=None,
+            sync_status="running",
+            days=60,
+        )
+        assert verdict == Verdict.RUNNING
+        assert "running" in reason.lower()
 
     def test_missing_table_verdict_not_computed_here(self):
         """MISSING_TABLE is not directly produced by compute_verdict —
@@ -204,3 +217,50 @@ class TestComputePipelineBlockers:
         pages_blocked = [b["page"] for b in blockers]
         assert "Search Terms" in pages_blocked
         assert "N-Grams" in pages_blocked
+        assert "Waste Terms" in pages_blocked
+
+    def test_db_unavailable_adds_top_level_and_downstream_blockers(self):
+        """DB unavailable should raise top-level and search-term blockers."""
+        datasets = {
+            "search_terms": {
+                "verdict": Verdict.DB_UNAVAILABLE,
+                "reason": "Database connection unavailable",
+            },
+            "waste_terms": {"verdict": Verdict.DB_UNAVAILABLE, "reason": ""},
+        }
+        blockers = compute_pipeline_blockers(datasets, db_available=False)
+        pages_blocked = [b["page"] for b in blockers]
+        assert "System" in pages_blocked
+        assert "Search Terms" in pages_blocked
+        assert "N-Grams" in pages_blocked
+        assert "Waste Terms" in pages_blocked
+
+
+class TestSyncStateMapping:
+    """sync_state rows should be keyed by source/dataset."""
+
+    def test_get_sync_state_keys_source_dataset(self):
+        class FakeCursor:
+            description = [
+                ("source",),
+                ("dataset",),
+                ("status",),
+                ("last_successful_sync_at",),
+                ("last_source_date",),
+                ("error_message",),
+            ]
+
+            def execute(self, _query):
+                return None
+
+            def fetchall(self):
+                return [
+                    ("windsor", "search_terms", "success", None, None, None),
+                    ("hubspot", "contacts", "running", None, None, None),
+                ]
+
+        cur = FakeCursor()
+        state = _get_sync_state(cur, existing_tables={"sync_state"})
+        assert "windsor/search_terms" in state
+        assert "hubspot/contacts" in state
+        assert state["hubspot/contacts"]["status"] == "running"

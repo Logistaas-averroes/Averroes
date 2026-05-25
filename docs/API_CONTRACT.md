@@ -1910,6 +1910,7 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
 | Verdict | Meaning |
 |---------|---------|
 | `OK` | Data present and within freshness threshold |
+| `RUNNING` | Sync is currently in progress (data may still be loading) |
 | `FRESH_BUT_EMPTY` | Sync says success but table has zero rows |
 | `STALE` | Latest date exceeds staleness threshold |
 | `EMPTY_VALID` | No sync expected and table is empty |
@@ -1921,7 +1922,7 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
 
 - **Read-only.** No external API calls. No data mutation.
 - Equivalent to running `python scripts/audit_production_reality.py --days 60 --json`
-- Useful for monitoring dashboards and automated health checks.
+- Admin/manual diagnostic endpoint. Responses are short-TTL cached in API to reduce DB load from repeated polling.
 
 ---
 

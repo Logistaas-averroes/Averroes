@@ -193,7 +193,8 @@ This audit traces every sidebar page from UI → endpoint → DB table → sched
 │  write_waste_terms() → waste_terms table                                 │
 │  write_gclid_attribution() → gclid_attribution table                     │
 │  write_gclid_coverage_snapshot() → gclid_coverage_snapshots table        │
-│  start_sync_batch() / complete_sync_batch() → sync_batches + sync_state  │
+│  start_sync_batch() / finish_sync_batch() / update_sync_state()           │
+│    → sync_batches + sync_state                                             │
 └──────────────────────────────┬──────────────────────────────────────────┘
                                │
                                ▼
@@ -224,7 +225,7 @@ This audit traces every sidebar page from UI → endpoint → DB table → sched
 ### How Freshness Works
 
 1. **`sync_state` table** stores one row per `(source, dataset)` pair.
-2. When `db/writers.py` calls `complete_sync_batch(status="success")`, it updates `sync_state.status = 'success'` and sets `last_successful_sync_at`.
+2. When `db/writers.py` calls `finish_sync_batch(status="success")`, it updates `sync_state.status = 'success'` and sets `last_successful_sync_at` (or `update_sync_state(...)` does the equivalent upsert).
 3. The `/api/datasets/freshness` endpoint reads `sync_state` and returns status per dataset.
 4. The frontend (`static/app.js`) displays freshness strips per page via `PAGE_DATASET_MAP`.
 
@@ -232,7 +233,7 @@ This audit traces every sidebar page from UI → endpoint → DB table → sched
 
 **Freshness tracks whether a sync job completed, not whether data was produced.**
 
-If `complete_sync_batch(status="success", row_count=0)` is called, the sync_state shows:
+If `finish_sync_batch(status="success", row_count=0)` is called, the sync_state shows:
 - `status = "success"`
 - `last_successful_sync_at = now()`
 
@@ -264,7 +265,7 @@ This is the root cause of the Search Terms trust problem.
 
 ### Where Freshness Logic Lives
 
-- **Writer:** `db/writers.py` → `complete_sync_batch()` (updates sync_state)
+- **Writer:** `db/writers.py` → `start_sync_batch()`, `finish_sync_batch()`, `update_sync_state()` (updates sync_state)
 - **API:** `api/server.py` → `/api/datasets/freshness` (reads sync_state)
 - **Frontend:** `static/app.js` → `loadDatasetFreshness()` + `PAGE_DATASET_MAP`
 - **Display:** Freshness strip rendered per page section using `renderFreshnessStrip()`
