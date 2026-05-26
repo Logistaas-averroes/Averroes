@@ -652,3 +652,58 @@ const PAGE_DATASET_MAP = {
 ```
 
 Note: `waste` and `ngrams` are marked as `DERIVED_DATASET_PAGES` — the freshness strip says "Derived from" instead of "Dataset freshness:".
+
+---
+
+## PR-ADS-065 Follow-up Finding
+
+### Search Terms Pipeline Verification & Repair
+
+**Diagnosis (PR-ADS-065):**
+
+The Search Terms pipeline required targeted verification and hardening because:
+- `persistence_succeeded()` treated zero fetched + zero written as success
+- Zero rows could produce "successful" sync state while evidence layer is empty
+- Waste Terms and N-Grams depend on Search Terms being populated
+
+**Changes made:**
+
+1. **Connector hardening** (`connectors/windsor_pull.py`):
+   - Added explicit logging: date_preset, row count, sample keys, search_term field presence
+   - Added `normalize_search_term_rows()` function
+   - Loud WARNING when both last_60d and last_14d return zero rows
+   - ERROR when rows lack search_term field (contract violation)
+
+2. **DB writer hardening** (`db/writers.py`):
+   - Logs input_rows, prepared_rows, skipped_blank_search_term, written_rows
+   - ERROR when all rows are skipped due to missing/blank search_term
+
+3. **Scheduler hardening** (`scheduler/weekly.py`, `scheduler/daily.py`):
+   - Zero-row pulls now use `status="success"` with `row_count=0` plus warning message
+   - Fetched > 0 but written = 0 explicitly raises and marks failed
+
+4. **API data_quality enhancement** (`api/server.py`):
+   - `/api/search-terms` and `/api/search-terms/summary` now include:
+     `table`, `days`, `rows_in_window`, `total_rows_in_window`, `rows_returned`, `latest_source_date`, `is_empty`, `warning`
+
+5. **Frontend safety** (`static/app.js`):
+   - Empty state now warns about pipeline issue, not just "no results"
+   - Directs user to check Scheduler/System Health/Reality Audit
+
+6. **Verification script** (`scripts/verify_search_terms_pipeline.py`):
+   - Supports: `--db-only`, `--pull-live`, `--api-url`, `--admin-token`, `--pretty`, `--json`
+   - Produces verdicts: OK, WINDSOR_PULL_EMPTY, DB_WRITE_FAILED, etc.
+
+**Expected production run output:**
+
+```
+Verdict will be determined by first production run after this PR merges.
+Until scheduler runs with these changes, the actual diagnosis is:
+NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT
+```
+
+**Next steps:**
+- After deployment, run: `python scripts/verify_search_terms_pipeline.py --days 60 --db-only --pretty`
+- If verdict is WINDSOR_PULL_EMPTY: investigate Windsor REST vs MCP parity (PR-ADS-066)
+- If verdict is DB_WRITE_FAILED: fix write_search_terms() before proceeding
+- If verdict is OK: proceed with Waste Terms and N-Grams confidence

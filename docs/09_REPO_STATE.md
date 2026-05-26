@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-025C — Data Quality Fix: Campaign Name Normalisation, Lead Property Mapping, Source Type Tracking (May 2026)
+**Last updated:** PR-ADS-065 — Search Terms Pipeline Verification & Repair (May 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -14,7 +14,7 @@
 | File | Module | Notes |
 |------|--------|-------|
 | `connectors/hubspot_pull.py` | HubSpot CRM connector | associations_api crash fixed (PR-ADS-027); now uses CRM v4 REST API for associations — version-agnostic |
-| `connectors/windsor_pull.py` | Windsor.ai connector | search term query fixed (PR-ADS-027); removed segment=search_term (400 error), switched to date_preset; ✅ Search-term contract aligned to confirmed Windsor 60-day extraction path (PR-ADS-063) |
+| `connectors/windsor_pull.py` | Windsor.ai connector | search term query fixed (PR-ADS-027); removed segment=search_term (400 error), switched to date_preset; ✅ Search-term contract aligned to confirmed Windsor 60-day extraction path (PR-ADS-063); ✅ PR-ADS-065: Enhanced logging (row count, sample keys, search_term field presence), normalize_search_term_rows() added, loud warnings on empty/missing-field pulls |
 | `connectors/gclid_match.py` | GCLID reconciliation | Joins Windsor + HubSpot via GCLID; falls back if `logistaas_config.yaml` missing |
 | `analysis/core.py` | Waste detection + lead quality + campaign truth | All three functions in one file; `load_json` defined at line 471; PR-ADS-025F: Windsor spend + HubSpot SQLs merged into single row per campaign before write_campaigns() call; junk entries filtered pre-write; PR-ADS-025F-FIX: lq_by_campaign aggregates instead of overwrites; legacy keys emitted for backwards compat |
 | `analysis/rule_advisor.py` | Deterministic report generator | **NEW in PR-ADS-021** — `generate_deterministic_report(report_type)` generates markdown from structured JSON outputs; no external API; replaces Claude as default |
@@ -51,7 +51,9 @@
 | `docs/API_CONTRACT.md` | API endpoint contract | PR-ADS-025C: /api/leads response/example updated to include source_type. Valid source_type enum remains documented here in repo state: paid_search, organic_search, referral, direct, email, other. Single source of truth for every endpoint in api/server.py |
 | `docs/23_PRODUCTION_REALITY_AND_UX_AUDIT.md` | Production reality map and UX navigation diagnosis | PR-ADS-064: Full audit of every sidebar page, endpoint, DB table, scheduler, and data pipeline. Search Terms pipeline investigation. UX restructure recommendation. |
 | `scripts/audit_production_reality.py` | Read-only diagnostic script for production data trust | PR-ADS-064: Checks row counts, freshness, verdicts per dataset. Flags FRESH_BUT_EMPTY. No external API calls, no mutations. |
+| `scripts/verify_search_terms_pipeline.py` | Search Terms pipeline verification script | PR-ADS-065: Focused verification of the full Search Terms chain (Windsor → file → DB → API). Supports --db-only, --pull-live, --api-url modes. Produces pipeline verdicts. |
 | `tests/test_production_reality_audit.py` | Unit tests for audit script verdict logic | PR-ADS-064: Tests compute_verdict() and compute_pipeline_blockers() pure functions |
+| `tests/test_search_terms_pipeline_verifier.py` | Unit tests for Search Terms verifier | PR-ADS-065: Tests compute_search_terms_verdict() pure function for all verdict cases |
 
 **Phase 1 state:** Read-only. Deterministic advisor active. Internal auth active. Claude API optional.
 
