@@ -5361,3 +5361,336 @@ def api_system_search_terms_verdict(
             "data": result,
         }
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SYSTEM STATUS WAR ROOM (PR-ADS-068)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_WAR_ROOM_CACHE_TTL_SECONDS = 60
+_war_room_cache_lock = threading.Lock()
+_war_room_cache: dict[int, dict[str, Any]] = {}
+
+
+@app.get("/api/system/status-war-room")
+def api_system_status_war_room(
+    request: Request,
+    days: int = Query(default=60, description="Time window in days (1–90)"),
+) -> dict[str, Any]:
+    """Return consolidated system status war room.
+
+    Admin only. Combines canonical freshness, pipeline dependencies,
+    source health, scheduler state, and critical blockers into one view.
+
+    Does NOT call Google Ads, HubSpot, Windsor, or any external service.
+    Does NOT mutate any data.
+    Phase 1 read-only. PR-ADS-068.
+    """
+    check_admin_or_token(request)
+
+    days = max(1, min(90, days))
+
+    now_ts = datetime.now(timezone.utc).timestamp()
+    with _war_room_cache_lock:
+        cached = _war_room_cache.get(days)
+        if cached and now_ts < cached["expires_at"]:
+            return cached["data"]
+
+    from services.freshness_service import (  # noqa: PLC0415
+        DATASET_FRESHNESS_CONFIG,
+        BLOCKING_STATES,
+        compute_canonical_freshness,
+    )
+    from services.system_status_service import (  # noqa: PLC0415
+        build_war_room_response,
+    )
+    from db.connection import get_conn  # noqa: PLC0415
+    from psycopg2 import sql as _psql  # noqa: PLC0415
+
+    # ── Gather data from DB ────────────────────────────────────────────────
+    dataset_statuses: dict[str, str] = {}
+    dataset_details: dict[str, dict[str, Any]] = {}
+    sync_source_info: dict[str, dict[str, Any]] = {}
+    runs_data: dict[str, Any] = {}
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                # DB unavailable — mark all as db_unavailable
+                for cfg_key in DATASET_FRESHNESS_CONFIG:
+                    dataset_statuses[cfg_key] = "db_unavailable"
+                result = build_war_room_response(
+                    days=days,
+                    dataset_statuses=dataset_statuses,
+                    dataset_details=dataset_details,
+                    sync_info=sync_source_info,
+                    runs_data=runs_data,
+                )
+                store_ts = datetime.now(timezone.utc).timestamp()
+                with _war_room_cache_lock:
+                    _war_room_cache[days] = {
+                        "expires_at": store_ts + _WAR_ROOM_CACHE_TTL_SECONDS,
+                        "data": result,
+                    }
+                return result
+
+            with conn.cursor() as cur:
+                # 1. Get sync_state
+                cur.execute("""
+                    SELECT source, dataset, status, last_successful_sync_at,
+                           last_source_date, last_batch_id, error_message, updated_at
+                    FROM sync_state
+                    ORDER BY source, dataset
+                """)
+                sync_rows = cur.fetchall()
+                sync_cols = [d[0] for d in cur.description]
+                sync_map: dict[tuple[str, str], dict] = {}
+                for row in sync_rows:
+                    r = dict(zip(sync_cols, row))
+                    sync_map[(r["source"], r["dataset"])] = r
+
+                # 2. Get row counts per dataset
+                window_start = date.today() - timedelta(days=days)
+                row_counts: dict[str, int | None] = {}
+                _count_cache: dict[tuple[str, str], int | None] = {}
+                for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
+                    table_name = str(cfg.get("table") or "")
+                    date_column = str(cfg.get("date_column") or "")
+                    if not table_name or not date_column:
+                        continue
+                    if not (_SAFE_SQL_IDENTIFIER_RE.match(table_name) and _SAFE_SQL_IDENTIFIER_RE.match(date_column)):
+                        log.warning(
+                            "[api/status-war-room] invalid identifier for dataset %r: table=%r date_column=%r",
+                            cfg_key, table_name, date_column,
+                        )
+                        continue
+                    cache_key = (table_name, date_column)
+                    if cache_key in _count_cache:
+                        row_counts[cfg_key] = _count_cache[cache_key]
+                        continue
+                    try:
+                        query = _psql.SQL("SELECT COUNT(*) FROM {} WHERE {} >= %s").format(
+                            _psql.Identifier(table_name),
+                            _psql.Identifier(date_column),
+                        )
+                        cur.execute(query, (window_start,))
+                        result_row = cur.fetchone()
+                        count = int(result_row[0]) if result_row and result_row[0] is not None else 0
+                        _count_cache[cache_key] = count
+                        row_counts[cfg_key] = count
+                    except Exception:  # noqa: BLE001
+                        _count_cache[cache_key] = None
+                        row_counts[cfg_key] = None
+
+                # 3. Get latest batch info — one row per source (most recent by started_at)
+                latest_batch_by_source: dict[str, dict] = {}
+                try:
+                    cur.execute("""
+                        SELECT DISTINCT ON (source)
+                            source, dataset, status, row_count
+                        FROM sync_batches
+                        ORDER BY source, started_at DESC
+                    """)
+                    bcols = [d[0] for d in cur.description]
+                    for brow in cur.fetchall():
+                        br = dict(zip(bcols, brow))
+                        latest_batch_by_source[br["source"]] = {
+                            "dataset": br["dataset"],
+                            "status": br["status"],
+                            "row_count": br["row_count"],
+                        }
+                    # Also keep per-(source, dataset) map for canonical freshness computation
+                    latest_batch_info: dict[tuple[str, str], dict] = {}
+                    cur.execute("""
+                        SELECT DISTINCT ON (source, dataset)
+                            source, dataset, status, row_count
+                        FROM sync_batches
+                        ORDER BY source, dataset, started_at DESC
+                    """)
+                    bcols2 = [d[0] for d in cur.description]
+                    for brow in cur.fetchall():
+                        br = dict(zip(bcols2, brow))
+                        latest_batch_info[(br["source"], br["dataset"])] = {
+                            "status": br["status"],
+                            "row_count": br["row_count"],
+                        }
+                except Exception:  # noqa: BLE001
+                    latest_batch_info = {}
+                    latest_batch_by_source = {}
+
+                # 4. Compute canonical freshness for each dataset
+                canonical_status_map: dict[str, str] = {}
+
+                # First pass: non-dependent
+                for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
+                    if cfg.get("depends_on"):
+                        continue
+                    src = cfg["source"]
+                    ds = cfg["dataset"]
+                    sync_row = sync_map.get((src, ds), {})
+
+                    sync_status = sync_row.get("status")
+                    if (
+                        sync_status == "unknown"
+                        and sync_row.get("last_successful_sync_at") is None
+                        and sync_row.get("last_source_date") is None
+                        and sync_row.get("last_batch_id") is None
+                    ):
+                        sync_status = None
+
+                    last_sync_at = sync_row.get("last_successful_sync_at")
+                    latest_src_date = None
+                    if sync_row.get("last_source_date"):
+                        try:
+                            latest_src_date = date.fromisoformat(str(sync_row["last_source_date"]))
+                        except (ValueError, TypeError):
+                            pass
+
+                    batch_info = latest_batch_info.get((src, ds), {})
+                    verdict = compute_canonical_freshness(
+                        dataset=cfg_key,
+                        rows_in_window=row_counts.get(cfg_key),
+                        latest_source_date=latest_src_date,
+                        sync_status=sync_status,
+                        latest_batch_status=batch_info.get("status"),
+                        latest_batch_row_count=batch_info.get("row_count"),
+                        last_successful_sync_at=last_sync_at,
+                        stale_threshold_days=cfg.get("stale_threshold_days", 8),
+                        dependency_status=None,
+                    )
+                    canonical_status_map[cfg_key] = verdict["canonical_status"]
+                    dataset_details[cfg_key] = {
+                        "rows_in_window": row_counts.get(cfg_key),
+                        "latest_source_date": str(sync_row.get("last_source_date")) if sync_row.get("last_source_date") else None,
+                        "last_batch_row_count": batch_info.get("row_count", 0),
+                        "reason": verdict.get("reason", ""),
+                        "next_action": verdict.get("next_action", ""),
+                    }
+
+                # Second pass: dependent datasets
+                for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
+                    if not cfg.get("depends_on"):
+                        continue
+                    src = cfg["source"]
+                    ds = cfg["dataset"]
+                    sync_row = sync_map.get((src, ds), {})
+
+                    sync_status = sync_row.get("status")
+                    if (
+                        sync_status == "unknown"
+                        and sync_row.get("last_successful_sync_at") is None
+                        and sync_row.get("last_source_date") is None
+                        and sync_row.get("last_batch_id") is None
+                    ):
+                        sync_status = None
+
+                    last_sync_at = sync_row.get("last_successful_sync_at")
+                    latest_src_date = None
+                    if sync_row.get("last_source_date"):
+                        try:
+                            latest_src_date = date.fromisoformat(str(sync_row["last_source_date"]))
+                        except (ValueError, TypeError):
+                            pass
+
+                    batch_info = latest_batch_info.get((src, ds), {})
+
+                    dep_status = None
+                    for dep in cfg["depends_on"]:
+                        dep_st = canonical_status_map.get(dep)
+                        if dep_st and dep_st in BLOCKING_STATES:
+                            dep_status = dep_st
+                            break
+
+                    verdict = compute_canonical_freshness(
+                        dataset=cfg_key,
+                        rows_in_window=row_counts.get(cfg_key),
+                        latest_source_date=latest_src_date,
+                        sync_status=sync_status,
+                        latest_batch_status=batch_info.get("status"),
+                        latest_batch_row_count=batch_info.get("row_count"),
+                        last_successful_sync_at=last_sync_at,
+                        stale_threshold_days=cfg.get("stale_threshold_days", 8),
+                        dependency_status=dep_status,
+                    )
+                    canonical_status_map[cfg_key] = verdict["canonical_status"]
+                    dataset_details[cfg_key] = {
+                        "rows_in_window": row_counts.get(cfg_key),
+                        "latest_source_date": str(sync_row.get("last_source_date")) if sync_row.get("last_source_date") else None,
+                        "last_batch_row_count": batch_info.get("row_count", 0),
+                        "reason": verdict.get("reason", ""),
+                        "next_action": verdict.get("next_action", ""),
+                    }
+
+                dataset_statuses = canonical_status_map
+
+                # 5. Source sync info
+                for src_key in ["windsor", "hubspot", "gclid", "analysis", "computed"]:
+                    # Find best last_successful_sync_at for this source
+                    best_sync = None
+                    for (s, d), srow in sync_map.items():
+                        if s == src_key:
+                            lsa = srow.get("last_successful_sync_at")
+                            if lsa and (best_sync is None or lsa > best_sync):
+                                best_sync = lsa
+                    # Use latest batch (by started_at DESC) for this source
+                    batch_status = latest_batch_by_source.get(src_key, {}).get("status")
+
+                    sync_source_info[src_key] = {
+                        "last_successful_sync_at": best_sync.isoformat() if best_sync else None,
+                        "latest_batch_status": batch_status,
+                    }
+
+                # 6. Scheduler runs
+                for run_type in ["daily", "weekly", "monthly"]:
+                    try:
+                        cur.execute(
+                            "SELECT status, started_at, finished_at FROM runs "
+                            "WHERE run_type = %s ORDER BY started_at DESC LIMIT 1",
+                            (run_type,),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            runs_data[run_type] = {
+                                "status": row[0],
+                                "started_at": row[1].isoformat() if row[1] else None,
+                                "finished_at": row[2].isoformat() if row[2] else None,
+                            }
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                # Incremental sync — check if run_type exists
+                try:
+                    cur.execute(
+                        "SELECT status, started_at, finished_at FROM runs "
+                        "WHERE run_type = 'incremental' ORDER BY started_at DESC LIMIT 1",
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        runs_data["incremental"] = {
+                            "status": row[0],
+                            "started_at": row[1].isoformat() if row[1] else None,
+                            "finished_at": row[2].isoformat() if row[2] else None,
+                        }
+                except Exception:  # noqa: BLE001
+                    pass
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/status-war-room] database error: %s", exc, exc_info=True)
+        for cfg_key in DATASET_FRESHNESS_CONFIG:
+            dataset_statuses[cfg_key] = "db_unavailable"
+
+    result = build_war_room_response(
+        days=days,
+        dataset_statuses=dataset_statuses,
+        dataset_details=dataset_details,
+        sync_info=sync_source_info,
+        runs_data=runs_data,
+    )
+
+    store_ts = datetime.now(timezone.utc).timestamp()
+    with _war_room_cache_lock:
+        _war_room_cache[days] = {
+            "expires_at": store_ts + _WAR_ROOM_CACHE_TTL_SECONDS,
+            "data": result,
+        }
+    return result

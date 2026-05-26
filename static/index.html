@@ -910,6 +910,18 @@
           <p class="page-subtitle">Readiness checks — environment, config, modules</p>
         </header>
         <p id="run-meta-health" class="run-meta" data-section="health"></p>
+
+        <!-- System Status War Room (PR-ADS-068) -->
+        <div class="panel war-room-panel" id="war-room-panel">
+          <div class="panel__header" style="display:flex;align-items:center;justify-content:space-between">
+            <span>System Status War Room</span>
+            <button id="war-room-refresh-btn" class="btn btn--ghost btn--sm" type="button" aria-label="Refresh War Room">Refresh</button>
+          </div>
+          <div class="panel__body">
+            <div id="war-room-body"><p class="empty-state"><span class="spinner"></span> Loading system status…</p></div>
+          </div>
+        </div>
+
         <div id="health-body"><p class="empty-state">Loading readiness data…</p></div>
 
         <!-- Dataset Freshness panel -->
