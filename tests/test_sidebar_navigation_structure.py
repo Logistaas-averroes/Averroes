@@ -5,7 +5,8 @@ Tests that the sidebar HTML has correct structure, groups, labels, and route key
 from pathlib import Path
 import re
 
-HTML = Path("static/index.html").read_text()
+ROOT = Path(__file__).resolve().parents[1]
+HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
 # All required data-page route keys (must never change without a migration PR)
 REQUIRED_ROUTE_KEYS = [

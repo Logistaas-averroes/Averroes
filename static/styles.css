@@ -293,7 +293,6 @@ a {
   list-style: none;
   flex: 1;
   padding: var(--space-3) 0;
-  overflow-y: auto;
 }
 
 .sidebar__nav li {
@@ -318,11 +317,11 @@ a {
   margin-top: var(--space-2) !important;
 }
 
-.nav-item--admin {
+.nav-item.nav-item--admin {
   color: rgba(236, 244, 255, 0.5);
 }
 
-.nav-item--admin:hover {
+.nav-item.nav-item--admin:hover {
   color: rgba(236, 244, 255, 0.8);
 }
 

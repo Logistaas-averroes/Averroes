@@ -739,8 +739,6 @@ Reason: Database connection unavailable
 **REST vs MCP parity:** If production shows WINDSOR_PULL_EMPTY while MCP previously returned ~45,292 rows, use the MCP import path as a bridge until REST parity is confirmed.
 ---
 
----
-
 ## PR-ADS-069 — Sidebar UX Grouping & Page Rename
 
 **Goal:** Restructure the sidebar into clear operator-intent groups and rename confusing page labels.
