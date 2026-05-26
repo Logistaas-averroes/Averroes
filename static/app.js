@@ -139,7 +139,7 @@ const PAGE_EXPLANATIONS = {
     purpose: "Search terms flagged for human review as potential wasted spend.",
     source: "Analysis layer derived from Search Term Universe.",
     dependsOn: ["search_terms", "waste_terms"],
-    emptyMeans: "This may mean no terms were flagged, or it may mean Search Term Universe is empty.",
+    emptyMeans: "This may mean no terms were flagged, or it may mean Search Term Universe is empty. Waste detection depends on Search Term Universe — if search-term data is unavailable, no waste verdict can be produced.",
     nextAction: "Check System Status before assuming no waste exists."
   },
   geo: {
@@ -226,26 +226,31 @@ const PAGE_EXPLANATIONS = {
 
 // ── Page Dependencies (PR-ADS-070) ────────────────────────────────────────
 //
-// Maps each page to the dataset keys it depends on for canonical freshness checks.
+// Maps each page to the source-qualified dataset keys it depends on for
+// canonical freshness checks.  Keys match the "source/dataset" format used
+// by PAGE_DATASET_MAP and _datasetFreshnessByKey so that
+// getPageCanonicalStatus() can look them up directly.
+// Pages with no canonical freshness record (scheduler, health, backfill)
+// use empty arrays — they have their own status mechanisms.
 
 const PAGE_DEPENDENCIES = {
-  dashboard: ["campaigns", "leads", "deals", "waste_terms"],
-  "action-queue": ["campaigns", "search_terms", "waste_terms", "leads"],
-  reports: ["weekly_report"],
-  campaigns: ["campaigns"],
-  waste: ["waste_terms", "search_terms"],
-  "search-terms": ["search_terms"],
-  ngrams: ["ngrams", "search_terms"],
-  geo: ["geo"],
-  keywords: ["keywords"],
-  leads: ["leads"],
-  deals: ["deals"],
-  "gclid-attribution": ["gclid_attribution", "gclid_coverage_snapshots"],
-  opportunities: ["leads"],
-  scheduler: ["runs"],
-  health: ["system_status"],
-  backfill: ["historical_backfill"],
-  "historical-intelligence": ["historical_intelligence"]
+  dashboard:               ["windsor/campaigns", "hubspot/contacts", "hubspot/deals", "windsor/search_terms"],
+  "action-queue":          ["windsor/campaigns", "windsor/search_terms", "hubspot/contacts"],
+  reports:                 ["windsor/campaigns", "hubspot/contacts", "hubspot/deals"],
+  campaigns:               ["windsor/campaigns"],
+  waste:                   ["windsor/search_terms"],
+  "search-terms":          ["windsor/search_terms"],
+  ngrams:                  ["windsor/search_terms"],
+  geo:                     ["windsor/geo"],
+  keywords:                ["windsor/keywords"],
+  leads:                   ["hubspot/contacts"],
+  deals:                   ["hubspot/deals"],
+  "gclid-attribution":     ["gclid/matches"],
+  opportunities:           ["hubspot/contacts"],
+  scheduler:               [],
+  health:                  [],
+  backfill:                [],
+  "historical-intelligence": [],
 };
 
 // ── Session state ──────────────────────────────────────────────────────────
@@ -556,6 +561,47 @@ function buildEmptyState({ pageKey, canonicalStatus, rowsInWindow, filtersActive
       <p class="empty-state__title">${escapeHtml(body)}</p>
       ${actionText ? `<p class="empty-state__body"><strong>Next:</strong> ${escapeHtml(actionText)}</p>` : ""}
     </div>`;
+}
+
+/**
+ * Determine the most severe canonical freshness status for a page, based on
+ * its PAGE_DEPENDENCIES entries looked up in the _datasetFreshnessByKey cache.
+ *
+ * @param {string} pageKey - Page route key (e.g. "search-terms", "waste")
+ * @returns {string|null} Canonical status string or null when undeterminable
+ */
+function getPageCanonicalStatus(pageKey) {
+  const deps = PAGE_DEPENDENCIES[pageKey];
+  if (!deps || deps.length === 0) return null;
+  if (Object.keys(_datasetFreshnessByKey).length === 0) return null;
+
+  // Severity order, most severe first — first match wins
+  const SEVERITY_ORDER = [
+    "db_unavailable",
+    "failed",
+    "stale_and_empty",
+    "dependency_blocked",
+    "stale_with_data",
+    "fresh_but_empty",
+    "running",
+    "not_run",
+    "fresh_with_data",
+  ];
+
+  let worstIdx = SEVERITY_ORDER.length; // beyond list = no data / unknown
+  let worstStatus = null;
+
+  for (const key of deps) {
+    const row = _datasetFreshnessByKey[key];
+    if (!row || !row.canonical_status) continue;
+    const idx = SEVERITY_ORDER.indexOf(row.canonical_status);
+    if (idx !== -1 && idx < worstIdx) {
+      worstIdx = idx;
+      worstStatus = row.canonical_status;
+    }
+  }
+
+  return worstStatus;
 }
 
 function verdictBadge(verdict) {
@@ -1825,8 +1871,11 @@ async function loadCampaigns() {
     const campaigns = data.campaigns || [];
 
     if (campaigns.length === 0) {
-      if (tableEl) tableEl.innerHTML =
-        `<p class="empty-state" style="padding:var(--space-5)">No campaign data. Trigger a weekly run.</p>`;
+      if (tableEl) tableEl.innerHTML = buildEmptyState({
+        pageKey: "campaigns",
+        canonicalStatus: getPageCanonicalStatus("campaigns"),
+        rowsInWindow: 0,
+      });
       ["vc-scale", "vc-fix", "vc-hold", "vc-cut"].forEach((id) => {
         const el = document.getElementById(id);
         if (el) el.textContent = "0";
@@ -2012,15 +2061,16 @@ function renderWasteTable(items) {
 
   if (items.length === 0) {
     if (_wasteData.length === 0) {
-      tableEl.innerHTML = `
-        <div class="waste-empty-state">
-          <p class="empty-state">No flagged waste terms in this time range.</p>
-          <p class="waste-empty-subtext">This may mean no terms were flagged, or it may mean Search Term Universe is empty. Waste detection depends on Search Term Universe — if search-term data is unavailable, this page cannot confirm the account is clean.</p>
-          <p class="waste-empty-subtext"><strong>Next:</strong> Check System Status before assuming no waste exists.</p>
-        </div>`;
+      tableEl.innerHTML = buildEmptyState({
+        pageKey: "waste",
+        canonicalStatus: getPageCanonicalStatus("waste"),
+        rowsInWindow: 0,
+      });
     } else {
-      tableEl.innerHTML =
-        `<p class="empty-state" style="padding:var(--space-5)">No results match the current filter.</p>`;
+      tableEl.innerHTML = buildEmptyState({
+        pageKey: "waste",
+        filtersActive: true,
+      });
     }
     return;
   }
@@ -2153,8 +2203,11 @@ async function loadLeads() {
     const leads = Array.from(seen.values());
 
     if (leads.length === 0) {
-      if (tableEl) tableEl.innerHTML =
-        `<p class="empty-state" style="padding:var(--space-5)">No lead data yet. Trigger a weekly run.</p>`;
+      if (tableEl) tableEl.innerHTML = buildEmptyState({
+        pageKey: "leads",
+        canonicalStatus: getPageCanonicalStatus("leads"),
+        rowsInWindow: 0,
+      });
       [totalEl, sqlsEl, junkEl, progressEl].forEach((el) => {
         if (el) el.textContent = "—";
       });
@@ -3039,21 +3092,16 @@ function renderSearchTermsTable() {
 
   if (visible.length === 0) {
     if (searchTermsStatus === "empty" || searchTermRows.length === 0) {
-      tableEl.innerHTML = `
-        <div class="waste-empty-state">
-          <p class="empty-state">No search-term rows are stored for this window.</p>
-          <p class="waste-empty-subtext">
-            This does not mean the account is clean. It means the Search Terms evidence pipeline
-            has no data for the selected window.<br><br>
-            <strong>Check:</strong><br>
-            1. Scheduler → latest weekly/daily run<br>
-            2. System Health → search_terms freshness<br>
-            3. Reality Audit → search_terms verdict
-          </p>
-        </div>`;
+      tableEl.innerHTML = buildEmptyState({
+        pageKey: "search-terms",
+        canonicalStatus: getPageCanonicalStatus("search-terms"),
+        rowsInWindow: 0,
+      });
     } else {
-      tableEl.innerHTML =
-        `<p class="empty-state" style="padding:var(--space-5)">No results match the current filter.</p>`;
+      tableEl.innerHTML = buildEmptyState({
+        pageKey: "search-terms",
+        filtersActive: true,
+      });
     }
     return;
   }
@@ -3341,7 +3389,11 @@ function renderNgramsTable(data) {
   }
 
   if (ngramRows.length === 0) {
-    tableEl.innerHTML = `<div class="waste-empty-state"><p class="empty-state">No n-grams found for the selected filters.</p><p class="waste-empty-subtext">Search Pattern Analysis is computed from Search Term Universe. If Search Terms has no usable rows, pattern analysis cannot produce trustworthy results.</p><p class="waste-empty-subtext"><strong>Next:</strong> Fix Search Term Universe first.</p></div>`;
+    tableEl.innerHTML = buildEmptyState({
+      pageKey: "ngrams",
+      canonicalStatus: getPageCanonicalStatus("ngrams"),
+      rowsInWindow: 0,
+    });
     return;
   }
 
@@ -4528,7 +4580,7 @@ function renderBackfillSummary(run) {
   panelEl.hidden = false;
 
   if (!run) {
-    bodyEl.innerHTML = `<p class="empty-state">No run data available.</p>`;
+    bodyEl.innerHTML = buildEmptyState({ pageKey: "backfill", rowsInWindow: 0 });
     return;
   }
 

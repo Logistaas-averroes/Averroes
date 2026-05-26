@@ -31,67 +31,191 @@ REQUIRED_ROUTES = [
 ]
 
 
+# ── Extraction helpers ────────────────────────────────────────────────────────
+
+def extract_js_object_block(js_text, var_name):
+    """
+    Extract the full brace-matched content of a JS object variable assignment:
+        const <var_name> = { ... };
+    Returns the entire {...} string, or None if the variable is not found.
+    """
+    marker = f"const {var_name} = {{"
+    start = js_text.find(marker)
+    if start == -1:
+        return None
+    brace_start = start + len(marker) - 1  # position of the opening '{'
+    depth = 0
+    for i, ch in enumerate(js_text[brace_start:]):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return js_text[brace_start : brace_start + i + 1]
+    return None
+
+
+def get_route_entry_slice(block, route):
+    """
+    Find and return the value sub-object ({...}) for a route key inside an
+    extracted JS object block.  Returns the {...} string or None.
+    """
+    patterns = [f'"{route}":', f"'{route}':", f"{route}:"]
+    for pat in patterns:
+        idx = block.find(pat)
+        if idx == -1:
+            continue
+        brace_start = block.find("{", idx + len(pat))
+        if brace_start == -1:
+            continue
+        depth = 0
+        for i, ch in enumerate(block[brace_start:]):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return block[brace_start : brace_start + i + 1]
+    return None
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
 class TestPageExplanationsCoverage:
-    """PAGE_EXPLANATIONS must contain every required data-page route."""
+    """PAGE_EXPLANATIONS must contain every required data-page route with all required fields."""
 
     def test_page_explanations_object_exists(self):
         assert "PAGE_EXPLANATIONS" in APP_JS, "PAGE_EXPLANATIONS object not found in app.js"
 
+    def test_page_explanations_block_extractable(self):
+        block = extract_js_object_block(APP_JS, "PAGE_EXPLANATIONS")
+        assert block is not None, "Could not extract PAGE_EXPLANATIONS block from app.js"
+
     def test_all_routes_have_explanations(self):
+        """Every required route must appear as a key inside the PAGE_EXPLANATIONS block."""
+        block = extract_js_object_block(APP_JS, "PAGE_EXPLANATIONS")
+        assert block is not None, "Could not extract PAGE_EXPLANATIONS block"
         for route in REQUIRED_ROUTES:
-            # Check that the route key appears inside PAGE_EXPLANATIONS
-            # Route keys in the object use quoted keys for hyphenated names
-            patterns = [
-                f'"{route}"',   # quoted key like "search-terms"
-                f"'{route}'",   # single-quoted
-                f"{route}:",    # unquoted (only for non-hyphenated)
-            ]
-            found = any(p in APP_JS for p in patterns)
-            assert found, f"PAGE_EXPLANATIONS missing entry for route: {route}"
+            entry = get_route_entry_slice(block, route)
+            assert entry is not None, (
+                f"PAGE_EXPLANATIONS missing entry for route: '{route}'"
+            )
 
     def test_explanations_have_required_fields(self):
-        """Each explanation should have purpose, source, dependsOn, emptyMeans, nextAction."""
+        """For each route, verify all required fields exist inside that route's entry."""
+        block = extract_js_object_block(APP_JS, "PAGE_EXPLANATIONS")
+        assert block is not None, "Could not extract PAGE_EXPLANATIONS block"
         required_fields = ["purpose", "source", "dependsOn", "emptyMeans", "nextAction"]
-        for field in required_fields:
-            # Count occurrences — should be at least len(REQUIRED_ROUTES)
-            count = APP_JS.count(f"{field}:")
-            assert count >= len(REQUIRED_ROUTES), (
-                f"Field '{field}' appears only {count} times, expected at least {len(REQUIRED_ROUTES)}"
-            )
+        for route in REQUIRED_ROUTES:
+            entry = get_route_entry_slice(block, route)
+            assert entry is not None, f"No entry found for route '{route}'"
+            for field in required_fields:
+                assert f"{field}:" in entry, (
+                    f"Route '{route}' is missing required field '{field}' in PAGE_EXPLANATIONS"
+                )
 
 
 class TestPageDependenciesCoverage:
-    """PAGE_DEPENDENCIES must contain every major data page."""
+    """PAGE_DEPENDENCIES must contain every major data page with source-qualified dataset keys."""
 
     def test_page_dependencies_object_exists(self):
         assert "PAGE_DEPENDENCIES" in APP_JS, "PAGE_DEPENDENCIES object not found in app.js"
 
+    def test_page_dependencies_block_extractable(self):
+        block = extract_js_object_block(APP_JS, "PAGE_DEPENDENCIES")
+        assert block is not None, "Could not extract PAGE_DEPENDENCIES block from app.js"
+
     def test_all_routes_have_dependencies(self):
+        """Every required route must appear as a key inside the PAGE_DEPENDENCIES block."""
+        block = extract_js_object_block(APP_JS, "PAGE_DEPENDENCIES")
+        assert block is not None, "Could not extract PAGE_DEPENDENCIES block"
         for route in REQUIRED_ROUTES:
-            patterns = [
-                f'"{route}"',
-                f"'{route}'",
-                f"{route}:",
-            ]
-            # PAGE_DEPENDENCIES should contain the route
-            # Find the PAGE_DEPENDENCIES section
-            dep_start = APP_JS.find("PAGE_DEPENDENCIES")
-            dep_section = APP_JS[dep_start:dep_start + 2000]
-            found = any(p in dep_section for p in patterns)
-            assert found, f"PAGE_DEPENDENCIES missing entry for route: {route}"
+            patterns = [f'"{route}":', f"'{route}':", f"{route}:"]
+            found = any(pat in block for pat in patterns)
+            assert found, f"PAGE_DEPENDENCIES missing entry for route: '{route}'"
+
+    def test_dependencies_use_source_qualified_keys(self):
+        """PAGE_DEPENDENCIES must use source-qualified keys (e.g. windsor/search_terms)."""
+        block = extract_js_object_block(APP_JS, "PAGE_DEPENDENCIES")
+        assert block is not None, "Could not extract PAGE_DEPENDENCIES block"
+        # At least the core data pages should reference source-qualified dataset keys
+        qualified_keys = [
+            "windsor/search_terms",
+            "windsor/campaigns",
+            "hubspot/contacts",
+        ]
+        for key in qualified_keys:
+            assert f'"{key}"' in block or f"'{key}'" in block, (
+                f"PAGE_DEPENDENCIES should use source-qualified key '{key}'"
+            )
+
+
+class TestBuildEmptyStateIntegration:
+    """buildEmptyState() must be wired into every critical page renderer."""
+
+    def _fn_body(self, fn_signature, window=3000):
+        """Return a slice of app.js starting at the given function signature."""
+        idx = APP_JS.find(fn_signature)
+        assert idx != -1, f"Function not found: {fn_signature}"
+        return APP_JS[idx : idx + window]
+
+    def test_build_empty_state_exists(self):
+        assert "function buildEmptyState" in APP_JS
+
+    def test_get_page_canonical_status_exists(self):
+        assert "function getPageCanonicalStatus" in APP_JS
+
+    def test_build_empty_state_called_in_search_terms(self):
+        body = self._fn_body("function renderSearchTermsTable(")
+        assert "buildEmptyState(" in body, (
+            "renderSearchTermsTable must call buildEmptyState() for its empty state"
+        )
+
+    def test_build_empty_state_called_in_waste(self):
+        body = self._fn_body("function renderWasteTable(")
+        assert "buildEmptyState(" in body, (
+            "renderWasteTable must call buildEmptyState() for its empty state"
+        )
+
+    def test_build_empty_state_called_in_ngrams(self):
+        body = self._fn_body("function renderNgramsTable(")
+        assert "buildEmptyState(" in body, (
+            "renderNgramsTable must call buildEmptyState() for its empty state"
+        )
+
+    def test_build_empty_state_called_in_campaigns(self):
+        body = self._fn_body("async function loadCampaigns(")
+        assert "buildEmptyState(" in body, (
+            "loadCampaigns must call buildEmptyState() for its empty state"
+        )
+
+    def test_build_empty_state_called_in_leads(self):
+        body = self._fn_body("async function loadLeads(")
+        assert "buildEmptyState(" in body, (
+            "loadLeads must call buildEmptyState() for its empty state"
+        )
+
+    def test_build_empty_state_called_in_backfill(self):
+        body = self._fn_body("function renderBackfillSummary(", window=2000)
+        assert "buildEmptyState(" in body, (
+            "renderBackfillSummary must call buildEmptyState() for its no-run state"
+        )
 
 
 class TestSearchTermUniverseExplanation:
     """Search Term Universe explanation must warn that zero does not mean clean."""
 
     def test_zero_does_not_mean_clean_in_explanations(self):
-        # The PAGE_EXPLANATIONS entry for search-terms
-        assert "does not mean the account is clean" in APP_JS, (
-            "Search Term Universe explanation must state that zero does not mean the account is clean"
+        block = extract_js_object_block(APP_JS, "PAGE_EXPLANATIONS")
+        assert block is not None, "Could not extract PAGE_EXPLANATIONS block"
+        st_entry = get_route_entry_slice(block, "search-terms")
+        assert st_entry is not None, "No search-terms entry in PAGE_EXPLANATIONS"
+        assert "does not mean the account is clean" in st_entry, (
+            "Search Term Universe PAGE_EXPLANATIONS entry must state zero does not mean clean"
         )
 
     def test_zero_does_not_mean_clean_in_empty_state(self):
-        # The rendered empty state for search terms
+        # buildEmptyState() for search-terms uses emptyMeans from PAGE_EXPLANATIONS
         assert "does not mean the account is clean" in APP_JS, (
             "Search Term Universe empty state must warn that zero does not mean clean"
         )
@@ -101,20 +225,18 @@ class TestWasteTermsExplanation:
     """Waste Terms explanation must reference Search Term Universe dependency."""
 
     def test_waste_depends_on_search_terms_in_explanations(self):
-        # Check PAGE_EXPLANATIONS for waste references search_terms dependency
-        waste_section_start = APP_JS.find('"waste"') if '"waste"' in APP_JS else APP_JS.find("waste:")
-        assert waste_section_start != -1, "Waste entry not found in PAGE_EXPLANATIONS"
-
-        # The waste empty state should mention Search Term Universe
-        assert "Search Term Universe" in APP_JS, (
-            "Waste Terms explanation must reference Search Term Universe dependency"
+        block = extract_js_object_block(APP_JS, "PAGE_EXPLANATIONS")
+        assert block is not None, "Could not extract PAGE_EXPLANATIONS block"
+        waste_entry = get_route_entry_slice(block, "waste")
+        assert waste_entry is not None, "No waste entry in PAGE_EXPLANATIONS"
+        assert "Search Term Universe" in waste_entry, (
+            "Waste PAGE_EXPLANATIONS entry must reference Search Term Universe"
         )
 
     def test_waste_empty_state_mentions_dependency(self):
-        # The actual rendered empty state for waste
-        assert "Waste detection depends on Search Term Universe" in APP_JS or \
-               "depends on Search Term Universe" in APP_JS, (
-            "Waste empty state must explain dependency on Search Terms"
+        # PAGE_EXPLANATIONS["waste"].emptyMeans must include the dependency
+        assert "depends on Search Term Universe" in APP_JS, (
+            "Waste empty state must explain dependency on Search Term Universe"
         )
 
 
@@ -122,15 +244,18 @@ class TestNgramsExplanation:
     """Search Pattern Analysis explanation must reference Search Term Universe dependency."""
 
     def test_ngrams_depends_on_search_terms(self):
-        # N-grams explanation should reference search terms
-        assert "computed from Search Term Universe" in APP_JS or \
-               "Computed from Search Term Universe" in APP_JS, (
-            "N-Grams explanation must state it is computed from Search Term Universe"
+        block = extract_js_object_block(APP_JS, "PAGE_EXPLANATIONS")
+        assert block is not None, "Could not extract PAGE_EXPLANATIONS block"
+        ngrams_entry = get_route_entry_slice(block, "ngrams")
+        assert ngrams_entry is not None, "No ngrams entry in PAGE_EXPLANATIONS"
+        assert "Search Term Universe" in ngrams_entry, (
+            "N-Grams PAGE_EXPLANATIONS entry must reference Search Term Universe"
         )
 
     def test_ngrams_empty_state_mentions_search_terms(self):
-        assert "Search Term Universe" in APP_JS, (
-            "N-Grams empty state must mention Search Term Universe"
+        assert "computed from Search Term Universe" in APP_JS or \
+               "Computed from Search Term Universe" in APP_JS, (
+            "N-Grams explanation must state it is computed from Search Term Universe"
         )
 
 
@@ -138,20 +263,30 @@ class TestAdminBackfillExplanation:
     """Admin Backfill explanation must mention dry-run safety and read-only."""
 
     def test_backfill_mentions_dry_run(self):
-        # Find backfill section
-        assert "dry-run" in APP_JS.lower() or "Dry-run" in APP_JS, (
-            "Admin Backfill explanation must mention dry-run"
+        block = extract_js_object_block(APP_JS, "PAGE_EXPLANATIONS")
+        assert block is not None, "Could not extract PAGE_EXPLANATIONS block"
+        backfill_entry = get_route_entry_slice(block, "backfill")
+        assert backfill_entry is not None, "No backfill entry in PAGE_EXPLANATIONS"
+        assert "dry-run" in backfill_entry.lower() or "dry run" in backfill_entry.lower(), (
+            "Admin Backfill PAGE_EXPLANATIONS entry must mention dry-run"
         )
 
     def test_backfill_mentions_read_only(self):
-        assert "Read-only" in APP_JS or "read-only" in APP_JS, (
-            "Admin Backfill explanation must mention read-only safety"
+        block = extract_js_object_block(APP_JS, "PAGE_EXPLANATIONS")
+        assert block is not None, "Could not extract PAGE_EXPLANATIONS block"
+        backfill_entry = get_route_entry_slice(block, "backfill")
+        assert backfill_entry is not None, "No backfill entry in PAGE_EXPLANATIONS"
+        assert "read-only" in backfill_entry.lower() or "Read-only" in backfill_entry, (
+            "Admin Backfill PAGE_EXPLANATIONS entry must mention read-only safety"
         )
 
     def test_backfill_does_not_write(self):
-        # The backfill explanation should say it does not write
-        assert "does not write" in APP_JS, (
-            "Admin Backfill explanation must state dry-run does not write to the database"
+        block = extract_js_object_block(APP_JS, "PAGE_EXPLANATIONS")
+        assert block is not None, "Could not extract PAGE_EXPLANATIONS block"
+        backfill_entry = get_route_entry_slice(block, "backfill")
+        assert backfill_entry is not None, "No backfill entry in PAGE_EXPLANATIONS"
+        assert "does not write" in backfill_entry, (
+            "Admin Backfill PAGE_EXPLANATIONS entry must state dry-run does not write"
         )
 
 
@@ -177,6 +312,9 @@ class TestRenderHelpers:
 
     def test_build_empty_state_exists(self):
         assert "function buildEmptyState" in APP_JS
+
+    def test_get_page_canonical_status_exists(self):
+        assert "function getPageCanonicalStatus" in APP_JS
 
 
 class TestPageExplanationContainers:
