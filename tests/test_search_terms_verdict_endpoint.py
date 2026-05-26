@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -122,3 +123,114 @@ class TestSearchTermsVerdictEndpoint:
             latest_weekly_run="2026-05-25 07:00:00",
         )
         assert verdict == Verdict.UNKNOWN
+
+    def test_non_standard_days_verdict_ok(self):
+        """compute_search_terms_verdict correctly handles a non-standard window (e.g., days=45)."""
+        verdict, reason = compute_search_terms_verdict(
+            db_available=True,
+            db_rows_window=3500,
+            window_days=45,
+            sync_status="success",
+            latest_weekly_run="2026-05-25 07:00:00",
+        )
+        assert verdict == Verdict.OK
+        assert "3500" in reason or "OK" in reason
+
+    def test_non_standard_days_verdict_empty(self):
+        """Non-standard window with 0 rows and no sync = NOT_DEPLOYED."""
+        verdict, reason = compute_search_terms_verdict(
+            db_available=True,
+            db_rows_window=0,
+            window_days=1,
+            sync_status=None,
+            latest_weekly_run=None,
+        )
+        assert verdict == Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT
+
+
+class TestBuildSearchTermsVerdictDB:
+    """Test _build_search_terms_verdict DB query logic with mocked DB connection."""
+
+    def _make_cursor(self, query_results: list):
+        """Return a mock cursor that returns query_results in sequence."""
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchone.side_effect = query_results
+        return cur
+
+    def _make_conn(self, cursor):
+        conn = MagicMock()
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
+        conn.cursor = MagicMock(return_value=cursor)
+        return conn
+
+    def _patch_get_conn(self, conn):
+        """Patch get_conn so _build_search_terms_verdict uses our mock."""
+        mock_db_conn = MagicMock()
+        mock_db_conn.get_conn = MagicMock(return_value=conn)
+        return patch.dict("sys.modules", {"db.connection": mock_db_conn})
+
+    def test_non_standard_days_queries_exact_window(self):
+        """For days=1, _build_search_terms_verdict runs a COUNT(*) for the 1-day window."""
+        # Query results in order:
+        # rows_7d, rows_14d, rows_30d, rows_60d, rows_requested(1d),
+        # MAX(source_date), blank rows, spend rows, click rows,
+        # sync_state row (None), sync_batches row (None), runs row (None)
+        query_results = [
+            (150,),   # rows_7d
+            (400,),   # rows_14d
+            (800,),   # rows_30d
+            (1200,),  # rows_60d
+            (25,),    # rows_requested (days=1 — non-standard)
+            ("2026-05-25",),  # MAX(source_date)
+            (0,),     # blank_search_term_rows
+            (100,),   # spend_rows
+            (80,),    # click_rows
+            None,     # sync_state (no row)
+            None,     # sync_batches (no row)
+            None,     # runs (no row)
+        ]
+        cursor = self._make_cursor(query_results)
+        conn = self._make_conn(cursor)
+
+        with self._patch_get_conn(conn):
+            from api.server import _build_search_terms_verdict
+            result = _build_search_terms_verdict(days=1)
+
+        # The verdict should use the 1-day count (25 rows), not the 60d count (1200)
+        assert result["db"]["rows_requested"] == 25
+        # The api total_rows_in_window reflects the 1-day count
+        assert result["api"]["total_rows_in_window"] == 25
+
+    def test_windsor_mcp_sync_visible_in_verdict(self):
+        """When windsor_mcp has the latest sync, the verdict endpoint surfaces it."""
+        # Query results in order for days=60 (standard):
+        # rows_7d, rows_14d, rows_30d, rows_60d (no rows_requested since days=60),
+        # MAX(source_date), blank rows, spend rows, click rows,
+        # sync_state row (windsor_mcp success), sync_batches row (windsor_mcp), runs row
+        query_results = [
+            (0,),    # rows_7d
+            (0,),    # rows_14d
+            (100,),  # rows_30d
+            (250,),  # rows_60d
+            ("2026-05-10",),     # MAX(source_date)
+            (0,),                # blank_search_term_rows
+            (50,),               # spend_rows
+            (40,),               # click_rows
+            ("windsor_mcp", "success", "2026-05-10 08:00:00"),  # sync_state row
+            ("windsor_mcp", "success", 250, "2026-05-10 08:00:00"),  # sync_batches row
+            None,                # runs row (no weekly run)
+        ]
+        cursor = self._make_cursor(query_results)
+        conn = self._make_conn(cursor)
+
+        with self._patch_get_conn(conn):
+            from api.server import _build_search_terms_verdict
+            result = _build_search_terms_verdict(days=60)
+
+        assert result["sync"]["sync_source"] == "windsor_mcp"
+        assert result["sync"]["sync_state_status"] == "success"
+        assert result["sync"]["latest_batch_source"] == "windsor_mcp"
+        assert result["sync"]["latest_batch_row_count"] == 250

@@ -9,11 +9,12 @@ PR-ADS-066 — Search Terms Production Verdict Panel & Windsor Source-Parity Res
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sys
 import tempfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -60,6 +61,40 @@ class TestMCPDoubleParse:
 
     def test_invalid_json_string(self):
         result = _parse_mcp_payload("not json at all {{{")
+        assert result == []
+
+    def test_windsor_confirmed_mcp_shape(self):
+        """Confirmed Windsor MCP get_data shape (May 2026):
+        [{"text": "[{\"search_term\": \"cargowise pricing\", ...}]"}]
+        """
+        inner_rows = [
+            {"search_term": "cargowise pricing", "clicks": 10, "impressions": 100},
+            {"search_term": "freight management software", "clicks": 5, "impressions": 50},
+        ]
+        raw_mcp = [{"text": json.dumps(inner_rows)}]
+        result = _parse_mcp_payload(raw_mcp)
+        assert len(result) == 2
+        assert result[0]["search_term"] == "cargowise pricing"
+        assert result[1]["search_term"] == "freight management software"
+
+    def test_windsor_mcp_shape_single_row(self):
+        """Windsor MCP shape with a single row inside the text field."""
+        inner = [{"search_term": "logistics erp", "clicks": 3}]
+        raw = [{"text": json.dumps(inner)}]
+        result = _parse_mcp_payload(raw)
+        assert len(result) == 1
+        assert result[0]["search_term"] == "logistics erp"
+
+    def test_windsor_mcp_shape_invalid_inner_json(self):
+        """Windsor MCP shape where the text field contains invalid JSON."""
+        raw = [{"text": "not valid json {{{"}]
+        result = _parse_mcp_payload(raw)
+        assert result == []
+
+    def test_windsor_mcp_shape_empty_list_inside(self):
+        """Windsor MCP shape where the text field contains an empty list."""
+        raw = [{"text": "[]"}]
+        result = _parse_mcp_payload(raw)
         assert result == []
 
 
@@ -136,7 +171,7 @@ class TestDryRunDoesNotWrite:
             os.unlink(tmp_path)
 
     def test_apply_calls_writer(self):
-        """When --apply is used, it should attempt DB write."""
+        """When --apply is used, it should call DB writers with correct signatures."""
         data = [{"search_term": "apply test", "clicks": 3}]
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -144,30 +179,68 @@ class TestDryRunDoesNotWrite:
             tmp_path = f.name
 
         try:
-            mock_conn = MagicMock()
-            mock_conn.__enter__ = MagicMock(return_value=mock_conn)
-            mock_conn.__exit__ = MagicMock(return_value=False)
+            mock_start = MagicMock(return_value=42)
+            mock_write = MagicMock(return_value=1)
+            mock_finish = MagicMock(return_value=True)
 
-            with patch("scripts.import_windsor_mcp_search_terms.sys") as _:
-                # Patch the imports that happen inside run_import
-                with patch.dict("sys.modules", {
-                    "db": MagicMock(),
-                    "db.connection": MagicMock(get_conn=MagicMock(return_value=mock_conn)),
-                    "db.writers": MagicMock(
-                        start_sync_batch=MagicMock(return_value=1),
-                        finish_sync_batch=MagicMock(),
-                        write_search_terms=MagicMock(return_value=1),
-                    ),
-                }):
-                    # Re-import to pick up mocked modules
-                    import importlib
-                    import scripts.import_windsor_mcp_search_terms as mod
-                    importlib.reload(mod)
+            mock_writers = MagicMock()
+            mock_writers.start_sync_batch = mock_start
+            mock_writers.write_search_terms = mock_write
+            mock_writers.finish_sync_batch = mock_finish
 
-                    result = mod.run_import(input_path=tmp_path, apply=True)
-                    # The test may fail to properly mock get_conn context manager
-                    # but it demonstrates the apply path attempts to write
-                    assert result.get("dry_run") is not True or result.get("error")
+            with patch.dict("sys.modules", {"db.writers": mock_writers}):
+                import scripts.import_windsor_mcp_search_terms as mod
+                importlib.reload(mod)
+
+                result = mod.run_import(input_path=tmp_path, apply=True)
+
+            # Assertions: start_sync_batch called with correct args (no conn, has sync_type)
+            mock_start.assert_called_once_with(
+                source="windsor_mcp",
+                dataset="search_terms",
+                sync_type="manual",
+            )
+
+            # write_search_terms called with run_id=None, rows list, sync_batch_id=42
+            mock_write.assert_called_once()
+            write_args, write_kwargs = mock_write.call_args
+            assert write_args[0] is None  # run_id
+            assert len(write_args[1]) == 1  # one valid row
+            assert write_kwargs.get("sync_batch_id") == 42
+
+            # finish_sync_batch called with correct positional batch_id + kwargs
+            mock_finish.assert_called_once_with(42, status="success", row_count=1)
+
+            # Summary reflects successful write
+            assert result["applied"] is True
+            assert result["db_written"] == 1
+            assert "error" not in result
+        finally:
+            os.unlink(tmp_path)
+
+    def test_apply_batch_id_zero_returns_error(self):
+        """When start_sync_batch returns 0 (DB unavailable), apply returns an error."""
+        data = [{"search_term": "db-fail test", "clicks": 1}]
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            tmp_path = f.name
+
+        try:
+            mock_writers = MagicMock()
+            mock_writers.start_sync_batch = MagicMock(return_value=0)
+            mock_writers.write_search_terms = MagicMock()
+            mock_writers.finish_sync_batch = MagicMock()
+
+            with patch.dict("sys.modules", {"db.writers": mock_writers}):
+                import scripts.import_windsor_mcp_search_terms as mod
+                importlib.reload(mod)
+
+                result = mod.run_import(input_path=tmp_path, apply=True)
+
+            assert "error" in result
+            assert result["applied"] is False
+            mock_writers.write_search_terms.assert_not_called()
         finally:
             os.unlink(tmp_path)
 

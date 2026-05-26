@@ -4977,6 +4977,16 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
                     row = cur.fetchone()
                     db_info[key] = int(row[0]) if row else 0
 
+                # For non-standard windows run an exact count
+                if days not in (7, 14, 30, 60):
+                    cur.execute(
+                        "SELECT COUNT(*) FROM search_terms "
+                        "WHERE source_date >= NOW() - INTERVAL '1 day' * %s",
+                        (days,),
+                    )
+                    row = cur.fetchone()
+                    db_info["rows_requested"] = int(row[0]) if row else 0
+
                 cur.execute("SELECT MAX(source_date) FROM search_terms")
                 row = cur.fetchone()
                 db_info["latest_source_date"] = str(row[0]) if row and row[0] else None
@@ -4996,30 +5006,36 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
                 row = cur.fetchone()
                 db_info["click_rows"] = int(row[0]) if row else 0
 
-                # Sync state
+                # Sync state — include both windsor (REST) and windsor_mcp (MCP import)
+                # to show the most recent successful sync regardless of source.
                 cur.execute(
-                    "SELECT status, last_successful_sync_at "
+                    "SELECT source, status, last_successful_sync_at "
                     "FROM sync_state "
-                    "WHERE source = 'windsor' AND dataset = 'search_terms' "
+                    "WHERE source IN ('windsor', 'windsor_mcp') "
+                    "  AND dataset = 'search_terms' "
+                    "ORDER BY last_successful_sync_at DESC NULLS LAST "
                     "LIMIT 1"
                 )
                 row = cur.fetchone()
                 if row:
-                    sync_info["sync_state_status"] = row[0]
-                    sync_info["last_successful_sync_at"] = str(row[1]) if row[1] else None
+                    sync_info["sync_source"] = row[0]
+                    sync_info["sync_state_status"] = row[1]
+                    sync_info["last_successful_sync_at"] = str(row[2]) if row[2] else None
 
-                # Latest sync batch
+                # Latest sync batch — include both sources, most recent first
                 cur.execute(
-                    "SELECT status, row_count, started_at "
+                    "SELECT source, status, row_count, started_at "
                     "FROM sync_batches "
-                    "WHERE source = 'windsor' AND dataset = 'search_terms' "
+                    "WHERE source IN ('windsor', 'windsor_mcp') "
+                    "  AND dataset = 'search_terms' "
                     "ORDER BY started_at DESC LIMIT 1"
                 )
                 row = cur.fetchone()
                 if row:
-                    sync_info["latest_batch_status"] = row[0]
-                    sync_info["latest_batch_row_count"] = row[1]
-                    sync_info["latest_batch_started_at"] = str(row[2]) if row[2] else None
+                    sync_info["latest_batch_source"] = row[0]
+                    sync_info["latest_batch_status"] = row[1]
+                    sync_info["latest_batch_row_count"] = row[2]
+                    sync_info["latest_batch_started_at"] = str(row[3]) if row[3] else None
 
                 # Latest weekly run for verdict logic
                 cur.execute(
@@ -5046,8 +5062,8 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
     if days in (7, 14, 30, 60):
         db_rows_window = db_info.get(f"rows_{days}d", 0)
     else:
-        # For non-standard windows, use the largest bucket that fits
-        db_rows_window = db_info.get("rows_60d", 0)
+        # Use the real COUNT(*) query result for non-standard windows
+        db_rows_window = db_info.get("rows_requested", 0)
 
     verdict_str, reason = compute_search_terms_verdict(
         db_available=True,
