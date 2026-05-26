@@ -5,7 +5,6 @@ PR-ADS-067 — Unit tests for canonical freshness semantics.
 Tests the pure compute_canonical_freshness() function with all state combinations.
 """
 
-import pytest
 from datetime import date, datetime, timedelta, timezone
 
 from services.freshness_service import (
@@ -330,7 +329,7 @@ def test_display_labels():
 # ── Edge cases ──────────────────────────────────────────────────────────────
 
 def test_fresh_but_empty_with_none_rows():
-    """rows_in_window=None treated as no rows (empty)."""
+    """rows_in_window=None should be unknown (count unavailable), not empty."""
     result = compute_canonical_freshness(
         dataset="campaigns",
         rows_in_window=None,
@@ -341,7 +340,23 @@ def test_fresh_but_empty_with_none_rows():
         last_successful_sync_at=_recent_sync(),
         stale_threshold_days=8,
     )
+    assert result["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN
+
+
+def test_fresh_but_empty_reason_includes_latest_batch_count():
+    """Reason text should surface latest_batch_row_count when useful."""
+    result = compute_canonical_freshness(
+        dataset="search_terms",
+        rows_in_window=0,
+        latest_source_date=_recent_date(),
+        sync_status="success",
+        latest_batch_status="success",
+        latest_batch_row_count=13,
+        last_successful_sync_at=_recent_sync(),
+        stale_threshold_days=8,
+    )
     assert result["canonical_status"] == CanonicalFreshnessStatus.FRESH_BUT_EMPTY
+    assert "13" in result["reason"]
 
 
 def test_dependency_blocked_takes_priority_over_not_run():

@@ -4568,31 +4568,54 @@ function renderDatasetFreshness(data) {
   }
 
   // Summary cards
-  const summary = (data && data.summary) ? data.summary : (() => {
-    const s = { total: 0, success: 0, failed: 0, running: 0, unknown: 0, stale: 0 };
-    for (const row of datasetFreshnessRows) {
-      s.total++;
-      const ds = datasetDisplayStatus(row);
-      if (ds === "success")      s.success++;
-      else if (ds === "failed")  s.failed++;
-      else if (ds === "running") s.running++;
-      else if (ds === "stale")   s.stale++;
-      else                       s.unknown++;
-    }
-    return s;
-  })();
-
-  // Compute stale count from rows since the API summary doesn't have it
+  let totalCount = 0;
+  let freshCount = 0;
   let staleCount = 0;
-  for (const row of datasetFreshnessRows) {
-    if (datasetDisplayStatus(row) === "stale") staleCount++;
+  let failedCount = 0;
+  let runningCount = 0;
+  let unknownCount = 0;
+  const canonicalSummary = (data && data.canonical_summary) ? data.canonical_summary : null;
+  if (canonicalSummary) {
+    totalCount = Object.values(canonicalSummary).reduce((acc, n) => acc + (Number(n) || 0), 0);
+    freshCount = Number(canonicalSummary.fresh_with_data || 0);
+    staleCount = Number(canonicalSummary.stale_with_data || 0)
+      + Number(canonicalSummary.fresh_but_empty || 0)
+      + Number(canonicalSummary.dependency_blocked || 0);
+    failedCount = Number(canonicalSummary.failed || 0)
+      + Number(canonicalSummary.stale_and_empty || 0)
+      + Number(canonicalSummary.db_unavailable || 0);
+    runningCount = Number(canonicalSummary.running || 0);
+    unknownCount = Number(canonicalSummary.unknown || 0)
+      + Number(canonicalSummary.not_run || 0);
+  } else {
+    const summary = (data && data.summary) ? data.summary : (() => {
+      const s = { total: 0, success: 0, failed: 0, running: 0, unknown: 0, stale: 0 };
+      for (const row of datasetFreshnessRows) {
+        s.total++;
+        const ds = datasetDisplayStatus(row);
+        if (ds === "success")      s.success++;
+        else if (ds === "failed")  s.failed++;
+        else if (ds === "running") s.running++;
+        else if (ds === "stale")   s.stale++;
+        else                       s.unknown++;
+      }
+      return s;
+    })();
+    staleCount = 0;
+    for (const row of datasetFreshnessRows) {
+      if (datasetDisplayStatus(row) === "stale") staleCount++;
+    }
+    totalCount = summary.total || 0;
+    freshCount = (summary.success || 0) - staleCount;
+    failedCount = summary.failed || 0;
+    runningCount = summary.running || 0;
+    unknownCount = summary.unknown || 0;
   }
-  const freshCount = (summary.success || 0) - staleCount;
 
   if (summaryEl) {
     summaryEl.innerHTML = `
       <div class="freshness-summary-card">
-        <div class="freshness-summary-card__value">${summary.total || 0}</div>
+      <div class="freshness-summary-card__value">${totalCount}</div>
         <div class="freshness-summary-card__label">Total Datasets</div>
       </div>
       <div class="freshness-summary-card freshness-summary-card--success">
@@ -4605,15 +4628,15 @@ function renderDatasetFreshness(data) {
         <div class="freshness-summary-card__label">Possibly Stale</div>
       </div>` : ""}
       <div class="freshness-summary-card freshness-summary-card--failed">
-        <div class="freshness-summary-card__value">${summary.failed || 0}</div>
+        <div class="freshness-summary-card__value">${failedCount}</div>
         <div class="freshness-summary-card__label">Failed</div>
       </div>
       <div class="freshness-summary-card freshness-summary-card--running">
-        <div class="freshness-summary-card__value">${summary.running || 0}</div>
+        <div class="freshness-summary-card__value">${runningCount}</div>
         <div class="freshness-summary-card__label">Running</div>
       </div>
       <div class="freshness-summary-card freshness-summary-card--unknown">
-        <div class="freshness-summary-card__value">${summary.unknown || 0}</div>
+        <div class="freshness-summary-card__value">${unknownCount}</div>
         <div class="freshness-summary-card__label">Unknown</div>
       </div>`;
   }

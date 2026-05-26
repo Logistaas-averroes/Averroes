@@ -1,160 +1,181 @@
 """
 tests/test_dataset_freshness_endpoint.py
 
-PR-ADS-067 — Tests for the /api/datasets/freshness endpoint's canonical fields.
-Uses mocked DB to verify canonical freshness enrichment logic.
+PR-ADS-067 — Tests for canonical enrichment behavior used by /api/datasets/freshness.
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
-from datetime import datetime, date, timedelta, timezone
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from services.freshness_service import CanonicalFreshnessStatus
 
 
-# ── Unit tests for endpoint canonical enrichment logic ──────────────────────
+def _make_mock_conn(
+    *,
+    sync_rows: list[tuple] | None = None,
+    batch_rows: list[tuple] | None = None,
+    count_by_table: dict[str, int] | None = None,
+    failing_tables: set[str] | None = None,
+):
+    sync_rows = sync_rows or []
+    batch_rows = batch_rows or []
+    count_by_table = count_by_table or {}
+    failing_tables = failing_tables or set()
+    state: dict[str, object] = {"mode": None, "fetchone": None}
+    executed: list[tuple[str, tuple | None]] = []
 
-def test_canonical_fields_present_in_enriched_dataset():
-    """Verify that a dataset dict enriched with canonical fields has all required keys."""
-    from services.freshness_service import (
-        DATASET_FRESHNESS_CONFIG,
-        compute_canonical_freshness,
-        CanonicalFreshnessStatus,
+    cur = MagicMock()
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+
+    def execute(sql, params=None):
+        sql_text = " ".join(str(sql).split())
+        sql_lc = sql_text.lower()
+        executed.append((sql_text, params))
+        if "from sync_state" in sql_lc:
+            cur.description = [
+                ("source",), ("dataset",), ("status",), ("last_successful_sync_at",),
+                ("last_source_date",), ("last_batch_id",), ("error_message",), ("updated_at",),
+            ]
+            state["mode"] = "sync_state"
+            state["fetchone"] = None
+            return
+        if "from sync_batches" in sql_lc:
+            cur.description = [("source",), ("dataset",), ("status",), ("row_count",)]
+            state["mode"] = "sync_batches"
+            state["fetchone"] = None
+            return
+        if sql_lc.startswith("select count(*) from "):
+            table = sql_lc.split("from ", 1)[1].split(" ", 1)[0]
+            if table in failing_tables:
+                raise RuntimeError(f"simulated count failure: {table}")
+            cur.description = [("count",)]
+            state["mode"] = "count"
+            state["fetchone"] = (count_by_table.get(table, 0),)
+            return
+        raise AssertionError(f"Unexpected SQL: {sql_text}")
+
+    def fetchall():
+        if state["mode"] == "sync_state":
+            return sync_rows
+        if state["mode"] == "sync_batches":
+            return batch_rows
+        return []
+
+    def fetchone():
+        return state["fetchone"]
+
+    cur.execute.side_effect = execute
+    cur.fetchall.side_effect = fetchall
+    cur.fetchone.side_effect = fetchone
+
+    conn = MagicMock()
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor = MagicMock(return_value=cur)
+    return conn, executed
+
+
+def _call_endpoint(*, conn, days: int):
+    mock_db_conn = MagicMock()
+    mock_db_conn.get_conn = MagicMock(return_value=conn)
+    with patch.dict("sys.modules", {"db.connection": mock_db_conn}):
+        from api.server import api_datasets_freshness
+
+        return api_datasets_freshness(user={"username": "test"}, days=days)
+
+
+def test_placeholder_unknown_sync_maps_to_not_run():
+    conn, _ = _make_mock_conn()
+    payload = _call_endpoint(conn=conn, days=60)
+    campaigns = next(d for d in payload["datasets"] if d["dataset_key"] == "windsor/campaigns")
+    assert campaigns["status"] == "unknown"
+    assert campaigns["canonical_status"] == CanonicalFreshnessStatus.NOT_RUN
+
+
+def test_days_one_uses_exact_one_day_window_for_counts():
+    now = datetime.now(timezone.utc)
+    conn, executed = _make_mock_conn(
+        sync_rows=[("windsor", "campaigns", "success", now, date.today(), 11, None, now)],
+        count_by_table={"campaigns": 7},
     )
+    payload = _call_endpoint(conn=conn, days=1)
+    campaigns = next(d for d in payload["datasets"] if d["dataset_key"] == "windsor/campaigns")
+    assert campaigns["rows_in_window"] == 7
+    campaign_count_calls = [c for c in executed if "COUNT(*) FROM campaigns" in c[0]]
+    assert campaign_count_calls, "Expected count query for campaigns table"
+    assert campaign_count_calls[0][1] == (date.today() - timedelta(days=1),)
 
-    # Simulate what the endpoint does: compute a verdict and attach fields
-    verdict = compute_canonical_freshness(
-        dataset="campaigns",
-        rows_in_window=100,
-        latest_source_date=date.today(),
-        sync_status="success",
-        latest_batch_status="success",
-        latest_batch_row_count=100,
-        last_successful_sync_at=datetime.now(timezone.utc),
-        stale_threshold_days=8,
+
+def test_row_count_query_failure_is_unknown_not_zero():
+    now = datetime.now(timezone.utc)
+    conn, _ = _make_mock_conn(
+        sync_rows=[("gclid", "matches", "success", now, date.today(), 9, None, now)],
+        count_by_table={"campaigns": 10, "search_terms": 10, "keywords": 10, "geo": 10, "leads": 10, "deals": 10},
+        failing_tables={"gclid_attribution"},
     )
-
-    # Check required canonical fields
-    assert "canonical_status" in verdict
-    assert "severity" in verdict
-    assert "reason" in verdict
-    assert "next_action" in verdict
-    assert verdict["canonical_status"] == CanonicalFreshnessStatus.FRESH_WITH_DATA
+    payload = _call_endpoint(conn=conn, days=30)
+    matches = next(d for d in payload["datasets"] if d["dataset_key"] == "gclid/matches")
+    assert matches["rows_in_window"] is None
+    assert matches["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN
 
 
-def test_dependency_blocking_propagates():
-    """When search_terms is fresh_but_empty, waste_terms should be dependency_blocked."""
-    from services.freshness_service import (
-        compute_canonical_freshness,
-        CanonicalFreshnessStatus,
-        BLOCKING_STATES,
-    )
-
-    # Compute search_terms status first
-    st_verdict = compute_canonical_freshness(
-        dataset="search_terms",
-        rows_in_window=0,
-        latest_source_date=date.today(),
-        sync_status="success",
-        latest_batch_status="success",
-        latest_batch_row_count=0,
-        last_successful_sync_at=datetime.now(timezone.utc),
-        stale_threshold_days=8,
-    )
-    assert st_verdict["canonical_status"] == CanonicalFreshnessStatus.FRESH_BUT_EMPTY
-    assert st_verdict["canonical_status"] in BLOCKING_STATES
-
-    # Now compute waste_terms with search_terms dependency blocked
-    wt_verdict = compute_canonical_freshness(
-        dataset="waste_terms",
-        rows_in_window=0,
-        latest_source_date=None,
-        sync_status="success",
-        latest_batch_status="success",
-        latest_batch_row_count=0,
-        last_successful_sync_at=datetime.now(timezone.utc),
-        stale_threshold_days=8,
-        dependency_status=st_verdict["canonical_status"],
-    )
-    assert wt_verdict["canonical_status"] == CanonicalFreshnessStatus.DEPENDENCY_BLOCKED
-
-
-def test_ngrams_blocked_when_search_terms_failed():
-    """N-Grams should show dependency_blocked when search_terms is failed."""
-    from services.freshness_service import (
-        compute_canonical_freshness,
-        CanonicalFreshnessStatus,
-    )
-
-    ng_verdict = compute_canonical_freshness(
-        dataset="ngrams",
-        rows_in_window=None,
-        latest_source_date=None,
-        sync_status=None,
-        latest_batch_status=None,
-        latest_batch_row_count=None,
-        last_successful_sync_at=None,
-        stale_threshold_days=8,
-        dependency_status=CanonicalFreshnessStatus.FAILED,
-    )
-    assert ng_verdict["canonical_status"] == CanonicalFreshnessStatus.DEPENDENCY_BLOCKED
-
-
-def test_response_preserves_existing_fields():
-    """Canonical fields should be added alongside existing fields, not replacing them."""
-    from services.freshness_service import (
-        compute_canonical_freshness,
-        CanonicalFreshnessStatus,
-    )
-
-    # Simulate a dataset dict from the existing endpoint
-    existing_row = {
-        "dataset_key": "windsor/campaigns",
-        "source": "windsor",
-        "dataset": "campaigns",
-        "status": "success",
-        "last_successful_sync_at": datetime.now(timezone.utc).isoformat(),
-        "last_source_date": str(date.today()),
-        "last_batch_id": 42,
-        "error_message": None,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+def test_configured_datasets_get_count_coverage_or_unknown():
+    now = datetime.now(timezone.utc)
+    counts = {
+        "campaigns": 5,
+        "search_terms": 6,
+        "waste_terms": 7,
+        "keywords": 8,
+        "geo": 9,
+        "leads": 10,
+        "deals": 11,
+        "gclid_attribution": 12,
+        "gclid_coverage_snapshots": 13,
+        "historical_intelligence": 14,
     }
-
-    # Compute verdict
-    verdict = compute_canonical_freshness(
-        dataset="campaigns",
-        rows_in_window=500,
-        latest_source_date=date.today(),
-        sync_status="success",
-        latest_batch_status="success",
-        latest_batch_row_count=500,
-        last_successful_sync_at=datetime.now(timezone.utc),
-        stale_threshold_days=8,
+    conn, _ = _make_mock_conn(
+        sync_rows=[
+            ("analysis", "waste_terms", "success", now, date.today(), 1, None, now),
+            ("analysis", "historical_intelligence", "success", now, date.today(), 2, None, now),
+            ("gclid", "matches", "success", now, date.today(), 3, None, now),
+            ("gclid", "coverage_snapshots", "success", now, date.today(), 4, None, now),
+            ("windsor", "search_terms", "success", now, date.today(), 5, None, now),
+        ],
+        count_by_table=counts,
     )
-
-    # Merge (simulating what endpoint does)
-    existing_row.update({
-        "canonical_status": verdict["canonical_status"],
-        "severity": verdict["severity"],
-        "rows_in_window": 500,
-        "reason": verdict["reason"],
-        "next_action": verdict["next_action"],
-    })
-
-    # Old fields still present
-    assert "dataset_key" in existing_row
-    assert "source" in existing_row
-    assert "status" in existing_row
-    assert "last_batch_id" in existing_row
-    # New canonical fields present
-    assert "canonical_status" in existing_row
-    assert "severity" in existing_row
-    assert "rows_in_window" in existing_row
-    assert "reason" in existing_row
-    assert "next_action" in existing_row
+    payload = _call_endpoint(conn=conn, days=60)
+    data_by_key = {d["dataset_key"]: d for d in payload["datasets"]}
+    assert data_by_key["analysis/waste_terms"]["rows_in_window"] == 7
+    assert data_by_key["analysis/historical_intelligence"]["rows_in_window"] == 14
+    assert data_by_key["gclid/matches"]["rows_in_window"] == 12
+    assert data_by_key["gclid/coverage_snapshots"]["rows_in_window"] == 13
+    for row in payload["datasets"]:
+        assert row["rows_in_window"] is not None or row["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN
 
 
-def test_all_severity_values_valid():
-    """Severity should only be ok, warning, error, or neutral."""
-    from services.freshness_service import SEVERITY_MAP
-    valid = {"ok", "warning", "error", "neutral"}
-    for status, severity in SEVERITY_MAP.items():
-        assert severity in valid, f"Invalid severity '{severity}' for status '{status}'"
+def test_dependency_blocked_still_applies_to_waste_terms_and_ngrams():
+    now = datetime.now(timezone.utc)
+    conn, _ = _make_mock_conn(
+        sync_rows=[
+            ("windsor", "search_terms", "success", now, date.today(), 1, None, now),
+            ("analysis", "waste_terms", "success", now, date.today(), 2, None, now),
+            ("computed", "ngrams", "success", now, date.today(), 3, None, now),
+        ],
+        count_by_table={"search_terms": 0, "waste_terms": 3},
+    )
+    payload = _call_endpoint(conn=conn, days=60)
+    waste = next(d for d in payload["datasets"] if d["dataset_key"] == "analysis/waste_terms")
+    ngrams = next(d for d in payload["datasets"] if d["dataset_key"] == "computed/ngrams")
+    assert waste["canonical_status"] == CanonicalFreshnessStatus.DEPENDENCY_BLOCKED
+    assert ngrams["canonical_status"] == CanonicalFreshnessStatus.DEPENDENCY_BLOCKED
+
+
+def test_system_health_summary_renderer_uses_canonical_summary():
+    app_js = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    assert "data.canonical_summary" in app_js
+    assert "fresh_with_data" in app_js
+    assert "dependency_blocked" in app_js

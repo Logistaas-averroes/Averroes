@@ -933,7 +933,7 @@ Enhanced with canonical freshness semantics (PR-ADS-067).
 **Query parameters:**
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `days` | int | 60 | Window for row count queries |
+| `days` | int | 60 | Window for row count queries (clamped to 1–90) |
 
 **Known datasets:**
 - `windsor` / `campaigns`

@@ -12,12 +12,8 @@ Phase 1 — Read Only.  No external writes.
 """
 
 from __future__ import annotations
-
-import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-
-log = logging.getLogger(__name__)
 
 
 # ── Canonical Status Constants ──────────────────────────────────────────────
@@ -245,11 +241,22 @@ def compute_canonical_freshness(
             next_action="Check error logs and retry sync.",
         )
 
-    # 6. Determine staleness
-    is_stale = _is_stale(last_successful_sync_at, latest_source_date, stale_threshold_days)
-    has_rows = (rows_in_window is not None and rows_in_window > 0)
+    # 6. Row count unavailable (cannot safely classify empty vs with_data)
+    if rows_in_window is None:
+        batch_hint = ""
+        if latest_batch_row_count is not None:
+            batch_hint = f" Latest batch row count: {latest_batch_row_count}."
+        return _result(
+            CanonicalFreshnessStatus.UNKNOWN,
+            reason=f"Row count is unavailable for the selected window; cannot determine dataset freshness.{batch_hint}",
+            next_action="Check dataset row-count query health and retry.",
+        )
 
-    # 7. Classify
+    # 7. Determine staleness
+    is_stale = _is_stale(last_successful_sync_at, latest_source_date, stale_threshold_days)
+    has_rows = rows_in_window > 0
+
+    # 8. Classify
     if is_stale:
         if has_rows:
             return _result(
@@ -258,9 +265,12 @@ def compute_canonical_freshness(
                 next_action="Check scheduler schedule and trigger a fresh sync.",
             )
         else:
+            batch_hint = ""
+            if latest_batch_row_count is not None:
+                batch_hint = f" Latest batch row count: {latest_batch_row_count}."
             return _result(
                 CanonicalFreshnessStatus.STALE_AND_EMPTY,
-                reason="No rows and no recent sync.",
+                reason=f"No rows and no recent sync.{batch_hint}",
                 next_action="Trigger sync and verify data source is producing rows.",
             )
     else:
@@ -271,9 +281,12 @@ def compute_canonical_freshness(
                 next_action="No action needed.",
             )
         else:
+            batch_hint = ""
+            if latest_batch_row_count is not None:
+                batch_hint = f" Latest batch row count: {latest_batch_row_count}."
             return _result(
                 CanonicalFreshnessStatus.FRESH_BUT_EMPTY,
-                reason="Latest sync succeeded but no rows exist in the selected window.",
+                reason=f"Latest sync succeeded but no rows exist in the selected window.{batch_hint}",
                 next_action="Check source pull, sync batch row count, and pipeline verifier.",
             )
 
