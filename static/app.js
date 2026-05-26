@@ -4645,9 +4645,9 @@ document.addEventListener("DOMContentLoaded", () => {
 function datasetRelatedPage(source, dataset) {
   const key = `${source}/${dataset}`;
   const map = {
-    "windsor/search_terms": { page: "search-terms", label: "Search Terms" },
-    "windsor/keywords":     { page: "keywords",     label: "Keywords"     },
-    "windsor/geo":          { page: "geo",           label: "Geo"          },
+    "windsor/search_terms": { page: "search-terms", label: "Search Term Universe" },
+    "windsor/keywords":     { page: "keywords",     label: "Keyword Performance" },
+    "windsor/geo":          { page: "geo",           label: "Country Performance" },
     "windsor/campaigns":    { page: "campaigns",     label: "Campaigns"    },
     "hubspot/contacts":     { page: "leads",         label: "Lead Quality" },
     "hubspot/deals":        { page: "deals",         label: "Deals"        },

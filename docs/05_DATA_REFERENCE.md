@@ -273,3 +273,11 @@ view of all data pipelines, combining canonical freshness semantics with depende
 | computed | Computed Layer | ngrams |
 
 Service logic: `services/system_status_service.py`
+
+---
+
+## UI Navigation — Route Stability
+
+All frontend pages use `data-page` route keys that are stable identifiers. Visible labels may be changed for UX clarity without affecting routing or data references.
+
+See `docs/24_UI_NAVIGATION_MODEL.md` for the full navigation model and rename map.

@@ -300,6 +300,31 @@ a {
   margin-bottom: 2px;
 }
 
+/* ── Sidebar section labels ──────────────────────────────────────────────── */
+.sidebar__section-label {
+  margin: var(--space-4) var(--space-3) var(--space-2) !important;
+  padding: 0 var(--space-2) !important;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  cursor: default;
+  user-select: none;
+}
+
+.sidebar__section-label:first-child {
+  margin-top: var(--space-2) !important;
+}
+
+.nav-item.nav-item--admin {
+  color: rgba(236, 244, 255, 0.5);
+}
+
+.nav-item.nav-item--admin:hover {
+  color: rgba(236, 244, 255, 0.8);
+}
+
 .nav-item {
   display: flex;
   align-items: center;
@@ -1691,6 +1716,7 @@ a {
   .nav-item__label,
   .sidebar__phase-badge,
   .sidebar__user,
+  .sidebar__section-label,
   .btn--signout .nav-item__label {
     display: none;
   }
