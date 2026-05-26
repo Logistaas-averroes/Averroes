@@ -435,7 +435,11 @@ function renderPageExplanation(pageKey, options = {}) {
     if (info.dependsOn && info.dependsOn.length > 0) {
       chipItems.push(`<span class="context-chip context-chip--depends">Depends on: ${escapeHtml(deps)}</span>`);
     }
-    chipItems.push(`<span class="context-chip context-chip--readonly">Read-only</span>`);
+    // Pages that can trigger actions (scheduler runs, backfill) don't get the read-only chip
+    const NON_READONLY_PAGES = new Set(["scheduler", "backfill"]);
+    if (!NON_READONLY_PAGES.has(pageKey)) {
+      chipItems.push(`<span class="context-chip context-chip--readonly">Read-only</span>`);
+    }
     chipsHtml = `<div class="page-context-chips">${chipItems.join("")}</div>`;
   }
 
