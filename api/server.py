@@ -4906,3 +4906,215 @@ def api_system_reality_audit(
             "data": audit,
         }
     return audit
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEARCH TERMS PRODUCTION VERDICT (PR-ADS-066)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_SEARCH_TERMS_VERDICT_CACHE_TTL_SECONDS = 60
+_search_terms_verdict_cache_lock = threading.Lock()
+_search_terms_verdict_cache: dict[int, dict[str, Any]] = {}
+
+
+def _build_search_terms_verdict(days: int) -> dict[str, Any]:
+    """Build focused Search Terms pipeline verdict from DB state.
+
+    Read-only. No external calls. No writes.
+    """
+    from db.connection import get_conn  # noqa: PLC0415
+    from scripts.verify_search_terms_pipeline import (  # noqa: PLC0415
+        Verdict,
+        compute_search_terms_verdict,
+    )
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+
+    db_info: dict[str, Any] = {
+        "available": False,
+        "rows_7d": 0,
+        "rows_14d": 0,
+        "rows_30d": 0,
+        "rows_60d": 0,
+        "latest_source_date": None,
+        "blank_search_term_rows": 0,
+        "spend_rows": 0,
+        "click_rows": 0,
+    }
+    sync_info: dict[str, Any] = {
+        "latest_batch_status": None,
+        "latest_batch_row_count": None,
+        "latest_batch_started_at": None,
+        "sync_state_status": None,
+        "last_successful_sync_at": None,
+    }
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                verdict_str = Verdict.DB_UNAVAILABLE
+                reason = "Database connection unavailable"
+                return {
+                    "generated_at": generated_at,
+                    "days": days,
+                    "verdict": verdict_str,
+                    "reason": reason,
+                    "db": db_info,
+                    "sync": sync_info,
+                    "api": {"checked": False, "rows_returned": None, "total_rows_in_window": 0, "is_empty": True},
+                    "next_action": "Fix database connection before checking Search Terms pipeline.",
+                }
+
+            db_info["available"] = True
+
+            with conn.cursor() as cur:
+                for window, key in [(7, "rows_7d"), (14, "rows_14d"), (30, "rows_30d"), (60, "rows_60d")]:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM search_terms "
+                        "WHERE source_date >= NOW() - INTERVAL '1 day' * %s",
+                        (window,),
+                    )
+                    row = cur.fetchone()
+                    db_info[key] = int(row[0]) if row else 0
+
+                cur.execute("SELECT MAX(source_date) FROM search_terms")
+                row = cur.fetchone()
+                db_info["latest_source_date"] = str(row[0]) if row and row[0] else None
+
+                cur.execute(
+                    "SELECT COUNT(*) FROM search_terms "
+                    "WHERE search_term IS NULL OR TRIM(search_term) = ''"
+                )
+                row = cur.fetchone()
+                db_info["blank_search_term_rows"] = int(row[0]) if row else 0
+
+                cur.execute("SELECT COUNT(*) FROM search_terms WHERE spend_usd > 0")
+                row = cur.fetchone()
+                db_info["spend_rows"] = int(row[0]) if row else 0
+
+                cur.execute("SELECT COUNT(*) FROM search_terms WHERE clicks > 0")
+                row = cur.fetchone()
+                db_info["click_rows"] = int(row[0]) if row else 0
+
+                # Sync state
+                cur.execute(
+                    "SELECT status, last_successful_sync_at "
+                    "FROM sync_state "
+                    "WHERE source = 'windsor' AND dataset = 'search_terms' "
+                    "LIMIT 1"
+                )
+                row = cur.fetchone()
+                if row:
+                    sync_info["sync_state_status"] = row[0]
+                    sync_info["last_successful_sync_at"] = str(row[1]) if row[1] else None
+
+                # Latest sync batch
+                cur.execute(
+                    "SELECT status, row_count, started_at "
+                    "FROM sync_batches "
+                    "WHERE source = 'windsor' AND dataset = 'search_terms' "
+                    "ORDER BY started_at DESC LIMIT 1"
+                )
+                row = cur.fetchone()
+                if row:
+                    sync_info["latest_batch_status"] = row[0]
+                    sync_info["latest_batch_row_count"] = row[1]
+                    sync_info["latest_batch_started_at"] = str(row[2]) if row[2] else None
+
+                # Latest weekly run for verdict logic
+                cur.execute(
+                    "SELECT started_at FROM runs "
+                    "WHERE run_type = 'weekly' ORDER BY started_at DESC LIMIT 1"
+                )
+                row = cur.fetchone()
+                latest_weekly_run = str(row[0]) if row and row[0] else None
+
+    except Exception as exc:
+        log.error("[api/search-terms-verdict] DB error: %s", exc, exc_info=True)
+        return {
+            "generated_at": generated_at,
+            "days": days,
+            "verdict": Verdict.DB_UNAVAILABLE,
+            "reason": f"Database error: {exc}",
+            "db": db_info,
+            "sync": sync_info,
+            "api": {"checked": False, "rows_returned": None, "total_rows_in_window": 0, "is_empty": True},
+            "next_action": "Fix database connection before checking Search Terms pipeline.",
+        }
+
+    # Determine the row count for the requested window
+    window_key = f"rows_{days}d" if days in (7, 14, 30, 60) else "rows_60d"
+    db_rows_window = db_info.get(window_key, db_info.get("rows_60d", 0))
+
+    verdict_str, reason = compute_search_terms_verdict(
+        db_available=True,
+        db_rows_window=db_rows_window,
+        window_days=days,
+        sync_status=sync_info.get("sync_state_status"),
+        latest_weekly_run=latest_weekly_run,
+    )
+
+    # Determine next action
+    next_actions = {
+        Verdict.OK: "Search Terms pipeline is healthy. Proceed to Waste Terms/N-Grams confidence.",
+        Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT: "Run scheduler (daily or weekly) to trigger first Search Terms sync after deployment.",
+        Verdict.WINDSOR_PULL_EMPTY: "Verify Windsor plan/API access or use MCP payload import path.",
+        Verdict.WINDSOR_PULL_MISSING_SEARCH_TERM_FIELD: "Check Windsor field mapping — search_term field not present in response.",
+        Verdict.FILE_EMPTY: "Check Windsor pull — ads_search_terms.json is empty.",
+        Verdict.DB_WRITE_FAILED: "Check write_search_terms() — Windsor returned rows but DB has none.",
+        Verdict.DB_HAS_ROWS_API_EMPTY: "Check /api/search-terms endpoint filtering — DB has rows but API returns empty.",
+        Verdict.FRESH_BUT_EMPTY: "Sync reports success but zero rows found. Check Windsor pull or scheduler logic.",
+        Verdict.DB_UNAVAILABLE: "Fix database connection before checking Search Terms pipeline.",
+        Verdict.UNKNOWN: "Unable to determine pipeline state. Run verify_search_terms_pipeline.py manually.",
+    }
+    next_action = next_actions.get(verdict_str, next_actions[Verdict.UNKNOWN])
+
+    return {
+        "generated_at": generated_at,
+        "days": days,
+        "verdict": verdict_str,
+        "reason": reason,
+        "db": db_info,
+        "sync": sync_info,
+        "api": {
+            "checked": False,
+            "rows_returned": None,
+            "total_rows_in_window": db_rows_window,
+            "is_empty": db_rows_window == 0,
+        },
+        "next_action": next_action,
+    }
+
+
+@app.get("/api/system/search-terms-verdict")
+def api_system_search_terms_verdict(
+    request: Request,
+    days: int = Query(default=60, description="Time window in days (1–90)"),
+) -> dict[str, Any]:
+    """Return a focused Search Terms production verdict.
+
+    Admin only. Reports pipeline health: OK, empty, DB-broken, API-broken,
+    or not yet run after deployment. Waste Terms and N-Grams depend on this.
+
+    Does NOT call Google Ads, HubSpot, Windsor, or any external service.
+    Does NOT mutate any data.
+    Phase 1 read-only. PR-ADS-066.
+    """
+    check_admin_or_token(request)
+
+    days = max(1, min(90, days))
+
+    now_ts = datetime.now(timezone.utc).timestamp()
+    with _search_terms_verdict_cache_lock:
+        cached = _search_terms_verdict_cache.get(days)
+        if cached and now_ts < cached["expires_at"]:
+            return cached["data"]
+
+    result = _build_search_terms_verdict(days)
+
+    with _search_terms_verdict_cache_lock:
+        _search_terms_verdict_cache[days] = {
+            "expires_at": now_ts + _SEARCH_TERMS_VERDICT_CACHE_TTL_SECONDS,
+            "data": result,
+        }
+    return result

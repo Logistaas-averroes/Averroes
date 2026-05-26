@@ -127,6 +127,8 @@ No files are currently in a broken state.
 | PR-ADS-025F-FIX | Copilot fixes — lq aggregate, legacy key shim, race-safe TRUNCATE | 🔄 In Progress |
 | PR-ADS-025B | Dashboard live data — markdown parser removed, /api/* DB calls, time range selector | 🔄 In Progress |
 | PR-ADS-064 | Full Production Reality Audit & UX Navigation Diagnosis — audit doc, diagnostic script, admin endpoint | 🔨 In Progress |
+| PR-ADS-065 | Search Terms Pipeline Verification & Repair — verifier script, connector/writer/scheduler hardening | 🔨 In Progress |
+| PR-ADS-066 | Search Terms Production Verdict Panel & Windsor Source-Parity Resolution — verdict endpoint, UI panel, MCP import | 🔨 In Progress |
 | **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 

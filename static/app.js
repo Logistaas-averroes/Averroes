@@ -4487,6 +4487,7 @@ async function loadHealth() {
   // Load dataset freshness panel alongside readiness checks
   loadDatasetFreshness();
   loadGclidCoverage();
+  loadSearchTermsVerdict();
 }
 
 // ── Dataset Freshness ──────────────────────────────────────────────────────
@@ -4727,6 +4728,70 @@ async function loadDatasetFreshness() {
     datasetFreshnessRows = [];
     _datasetFreshnessByKey = {};
     renderDatasetFreshness();
+  }
+}
+
+// ── Search Terms Pipeline Verdict (PR-ADS-066) ───────────────────────────
+
+async function loadSearchTermsVerdict() {
+  const bodyEl = document.getElementById("search-terms-verdict-body");
+  const refreshBtn = document.getElementById("search-terms-verdict-refresh-btn");
+  if (!bodyEl) return;
+
+  // Wire refresh button
+  if (refreshBtn && !refreshBtn._wired) {
+    refreshBtn._wired = true;
+    refreshBtn.addEventListener("click", () => loadSearchTermsVerdict());
+  }
+
+  bodyEl.innerHTML = `<p class="empty-state"><span class="spinner"></span> Loading Search Terms verdict…</p>`;
+
+  try {
+    const data = await fetchJSON("/api/system/search-terms-verdict?days=60");
+
+    const verdictColorCls = _verdictColorClass(data.verdict);
+    const cards = [
+      { label: "Verdict", value: data.verdict || "—", cls: verdictColorCls },
+      { label: "Rows (60d)", value: data.db ? fmt(data.db.rows_60d) : "—" },
+      { label: "Latest Source Date", value: data.db && data.db.latest_source_date ? escapeHtml(data.db.latest_source_date) : "—" },
+      { label: "Sync Status", value: data.sync && data.sync.sync_state_status ? escapeHtml(data.sync.sync_state_status) : "—" },
+      { label: "Latest Batch Rows", value: data.sync && data.sync.latest_batch_row_count != null ? fmt(data.sync.latest_batch_row_count) : "—" },
+      { label: "Next Action", value: data.next_action ? escapeHtml(data.next_action) : "—", wide: true },
+    ];
+
+    bodyEl.innerHTML = `
+      <div class="verdict-cards-grid">
+        ${cards.map(c => `
+          <div class="verdict-card${c.wide ? " verdict-card--wide" : ""}${c.cls ? " " + c.cls : ""}">
+            <div class="verdict-card__value">${c.value}</div>
+            <div class="verdict-card__label">${escapeHtml(c.label)}</div>
+          </div>
+        `).join("")}
+      </div>
+      <p style="font-size:12px;color:var(--text-muted);margin-top:var(--space-3)">
+        Generated: ${data.generated_at ? escapeHtml(data.generated_at) : "—"}
+        ${data.reason ? " — " + escapeHtml(data.reason) : ""}
+      </p>`;
+  } catch (e) {
+    if (e.message === "HTTP 401" || e.message === "HTTP 403") {
+      bodyEl.innerHTML = `<p class="empty-state">Admin access required.</p>`;
+      return;
+    }
+    bodyEl.innerHTML = `<p class="empty-state">Could not load Search Terms verdict. Check API health.</p>`;
+  }
+}
+
+function _verdictColorClass(verdict) {
+  if (!verdict) return "";
+  switch (verdict) {
+    case "OK": return "verdict-card--ok";
+    case "FRESH_BUT_EMPTY":
+    case "WINDSOR_PULL_EMPTY": return "verdict-card--warn";
+    case "DB_WRITE_FAILED":
+    case "DB_UNAVAILABLE":
+    case "DB_HAS_ROWS_API_EMPTY": return "verdict-card--error";
+    case "NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT": return "verdict-card--gray";
+    default: return "verdict-card--warn";
   }
 }
 
