@@ -2836,7 +2836,7 @@ def api_action_queue(
 
 
 # ---------------------------------------------------------------------------
-# Dataset freshness endpoint — read-only, auth required. (PR-ADS-039)
+# Dataset freshness endpoint — read-only, auth required. (PR-ADS-039, PR-ADS-067)
 # ---------------------------------------------------------------------------
 
 # Known source/dataset pairs — returned as placeholders when sync_state is empty.
@@ -2848,17 +2848,29 @@ _KNOWN_DATASETS: list[tuple[str, str]] = [
     ("hubspot", "contacts"),
     ("hubspot", "deals"),
     ("gclid",   "matches"),
+    ("gclid",   "coverage_snapshots"),
+    ("analysis", "waste_terms"),
+    ("computed", "ngrams"),
+    ("analysis", "historical_intelligence"),
 ]
 
 
 @app.get("/api/datasets/freshness")
-def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]:
+def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -> dict[str, Any]:
     """Return per-dataset sync state / watermark from the sync_state table.
 
     Auth required. Read-only. No live fetch, no sync execution, no external calls.
     Phase 1 read-only — no writes to Google Ads, HubSpot, or any external system.
     Source: sync_state table (PR-ADS-039).
+    Enhanced with canonical freshness semantics (PR-ADS-067).
     """
+    from services.freshness_service import (  # noqa: PLC0415
+        DATASET_FRESHNESS_CONFIG,
+        BLOCKING_STATES,
+        CanonicalFreshnessStatus,
+        compute_canonical_freshness,
+    )
+
     _safe_empty: dict[str, Any] = {
         "datasets": [],
         "summary": {"total": 0, "success": 0, "failed": 0, "running": 0, "unknown": 0},
@@ -2911,6 +2923,62 @@ def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]
             "updated_at":              r["updated_at"].isoformat() if r["updated_at"] else None,
         }
 
+    # ── Row counts per dataset (PR-ADS-067) ──────────────────────────────────
+    # Query actual row counts for the selected window to distinguish
+    # fresh_with_data from fresh_but_empty.
+    row_counts: dict[str, int] = {}
+    latest_batch_info: dict[str, dict] = {}
+    try:
+        with get_conn() as conn2:
+            if conn2:
+                with conn2.cursor() as cur2:
+                    from datetime import date as _date, timedelta as _td
+                    window_start = _date.today() - _td(days=max(days, 7))
+                    # Count rows for key tables within the window
+                    _count_queries = [
+                        ("campaigns", f"SELECT COUNT(*) FROM campaigns WHERE run_date >= '{window_start}'"),
+                        ("search_terms", f"SELECT COUNT(*) FROM search_terms WHERE source_date >= '{window_start}'"),
+                        ("keywords", f"SELECT COUNT(*) FROM keywords WHERE run_date >= '{window_start}'"),
+                        ("geo", f"SELECT COUNT(*) FROM geo WHERE run_date >= '{window_start}'"),
+                        ("leads", f"SELECT COUNT(*) FROM leads WHERE created_at >= '{window_start}'"),
+                        ("deals", f"SELECT COUNT(*) FROM deals WHERE close_date >= '{window_start}'"),
+                    ]
+                    for tbl_key, q in _count_queries:
+                        try:
+                            cur2.execute(q)
+                            result = cur2.fetchone()
+                            row_counts[tbl_key] = result[0] if result else 0
+                        except Exception:
+                            row_counts[tbl_key] = 0
+
+                    # Get latest batch info per source/dataset
+                    try:
+                        cur2.execute("""
+                            SELECT DISTINCT ON (source, dataset)
+                                source, dataset, status, row_count
+                            FROM sync_batches
+                            ORDER BY source, dataset, started_at DESC
+                        """)
+                        for brow in cur2.fetchall():
+                            bcols = [d[0] for d in cur2.description]
+                            br = dict(zip(bcols, brow))
+                            latest_batch_info[(br["source"], br["dataset"])] = {
+                                "status": br["status"],
+                                "row_count": br["row_count"] or 0,
+                            }
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # ── Build canonical freshness config lookup ────────────────────────────
+    # Map (source, dataset) -> config key for reverse lookup
+    _cfg_by_source_dataset: dict[tuple[str, str], str] = {}
+    for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
+        src = cfg["source"]
+        ds = cfg["dataset"]
+        _cfg_by_source_dataset[(src, ds)] = cfg_key
+
     # Merge known dataset list with DB rows; fill missing entries as 'unknown'
     datasets: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -2938,14 +3006,139 @@ def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]
         if key not in seen:
             datasets.append(row)
 
+    # ── Compute canonical freshness for each dataset (PR-ADS-067) ──────────
+    # First pass: compute non-dependent datasets to build canonical_status_map
+    canonical_status_map: dict[str, str] = {}
+    from datetime import datetime as _datetime
+
+    for d in datasets:
+        src = d.get("source", "")
+        ds = d.get("dataset", "")
+        cfg_key = _cfg_by_source_dataset.get((src, ds))
+        cfg = DATASET_FRESHNESS_CONFIG.get(cfg_key, {}) if cfg_key else {}
+        stale_days = cfg.get("stale_threshold_days", 8)
+        depends_on = cfg.get("depends_on", [])
+        table_name = cfg.get("table", ds)
+
+        # Get row count for this dataset's table
+        rcount = row_counts.get(table_name, None)
+
+        # Parse dates
+        last_sync_at = None
+        if d.get("last_successful_sync_at"):
+            try:
+                last_sync_at = _datetime.fromisoformat(d["last_successful_sync_at"])
+            except (ValueError, TypeError):
+                pass
+
+        latest_src_date = None
+        if d.get("last_source_date"):
+            try:
+                from datetime import date as _d
+                latest_src_date = _d.fromisoformat(d["last_source_date"])
+            except (ValueError, TypeError):
+                pass
+
+        # Get batch info
+        batch_info = latest_batch_info.get((src, ds), {})
+        batch_status = batch_info.get("status")
+        batch_row_count = batch_info.get("row_count", 0)
+
+        # Skip dependency logic in first pass (handled below)
+        if not depends_on:
+            verdict = compute_canonical_freshness(
+                dataset=cfg_key or ds,
+                rows_in_window=rcount,
+                latest_source_date=latest_src_date,
+                sync_status=d.get("status"),
+                latest_batch_status=batch_status,
+                latest_batch_row_count=batch_row_count,
+                last_successful_sync_at=last_sync_at,
+                stale_threshold_days=stale_days,
+                dependency_status=None,
+            )
+        else:
+            verdict = None  # Placeholder, computed in second pass
+
+        d["_cfg_key"] = cfg_key
+        d["_verdict"] = verdict
+        d["_depends_on"] = depends_on
+        d["_stale_days"] = stale_days
+        d["_rcount"] = rcount
+        d["_batch_status"] = batch_status
+        d["_batch_row_count"] = batch_row_count
+        d["_last_sync_at"] = last_sync_at
+        d["_latest_src_date"] = latest_src_date
+
+        if verdict:
+            canonical_status_map[cfg_key or ds] = verdict["canonical_status"]
+
+    # Second pass: compute dependent datasets
+    for d in datasets:
+        if d["_verdict"] is None:
+            depends_on = d["_depends_on"]
+            # Check dependency status
+            dep_status = None
+            for dep in depends_on:
+                dep_st = canonical_status_map.get(dep)
+                if dep_st and dep_st in BLOCKING_STATES:
+                    dep_status = dep_st
+                    break
+
+            verdict = compute_canonical_freshness(
+                dataset=d["_cfg_key"] or d.get("dataset", ""),
+                rows_in_window=d["_rcount"],
+                latest_source_date=d["_latest_src_date"],
+                sync_status=d.get("status"),
+                latest_batch_status=d["_batch_status"],
+                latest_batch_row_count=d["_batch_row_count"],
+                last_successful_sync_at=d["_last_sync_at"],
+                stale_threshold_days=d["_stale_days"],
+                dependency_status=dep_status,
+            )
+            d["_verdict"] = verdict
+            canonical_status_map[d["_cfg_key"] or d.get("dataset", "")] = verdict["canonical_status"]
+
+    # Enrich each dataset record with canonical fields
+    for d in datasets:
+        verdict = d.pop("_verdict", {}) or {}
+        cfg_key = d.pop("_cfg_key", None)
+        depends_on = d.pop("_depends_on", [])
+        stale_days = d.pop("_stale_days", 8)
+        rcount = d.pop("_rcount", None)
+        batch_status = d.pop("_batch_status", None)
+        batch_row_count = d.pop("_batch_row_count", 0)
+        d.pop("_last_sync_at", None)
+        d.pop("_latest_src_date", None)
+
+        d["canonical_status"] = verdict.get("canonical_status", CanonicalFreshnessStatus.UNKNOWN)
+        d["severity"] = verdict.get("severity", "neutral")
+        d["rows_in_window"] = rcount
+        d["latest_source_date"] = d.get("last_source_date")
+        d["last_batch_row_count"] = batch_row_count
+        d["stale_threshold_days"] = stale_days
+        d["depends_on"] = depends_on
+        d["dependency_status"] = None
+        if depends_on:
+            for dep in depends_on:
+                dep_st = canonical_status_map.get(dep)
+                if dep_st and dep_st in BLOCKING_STATES:
+                    d["dependency_status"] = dep_st
+                    break
+        d["reason"] = verdict.get("reason", "")
+        d["next_action"] = verdict.get("next_action", "")
+
     # Build summary counts
     status_counts: dict[str, int] = {"success": 0, "failed": 0, "running": 0, "unknown": 0}
+    canonical_counts: dict[str, int] = {}
     for d in datasets:
         s = d.get("status") or "unknown"
         if s in status_counts:
             status_counts[s] += 1
         else:
             status_counts["unknown"] += 1
+        cs = d.get("canonical_status", "unknown")
+        canonical_counts[cs] = canonical_counts.get(cs, 0) + 1
 
     return {
         "datasets": datasets,
@@ -2956,6 +3149,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]
             "running": status_counts["running"],
             "unknown": status_counts["unknown"],
         },
+        "canonical_summary": canonical_counts,
         "db_unavailable": False,
     }
 

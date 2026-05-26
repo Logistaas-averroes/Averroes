@@ -3234,6 +3234,62 @@ a {
   border-color: var(--c-warning-border);
 }
 
+/* ── PR-ADS-067: Canonical freshness badge styles ─────────────────────────── */
+.freshness-status-fresh-with-data {
+  background: var(--c-success-bg);
+  color: var(--c-success);
+  border-color: var(--c-success-border);
+}
+
+.freshness-status-fresh-but-empty {
+  background: var(--c-warning-bg);
+  color: var(--c-warning);
+  border-color: var(--c-warning-border);
+}
+
+.freshness-status-stale-with-data {
+  background: var(--c-warning-bg);
+  color: var(--c-warning);
+  border-color: var(--c-warning-border);
+}
+
+.freshness-status-stale-and-empty {
+  background: var(--c-danger-bg);
+  color: var(--c-danger);
+  border-color: var(--c-danger-border);
+}
+
+.freshness-status-not-run {
+  background: var(--c-neutral-bg);
+  color: var(--c-neutral);
+  border-color: var(--c-neutral-border);
+}
+
+.freshness-status-dependency-blocked {
+  background: var(--c-warning-bg);
+  color: var(--c-warning);
+  border-color: var(--c-warning-border);
+}
+
+.freshness-status-db-unavailable {
+  background: var(--c-danger-bg);
+  color: var(--c-danger);
+  border-color: var(--c-danger-border);
+}
+
+/* Per-page strip canonical warning (orange) — distinct from is-stale (red tint) */
+.run-meta.is-canonical-warning {
+  color: var(--c-warning);
+}
+
+/* Reason/action columns in freshness table */
+.td--reason, .td--action {
+  font-size: 12px;
+  max-width: 220px;
+  white-space: normal;
+  line-height: 1.35;
+}
+
 /* Related-page link button in table */
 .freshness-related-link {
   font-size: 12px;

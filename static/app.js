@@ -803,74 +803,84 @@ function renderPageDatasetFreshness(sectionKey) {
   if (datasetKeys.length === 1) {
     const key           = datasetKeys[0];
     const row           = _datasetFreshnessByKey[key];
-    const displayStatus = row ? datasetDisplayStatus(row) : "unknown";
-    const source        = row ? (row.source || "") : "";
     const dsName        = _datasetDisplayName(key);
-    const dateStr       = (row && row.last_successful_sync_at)
-      ? fmtDate(row.last_successful_sync_at) : null;
 
-    const prefix = isDerived ? _derivedPageLabel(sectionKey) : `Dataset freshness: ${dsName}`;
+    // Use canonical_status from backend (PR-ADS-067) when available
+    const cs = row ? row.canonical_status : null;
 
-    if (!row || displayStatus === "unknown") {
-      el.textContent = `${prefix} · Unknown (freshness unverified)`;
+    if (!row || !cs || cs === "unknown") {
+      el.textContent = `${isDerived ? _derivedPageLabel(sectionKey) : `Dataset freshness: ${dsName}`} · Unknown (freshness unverified)`;
       el.className   = "run-meta";
       return;
     }
 
-    if (displayStatus === "success") {
-      const syncPart = dateStr ? ` synced ${dateStr}` : "";
-      el.textContent = `${prefix}${syncPart} · Source: ${_sourceDisplayName(source)} · Fresh`;
-      el.className   = "run-meta is-fresh";
-    } else if (displayStatus === "stale") {
-      const syncPart = dateStr ? ` last synced ${dateStr}` : "";
-      el.textContent = `${prefix}${syncPart} · Source: ${_sourceDisplayName(source)} · Stale`;
-      el.className   = "run-meta is-stale";
-    } else if (displayStatus === "failed") {
-      el.textContent = `${prefix} · Latest sync failed · Check System Health · Failed`;
-      el.className   = "run-meta is-stale";
-    } else if (displayStatus === "running") {
-      el.textContent = `${prefix} · Sync in progress · Source: ${_sourceDisplayName(source)} · Running`;
-      el.className   = "run-meta";
-    } else {
-      el.textContent = `${prefix} · Unknown (freshness unverified)`;
-      el.className   = "run-meta";
-    }
+    const _csLabels = {
+      fresh_with_data:    "Fresh with data",
+      fresh_but_empty:    "Fresh but empty",
+      stale_with_data:    "Stale with data",
+      stale_and_empty:    "Stale and empty",
+      failed:             "Failed",
+      running:            "Running",
+      not_run:            "Not run",
+      dependency_blocked: "Blocked by dependency",
+      db_unavailable:     "DB unavailable",
+    };
+    const _csClasses = {
+      fresh_with_data:    "run-meta is-fresh",
+      fresh_but_empty:    "run-meta is-canonical-warning",
+      stale_with_data:    "run-meta is-stale",
+      stale_and_empty:    "run-meta is-stale",
+      failed:             "run-meta is-stale",
+      running:            "run-meta",
+      not_run:            "run-meta",
+      dependency_blocked: "run-meta is-canonical-warning",
+      db_unavailable:     "run-meta is-stale",
+    };
+
+    const prefix = isDerived ? _derivedPageLabel(sectionKey) : `Dataset freshness: ${dsName}`;
+    const label = _csLabels[cs] || cs;
+    const reason = row.reason ? ` — ${row.reason}` : "";
+    el.textContent = `${prefix} · ${label}${reason}`;
+    el.className = _csClasses[cs] || "run-meta";
     return;
   }
 
   // ── Multi-dataset pages ───────────────────────────────────────────────────
   const statuses = datasetKeys.map((key) => {
     const row = _datasetFreshnessByKey[key];
-    return row ? datasetDisplayStatus(row) : "unknown";
+    return row ? (row.canonical_status || datasetDisplayStatus(row)) : "unknown";
   });
 
-  const freshCount   = statuses.filter((s) => s === "success").length;
-  const staleCount   = statuses.filter((s) => s === "stale").length;
-  const failedCount  = statuses.filter((s) => s === "failed").length;
+  const freshCount   = statuses.filter((s) => s === "fresh_with_data" || s === "success").length;
+  const warningCount = statuses.filter((s) => s === "fresh_but_empty" || s === "stale_with_data" || s === "dependency_blocked").length;
+  const errorCount   = statuses.filter((s) => s === "failed" || s === "stale_and_empty" || s === "db_unavailable").length;
   const runningCount = statuses.filter((s) => s === "running").length;
-  const unknownCount = statuses.filter((s) => s === "unknown").length;
+  const unknownCount = statuses.filter((s) => s === "unknown" || s === "not_run").length;
   const totalCount   = datasetKeys.length;
 
-  const statusLabel = {
-    success: "Fresh", stale: "Stale", failed: "Failed", running: "Running", unknown: "Unknown",
-  };
   const detail = datasetKeys.map((key, i) => {
-    return `${_datasetDisplayName(key)}: ${statusLabel[statuses[i]] || "Unknown"}`;
+    const _shortLabels = {
+      fresh_with_data: "Fresh", fresh_but_empty: "Empty", stale_with_data: "Stale",
+      stale_and_empty: "Stale+Empty", failed: "Failed", running: "Running",
+      not_run: "Not run", dependency_blocked: "Blocked", db_unavailable: "DB down",
+      unknown: "Unknown", success: "Fresh", stale: "Stale",
+    };
+    return `${_datasetDisplayName(key)}: ${_shortLabels[statuses[i]] || "Unknown"}`;
   }).join(" · ");
 
-  const sourceWord  = totalCount === 1 ? "source" : "sources";
+  const sourceWord = totalCount === 1 ? "source" : "sources";
   const summaryParts = [`Dataset freshness: ${totalCount} ${sourceWord}`];
-  if (freshCount  > 0) summaryParts.push(`${freshCount} fresh`);
-  if (staleCount  > 0) summaryParts.push(`${staleCount} stale`);
-  if (failedCount > 0) summaryParts.push(`${failedCount} failed`);
+  if (freshCount > 0) summaryParts.push(`${freshCount} fresh`);
+  if (warningCount > 0) summaryParts.push(`${warningCount} warning`);
+  if (errorCount > 0) summaryParts.push(`${errorCount} error`);
   if (runningCount > 0) summaryParts.push(`${runningCount} running`);
   if (unknownCount > 0) summaryParts.push(`${unknownCount} unknown`);
   const summary = summaryParts.join(" · ");
 
   el.textContent = `${summary} · ${detail}`;
-  el.className   = (failedCount > 0 || staleCount > 0)
+  el.className = (errorCount > 0)
     ? "run-meta is-stale"
-    : (freshCount === totalCount ? "run-meta is-fresh" : "run-meta");
+    : (warningCount > 0 ? "run-meta is-canonical-warning" : (freshCount === totalCount ? "run-meta is-fresh" : "run-meta"));
 }
 
 function updateReportActionButtons() {
@@ -4608,38 +4618,78 @@ function renderDatasetFreshness(data) {
       </div>`;
   }
 
-  // Table rows
+  // Table rows — use canonical_status from backend (PR-ADS-067) when available,
+  // fall back to legacy datasetDisplayStatus() for backward compat.
+  const _canonicalBadgeCls = {
+    fresh_with_data:      "freshness-status-fresh-with-data",
+    fresh_but_empty:      "freshness-status-fresh-but-empty",
+    stale_with_data:      "freshness-status-stale-with-data",
+    stale_and_empty:      "freshness-status-stale-and-empty",
+    failed:               "freshness-status-failed",
+    running:              "freshness-status-running",
+    not_run:              "freshness-status-not-run",
+    dependency_blocked:   "freshness-status-dependency-blocked",
+    db_unavailable:       "freshness-status-db-unavailable",
+    unknown:              "freshness-status-unknown",
+  };
+  const _canonicalBadgeLabel = {
+    fresh_with_data:      "Fresh with data",
+    fresh_but_empty:      "Fresh but empty",
+    stale_with_data:      "Stale with data",
+    stale_and_empty:      "Stale and empty",
+    failed:               "Failed",
+    running:              "Running",
+    not_run:              "Not run",
+    dependency_blocked:   "Blocked",
+    db_unavailable:       "DB unavailable",
+    unknown:              "Unknown",
+  };
+
   const rows = datasetFreshnessRows.map((row) => {
-    const ds = datasetDisplayStatus(row);
-    const badgeCls = {
-      success: "freshness-status-success",
-      failed:  "freshness-status-failed",
-      running: "freshness-status-running",
-      unknown: "freshness-status-unknown",
-      stale:   "freshness-status-stale",
-    }[ds] || "freshness-status-unknown";
-    const badgeLabel = {
-      success: "Fresh",
-      failed:  "Failed",
-      running: "Running",
-      unknown: "Unknown",
-      stale:   "Stale",
-    }[ds] || escapeHtml(ds);
+    // Canonical status from backend (PR-ADS-067)
+    const cs = row.canonical_status || null;
+    let badgeCls, badgeLabel;
+    if (cs && _canonicalBadgeCls[cs]) {
+      badgeCls = _canonicalBadgeCls[cs];
+      badgeLabel = _canonicalBadgeLabel[cs];
+    } else {
+      // Legacy fallback
+      const ds = datasetDisplayStatus(row);
+      badgeCls = {
+        success: "freshness-status-success",
+        failed:  "freshness-status-failed",
+        running: "freshness-status-running",
+        unknown: "freshness-status-unknown",
+        stale:   "freshness-status-stale",
+      }[ds] || "freshness-status-unknown";
+      badgeLabel = {
+        success: "Fresh",
+        failed:  "Failed",
+        running: "Running",
+        unknown: "Unknown",
+        stale:   "Stale",
+      }[ds] || escapeHtml(ds);
+    }
 
     const related = datasetRelatedPage(row.source, row.dataset);
     const relatedCell = related
       ? `<button class="freshness-related-link btn btn--ghost btn--sm" type="button" data-page="${escapeHtml(related.page)}">${escapeHtml(related.label)}</button>`
       : `<span class="td--na">—</span>`;
 
+    // Reason / next_action tooltip (PR-ADS-067)
+    const reasonTip = row.reason ? ` title="${escapeHtml(row.reason + (row.next_action ? ' Next: ' + row.next_action : ''))}"` : "";
+    const rowsCell = row.rows_in_window != null ? String(row.rows_in_window) : '<span class="td--na">—</span>';
+
     return `
       <tr>
         <td>${escapeHtml(row.source || "—")}</td>
         <td class="td--name">${escapeHtml(fmt(row.dataset).replace(/_/g, " "))}</td>
-        <td><span class="freshness-status-badge ${badgeCls}">${badgeLabel}</span></td>
+        <td><span class="freshness-status-badge ${badgeCls}"${reasonTip}>${badgeLabel}</span></td>
+        <td>${rowsCell}</td>
         <td>${row.last_successful_sync_at ? fmtDate(row.last_successful_sync_at) : '<span class="td--na">—</span>'}</td>
-        <td>${row.last_source_date ? escapeHtml(row.last_source_date) : '<span class="td--na">—</span>'}</td>
-        <td>${row.last_batch_id != null ? escapeHtml(String(row.last_batch_id)) : '<span class="td--na">—</span>'}</td>
-        <td class="${row.error_message ? "" : "td--na"}">${row.error_message ? escapeHtml(row.error_message) : "—"}</td>
+        <td>${row.latest_source_date || row.last_source_date ? escapeHtml(row.latest_source_date || row.last_source_date) : '<span class="td--na">—</span>'}</td>
+        <td class="td--reason">${row.reason ? escapeHtml(row.reason) : '<span class="td--na">—</span>'}</td>
+        <td class="td--action">${row.next_action ? escapeHtml(row.next_action) : '<span class="td--na">—</span>'}</td>
         <td>${relatedCell}</td>
       </tr>`;
   }).join("");
@@ -4651,12 +4701,13 @@ function renderDatasetFreshness(data) {
           <tr>
             <th>Source</th>
             <th>Dataset</th>
-            <th>Status</th>
-            <th>Last Successful Sync</th>
-            <th>Last Source Date</th>
-            <th>Last Batch</th>
-            <th>Error</th>
-            <th>Related Page</th>
+            <th>Canonical Status</th>
+            <th>Rows</th>
+            <th>Last Sync</th>
+            <th>Latest Source Date</th>
+            <th>Reason</th>
+            <th>Next Action</th>
+            <th>Page</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -4668,16 +4719,19 @@ function renderDatasetFreshness(data) {
     btn.addEventListener("click", () => navigate(btn.dataset.page));
   });
 
-  // Help notes
+  // Help notes (PR-ADS-067 canonical states)
   if (helpEl) {
     helpEl.hidden = false;
     helpEl.innerHTML = `
-      <strong>Unknown</strong> means no successful tracked sync has been recorded yet.
-      It does not necessarily mean the source failed.<br>
-      <strong>Failed</strong> means the last tracked local persistence attempt failed.
-      Previous successful watermarks are preserved when available.<br>
-      <strong>Stale</strong> is a display-only badge applied when the last successful sync
-      is more than ${_staleAfterDays} day${_staleAfterDays === 1 ? "" : "s"} old — it does not change backend status.`;
+      <strong>Fresh with data</strong> — sync succeeded recently and rows exist.<br>
+      <strong>Fresh but empty</strong> — sync succeeded but no rows in the window (warning).<br>
+      <strong>Stale with data</strong> — rows exist but last sync is older than ${_staleAfterDays} days.<br>
+      <strong>Stale and empty</strong> — no rows and no recent sync (critical).<br>
+      <strong>Failed</strong> — latest sync or batch failed.<br>
+      <strong>Running</strong> — sync in progress.<br>
+      <strong>Not run</strong> — no sync has been recorded yet.<br>
+      <strong>Blocked</strong> — depends on another dataset that is unavailable.<br>
+      <strong>DB unavailable</strong> — database connection issue.`;
   }
 }
 
