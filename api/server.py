@@ -5035,7 +5035,7 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
             "generated_at": generated_at,
             "days": days,
             "verdict": Verdict.DB_UNAVAILABLE,
-            "reason": f"Database error: {exc}",
+            "reason": "Database error occurred",
             "db": db_info,
             "sync": sync_info,
             "api": {"checked": False, "rows_returned": None, "total_rows_in_window": 0, "is_empty": True},
@@ -5043,8 +5043,11 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
         }
 
     # Determine the row count for the requested window
-    window_key = f"rows_{days}d" if days in (7, 14, 30, 60) else "rows_60d"
-    db_rows_window = db_info.get(window_key, db_info.get("rows_60d", 0))
+    if days in (7, 14, 30, 60):
+        db_rows_window = db_info.get(f"rows_{days}d", 0)
+    else:
+        # For non-standard windows, use the largest bucket that fits
+        db_rows_window = db_info.get("rows_60d", 0)
 
     verdict_str, reason = compute_search_terms_verdict(
         db_available=True,

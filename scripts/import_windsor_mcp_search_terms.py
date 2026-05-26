@@ -58,7 +58,10 @@ def _extract_ad_group_id(resource_path: str | None) -> str | None:
     if not resource_path:
         return None
     match = re.search(r"adGroups/(\d+)", resource_path)
-    return match.group(1) if match else resource_path
+    if match:
+        return match.group(1)
+    # Only return raw value if it looks numeric
+    return resource_path if resource_path.isdigit() else None
 
 
 def _parse_mcp_payload(raw_data: Any) -> list[dict[str, Any]]:

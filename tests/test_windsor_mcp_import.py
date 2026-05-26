@@ -106,6 +106,9 @@ class TestAdGroupIdExtraction:
     def test_plain_numeric_id(self):
         assert _extract_ad_group_id("12345") == "12345"
 
+    def test_non_numeric_non_path_returns_none(self):
+        assert _extract_ad_group_id("some-string") is None
+
     def test_none_input(self):
         assert _extract_ad_group_id(None) is None
 
