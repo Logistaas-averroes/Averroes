@@ -679,12 +679,12 @@ The Search Terms pipeline required targeted verification and hardening because:
    - ERROR when all rows are skipped due to missing/blank search_term
 
 3. **Scheduler hardening** (`scheduler/weekly.py`, `scheduler/daily.py`):
-   - Zero-row pulls now marked `status="success_empty"` (not clean success)
+   - Zero-row pulls now use `status="success"` with `row_count=0` plus warning message
    - Fetched > 0 but written = 0 explicitly raises and marks failed
 
 4. **API data_quality enhancement** (`api/server.py`):
    - `/api/search-terms` and `/api/search-terms/summary` now include:
-     `table`, `days`, `rows_in_window`, `latest_source_date`, `is_empty`, `warning`
+     `table`, `days`, `rows_in_window`, `total_rows_in_window`, `rows_returned`, `latest_source_date`, `is_empty`, `warning`
 
 5. **Frontend safety** (`static/app.js`):
    - Empty state now warns about pipeline issue, not just "no results"

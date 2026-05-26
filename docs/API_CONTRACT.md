@@ -1089,6 +1089,8 @@ Paginated raw search-term fact rows for the last N days.
     "table": "search_terms",
     "days": 14,
     "rows_in_window": 45292,
+    "total_rows_in_window": 45292,
+    "rows_returned": 100,
     "latest_source_date": "2026-05-25",
     "is_empty": false,
     "note": "is_flagged_waste is tri-state: null = not analyzed, true = flagged waste, false = analyzed clean. Current Windsor connector is confirmed up to last_14d search-term window unless plan supports more.",
@@ -1197,6 +1199,11 @@ Aggregate summary counts for the selected filter/window.
   "data_quality": {
     "source": "windsor",
     "dataset": "search_terms",
+    "table": "search_terms",
+    "days": 14,
+    "rows_in_window": 128,
+    "total_rows_in_window": 128,
+    "rows_returned": 128,
     "note": "Summary is computed from stored search_terms rows in PostgreSQL. Google conversions are platform conversions, not HubSpot SQLs."
   },
   "db_unavailable": false

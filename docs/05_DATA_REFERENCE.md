@@ -199,7 +199,7 @@ The Search Terms pipeline now includes explicit logging and verification:
 - **Normalizer** (`normalize_search_term_rows()`): Skips blank search_term rows, preserves field contract.
 - **DB Writer** (`write_search_terms()`): Logs input/prepared/skipped/written counts.
   Errors if all rows skipped due to missing field.
-- **Scheduler**: Marks zero-row pulls as `status="success_empty"` (not clean success).
+- **Scheduler**: Records zero-row pulls as `status="success"` with `row_count=0` and a warning message.
   Fetched > 0 but written = 0 is marked as failed.
 - **Verification script**: `scripts/verify_search_terms_pipeline.py --days 60 --db-only --pretty`
 

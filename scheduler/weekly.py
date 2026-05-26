@@ -195,11 +195,11 @@ def run_weekly_report():
             # PR-ADS-065: Distinguish empty pull from write failure
             fetched_count = len(search_terms or [])
             if fetched_count == 0:
-                # Windsor returned nothing — mark as success_empty (not a crash, but suspicious)
+                # Windsor returned nothing — record success with row_count=0 and warning message.
                 if st_batch_id:
                     db_writers.finish_sync_batch(
                         batch_id=st_batch_id,
-                        status="success_empty",
+                        status="success",
                         row_count=0,
                         last_source_date=window_end,
                         error_message=(
@@ -209,7 +209,7 @@ def run_weekly_report():
                     )
                 log.warning(
                     "[weekly] Windsor search-term pull returned 0 rows; "
-                    "marking sync as success_empty"
+                    "marking sync as success with row_count=0"
                 )
             elif not persistence_succeeded(search_terms, st_count):
                 raise RuntimeError(

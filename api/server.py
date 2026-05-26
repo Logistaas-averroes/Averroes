@@ -3128,41 +3128,56 @@ def api_search_terms(
                 return _safe_empty
 
             with conn.cursor() as cur:
-                # ── Build dynamic WHERE clauses ───────────────────────────
-                conditions: list[str] = [
+                # ── Build base WHERE clauses (window + filters; excludes cursor) ──
+                base_conditions: list[str] = [
                     "source_date >= NOW() - INTERVAL '1 day' * %s",
                 ]
-                params: list[Any] = [days]
+                base_params: list[Any] = [days]
+
+                if campaign_key is not None:
+                    base_conditions.append("campaign_name = %s")
+                    base_params.append(campaign_key)
+
+                if match_type:
+                    base_conditions.append("match_type ILIKE %s")
+                    base_params.append(f"%{match_type.strip()}%")
+
+                if q:
+                    base_conditions.append("search_term ILIKE %s")
+                    base_params.append(f"%{q.strip()}%")
+
+                if effective_state == "flagged":
+                    base_conditions.append("is_flagged_waste IS TRUE")
+                elif effective_state == "clean":
+                    base_conditions.append("is_flagged_waste IS FALSE")
+                elif effective_state == "unanalyzed":
+                    base_conditions.append("is_flagged_waste IS NULL")
+                # "all" — no additional condition
+
+                if min_spend is not None:
+                    base_conditions.append("spend_usd >= %s")
+                    base_params.append(min_spend)
+
+                base_where_sql = " AND ".join(base_conditions)
+
+                # ── Count full filtered window (not current page) ────────────
+                cur.execute(
+                    "SELECT COUNT(*), MAX(source_date) FROM search_terms WHERE " + base_where_sql,
+                    base_params,
+                )
+                count_row = cur.fetchone()
+                total_rows_in_window = int(count_row[0]) if count_row else 0
+                latest_source_date = str(count_row[1]) if count_row and count_row[1] else None
+
+                # ── Build paginated WHERE clauses (base + cursor) ─────────────
+                conditions = list(base_conditions)
+                params = list(base_params)
 
                 if cursor_date is not None and cursor_id is not None:
                     conditions.append(
                         "(source_date < %s OR (source_date = %s AND id < %s))"
                     )
                     params += [cursor_date, cursor_date, cursor_id]
-
-                if campaign_key is not None:
-                    conditions.append("campaign_name = %s")
-                    params.append(campaign_key)
-
-                if match_type:
-                    conditions.append("match_type ILIKE %s")
-                    params.append(f"%{match_type.strip()}%")
-
-                if q:
-                    conditions.append("search_term ILIKE %s")
-                    params.append(f"%{q.strip()}%")
-
-                if effective_state == "flagged":
-                    conditions.append("is_flagged_waste IS TRUE")
-                elif effective_state == "clean":
-                    conditions.append("is_flagged_waste IS FALSE")
-                elif effective_state == "unanalyzed":
-                    conditions.append("is_flagged_waste IS NULL")
-                # "all" — no additional condition
-
-                if min_spend is not None:
-                    conditions.append("spend_usd >= %s")
-                    params.append(min_spend)
 
                 where_sql = " AND ".join(conditions)
 
@@ -3230,7 +3245,9 @@ def api_search_terms(
         "dataset": "search_terms",
         "table": "search_terms",
         "days": days,
-        "rows_in_window": len(out),
+        "rows_in_window": total_rows_in_window,
+        "total_rows_in_window": total_rows_in_window,
+        "rows_returned": len(out),
         "is_empty": is_empty,
         "note": _SEARCH_TERMS_DATA_QUALITY_NOTE,
         "warning": (
@@ -3239,12 +3256,7 @@ def api_search_terms(
             if is_empty else None
         ),
     }
-    # Compute latest_source_date from returned rows
-    if out:
-        source_dates = [r["source_date"] for r in out if r.get("source_date")]
-        data_quality["latest_source_date"] = max(source_dates) if source_dates else None
-    else:
-        data_quality["latest_source_date"] = None
+    data_quality["latest_source_date"] = latest_source_date
 
     return {
         "days": days,
@@ -3484,6 +3496,8 @@ def api_search_terms_summary(
         "table": "search_terms",
         "days": days,
         "rows_in_window": total_terms,
+        "total_rows_in_window": total_terms,
+        "rows_returned": total_terms,
         "is_empty": is_empty,
         "note": _SEARCH_TERMS_SUMMARY_DATA_QUALITY_NOTE,
         "warning": (

@@ -111,11 +111,11 @@ def run_daily_pulse():
             # PR-ADS-065: Distinguish empty pull from write failure
             fetched_count = len(search_terms or [])
             if fetched_count == 0:
-                # Windsor returned nothing for daily 1-day window — mark success_empty
+                # Windsor returned nothing for daily 1-day window.
                 if st_batch_id:
                     db_writers.finish_sync_batch(
                         batch_id=st_batch_id,
-                        status="success_empty",
+                        status="success",
                         row_count=0,
                         last_source_date=today,
                         error_message=(
@@ -123,7 +123,7 @@ def run_daily_pulse():
                             "this may be normal for a 1-day window or may indicate issues."
                         ),
                     )
-                log.info("[daily] Windsor search-term daily pull returned 0 rows (success_empty)")
+                log.info("[daily] Windsor search-term daily pull returned 0 rows (success)")
             elif not persistence_succeeded(search_terms, st_count):
                 raise RuntimeError(
                     f"Windsor search_terms persistence failed: "

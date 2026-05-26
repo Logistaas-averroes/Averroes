@@ -53,7 +53,8 @@ class Verdict:
 def compute_search_terms_verdict(
     *,
     db_available: bool = False,
-    db_rows_60d: int = 0,
+    db_rows_window: int = 0,
+    window_days: int = 60,
     sync_status: Optional[str] = None,
     latest_weekly_run: Optional[str] = None,
     live_pull_rows: Optional[int] = None,
@@ -70,7 +71,7 @@ def compute_search_terms_verdict(
         return Verdict.DB_UNAVAILABLE, "Database connection unavailable"
 
     # Not deployed or not run
-    if latest_weekly_run is None and db_rows_60d == 0 and sync_status is None:
+    if latest_weekly_run is None and db_rows_window == 0 and sync_status is None:
         return (
             Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT,
             "No weekly run found and no sync state for search_terms; "
@@ -78,7 +79,7 @@ def compute_search_terms_verdict(
         )
 
     # Live pull was attempted and returned 0
-    if live_pull_rows is not None and live_pull_rows == 0 and db_rows_60d == 0:
+    if live_pull_rows is not None and live_pull_rows == 0 and db_rows_window == 0:
         return (
             Verdict.WINDSOR_PULL_EMPTY,
             "Windsor pull returned 0 rows and DB has 0 rows; "
@@ -94,7 +95,7 @@ def compute_search_terms_verdict(
         )
 
     # Live pull has rows but DB is empty → write failed
-    if live_pull_rows is not None and live_pull_rows > 0 and db_rows_60d == 0:
+    if live_pull_rows is not None and live_pull_rows > 0 and db_rows_window == 0:
         return (
             Verdict.DB_WRITE_FAILED,
             f"Windsor returned {live_pull_rows} rows but DB has 0; "
@@ -102,32 +103,32 @@ def compute_search_terms_verdict(
         )
 
     # Sync success but DB empty → fresh but empty (suspicious)
-    if sync_status in ("success", "fresh") and db_rows_60d == 0:
+    if sync_status in ("success", "fresh") and db_rows_window == 0:
         return (
             Verdict.FRESH_BUT_EMPTY,
-            "Sync state shows success but search_terms table has 0 rows; "
+            f"Sync state shows success but search_terms table has 0 rows in {window_days}-day window; "
             "pipeline completed but produced no evidence",
         )
 
     # File check
-    if file_rows is not None and file_rows == 0 and db_rows_60d == 0:
+    if file_rows is not None and file_rows == 0 and db_rows_window == 0:
         return Verdict.FILE_EMPTY, "ads_search_terms.json is empty and DB has 0 rows"
 
     # DB has rows but API returns 0
-    if db_rows_60d > 0 and api_rows is not None and api_rows == 0:
+    if db_rows_window > 0 and api_rows is not None and api_rows == 0:
         return (
             Verdict.DB_HAS_ROWS_API_EMPTY,
-            f"DB has {db_rows_60d} rows but API returned 0; "
+            f"DB has {db_rows_window} rows in {window_days}-day window but API returned 0; "
             "API query or auth may be filtering incorrectly",
         )
 
     # API has rows but UI might filter (informational — can't check UI programmatically)
-    if api_rows is not None and api_rows > 0 and db_rows_60d > 0:
-        return Verdict.OK, f"Pipeline OK: DB has {db_rows_60d} rows, API returned {api_rows}"
+    if api_rows is not None and api_rows > 0 and db_rows_window > 0:
+        return Verdict.OK, f"Pipeline OK: DB has {db_rows_window} rows, API returned {api_rows}"
 
     # DB has rows and no API check → OK
-    if db_rows_60d > 0:
-        return Verdict.OK, f"Pipeline OK: DB has {db_rows_60d} rows in 60-day window"
+    if db_rows_window > 0:
+        return Verdict.OK, f"Pipeline OK: DB has {db_rows_window} rows in {window_days}-day window"
 
     # Fallback
     return Verdict.UNKNOWN, "Could not determine pipeline state from available evidence"
@@ -143,6 +144,7 @@ def _check_db(days: int) -> dict[str, Any]:
         "rows_14d": 0,
         "rows_30d": 0,
         "rows_60d": 0,
+        "rows_requested_window": 0,
         "max_source_date": None,
         "blank_search_term_count": 0,
         "null_campaign_count": 0,
@@ -233,7 +235,7 @@ def _check_db(days: int) -> dict[str, Any]:
 
                 # Sync state for windsor/search_terms
                 cur.execute(
-                    "SELECT status, last_success_at, error_message "
+                    "SELECT status, last_successful_sync_at, error_message "
                     "FROM sync_state "
                     "WHERE source = 'windsor' AND dataset = 'search_terms' "
                     "LIMIT 1"
@@ -261,6 +263,17 @@ def _check_db(days: int) -> dict[str, Any]:
                         "finished_at": str(row[4]) if row[4] else None,
                         "error_message": row[5],
                     }
+
+                if days in (7, 14, 30, 60):
+                    result["rows_requested_window"] = int(result[f"rows_{days}d"])
+                else:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM search_terms "
+                        "WHERE source_date >= NOW() - INTERVAL '1 day' * %s",
+                        (days,),
+                    )
+                    row = cur.fetchone()
+                    result["rows_requested_window"] = int(row[0]) if row else 0
 
     except Exception as exc:
         log.warning("DB check failed: %s", exc)
@@ -414,14 +427,19 @@ def run_verification(
 ) -> dict[str, Any]:
     """Run the full Search Terms pipeline verification."""
 
+    effective_db_only = bool(db_only)
+    do_live_pull = bool(pull_live and not effective_db_only)
+    do_api_check = bool((api_url and admin_token) and not effective_db_only)
+
     report: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "days": days,
         "modes": {
             "db": True,
             "file": True,
-            "live_pull": pull_live,
-            "api": bool(api_url and admin_token),
+            "db_only": effective_db_only,
+            "live_pull": do_live_pull,
+            "api": do_api_check,
         },
     }
 
@@ -433,13 +451,13 @@ def run_verification(
 
     # Optional live pull
     live_result = None
-    if pull_live:
+    if do_live_pull:
         live_result = _check_live_pull(days)
         report["live_pull"] = live_result
 
     # Optional API check
     api_result = None
-    if api_url and admin_token:
+    if do_api_check:
         api_result = _check_api(api_url, admin_token, days)
         report["api"] = api_result
 
@@ -447,7 +465,8 @@ def run_verification(
     db_info = report["db"]
     verdict, reason = compute_search_terms_verdict(
         db_available=db_info.get("available", False),
-        db_rows_60d=db_info.get("rows_60d", 0),
+        db_rows_window=db_info.get("rows_requested_window", 0),
+        window_days=days,
         sync_status=db_info.get("sync_status"),
         latest_weekly_run=(
             db_info["latest_weekly_run"]["started_at"]
@@ -474,7 +493,11 @@ def main():
         description="Verify the Search Terms evidence pipeline (read-only)."
     )
     parser.add_argument("--days", type=int, default=60, help="Lookback window in days")
-    parser.add_argument("--db-only", action="store_true", help="Only check DB and file (default)")
+    parser.add_argument(
+        "--db-only",
+        action="store_true",
+        help="Force DB+file-only mode (default when neither --pull-live nor --api-url is set)",
+    )
     parser.add_argument("--pull-live", action="store_true", help="Attempt live Windsor read-only pull")
     parser.add_argument("--api-url", type=str, default=None, help="App base URL for API checks")
     parser.add_argument("--admin-token", type=str, default=None, help="Admin bearer token for API auth")
@@ -483,12 +506,16 @@ def main():
 
     args = parser.parse_args()
 
+    api_url = args.api_url or os.environ.get("APP_URL")
+    admin_token = args.admin_token or os.environ.get("ADMIN_API_TOKEN")
+    db_only_mode = bool(args.db_only or (not args.pull_live and not api_url))
+
     result = run_verification(
         days=args.days,
-        db_only=args.db_only,
+        db_only=db_only_mode,
         pull_live=args.pull_live,
-        api_url=args.api_url or os.environ.get("APP_URL"),
-        admin_token=args.admin_token or os.environ.get("ADMIN_API_TOKEN"),
+        api_url=api_url,
+        admin_token=admin_token,
     )
 
     if args.json_output:
@@ -517,6 +544,7 @@ def _print_pretty(result: dict[str, Any]):
     print(f"  Rows (14d):        {db.get('rows_14d')}")
     print(f"  Rows (30d):        {db.get('rows_30d')}")
     print(f"  Rows (60d):        {db.get('rows_60d')}")
+    print(f"  Rows (requested):  {db.get('rows_requested_window')} (days={result['days']})")
     print(f"  MAX(source_date):  {db.get('max_source_date')}")
     print(f"  Blank search_term: {db.get('blank_search_term_count')}")
     print(f"  NULL campaign:     {db.get('null_campaign_count')}")
