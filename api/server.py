@@ -2936,16 +2936,16 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
                     window_start = _date.today() - _td(days=max(days, 7))
                     # Count rows for key tables within the window
                     _count_queries = [
-                        ("campaigns", f"SELECT COUNT(*) FROM campaigns WHERE run_date >= '{window_start}'"),
-                        ("search_terms", f"SELECT COUNT(*) FROM search_terms WHERE source_date >= '{window_start}'"),
-                        ("keywords", f"SELECT COUNT(*) FROM keywords WHERE run_date >= '{window_start}'"),
-                        ("geo", f"SELECT COUNT(*) FROM geo WHERE run_date >= '{window_start}'"),
-                        ("leads", f"SELECT COUNT(*) FROM leads WHERE created_at >= '{window_start}'"),
-                        ("deals", f"SELECT COUNT(*) FROM deals WHERE close_date >= '{window_start}'"),
+                        ("campaigns", "SELECT COUNT(*) FROM campaigns WHERE run_date >= %s"),
+                        ("search_terms", "SELECT COUNT(*) FROM search_terms WHERE source_date >= %s"),
+                        ("keywords", "SELECT COUNT(*) FROM keywords WHERE run_date >= %s"),
+                        ("geo", "SELECT COUNT(*) FROM geo WHERE run_date >= %s"),
+                        ("leads", "SELECT COUNT(*) FROM leads WHERE created_at >= %s"),
+                        ("deals", "SELECT COUNT(*) FROM deals WHERE close_date >= %s"),
                     ]
                     for tbl_key, q in _count_queries:
                         try:
-                            cur2.execute(q)
+                            cur2.execute(q, (window_start,))
                             result = cur2.fetchone()
                             row_counts[tbl_key] = result[0] if result else 0
                         except Exception:
