@@ -80,6 +80,179 @@ const PAGE_DATASET_MAP = {
 // wording for these rather than "Dataset freshness:".
 const DERIVED_DATASET_PAGES = new Set(["ngrams", "waste"]);
 
+// ── Page Explanations (PR-ADS-070) ────────────────────────────────────────
+//
+// Each page gets a concise explanation block: what it shows, data source,
+// dependencies, what empty means, and what action to take next.
+
+const PAGE_EXPLANATIONS = {
+  dashboard: {
+    title: "Dashboard",
+    purpose: "High-level summary of paid media performance, lead quality, waste, and campaign movement.",
+    source: "Campaign, lead, deal, waste, and report data.",
+    dependsOn: ["campaigns", "leads", "deals", "waste_terms"],
+    emptyMeans: "The dashboard may be waiting for campaign, HubSpot, or waste-analysis data.",
+    nextAction: "Open System Status to check pipeline health."
+  },
+  "action-queue": {
+    title: "Action Queue",
+    purpose: "Ranked human-review items based on campaign, waste, geo, keyword, and data-quality signals.",
+    source: "Campaigns, search terms, waste, and lead data.",
+    dependsOn: ["campaigns", "search_terms", "waste_terms", "leads"],
+    emptyMeans: "No queue rules crossed the current review thresholds for this window.",
+    nextAction: "Check System Status to verify all pipelines are running."
+  },
+  reports: {
+    title: "Reports",
+    purpose: "Latest generated advisor report from the scheduled analysis pipeline.",
+    source: "Weekly/monthly report generation jobs.",
+    dependsOn: ["weekly_report"],
+    emptyMeans: "No report has been generated yet. Reports appear after weekly or monthly scheduler jobs complete.",
+    nextAction: "Check Data Runs to confirm scheduler has executed."
+  },
+  campaigns: {
+    title: "Campaigns",
+    purpose: "Campaign truth table — spend, quality, verdict, and performance metrics.",
+    source: "Windsor / Google Ads campaign data.",
+    dependsOn: ["campaigns"],
+    emptyMeans: "No campaign performance rows found for this window. Windsor campaign data may not have synced.",
+    nextAction: "Check System Status → Windsor / Campaigns."
+  },
+  "search-terms": {
+    title: "Search Term Universe",
+    purpose: "Raw Google Ads search terms pulled from Windsor.",
+    source: "Windsor / Google Ads search-term data.",
+    dependsOn: ["search_terms"],
+    emptyMeans: "This does not mean the account is clean. It means no search-term rows are currently available for this window.",
+    nextAction: "Check System Status → Search Terms Pipeline."
+  },
+  ngrams: {
+    title: "Search Pattern Analysis",
+    purpose: "Recurring words and phrases extracted from stored search terms.",
+    source: "Computed from Search Term Universe.",
+    dependsOn: ["search_terms"],
+    emptyMeans: "If Search Term Universe is empty or blocked, pattern analysis cannot run.",
+    nextAction: "Fix Search Term Universe first."
+  },
+  waste: {
+    title: "Flagged Waste Terms",
+    purpose: "Search terms flagged for human review as potential wasted spend.",
+    source: "Analysis layer derived from Search Term Universe.",
+    dependsOn: ["search_terms", "waste_terms"],
+    emptyMeans: "This may mean no terms were flagged, or it may mean Search Term Universe is empty. Waste detection depends on Search Term Universe — if search-term data is unavailable, no waste verdict can be produced.",
+    nextAction: "Check System Status before assuming no waste exists."
+  },
+  geo: {
+    title: "Country Performance",
+    purpose: "Geographic intelligence — performance and quality by country.",
+    source: "Windsor / Google Ads geo data.",
+    dependsOn: ["geo"],
+    emptyMeans: "No geo intelligence available for the selected window.",
+    nextAction: "Check System Status → Windsor / Geo."
+  },
+  keywords: {
+    title: "Keyword Performance",
+    purpose: "Keyword-level performance metrics and quality signals.",
+    source: "Windsor / Google Ads keyword data.",
+    dependsOn: ["keywords"],
+    emptyMeans: "No keyword data available for the selected window.",
+    nextAction: "Check System Status → Windsor / Keywords."
+  },
+  leads: {
+    title: "Lead Quality",
+    purpose: "HubSpot lead-quality breakdown — lifecycle stage, junk rate, and campaign attribution.",
+    source: "HubSpot CRM contacts.",
+    dependsOn: ["leads"],
+    emptyMeans: "No HubSpot lead-quality rows found for this window. Contacts may not have synced.",
+    nextAction: "Check System Status → HubSpot CRM."
+  },
+  deals: {
+    title: "Deals",
+    purpose: "HubSpot deal pipeline — stages, values, and campaign attribution.",
+    source: "HubSpot CRM deals.",
+    dependsOn: ["deals"],
+    emptyMeans: "No deal rows found for this window. HubSpot deals may not have synced.",
+    nextAction: "Check System Status → HubSpot CRM."
+  },
+  "gclid-attribution": {
+    title: "GCLID Attribution",
+    purpose: "Click-to-lead matching via GCLID — proves which Google Ads click produced which HubSpot contact.",
+    source: "GCLID match engine joining Windsor + HubSpot.",
+    dependsOn: ["gclid_attribution", "gclid_coverage_snapshots"],
+    emptyMeans: "No GCLID attribution rows found. This may mean no matching GCLIDs exist in the selected window.",
+    nextAction: "Check System Status → GCLID / Matches."
+  },
+  opportunities: {
+    title: "In Progress Leads",
+    purpose: "Leads currently in active pipeline stages (not yet closed-won or lost).",
+    source: "HubSpot CRM contacts.",
+    dependsOn: ["leads"],
+    emptyMeans: "No in-progress leads in the selected window.",
+    nextAction: "Check System Status → HubSpot CRM."
+  },
+  scheduler: {
+    title: "Data Runs",
+    purpose: "Scheduler job status, run history, and next-run schedule.",
+    source: "Internal scheduler and run tracking.",
+    dependsOn: ["runs"],
+    emptyMeans: "No scheduler runs recorded yet. The scheduler may not have executed since run tracking was enabled.",
+    nextAction: "Check scheduler configuration and latest job status."
+  },
+  health: {
+    title: "System Status",
+    purpose: "War Room — blockers, source health, pipeline status, and data freshness across all datasets.",
+    source: "Internal system status and freshness checks.",
+    dependsOn: ["system_status"],
+    emptyMeans: "System status could not be loaded. Admin access is required.",
+    nextAction: "Confirm admin role and API connectivity."
+  },
+  backfill: {
+    title: "Admin Backfill",
+    purpose: "Manual historical data ingestion. Dry-run previews the plan without writing to the database.",
+    source: "Windsor / HubSpot historical data.",
+    dependsOn: ["historical_backfill"],
+    emptyMeans: "No backfill run selected. Run a dry-run first to preview the ingestion plan.",
+    nextAction: "Select a date range and run dry-run. Dry-run does not write to the database or modify Google Ads/HubSpot. Read-only."
+  },
+  "historical-intelligence": {
+    title: "Historical Trends",
+    purpose: "Long-term historical intelligence — period-over-period comparisons and trend analysis.",
+    source: "Historical campaign, lead, and deal data.",
+    dependsOn: ["historical_intelligence"],
+    emptyMeans: "Not enough historical data for trend analysis, or the data has not been backfilled yet.",
+    nextAction: "Check Admin Backfill to verify historical data availability."
+  }
+};
+
+// ── Page Dependencies (PR-ADS-070) ────────────────────────────────────────
+//
+// Maps each page to the source-qualified dataset keys it depends on for
+// canonical freshness checks.  Keys match the "source/dataset" format used
+// by PAGE_DATASET_MAP and _datasetFreshnessByKey so that
+// getPageCanonicalStatus() can look them up directly.
+// Pages with no canonical freshness record (scheduler, health, backfill)
+// use empty arrays — they have their own status mechanisms.
+
+const PAGE_DEPENDENCIES = {
+  dashboard:               ["windsor/campaigns", "hubspot/contacts", "hubspot/deals", "windsor/search_terms"],
+  "action-queue":          ["windsor/campaigns", "windsor/search_terms", "hubspot/contacts"],
+  reports:                 ["windsor/campaigns", "hubspot/contacts", "hubspot/deals"],
+  campaigns:               ["windsor/campaigns"],
+  waste:                   ["windsor/search_terms"],
+  "search-terms":          ["windsor/search_terms"],
+  ngrams:                  ["windsor/search_terms"],
+  geo:                     ["windsor/geo"],
+  keywords:                ["windsor/keywords"],
+  leads:                   ["hubspot/contacts"],
+  deals:                   ["hubspot/deals"],
+  "gclid-attribution":     ["gclid/matches"],
+  opportunities:           ["hubspot/contacts"],
+  scheduler:               [],
+  health:                  [],
+  backfill:                [],
+  "historical-intelligence": [],
+};
+
 // ── Session state ──────────────────────────────────────────────────────────
 
 let _currentUser   = null;  // { username, role } or null
@@ -244,6 +417,191 @@ function downloadCSV(filename, headers, rowData) {
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
+}
+
+// ── Page Explanation & Empty State helpers (PR-ADS-070) ────────────────────
+
+/**
+ * Render a compact page explanation panel for the given page key.
+ * Inserts into an element with id="page-explanation-{pageKey}" if it exists,
+ * otherwise returns the HTML string.
+ */
+function renderPageExplanation(pageKey, options = {}) {
+  const info = PAGE_EXPLANATIONS[pageKey];
+  if (!info) return "";
+
+  const deps = (info.dependsOn || []).join(", ") || "None";
+  const showChips = options.showChips !== false;
+
+  let chipsHtml = "";
+  if (showChips) {
+    const chipItems = [];
+    if (info.source) chipItems.push(`<span class="context-chip context-chip--source">${escapeHtml(info.source)}</span>`);
+    if (info.dependsOn && info.dependsOn.length > 0) {
+      chipItems.push(`<span class="context-chip context-chip--depends">Depends on: ${escapeHtml(deps)}</span>`);
+    }
+    // Pages that can trigger actions (scheduler runs, backfill) don't get the read-only chip
+    const NON_READONLY_PAGES = new Set(["scheduler", "backfill"]);
+    if (!NON_READONLY_PAGES.has(pageKey)) {
+      chipItems.push(`<span class="context-chip context-chip--readonly">Read-only</span>`);
+    }
+    chipsHtml = `<div class="page-context-chips">${chipItems.join("")}</div>`;
+  }
+
+  const html = `
+    <div class="page-explanation">
+      <div class="page-explanation__grid">
+        <div class="page-explanation__item">
+          <strong>What this page shows</strong>
+          <span>${escapeHtml(info.purpose)}</span>
+        </div>
+        <div class="page-explanation__item">
+          <strong>What empty means</strong>
+          <span>${escapeHtml(info.emptyMeans)}</span>
+        </div>
+        <div class="page-explanation__item">
+          <strong>Next action</strong>
+          <span>${escapeHtml(info.nextAction)}</span>
+        </div>
+      </div>
+      ${chipsHtml}
+    </div>`;
+
+  // Try to inject into a dedicated container if present
+  const container = document.getElementById(`page-explanation-${pageKey}`);
+  if (container) {
+    container.innerHTML = html;
+    container.hidden = false;
+  }
+  return html;
+}
+
+/**
+ * Build a contextual empty-state HTML block based on canonical status and page context.
+ *
+ * @param {object} params
+ * @param {string} params.pageKey - Page route key
+ * @param {string} [params.canonicalStatus] - Canonical freshness status
+ * @param {number} [params.rowsInWindow] - Row count in current window
+ * @param {boolean} [params.filtersActive] - Whether user filters narrowed results to zero
+ * @param {string} [params.error] - Error message if applicable
+ * @returns {string} HTML string
+ */
+function buildEmptyState({ pageKey, canonicalStatus, rowsInWindow, filtersActive, error }) {
+  const info = PAGE_EXPLANATIONS[pageKey] || {};
+  const title = info.title || pageKey;
+
+  // Determine empty state type
+  let stateType = "unknown";
+  if (error) {
+    stateType = "error";
+  } else if (filtersActive) {
+    stateType = "filtered_out";
+  } else if (canonicalStatus === "dependency_blocked") {
+    stateType = "dependency_blocked";
+  } else if (canonicalStatus === "fresh_but_empty") {
+    stateType = "fresh_but_empty";
+  } else if (canonicalStatus === "failed" || canonicalStatus === "stale_and_empty") {
+    stateType = "stale_or_failed";
+  } else if (canonicalStatus === "db_unavailable") {
+    stateType = "db_unavailable";
+  } else if (canonicalStatus === "not_run") {
+    stateType = "not_run";
+  } else if (rowsInWindow === 0) {
+    stateType = "no_rows";
+  }
+
+  const severityClass = {
+    error: "empty-state--error",
+    dependency_blocked: "empty-state--blocked",
+    stale_or_failed: "empty-state--error",
+    db_unavailable: "empty-state--error",
+    fresh_but_empty: "empty-state--warning",
+    filtered_out: "empty-state--info",
+    not_run: "empty-state--info",
+    no_rows: "empty-state--info",
+    unknown: "empty-state--info",
+  }[stateType] || "empty-state--info";
+
+  let body = "";
+  let actionText = info.nextAction || "";
+
+  switch (stateType) {
+    case "error":
+      body = error || `Could not load ${title} data.`;
+      break;
+    case "filtered_out":
+      body = "No results match the current filter.";
+      actionText = "Try adjusting or clearing filters.";
+      break;
+    case "dependency_blocked":
+      body = `${title} is blocked by a dependency.`;
+      if (info.emptyMeans) body += ` ${info.emptyMeans}`;
+      break;
+    case "fresh_but_empty":
+      body = info.emptyMeans || `No ${title} rows found for this window.`;
+      break;
+    case "stale_or_failed":
+      body = `${title} data may be stale or the pipeline has failed.`;
+      actionText = info.nextAction || "Check System Status for pipeline health.";
+      break;
+    case "db_unavailable":
+      body = `${title} temporarily unavailable — database offline.`;
+      actionText = "Check System Status for database connectivity.";
+      break;
+    case "not_run":
+      body = info.emptyMeans || `${title} has not run yet.`;
+      break;
+    default:
+      body = info.emptyMeans || `No ${title} data found for this window.`;
+  }
+
+  return `
+    <div class="empty-state-block ${severityClass}">
+      <p class="empty-state__title">${escapeHtml(body)}</p>
+      ${actionText ? `<p class="empty-state__body"><strong>Next:</strong> ${escapeHtml(actionText)}</p>` : ""}
+    </div>`;
+}
+
+/**
+ * Determine the most severe canonical freshness status for a page, based on
+ * its PAGE_DEPENDENCIES entries looked up in the _datasetFreshnessByKey cache.
+ *
+ * @param {string} pageKey - Page route key (e.g. "search-terms", "waste")
+ * @returns {string|null} Canonical status string or null when undeterminable
+ */
+function getPageCanonicalStatus(pageKey) {
+  const deps = PAGE_DEPENDENCIES[pageKey];
+  if (!deps || deps.length === 0) return null;
+  if (Object.keys(_datasetFreshnessByKey).length === 0) return null;
+
+  // Severity order, most severe first — first match wins
+  const SEVERITY_ORDER = [
+    "db_unavailable",
+    "failed",
+    "stale_and_empty",
+    "dependency_blocked",
+    "stale_with_data",
+    "fresh_but_empty",
+    "running",
+    "not_run",
+    "fresh_with_data",
+  ];
+
+  let mostSevereIdx = SEVERITY_ORDER.length; // beyond list = no data / unknown
+  let worstStatus = null;
+
+  for (const key of deps) {
+    const row = _datasetFreshnessByKey[key];
+    if (!row || !row.canonical_status) continue;
+    const idx = SEVERITY_ORDER.indexOf(row.canonical_status);
+    if (idx !== -1 && idx < mostSevereIdx) {
+      mostSevereIdx = idx;
+      worstStatus = row.canonical_status;
+    }
+  }
+
+  return worstStatus;
 }
 
 function verdictBadge(verdict) {
@@ -510,6 +868,9 @@ function navigate(page) {
   // Show target page
   const target = document.getElementById(`page-${page}`);
   if (target) target.hidden = false;
+
+  // Render page explanation panel (PR-ADS-070)
+  renderPageExplanation(page);
 
   // Update active nav item
   document.querySelectorAll(".nav-item").forEach((el) => {
@@ -1510,8 +1871,11 @@ async function loadCampaigns() {
     const campaigns = data.campaigns || [];
 
     if (campaigns.length === 0) {
-      if (tableEl) tableEl.innerHTML =
-        `<p class="empty-state" style="padding:var(--space-5)">No campaign data. Trigger a weekly run.</p>`;
+      if (tableEl) tableEl.innerHTML = buildEmptyState({
+        pageKey: "campaigns",
+        canonicalStatus: getPageCanonicalStatus("campaigns"),
+        rowsInWindow: 0,
+      });
       ["vc-scale", "vc-fix", "vc-hold", "vc-cut"].forEach((id) => {
         const el = document.getElementById(id);
         if (el) el.textContent = "0";
@@ -1697,14 +2061,16 @@ function renderWasteTable(items) {
 
   if (items.length === 0) {
     if (_wasteData.length === 0) {
-      tableEl.innerHTML = `
-        <div class="waste-empty-state">
-          <p class="empty-state">No flagged waste terms in this time range.</p>
-          <p class="waste-empty-subtext">This does not mean there was no waste. It means no terms crossed the current detection rules for the selected window.</p>
-        </div>`;
+      tableEl.innerHTML = buildEmptyState({
+        pageKey: "waste",
+        canonicalStatus: getPageCanonicalStatus("waste"),
+        rowsInWindow: 0,
+      });
     } else {
-      tableEl.innerHTML =
-        `<p class="empty-state" style="padding:var(--space-5)">No results match the current filter.</p>`;
+      tableEl.innerHTML = buildEmptyState({
+        pageKey: "waste",
+        filtersActive: true,
+      });
     }
     return;
   }
@@ -1837,8 +2203,11 @@ async function loadLeads() {
     const leads = Array.from(seen.values());
 
     if (leads.length === 0) {
-      if (tableEl) tableEl.innerHTML =
-        `<p class="empty-state" style="padding:var(--space-5)">No lead data yet. Trigger a weekly run.</p>`;
+      if (tableEl) tableEl.innerHTML = buildEmptyState({
+        pageKey: "leads",
+        canonicalStatus: getPageCanonicalStatus("leads"),
+        rowsInWindow: 0,
+      });
       [totalEl, sqlsEl, junkEl, progressEl].forEach((el) => {
         if (el) el.textContent = "—";
       });
@@ -2723,21 +3092,16 @@ function renderSearchTermsTable() {
 
   if (visible.length === 0) {
     if (searchTermsStatus === "empty" || searchTermRows.length === 0) {
-      tableEl.innerHTML = `
-        <div class="waste-empty-state">
-          <p class="empty-state">No search-term rows are stored for this window.</p>
-          <p class="waste-empty-subtext">
-            This does not mean the account is clean. It means the Search Terms evidence pipeline
-            has no data for the selected window.<br><br>
-            <strong>Check:</strong><br>
-            1. Scheduler → latest weekly/daily run<br>
-            2. System Health → search_terms freshness<br>
-            3. Reality Audit → search_terms verdict
-          </p>
-        </div>`;
+      tableEl.innerHTML = buildEmptyState({
+        pageKey: "search-terms",
+        canonicalStatus: getPageCanonicalStatus("search-terms"),
+        rowsInWindow: 0,
+      });
     } else {
-      tableEl.innerHTML =
-        `<p class="empty-state" style="padding:var(--space-5)">No results match the current filter.</p>`;
+      tableEl.innerHTML = buildEmptyState({
+        pageKey: "search-terms",
+        filtersActive: true,
+      });
     }
     return;
   }
@@ -3025,7 +3389,11 @@ function renderNgramsTable(data) {
   }
 
   if (ngramRows.length === 0) {
-    tableEl.innerHTML = `<div class="waste-empty-state"><p class="empty-state">No n-grams found for the selected filters.</p></div>`;
+    tableEl.innerHTML = buildEmptyState({
+      pageKey: "ngrams",
+      canonicalStatus: getPageCanonicalStatus("ngrams"),
+      rowsInWindow: 0,
+    });
     return;
   }
 
@@ -4212,7 +4580,7 @@ function renderBackfillSummary(run) {
   panelEl.hidden = false;
 
   if (!run) {
-    bodyEl.innerHTML = `<p class="empty-state">No run data available.</p>`;
+    bodyEl.innerHTML = buildEmptyState({ pageKey: "backfill", rowsInWindow: 0 });
     return;
   }
 
