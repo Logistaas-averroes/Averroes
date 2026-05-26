@@ -59,9 +59,10 @@ import importlib
 import json
 import logging
 import os
+import re
 import threading
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -2836,7 +2837,7 @@ def api_action_queue(
 
 
 # ---------------------------------------------------------------------------
-# Dataset freshness endpoint — read-only, auth required. (PR-ADS-039)
+# Dataset freshness endpoint — read-only, auth required. (PR-ADS-039, PR-ADS-067)
 # ---------------------------------------------------------------------------
 
 # Known source/dataset pairs — returned as placeholders when sync_state is empty.
@@ -2848,24 +2849,43 @@ _KNOWN_DATASETS: list[tuple[str, str]] = [
     ("hubspot", "contacts"),
     ("hubspot", "deals"),
     ("gclid",   "matches"),
+    ("gclid",   "coverage_snapshots"),
+    ("analysis", "waste_terms"),
+    ("computed", "ngrams"),
+    ("analysis", "historical_intelligence"),
 ]
+_SAFE_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @app.get("/api/datasets/freshness")
-def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]:
+def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -> dict[str, Any]:
     """Return per-dataset sync state / watermark from the sync_state table.
 
     Auth required. Read-only. No live fetch, no sync execution, no external calls.
     Phase 1 read-only — no writes to Google Ads, HubSpot, or any external system.
     Source: sync_state table (PR-ADS-039).
+    Enhanced with canonical freshness semantics (PR-ADS-067).
     """
+    from services.freshness_service import (  # noqa: PLC0415
+        DATASET_FRESHNESS_CONFIG,
+        BLOCKING_STATES,
+        CanonicalFreshnessStatus,
+        compute_canonical_freshness,
+    )
+    days = max(1, min(90, int(days)))
+
     _safe_empty: dict[str, Any] = {
         "datasets": [],
         "summary": {"total": 0, "success": 0, "failed": 0, "running": 0, "unknown": 0},
         "db_unavailable": True,
     }
 
+    from psycopg2 import sql as _psql  # noqa: PLC0415
+
     from db.connection import get_conn  # noqa: PLC0415
+    row_counts: dict[str, int | None] = {}
+    latest_batch_info: dict[tuple[str, str], dict] = {}
+
     try:
         with get_conn() as conn:
             if conn is None:
@@ -2890,6 +2910,65 @@ def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
 
+                window_start = date.today() - timedelta(days=days)
+                _count_cache: dict[tuple[str, str], int | None] = {}
+
+                for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
+                    table_name = str(cfg.get("table") or "")
+                    date_column = str(cfg.get("date_column") or "")
+                    if not table_name or not date_column:
+                        continue
+                    if not (_SAFE_SQL_IDENTIFIER_RE.match(table_name) and _SAFE_SQL_IDENTIFIER_RE.match(date_column)):
+                        log.warning(
+                            "[api/datasets/freshness] invalid identifier for dataset=%s table=%s date_column=%s",
+                            cfg_key,
+                            table_name,
+                            date_column,
+                        )
+                        continue
+
+                    cache_key = (table_name, date_column)
+                    if cache_key in _count_cache:
+                        row_counts[cfg_key] = _count_cache[cache_key]
+                        continue
+
+                    query = _psql.SQL("SELECT COUNT(*) FROM {} WHERE {} >= %s").format(
+                        _psql.Identifier(table_name),
+                        _psql.Identifier(date_column),
+                    )
+                    try:
+                        cur.execute(query, (window_start,))
+                        result = cur.fetchone()
+                        count = int(result[0]) if result and result[0] is not None else 0
+                        _count_cache[cache_key] = count
+                        row_counts[cfg_key] = count
+                    except Exception as exc:  # noqa: BLE001
+                        _count_cache[cache_key] = None
+                        row_counts[cfg_key] = None
+                        log.warning(
+                            "[api/datasets/freshness] row count query failed for dataset=%s table=%s: %s",
+                            cfg_key,
+                            table_name,
+                            exc,
+                        )
+
+                try:
+                    cur.execute("""
+                        SELECT DISTINCT ON (source, dataset)
+                            source, dataset, status, row_count
+                        FROM sync_batches
+                        ORDER BY source, dataset, started_at DESC
+                    """)
+                    bcols = [d[0] for d in cur.description]
+                    for brow in cur.fetchall():
+                        br = dict(zip(bcols, brow))
+                        latest_batch_info[(br["source"], br["dataset"])] = {
+                            "status": br["status"],
+                            "row_count": br["row_count"],
+                        }
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[api/datasets/freshness] latest sync_batch query failed: %s", exc)
+
     except Exception as exc:  # noqa: BLE001
         log.error("[api/datasets/freshness] database error: %s", exc, exc_info=True)
         return _safe_empty
@@ -2910,6 +2989,14 @@ def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]
             "error_message":           r["error_message"],
             "updated_at":              r["updated_at"].isoformat() if r["updated_at"] else None,
         }
+
+    # ── Build canonical freshness config lookup ────────────────────────────
+    # Map (source, dataset) -> config key for reverse lookup
+    _cfg_by_source_dataset: dict[tuple[str, str], str] = {}
+    for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
+        src = cfg["source"]
+        ds = cfg["dataset"]
+        _cfg_by_source_dataset[(src, ds)] = cfg_key
 
     # Merge known dataset list with DB rows; fill missing entries as 'unknown'
     datasets: list[dict] = []
@@ -2938,14 +3025,150 @@ def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]
         if key not in seen:
             datasets.append(row)
 
+    # ── Compute canonical freshness for each dataset (PR-ADS-067) ──────────
+    # First pass: compute non-dependent datasets to build canonical_status_map
+    canonical_status_map: dict[str, str] = {}
+    for d in datasets:
+        src = d.get("source", "")
+        ds = d.get("dataset", "")
+        cfg_key = _cfg_by_source_dataset.get((src, ds))
+        cfg = DATASET_FRESHNESS_CONFIG.get(cfg_key, {}) if cfg_key else {}
+        stale_days = cfg.get("stale_threshold_days", 8)
+        depends_on = cfg.get("depends_on", [])
+
+        # Get row count for this configured dataset
+        rcount = row_counts.get(cfg_key, None) if cfg_key else None
+
+        # Parse dates
+        last_sync_at = None
+        if d.get("last_successful_sync_at"):
+            try:
+                last_sync_at = datetime.fromisoformat(d["last_successful_sync_at"])
+            except (ValueError, TypeError):
+                pass
+
+        latest_src_date = None
+        if d.get("last_source_date"):
+            try:
+                from datetime import date as _d
+                latest_src_date = _d.fromisoformat(d["last_source_date"])
+            except (ValueError, TypeError):
+                pass
+
+        # Get batch info
+        batch_info = latest_batch_info.get((src, ds), {})
+        batch_status = batch_info.get("status")
+        batch_row_count = batch_info.get("row_count")
+        sync_status_for_canonical = d.get("status")
+
+        # Placeholder records preserve legacy status="unknown" for response, but canonical
+        # freshness should treat missing sync metadata as not_run.
+        if (
+            sync_status_for_canonical == "unknown"
+            and d.get("last_successful_sync_at") is None
+            and d.get("last_source_date") is None
+            and d.get("last_batch_id") is None
+            and d.get("error_message") is None
+        ):
+            sync_status_for_canonical = None
+
+        # Skip dependency logic in first pass (handled below)
+        if not depends_on:
+            verdict = compute_canonical_freshness(
+                dataset=cfg_key or ds,
+                rows_in_window=rcount,
+                latest_source_date=latest_src_date,
+                sync_status=sync_status_for_canonical,
+                latest_batch_status=batch_status,
+                latest_batch_row_count=batch_row_count,
+                last_successful_sync_at=last_sync_at,
+                stale_threshold_days=stale_days,
+                dependency_status=None,
+            )
+        else:
+            verdict = None  # Placeholder, computed in second pass
+
+        d["_cfg_key"] = cfg_key
+        d["_verdict"] = verdict
+        d["_depends_on"] = depends_on
+        d["_stale_days"] = stale_days
+        d["_rcount"] = rcount
+        d["_batch_status"] = batch_status
+        d["_batch_row_count"] = batch_row_count
+        d["_last_sync_at"] = last_sync_at
+        d["_latest_src_date"] = latest_src_date
+        d["_sync_status_for_canonical"] = sync_status_for_canonical
+
+        if verdict:
+            canonical_status_map[cfg_key or ds] = verdict["canonical_status"]
+
+    # Second pass: compute dependent datasets
+    for d in datasets:
+        if d["_verdict"] is None:
+            depends_on = d["_depends_on"]
+            # Check dependency status
+            dep_status = None
+            for dep in depends_on:
+                dep_st = canonical_status_map.get(dep)
+                if dep_st and dep_st in BLOCKING_STATES:
+                    dep_status = dep_st
+                    break
+
+            verdict = compute_canonical_freshness(
+                dataset=d["_cfg_key"] or d.get("dataset", ""),
+                rows_in_window=d["_rcount"],
+                latest_source_date=d["_latest_src_date"],
+                sync_status=d["_sync_status_for_canonical"],
+                latest_batch_status=d["_batch_status"],
+                latest_batch_row_count=d["_batch_row_count"],
+                last_successful_sync_at=d["_last_sync_at"],
+                stale_threshold_days=d["_stale_days"],
+                dependency_status=dep_status,
+            )
+            d["_verdict"] = verdict
+            canonical_status_map[d["_cfg_key"] or d.get("dataset", "")] = verdict["canonical_status"]
+
+    # Enrich each dataset record with canonical fields
+    for d in datasets:
+        verdict = d.pop("_verdict", {}) or {}
+        cfg_key = d.pop("_cfg_key", None)
+        depends_on = d.pop("_depends_on", [])
+        stale_days = d.pop("_stale_days", 8)
+        rcount = d.pop("_rcount", None)
+        batch_status = d.pop("_batch_status", None)
+        batch_row_count = d.pop("_batch_row_count", 0)
+        d.pop("_last_sync_at", None)
+        d.pop("_latest_src_date", None)
+        d.pop("_sync_status_for_canonical", None)
+
+        d["canonical_status"] = verdict.get("canonical_status", CanonicalFreshnessStatus.UNKNOWN)
+        d["severity"] = verdict.get("severity", "neutral")
+        d["rows_in_window"] = rcount
+        d["latest_source_date"] = d.get("last_source_date")
+        d["last_batch_row_count"] = batch_row_count
+        d["stale_threshold_days"] = stale_days
+        d["depends_on"] = depends_on
+        d["dependency_status"] = None
+        if depends_on:
+            for dep in depends_on:
+                dep_st = canonical_status_map.get(dep)
+                if dep_st and dep_st in BLOCKING_STATES:
+                    d["dependency_status"] = dep_st
+                    break
+        d["reason"] = verdict.get("reason", "")
+        d["next_action"] = verdict.get("next_action", "")
+
     # Build summary counts
     status_counts: dict[str, int] = {"success": 0, "failed": 0, "running": 0, "unknown": 0}
+    canonical_counts: dict[str, int] = {}
     for d in datasets:
         s = d.get("status") or "unknown"
         if s in status_counts:
             status_counts[s] += 1
         else:
             status_counts["unknown"] += 1
+        cs = d.get("canonical_status", "unknown")
+        canonical_counts[cs] = canonical_counts.get(cs, 0) + 1
 
     return {
         "datasets": datasets,
@@ -2956,6 +3179,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth)) -> dict[str, Any]
             "running": status_counts["running"],
             "unknown": status_counts["unknown"],
         },
+        "canonical_summary": canonical_counts,
         "db_unavailable": False,
     }
 

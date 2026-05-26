@@ -239,3 +239,54 @@ Manual UI checks:
 - [ ] Failed datasets show failure state with "Check System Health" link
 - [ ] System Health Dataset Freshness table uses same status labels (Fresh / Stale / Failed / Running / Unknown)
 - [ ] No page implies Google Ads or HubSpot modification
+
+---
+
+## Canonical Freshness Semantics (PR-ADS-067)
+
+PR-ADS-067 introduces backend-computed canonical freshness verdicts that replace
+the display-only staleness logic with a single source of truth.
+
+### Canonical States
+
+| State | Severity | Meaning |
+|-------|----------|---------|
+| `fresh_with_data` | ok | Sync succeeded recently and rows exist in the selected window |
+| `fresh_but_empty` | warning | Sync succeeded recently but row count is zero |
+| `stale_with_data` | warning | Rows exist, but latest source/sync date is older than threshold |
+| `stale_and_empty` | error | No rows and no recent sync |
+| `failed` | error | Latest sync batch or sync_state status is failed |
+| `running` | neutral | Latest sync batch is currently running |
+| `not_run` | neutral | No sync_state or sync_batches exist for this dataset |
+| `dependency_blocked` | warning | Dataset depends on another dataset that is empty/broken |
+| `db_unavailable` | error | Database connection unavailable |
+| `unknown` | neutral | Could not classify safely |
+
+### Dependency Logic
+
+- `waste_terms` depends on `search_terms`
+- `ngrams` depends on `search_terms`
+
+If the dependency is in a blocking state (`fresh_but_empty`, `failed`, `db_unavailable`,
+`stale_and_empty`, `not_run`), the dependent dataset shows `dependency_blocked`.
+
+### Service Location
+
+Backend canonical freshness logic lives in `services/freshness_service.py`:
+- `CanonicalFreshnessStatus` — status constants
+- `DATASET_FRESHNESS_CONFIG` — per-dataset configuration
+- `compute_canonical_freshness()` — pure function computing the verdict
+
+### API Response Enhancement
+
+`GET /api/datasets/freshness` now includes for each dataset:
+- `canonical_status` — one of the canonical states above
+- `severity` — `ok` | `warning` | `error` | `neutral`
+- `rows_in_window` — actual row count in the selected time window
+- `latest_source_date` — latest source data date
+- `last_batch_row_count` — rows from latest sync batch
+- `stale_threshold_days` — staleness threshold for this dataset
+- `depends_on` — list of dependency dataset keys
+- `dependency_status` — canonical status of blocking dependency (if any)
+- `reason` — human-readable explanation
+- `next_action` — recommended remediation step

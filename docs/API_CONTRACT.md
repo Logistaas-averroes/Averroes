@@ -924,10 +924,16 @@ Data quality:
 
 #### `GET /api/datasets/freshness`
 Per-dataset sync state / watermark. Returns the latest known sync status for each source+dataset pair.
+Enhanced with canonical freshness semantics (PR-ADS-067).
 
 **Auth:** Auth
 **Read-only:** Yes — no live fetch, no sync execution, no external API calls
-**Source:** `sync_state` table (PR-ADS-039)
+**Source:** `sync_state` table (PR-ADS-039), `sync_batches`, row counts from data tables
+
+**Query parameters:**
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `days` | int | 60 | Window for row count queries (clamped to 1–90) |
 
 **Known datasets:**
 - `windsor` / `campaigns`
@@ -937,10 +943,28 @@ Per-dataset sync state / watermark. Returns the latest known sync status for eac
 - `hubspot` / `contacts`
 - `hubspot` / `deals`
 - `gclid` / `matches`
+- `gclid` / `coverage_snapshots`
+- `analysis` / `waste_terms`
+- `computed` / `ngrams`
+- `analysis` / `historical_intelligence`
 
-**Status values:** `success` | `failed` | `running` | `unknown`
+**Status values (legacy):** `success` | `failed` | `running` | `unknown`
 
-**Response 200 (with sync data):**
+**Canonical status values (PR-ADS-067):**
+| Status | Severity | Description |
+|--------|----------|-------------|
+| `fresh_with_data` | ok | Sync succeeded recently and rows exist in window |
+| `fresh_but_empty` | warning | Sync succeeded but zero rows in window |
+| `stale_with_data` | warning | Rows exist but sync is older than threshold |
+| `stale_and_empty` | error | No rows and no recent sync |
+| `failed` | error | Latest sync/batch failed |
+| `running` | neutral | Sync currently in progress |
+| `not_run` | neutral | No sync recorded yet |
+| `dependency_blocked` | warning | Upstream dataset is unavailable |
+| `db_unavailable` | error | Database connection issue |
+| `unknown` | neutral | Could not classify |
+
+**Response 200 (with sync data and canonical fields):**
 ```json
 {
   "datasets": [
@@ -952,15 +976,32 @@ Per-dataset sync state / watermark. Returns the latest known sync status for eac
       "last_source_date": "2026-05-03",
       "last_batch_id": 12,
       "error_message": null,
-      "updated_at": "2026-05-04T06:03:00+00:00"
+      "updated_at": "2026-05-04T06:03:00+00:00",
+      "canonical_status": "fresh_with_data",
+      "severity": "ok",
+      "rows_in_window": 45292,
+      "latest_source_date": "2026-05-03",
+      "last_batch_row_count": 45292,
+      "stale_threshold_days": 8,
+      "depends_on": [],
+      "dependency_status": null,
+      "reason": "Data present and recently synced.",
+      "next_action": "No action needed."
     }
   ],
   "summary": {
-    "total": 7,
-    "success": 3,
+    "total": 11,
+    "success": 5,
     "failed": 1,
     "running": 0,
-    "unknown": 3
+    "unknown": 5
+  },
+  "canonical_summary": {
+    "fresh_with_data": 3,
+    "fresh_but_empty": 1,
+    "not_run": 5,
+    "failed": 1,
+    "dependency_blocked": 1
   },
   "db_unavailable": false
 }
@@ -970,21 +1011,16 @@ Per-dataset sync state / watermark. Returns the latest known sync status for eac
 ```json
 {
   "datasets": [
-    { "source": "windsor",  "dataset": "campaigns",    "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
-    { "source": "windsor",  "dataset": "keywords",     "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
-    { "source": "windsor",  "dataset": "search_terms", "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
-    { "source": "windsor",  "dataset": "geo",          "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
-    { "source": "hubspot",  "dataset": "contacts",     "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
-    { "source": "hubspot",  "dataset": "deals",        "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null },
-    { "source": "gclid",    "dataset": "matches",      "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null }
+    { "source": "windsor",  "dataset": "campaigns",    "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null, "canonical_status": "not_run", "severity": "neutral", "rows_in_window": null, "latest_source_date": null, "last_batch_row_count": 0, "stale_threshold_days": 8, "depends_on": [], "dependency_status": null, "reason": "No sync state or sync batches exist for this dataset.", "next_action": "Trigger a sync via scheduler or manual run." }
   ],
   "summary": {
-    "total": 7,
+    "total": 11,
     "success": 0,
     "failed": 0,
     "running": 0,
-    "unknown": 7
+    "unknown": 11
   },
+  "canonical_summary": { "not_run": 11 },
   "db_unavailable": false
 }
 ```
