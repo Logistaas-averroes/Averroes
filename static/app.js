@@ -4576,17 +4576,18 @@ function renderDatasetFreshness(data) {
   let unknownCount = 0;
   const canonicalSummary = (data && data.canonical_summary) ? data.canonical_summary : null;
   if (canonicalSummary) {
-    totalCount = Object.values(canonicalSummary).reduce((acc, n) => acc + (Number(n) || 0), 0);
-    freshCount = Number(canonicalSummary.fresh_with_data || 0);
-    staleCount = Number(canonicalSummary.stale_with_data || 0)
-      + Number(canonicalSummary.fresh_but_empty || 0)
-      + Number(canonicalSummary.dependency_blocked || 0);
-    failedCount = Number(canonicalSummary.failed || 0)
-      + Number(canonicalSummary.stale_and_empty || 0)
-      + Number(canonicalSummary.db_unavailable || 0);
-    runningCount = Number(canonicalSummary.running || 0);
-    unknownCount = Number(canonicalSummary.unknown || 0)
-      + Number(canonicalSummary.not_run || 0);
+    const getCanonicalCount = (key) => Number(canonicalSummary[key] || 0);
+    freshCount = getCanonicalCount("fresh_with_data");
+    staleCount = getCanonicalCount("stale_with_data")
+      + getCanonicalCount("fresh_but_empty")
+      + getCanonicalCount("dependency_blocked");
+    failedCount = getCanonicalCount("failed")
+      + getCanonicalCount("stale_and_empty")
+      + getCanonicalCount("db_unavailable");
+    runningCount = getCanonicalCount("running");
+    unknownCount = getCanonicalCount("unknown")
+      + getCanonicalCount("not_run");
+    totalCount = freshCount + staleCount + failedCount + runningCount + unknownCount;
   } else {
     const summary = (data && data.summary) ? data.summary : (() => {
       const s = { total: 0, success: 0, failed: 0, running: 0, unknown: 0, stale: 0 };

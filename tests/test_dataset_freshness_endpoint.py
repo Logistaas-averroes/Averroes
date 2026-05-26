@@ -7,7 +7,7 @@ PR-ADS-067 — Tests for canonical enrichment behavior used by /api/datasets/fre
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
+import re
 from unittest.mock import MagicMock, patch
 
 from services.freshness_service import CanonicalFreshnessStatus
@@ -25,7 +25,7 @@ def _make_mock_conn(
     count_by_table = count_by_table or {}
     failing_tables = failing_tables or set()
     state: dict[str, object] = {"mode": None, "fetchone": None}
-    executed: list[tuple[str, tuple | None]] = []
+    executed: list[dict[str, object]] = []
 
     cur = MagicMock()
     cur.__enter__ = MagicMock(return_value=cur)
@@ -34,8 +34,9 @@ def _make_mock_conn(
     def execute(sql, params=None):
         sql_text = " ".join(str(sql).split())
         sql_lc = sql_text.lower()
-        executed.append((sql_text, params))
+        executed.append({"sql": sql_text, "params": params, "kind": "other"})
         if "from sync_state" in sql_lc:
+            executed[-1]["kind"] = "sync_state"
             cur.description = [
                 ("source",), ("dataset",), ("status",), ("last_successful_sync_at",),
                 ("last_source_date",), ("last_batch_id",), ("error_message",), ("updated_at",),
@@ -44,12 +45,20 @@ def _make_mock_conn(
             state["fetchone"] = None
             return
         if "from sync_batches" in sql_lc:
+            executed[-1]["kind"] = "sync_batches"
             cur.description = [("source",), ("dataset",), ("status",), ("row_count",)]
             state["mode"] = "sync_batches"
             state["fetchone"] = None
             return
+        table = None
         if sql_lc.startswith("select count(*) from "):
             table = sql_lc.split("from ", 1)[1].split(" ", 1)[0]
+        elif "sql('select count(*) from ')" in sql_lc and "identifier('" in sql_lc:
+            match = re.search(r"Identifier\('([^']+)'\)", sql_text)
+            table = match.group(1).lower() if match else None
+        if table:
+            executed[-1]["kind"] = "count"
+            executed[-1]["table"] = table
             if table in failing_tables:
                 raise RuntimeError(f"simulated count failure: {table}")
             cur.description = [("count",)]
@@ -105,9 +114,9 @@ def test_days_one_uses_exact_one_day_window_for_counts():
     payload = _call_endpoint(conn=conn, days=1)
     campaigns = next(d for d in payload["datasets"] if d["dataset_key"] == "windsor/campaigns")
     assert campaigns["rows_in_window"] == 7
-    campaign_count_calls = [c for c in executed if "COUNT(*) FROM campaigns" in c[0]]
+    campaign_count_calls = [c for c in executed if c.get("kind") == "count" and c.get("table") == "campaigns"]
     assert campaign_count_calls, "Expected count query for campaigns table"
-    assert campaign_count_calls[0][1] == (date.today() - timedelta(days=1),)
+    assert campaign_count_calls[0]["params"] == (date.today() - timedelta(days=1),)
 
 
 def test_row_count_query_failure_is_unknown_not_zero():
@@ -175,7 +184,9 @@ def test_dependency_blocked_still_applies_to_waste_terms_and_ngrams():
 
 
 def test_system_health_summary_renderer_uses_canonical_summary():
+    from pathlib import Path
+
     app_js = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
     assert "data.canonical_summary" in app_js
-    assert "fresh_with_data" in app_js
-    assert "dependency_blocked" in app_js
+    assert "getCanonicalCount(\"fresh_with_data\")" in app_js
+    assert "getCanonicalCount(\"dependency_blocked\")" in app_js

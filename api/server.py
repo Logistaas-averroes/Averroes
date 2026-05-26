@@ -62,7 +62,7 @@ import os
 import re
 import threading
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -2854,6 +2854,7 @@ _KNOWN_DATASETS: list[tuple[str, str]] = [
     ("computed", "ngrams"),
     ("analysis", "historical_intelligence"),
 ]
+_SAFE_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @app.get("/api/datasets/freshness")
@@ -2879,7 +2880,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
         "db_unavailable": True,
     }
 
-    from datetime import date as _date, datetime as _datetime, timedelta as _td
+    from psycopg2 import sql as _psql  # noqa: PLC0415
 
     from db.connection import get_conn  # noqa: PLC0415
     row_counts: dict[str, int | None] = {}
@@ -2909,8 +2910,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
 
-                window_start = _date.today() - _td(days=days)
-                _safe_identifier = re.compile(r"^[a-z_][a-z0-9_]*$")
+                window_start = date.today() - timedelta(days=days)
                 _count_cache: dict[tuple[str, str], int | None] = {}
 
                 for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
@@ -2918,7 +2918,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
                     date_column = str(cfg.get("date_column") or "")
                     if not table_name or not date_column:
                         continue
-                    if not (_safe_identifier.match(table_name) and _safe_identifier.match(date_column)):
+                    if not (_SAFE_SQL_IDENTIFIER_RE.match(table_name) and _SAFE_SQL_IDENTIFIER_RE.match(date_column)):
                         log.warning(
                             "[api/datasets/freshness] invalid identifier for dataset=%s table=%s date_column=%s",
                             cfg_key,
@@ -2932,7 +2932,10 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
                         row_counts[cfg_key] = _count_cache[cache_key]
                         continue
 
-                    query = f"SELECT COUNT(*) FROM {table_name} WHERE {date_column} >= %s"
+                    query = _psql.SQL("SELECT COUNT(*) FROM {} WHERE {} >= %s").format(
+                        _psql.Identifier(table_name),
+                        _psql.Identifier(date_column),
+                    )
                     try:
                         cur.execute(query, (window_start,))
                         result = cur.fetchone()
@@ -3040,7 +3043,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
         last_sync_at = None
         if d.get("last_successful_sync_at"):
             try:
-                last_sync_at = _datetime.fromisoformat(d["last_successful_sync_at"])
+                last_sync_at = datetime.fromisoformat(d["last_successful_sync_at"])
             except (ValueError, TypeError):
                 pass
 
