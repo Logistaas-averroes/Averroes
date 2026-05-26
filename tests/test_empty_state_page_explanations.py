@@ -153,8 +153,10 @@ class TestPageDependenciesCoverage:
 class TestBuildEmptyStateIntegration:
     """buildEmptyState() must be wired into every critical page renderer."""
 
-    def _fn_body(self, fn_signature, window=3000):
-        """Return a slice of app.js starting at the given function signature."""
+    def _get_function_slice(self, fn_signature, window=3000):
+        """Return a slice of app.js starting at the given function signature.
+        'window' is the number of characters to include after the signature start.
+        """
         idx = APP_JS.find(fn_signature)
         assert idx != -1, f"Function not found: {fn_signature}"
         return APP_JS[idx : idx + window]
@@ -166,37 +168,37 @@ class TestBuildEmptyStateIntegration:
         assert "function getPageCanonicalStatus" in APP_JS
 
     def test_build_empty_state_called_in_search_terms(self):
-        body = self._fn_body("function renderSearchTermsTable(")
+        body = self._get_function_slice("function renderSearchTermsTable(")
         assert "buildEmptyState(" in body, (
             "renderSearchTermsTable must call buildEmptyState() for its empty state"
         )
 
     def test_build_empty_state_called_in_waste(self):
-        body = self._fn_body("function renderWasteTable(")
+        body = self._get_function_slice("function renderWasteTable(")
         assert "buildEmptyState(" in body, (
             "renderWasteTable must call buildEmptyState() for its empty state"
         )
 
     def test_build_empty_state_called_in_ngrams(self):
-        body = self._fn_body("function renderNgramsTable(")
+        body = self._get_function_slice("function renderNgramsTable(")
         assert "buildEmptyState(" in body, (
             "renderNgramsTable must call buildEmptyState() for its empty state"
         )
 
     def test_build_empty_state_called_in_campaigns(self):
-        body = self._fn_body("async function loadCampaigns(")
+        body = self._get_function_slice("async function loadCampaigns(")
         assert "buildEmptyState(" in body, (
             "loadCampaigns must call buildEmptyState() for its empty state"
         )
 
     def test_build_empty_state_called_in_leads(self):
-        body = self._fn_body("async function loadLeads(")
+        body = self._get_function_slice("async function loadLeads(")
         assert "buildEmptyState(" in body, (
             "loadLeads must call buildEmptyState() for its empty state"
         )
 
     def test_build_empty_state_called_in_backfill(self):
-        body = self._fn_body("function renderBackfillSummary(", window=2000)
+        body = self._get_function_slice("function renderBackfillSummary(", window=2000)
         assert "buildEmptyState(" in body, (
             "renderBackfillSummary must call buildEmptyState() for its no-run state"
         )

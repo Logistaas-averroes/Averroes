@@ -588,15 +588,15 @@ function getPageCanonicalStatus(pageKey) {
     "fresh_with_data",
   ];
 
-  let worstIdx = SEVERITY_ORDER.length; // beyond list = no data / unknown
+  let mostSevereIdx = SEVERITY_ORDER.length; // beyond list = no data / unknown
   let worstStatus = null;
 
   for (const key of deps) {
     const row = _datasetFreshnessByKey[key];
     if (!row || !row.canonical_status) continue;
     const idx = SEVERITY_ORDER.indexOf(row.canonical_status);
-    if (idx !== -1 && idx < worstIdx) {
-      worstIdx = idx;
+    if (idx !== -1 && idx < mostSevereIdx) {
+      mostSevereIdx = idx;
       worstStatus = row.canonical_status;
     }
   }
