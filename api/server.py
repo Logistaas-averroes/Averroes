@@ -5426,6 +5426,12 @@ def api_system_status_war_room(
                     sync_info=sync_source_info,
                     runs_data=runs_data,
                 )
+                store_ts = datetime.now(timezone.utc).timestamp()
+                with _war_room_cache_lock:
+                    _war_room_cache[days] = {
+                        "expires_at": store_ts + _WAR_ROOM_CACHE_TTL_SECONDS,
+                        "data": result,
+                    }
                 return result
 
             with conn.cursor() as cur:
@@ -5446,12 +5452,21 @@ def api_system_status_war_room(
                 # 2. Get row counts per dataset
                 window_start = date.today() - timedelta(days=days)
                 row_counts: dict[str, int | None] = {}
+                _count_cache: dict[tuple[str, str], int | None] = {}
                 for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
                     table_name = str(cfg.get("table") or "")
                     date_column = str(cfg.get("date_column") or "")
                     if not table_name or not date_column:
                         continue
                     if not (_SAFE_SQL_IDENTIFIER_RE.match(table_name) and _SAFE_SQL_IDENTIFIER_RE.match(date_column)):
+                        log.warning(
+                            "[api/status-war-room] invalid identifier for dataset %r: table=%r date_column=%r",
+                            cfg_key, table_name, date_column,
+                        )
+                        continue
+                    cache_key = (table_name, date_column)
+                    if cache_key in _count_cache:
+                        row_counts[cfg_key] = _count_cache[cache_key]
                         continue
                     try:
                         query = _psql.SQL("SELECT COUNT(*) FROM {} WHERE {} >= %s").format(
@@ -5460,28 +5475,48 @@ def api_system_status_war_room(
                         )
                         cur.execute(query, (window_start,))
                         result_row = cur.fetchone()
-                        row_counts[cfg_key] = int(result_row[0]) if result_row and result_row[0] is not None else 0
+                        count = int(result_row[0]) if result_row and result_row[0] is not None else 0
+                        _count_cache[cache_key] = count
+                        row_counts[cfg_key] = count
                     except Exception:  # noqa: BLE001
+                        _count_cache[cache_key] = None
                         row_counts[cfg_key] = None
 
-                # 3. Get latest batch info
-                latest_batch_info: dict[tuple[str, str], dict] = {}
+                # 3. Get latest batch info — one row per source (most recent by started_at)
+                latest_batch_by_source: dict[str, dict] = {}
                 try:
+                    cur.execute("""
+                        SELECT DISTINCT ON (source)
+                            source, dataset, status, row_count
+                        FROM sync_batches
+                        ORDER BY source, started_at DESC
+                    """)
+                    bcols = [d[0] for d in cur.description]
+                    for brow in cur.fetchall():
+                        br = dict(zip(bcols, brow))
+                        latest_batch_by_source[br["source"]] = {
+                            "dataset": br["dataset"],
+                            "status": br["status"],
+                            "row_count": br["row_count"],
+                        }
+                    # Also keep per-(source, dataset) map for canonical freshness computation
+                    latest_batch_info: dict[tuple[str, str], dict] = {}
                     cur.execute("""
                         SELECT DISTINCT ON (source, dataset)
                             source, dataset, status, row_count
                         FROM sync_batches
                         ORDER BY source, dataset, started_at DESC
                     """)
-                    bcols = [d[0] for d in cur.description]
+                    bcols2 = [d[0] for d in cur.description]
                     for brow in cur.fetchall():
-                        br = dict(zip(bcols, brow))
+                        br = dict(zip(bcols2, brow))
                         latest_batch_info[(br["source"], br["dataset"])] = {
                             "status": br["status"],
                             "row_count": br["row_count"],
                         }
                 except Exception:  # noqa: BLE001
-                    pass
+                    latest_batch_info = {}
+                    latest_batch_by_source = {}
 
                 # 4. Compute canonical freshness for each dataset
                 canonical_status_map: dict[str, str] = {}
@@ -5592,17 +5627,13 @@ def api_system_status_war_room(
                 for src_key in ["windsor", "hubspot", "gclid", "analysis", "computed"]:
                     # Find best last_successful_sync_at for this source
                     best_sync = None
-                    batch_status = None
                     for (s, d), srow in sync_map.items():
                         if s == src_key:
                             lsa = srow.get("last_successful_sync_at")
                             if lsa and (best_sync is None or lsa > best_sync):
                                 best_sync = lsa
-                    # Best batch status from any dataset of this source
-                    for (s, d), binfo in latest_batch_info.items():
-                        if s == src_key:
-                            batch_status = binfo.get("status")
-                            break
+                    # Use latest batch (by started_at DESC) for this source
+                    batch_status = latest_batch_by_source.get(src_key, {}).get("status")
 
                     sync_source_info[src_key] = {
                         "last_successful_sync_at": best_sync.isoformat() if best_sync else None,
@@ -5656,9 +5687,10 @@ def api_system_status_war_room(
         runs_data=runs_data,
     )
 
+    store_ts = datetime.now(timezone.utc).timestamp()
     with _war_room_cache_lock:
         _war_room_cache[days] = {
-            "expires_at": now_ts + _WAR_ROOM_CACHE_TTL_SECONDS,
+            "expires_at": store_ts + _WAR_ROOM_CACHE_TTL_SECONDS,
             "data": result,
         }
     return result

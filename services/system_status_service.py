@@ -16,7 +16,6 @@ from typing import Any
 
 from services.freshness_service import (
     BLOCKING_STATES,
-    DATASET_FRESHNESS_CONFIG,
     CanonicalFreshnessStatus,
     SEVERITY_MAP,
 )
@@ -248,7 +247,6 @@ def compute_summary_counts(dataset_statuses: dict[str, str]) -> dict[str, int]:
 
 def compute_critical_blockers(
     dataset_statuses: dict[str, str],
-    dataset_details: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Generate critical blocker objects from canonical statuses."""
     blockers: list[dict[str, Any]] = []
@@ -496,7 +494,7 @@ def build_war_room_response(
     """
     overall_status, overall_label = compute_overall_status(dataset_statuses)
     summary = compute_summary_counts(dataset_statuses)
-    blockers = compute_critical_blockers(dataset_statuses, dataset_details)
+    blockers = compute_critical_blockers(dataset_statuses)
     sources = compute_source_health(dataset_statuses, sync_info)
     pipelines = compute_pipelines(dataset_statuses, dataset_details)
     scheduler = compute_scheduler_summary(runs_data)

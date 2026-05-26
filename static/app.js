@@ -4503,23 +4503,6 @@ async function loadHealth() {
 
 // ── System Status War Room (PR-ADS-068) ────────────────────────────────────
 
-const PAGE_PIPELINE_IMPACT = {
-  dashboard: ["campaigns", "leads", "waste_terms"],
-  campaigns: ["campaigns"],
-  waste: ["waste_terms", "search_terms"],
-  "search-terms": ["search_terms"],
-  ngrams: ["ngrams", "search_terms"],
-  geo: ["geo"],
-  keywords: ["keywords"],
-  leads: ["leads"],
-  deals: ["deals"],
-  "gclid-attribution": ["gclid_attribution", "gclid_coverage_snapshots"],
-  opportunities: ["leads"],
-  health: ["all"],
-  backfill: ["admin"],
-  "historical-intelligence": ["historical_intelligence"]
-};
-
 async function loadWarRoom() {
   const el = document.getElementById("war-room-body");
   if (!el) return;
