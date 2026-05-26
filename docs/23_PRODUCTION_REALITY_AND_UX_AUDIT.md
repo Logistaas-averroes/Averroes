@@ -752,3 +752,20 @@ Reason: Database connection unavailable
 6. **Documentation** — `docs/24_UI_NAVIGATION_MODEL.md` added with navigation model and route stability rule.
 
 **Route stability rule:** Visible page names may change, but `data-page` route keys must remain stable unless a dedicated migration PR updates every reference.
+
+---
+
+## PR-ADS-070 — Empty State & Page Explanation Upgrade
+
+**Goal:** Upgrade page explanations and empty states so users never see vague "No data found" without context.
+
+**Changes:**
+1. **PAGE_EXPLANATIONS** — config object in `static/app.js` with purpose/source/dependsOn/emptyMeans/nextAction for all 17 routes.
+2. **PAGE_DEPENDENCIES** — mapping of each page to its upstream dataset dependencies.
+3. **renderPageExplanation()** — reusable helper rendering compact explanation panels with context chips.
+4. **buildEmptyState()** — helper generating severity-aware empty state blocks based on canonical status.
+5. **Critical empty states updated** — Search Term Universe warns zero ≠ clean; Waste Terms and N-Grams explain Search Terms dependency; Admin Backfill states dry-run is safe/read-only.
+6. **CSS** — `.page-explanation`, `.page-context-chips`, `.context-chip`, `.empty-state--warning/blocked/error/info` styles added.
+7. **Documentation** — `docs/25_EMPTY_STATE_AND_PAGE_EXPLANATION_MODEL.md` created.
+
+**Key principle:** A zero-row page should only look scary if canonical freshness says it is suspicious, blocked, stale, or failed.

@@ -276,4 +276,4 @@ When fully built, this system is Logistaas's permanent paid media intelligence l
 | PR | Module | Description | Status |
 |----|--------|-------------|--------|
 | PR-ADS-069 | `static/` + `docs/` + `tests/` | Sidebar grouped into Command Center / Evidence / Review & Quality / Admin; page labels renamed to operator language; route keys unchanged | ✅ Complete |
-| PR-ADS-070 | `static/` | Empty-state + page explanation upgrade | ⬜ Next |
+| PR-ADS-070 | `static/` + `docs/` + `tests/` | Empty State & Page Explanation Upgrade — every page explains itself, critical empty states are contextual, not generic | 🔨 In progress |

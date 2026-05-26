@@ -303,3 +303,18 @@ Service logic: `services/system_status_service.py`
 The war room uses the same canonical states and severity model defined above,
 plus adds overall system status (ok/warning/error/neutral), source health
 aggregation, and page impact analysis.
+
+### Empty State & Page Explanation (PR-ADS-070)
+
+PR-ADS-070 integrates canonical freshness into page-level empty states. The
+frontend now uses `PAGE_DEPENDENCIES` to determine which datasets a page
+depends on, and renders contextual empty-state messages based on canonical
+status rather than displaying generic "No data found" messages.
+
+Key integration points:
+- `dependency_blocked` → page shows "Blocked by [dependency]" instead of "No data"
+- `fresh_but_empty` → page shows advisory (not error) empty state
+- `failed` / `stale_and_empty` → page shows error-level empty state
+- `db_unavailable` → page shows offline message
+
+See `docs/25_EMPTY_STATE_AND_PAGE_EXPLANATION_MODEL.md` for the full taxonomy.

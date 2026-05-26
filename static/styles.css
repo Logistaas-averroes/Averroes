@@ -3840,3 +3840,129 @@ a {
 .war-room-impact__page { font-size: 12px; font-weight: 600; color: var(--text-primary, #374151); min-width: 120px; }
 .war-room-impact__status { font-size: 11px; font-weight: 700; color: var(--amber-600, #d97706); text-transform: uppercase; }
 .war-room-impact__reason { font-size: 11px; color: var(--text-muted, #9ca3af); }
+
+/* ── Page Explanation & Empty State (PR-ADS-070) ─────────────────────────── */
+
+.page-explanation {
+  margin: var(--space-3) 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-alt, #fbfbfd);
+  border: 1px solid var(--border, #e0e6ef);
+  border-radius: var(--radius-sm, 6px);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary, #4b5563);
+}
+
+.page-explanation__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-3) var(--space-5);
+}
+
+.page-explanation__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.page-explanation__item strong {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.page-explanation__item span {
+  color: var(--text-secondary, #4b5563);
+}
+
+/* Page context chips */
+.page-context-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border, #e0e6ef);
+}
+
+.context-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--c-neutral-bg, #f0f0f5);
+  color: var(--text-secondary, #4b5563);
+  border: 1px solid var(--c-neutral-border, rgba(110, 110, 115, 0.15));
+}
+
+.context-chip--source {
+  background: color-mix(in srgb, var(--brand-sky-accent, #129ef5) 8%, white);
+  color: var(--brand-sky-accent, #129ef5);
+  border-color: color-mix(in srgb, var(--brand-sky-accent, #129ef5) 20%, transparent);
+}
+
+.context-chip--depends {
+  background: color-mix(in srgb, var(--c-warning, #b45309) 8%, white);
+  color: var(--c-warning, #b45309);
+  border-color: var(--c-warning-border, rgba(180, 83, 9, 0.2));
+}
+
+.context-chip--readonly {
+  background: var(--c-success-bg, #dcfce7);
+  color: var(--c-success, #15803d);
+  border-color: var(--c-success-border, rgba(21, 128, 61, 0.2));
+}
+
+/* Empty state blocks with severity */
+.empty-state-block {
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border, #e0e6ef);
+  background: var(--surface-alt, #fbfbfd);
+}
+
+.empty-state-block.empty-state--info {
+  border-color: var(--c-neutral-border, rgba(110, 110, 115, 0.15));
+  background: var(--c-neutral-bg, #f0f0f5);
+}
+
+.empty-state-block.empty-state--warning {
+  border-color: var(--c-warning-border, rgba(180, 83, 9, 0.2));
+  background: var(--c-warning-bg, #fef3c7);
+}
+
+.empty-state-block.empty-state--blocked {
+  border-color: var(--c-warning-border, rgba(180, 83, 9, 0.2));
+  background: color-mix(in srgb, var(--c-warning-bg, #fef3c7) 60%, white);
+}
+
+.empty-state-block.empty-state--error {
+  border-color: var(--c-danger-border, rgba(185, 28, 28, 0.2));
+  background: var(--c-danger-bg, #fee2e2);
+}
+
+.empty-state__title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary, #011931);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.empty-state__body {
+  font-size: 12px;
+  color: var(--text-secondary, #4b5563);
+  margin: var(--space-2) 0 0;
+  line-height: 1.5;
+}
+
+.empty-state__actions {
+  margin-top: var(--space-3);
+  display: flex;
+  gap: var(--space-2);
+}

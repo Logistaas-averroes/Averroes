@@ -74,7 +74,10 @@ Changing a route key without updating all references will break navigation, fres
 
 Planned for subsequent PRs:
 
-- **PR-ADS-070** — Empty-state + page explanation upgrade
+- **PR-ADS-070** — Empty State & Page Explanation Upgrade ✅ Complete
+  - Every page now has `PAGE_EXPLANATIONS` config, context chips, and contextual empty states
+  - See `docs/25_EMPTY_STATE_AND_PAGE_EXPLANATION_MODEL.md` for full pattern documentation
+- **PR-ADS-071** — Page Help Panels
 - Sidebar collapse/expand toggle for smaller screens
 - Page-level breadcrumbs
 - Keyboard shortcut navigation (Cmd+K style)

@@ -263,6 +263,7 @@
           <h1 class="page-title">Dashboard</h1>
           <p class="page-subtitle">Campaign intelligence overview</p>
         </header>
+        <div id="page-explanation-dashboard" hidden></div>
         <div class="kpi-grid">
           <div class="kpi-card">
             <div class="kpi-card__label">Total Spend (30d)</div>
@@ -333,6 +334,7 @@
           <h1 class="page-title">Action Queue</h1>
           <p class="page-subtitle">Ranked human-review items based on campaign, waste, geo, keyword, and data-quality signals.</p>
         </header>
+        <div id="page-explanation-action-queue" hidden></div>
         <p id="run-meta-action_queue" class="run-meta" data-section="action_queue"></p>
         <div class="kpi-grid" id="action-queue-kpis">
           <div class="kpi-card">
@@ -383,6 +385,7 @@
           <h1 class="page-title">Reports</h1>
           <p class="page-subtitle">Latest generated advisor report from the scheduled analysis pipeline.</p>
         </header>
+        <div id="page-explanation-reports" hidden></div>
         <div class="report-meta-grid" id="reports-meta"></div>
         <div class="report-actions-panel" id="reports-actions">
           <button class="btn btn--secondary" id="report-copy-btn" type="button" disabled>
@@ -411,6 +414,7 @@
           <h1 class="page-title">Campaigns</h1>
           <p class="page-subtitle">Campaign truth table — spend, quality, and verdict</p>
         </header>
+        <div id="page-explanation-campaigns" hidden></div>
         <p id="run-meta-campaigns" class="run-meta" data-section="campaigns"></p>
         <div class="verdict-count-grid" id="camp-verdict-grid">
           <div class="verdict-count-card verdict-count-card--scale">
@@ -444,6 +448,7 @@
           <h1 class="page-title">Flagged Waste Terms</h1>
           <p class="page-subtitle">Search terms flagged as wasted spend, grouped by junk signal and campaign evidence.</p>
         </header>
+        <div id="page-explanation-waste" hidden></div>
         <p id="run-meta-waste" class="run-meta" data-section="waste"></p>
         <div class="kpi-grid">
           <div class="kpi-card">
@@ -508,6 +513,7 @@
           <h1 class="page-title">Search Term Universe</h1>
           <p class="page-subtitle">Raw Google Ads search terms pulled from Windsor. Read-only evidence view.</p>
         </header>
+        <div id="page-explanation-search-terms" hidden></div>
         <p id="run-meta-search_terms" class="run-meta" data-section="search_terms"></p>
 
         <div id="search-terms-kpis" class="kpi-grid"></div>
@@ -574,6 +580,7 @@
           <h1 class="page-title">Search Pattern Analysis</h1>
           <p class="page-subtitle">Recurring word and phrase patterns from search-term evidence. Read-only analysis — candidate terms for human review only.</p>
         </header>
+        <div id="page-explanation-ngrams" hidden></div>
         <p id="run-meta-ngrams" class="run-meta" data-section="ngrams"></p>
 
         <div class="read-only-notice" role="note">
@@ -643,6 +650,7 @@
           <h1 class="page-title">Country Performance</h1>
           <p class="page-subtitle">Country-level ad performance and HubSpot lead quality, shown side by side.</p>
         </header>
+        <div id="page-explanation-geo" hidden></div>
         <p id="run-meta-geo" class="run-meta" data-section="geo"></p>
         <div class="kpi-grid" id="geo-kpi-grid">
           <div class="kpi-card">
@@ -707,6 +715,7 @@
           <h1 class="page-title">Keyword Performance</h1>
           <p class="page-subtitle">Keyword performance from Google Ads/Windsor. This view shows ad-platform metrics only — not HubSpot lead quality.</p>
         </header>
+        <div id="page-explanation-keywords" hidden></div>
         <p id="run-meta-keywords" class="run-meta" data-section="keywords"></p>
         <div class="kpi-grid">
           <div class="kpi-card">
@@ -772,6 +781,7 @@
           <h1 class="page-title">Lead Quality</h1>
           <p class="page-subtitle">Contact qualification breakdown by campaign</p>
         </header>
+        <div id="page-explanation-leads" hidden></div>
         <p id="run-meta-lead_quality" class="run-meta" data-section="lead_quality"></p>
         <div class="kpi-grid">
           <div class="kpi-card">
@@ -809,6 +819,7 @@
           <h1 class="page-title">Deals</h1>
           <p class="page-subtitle">GCLID-matched deal pipeline</p>
         </header>
+        <div id="page-explanation-deals" hidden></div>
         <p id="run-meta-deals" class="run-meta" data-section="deals"></p>
         <div class="panel">
           <div class="panel__header">Pipeline Stages</div>
@@ -828,6 +839,7 @@
           <h1 class="page-title">GCLID Attribution</h1>
           <p class="page-subtitle">Read-only attribution forensics linking click evidence to contacts and deals.</p>
         </header>
+        <div id="page-explanation-gclid-attribution" hidden></div>
         <p id="run-meta-gclid_attribution" class="run-meta" data-section="gclid_attribution"></p>
 
         <div id="gclid-coverage-kpis" class="kpi-grid"></div>
@@ -899,6 +911,7 @@
           <h1 class="page-title">In Progress Leads</h1>
           <p class="page-subtitle">Contacts still moving through MDR review — meeting booked, pending meeting, or connecting.</p>
         </header>
+        <div id="page-explanation-opportunities" hidden></div>
         <p id="run-meta-in_progress_leads" class="run-meta" data-section="in_progress_leads"></p>
         <div id="opps-body"><p class="empty-state">Loading in-progress leads…</p></div>
       </section>
@@ -909,6 +922,7 @@
           <h1 class="page-title">Data Runs</h1>
           <p class="page-subtitle">Scheduler and latest runs — job status and manual triggers.</p>
         </header>
+        <div id="page-explanation-scheduler" hidden></div>
         <p id="run-meta-scheduler" class="run-meta" data-section="scheduler"></p>
         <div class="sched-grid" id="sched-jobs-grid"><p class="empty-state">Loading scheduler…</p></div>
         <div class="run-feedback" id="sched-feedback" hidden></div>
@@ -920,6 +934,7 @@
           <h1 class="page-title">System Status</h1>
           <p class="page-subtitle">War Room for pipelines, blockers, freshness, and scheduler health.</p>
         </header>
+        <div id="page-explanation-health" hidden></div>
         <p id="run-meta-health" class="run-meta" data-section="health"></p>
 
         <!-- System Status War Room (PR-ADS-068) -->
@@ -978,6 +993,7 @@
           <h1 class="page-title">Admin Backfill</h1>
           <p class="page-subtitle">Admin-only manual trigger for historical data ingestion.</p>
         </header>
+        <div id="page-explanation-backfill" hidden></div>
 
         <div class="read-only-notice" role="note">
           This pulls historical data into the local system only. It does not modify Google Ads, HubSpot, campaigns, bids, budgets, contacts, deals, or negative keywords.
@@ -1073,6 +1089,7 @@
           <h1 class="page-title">Historical Trends</h1>
           <p class="page-subtitle">Long-term historical intelligence. Read-only trend analysis — does not modify Google Ads or HubSpot.</p>
         </header>
+        <div id="page-explanation-historical-intelligence" hidden></div>
 
         <!-- Period controls -->
         <div class="action-queue-controls" id="hi-controls">
