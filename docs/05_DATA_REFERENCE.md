@@ -203,6 +203,25 @@ The Search Terms pipeline now includes explicit logging and verification:
   Fetched > 0 but written = 0 is marked as failed.
 - **Verification script**: `scripts/verify_search_terms_pipeline.py --days 60 --db-only --pretty`
 
+### MCP Import Path (PR-ADS-066)
+
+If Windsor REST returns 0 rows but MCP previously returned data:
+
+```bash
+# Dry-run (default):
+python scripts/import_windsor_mcp_search_terms.py --input data/windsor_mcp_search_terms_raw.json --dry-run
+
+# Apply:
+python scripts/import_windsor_mcp_search_terms.py --input data/windsor_mcp_search_terms_raw.json --apply
+```
+
+Rules:
+- Dry-run by default — validates without writing.
+- Requires `search_term` field in every row (rejects blanks).
+- Normalizes `ad_group_id` from Google Ads resource paths.
+- Creates sync_batch with `source="windsor_mcp"` `dataset="search_terms"`.
+- Never calls Google Ads, HubSpot, or any external API.
+
 ---
 
 ## UTM Parameters in First-Click URL

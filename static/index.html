@@ -927,6 +927,18 @@
           </div>
         </div>
 
+        <!-- Search Terms Pipeline Verdict (PR-ADS-066) -->
+        <div class="panel" id="search-terms-verdict-panel" style="margin-top:var(--space-6)">
+          <div class="panel__header" style="display:flex;align-items:center;justify-content:space-between">
+            <span>Search Terms Pipeline</span>
+            <button id="search-terms-verdict-refresh-btn" class="btn btn--ghost btn--sm" type="button" aria-label="Refresh Search Terms Verdict">Refresh</button>
+          </div>
+          <div class="panel__body">
+            <p class="freshness-help-note" style="margin-bottom:var(--space-3);font-size:12px;color:var(--text-muted)">Search Terms is the raw evidence layer. Waste Terms and N-Grams depend on this dataset.</p>
+            <div id="search-terms-verdict-body"><p class="empty-state"><span class="spinner"></span> Loading Search Terms verdict…</p></div>
+          </div>
+        </div>
+
         <!-- GCLID Coverage mini-panel (optional — hidden if endpoint unavailable) -->
         <div class="panel" id="gclid-coverage-panel" style="margin-top:var(--space-4)" hidden>
           <div class="panel__header">GCLID Coverage</div>

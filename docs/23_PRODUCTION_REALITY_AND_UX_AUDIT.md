@@ -707,3 +707,33 @@ NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT
 - If verdict is WINDSOR_PULL_EMPTY: investigate Windsor REST vs MCP parity (PR-ADS-066)
 - If verdict is DB_WRITE_FAILED: fix write_search_terms() before proceeding
 - If verdict is OK: proceed with Waste Terms and N-Grams confidence
+
+---
+
+## PR-ADS-066 — Search Terms Production Verdict Panel & Windsor Source-Parity Resolution
+
+**Goal:** Make Search Terms pipeline status visible and actionable from the System Health page.
+
+**Added:**
+1. **Verdict endpoint** (`GET /api/system/search-terms-verdict?days=60`):
+   - Admin-only. Returns verdict, DB row counts, sync status, next action.
+   - Verdicts: OK, WINDSOR_PULL_EMPTY, DB_WRITE_FAILED, DB_HAS_ROWS_API_EMPTY, FRESH_BUT_EMPTY, NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT, DB_UNAVAILABLE, UNKNOWN.
+
+2. **System Health panel** (Search Terms Pipeline):
+   - Verdict card with color coding (green/orange/red/gray).
+   - Row counts, latest source date, sync status, batch rows, next action.
+   - Copy: "Search Terms is the raw evidence layer. Waste Terms and N-Grams depend on this dataset."
+
+3. **MCP import script** (`scripts/import_windsor_mcp_search_terms.py`):
+   - Bridge for importing Windsor MCP payload when REST returns empty.
+   - Dry-run by default. `--apply` to write.
+   - Validates search_term field, normalizes ad_group_id from resource path.
+   - Creates sync_batch with source="windsor_mcp".
+
+**Production verifier output (CI — no DB):**
+```
+Verdict: DB_UNAVAILABLE
+Reason: Database connection unavailable
+```
+
+**REST vs MCP parity:** If production shows WINDSOR_PULL_EMPTY while MCP previously returned ~45,292 rows, use the MCP import path as a bridge until REST parity is confirmed.

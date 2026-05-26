@@ -1861,6 +1861,94 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
 
 ---
 
+## Search Terms Production Verdict (PR-ADS-066)
+
+### `GET /api/system/search-terms-verdict`
+
+**Auth:** Admin only (session with admin role, or `ADMIN_API_TOKEN` Bearer header)  
+**Purpose:** Focused Search Terms pipeline health verdict. Reports whether Search Terms data is present, syncing, broken, or missing.  
+**Added:** PR-ADS-066
+
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `days` | int | 60 | Time window in days (1–90) |
+
+#### Response Shape (OK)
+
+```json
+{
+  "generated_at": "2026-05-25T12:00:00+00:00",
+  "days": 60,
+  "verdict": "OK",
+  "reason": "Pipeline OK: DB has 45292 rows in 60-day window",
+  "db": {
+    "available": true,
+    "rows_7d": 12000,
+    "rows_14d": 24000,
+    "rows_30d": 39000,
+    "rows_60d": 45292,
+    "latest_source_date": "2026-05-25",
+    "blank_search_term_rows": 0,
+    "spend_rows": 19000,
+    "click_rows": 16000
+  },
+  "sync": {
+    "latest_batch_status": "success",
+    "latest_batch_row_count": 45292,
+    "latest_batch_started_at": "2026-05-25T07:00:00",
+    "sync_state_status": "success",
+    "last_successful_sync_at": "2026-05-25T07:04:00"
+  },
+  "api": {
+    "checked": false,
+    "rows_returned": null,
+    "total_rows_in_window": 45292,
+    "is_empty": false
+  },
+  "next_action": "Search Terms pipeline is healthy. Proceed to Waste Terms/N-Grams confidence."
+}
+```
+
+#### Response Shape (WINDSOR_PULL_EMPTY)
+
+```json
+{
+  "generated_at": "2026-05-25T12:00:00+00:00",
+  "days": 60,
+  "verdict": "WINDSOR_PULL_EMPTY",
+  "reason": "Windsor pull returned 0 rows and DB has 0 rows; source is empty or REST endpoint not returning data",
+  "db": { "available": true, "rows_7d": 0, "rows_14d": 0, "rows_30d": 0, "rows_60d": 0, "latest_source_date": null, "blank_search_term_rows": 0, "spend_rows": 0, "click_rows": 0 },
+  "sync": { "latest_batch_status": null, "latest_batch_row_count": null, "latest_batch_started_at": null, "sync_state_status": null, "last_successful_sync_at": null },
+  "api": { "checked": false, "rows_returned": null, "total_rows_in_window": 0, "is_empty": true },
+  "next_action": "Verify Windsor plan/API access or use MCP payload import path."
+}
+```
+
+#### Verdicts
+
+| Verdict | Meaning |
+|---------|---------|
+| `OK` | Search terms exist in DB and pipeline is healthy |
+| `NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT` | No weekly run found; pipeline may not have run since deployment |
+| `WINDSOR_PULL_EMPTY` | Windsor REST returned 0 rows and DB is empty |
+| `WINDSOR_PULL_MISSING_SEARCH_TERM_FIELD` | Windsor returned rows but search_term field is missing |
+| `FILE_EMPTY` | ads_search_terms.json is empty and DB has 0 rows |
+| `DB_WRITE_FAILED` | Windsor returned rows but DB has none |
+| `DB_HAS_ROWS_API_EMPTY` | DB has rows but /api/search-terms returns empty |
+| `FRESH_BUT_EMPTY` | Sync says success but zero rows in window |
+| `DB_UNAVAILABLE` | Database connection failed |
+| `UNKNOWN` | Could not determine pipeline state |
+
+#### Notes
+
+- **Read-only.** No external API calls. No data mutation.
+- Short-TTL cached (60s) to reduce DB load.
+- Search Terms is the raw evidence layer. Waste Terms and N-Grams depend on this dataset.
+
+---
+
 ## System Reality Audit (PR-ADS-064)
 
 ### `GET /api/system/reality-audit`
