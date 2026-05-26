@@ -737,3 +737,20 @@ Reason: Database connection unavailable
 ```
 
 **REST vs MCP parity:** If production shows WINDSOR_PULL_EMPTY while MCP previously returned ~45,292 rows, use the MCP import path as a bridge until REST parity is confirmed.
+---
+
+---
+
+## PR-ADS-069 — Sidebar UX Grouping & Page Rename
+
+**Goal:** Restructure the sidebar into clear operator-intent groups and rename confusing page labels.
+
+**Changes:**
+1. **Sidebar grouped** into four sections: Command Center, Evidence, Review & Quality, Admin.
+2. **Labels renamed** to operator-friendly language (see `docs/24_UI_NAVIGATION_MODEL.md` for full rename map).
+3. **Route keys unchanged** — all `data-page` attributes remain stable.
+4. **CSS** — section label styles, admin quieting, no accordion.
+5. **Page headers** updated to match new visible labels.
+6. **Documentation** — `docs/24_UI_NAVIGATION_MODEL.md` added with navigation model and route stability rule.
+
+**Route stability rule:** Visible page names may change, but `data-page` route keys must remain stable unless a dedicated migration PR updates every reference.

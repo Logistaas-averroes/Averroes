@@ -72,6 +72,8 @@
       </div>
 
       <ul class="sidebar__nav" role="list">
+        <!-- Command Center -->
+        <li class="sidebar__section-label" aria-hidden="true">Command Center</li>
         <li>
           <a class="nav-item" data-page="dashboard" href="#" role="button" tabindex="0" aria-label="Dashboard">
             <span class="nav-item__icon" aria-hidden="true">
@@ -96,6 +98,9 @@
             <span class="nav-item__label">Reports</span>
           </a>
         </li>
+
+        <!-- Evidence -->
+        <li class="sidebar__section-label" aria-hidden="true">Evidence</li>
         <li>
           <a class="nav-item" data-page="campaigns" href="#" role="button" tabindex="0" aria-label="Campaigns">
             <span class="nav-item__icon" aria-hidden="true">
@@ -105,43 +110,35 @@
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="waste" href="#" role="button" tabindex="0" aria-label="Waste Terms">
-            <span class="nav-item__icon" aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-            </span>
-            <span class="nav-item__label">Waste Terms</span>
-          </a>
-        </li>
-        <li>
-          <a class="nav-item" data-page="search-terms" href="#" role="button" tabindex="0" aria-label="Search Terms">
+          <a class="nav-item" data-page="search-terms" href="#" role="button" tabindex="0" aria-label="Search Term Universe — raw Google Ads search terms" title="Raw Google Ads search terms">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             </span>
-            <span class="nav-item__label">Search Terms</span>
+            <span class="nav-item__label">Search Term Universe</span>
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="ngrams" href="#" role="button" tabindex="0" aria-label="N-Grams">
+          <a class="nav-item" data-page="ngrams" href="#" role="button" tabindex="0" aria-label="Search Pattern Analysis — N-Gram patterns from search terms" title="N-Gram patterns from search terms">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h4v4H3zM10 3h4v4h-4zM17 3h4v4h-4zM3 10h4v4H3zM10 10h4v4h-4zM17 10h4v4h-4z"/><path d="M5 17h14"/></svg>
             </span>
-            <span class="nav-item__label">N-Grams</span>
+            <span class="nav-item__label">Search Pattern Analysis</span>
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="geo" href="#" role="button" tabindex="0" aria-label="Geo">
-            <span class="nav-item__icon" aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-            </span>
-            <span class="nav-item__label">Geo</span>
-          </a>
-        </li>
-        <li>
-          <a class="nav-item" data-page="keywords" href="#" role="button" tabindex="0" aria-label="Keywords">
+          <a class="nav-item" data-page="keywords" href="#" role="button" tabindex="0" aria-label="Keyword Performance">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/></svg>
             </span>
-            <span class="nav-item__label">Keywords</span>
+            <span class="nav-item__label">Keyword Performance</span>
+          </a>
+        </li>
+        <li>
+          <a class="nav-item" data-page="geo" href="#" role="button" tabindex="0" aria-label="Country Performance">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            </span>
+            <span class="nav-item__label">Country Performance</span>
           </a>
         </li>
         <li>
@@ -168,6 +165,17 @@
             <span class="nav-item__label">GCLID Attribution</span>
           </a>
         </li>
+
+        <!-- Review & Quality -->
+        <li class="sidebar__section-label" aria-hidden="true">Review &amp; Quality</li>
+        <li>
+          <a class="nav-item" data-page="waste" href="#" role="button" tabindex="0" aria-label="Flagged Waste Terms — search terms flagged for human review" title="Search terms flagged for human review">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+            </span>
+            <span class="nav-item__label">Flagged Waste Terms</span>
+          </a>
+        </li>
         <li>
           <a class="nav-item" data-page="opportunities" href="#" role="button" tabindex="0" aria-label="In Progress Leads">
             <span class="nav-item__icon" aria-hidden="true">
@@ -176,36 +184,39 @@
             <span class="nav-item__label">In Progress Leads</span>
           </a>
         </li>
+
+        <!-- Admin -->
+        <li class="sidebar__section-label" aria-hidden="true">Admin</li>
         <li>
-          <a class="nav-item" data-page="scheduler" href="#" role="button" tabindex="0" aria-label="Scheduler">
+          <a class="nav-item nav-item--admin" data-page="scheduler" href="#" role="button" tabindex="0" aria-label="Data Runs — scheduler and latest runs" title="Scheduler and latest runs">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
             </span>
-            <span class="nav-item__label">Scheduler</span>
+            <span class="nav-item__label">Data Runs</span>
           </a>
         </li>
         <li id="nav-health-item">
-          <a class="nav-item" data-page="health" href="#" role="button" tabindex="0" aria-label="System Health">
+          <a class="nav-item nav-item--admin" data-page="health" href="#" role="button" tabindex="0" aria-label="System Status — War Room, blockers, and source health" title="War Room, blockers, and source health">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
             </span>
-            <span class="nav-item__label">System Health</span>
+            <span class="nav-item__label">System Status</span>
           </a>
         </li>
         <li id="nav-backfill-item">
-          <a class="nav-item" data-page="backfill" href="#" role="button" tabindex="0" aria-label="Historical Backfill">
+          <a class="nav-item nav-item--admin" data-page="backfill" href="#" role="button" tabindex="0" aria-label="Admin Backfill — manual historical ingestion" title="Manual historical ingestion">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
             </span>
-            <span class="nav-item__label">Historical Backfill</span>
+            <span class="nav-item__label">Admin Backfill</span>
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="historical-intelligence" href="#" role="button" tabindex="0" aria-label="Historical Intelligence">
+          <a class="nav-item nav-item--admin" data-page="historical-intelligence" href="#" role="button" tabindex="0" aria-label="Historical Trends — long-term historical intelligence" title="Long-term historical intelligence">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="19" r="2"/></svg>
             </span>
-            <span class="nav-item__label">Historical Intelligence</span>
+            <span class="nav-item__label">Historical Trends</span>
           </a>
         </li>
       </ul>
@@ -430,7 +441,7 @@
       <!-- Waste Terms -->
       <section id="page-waste" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">Waste Terms</h1>
+          <h1 class="page-title">Flagged Waste Terms</h1>
           <p class="page-subtitle">Search terms flagged as wasted spend, grouped by junk signal and campaign evidence.</p>
         </header>
         <p id="run-meta-waste" class="run-meta" data-section="waste"></p>
@@ -494,8 +505,8 @@
       <!-- Search Terms Forensics -->
       <section id="page-search-terms" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">Search Terms</h1>
-          <p class="page-subtitle">Full Google Ads/Windsor search-term forensics. Read-only evidence view.</p>
+          <h1 class="page-title">Search Term Universe</h1>
+          <p class="page-subtitle">Raw Google Ads search terms pulled from Windsor. Read-only evidence view.</p>
         </header>
         <p id="run-meta-search_terms" class="run-meta" data-section="search_terms"></p>
 
@@ -560,8 +571,8 @@
       <!-- N-Gram Intelligence -->
       <section id="page-ngrams" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">N-Gram Intelligence</h1>
-          <p class="page-subtitle">Recurring word and phrase patterns from stored search terms. Read-only analysis — candidate terms for human review only.</p>
+          <h1 class="page-title">Search Pattern Analysis</h1>
+          <p class="page-subtitle">Recurring word and phrase patterns from search-term evidence. Read-only analysis — candidate terms for human review only.</p>
         </header>
         <p id="run-meta-ngrams" class="run-meta" data-section="ngrams"></p>
 
@@ -629,7 +640,7 @@
       <!-- Geo Intelligence -->
       <section id="page-geo" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">Geo Intelligence</h1>
+          <h1 class="page-title">Country Performance</h1>
           <p class="page-subtitle">Country-level ad performance and HubSpot lead quality, shown side by side.</p>
         </header>
         <p id="run-meta-geo" class="run-meta" data-section="geo"></p>
@@ -693,7 +704,7 @@
       <!-- Keywords -->
       <section id="page-keywords" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">Keywords</h1>
+          <h1 class="page-title">Keyword Performance</h1>
           <p class="page-subtitle">Keyword performance from Google Ads/Windsor. This view shows ad-platform metrics only — not HubSpot lead quality.</p>
         </header>
         <p id="run-meta-keywords" class="run-meta" data-section="keywords"></p>
@@ -895,8 +906,8 @@
       <!-- Scheduler -->
       <section id="page-scheduler" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">Scheduler</h1>
-          <p class="page-subtitle">In-app APScheduler — job status and manual triggers</p>
+          <h1 class="page-title">Data Runs</h1>
+          <p class="page-subtitle">Scheduler and latest runs — job status and manual triggers.</p>
         </header>
         <p id="run-meta-scheduler" class="run-meta" data-section="scheduler"></p>
         <div class="sched-grid" id="sched-jobs-grid"><p class="empty-state">Loading scheduler…</p></div>
@@ -906,8 +917,8 @@
       <!-- System Health -->
       <section id="page-health" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">System Health</h1>
-          <p class="page-subtitle">Readiness checks — environment, config, modules</p>
+          <h1 class="page-title">System Status</h1>
+          <p class="page-subtitle">War Room for pipelines, blockers, freshness, and scheduler health.</p>
         </header>
         <p id="run-meta-health" class="run-meta" data-section="health"></p>
 
@@ -964,8 +975,8 @@
       <!-- Historical Backfill (admin-only) -->
       <section id="page-backfill" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">Historical Backfill</h1>
-          <p class="page-subtitle">Admin-only manual trigger for the historical data ingestion framework.</p>
+          <h1 class="page-title">Admin Backfill</h1>
+          <p class="page-subtitle">Admin-only manual trigger for historical data ingestion.</p>
         </header>
 
         <div class="read-only-notice" role="note">
@@ -1059,8 +1070,8 @@
       <!-- Historical Intelligence -->
       <section id="page-historical-intelligence" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">Historical Intelligence</h1>
-          <p class="page-subtitle">Read-only historical trend analysis. These signals are for human review and do not modify Google Ads or HubSpot.</p>
+          <h1 class="page-title">Historical Trends</h1>
+          <p class="page-subtitle">Long-term historical intelligence. Read-only trend analysis — does not modify Google Ads or HubSpot.</p>
         </header>
 
         <!-- Period controls -->

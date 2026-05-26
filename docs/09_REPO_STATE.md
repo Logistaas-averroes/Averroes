@@ -149,3 +149,5 @@ No files are currently in a broken state.
 - Frontend dashboard — built in PR-ADS-018
 - In-app scheduler — built in PR-ADS-019 (APScheduler, runs inside web service process)
 - Meta Ads connector — Phase 4
+
+| PR-ADS-069 | Sidebar UX Grouping & Page Rename — four sidebar groups, 9 label renames, route stability rule, navigation doc | ✅ Complete |

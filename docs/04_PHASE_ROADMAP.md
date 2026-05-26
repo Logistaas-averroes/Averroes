@@ -268,3 +268,12 @@ When fully built, this system is Logistaas's permanent paid media intelligence l
 - Strategic decisions are made on verified data, not platform metrics
 
 **The goal is not a better dashboard. The goal is a better signal.**
+
+---
+
+### PR-ADS-069 — Sidebar UX Grouping & Page Rename
+
+| PR | Module | Description | Status |
+|----|--------|-------------|--------|
+| PR-ADS-069 | `static/` + `docs/` + `tests/` | Sidebar grouped into Command Center / Evidence / Review & Quality / Admin; page labels renamed to operator language; route keys unchanged | ✅ Complete |
+| PR-ADS-070 | `static/` | Empty-state + page explanation upgrade | ⬜ Next |
