@@ -4498,7 +4498,164 @@ async function loadHealth() {
   loadDatasetFreshness();
   loadGclidCoverage();
   loadSearchTermsVerdict();
+  loadWarRoom();
 }
+
+// ── System Status War Room (PR-ADS-068) ────────────────────────────────────
+
+const PAGE_PIPELINE_IMPACT = {
+  dashboard: ["campaigns", "leads", "waste_terms"],
+  campaigns: ["campaigns"],
+  waste: ["waste_terms", "search_terms"],
+  "search-terms": ["search_terms"],
+  ngrams: ["ngrams", "search_terms"],
+  geo: ["geo"],
+  keywords: ["keywords"],
+  leads: ["leads"],
+  deals: ["deals"],
+  "gclid-attribution": ["gclid_attribution", "gclid_coverage_snapshots"],
+  opportunities: ["leads"],
+  health: ["all"],
+  backfill: ["admin"],
+  "historical-intelligence": ["historical_intelligence"]
+};
+
+async function loadWarRoom() {
+  const el = document.getElementById("war-room-body");
+  if (!el) return;
+
+  el.innerHTML = `<p class="empty-state"><span class="spinner"></span> Loading system status…</p>`;
+
+  try {
+    const data = await fetchJSON("/api/system/status-war-room?days=60");
+    renderWarRoom(el, data);
+  } catch (e) {
+    if (e.message === "HTTP 401" || e.message === "HTTP 403") {
+      el.innerHTML = `<p class="empty-state">Admin access required for War Room.</p>`;
+      return;
+    }
+    el.innerHTML = `<p class="empty-state">Could not load system status.</p>`;
+  }
+}
+
+function renderWarRoom(el, data) {
+  const statusCls = data.overall_status === "ok" ? "war-room-status--ok"
+    : data.overall_status === "error" ? "war-room-status--error"
+    : data.overall_status === "warning" ? "war-room-status--warning"
+    : "war-room-status--neutral";
+
+  const blockedCount = (data.page_impact || []).length;
+  const warningCount = (data.summary || {}).warning || 0;
+  const errorCount = (data.summary || {}).error || 0;
+
+  // Hero
+  let html = `
+    <div class="war-room-hero ${statusCls}">
+      <div class="war-room-hero__status">
+        <span class="war-room-hero__label">System Status:</span>
+        <span class="war-room-hero__value">${escapeHtml((data.overall_status || "unknown").toUpperCase())}</span>
+      </div>
+      <p class="war-room-hero__desc">${escapeHtml(data.overall_label || "")}</p>
+      <p class="war-room-hero__meta">${blockedCount} blocked page${blockedCount !== 1 ? "s" : ""} · ${warningCount} warning${warningCount !== 1 ? "s" : ""} · ${errorCount} critical failure${errorCount !== 1 ? "s" : ""}</p>
+      <p class="war-room-hero__ts">Generated: ${data.generated_at ? new Date(data.generated_at).toLocaleString() : "—"} · Window: ${data.days || 60} days</p>
+    </div>`;
+
+  // Critical Blockers
+  const blockers = data.critical_blockers || [];
+  if (blockers.length > 0) {
+    html += `<div class="war-room-section"><h3 class="war-room-section__title">Critical Blockers</h3><div class="war-room-blockers">`;
+    for (const b of blockers) {
+      const bCls = b.severity === "error" ? "war-room-blocker--error" : "war-room-blocker--warning";
+      html += `
+        <div class="war-room-blocker ${bCls}">
+          <div class="war-room-blocker__title">${escapeHtml(b.title)}</div>
+          <div class="war-room-blocker__affects">Affects: ${escapeHtml((b.affected_pages || []).join(", "))}</div>
+          <div class="war-room-blocker__action">Next: ${escapeHtml(b.next_action || "")}</div>
+        </div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  // Pipeline Dependency Map
+  const pipelines = data.pipelines || [];
+  if (pipelines.length > 0) {
+    html += `<div class="war-room-section"><h3 class="war-room-section__title">Pipeline Dependency Map</h3>`;
+    html += `<p class="war-room-section__note">Search Terms is the raw evidence layer. Waste Terms and N-Grams depend on it.</p>`;
+    html += `<div class="war-room-table-wrap"><table class="war-room-table"><thead><tr>
+      <th>Pipeline</th><th>Status</th><th>Rows</th><th>Blocks</th><th>Next Action</th>
+    </tr></thead><tbody>`;
+    for (const p of pipelines) {
+      const sevCls = p.severity === "ok" ? "sev--ok" : p.severity === "error" ? "sev--error" : p.severity === "warning" ? "sev--warning" : "sev--neutral";
+      const blocksStr = (p.blocks || []).map(b => b.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())).join(", ") || "—";
+      const statusLabel = (p.canonical_status || "unknown").replace(/_/g, " ");
+      html += `<tr>
+        <td>${escapeHtml(p.source || "")} → ${escapeHtml(p.label || "")}</td>
+        <td><span class="war-room-pill ${sevCls}">${escapeHtml(statusLabel)}</span></td>
+        <td>${p.rows_in_window != null ? Number(p.rows_in_window).toLocaleString() : "—"}</td>
+        <td>${escapeHtml(blocksStr)}</td>
+        <td>${escapeHtml(p.next_action || "—")}</td>
+      </tr>`;
+    }
+    html += `</tbody></table></div></div>`;
+  }
+
+  // Source Health Cards
+  const sources = data.sources || [];
+  if (sources.length > 0) {
+    html += `<div class="war-room-section"><h3 class="war-room-section__title">Source Health</h3><div class="war-room-sources">`;
+    for (const s of sources) {
+      const sCls = s.status === "ok" ? "war-room-source--ok" : s.status === "error" ? "war-room-source--error" : s.status === "warning" ? "war-room-source--warning" : "war-room-source--neutral";
+      html += `
+        <div class="war-room-source ${sCls}">
+          <div class="war-room-source__label">${escapeHtml(s.label || s.source)}</div>
+          <div class="war-room-source__status">${escapeHtml((s.status || "unknown").toUpperCase())}</div>
+          <div class="war-room-source__datasets">${(s.datasets || []).map(d => escapeHtml(d.replace(/_/g, " "))).join(", ")}</div>
+          <div class="war-room-source__sync">Last sync: ${s.last_successful_sync_at ? new Date(s.last_successful_sync_at).toLocaleString() : "—"}</div>
+          <div class="war-room-source__action">${escapeHtml(s.next_action || "")}</div>
+        </div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  // Scheduler Timeline
+  const sched = data.scheduler || {};
+  html += `<div class="war-room-section"><h3 class="war-room-section__title">Scheduler Latest Runs</h3><div class="war-room-scheduler">`;
+  for (const [key, label] of [["latest_daily", "Daily"], ["latest_weekly", "Weekly"], ["latest_monthly", "Monthly"], ["latest_incremental", "Incremental"]]) {
+    const run = sched[key];
+    const runStatus = run ? run.status : "not_run";
+    const rCls = runStatus === "success" ? "war-room-run--ok" : runStatus === "failed" ? "war-room-run--error" : "war-room-run--neutral";
+    html += `
+      <div class="war-room-run ${rCls}">
+        <div class="war-room-run__label">${escapeHtml(label)}</div>
+        <div class="war-room-run__status">${escapeHtml(runStatus)}</div>
+        <div class="war-room-run__time">${run && run.started_at ? new Date(run.started_at).toLocaleString() : "—"}</div>
+      </div>`;
+  }
+  html += `</div></div>`;
+
+  // Page Impact
+  const impacts = data.page_impact || [];
+  if (impacts.length > 0) {
+    html += `<div class="war-room-section"><h3 class="war-room-section__title">Page Impact</h3><div class="war-room-impacts">`;
+    for (const imp of impacts) {
+      html += `
+        <div class="war-room-impact">
+          <span class="war-room-impact__page">${escapeHtml(imp.page)}</span>
+          <span class="war-room-impact__status">Blocked</span>
+          <span class="war-room-impact__reason">${escapeHtml(imp.reason || "")}</span>
+        </div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  el.innerHTML = html;
+}
+
+// War Room refresh button
+document.addEventListener("DOMContentLoaded", () => {
+  const btn = document.getElementById("war-room-refresh-btn");
+  if (btn) btn.addEventListener("click", () => loadWarRoom());
+});
 
 // ── Dataset Freshness ──────────────────────────────────────────────────────
 

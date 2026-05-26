@@ -238,3 +238,38 @@ hsa_kw=cargowise            ← keyword text
 hsa_mt=b                    ← match type (b=broad, e=exact, p=phrase)
 gclid=Cj0KCQjwyr3O...       ← GCLID (also in hs_google_click_id)
 ```
+
+---
+
+## System Status War Room (PR-ADS-068)
+
+The System Status War Room (`GET /api/system/status-war-room`) provides a consolidated
+view of all data pipelines, combining canonical freshness semantics with dependency mapping.
+
+### Pipeline Dependencies
+
+| Dataset | Source | Depends On | Blocks |
+|---------|--------|-----------|--------|
+| campaigns | windsor | — | — |
+| search_terms | windsor | — | waste_terms, ngrams |
+| waste_terms | analysis | search_terms | — |
+| ngrams | computed | search_terms | — |
+| keywords | windsor | — | — |
+| geo | windsor | — | — |
+| leads | hubspot | — | — |
+| deals | hubspot | — | — |
+| gclid_attribution | gclid | — | — |
+| gclid_coverage_snapshots | gclid | — | — |
+| historical_intelligence | analysis | — | — |
+
+### Source Groupings
+
+| Source | Label | Datasets |
+|--------|-------|----------|
+| windsor | Windsor / Google Ads | campaigns, search_terms, keywords, geo |
+| hubspot | HubSpot CRM | leads, deals |
+| gclid | GCLID Match | gclid_attribution, gclid_coverage_snapshots |
+| analysis | Analysis Layer | waste_terms, historical_intelligence |
+| computed | Computed Layer | ngrams |
+
+Service logic: `services/system_status_service.py`

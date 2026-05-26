@@ -290,3 +290,16 @@ Backend canonical freshness logic lives in `services/freshness_service.py`:
 - `dependency_status` — canonical status of blocking dependency (if any)
 - `reason` — human-readable explanation
 - `next_action` — recommended remediation step
+
+### System Status War Room (PR-ADS-068)
+
+PR-ADS-068 builds on canonical freshness semantics to create a consolidated
+System Status War Room view. The war room endpoint (`GET /api/system/status-war-room`)
+combines canonical freshness for all datasets with pipeline dependency mapping,
+source health, scheduler run state, and critical blocker detection.
+
+Service logic: `services/system_status_service.py`
+
+The war room uses the same canonical states and severity model defined above,
+plus adds overall system status (ok/warning/error/neutral), source health
+aggregation, and page impact analysis.

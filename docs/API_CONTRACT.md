@@ -2063,6 +2063,93 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
 
 ---
 
+## System Status War Room (PR-ADS-068)
+
+### `GET /api/system/status-war-room`
+
+**Auth:** Admin only (session with admin role, or `ADMIN_API_TOKEN` Bearer header)  
+**Purpose:** Consolidated system status, blockers, pipelines, source health, scheduler state. One-page operational view.  
+**Added:** PR-ADS-068
+
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `days` | int | 60 | Time window in days (1–90) |
+
+#### Response Shape
+
+```json
+{
+  "generated_at": "2026-05-26T08:00:00+00:00",
+  "days": 60,
+  "overall_status": "warning",
+  "overall_label": "System usable — Search Terms empty; 2 blocked",
+  "summary": { "ok": 6, "warning": 1, "error": 0, "neutral": 1, "blocked": 2 },
+  "critical_blockers": [
+    {
+      "id": "search_terms_empty",
+      "severity": "warning",
+      "title": "Search Terms has no usable rows",
+      "affected_pages": ["Search Terms", "Waste Terms", "N-Grams"],
+      "reason": "Search Terms is fresh_but_empty.",
+      "next_action": "Check Search Terms verdict and Windsor REST/MCP parity."
+    }
+  ],
+  "sources": [
+    {
+      "source": "windsor",
+      "label": "Windsor / Google Ads",
+      "status": "warning",
+      "datasets": ["campaigns", "search_terms", "keywords", "geo"],
+      "last_successful_sync_at": "2026-05-25T07:04:00+00:00",
+      "latest_batch_status": "success",
+      "next_action": "Check Search Terms if empty."
+    }
+  ],
+  "pipelines": [
+    {
+      "key": "search_terms",
+      "label": "Search Terms Pipeline",
+      "source": "windsor",
+      "page": "Search Terms",
+      "canonical_status": "fresh_but_empty",
+      "severity": "warning",
+      "rows_in_window": 0,
+      "latest_source_date": null,
+      "last_batch_row_count": 0,
+      "depends_on": [],
+      "blocks": ["waste_terms", "ngrams"],
+      "reason": "Latest sync succeeded but no rows exist in the selected window.",
+      "next_action": "Check source pull, sync batch row count, and pipeline verifier."
+    }
+  ],
+  "scheduler": {
+    "latest_daily": { "status": "success", "started_at": "2026-05-26T06:00:00+00:00", "finished_at": "2026-05-26T06:03:00+00:00" },
+    "latest_weekly": { "status": "success", "started_at": "2026-05-25T07:00:00+00:00", "finished_at": "2026-05-25T07:08:00+00:00" },
+    "latest_monthly": null,
+    "latest_incremental": null
+  },
+  "page_impact": [
+    {
+      "page": "Waste",
+      "status": "blocked",
+      "blocked_by": "waste_terms",
+      "reason": "Waste depends on Waste Terms."
+    }
+  ]
+}
+```
+
+#### Notes
+
+- **Read-only.** No external API calls. No data mutation. No scheduler triggers.
+- Short-TTL cached (60s) to reduce DB load.
+- Combines canonical freshness, pipeline dependencies, source health, and scheduler run state.
+- Uses `services/system_status_service.py` for pure helper logic.
+
+---
+
 ## Forbidden Endpoints (Phase 1)
 
 These endpoints **must not exist** in Phase 1. Adding them is a doctrine violation.

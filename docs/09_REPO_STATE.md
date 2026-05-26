@@ -130,6 +130,7 @@ No files are currently in a broken state.
 | PR-ADS-065 | Search Terms Pipeline Verification & Repair — verifier script, connector/writer/scheduler hardening | 🔨 In Progress |
 | PR-ADS-066 | Search Terms Production Verdict Panel & Windsor Source-Parity Resolution — verdict endpoint, UI panel, MCP import | ✅ Complete |
 | PR-ADS-067 | Canonical Freshness Semantics & Zero-Row Truth States — `services/freshness_service.py`, canonical endpoint enrichment, UI truth labels | 🔨 In Progress |
+| PR-ADS-068 | System Status War Room & Pipeline Dependency Map — `services/system_status_service.py`, war room endpoint, UI war room section | 🔨 In Progress |
 | **Next state** | **4-week Phase 1 live validation period** | 🟢 Next |
 | PR-ADS-005 | Config hardening — create `config/logistaas_config.yaml`, validate all YAML keys | ⬜ Post-validation |
 

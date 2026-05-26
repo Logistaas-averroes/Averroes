@@ -577,10 +577,10 @@ Based on this audit, the recommended sequence is:
 |----|-------|----------|-----------|
 | **PR-ADS-065** | Search Terms Pipeline Verification & Repair | P0 | Verify next weekly run produces rows; if not, debug Windsor pull → DB write path |
 | **PR-ADS-066** | Freshness Semantics & Zero-Row Truth States | P1 | Implement `fresh_with_data` / `fresh_but_empty` distinction in sync_state and UI |
-| **PR-ADS-067** | System Status / Pipeline Health War Room | P1 | Add pipeline status view showing each step: source → pull → write → rows → API |
-| **PR-ADS-068** | Sidebar UX Grouping & Page Rename | P2 | Implement grouping + renames from Section 13 |
-| **PR-ADS-069** | Empty State + Page Explanation Upgrade | P2 | Each page explains what it shows, data source, and what empty means |
-| **PR-ADS-070** | Report / Dashboard Data Confidence Layer | P3 | Dashboard cards show data source age, freshness, and confidence level |
+| **PR-ADS-067** | Canonical Freshness Semantics & Zero-Row Truth States | P1 | Backend canonical freshness service with 10 truth states |
+| **PR-ADS-068** | System Status War Room & Pipeline Dependency Map | P1 | Consolidated system status page with blockers, pipelines, source health, scheduler |
+| **PR-ADS-069** | Sidebar UX Grouping & Page Rename | P2 | Implement grouping + renames from Section 13 |
+| **PR-ADS-070** | Empty State + Page Explanation Upgrade | P2 | Each page explains what it shows, data source, and what empty means |
 
 ### Decision Logic
 

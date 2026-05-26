@@ -3724,3 +3724,94 @@ a {
 }
 
 .verdict-card--gray .verdict-card__value { color: var(--text-muted); }
+
+/* ── System Status War Room (PR-ADS-068) ─────────────────────────────────── */
+
+.war-room-panel { margin-bottom: var(--space-6, 1.5rem); }
+
+.war-room-hero {
+  padding: var(--space-4, 1rem) var(--space-5, 1.25rem);
+  border-radius: var(--radius, 8px);
+  margin-bottom: var(--space-4, 1rem);
+  border: 1px solid var(--border-light, #e5e7eb);
+}
+
+.war-room-hero--ok, .war-room-status--ok .war-room-hero {
+  background: color-mix(in srgb, var(--green-500, #22c55e) 8%, var(--surface-alt, #f9fafb));
+  border-color: var(--green-500, #22c55e);
+}
+.war-room-status--ok .war-room-hero { background: color-mix(in srgb, var(--green-500, #22c55e) 8%, var(--surface-alt, #f9fafb)); border-color: var(--green-500, #22c55e); }
+.war-room-status--warning .war-room-hero { background: color-mix(in srgb, var(--amber-500, #f59e0b) 8%, var(--surface-alt, #f9fafb)); border-color: var(--amber-500, #f59e0b); }
+.war-room-status--error .war-room-hero { background: color-mix(in srgb, var(--red-500, #ef4444) 8%, var(--surface-alt, #f9fafb)); border-color: var(--red-500, #ef4444); }
+.war-room-status--neutral .war-room-hero { background: var(--surface-alt, #f9fafb); border-color: var(--border-light, #e5e7eb); }
+
+.war-room-hero__status { display: flex; align-items: center; gap: var(--space-2, 0.5rem); margin-bottom: var(--space-2, 0.5rem); }
+.war-room-hero__label { font-size: 13px; font-weight: 500; color: var(--text-secondary, #6b7280); }
+.war-room-hero__value { font-size: 18px; font-weight: 700; }
+.war-room-status--ok .war-room-hero__value { color: var(--green-600, #16a34a); }
+.war-room-status--warning .war-room-hero__value { color: var(--amber-600, #d97706); }
+.war-room-status--error .war-room-hero__value { color: var(--red-600, #dc2626); }
+.war-room-status--neutral .war-room-hero__value { color: var(--text-muted, #9ca3af); }
+.war-room-hero__desc { font-size: 14px; color: var(--text-primary, #374151); margin: 0 0 var(--space-1, 0.25rem); }
+.war-room-hero__meta { font-size: 12px; color: var(--text-muted, #9ca3af); margin: 0; }
+.war-room-hero__ts { font-size: 11px; color: var(--text-muted, #9ca3af); margin-top: var(--space-1, 0.25rem); }
+
+.war-room-section { margin-top: var(--space-5, 1.25rem); }
+.war-room-section__title { font-size: 14px; font-weight: 600; margin-bottom: var(--space-3, 0.75rem); color: var(--text-primary, #374151); }
+.war-room-section__note { font-size: 12px; color: var(--text-muted, #9ca3af); margin-bottom: var(--space-3, 0.75rem); }
+
+/* Blockers */
+.war-room-blockers { display: flex; flex-direction: column; gap: var(--space-2, 0.5rem); }
+.war-room-blocker { padding: var(--space-3, 0.75rem); border-radius: var(--radius, 8px); border: 1px solid; }
+.war-room-blocker--error { border-color: var(--red-500, #ef4444); background: color-mix(in srgb, var(--red-500, #ef4444) 6%, var(--surface-alt, #f9fafb)); }
+.war-room-blocker--warning { border-color: var(--amber-500, #f59e0b); background: color-mix(in srgb, var(--amber-500, #f59e0b) 6%, var(--surface-alt, #f9fafb)); }
+.war-room-blocker__title { font-size: 13px; font-weight: 600; color: var(--text-primary, #374151); }
+.war-room-blocker__affects { font-size: 12px; color: var(--text-secondary, #6b7280); margin-top: 2px; }
+.war-room-blocker__action { font-size: 12px; color: var(--text-muted, #9ca3af); margin-top: 2px; }
+
+/* Pipeline table */
+.war-room-table-wrap { overflow-x: auto; }
+.war-room-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.war-room-table th { text-align: left; padding: var(--space-2, 0.5rem); font-weight: 600; color: var(--text-secondary, #6b7280); border-bottom: 1px solid var(--border-light, #e5e7eb); }
+.war-room-table td { padding: var(--space-2, 0.5rem); border-bottom: 1px solid var(--border-light, #e5e7eb); color: var(--text-primary, #374151); }
+.war-room-pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; text-transform: capitalize; }
+.war-room-pill.sev--ok { background: color-mix(in srgb, var(--green-500, #22c55e) 15%, white); color: var(--green-700, #15803d); }
+.war-room-pill.sev--warning { background: color-mix(in srgb, var(--amber-500, #f59e0b) 15%, white); color: var(--amber-700, #b45309); }
+.war-room-pill.sev--error { background: color-mix(in srgb, var(--red-500, #ef4444) 15%, white); color: var(--red-700, #b91c1c); }
+.war-room-pill.sev--neutral { background: var(--surface-alt, #f3f4f6); color: var(--text-muted, #9ca3af); }
+
+/* Source health cards */
+.war-room-sources { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-3, 0.75rem); }
+.war-room-source { padding: var(--space-3, 0.75rem); border-radius: var(--radius, 8px); border: 1px solid var(--border-light, #e5e7eb); }
+.war-room-source--ok { border-color: var(--green-500, #22c55e); }
+.war-room-source--warning { border-color: var(--amber-500, #f59e0b); }
+.war-room-source--error { border-color: var(--red-500, #ef4444); }
+.war-room-source--neutral { border-color: var(--border-light, #e5e7eb); }
+.war-room-source__label { font-size: 13px; font-weight: 600; color: var(--text-primary, #374151); }
+.war-room-source__status { font-size: 12px; font-weight: 700; margin-top: 2px; }
+.war-room-source--ok .war-room-source__status { color: var(--green-600, #16a34a); }
+.war-room-source--warning .war-room-source__status { color: var(--amber-600, #d97706); }
+.war-room-source--error .war-room-source__status { color: var(--red-600, #dc2626); }
+.war-room-source__datasets { font-size: 11px; color: var(--text-muted, #9ca3af); margin-top: 4px; }
+.war-room-source__sync { font-size: 11px; color: var(--text-muted, #9ca3af); margin-top: 2px; }
+.war-room-source__action { font-size: 11px; color: var(--text-secondary, #6b7280); margin-top: 4px; }
+
+/* Scheduler timeline */
+.war-room-scheduler { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--space-3, 0.75rem); }
+.war-room-run { padding: var(--space-3, 0.75rem); border-radius: var(--radius, 8px); border: 1px solid var(--border-light, #e5e7eb); text-align: center; }
+.war-room-run--ok { border-color: var(--green-500, #22c55e); }
+.war-room-run--error { border-color: var(--red-500, #ef4444); }
+.war-room-run--neutral { border-color: var(--border-light, #e5e7eb); }
+.war-room-run__label { font-size: 12px; font-weight: 600; color: var(--text-primary, #374151); }
+.war-room-run__status { font-size: 12px; font-weight: 700; margin-top: 2px; text-transform: capitalize; }
+.war-room-run--ok .war-room-run__status { color: var(--green-600, #16a34a); }
+.war-room-run--error .war-room-run__status { color: var(--red-600, #dc2626); }
+.war-room-run--neutral .war-room-run__status { color: var(--text-muted, #9ca3af); }
+.war-room-run__time { font-size: 11px; color: var(--text-muted, #9ca3af); margin-top: 2px; }
+
+/* Page impact */
+.war-room-impacts { display: flex; flex-direction: column; gap: var(--space-2, 0.5rem); }
+.war-room-impact { display: flex; align-items: center; gap: var(--space-3, 0.75rem); padding: var(--space-2, 0.5rem); border-radius: var(--radius, 8px); background: color-mix(in srgb, var(--amber-500, #f59e0b) 6%, var(--surface-alt, #f9fafb)); border: 1px solid var(--amber-300, #fcd34d); }
+.war-room-impact__page { font-size: 12px; font-weight: 600; color: var(--text-primary, #374151); min-width: 120px; }
+.war-room-impact__status { font-size: 11px; font-weight: 700; color: var(--amber-600, #d97706); text-transform: uppercase; }
+.war-room-impact__reason { font-size: 11px; color: var(--text-muted, #9ca3af); }

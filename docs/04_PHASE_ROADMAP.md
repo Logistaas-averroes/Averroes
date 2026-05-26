@@ -208,6 +208,7 @@ The N-Gram Intelligence block is now complete as a read-only analysis layer.
 | PR-ADS-065 | Search Terms Pipeline Verification & Repair | 🔨 In progress | 1 |
 | PR-ADS-066 | Search Terms Production Verdict Panel & Windsor Source-Parity Resolution | ✅ Complete | 1 |
 | PR-ADS-067 | Canonical Freshness Semantics & Zero-Row Truth States | 🔨 In progress | 1 |
+| PR-ADS-068 | System Status War Room & Pipeline Dependency Map | 🔨 In progress | 1 |
 
 **Governance:**
 N-Gram Intelligence identifies candidate terms for human review only.
