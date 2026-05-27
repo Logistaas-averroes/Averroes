@@ -7586,6 +7586,7 @@ function openHelpDrawer(pageKey) {
   const overlay = document.getElementById("help-drawer-overlay");
   const drawer = document.getElementById("help-drawer");
   if (!overlay || !drawer) return;
+  if (_helpDrawerOpen) return;
 
   const content = PAGE_HELP_CONTENT[pageKey];
   const explanation = PAGE_EXPLANATIONS[pageKey];
@@ -7636,22 +7637,54 @@ function openHelpDrawer(pageKey) {
 }
 
 function closeHelpDrawer() {
+  if (!_helpDrawerOpen) return;
   const overlay = document.getElementById("help-drawer-overlay");
   const drawer = document.getElementById("help-drawer");
   if (overlay) { overlay.hidden = true; overlay.setAttribute("aria-hidden", "true"); }
   if (drawer) drawer.hidden = true;
   _helpDrawerOpen = false;
   document.removeEventListener("keydown", _helpDrawerKeyHandler);
-  if (_helpDrawerFocusReturn) {
+  if (_helpDrawerFocusReturn && typeof _helpDrawerFocusReturn.focus === "function" && document.contains(_helpDrawerFocusReturn)) {
     _helpDrawerFocusReturn.focus();
-    _helpDrawerFocusReturn = null;
   }
+  _helpDrawerFocusReturn = null;
 }
 
 function _helpDrawerKeyHandler(e) {
+  if (!_helpDrawerOpen) return;
   if (e.key === "Escape") {
     e.preventDefault();
     closeHelpDrawer();
+    return;
+  }
+  if (e.key === "Tab") {
+    _trapHelpDrawerFocus(e);
+  }
+}
+
+function _trapHelpDrawerFocus(e) {
+  const drawer = document.getElementById("help-drawer");
+  if (!drawer || drawer.hidden) return;
+
+  const focusable = Array.from(drawer.querySelectorAll(
+    'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+  )).filter((el) => !el.closest("[hidden]"));
+
+  if (!focusable.length) {
+    e.preventDefault();
+    drawer.focus();
+    return;
+  }
+
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
   }
 }
 
@@ -7667,19 +7700,23 @@ async function loadRevenueSnapshotHistory() {
   container.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue snapshots…</p>';
 
   try {
-    const [latestRes, listRes] = await Promise.all([
-      fetch("/api/reports/roas/snapshots/latest?window=60d", { credentials: "same-origin" }),
-      fetch("/api/reports/roas/snapshots?window=60d&limit=30", { credentials: "same-origin" }),
+    const [latestResult, listResult] = await Promise.allSettled([
+      fetchJSON("/api/reports/roas/snapshots/latest?window=60d"),
+      fetchJSON("/api/reports/roas/snapshots?window=60d&limit=30"),
     ]);
 
     let latestData = null;
     let listData = null;
 
-    if (latestRes.ok) {
-      latestData = await latestRes.json();
+    if (latestResult.status === "fulfilled") {
+      latestData = latestResult.value;
+    } else if (!_isNotFoundError(latestResult.reason)) {
+      throw latestResult.reason;
     }
-    if (listRes.ok) {
-      listData = await listRes.json();
+    if (listResult.status === "fulfilled") {
+      listData = listResult.value;
+    } else if (!_isNotFoundError(listResult.reason)) {
+      throw listResult.reason;
     }
 
     const snapshots = (listData && listData.snapshots) || [];
@@ -7783,4 +7820,9 @@ async function loadRevenueSnapshotHistory() {
     snapshotHistoryStatus = "error";
     container.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue snapshots.</p>';
   }
+}
+
+function _isNotFoundError(err) {
+  const msg = String((err && err.message) || err || "");
+  return msg === "HTTP 404" || /not found/i.test(msg);
 }

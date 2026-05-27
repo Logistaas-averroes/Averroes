@@ -4503,7 +4503,7 @@ a {
   border-color: var(--c-accent, #129ef5);
 }
 .page-help-btn__label {
-  font-family: 'Sora', sans-serif;
+  font-family: var(--font-sans);
 }
 
 .help-drawer {

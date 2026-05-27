@@ -69,9 +69,19 @@ REQUIRED_HELP_PAGES = [
 
 def test_page_help_content_covers_all_pages():
     """PAGE_HELP_CONTENT must have entries for all required pages."""
+    block_match = re.search(
+        r"const\s+PAGE_HELP_CONTENT\s*=\s*\{(?P<body>[\s\S]*?)\n\};\n\n// ── Page Dependencies",
+        JS,
+    )
+    assert block_match, "Could not find PAGE_HELP_CONTENT block"
+    help_block = block_match.group("body")
+
     for key in REQUIRED_HELP_PAGES:
-        # Keys in JS use quotes for hyphenated names
-        assert f'"{key}"' in JS or f"'{key}'" in JS, (
+        if re.match(r"^[A-Za-z_$][A-Za-z0-9_$]*$", key):
+            key_pattern = rf"^\s*{re.escape(key)}\s*:"
+        else:
+            key_pattern = rf'^\s*["\']{re.escape(key)}["\']\s*:'
+        assert re.search(key_pattern, help_block, re.MULTILINE), (
             f"Missing PAGE_HELP_CONTENT entry for page: {key}"
         )
 
