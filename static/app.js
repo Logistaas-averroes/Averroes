@@ -786,6 +786,9 @@ function showApp(user) {
   // Show/hide Historical Backfill nav item
   const backfillNav = document.getElementById("nav-backfill-item");
   if (backfillNav) backfillNav.hidden = user.role !== "admin";
+  // Show/hide Churn Input nav item
+  const churnInputNav = document.getElementById("nav-churn-input-item");
+  if (churnInputNav) churnInputNav.hidden = user.role !== "admin";
   // Start with sidebar health check and data freshness
   loadSidebarHealth();
   loadDataFreshness();
@@ -7095,7 +7098,7 @@ function renderUnitEconomicsPage() {
       <div class="kpi-card"><div class="kpi-card__label">Payback Months</div><div class="kpi-card__value">${fmtNum(overall.payback_months)}</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Avg Deal ACV</div><div class="kpi-card__value">${fmtMoney(overall.avg_deal_acv || overall.average_deal_acv)}</div></div>
       <div class="kpi-card"><div class="kpi-card__label">Avg Deal MRR</div><div class="kpi-card__value">${fmtMoney(overall.avg_deal_mrr || overall.average_deal_mrr)}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Monthly Churn Rate</div><div class="kpi-card__value">${fmtNum((overall.monthly_churn_rate || overall.churn_rate_used) * 100, 1)}%</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Monthly Churn Rate</div><div class="kpi-card__value">${fmtNum((overall.monthly_churn_rate_used ?? 0) * 100, 1)}%</div></div>
     `;
   }
 

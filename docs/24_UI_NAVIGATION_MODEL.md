@@ -50,19 +50,19 @@ Placing them after Platform Evidence and Lead Intelligence creates a clear readi
 | Menu Label | Route Key | Section |
 |-----------|-----------|---------|
 | Dashboard | `dashboard` | Command Center |
-| Action Queue | `actions` | Command Center |
+| Action Queue | `action-queue` | Command Center |
 | Reports | `reports` | Command Center |
 | Campaigns | `campaigns` | Platform Evidence |
 | Search Terms | `search-terms` | Platform Evidence |
 | Keywords | `keywords` | Platform Evidence |
 | Countries | `geo` | Platform Evidence |
 | Lead Quality | `leads` | Lead Intelligence |
-| In Progress Leads | `in-progress` | Lead Intelligence |
+| In Progress Leads | `opportunities` | Lead Intelligence |
 | Flagged Waste Terms | `waste` | Lead Intelligence |
 | Deals | `deals` | Revenue & Attribution |
 | ROAS by Campaign | `roas-campaigns` | Revenue & Attribution |
 | ROAS by Country | `roas-countries` | Revenue & Attribution |
-| GCLID Attribution | `gclid` | Revenue & Attribution |
+| GCLID Attribution | `gclid-attribution` | Revenue & Attribution |
 | Unit Economics | `unit-economics` | Revenue & Attribution |
 | Data Runs | `scheduler` | Admin |
 | System Status | `health` | Admin |

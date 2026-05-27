@@ -4002,12 +4002,8 @@ a {
   font-weight: 600;
 }
 
-.search-terms-tab-pane {
+.search-terms-tab-pane[hidden] {
   display: none;
-}
-
-.search-terms-tab-pane.active {
-  display: block;
 }
 
 /* ── ROAS Window Controls ───────────────────────────────────────────────── */
@@ -4269,18 +4265,6 @@ a {
 .churn-input-success {
   color: #16a34a;
   font-size: 0.85rem;
-  margin-top: var(--space-2, 0.5rem);
-}
-
-/* ── Revenue Section Menu Accent ────────────────────────────────────────── */
-
-.sidebar__group-title {
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--color-text-muted, #64748b);
-  padding: var(--space-3, 0.75rem) var(--space-4, 1rem) var(--space-1, 0.25rem);
   margin-top: var(--space-2, 0.5rem);
 }
 
