@@ -99,8 +99,8 @@
           </a>
         </li>
 
-        <!-- Evidence -->
-        <li class="sidebar__section-label" role="heading" aria-level="2">Evidence</li>
+        <!-- Platform Evidence -->
+        <li class="sidebar__section-label" role="heading" aria-level="2">Platform Evidence</li>
         <li>
           <a class="nav-item" data-page="campaigns" href="#" role="button" tabindex="0" aria-label="Campaigns">
             <span class="nav-item__icon" aria-hidden="true">
@@ -110,37 +110,32 @@
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="search-terms" href="#" role="button" tabindex="0" aria-label="Search Term Universe — raw Google Ads search terms" title="Raw Google Ads search terms">
+          <a class="nav-item" data-page="search-terms" href="#" role="button" tabindex="0" aria-label="Search Terms" title="Search terms and pattern analysis">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             </span>
-            <span class="nav-item__label">Search Term Universe</span>
+            <span class="nav-item__label">Search Terms</span>
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="ngrams" href="#" role="button" tabindex="0" aria-label="Search Pattern Analysis — N-Gram patterns from search terms" title="N-Gram patterns from search terms">
-            <span class="nav-item__icon" aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h4v4H3zM10 3h4v4h-4zM17 3h4v4h-4zM3 10h4v4H3zM10 10h4v4h-4zM17 10h4v4h-4z"/><path d="M5 17h14"/></svg>
-            </span>
-            <span class="nav-item__label">Search Pattern Analysis</span>
-          </a>
-        </li>
-        <li>
-          <a class="nav-item" data-page="keywords" href="#" role="button" tabindex="0" aria-label="Keyword Performance">
+          <a class="nav-item" data-page="keywords" href="#" role="button" tabindex="0" aria-label="Keywords">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/></svg>
             </span>
-            <span class="nav-item__label">Keyword Performance</span>
+            <span class="nav-item__label">Keywords</span>
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="geo" href="#" role="button" tabindex="0" aria-label="Country Performance">
+          <a class="nav-item" data-page="geo" href="#" role="button" tabindex="0" aria-label="Countries">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
             </span>
-            <span class="nav-item__label">Country Performance</span>
+            <span class="nav-item__label">Countries</span>
           </a>
         </li>
+
+        <!-- Lead Intelligence -->
+        <li class="sidebar__section-label" role="heading" aria-level="2">Lead Intelligence</li>
         <li>
           <a class="nav-item" data-page="leads" href="#" role="button" tabindex="0" aria-label="Lead Quality">
             <span class="nav-item__icon" aria-hidden="true">
@@ -150,11 +145,46 @@
           </a>
         </li>
         <li>
+          <a class="nav-item" data-page="opportunities" href="#" role="button" tabindex="0" aria-label="In Progress Leads">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+            </span>
+            <span class="nav-item__label">In Progress Leads</span>
+          </a>
+        </li>
+        <li>
+          <a class="nav-item" data-page="waste" href="#" role="button" tabindex="0" aria-label="Flagged Waste Terms — search terms flagged for human review" title="Search terms flagged for human review">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+            </span>
+            <span class="nav-item__label">Flagged Waste Terms</span>
+          </a>
+        </li>
+
+        <!-- Revenue & Attribution -->
+        <li class="sidebar__section-label" role="heading" aria-level="2">Revenue &amp; Attribution</li>
+        <li>
           <a class="nav-item" data-page="deals" href="#" role="button" tabindex="0" aria-label="Deals">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
             </span>
             <span class="nav-item__label">Deals</span>
+          </a>
+        </li>
+        <li>
+          <a class="nav-item" data-page="roas-campaigns" href="#" role="button" tabindex="0" aria-label="ROAS by Campaign">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            </span>
+            <span class="nav-item__label">ROAS by Campaign</span>
+          </a>
+        </li>
+        <li>
+          <a class="nav-item" data-page="roas-countries" href="#" role="button" tabindex="0" aria-label="ROAS by Country">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            </span>
+            <span class="nav-item__label">ROAS by Country</span>
           </a>
         </li>
         <li>
@@ -165,23 +195,12 @@
             <span class="nav-item__label">GCLID Attribution</span>
           </a>
         </li>
-
-        <!-- Review & Quality -->
-        <li class="sidebar__section-label" role="heading" aria-level="2">Review &amp; Quality</li>
         <li>
-          <a class="nav-item" data-page="waste" href="#" role="button" tabindex="0" aria-label="Flagged Waste Terms — search terms flagged for human review" title="Search terms flagged for human review">
+          <a class="nav-item" data-page="unit-economics" href="#" role="button" tabindex="0" aria-label="Unit Economics">
             <span class="nav-item__icon" aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
             </span>
-            <span class="nav-item__label">Flagged Waste Terms</span>
-          </a>
-        </li>
-        <li>
-          <a class="nav-item" data-page="opportunities" href="#" role="button" tabindex="0" aria-label="In Progress Leads">
-            <span class="nav-item__icon" aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-            </span>
-            <span class="nav-item__label">In Progress Leads</span>
+            <span class="nav-item__label">Unit Economics</span>
           </a>
         </li>
 
@@ -211,12 +230,12 @@
             <span class="nav-item__label">Admin Backfill</span>
           </a>
         </li>
-        <li>
-          <a class="nav-item nav-item--admin" data-page="historical-intelligence" href="#" role="button" tabindex="0" aria-label="Historical Trends — long-term historical intelligence" title="Long-term historical intelligence">
+        <li id="nav-churn-input-item">
+          <a class="nav-item nav-item--admin" data-page="churn-input" href="#" role="button" tabindex="0" aria-label="Churn Input — manual churn rate configuration" title="Manual churn rate configuration">
             <span class="nav-item__icon" aria-hidden="true">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="19" r="2"/></svg>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
             </span>
-            <span class="nav-item__label">Historical Trends</span>
+            <span class="nav-item__label">Churn Input</span>
           </a>
         </li>
       </ul>
@@ -507,14 +526,23 @@
         </p>
       </section>
 
-      <!-- Search Terms Forensics -->
+      <!-- Search Terms (Merged: Search Terms + Patterns) -->
       <section id="page-search-terms" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">Search Term Universe</h1>
-          <p class="page-subtitle">Raw Google Ads search terms pulled from Windsor. Read-only evidence view.</p>
+          <h1 class="page-title">Search Terms</h1>
+          <p class="page-subtitle">Search term evidence and pattern analysis. Read-only view.</p>
         </header>
         <div id="page-explanation-search-terms" hidden></div>
         <p id="run-meta-search_terms" class="run-meta" data-section="search_terms"></p>
+
+        <!-- Tabs -->
+        <div class="search-terms-tabs" role="tablist" aria-label="Search Terms tabs">
+          <button class="search-terms-tab active" role="tab" aria-selected="true" aria-controls="search-terms-tab-terms" id="tab-btn-terms" data-tab="terms" type="button">Search Terms</button>
+          <button class="search-terms-tab" role="tab" aria-selected="false" aria-controls="search-terms-tab-patterns" id="tab-btn-patterns" data-tab="patterns" type="button">Patterns</button>
+        </div>
+
+        <!-- Tab: Search Terms -->
+        <div id="search-terms-tab-terms" class="search-terms-tab-pane" role="tabpanel" aria-labelledby="tab-btn-terms">
 
         <div id="search-terms-kpis" class="kpi-grid"></div>
 
@@ -572,14 +600,11 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           This page is read-only. It does not add negatives, push changes, pause campaigns, or modify bids/budgets.
         </p>
-      </section>
+        </div><!-- /search-terms-tab-terms -->
 
-      <!-- N-Gram Intelligence -->
-      <section id="page-ngrams" class="page" hidden>
-        <header class="page-header">
-          <h1 class="page-title">Search Pattern Analysis</h1>
-          <p class="page-subtitle">Recurring word and phrase patterns from search-term evidence. Read-only analysis — candidate terms for human review only.</p>
-        </header>
+        <!-- Tab: Patterns (N-Gram) -->
+        <div id="search-terms-tab-patterns" class="search-terms-tab-pane" role="tabpanel" aria-labelledby="tab-btn-patterns" hidden>
+
         <div id="page-explanation-ngrams" hidden></div>
         <p id="run-meta-ngrams" class="run-meta" data-section="ngrams"></p>
 
@@ -640,9 +665,14 @@
 
         <p class="grace-note">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Read-only analysis. These are candidate terms for manual review only. The system does not push negative keywords, modify Google Ads, pause campaigns, or change bids/budgets. This analysis may be capped by available rows — treat results as directional when a row cap is shown.
+          Read-only analysis. These are candidate terms for manual review only. The system does not push negative keywords, modify Google Ads, pause campaigns, or change bids/budgets.
         </p>
+        </div><!-- /search-terms-tab-patterns -->
+
       </section>
+
+      <!-- N-Gram Intelligence (kept as hidden route alias for backward compatibility) -->
+      <section id="page-ngrams" class="page" hidden></section>
 
       <!-- Geo Intelligence -->
       <section id="page-geo" class="page" hidden>
@@ -1151,6 +1181,147 @@
         <p class="grace-note">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           Historical Intelligence reads local data only. It does not modify Google Ads, HubSpot, campaigns, bids, budgets, contacts, deals, or negative keywords.
+        </p>
+      </section>
+
+      <!-- ROAS by Campaign -->
+      <section id="page-roas-campaigns" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">ROAS by Campaign</h1>
+          <p class="page-subtitle">HubSpot Revenue ROAS — campaign-level spend vs. closed-won revenue.</p>
+        </header>
+        <div id="page-explanation-roas-campaigns" hidden></div>
+        <div class="roas-window-controls">
+          <label class="roas-window-label">Window:</label>
+          <select id="roas-campaigns-window" class="waste-filter-select" aria-label="ROAS analysis window">
+            <option value="7d">7d</option>
+            <option value="14d">14d</option>
+            <option value="30d">30d</option>
+            <option value="60d" selected>60d</option>
+            <option value="90d">90d</option>
+            <option value="365d">365d</option>
+          </select>
+          <button id="roas-campaigns-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+        </div>
+        <div id="roas-campaigns-kpis" class="kpi-grid"></div>
+        <div class="panel">
+          <div class="panel__header">Revenue Truth ROAS — Campaign Decision Table</div>
+          <div class="panel__body panel__body--flush" id="roas-campaigns-table-body">
+            <p class="empty-state" style="padding: var(--space-5);">Loading ROAS by campaign…</p>
+          </div>
+        </div>
+        <p class="grace-note">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Revenue Truth ROAS uses HubSpot closed-won data, not Google Ads conversion values. Read-only — no writes to any external system.
+        </p>
+      </section>
+
+      <!-- ROAS by Country -->
+      <section id="page-roas-countries" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">ROAS by Country</h1>
+          <p class="page-subtitle">Country-level Revenue Truth ROAS — estimated until GCLID attribution is fully wired.</p>
+        </header>
+        <div id="page-explanation-roas-countries" hidden></div>
+        <div class="roas-estimate-warning" role="alert">
+          <strong>⚠ Country-level ROAS is an estimate</strong> until GCLID attribution is fully wired. Use it for directional diagnosis, not final budget decisions.
+        </div>
+        <div class="roas-window-controls">
+          <label class="roas-window-label">Window:</label>
+          <select id="roas-countries-window" class="waste-filter-select" aria-label="ROAS analysis window">
+            <option value="7d">7d</option>
+            <option value="14d">14d</option>
+            <option value="30d">30d</option>
+            <option value="60d" selected>60d</option>
+            <option value="90d">90d</option>
+            <option value="365d">365d</option>
+          </select>
+          <button id="roas-countries-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+        </div>
+        <div id="roas-countries-kpis" class="kpi-grid"></div>
+        <div class="panel">
+          <div class="panel__header">Country ROAS Estimates</div>
+          <div class="panel__body panel__body--flush" id="roas-countries-table-body">
+            <p class="empty-state" style="padding: var(--space-5);">Loading ROAS by country…</p>
+          </div>
+        </div>
+        <p class="grace-note">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Country ROAS reads local data only. No writes to Google Ads, HubSpot, or any external system.
+        </p>
+      </section>
+
+      <!-- Unit Economics -->
+      <section id="page-unit-economics" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Unit Economics</h1>
+          <p class="page-subtitle">Are we buying customers profitably? Executive-level SaaS economics from revenue truth.</p>
+        </header>
+        <div id="page-explanation-unit-economics" hidden></div>
+        <div class="roas-window-controls">
+          <label class="roas-window-label">Window:</label>
+          <select id="unit-economics-window" class="waste-filter-select" aria-label="Unit economics window">
+            <option value="7d">7d</option>
+            <option value="14d">14d</option>
+            <option value="30d">30d</option>
+            <option value="60d" selected>60d</option>
+            <option value="90d">90d</option>
+            <option value="365d">365d</option>
+          </select>
+          <button id="unit-economics-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+        </div>
+        <div id="unit-economics-kpis" class="kpi-grid"></div>
+        <div id="unit-economics-verdict" class="unit-economics-verdict"></div>
+        <div class="panel">
+          <div class="panel__header">Campaign-Level Economics</div>
+          <div class="panel__body panel__body--flush" id="unit-economics-table-body">
+            <p class="empty-state" style="padding: var(--space-5);">Loading unit economics…</p>
+          </div>
+        </div>
+        <p class="grace-note">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Unit economics reads local data only. No writes to Google Ads, HubSpot, or any external system.
+        </p>
+      </section>
+
+      <!-- Churn Input (Admin) -->
+      <section id="page-churn-input" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Churn Input</h1>
+          <p class="page-subtitle">Manual monthly churn rate configuration for LTV/ROAS calculations.</p>
+        </header>
+        <div id="page-explanation-churn-input" hidden></div>
+        <div class="churn-input-notice" role="note">
+          This updates local churn config only. It does not write to HubSpot or Google Ads.
+        </div>
+        <div id="churn-input-current" class="churn-input-current">
+          <p class="empty-state">Loading churn configuration…</p>
+        </div>
+        <div class="panel">
+          <div class="panel__header">Update Monthly Churn Override</div>
+          <div class="panel__body">
+            <form id="churn-input-form" class="churn-input-form" novalidate>
+              <div class="churn-input-fields">
+                <div class="churn-input-field">
+                  <label for="churn-month">Month (YYYY-MM)</label>
+                  <input type="text" id="churn-month" name="month" placeholder="2026-05" pattern="\d{4}-\d{2}" required />
+                </div>
+                <div class="churn-input-field">
+                  <label for="churn-rate">Monthly Churn Rate (0–1)</label>
+                  <input type="number" id="churn-rate" name="rate" placeholder="0.03" min="0" max="1" step="0.001" required />
+                </div>
+              </div>
+              <div class="churn-input-actions">
+                <button type="submit" class="btn btn--primary">Save Override</button>
+              </div>
+              <div class="churn-input-error" id="churn-input-error" hidden></div>
+              <div class="churn-input-success" id="churn-input-success" hidden></div>
+            </form>
+          </div>
+        </div>
+        <p class="grace-note">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Churn rates are stored in local YAML config only. Admin access required.
         </p>
       </section>
 

@@ -17,7 +17,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input"];
 
 // Deal pipeline stages (Phase 1 read-only reference)
 const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
@@ -221,6 +221,38 @@ const PAGE_EXPLANATIONS = {
     dependsOn: ["historical_intelligence"],
     emptyMeans: "Not enough historical data for trend analysis, or the data has not been backfilled yet.",
     nextAction: "Check Admin Backfill to verify historical data availability."
+  },
+  "roas-campaigns": {
+    title: "ROAS by Campaign",
+    purpose: "HubSpot Revenue Truth ROAS — shows which campaigns produce profitable customers based on closed-won revenue.",
+    source: "Revenue Truth Layer (HubSpot deals + Windsor campaigns).",
+    dependsOn: ["hubspot/deals", "windsor/campaigns"],
+    emptyMeans: "No closed-won deals attributed to campaigns in this window, or the revenue truth layer has not computed results yet.",
+    nextAction: "Check that HubSpot deals are synced and campaigns have spend data."
+  },
+  "roas-countries": {
+    title: "ROAS by Country",
+    purpose: "Country-level Revenue Truth ROAS — estimated until GCLID attribution is fully wired.",
+    source: "Revenue Truth Layer (HubSpot deals + Windsor geo).",
+    dependsOn: ["hubspot/deals", "windsor/geo"],
+    emptyMeans: "No country-level revenue data available for this window.",
+    nextAction: "Check that geo and deal data are synced."
+  },
+  "unit-economics": {
+    title: "Unit Economics",
+    purpose: "Executive SaaS economics — LTV/CAC, payback, and profitability verdicts.",
+    source: "Revenue Truth Layer.",
+    dependsOn: ["hubspot/deals", "windsor/campaigns"],
+    emptyMeans: "Not enough closed-won volume to compute unit economics.",
+    nextAction: "Ensure sufficient deal volume exists in the selected window."
+  },
+  "churn-input": {
+    title: "Churn Input",
+    purpose: "Admin page for manual monthly churn rate overrides used in LTV/ROAS calculations.",
+    source: "Local YAML configuration.",
+    dependsOn: [],
+    emptyMeans: "Default churn rate is applied when no overrides are set.",
+    nextAction: "Add a monthly override if the default rate (3%) does not reflect reality."
   }
 };
 
@@ -251,6 +283,10 @@ const PAGE_DEPENDENCIES = {
   health:                  [],
   backfill:                [],
   "historical-intelligence": [],
+  "roas-campaigns":          ["hubspot/deals", "windsor/campaigns"],
+  "roas-countries":          ["hubspot/deals", "windsor/geo"],
+  "unit-economics":          ["hubspot/deals", "windsor/campaigns"],
+  "churn-input":             [],
 };
 
 // ── Session state ──────────────────────────────────────────────────────────
@@ -750,6 +786,9 @@ function showApp(user) {
   // Show/hide Historical Backfill nav item
   const backfillNav = document.getElementById("nav-backfill-item");
   if (backfillNav) backfillNav.hidden = user.role !== "admin";
+  // Show/hide Churn Input nav item
+  const churnInputNav = document.getElementById("nav-churn-input-item");
+  if (churnInputNav) churnInputNav.hidden = user.role !== "admin";
   // Start with sidebar health check and data freshness
   loadSidebarHealth();
   loadDataFreshness();
@@ -848,6 +887,16 @@ async function handleLogout() {
 // ── Router ─────────────────────────────────────────────────────────────────
 
 function navigate(page) {
+  // Route alias: "ngrams" redirects to search-terms with Patterns tab active
+  if (page === "ngrams") {
+    navigate("search-terms");
+    // Activate patterns tab after navigation
+    setTimeout(() => {
+      const patternsTab = document.getElementById("tab-btn-patterns");
+      if (patternsTab) patternsTab.click();
+    }, 0);
+    return;
+  }
   // Role enforcement: health page is admin-only
   if (page === "health" && (!_currentUser || _currentUser.role !== "admin")) {
     navigate("dashboard");
@@ -855,6 +904,11 @@ function navigate(page) {
   }
   // Role enforcement: backfill page is admin-only
   if (page === "backfill" && (!_currentUser || _currentUser.role !== "admin")) {
+    navigate("dashboard");
+    return;
+  }
+  // Role enforcement: churn-input page is admin-only
+  if (page === "churn-input" && (!_currentUser || _currentUser.role !== "admin")) {
     navigate("dashboard");
     return;
   }
@@ -916,6 +970,10 @@ function loadPage(page) {
     case "action-queue":  loadActionQueue();   break;
     case "backfill":      loadBackfillStatus(); break;
     case "historical-intelligence": loadHistoricalIntelligence(); break;
+    case "roas-campaigns":  loadRoasCampaigns();  break;
+    case "roas-countries":  loadRoasCountries();  break;
+    case "unit-economics":  loadUnitEconomics();  break;
+    case "churn-input":     loadChurnInput();     break;
   }
 }
 
@@ -6705,6 +6763,48 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (hiCurSel)     hiCurSel.addEventListener("change",    loadHistoricalIntelligence);
   if (hiPrevSel)    hiPrevSel.addEventListener("change",   loadHistoricalIntelligence);
 
+  // Wire up Search Terms tabs
+  document.querySelectorAll(".search-terms-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".search-terms-tab").forEach((t) => {
+        t.classList.remove("active");
+        t.setAttribute("aria-selected", "false");
+      });
+      tab.classList.add("active");
+      tab.setAttribute("aria-selected", "true");
+      const targetTab = tab.dataset.tab;
+      document.querySelectorAll(".search-terms-tab-pane").forEach((pane) => {
+        pane.hidden = pane.id !== `search-terms-tab-${targetTab}`;
+      });
+      // Load patterns data when switching to patterns tab
+      if (targetTab === "patterns") {
+        loadNgrams();
+      }
+    });
+  });
+
+  // Wire up ROAS by Campaign controls
+  const roasCampRefresh = document.getElementById("roas-campaigns-refresh-btn");
+  const roasCampWindow  = document.getElementById("roas-campaigns-window");
+  if (roasCampRefresh) roasCampRefresh.addEventListener("click", loadRoasCampaigns);
+  if (roasCampWindow)  roasCampWindow.addEventListener("change", loadRoasCampaigns);
+
+  // Wire up ROAS by Country controls
+  const roasCountryRefresh = document.getElementById("roas-countries-refresh-btn");
+  const roasCountryWindow  = document.getElementById("roas-countries-window");
+  if (roasCountryRefresh) roasCountryRefresh.addEventListener("click", loadRoasCountries);
+  if (roasCountryWindow)  roasCountryWindow.addEventListener("change", loadRoasCountries);
+
+  // Wire up Unit Economics controls
+  const ueRefresh = document.getElementById("unit-economics-refresh-btn");
+  const ueWindow  = document.getElementById("unit-economics-window");
+  if (ueRefresh) ueRefresh.addEventListener("click", loadUnitEconomics);
+  if (ueWindow)  ueWindow.addEventListener("change", loadUnitEconomics);
+
+  // Wire up Churn Input form
+  const churnForm = document.getElementById("churn-input-form");
+  if (churnForm) churnForm.addEventListener("submit", handleChurnInputSubmit);
+
   // Check auth and load initial page
   const isAuth = await checkAuth();
   if (isAuth) {
@@ -6717,3 +6817,436 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 });
+
+// ── ROAS & Revenue Pages (PR-ADS-080B) ────────────────────────────────────
+
+const VALID_ROAS_WINDOWS = ["7d", "14d", "30d", "60d", "90d", "365d"];
+
+function getVerdictBadgeClass(verdict) {
+  switch (verdict) {
+    case "SCALE": return "roas-verdict-badge roas-verdict-badge--scale";
+    case "HOLD":  return "roas-verdict-badge roas-verdict-badge--hold";
+    case "FIX":   return "roas-verdict-badge roas-verdict-badge--fix";
+    case "CUT":   return "roas-verdict-badge roas-verdict-badge--cut";
+    case "INSUFFICIENT_DATA": return "roas-verdict-badge roas-verdict-badge--insufficient";
+    default: return "roas-verdict-badge";
+  }
+}
+
+function getAttributionBadge(confidence) {
+  switch (confidence) {
+    case "tier_1_gclid":          return '<span class="attribution-badge attribution-badge--tier1">Exact GCLID</span>';
+    case "tier_2_source_tag":     return '<span class="attribution-badge attribution-badge--tier2">Source Tag</span>';
+    case "tier_3_spend_weighted": return '<span class="attribution-badge attribution-badge--tier3">Estimate</span>';
+    default: return '<span class="attribution-badge">' + escapeHtml(confidence || "unknown") + '</span>';
+  }
+}
+
+function fmtRoas(v) {
+  if (v === null || v === undefined) return "—";
+  return (v * 100).toFixed(0) + "%";
+}
+
+function fmtMoney(v) {
+  if (v === null || v === undefined) return "—";
+  if (Math.abs(v) >= 1000000) return "$" + (v / 1000000).toFixed(1) + "M";
+  if (Math.abs(v) >= 1000) return "$" + (v / 1000).toFixed(1) + "k";
+  return "$" + v.toFixed(0);
+}
+
+function fmtNum(v, decimals) {
+  if (v === null || v === undefined) return "—";
+  return Number(v).toFixed(decimals !== undefined ? decimals : 1);
+}
+
+// ── ROAS by Campaign ──────────────────────────────────────────────────────
+
+let roasCampaignsData = [];
+let roasCampaignsStatus = "idle";
+
+async function loadRoasCampaigns() {
+  const windowSel = document.getElementById("roas-campaigns-window");
+  const window_ = windowSel ? windowSel.value : "60d";
+  if (!VALID_ROAS_WINDOWS.includes(window_)) return;
+
+  roasCampaignsStatus = "loading";
+  const body = document.getElementById("roas-campaigns-table-body");
+  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading ROAS by campaign…</p>';
+
+  try {
+    const res = await fetch(`/api/reports/roas/campaigns?window=${window_}`, { credentials: "same-origin" });
+    if (!res.ok) {
+      roasCampaignsStatus = "error";
+      if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load ROAS data.</p>';
+      return;
+    }
+    const data = await res.json();
+    roasCampaignsData = data.campaigns || data.rows || [];
+    roasCampaignsStatus = roasCampaignsData.length ? "ok" : "empty";
+    renderRoasCampaignsPage();
+  } catch (err) {
+    console.error("[loadRoasCampaigns]", err);
+    roasCampaignsStatus = "error";
+    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading ROAS data.</p>';
+  }
+}
+
+function renderRoasCampaignsPage() {
+  const kpiGrid = document.getElementById("roas-campaigns-kpis");
+  const tableBody = document.getElementById("roas-campaigns-table-body");
+
+  if (roasCampaignsStatus === "empty" || !roasCampaignsData.length) {
+    if (kpiGrid) kpiGrid.innerHTML = "";
+    if (tableBody) tableBody.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">No ROAS data available for this window. Ensure closed-won deals exist and campaign data is synced.</p>';
+    renderPageExplanation("roas-campaigns", { forceVisible: true });
+    return;
+  }
+
+  // Summary KPIs
+  const totalSpend = roasCampaignsData.reduce((s, r) => s + (r.spend || 0), 0);
+  const totalAcv = roasCampaignsData.reduce((s, r) => s + (r.acv_revenue || 0), 0);
+  const totalLtv = roasCampaignsData.reduce((s, r) => s + (r.ltv_revenue || 0), 0);
+  const bestLtvCac = roasCampaignsData.reduce((best, r) => (r.ltv_to_cac || 0) > (best.ltv_to_cac || 0) ? r : best, roasCampaignsData[0]);
+  const verdictCounts = {};
+  roasCampaignsData.forEach((r) => { verdictCounts[r.verdict] = (verdictCounts[r.verdict] || 0) + 1; });
+
+  if (kpiGrid) {
+    kpiGrid.innerHTML = `
+      <div class="kpi-card"><div class="kpi-card__label">Total Spend</div><div class="kpi-card__value">${fmtMoney(totalSpend)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Total ACV Revenue</div><div class="kpi-card__value">${fmtMoney(totalAcv)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Total LTV Revenue</div><div class="kpi-card__value">${fmtMoney(totalLtv)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Best LTV/CAC</div><div class="kpi-card__value">${escapeHtml(bestLtvCac.campaign || "—")} (${fmtNum(bestLtvCac.ltv_to_cac)}x)</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">SCALE</div><div class="kpi-card__value">${verdictCounts.SCALE || 0}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">HOLD</div><div class="kpi-card__value">${verdictCounts.HOLD || 0}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">FIX</div><div class="kpi-card__value">${verdictCounts.FIX || 0}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">CUT</div><div class="kpi-card__value">${verdictCounts.CUT || 0}</div></div>
+    `;
+  }
+
+  // Sort by verdict priority then LTV/CAC
+  const verdictOrder = { SCALE: 0, HOLD: 1, FIX: 2, CUT: 3, INSUFFICIENT_DATA: 4 };
+  const sorted = [...roasCampaignsData].sort((a, b) => {
+    const va = verdictOrder[a.verdict] ?? 5;
+    const vb = verdictOrder[b.verdict] ?? 5;
+    if (va !== vb) return va - vb;
+    return (b.ltv_to_cac || 0) - (a.ltv_to_cac || 0);
+  });
+
+  if (tableBody) {
+    const headerRow = `<tr>
+      <th>Campaign</th><th>Spend</th><th>Deals Won</th><th>ACV Revenue</th><th>ARR Revenue</th>
+      <th>LTV Revenue</th><th>ACV ROAS</th><th>ARR ROAS</th><th>LTV ROAS</th><th>CAC</th>
+      <th>LTV/CAC</th><th>Payback Mo.</th><th>Attribution</th><th>Verdict</th><th>Warnings</th>
+    </tr>`;
+    const rows = sorted.map((r) => `<tr>
+      <td>${escapeHtml(r.campaign || "")}</td>
+      <td>${fmtMoney(r.spend)}</td>
+      <td>${fmt(r.deals_won)}</td>
+      <td>${fmtMoney(r.acv_revenue)}</td>
+      <td>${fmtMoney(r.arr_revenue)}</td>
+      <td>${fmtMoney(r.ltv_revenue)}</td>
+      <td>${fmtRoas(r.acv_roas)}</td>
+      <td>${fmtRoas(r.arr_roas)}</td>
+      <td>${fmtRoas(r.ltv_roas)}</td>
+      <td>${fmtMoney(r.cac)}</td>
+      <td>${fmtNum(r.ltv_to_cac)}x</td>
+      <td>${fmtNum(r.payback_months)}</td>
+      <td>${getAttributionBadge(r.attribution_confidence)}</td>
+      <td><span class="${getVerdictBadgeClass(r.verdict)}">${escapeHtml(r.verdict || "")}</span></td>
+      <td class="roas-warnings">${(r.warnings || []).map((w) => '<span class="roas-warning-chip">' + escapeHtml(w) + '</span>').join(" ")}</td>
+    </tr>`).join("");
+    tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
+  }
+}
+
+// ── ROAS by Country ───────────────────────────────────────────────────────
+
+let roasCountriesData = [];
+let roasCountriesStatus = "idle";
+
+async function loadRoasCountries() {
+  const windowSel = document.getElementById("roas-countries-window");
+  const window_ = windowSel ? windowSel.value : "60d";
+  if (!VALID_ROAS_WINDOWS.includes(window_)) return;
+
+  roasCountriesStatus = "loading";
+  const body = document.getElementById("roas-countries-table-body");
+  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading ROAS by country…</p>';
+
+  try {
+    const res = await fetch(`/api/reports/roas/countries?window=${window_}`, { credentials: "same-origin" });
+    if (!res.ok) {
+      roasCountriesStatus = "error";
+      if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load country ROAS data.</p>';
+      return;
+    }
+    const data = await res.json();
+    roasCountriesData = data.countries || data.rows || [];
+    roasCountriesStatus = roasCountriesData.length ? "ok" : "empty";
+    renderRoasCountriesPage();
+  } catch (err) {
+    console.error("[loadRoasCountries]", err);
+    roasCountriesStatus = "error";
+    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading country ROAS data.</p>';
+  }
+}
+
+function renderRoasCountriesPage() {
+  const kpiGrid = document.getElementById("roas-countries-kpis");
+  const tableBody = document.getElementById("roas-countries-table-body");
+
+  if (roasCountriesStatus === "empty" || !roasCountriesData.length) {
+    if (kpiGrid) kpiGrid.innerHTML = "";
+    if (tableBody) tableBody.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">No country ROAS data available for this window.</p>';
+    renderPageExplanation("roas-countries", { forceVisible: true });
+    return;
+  }
+
+  const totalSpend = roasCountriesData.reduce((s, r) => s + (r.spend || 0), 0);
+  const totalLtv = roasCountriesData.reduce((s, r) => s + (r.ltv_revenue || 0), 0);
+
+  if (kpiGrid) {
+    kpiGrid.innerHTML = `
+      <div class="kpi-card"><div class="kpi-card__label">Countries</div><div class="kpi-card__value">${roasCountriesData.length}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Total Spend</div><div class="kpi-card__value">${fmtMoney(totalSpend)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Total LTV Revenue</div><div class="kpi-card__value">${fmtMoney(totalLtv)}</div></div>
+    `;
+  }
+
+  const verdictOrder = { SCALE: 0, HOLD: 1, FIX: 2, CUT: 3, INSUFFICIENT_DATA: 4 };
+  const sorted = [...roasCountriesData].sort((a, b) => {
+    const va = verdictOrder[a.verdict] ?? 5;
+    const vb = verdictOrder[b.verdict] ?? 5;
+    if (va !== vb) return va - vb;
+    return (b.ltv_to_cac || 0) - (a.ltv_to_cac || 0);
+  });
+
+  if (tableBody) {
+    const headerRow = `<tr>
+      <th>Country</th><th>Spend</th><th>Deals Won</th><th>ACV Revenue</th><th>LTV Revenue</th>
+      <th>ACV ROAS</th><th>LTV ROAS</th><th>CAC</th><th>LTV/CAC</th><th>Payback Mo.</th>
+      <th>Attribution</th><th>Estimate</th><th>Verdict</th><th>Warnings</th>
+    </tr>`;
+    const rows = sorted.map((r) => `<tr>
+      <td>${escapeHtml(r.country || "")}</td>
+      <td>${fmtMoney(r.spend)}</td>
+      <td>${fmt(r.deals_won)}</td>
+      <td>${fmtMoney(r.acv_revenue)}</td>
+      <td>${fmtMoney(r.ltv_revenue)}</td>
+      <td>${fmtRoas(r.acv_roas)}</td>
+      <td>${fmtRoas(r.ltv_roas)}</td>
+      <td>${fmtMoney(r.cac)}</td>
+      <td>${fmtNum(r.ltv_to_cac)}x</td>
+      <td>${fmtNum(r.payback_months)}</td>
+      <td>${getAttributionBadge(r.attribution_confidence)}</td>
+      <td>${r.country_level_estimate ? '<span class="estimate-badge">Estimate</span>' : '<span class="estimate-badge estimate-badge--confirmed">Confirmed</span>'}</td>
+      <td><span class="${getVerdictBadgeClass(r.verdict)}">${escapeHtml(r.verdict || "")}</span></td>
+      <td class="roas-warnings">${(r.warnings || []).map((w) => '<span class="roas-warning-chip">' + escapeHtml(w) + '</span>').join(" ")}</td>
+    </tr>`).join("");
+    tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
+  }
+}
+
+// ── Unit Economics ─────────────────────────────────────────────────────────
+
+let unitEconomicsData = null;
+let unitEconomicsStatus = "idle";
+
+async function loadUnitEconomics() {
+  const windowSel = document.getElementById("unit-economics-window");
+  const window_ = windowSel ? windowSel.value : "60d";
+  if (!VALID_ROAS_WINDOWS.includes(window_)) return;
+
+  unitEconomicsStatus = "loading";
+  const body = document.getElementById("unit-economics-table-body");
+  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading unit economics…</p>';
+
+  try {
+    const res = await fetch(`/api/reports/unit-economics?window=${window_}`, { credentials: "same-origin" });
+    if (!res.ok) {
+      unitEconomicsStatus = "error";
+      if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load unit economics.</p>';
+      return;
+    }
+    unitEconomicsData = await res.json();
+    unitEconomicsStatus = "ok";
+    renderUnitEconomicsPage();
+  } catch (err) {
+    console.error("[loadUnitEconomics]", err);
+    unitEconomicsStatus = "error";
+    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading unit economics.</p>';
+  }
+}
+
+function renderUnitEconomicsPage() {
+  const kpiGrid = document.getElementById("unit-economics-kpis");
+  const verdictEl = document.getElementById("unit-economics-verdict");
+  const tableBody = document.getElementById("unit-economics-table-body");
+
+  if (!unitEconomicsData) {
+    if (tableBody) tableBody.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">No unit economics data available.</p>';
+    renderPageExplanation("unit-economics", { forceVisible: true });
+    return;
+  }
+
+  const d = unitEconomicsData;
+  const overall = d.overall || d;
+
+  if (kpiGrid) {
+    kpiGrid.innerHTML = `
+      <div class="kpi-card"><div class="kpi-card__label">LTV/CAC</div><div class="kpi-card__value">${fmtNum(overall.ltv_to_cac || overall.ltv_cac)}x</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Payback Months</div><div class="kpi-card__value">${fmtNum(overall.payback_months)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Avg Deal ACV</div><div class="kpi-card__value">${fmtMoney(overall.avg_deal_acv || overall.average_deal_acv)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Avg Deal MRR</div><div class="kpi-card__value">${fmtMoney(overall.avg_deal_mrr || overall.average_deal_mrr)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Monthly Churn Rate</div><div class="kpi-card__value">${fmtNum((overall.monthly_churn_rate_used ?? 0) * 100, 1)}%</div></div>
+    `;
+  }
+
+  if (verdictEl) {
+    const v = overall.verdict || overall.overall_verdict || "—";
+    const explanations = {
+      SCALE: "Strong unit economics — customer acquisition is profitable at scale.",
+      HOLD: "Watch closely — not enough scale confidence yet.",
+      FIX: "Economics are weak or payback is too long.",
+      CUT: "Losing money on customer acquisition.",
+      INSUFFICIENT_DATA: "Not enough closed-won volume to produce a reliable verdict."
+    };
+    verdictEl.innerHTML = `
+      <div class="unit-economics-verdict-card">
+        <span class="${getVerdictBadgeClass(v)}">${escapeHtml(v)}</span>
+        <span class="unit-economics-verdict-explanation">${escapeHtml(explanations[v] || "")}</span>
+      </div>
+    `;
+  }
+
+  const campaigns = d.by_campaign || d.campaigns || [];
+  if (!campaigns.length) {
+    if (tableBody) tableBody.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">No campaign-level economics data.</p>';
+    return;
+  }
+
+  if (tableBody) {
+    const headerRow = `<tr>
+      <th>Campaign</th><th>Spend</th><th>Deals Won</th><th>CAC</th><th>LTV/CAC</th>
+      <th>Payback Mo.</th><th>Verdict</th>
+    </tr>`;
+    const rows = campaigns.map((r) => `<tr>
+      <td>${escapeHtml(r.campaign || "")}</td>
+      <td>${fmtMoney(r.spend)}</td>
+      <td>${fmt(r.deals_won)}</td>
+      <td>${fmtMoney(r.cac)}</td>
+      <td>${fmtNum(r.ltv_to_cac || r.ltv_cac)}x</td>
+      <td>${fmtNum(r.payback_months)}</td>
+      <td><span class="${getVerdictBadgeClass(r.verdict)}">${escapeHtml(r.verdict || "")}</span></td>
+    </tr>`).join("");
+    tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
+  }
+}
+
+// ── Churn Input ───────────────────────────────────────────────────────────
+
+let churnInputData = null;
+
+async function loadChurnInput() {
+  const currentEl = document.getElementById("churn-input-current");
+  if (currentEl) currentEl.innerHTML = '<p class="empty-state">Loading churn configuration…</p>';
+
+  try {
+    const res = await fetch("/api/admin/churn-input", { credentials: "same-origin" });
+    if (!res.ok) {
+      if (currentEl) currentEl.innerHTML = '<p class="empty-state">Failed to load churn configuration. Admin access required.</p>';
+      return;
+    }
+    churnInputData = await res.json();
+    renderChurnInputPage();
+  } catch (err) {
+    console.error("[loadChurnInput]", err);
+    if (currentEl) currentEl.innerHTML = '<p class="empty-state">Error loading churn configuration.</p>';
+  }
+}
+
+function renderChurnInputPage() {
+  const currentEl = document.getElementById("churn-input-current");
+  if (!currentEl || !churnInputData) return;
+
+  const d = churnInputData;
+  const defaultChurn = d.default_monthly_churn || 0.03;
+  const monthlyOverrides = d.monthly || {};
+  const campaignOverrides = d.campaign_overrides || {};
+
+  let html = '<div class="churn-input-summary">';
+  html += `<div class="churn-input-section"><h3>Default Monthly Churn</h3><p class="churn-input-value">${(defaultChurn * 100).toFixed(1)}%</p></div>`;
+
+  html += '<div class="churn-input-section"><h3>Monthly Overrides</h3>';
+  const monthEntries = Object.entries(monthlyOverrides);
+  if (monthEntries.length) {
+    html += '<table class="data-table churn-table"><tr><th>Month</th><th>Rate</th></tr>';
+    monthEntries.sort((a, b) => b[0].localeCompare(a[0])).forEach(([month, rate]) => {
+      html += `<tr><td>${escapeHtml(month)}</td><td>${(rate * 100).toFixed(1)}%</td></tr>`;
+    });
+    html += '</table>';
+  } else {
+    html += '<p class="empty-state">No monthly overrides configured.</p>';
+  }
+  html += '</div>';
+
+  html += '<div class="churn-input-section"><h3>Campaign Overrides</h3>';
+  const campEntries = Object.entries(campaignOverrides);
+  if (campEntries.length) {
+    html += '<table class="data-table churn-table"><tr><th>Campaign</th><th>Rate</th></tr>';
+    campEntries.forEach(([campaign, rate]) => {
+      html += `<tr><td>${escapeHtml(campaign)}</td><td>${(rate * 100).toFixed(1)}%</td></tr>`;
+    });
+    html += '</table>';
+  } else {
+    html += '<p class="empty-state">No campaign overrides configured.</p>';
+  }
+  html += '</div></div>';
+
+  currentEl.innerHTML = html;
+}
+
+async function handleChurnInputSubmit(e) {
+  e.preventDefault();
+  const errorEl = document.getElementById("churn-input-error");
+  const successEl = document.getElementById("churn-input-success");
+  if (errorEl) { errorEl.hidden = true; errorEl.textContent = ""; }
+  if (successEl) { successEl.hidden = true; successEl.textContent = ""; }
+
+  const monthInput = document.getElementById("churn-month");
+  const rateInput = document.getElementById("churn-rate");
+  const month = (monthInput ? monthInput.value : "").trim();
+  const rate = rateInput ? parseFloat(rateInput.value) : NaN;
+
+  // Validate month format YYYY-MM
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    if (errorEl) { errorEl.textContent = "Month must be in YYYY-MM format (e.g. 2026-05)."; errorEl.hidden = false; }
+    return;
+  }
+  // Validate rate between 0 and 1
+  if (isNaN(rate) || rate < 0 || rate > 1) {
+    if (errorEl) { errorEl.textContent = "Churn rate must be a number between 0 and 1 (e.g. 0.03 for 3%)."; errorEl.hidden = false; }
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/admin/churn-input", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ month, rate }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const msg = body.detail || body.error || `Server returned ${res.status}`;
+      if (errorEl) { errorEl.textContent = msg; errorEl.hidden = false; }
+      return;
+    }
+    if (successEl) { successEl.textContent = `Churn override saved: ${month} → ${(rate * 100).toFixed(1)}%`; successEl.hidden = false; }
+    // Reload config to show updated values
+    loadChurnInput();
+  } catch (err) {
+    console.error("[handleChurnInputSubmit]", err);
+    if (errorEl) { errorEl.textContent = "Network error. Please try again."; errorEl.hidden = false; }
+  }
+}
