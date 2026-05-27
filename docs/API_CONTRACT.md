@@ -2180,10 +2180,11 @@ The reviewer will reject the PR if `api/server.py` and this file disagree.
 
 These endpoints form the Revenue Truth Layer. Revenue source is HubSpot won deals.
 Spend source is Windsor / Google Ads. **Google Ads conversion value is NOT used.**
+All route paths follow the repo convention and are mounted under `/api/...`.
 
 ---
 
-### `GET /reports/roas/campaigns`
+### `GET /api/reports/roas/campaigns`
 
 **Auth:** Auth (any authenticated session)
 
@@ -2191,6 +2192,10 @@ Spend source is Windsor / Google Ads. **Google Ads conversion value is NOT used.
 | Param  | Type   | Default | Description |
 |--------|--------|---------|-------------|
 | window | string | `60d`   | Time window. Valid: `7d`, `14d`, `30d`, `60d`, `90d`, `365d` |
+
+**Validation (400):**
+- Invalid `window` values return HTTP 400 with:
+  - `"detail": "Invalid window. Valid values: 7d, 14d, 30d, 60d, 90d, 365d"`
 
 **Response (200):**
 ```json
@@ -2238,7 +2243,7 @@ Spend source is Windsor / Google Ads. **Google Ads conversion value is NOT used.
 
 ---
 
-### `GET /reports/roas/countries`
+### `GET /api/reports/roas/countries`
 
 **Auth:** Auth (any authenticated session)
 
@@ -2246,6 +2251,10 @@ Spend source is Windsor / Google Ads. **Google Ads conversion value is NOT used.
 | Param  | Type   | Default | Description |
 |--------|--------|---------|-------------|
 | window | string | `60d`   | Time window. Valid: `7d`, `14d`, `30d`, `60d`, `90d`, `365d` |
+
+**Validation (400):**
+- Invalid `window` values return HTTP 400 with:
+  - `"detail": "Invalid window. Valid values: 7d, 14d, 30d, 60d, 90d, 365d"`
 
 **Response (200):**
 ```json
@@ -2285,7 +2294,7 @@ Spend source is Windsor / Google Ads. **Google Ads conversion value is NOT used.
 
 ---
 
-### `GET /reports/unit-economics`
+### `GET /api/reports/unit-economics`
 
 **Auth:** Auth (any authenticated session)
 
@@ -2293,6 +2302,10 @@ Spend source is Windsor / Google Ads. **Google Ads conversion value is NOT used.
 | Param  | Type   | Default | Description |
 |--------|--------|---------|-------------|
 | window | string | `60d`   | Time window. Valid: `7d`, `14d`, `30d`, `60d`, `90d`, `365d` |
+
+**Validation (400):**
+- Invalid `window` values return HTTP 400 with:
+  - `"detail": "Invalid window. Valid values: 7d, 14d, 30d, 60d, 90d, 365d"`
 
 **Response (200):**
 ```json
@@ -2313,7 +2326,7 @@ Spend source is Windsor / Google Ads. **Google Ads conversion value is NOT used.
 
 ---
 
-### `GET /admin/churn-input`
+### `GET /api/admin/churn-input`
 
 **Auth:** Admin (admin role cookie or `ADMIN_API_TOKEN` token)
 
@@ -2333,7 +2346,7 @@ Spend source is Windsor / Google Ads. **Google Ads conversion value is NOT used.
 
 ---
 
-### `POST /admin/churn-input`
+### `POST /api/admin/churn-input`
 
 **Auth:** Admin (admin role cookie or `ADMIN_API_TOKEN` token)
 

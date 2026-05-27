@@ -39,6 +39,15 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 THRESHOLDS_FILE = CONFIG_DIR / "thresholds.yaml"
 
 
+def _parse_iso_datetime(value) -> datetime:
+    """Parse ISO datetime input to naive UTC-compatible datetime."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+    raise TypeError("Unsupported date value type")
+
+
 def _load_thresholds() -> dict:
     """Load ROAS thresholds from config/thresholds.yaml."""
     if not THRESHOLDS_FILE.exists():
@@ -86,28 +95,39 @@ def _get_campaign_spend(windsor_data: list, campaign: str, window_days: int) -> 
     """Get total spend for a campaign within the time window."""
     cutoff = datetime.utcnow() - timedelta(days=window_days)
     total = 0.0
+    missing_date_rows = 0
+    invalid_date_rows = 0
 
     for row in windsor_data:
         row_campaign = (row.get("campaign") or "").lower().strip()
         if row_campaign != campaign.lower().strip():
             continue
 
-        # Check date within window
         row_date = row.get("date") or row.get("source_date")
-        if row_date:
-            try:
-                if isinstance(row_date, str):
-                    parsed = datetime.fromisoformat(row_date.replace("Z", "+00:00"))
-                    if parsed.replace(tzinfo=None) < cutoff:
-                        continue
-            except (ValueError, TypeError):
-                pass
+        if not row_date:
+            missing_date_rows += 1
+            continue
+        try:
+            parsed = _parse_iso_datetime(row_date)
+            if parsed < cutoff:
+                continue
+        except (ValueError, TypeError):
+            invalid_date_rows += 1
+            continue
 
         spend = row.get("spend", 0) or row.get("cost", 0) or 0
         try:
             total += float(spend)
         except (ValueError, TypeError):
             pass
+
+    if missing_date_rows or invalid_date_rows:
+        logger.warning(
+            "Skipped %d Windsor spend rows for campaign '%s' due to missing date and %d due to invalid date",
+            missing_date_rows,
+            campaign,
+            invalid_date_rows,
+        )
 
     return total
 
@@ -116,6 +136,8 @@ def _get_country_spend(windsor_data: list, country: str, window_days: int) -> fl
     """Get total spend for a country within the time window."""
     cutoff = datetime.utcnow() - timedelta(days=window_days)
     total = 0.0
+    missing_date_rows = 0
+    invalid_date_rows = 0
 
     for row in windsor_data:
         row_country = (row.get("country") or "").lower().strip()
@@ -123,20 +145,30 @@ def _get_country_spend(windsor_data: list, country: str, window_days: int) -> fl
             continue
 
         row_date = row.get("date") or row.get("source_date")
-        if row_date:
-            try:
-                if isinstance(row_date, str):
-                    parsed = datetime.fromisoformat(row_date.replace("Z", "+00:00"))
-                    if parsed.replace(tzinfo=None) < cutoff:
-                        continue
-            except (ValueError, TypeError):
-                pass
+        if not row_date:
+            missing_date_rows += 1
+            continue
+        try:
+            parsed = _parse_iso_datetime(row_date)
+            if parsed < cutoff:
+                continue
+        except (ValueError, TypeError):
+            invalid_date_rows += 1
+            continue
 
         spend = row.get("spend", 0) or row.get("cost", 0) or 0
         try:
             total += float(spend)
         except (ValueError, TypeError):
             pass
+
+    if missing_date_rows or invalid_date_rows:
+        logger.warning(
+            "Skipped %d Windsor spend rows for country '%s' due to missing date and %d due to invalid date",
+            missing_date_rows,
+            country,
+            invalid_date_rows,
+        )
 
     return total
 
@@ -145,23 +177,34 @@ def _get_total_spend(windsor_data: list, window_days: int) -> float:
     """Get total spend across all campaigns within the time window."""
     cutoff = datetime.utcnow() - timedelta(days=window_days)
     total = 0.0
+    missing_date_rows = 0
+    invalid_date_rows = 0
 
     for row in windsor_data:
         row_date = row.get("date") or row.get("source_date")
-        if row_date:
-            try:
-                if isinstance(row_date, str):
-                    parsed = datetime.fromisoformat(row_date.replace("Z", "+00:00"))
-                    if parsed.replace(tzinfo=None) < cutoff:
-                        continue
-            except (ValueError, TypeError):
-                pass
+        if not row_date:
+            missing_date_rows += 1
+            continue
+        try:
+            parsed = _parse_iso_datetime(row_date)
+            if parsed < cutoff:
+                continue
+        except (ValueError, TypeError):
+            invalid_date_rows += 1
+            continue
 
         spend = row.get("spend", 0) or row.get("cost", 0) or 0
         try:
             total += float(spend)
         except (ValueError, TypeError):
             pass
+
+    if missing_date_rows or invalid_date_rows:
+        logger.warning(
+            "Skipped %d Windsor spend rows due to missing date and %d due to invalid date",
+            missing_date_rows,
+            invalid_date_rows,
+        )
 
     return total
 
@@ -223,22 +266,36 @@ def compute_verdict(
 
 
 def _filter_deals_by_window(deals: list, window_days: int) -> list:
-    """Filter attributed deals by closedate within the time window."""
+    """Filter attributed deals by closedate within the time window.
+
+    Conservative fallback: include deals with missing/unparseable closedate, with warning.
+    """
     cutoff = datetime.utcnow() - timedelta(days=window_days)
     filtered = []
+    missing_closedate = 0
+    invalid_closedate = 0
     for deal in deals:
         closedate = deal.get("closedate")
         if closedate:
             try:
-                if isinstance(closedate, str):
-                    parsed = datetime.fromisoformat(closedate.replace("Z", "+00:00"))
-                    if parsed.replace(tzinfo=None) >= cutoff:
-                        filtered.append(deal)
-                        continue
+                parsed = _parse_iso_datetime(closedate)
+                if parsed >= cutoff:
+                    filtered.append(deal)
+                continue
             except (ValueError, TypeError):
-                pass
-        # If no valid date, include (conservative)
+                invalid_closedate += 1
+                filtered.append(deal)
+                continue
+        missing_closedate += 1
         filtered.append(deal)
+
+    if missing_closedate or invalid_closedate:
+        logger.warning(
+            "Included %d deals with missing closedate and %d with invalid closedate in %dd window fallback",
+            missing_closedate,
+            invalid_closedate,
+            window_days,
+        )
     return filtered
 
 

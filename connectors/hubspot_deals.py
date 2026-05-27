@@ -34,6 +34,7 @@ HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
 HUBSPOT_API_BASE_URL = "https://api.hubapi.com"
 MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 2
+MAX_SEARCH_PAGES = 100
 
 # Deal Won / Payment Received — confirmed HubSpot stage ID
 WON_DEAL_STAGE_ID = "326093516"
@@ -65,8 +66,10 @@ def _get_headers():
     """Return authorization headers for HubSpot API."""
     if not HUBSPOT_API_KEY:
         raise RuntimeError("HUBSPOT_API_KEY is not set")
+    bearer_scheme = "Bearer"
+    bearer_token = f"{bearer_scheme} {HUBSPOT_API_KEY}"
     return {
-        "Authorization": "Bea" + "rer " + HUBSPOT_API_KEY,
+        "Authorization": bearer_token,
         "Content-Type": "application/json",
     }
 
@@ -191,6 +194,8 @@ def pull_won_deals(days_back: int = 365) -> list:
 
     Filters on dealstage = 326093516 (Deal Won / Payment Received).
     Resolves associated contact fields where possible.
+    Known limitation: contact enrichment is currently per-deal (N+1 API pattern).
+    Pagination safeguards cap pages and stop if cursor does not advance.
     Saves normalized output to data/hubspot_won_deals.json.
 
     Returns list of normalized deal dicts.
@@ -201,10 +206,20 @@ def pull_won_deals(days_back: int = 365) -> list:
 
     deals = []
     after = None
+    pages_fetched = 0
 
     search_url = f"{HUBSPOT_API_BASE_URL}/crm/v3/objects/deals/search"
 
     while True:
+        pages_fetched += 1
+        if pages_fetched > MAX_SEARCH_PAGES:
+            logger.warning(
+                "Stopped HubSpot pagination after %d pages (MAX_SEARCH_PAGES=%d)",
+                pages_fetched - 1,
+                MAX_SEARCH_PAGES,
+            )
+            break
+
         payload = {
             "filterGroups": [
                 {
@@ -248,7 +263,15 @@ def pull_won_deals(days_back: int = 365) -> list:
         # Pagination
         paging = data.get("paging")
         if paging and paging.get("next"):
-            after = paging["next"].get("after")
+            next_after = paging["next"].get("after")
+            if not next_after:
+                break
+            if str(next_after) == str(after):
+                logger.warning(
+                    "Stopping HubSpot pagination: cursor did not advance (after=%s)", after
+                )
+                break
+            after = next_after
         else:
             break
 

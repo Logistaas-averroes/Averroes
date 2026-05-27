@@ -14,6 +14,7 @@ Expected output:
 
 import json
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # Ensure project root is on path
@@ -143,6 +144,21 @@ def main():
     # Step 6: Validation checks
     print("\n[6] Validation checks...")
     errors = []
+
+    # Window filter regression check (old deals must be excluded from 60d window)
+    from analysis.roas_calculator import _filter_deals_by_window
+    now = datetime.utcnow()
+    sample_window_deals = [
+        {"deal_id": "recent", "closedate": (now - timedelta(days=5)).isoformat() + "Z"},
+        {"deal_id": "old", "closedate": (now - timedelta(days=120)).isoformat() + "Z"},
+    ]
+    filtered_ids = {
+        d.get("deal_id") for d in _filter_deals_by_window(sample_window_deals, window_days=60)
+    }
+    if "old" in filtered_ids:
+        errors.append("Window filter regression: old deal included in 60d window")
+    if "recent" not in filtered_ids:
+        errors.append("Window filter regression: recent deal excluded in 60d window")
 
     # Check all campaign rows have attribution_confidence
     for camp in all_roas:

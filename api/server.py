@@ -5705,17 +5705,30 @@ def _parse_window(window: str) -> int:
     valid_windows = {"7d": 7, "14d": 14, "30d": 30, "60d": 60, "90d": 90, "365d": 365}
     if window in valid_windows:
         return valid_windows[window]
-    # Try numeric fallback
-    try:
-        days = int(window.replace("d", ""))
-        if 1 <= days <= 365:
-            return days
-    except (ValueError, TypeError):
-        pass
-    return 60  # default
+    raise HTTPException(
+        status_code=400,
+        detail="Invalid window. Valid values: 7d, 14d, 30d, 60d, 90d, 365d",
+    )
 
 
-@app.get("/reports/roas/campaigns")
+def _dominant_attribution_from_campaigns(campaigns: list[dict]) -> str:
+    """Derive overall attribution confidence, weighted by deals_won."""
+    weighted = {}
+    for campaign in campaigns:
+        confidence = campaign.get("attribution_confidence") or "tier_3_spend_weighted"
+        weight = campaign.get("deals_won", 0) or 0
+        try:
+            weight = int(weight)
+        except (ValueError, TypeError):
+            weight = 0
+        weighted[confidence] = weighted.get(confidence, 0) + (weight if weight > 0 else 1)
+
+    if not weighted:
+        return "tier_3_spend_weighted"
+    return max(weighted, key=weighted.get)
+
+
+@app.get("/api/reports/roas/campaigns")
 async def get_roas_campaigns(
     window: str = Query(default="60d"),
     _user=Depends(require_auth),
@@ -5745,7 +5758,7 @@ async def get_roas_campaigns(
     }
 
 
-@app.get("/reports/roas/countries")
+@app.get("/api/reports/roas/countries")
 async def get_roas_countries(
     window: str = Query(default="60d"),
     _user=Depends(require_auth),
@@ -5775,7 +5788,7 @@ async def get_roas_countries(
     }
 
 
-@app.get("/reports/unit-economics")
+@app.get("/api/reports/unit-economics")
 async def get_unit_economics(
     window: str = Query(default="60d"),
     _user=Depends(require_auth),
@@ -5815,9 +5828,8 @@ async def get_unit_economics(
 
     # Overall verdict
     from analysis.roas_calculator import compute_verdict
-    overall_verdict = compute_verdict(
-        ltv_cac, payback, total_deals, "tier_2_source_tag"
-    )
+    overall_attribution = _dominant_attribution_from_campaigns(campaigns)
+    overall_verdict = compute_verdict(ltv_cac, payback, total_deals, overall_attribution)
 
     return {
         "window": f"{window_days}d",
@@ -5834,7 +5846,7 @@ async def get_unit_economics(
     }
 
 
-@app.get("/admin/churn-input")
+@app.get("/api/admin/churn-input")
 async def get_churn_input(
     _user=Depends(check_admin_or_token),
 ):
@@ -5855,7 +5867,7 @@ class ChurnInputUpdate(BaseModel):
     rate: float
 
 
-@app.post("/admin/churn-input")
+@app.post("/api/admin/churn-input")
 async def update_churn_input(
     payload: ChurnInputUpdate,
     _user=Depends(check_admin_or_token),
