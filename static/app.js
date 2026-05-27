@@ -6999,9 +6999,9 @@ function getVerdictBadgeClass(verdict) {
 
 function getAttributionBadge(confidence) {
   switch (confidence) {
-    case "tier_1_gclid":          return '<span class="attribution-badge attribution-badge--tier1" title="Click-level match: revenue matched to ad interaction using GCLID evidence">Exact GCLID</span>';
-    case "tier_2_source_tag":     return '<span class="attribution-badge attribution-badge--tier2" title="Source tag match: revenue matched using HubSpot paid-search/campaign tags">Source Tag</span>';
-    case "tier_3_spend_weighted": return '<span class="attribution-badge attribution-badge--tier3" title="Estimated: revenue allocated using fallback spend-weighting. Use directionally, not as final truth.">Estimate</span>';
+    case "tier_1_gclid":          return '<span class="attribution-badge attribution-badge--tier1" title="Click-level match: revenue matched to ad interaction using GCLID evidence" aria-label="Exact GCLID: click-level match">Exact GCLID</span>';
+    case "tier_2_source_tag":     return '<span class="attribution-badge attribution-badge--tier2" title="Source tag match: revenue matched using HubSpot paid-search/campaign tags" aria-label="Source Tag: HubSpot paid-search/campaign tag match">Source Tag</span>';
+    case "tier_3_spend_weighted": return '<span class="attribution-badge attribution-badge--tier3" title="Estimated: revenue allocated using fallback spend-weighting. Use directionally, not as final truth." aria-label="Estimate: fallback allocation, use directionally">Estimate</span>';
     default: return '<span class="attribution-badge">' + escapeHtml(confidence || "unknown") + '</span>';
   }
 }
