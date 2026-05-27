@@ -5694,3 +5694,212 @@ def api_system_status_war_room(
             "data": result,
         }
     return result
+
+
+# ---------------------------------------------------------------------------
+# ROAS & Revenue Truth Endpoints (PR-ADS-080A)
+# ---------------------------------------------------------------------------
+
+def _parse_window(window: str) -> int:
+    """Parse window query parameter (e.g., '60d') to integer days."""
+    valid_windows = {"7d": 7, "14d": 14, "30d": 30, "60d": 60, "90d": 90, "365d": 365}
+    if window in valid_windows:
+        return valid_windows[window]
+    # Try numeric fallback
+    try:
+        days = int(window.replace("d", ""))
+        if 1 <= days <= 365:
+            return days
+    except (ValueError, TypeError):
+        pass
+    return 60  # default
+
+
+@app.get("/reports/roas/campaigns")
+async def get_roas_campaigns(
+    window: str = Query(default="60d"),
+    _user=Depends(require_auth),
+):
+    """Campaign-level ROAS report.
+
+    Revenue source: HubSpot won deals.
+    Spend source: Windsor / Google Ads.
+    Google Ads conversion value is NOT used.
+    """
+    from analysis.roas_calculator import compute_all_campaign_roas
+
+    window_days = _parse_window(window)
+
+    try:
+        campaigns = compute_all_campaign_roas(window_days=window_days)
+    except Exception as exc:
+        log.error("ROAS campaign computation failed: %s", exc)
+        raise HTTPException(status_code=500, detail="ROAS computation failed") from exc
+
+    return {
+        "window": f"{window_days}d",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_truth": "hubspot_won_deals_plus_windsor_spend",
+        "google_ads_conversion_value_used": False,
+        "campaigns": campaigns,
+    }
+
+
+@app.get("/reports/roas/countries")
+async def get_roas_countries(
+    window: str = Query(default="60d"),
+    _user=Depends(require_auth),
+):
+    """Country-level ROAS report.
+
+    Hard rule: country_level_estimate = true until GCLID is fully wired.
+    All rows include attribution_confidence.
+    """
+    from analysis.roas_calculator import compute_all_country_roas
+
+    window_days = _parse_window(window)
+
+    try:
+        countries = compute_all_country_roas(window_days=window_days)
+    except Exception as exc:
+        log.error("ROAS country computation failed: %s", exc)
+        raise HTTPException(status_code=500, detail="ROAS computation failed") from exc
+
+    return {
+        "window": f"{window_days}d",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_truth": "hubspot_won_deals_plus_windsor_spend",
+        "google_ads_conversion_value_used": False,
+        "country_level_estimate": True,
+        "countries": countries,
+    }
+
+
+@app.get("/reports/unit-economics")
+async def get_unit_economics(
+    window: str = Query(default="60d"),
+    _user=Depends(require_auth),
+):
+    """Unit economics report: LTV/CAC, payback, avg deal values."""
+    from analysis.roas_calculator import compute_all_campaign_roas
+    from connectors.hubspot_churn import get_monthly_churn
+
+    window_days = _parse_window(window)
+
+    try:
+        campaigns = compute_all_campaign_roas(window_days=window_days)
+    except Exception as exc:
+        log.error("Unit economics computation failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Unit economics computation failed") from exc
+
+    # Aggregate overall
+    total_spend = sum(c.get("spend", 0) for c in campaigns)
+    total_deals = sum(c.get("deals_won", 0) for c in campaigns)
+    total_acv = sum(c.get("acv_revenue", 0) for c in campaigns)
+    total_mrr = sum(c.get("mrr_revenue", 0) for c in campaigns)
+    total_ltv = sum(c.get("ltv_revenue", 0) for c in campaigns)
+
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    churn_info = get_monthly_churn(current_month)
+    churn_rate = churn_info["monthly_churn_rate"]
+
+    from analysis.unit_economics import compute_cac, compute_ltv_to_cac, compute_payback_months
+
+    avg_deal_acv = round(total_acv / total_deals) if total_deals > 0 else 0
+    avg_deal_mrr = round(total_mrr / total_deals) if total_deals > 0 else 0
+    avg_ltv = total_ltv / total_deals if total_deals > 0 else 0
+
+    cac = compute_cac(total_spend, total_deals)
+    ltv_cac = compute_ltv_to_cac(avg_ltv, cac) if cac else None
+    payback = compute_payback_months(cac, avg_deal_mrr) if cac and avg_deal_mrr > 0 else None
+
+    # Overall verdict
+    from analysis.roas_calculator import compute_verdict
+    overall_verdict = compute_verdict(
+        ltv_cac, payback, total_deals, "tier_2_source_tag"
+    )
+
+    return {
+        "window": f"{window_days}d",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "overall": {
+            "ltv_to_cac": round(ltv_cac, 2) if ltv_cac else None,
+            "payback_months": round(payback, 1) if payback else None,
+            "avg_deal_acv": avg_deal_acv,
+            "avg_deal_mrr": avg_deal_mrr,
+            "monthly_churn_rate_used": churn_rate,
+            "verdict": overall_verdict,
+        },
+        "by_campaign": campaigns,
+    }
+
+
+@app.get("/admin/churn-input")
+async def get_churn_input(
+    _user=Depends(check_admin_or_token),
+):
+    """Return current churn configuration as JSON."""
+    from connectors.hubspot_churn import load_churn_input
+
+    try:
+        config = load_churn_input()
+    except Exception as exc:
+        log.error("Failed to load churn config: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to load churn config") from exc
+
+    return config
+
+
+class ChurnInputUpdate(BaseModel):
+    month: str
+    rate: float
+
+
+@app.post("/admin/churn-input")
+async def update_churn_input(
+    payload: ChurnInputUpdate,
+    _user=Depends(check_admin_or_token),
+):
+    """Update monthly churn rate in config/churn_input.yaml.
+
+    Validation:
+      - Month format must be YYYY-MM.
+      - Rate must be 0 <= rate <= 1.
+      - Local config write only. No HubSpot write.
+    """
+    import re as _re
+
+    # Validate month format
+    if not _re.match(r"^\d{4}-\d{2}$", payload.month):
+        raise HTTPException(status_code=400, detail="month must be YYYY-MM format")
+
+    # Validate rate bounds
+    if payload.rate < 0 or payload.rate > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="rate must be between 0 and 1",
+        )
+
+    # Update local YAML
+    config_path = Path(__file__).parent.parent / "config" / "churn_input.yaml"
+
+    try:
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+        else:
+            config = {"default_monthly_churn": 0.03, "monthly": {}, "campaign_overrides": {}}
+
+        if "monthly" not in config:
+            config["monthly"] = {}
+
+        config["monthly"][payload.month] = payload.rate
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+    except Exception as exc:
+        log.error("Failed to update churn config: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to update churn config") from exc
+
+    return {"ok": True}
