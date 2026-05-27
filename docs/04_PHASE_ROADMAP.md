@@ -91,6 +91,23 @@ All of these must be true:
   - `scripts/smoke_test_roas_snapshot.py` — smoke test
   - `tests/test_roas_snapshot_service.py` — unit tests
 
+### GCLID Readiness Audit & ROAS Confidence Layer (PR-ADS-081/082)
+
+**PR-ADS-081/082 — GCLID Readiness Audit & ROAS Confidence Layer**
+- **Status:** Read-only attribution trust layer
+- **Depends on:** PR-ADS-080A (Revenue Truth Layer), PR-ADS-080B (Revenue-First Menu), PR-ADS-080C (ROAS Snapshots)
+- **Blocks:** PR-ADS-071 (Page Help Panels)
+- **Files:**
+  - `analysis/gclid_readiness_audit.py` — GCLID bridge readiness audit
+  - `analysis/attribution_confidence.py` — confidence labels and summaries
+  - `api/server.py` — two read-only attribution endpoints
+  - `static/index.html` — GCLID Attribution page readiness/confidence UI
+  - `static/app.js` — loaders and enhanced attribution badges
+  - `static/styles.css` — readiness and confidence styles
+  - `tests/test_gclid_readiness_audit.py` — readiness audit tests
+  - `tests/test_attribution_confidence.py` — confidence layer tests
+  - `docs/26_ATTRIBUTION_CONFIDENCE_MODEL.md` — confidence model documentation
+
 ### What it adds
 **OCT Uploader** (`connectors/oct_uploader.py`)
 - Reads HubSpot deal stage changes

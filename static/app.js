@@ -963,6 +963,8 @@ function loadPage(page) {
       loadGclidAttribution({ reset: true });
       loadGclidCoverageForAttribution();
       loadGclidQuality();
+      loadGclidReadiness();
+      loadAttributionConfidenceSummary();
       break;
     case "opportunities": loadOpportunities(); break;
     case "scheduler":     loadScheduler();     break;
@@ -6818,6 +6820,168 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 });
 
+// ── GCLID Readiness & Attribution Confidence (PR-ADS-081/082) ─────────────
+
+async function loadGclidReadiness() {
+  const container = document.getElementById("gclid-readiness-summary");
+  const blockersEl = document.getElementById("gclid-readiness-blockers");
+  const checksEl = document.getElementById("gclid-readiness-next-checks");
+  if (!container) return;
+
+  container.innerHTML = '<p class="empty-state">Loading GCLID readiness…</p>';
+  if (blockersEl) blockersEl.innerHTML = "";
+  if (checksEl) checksEl.innerHTML = "";
+
+  try {
+    const data = await fetchJSON("/api/attribution/gclid-readiness?window=60d");
+    if (!data || data.error) {
+      container.innerHTML = '<p class="empty-state">Could not load GCLID readiness audit.</p>';
+      return;
+    }
+
+    const status = data.readiness_status || "UNKNOWN";
+    const score = data.readiness_score ?? 0;
+    const summary = data.summary || {};
+
+    const statusCls = status === "READY" ? "readiness-status--ready"
+      : status === "PARTIAL" ? "readiness-status--partial"
+      : status === "NOT_READY" ? "readiness-status--not-ready"
+      : "readiness-status--unknown";
+
+    container.innerHTML = `
+      <div class="readiness-cards">
+        <div class="readiness-card">
+          <div class="readiness-card__label">Readiness Status</div>
+          <div class="readiness-card__value"><span class="readiness-status-badge ${statusCls}">${escapeHtml(status)}</span></div>
+        </div>
+        <div class="readiness-card">
+          <div class="readiness-card__label">Readiness Score</div>
+          <div class="readiness-card__value">${score}/100</div>
+        </div>
+        <div class="readiness-card">
+          <div class="readiness-card__label">Won Deals</div>
+          <div class="readiness-card__value">${summary.won_deals || 0}</div>
+        </div>
+        <div class="readiness-card">
+          <div class="readiness-card__label">Deals with GCLID</div>
+          <div class="readiness-card__value">${(summary.deals_with_direct_gclid || 0) + (summary.deals_with_contact_gclid || 0)}</div>
+        </div>
+        <div class="readiness-card">
+          <div class="readiness-card__label">Windsor GCLID Coverage</div>
+          <div class="readiness-card__value">${summary.windsor_rows_with_gclid || 0} rows</div>
+        </div>
+        <div class="readiness-card">
+          <div class="readiness-card__label">Exact Matches Possible</div>
+          <div class="readiness-card__value">${summary.tier_1_possible_matches || 0}</div>
+        </div>
+        <div class="readiness-card">
+          <div class="readiness-card__label">Source Tag Matches</div>
+          <div class="readiness-card__value">${summary.tier_2_source_tag_matches || 0}</div>
+        </div>
+        <div class="readiness-card">
+          <div class="readiness-card__label">Estimated Rows</div>
+          <div class="readiness-card__value">${summary.tier_3_estimated_required || 0}</div>
+        </div>
+      </div>
+      <p class="readiness-note">${status === "READY" ? "GCLID bridge is ready for exact attribution." : "GCLID bridge is not fully wired yet. Current ROAS remains partly directional."}</p>
+    `;
+
+    // Render blockers
+    const blockers = data.blockers || [];
+    if (blockersEl && blockers.length > 0) {
+      blockersEl.innerHTML = `
+        <h4 class="readiness-section-title">Blockers</h4>
+        <div class="blocker-cards">
+          ${blockers.map(b => `
+            <div class="blocker-card blocker-card--${escapeHtml(b.severity || "low")}">
+              <span class="blocker-severity">${escapeHtml((b.severity || "low").toUpperCase())}</span>
+              <span class="blocker-message">${escapeHtml(b.message)}</span>
+            </div>
+          `).join("")}
+        </div>
+      `;
+    }
+
+    // Render next checks
+    const checks = data.next_checks || [];
+    if (checksEl && checks.length > 0) {
+      checksEl.innerHTML = `
+        <h4 class="readiness-section-title">Next Checks</h4>
+        <ul class="next-checks-list">
+          ${checks.map(c => `<li>${escapeHtml(c)}</li>`).join("")}
+        </ul>
+      `;
+    }
+  } catch (err) {
+    console.error("[loadGclidReadiness]", err);
+    container.innerHTML = '<p class="empty-state">Error loading GCLID readiness.</p>';
+  }
+}
+
+async function loadAttributionConfidenceSummary() {
+  const container = document.getElementById("attribution-confidence-summary");
+  if (!container) return;
+
+  container.innerHTML = '<p class="empty-state">Loading confidence summary…</p>';
+
+  try {
+    const data = await fetchJSON("/api/attribution/confidence-summary?window=60d");
+    if (!data || data.error) {
+      container.innerHTML = '<p class="empty-state">Could not load attribution confidence.</p>';
+      return;
+    }
+
+    const overall = data.overall_confidence || "UNKNOWN";
+    const summary = data.summary || {};
+    const message = data.message || "";
+
+    const overallCls = overall === "HIGH" ? "confidence-level--high"
+      : overall === "MEDIUM" ? "confidence-level--medium"
+      : overall === "LOW" ? "confidence-level--low"
+      : "confidence-level--unknown";
+
+    const t1Pct = ((summary.tier_1_share || 0) * 100).toFixed(1);
+    const t2Pct = ((summary.tier_2_share || 0) * 100).toFixed(1);
+    const t3Pct = ((summary.tier_3_share || 0) * 100).toFixed(1);
+
+    container.innerHTML = `
+      <div class="confidence-cards">
+        <div class="confidence-card">
+          <div class="confidence-card__label">Overall Confidence</div>
+          <div class="confidence-card__value"><span class="confidence-level-badge ${overallCls}">${escapeHtml(overall)}</span></div>
+        </div>
+        <div class="confidence-card">
+          <div class="confidence-card__label">Campaign Rows</div>
+          <div class="confidence-card__value">${summary.campaign_rows || 0}</div>
+        </div>
+        <div class="confidence-card">
+          <div class="confidence-card__label">Country Rows</div>
+          <div class="confidence-card__value">${summary.country_rows || 0}</div>
+        </div>
+        <div class="confidence-card confidence-card--tier1">
+          <div class="confidence-card__label"><span class="attribution-badge attribution-badge--tier1">Exact GCLID</span></div>
+          <div class="confidence-card__value">${summary.tier_1_count || 0} <small>(${t1Pct}%)</small></div>
+          <div class="confidence-card__desc">Click-level match</div>
+        </div>
+        <div class="confidence-card confidence-card--tier2">
+          <div class="confidence-card__label"><span class="attribution-badge attribution-badge--tier2">Source Tag</span></div>
+          <div class="confidence-card__value">${summary.tier_2_count || 0} <small>(${t2Pct}%)</small></div>
+          <div class="confidence-card__desc">HubSpot paid-search/campaign tag</div>
+        </div>
+        <div class="confidence-card confidence-card--tier3">
+          <div class="confidence-card__label"><span class="attribution-badge attribution-badge--tier3">Estimate</span></div>
+          <div class="confidence-card__value">${summary.tier_3_count || 0} <small>(${t3Pct}%)</small></div>
+          <div class="confidence-card__desc">Fallback allocation — directional only</div>
+        </div>
+      </div>
+      <p class="confidence-message">${escapeHtml(message)}</p>
+    `;
+  } catch (err) {
+    console.error("[loadAttributionConfidenceSummary]", err);
+    container.innerHTML = '<p class="empty-state">Error loading confidence summary.</p>';
+  }
+}
+
 // ── ROAS & Revenue Pages (PR-ADS-080B) ────────────────────────────────────
 
 const VALID_ROAS_WINDOWS = ["7d", "14d", "30d", "60d", "90d", "365d"];
@@ -6835,9 +6999,9 @@ function getVerdictBadgeClass(verdict) {
 
 function getAttributionBadge(confidence) {
   switch (confidence) {
-    case "tier_1_gclid":          return '<span class="attribution-badge attribution-badge--tier1">Exact GCLID</span>';
-    case "tier_2_source_tag":     return '<span class="attribution-badge attribution-badge--tier2">Source Tag</span>';
-    case "tier_3_spend_weighted": return '<span class="attribution-badge attribution-badge--tier3">Estimate</span>';
+    case "tier_1_gclid":          return '<span class="attribution-badge attribution-badge--tier1" title="Click-level match: revenue matched to ad interaction using GCLID evidence" aria-label="Exact GCLID: click-level match">Exact GCLID</span>';
+    case "tier_2_source_tag":     return '<span class="attribution-badge attribution-badge--tier2" title="Source tag match: revenue matched using HubSpot paid-search/campaign tags" aria-label="Source Tag: HubSpot paid-search/campaign tag match">Source Tag</span>';
+    case "tier_3_spend_weighted": return '<span class="attribution-badge attribution-badge--tier3" title="Estimated: revenue allocated using fallback spend-weighting. Use directionally, not as final truth." aria-label="Estimate: fallback allocation, use directionally">Estimate</span>';
     default: return '<span class="attribution-badge">' + escapeHtml(confidence || "unknown") + '</span>';
   }
 }
