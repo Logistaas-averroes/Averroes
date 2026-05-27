@@ -1,5 +1,5 @@
 """
-PR-ADS-069 — Sidebar UX Grouping & Page Rename
+PR-ADS-080B — Revenue-First Menu Restructure & ROAS Frontend
 Tests that the sidebar HTML has correct structure, groups, labels, and route keys.
 """
 from pathlib import Path
@@ -15,7 +15,6 @@ REQUIRED_ROUTE_KEYS = [
     "reports",
     "campaigns",
     "search-terms",
-    "ngrams",
     "geo",
     "keywords",
     "leads",
@@ -23,28 +22,35 @@ REQUIRED_ROUTE_KEYS = [
     "gclid-attribution",
     "waste",
     "opportunities",
+    "roas-campaigns",
+    "roas-countries",
+    "unit-economics",
+    "churn-input",
     "scheduler",
     "health",
     "backfill",
-    "historical-intelligence",
 ]
 
 NEW_VISIBLE_LABELS = [
-    "Search Term Universe",
-    "Search Pattern Analysis",
-    "Country Performance",
-    "Keyword Performance",
+    "Keywords",
+    "Countries",
+    "Search Terms",
     "Flagged Waste Terms",
+    "In Progress Leads",
     "Data Runs",
     "System Status",
     "Admin Backfill",
-    "Historical Trends",
+    "ROAS by Campaign",
+    "ROAS by Country",
+    "Unit Economics",
+    "Churn Input",
 ]
 
 SIDEBAR_GROUPS = [
     "Command Center",
-    "Evidence",
-    "Review &amp; Quality",
+    "Platform Evidence",
+    "Lead Intelligence",
+    "Revenue &amp; Attribution",
     "Admin",
 ]
 
@@ -61,13 +67,18 @@ def test_all_route_keys_exist():
 
 
 def test_no_duplicate_route_keys():
-    """No data-page value should appear more than once."""
-    matches = re.findall(r'data-page="([^"]+)"', HTML)
+    """No data-page value should appear more than once in the sidebar nav."""
+    sidebar_match = re.search(
+        r'<nav id="sidebar".*?</nav>', HTML, re.DOTALL
+    )
+    assert sidebar_match, "Could not find sidebar nav element"
+    sidebar = sidebar_match.group(0)
+    matches = re.findall(r'data-page="([^"]+)"', sidebar)
     seen = {}
     for m in matches:
         seen[m] = seen.get(m, 0) + 1
     duplicates = {k: v for k, v in seen.items() if v > 1}
-    assert not duplicates, f"Duplicate data-page keys: {duplicates}"
+    assert not duplicates, f"Duplicate data-page keys in sidebar: {duplicates}"
 
 
 def test_sidebar_groups_exist():
@@ -88,9 +99,8 @@ def test_admin_ids_still_exist():
         assert f'id="{id_val}"' in HTML, f"Missing admin ID: {id_val}"
 
 
-def test_old_confusing_labels_removed_from_sidebar():
-    """Old labels should not appear as nav-item labels in the sidebar."""
-    # Extract the sidebar section only
+def test_old_duplicate_menu_items_removed():
+    """Old separate Search Term Universe / Search Pattern Analysis menu items must not exist as distinct nav items."""
     sidebar_match = re.search(
         r'<nav id="sidebar".*?</nav>', HTML, re.DOTALL
     )
@@ -98,20 +108,73 @@ def test_old_confusing_labels_removed_from_sidebar():
     sidebar = sidebar_match.group(0)
 
     old_labels_in_sidebar = [
-        ">Search Terms<",      # replaced by Search Term Universe
-        ">N-Grams<",           # replaced by Search Pattern Analysis
-        ">Geo<",               # replaced by Country Performance
-        ">Keywords<",          # replaced by Keyword Performance
-        ">Waste Terms<",       # replaced by Flagged Waste Terms
-        ">Scheduler<",         # replaced by Data Runs
-        ">System Health<",     # replaced by System Status
-        ">Historical Backfill<",  # replaced by Admin Backfill
-        ">Historical Intelligence<",  # replaced by Historical Trends
+        ">Search Term Universe<",
+        ">Search Pattern Analysis<",
+        ">Country Performance<",
+        ">Keyword Performance<",
     ]
     for label in old_labels_in_sidebar:
         assert label not in sidebar, (
             f"Old label still in sidebar: {label}"
         )
+
+
+def test_revenue_attribution_section_exists():
+    """Revenue & Attribution section must exist in the sidebar."""
+    assert "Revenue &amp; Attribution" in HTML
+
+
+def test_roas_pages_exist():
+    """ROAS by Campaign and ROAS by Country pages must have containers."""
+    assert 'id="page-roas-campaigns"' in HTML
+    assert 'id="page-roas-countries"' in HTML
+
+
+def test_unit_economics_page_exists():
+    """Unit Economics page must have a container."""
+    assert 'id="page-unit-economics"' in HTML
+
+
+def test_churn_input_page_exists():
+    """Churn Input page must have a container in Admin."""
+    assert 'id="page-churn-input"' in HTML
+
+
+def test_search_terms_has_tabs():
+    """Search Terms page must have tab buttons for search terms and patterns."""
+    page_match = re.search(
+        r'id="page-search-terms".*?</section>', HTML, re.DOTALL
+    )
+    assert page_match, "Could not find page-search-terms section"
+    page = page_match.group(0)
+    assert "search-terms-tab" in page, "Missing tab buttons in Search Terms page"
+    assert 'data-tab="search-terms"' in page or "Search Terms" in page
+    assert 'data-tab="patterns"' in page or "Patterns" in page
+
+
+def test_frontend_uses_api_reports_routes():
+    """Frontend JS must use /api/reports/... not /reports/..."""
+    js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    # Must contain /api/reports/ references
+    assert "/api/reports/roas/campaigns" in js
+    assert "/api/reports/roas/countries" in js
+    assert "/api/reports/unit-economics" in js
+    assert "/api/admin/churn-input" in js
+    # Must NOT use bare /reports/ routes for ROAS
+    bare_roas = re.findall(r'["\']\/reports\/roas', js)
+    assert not bare_roas, f"Found bare /reports/roas routes (should use /api/reports/): {bare_roas}"
+
+
+def test_country_roas_estimate_warning():
+    """Country ROAS page must include the estimate warning copy."""
+    page_match = re.search(
+        r'id="page-roas-countries".*?</section>', HTML, re.DOTALL
+    )
+    assert page_match, "Could not find page-roas-countries section"
+    page = page_match.group(0)
+    assert "Country-level ROAS is an estimate" in page, (
+        "Missing country-level estimate warning in ROAS by Country page"
+    )
 
 
 def test_section_labels_are_non_clickable():

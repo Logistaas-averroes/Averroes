@@ -3966,3 +3966,338 @@ a {
   display: flex;
   gap: var(--space-2);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PR-ADS-080B — ROAS & Revenue Pages
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Search Terms Tabs ──────────────────────────────────────────────────── */
+
+.search-terms-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--color-border, #e2e8f0);
+  margin-bottom: var(--space-4, 1rem);
+}
+
+.search-terms-tab {
+  padding: var(--space-2, 0.5rem) var(--space-4, 1rem);
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--color-text-muted, #64748b);
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.search-terms-tab:hover {
+  color: var(--color-text, #1e293b);
+}
+
+.search-terms-tab.active {
+  color: var(--color-primary, #3b82f6);
+  border-bottom-color: var(--color-primary, #3b82f6);
+  font-weight: 600;
+}
+
+.search-terms-tab-pane {
+  display: none;
+}
+
+.search-terms-tab-pane.active {
+  display: block;
+}
+
+/* ── ROAS Window Controls ───────────────────────────────────────────────── */
+
+.roas-window-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3, 0.75rem);
+  margin-bottom: var(--space-4, 1rem);
+}
+
+.roas-window-controls label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-text-muted, #64748b);
+}
+
+.roas-window-controls select {
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  background: var(--color-surface, #fff);
+}
+
+/* ── ROAS Estimate Warning ──────────────────────────────────────────────── */
+
+.roas-estimate-warning {
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-left: 4px solid #f59e0b;
+  border-radius: 6px;
+  padding: var(--space-3, 0.75rem) var(--space-4, 1rem);
+  margin-bottom: var(--space-4, 1rem);
+  font-size: 0.85rem;
+  color: #92400e;
+  line-height: 1.5;
+}
+
+/* ── ROAS Tables ────────────────────────────────────────────────────────── */
+
+.roas-table {
+  width: 100%;
+  font-size: 0.8rem;
+}
+
+.roas-table th {
+  white-space: nowrap;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.roas-table td {
+  white-space: nowrap;
+}
+
+.roas-warnings {
+  white-space: normal;
+  max-width: 200px;
+}
+
+.roas-warning-chip {
+  display: inline-block;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 0.7rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  margin: 0.1rem;
+}
+
+/* ── ROAS Verdict Badges ────────────────────────────────────────────────── */
+
+.roas-verdict-badge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.roas-verdict-badge--scale {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.roas-verdict-badge--hold {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+.roas-verdict-badge--fix {
+  background: #fed7aa;
+  color: #9a3412;
+}
+
+.roas-verdict-badge--cut {
+  background: #fecaca;
+  color: #991b1b;
+}
+
+.roas-verdict-badge--insufficient {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+/* ── Attribution Badges ─────────────────────────────────────────────────── */
+
+.attribution-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.attribution-badge--tier1 {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.attribution-badge--tier2 {
+  background: #e0e7ff;
+  color: #4338ca;
+}
+
+.attribution-badge--tier3 {
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1px dashed #94a3b8;
+}
+
+/* ── Estimate Badge ─────────────────────────────────────────────────────── */
+
+.estimate-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.estimate-badge--confirmed {
+  background: #dcfce7;
+  color: #166534;
+}
+
+/* ── Unit Economics ─────────────────────────────────────────────────────── */
+
+.unit-economics-verdict-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3, 0.75rem);
+  padding: var(--space-3, 0.75rem) var(--space-4, 1rem);
+  background: var(--color-surface-alt, #f8fafc);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 8px;
+  margin-bottom: var(--space-4, 1rem);
+}
+
+.unit-economics-verdict-explanation {
+  font-size: 0.85rem;
+  color: var(--color-text-muted, #64748b);
+}
+
+/* ── Churn Input ────────────────────────────────────────────────────────── */
+
+.churn-input-notice {
+  background: #eff6ff;
+  border: 1px solid #93c5fd;
+  border-left: 4px solid #3b82f6;
+  border-radius: 6px;
+  padding: var(--space-3, 0.75rem) var(--space-4, 1rem);
+  margin-bottom: var(--space-4, 1rem);
+  font-size: 0.85rem;
+  color: #1e40af;
+  line-height: 1.5;
+}
+
+.churn-input-summary {
+  display: grid;
+  gap: var(--space-4, 1rem);
+}
+
+.churn-input-section h3 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: var(--space-2, 0.5rem);
+  color: var(--color-text, #1e293b);
+}
+
+.churn-input-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-primary, #3b82f6);
+}
+
+.churn-table {
+  font-size: 0.85rem;
+}
+
+.churn-input-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3, 0.75rem);
+  padding: var(--space-4, 1rem);
+  background: var(--color-surface-alt, #f8fafc);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 8px;
+  margin-top: var(--space-4, 1rem);
+}
+
+.churn-input-form .form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.churn-input-form label {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-text-muted, #64748b);
+}
+
+.churn-input-form input {
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.churn-input-form button {
+  padding: 0.5rem 1.2rem;
+  background: var(--color-primary, #3b82f6);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.churn-input-form button:hover {
+  opacity: 0.9;
+}
+
+.churn-input-error {
+  color: #dc2626;
+  font-size: 0.85rem;
+  margin-top: var(--space-2, 0.5rem);
+}
+
+.churn-input-success {
+  color: #16a34a;
+  font-size: 0.85rem;
+  margin-top: var(--space-2, 0.5rem);
+}
+
+/* ── Revenue Section Menu Accent ────────────────────────────────────────── */
+
+.sidebar__group-title {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted, #64748b);
+  padding: var(--space-3, 0.75rem) var(--space-4, 1rem) var(--space-1, 0.25rem);
+  margin-top: var(--space-2, 0.5rem);
+}
+
+/* ── ROAS KPI Grid ──────────────────────────────────────────────────────── */
+
+.roas-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-3, 0.75rem);
+  margin-bottom: var(--space-4, 1rem);
+}
+
+/* ── ROAS Grace Note ────────────────────────────────────────────────────── */
+
+.roas-grace-note {
+  font-size: 0.75rem;
+  color: var(--color-text-muted, #94a3b8);
+  margin-top: var(--space-4, 1rem);
+  font-style: italic;
+}
