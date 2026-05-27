@@ -7644,7 +7644,12 @@ function closeHelpDrawer() {
   if (drawer) drawer.hidden = true;
   _helpDrawerOpen = false;
   document.removeEventListener("keydown", _helpDrawerKeyHandler);
-  if (_helpDrawerFocusReturn && typeof _helpDrawerFocusReturn.focus === "function" && document.contains(_helpDrawerFocusReturn)) {
+  if (
+    _helpDrawerFocusReturn &&
+    typeof _helpDrawerFocusReturn.focus === "function" &&
+    _helpDrawerFocusReturn instanceof Element &&
+    document.body.contains(_helpDrawerFocusReturn)
+  ) {
     _helpDrawerFocusReturn.focus();
   }
   _helpDrawerFocusReturn = null;
@@ -7667,7 +7672,7 @@ function _trapHelpDrawerFocus(e) {
   if (!drawer || drawer.hidden) return;
 
   const focusable = Array.from(drawer.querySelectorAll(
-    'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+    'a[href], button:not([disabled]), textarea, input, select, [contenteditable="true"], [tabindex]:not([tabindex="-1"])'
   )).filter((el) => !el.closest("[hidden]"));
 
   if (!focusable.length) {
@@ -7823,6 +7828,7 @@ async function loadRevenueSnapshotHistory() {
 }
 
 function _isNotFoundError(err) {
-  const msg = String((err && err.message) || err || "");
+  if (err?.status === 404) return true;
+  const msg = String(err?.message ?? err ?? "");
   return msg === "HTTP 404" || /not found/i.test(msg);
 }

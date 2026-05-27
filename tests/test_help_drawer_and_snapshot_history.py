@@ -69,12 +69,24 @@ REQUIRED_HELP_PAGES = [
 
 def test_page_help_content_covers_all_pages():
     """PAGE_HELP_CONTENT must have entries for all required pages."""
-    block_match = re.search(
-        r"const\s+PAGE_HELP_CONTENT\s*=\s*\{(?P<body>[\s\S]*?)\n\};\n\n// ── Page Dependencies",
-        JS,
-    )
-    assert block_match, "Could not find PAGE_HELP_CONTENT block"
-    help_block = block_match.group("body")
+    content_start = JS.find("const PAGE_HELP_CONTENT = {")
+    assert content_start != -1, "Could not find PAGE_HELP_CONTENT declaration"
+    object_start = JS.find("{", content_start)
+    assert object_start != -1, "Could not find PAGE_HELP_CONTENT object start"
+
+    depth = 0
+    object_end = -1
+    for idx, ch in enumerate(JS[object_start:], start=object_start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                object_end = idx
+                break
+    assert object_end != -1, "Could not find PAGE_HELP_CONTENT object end"
+
+    help_block = JS[object_start + 1:object_end]
 
     for key in REQUIRED_HELP_PAGES:
         if re.match(r"^[A-Za-z_$][A-Za-z0-9_$]*$", key):
