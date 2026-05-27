@@ -256,6 +256,147 @@ const PAGE_EXPLANATIONS = {
   }
 };
 
+// ── Page Help Drawer Content (PR-ADS-071) ─────────────────────────────────
+//
+// Extended help content for each page. Displayed in a slide-out help drawer.
+// Each entry: what, source, howToUse, doNotAssume, checkNext.
+
+const PAGE_HELP_CONTENT = {
+  dashboard: {
+    what: "High-level summary of paid media performance across campaigns, leads, deals, and waste. Designed for a quick daily health check.",
+    source: "Aggregated from Windsor campaigns, HubSpot contacts/deals, and waste analysis.",
+    howToUse: "Scan KPI cards for anomalies. Click into specific pages for drill-down. Use the time window selector to compare periods.",
+    doNotAssume: "Dashboard totals may lag if upstream pipelines have not completed. A green status dot means the API is online, not that data is fresh.",
+    checkNext: "System Status for pipeline health, or Action Queue for items needing human review."
+  },
+  "action-queue": {
+    what: "Ranked list of items requiring human review — campaigns to investigate, waste to confirm, geo anomalies, keyword issues, and data quality flags.",
+    source: "Generated from campaign verdicts, waste detection, geo intelligence, keyword metrics, and data quality checks.",
+    howToUse: "Work top-down by severity. Each item links to the relevant evidence page. Items are prompts for investigation, not automated actions.",
+    doNotAssume: "Severity is advisory only. An empty queue means no rules crossed thresholds — it does not guarantee account health.",
+    checkNext: "System Status to verify all pipelines ran, then the specific page linked from each queue item."
+  },
+  reports: {
+    what: "Latest generated advisor report from the scheduled analysis pipeline. Shows the most recent markdown report file.",
+    source: "Weekly/monthly report generation jobs produce markdown files.",
+    howToUse: "Read the latest report for a narrative summary. Use the Copy button to share with stakeholders. Refresh to check for newer reports.",
+    doNotAssume: "This is a point-in-time snapshot, not a live re-analysis. Data may have changed since the report was generated.",
+    checkNext: "Data Runs to see when the last report was generated."
+  },
+  campaigns: {
+    what: "Campaign truth table — every campaign with its spend, quality score, verdict (SCALE/HOLD/FIX/CUT), and key performance metrics.",
+    source: "Windsor / Google Ads campaign data synced via the campaign pipeline.",
+    howToUse: "Sort by verdict or spend to prioritise attention. Click a campaign name to open the detail drawer. Use the time window to compare periods.",
+    doNotAssume: "Verdicts are computed from available data. A HOLD verdict does not mean the campaign is bad — it means insufficient signal to recommend scaling.",
+    checkNext: "Campaign detail drawer for drill-down, or ROAS by Campaign for revenue attribution."
+  },
+  "search-terms": {
+    what: "Raw Google Ads search terms pulled from Windsor. Browse, filter, and export the full search-term universe.",
+    source: "Windsor / Google Ads search-term reports.",
+    howToUse: "Use filters to narrow by campaign, match type, waste state, or minimum spend. Switch to the Patterns tab for n-gram analysis.",
+    doNotAssume: "This page does not add negative keywords or modify Google Ads. It is read-only evidence.",
+    checkNext: "Flagged Waste Terms for terms already flagged, or Patterns tab for recurring word analysis."
+  },
+  keywords: {
+    what: "Keyword-level performance metrics — impressions, clicks, spend, conversions, and quality signals per keyword.",
+    source: "Windsor / Google Ads keyword data.",
+    howToUse: "Sort by spend or quality score. Filter to find high-spend low-quality keywords that may need attention.",
+    doNotAssume: "Keyword data reflects Google Ads reporting. Quality scores are Google's metric, not an internal calculation.",
+    checkNext: "Campaigns page for campaign-level context, or Search Terms to see what queries matched each keyword."
+  },
+  geo: {
+    what: "Country-level ad performance and HubSpot lead quality shown side by side. Identify which countries produce quality leads vs. waste.",
+    source: "Windsor / Google Ads geo reports merged with HubSpot lead quality by country.",
+    howToUse: "Compare spend, lead count, and junk rate across countries. Look for high-spend countries with poor lead quality.",
+    doNotAssume: "Country attribution uses Google Ads geographic reporting. It does not use IP geolocation or GCLID-level precision.",
+    checkNext: "ROAS by Country for revenue attribution at the country level."
+  },
+  leads: {
+    what: "HubSpot lead-quality breakdown — lifecycle stages, junk rate, campaign attribution, and quality scoring.",
+    source: "HubSpot CRM contacts synced via the HubSpot connector.",
+    howToUse: "Review junk rate by campaign. Identify which campaigns produce MQLs vs. junk. Use time window to track quality trends.",
+    doNotAssume: "Lead quality labels come from HubSpot lifecycle stages. The system does not modify lead statuses in HubSpot.",
+    checkNext: "Campaigns page to correlate lead quality with campaign spend and verdicts."
+  },
+  opportunities: {
+    what: "Leads currently in active pipeline stages — not yet closed-won or lost. Shows in-progress pipeline activity.",
+    source: "HubSpot CRM contacts filtered to active lifecycle stages.",
+    howToUse: "Monitor pipeline velocity. Identify leads that are stuck in early stages or progressing toward conversion.",
+    doNotAssume: "This is a snapshot of current pipeline state. It does not predict conversion probability.",
+    checkNext: "Deals page for closed-won revenue, or Lead Quality for quality breakdown."
+  },
+  waste: {
+    what: "Search terms flagged by waste detection as potential wasted spend. Grouped by junk signal and campaign evidence.",
+    source: "Analysis layer derived from Search Term Universe combined with HubSpot lead quality signals.",
+    howToUse: "Review flagged terms. Copy them for use as negative keywords in Google Ads (manual process). Filter by category or campaign.",
+    doNotAssume: "Flagged terms are candidates for human review, not confirmed waste. The system does not push negative keywords to Google Ads.",
+    checkNext: "Search Terms for full context, or Campaigns for spend impact."
+  },
+  deals: {
+    what: "HubSpot deal pipeline — stages, values, and campaign attribution for closed-won and in-progress deals.",
+    source: "HubSpot CRM deals synced via the HubSpot connector.",
+    howToUse: "Review deal values by campaign to understand revenue attribution. Filter by stage or time window.",
+    doNotAssume: "Deal attribution uses HubSpot's native campaign field. It does not re-attribute deals using click-level GCLID data (that requires GCLID bridge).",
+    checkNext: "ROAS by Campaign for campaign-level profitability, or Unit Economics for LTV/CAC."
+  },
+  "roas-campaigns": {
+    what: "Revenue Truth ROAS by campaign — shows which campaigns produce profitable customers based on closed-won HubSpot revenue and Windsor spend.",
+    source: "HubSpot closed-won deal revenue + Windsor campaign spend. This does NOT use Google Ads conversion value.",
+    howToUse: "Compare campaigns by LTV ROAS, ACV ROAS, and verdict. Use the window selector to analyse different time periods. SCALE campaigns are profitable; CUT campaigns are losing money.",
+    doNotAssume: "This is HubSpot revenue truth, not Google Ads conversion tracking. Revenue comes from actual closed-won deals, not estimated conversion values. INSUFFICIENT_DATA means not enough signal to judge.",
+    checkNext: "Unit Economics for portfolio-level LTV/CAC, or ROAS by Country for geographic breakdown."
+  },
+  "roas-countries": {
+    what: "Country-level Revenue Truth ROAS — estimated until GCLID attribution is fully wired. Shows directional profitability by geography.",
+    source: "HubSpot closed-won deal revenue + Windsor geo spend. Country ROAS is an estimate because deal-to-country mapping is approximate without full GCLID coverage.",
+    howToUse: "Use for directional diagnosis — identify countries that are clearly profitable or clearly losing money. Do not use for precise budget allocation until GCLID attribution is fully wired.",
+    doNotAssume: "These are estimates, not exact figures. Country attribution precision will improve as GCLID coverage increases. Do not make final budget decisions based solely on these numbers.",
+    checkNext: "GCLID Attribution page to check coverage readiness, or ROAS by Campaign for campaign-level precision."
+  },
+  "gclid-attribution": {
+    what: "GCLID click-to-lead matching — a readiness and confidence audit showing how well Google Ads clicks can be traced to HubSpot leads.",
+    source: "GCLID match engine joining Windsor click data with HubSpot contact records.",
+    howToUse: "Review match rates, coverage percentages, and confidence tiers. This page audits attribution readiness — it does not implement a GCLID-to-revenue bridge.",
+    doNotAssume: "This is a readiness/confidence audit only. It does NOT implement actual GCLID bridge attribution, OCT upload, or offline conversion tracking. It measures how ready the data is for those future capabilities.",
+    checkNext: "ROAS by Country to see how estimates will improve with better coverage, or System Status for GCLID pipeline health."
+  },
+  "unit-economics": {
+    what: "Executive SaaS economics — LTV, CAC, LTV/CAC ratio, payback months, and profitability verdicts at the portfolio level.",
+    source: "Revenue Truth Layer computed from HubSpot deals + Windsor campaigns + churn rate configuration.",
+    howToUse: "Review overall LTV/CAC and payback. Compare with industry benchmarks. A ratio above 3:1 generally indicates healthy unit economics.",
+    doNotAssume: "LTV calculations use the configured churn rate (default 3%). If actual churn differs, LTV will be inaccurate. Adjust via Churn Input page.",
+    checkNext: "Churn Input to verify/update churn rate, or ROAS by Campaign for campaign-level detail."
+  },
+  scheduler: {
+    what: "Scheduler job status — run history, next scheduled runs, and manual trigger buttons for daily/weekly/monthly jobs.",
+    source: "Internal scheduler and run tracking system.",
+    howToUse: "Check that jobs ran recently and completed successfully. Use manual triggers (admin only) to force a run if needed.",
+    doNotAssume: "A successful run does not guarantee data quality — it means the job completed without errors. Check specific pages for data validation.",
+    checkNext: "System Status for overall pipeline health, or the specific data page to verify output."
+  },
+  health: {
+    what: "War Room — system-wide health dashboard showing blockers, source connectivity, pipeline status, and data freshness across all datasets.",
+    source: "Internal system status checks, freshness records, and connectivity probes.",
+    howToUse: "Scan for red/amber indicators. Address blockers first. Freshness shows when each dataset was last successfully synced.",
+    doNotAssume: "Green status means the last check passed — it does not guarantee future reliability. Monitor trends, not single readings.",
+    checkNext: "Data Runs for detailed run logs, or the specific blocked page for investigation."
+  },
+  backfill: {
+    what: "Manual historical data ingestion — run backfills to pull historical data from Windsor/HubSpot for past time periods.",
+    source: "Windsor / HubSpot historical APIs, writing to the local database.",
+    howToUse: "Select a date range. Run dry-run first to preview what will be ingested. Then execute the actual backfill if the plan looks correct.",
+    doNotAssume: "Backfill writes to the local database only. It does NOT modify Google Ads, HubSpot, or any external system. Dry-run is read-only.",
+    checkNext: "System Status to verify post-backfill freshness, or the relevant data page to confirm new rows."
+  },
+  "churn-input": {
+    what: "Admin page for manual monthly churn rate overrides. Churn rate is used in LTV and ROAS calculations.",
+    source: "Local YAML configuration file. Not synced from or written to any external system.",
+    howToUse: "Enter a month (YYYY-MM) and the observed monthly churn rate (0–1). The override applies to LTV calculations for that month onward.",
+    doNotAssume: "This updates local configuration ONLY. It does NOT write to HubSpot, Google Ads, or any external service. Changes affect future LTV/ROAS calculations locally.",
+    checkNext: "Unit Economics to see updated LTV calculations, or ROAS by Campaign to see how churn affects campaign verdicts."
+  }
+};
+
 // ── Page Dependencies (PR-ADS-070) ────────────────────────────────────────
 //
 // Maps each page to the source-qualified dataset keys it depends on for
@@ -926,6 +1067,14 @@ function navigate(page) {
   // Render page explanation panel (PR-ADS-070)
   renderPageExplanation(page);
 
+  // Update help drawer button state (PR-ADS-071)
+  const helpBtn = document.getElementById("page-help-btn");
+  if (helpBtn) {
+    const hasHelp = !!PAGE_HELP_CONTENT[page];
+    helpBtn.hidden = !hasHelp;
+    helpBtn.dataset.page = page;
+  }
+
   // Update active nav item
   document.querySelectorAll(".nav-item").forEach((el) => {
     el.classList.toggle("active", el.dataset.page === page);
@@ -938,7 +1087,7 @@ function navigate(page) {
 function loadPage(page) {
   switch (page) {
     case "dashboard":     loadDashboard();                          break;
-    case "reports":       loadReports();                            break;
+    case "reports":       loadReports(); loadRevenueSnapshotHistory(); break;
     case "campaigns":     loadCampaigns();                          break;
     case "waste":         loadWaste();                              break;
     case "search-terms":  loadSearchTerms({ reset: true });         break;
@@ -6599,6 +6748,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
 
+  // Wire up Page Help Drawer (PR-ADS-071)
+  const helpBtn = document.getElementById("page-help-btn");
+  if (helpBtn) {
+    helpBtn.addEventListener("click", () => {
+      const pageKey = helpBtn.dataset.page || _currentPage;
+      if (pageKey) openHelpDrawer(pageKey);
+    });
+  }
+  const helpCloseBtn = document.getElementById("help-drawer-close-btn");
+  if (helpCloseBtn) helpCloseBtn.addEventListener("click", closeHelpDrawer);
+  const helpOverlay = document.getElementById("help-drawer-overlay");
+  if (helpOverlay) helpOverlay.addEventListener("click", closeHelpDrawer);
+
   // Wire up time range buttons
   document.querySelectorAll(".time-range-btn").forEach((btn) => {
     btn.addEventListener("click", () => setSelectedDays(parseInt(btn.dataset.days, 10)));
@@ -7413,4 +7575,260 @@ async function handleChurnInputSubmit(e) {
     console.error("[handleChurnInputSubmit]", err);
     if (errorEl) { errorEl.textContent = "Network error. Please try again."; errorEl.hidden = false; }
   }
+}
+
+// ── Page Help Drawer (PR-ADS-071) ─────────────────────────────────────────
+
+let _helpDrawerOpen = false;
+let _helpDrawerFocusReturn = null;
+
+function openHelpDrawer(pageKey) {
+  const overlay = document.getElementById("help-drawer-overlay");
+  const drawer = document.getElementById("help-drawer");
+  if (!overlay || !drawer) return;
+  if (_helpDrawerOpen) return;
+
+  const content = PAGE_HELP_CONTENT[pageKey];
+  const explanation = PAGE_EXPLANATIONS[pageKey];
+  if (!content && !explanation) return;
+
+  const title = (explanation && explanation.title) || pageKey;
+
+  let bodyHtml = `<h2 class="help-drawer__page-title">${escapeHtml(title)}</h2>`;
+
+  if (content) {
+    bodyHtml += `
+      <div class="help-drawer__section">
+        <h3 class="help-drawer__section-title">What this page is</h3>
+        <p>${escapeHtml(content.what)}</p>
+      </div>
+      <div class="help-drawer__section">
+        <h3 class="help-drawer__section-title">Where the data comes from</h3>
+        <p>${escapeHtml(content.source)}</p>
+      </div>
+      <div class="help-drawer__section">
+        <h3 class="help-drawer__section-title">How to use it</h3>
+        <p>${escapeHtml(content.howToUse)}</p>
+      </div>
+      <div class="help-drawer__section">
+        <h3 class="help-drawer__section-title">What not to assume</h3>
+        <p>${escapeHtml(content.doNotAssume)}</p>
+      </div>
+      <div class="help-drawer__section">
+        <h3 class="help-drawer__section-title">What to check next</h3>
+        <p>${escapeHtml(content.checkNext)}</p>
+      </div>`;
+  }
+
+  const body = document.getElementById("help-drawer-body");
+  if (body) body.innerHTML = bodyHtml;
+
+  _helpDrawerFocusReturn = document.activeElement;
+  overlay.hidden = false;
+  overlay.setAttribute("aria-hidden", "false");
+  drawer.hidden = false;
+  _helpDrawerOpen = true;
+
+  // Focus the close button
+  const closeBtn = document.getElementById("help-drawer-close-btn");
+  if (closeBtn) closeBtn.focus();
+
+  document.addEventListener("keydown", _helpDrawerKeyHandler);
+}
+
+function closeHelpDrawer() {
+  if (!_helpDrawerOpen) return;
+  const overlay = document.getElementById("help-drawer-overlay");
+  const drawer = document.getElementById("help-drawer");
+  if (overlay) { overlay.hidden = true; overlay.setAttribute("aria-hidden", "true"); }
+  if (drawer) drawer.hidden = true;
+  _helpDrawerOpen = false;
+  document.removeEventListener("keydown", _helpDrawerKeyHandler);
+  if (
+    _helpDrawerFocusReturn &&
+    typeof _helpDrawerFocusReturn.focus === "function" &&
+    _helpDrawerFocusReturn instanceof Element &&
+    document.body.contains(_helpDrawerFocusReturn)
+  ) {
+    _helpDrawerFocusReturn.focus();
+  }
+  _helpDrawerFocusReturn = null;
+}
+
+function _helpDrawerKeyHandler(e) {
+  if (!_helpDrawerOpen) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeHelpDrawer();
+    return;
+  }
+  if (e.key === "Tab") {
+    _trapHelpDrawerFocus(e);
+  }
+}
+
+function _trapHelpDrawerFocus(e) {
+  const drawer = document.getElementById("help-drawer");
+  if (!drawer || drawer.hidden) return;
+
+  const focusable = Array.from(drawer.querySelectorAll(
+    'a[href], button:not([disabled]), textarea, input, select, [contenteditable="true"], [tabindex]:not([tabindex="-1"])'
+  )).filter((el) => !el.closest("[hidden]"));
+
+  if (!focusable.length) {
+    e.preventDefault();
+    drawer.focus();
+    return;
+  }
+
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+// ── Revenue Snapshot History (PR-ADS-083A) ────────────────────────────────
+
+let snapshotHistoryStatus = "idle"; // idle | loading | ok | empty | error
+
+async function loadRevenueSnapshotHistory() {
+  const container = document.getElementById("snapshot-history-container");
+  if (!container) return;
+
+  snapshotHistoryStatus = "loading";
+  container.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue snapshots…</p>';
+
+  try {
+    const [latestResult, listResult] = await Promise.allSettled([
+      fetchJSON("/api/reports/roas/snapshots/latest?window=60d"),
+      fetchJSON("/api/reports/roas/snapshots?window=60d&limit=30"),
+    ]);
+
+    let latestData = null;
+    let listData = null;
+
+    if (latestResult.status === "fulfilled") {
+      latestData = latestResult.value;
+    } else if (!_isNotFoundError(latestResult.reason)) {
+      throw latestResult.reason;
+    }
+    if (listResult.status === "fulfilled") {
+      listData = listResult.value;
+    } else if (!_isNotFoundError(listResult.reason)) {
+      throw listResult.reason;
+    }
+
+    const snapshots = (listData && listData.snapshots) || [];
+
+    if (!latestData && snapshots.length === 0) {
+      snapshotHistoryStatus = "empty";
+      container.innerHTML = `
+        <div class="empty-state-block empty-state--info">
+          <p class="empty-state__title">No revenue snapshots exist yet.</p>
+          <p class="empty-state__body"><strong>Next:</strong> Snapshots are generated daily by the ROAS snapshot scheduler. Check Data Runs for scheduler status.</p>
+        </div>`;
+      return;
+    }
+
+    snapshotHistoryStatus = "ok";
+    let html = "";
+
+    // Latest snapshot card
+    if (latestData) {
+      const summary = latestData.summary || {};
+      const ue = latestData.unit_economics || {};
+      html += `
+        <div class="snapshot-latest-card">
+          <h3 class="snapshot-latest-card__title">Latest Snapshot</h3>
+          <div class="snapshot-latest-card__meta">
+            <span class="context-chip context-chip--source">Date: ${escapeHtml(latestData.snapshot_date || "—")}</span>
+            <span class="context-chip context-chip--depends">Window: ${escapeHtml(latestData.window || "60d")}</span>
+            <span class="context-chip context-chip--readonly">Generated: ${fmtDate(latestData.generated_at)}</span>
+          </div>
+          <div class="kpi-grid snapshot-kpi-grid">
+            <div class="kpi-card"><div class="kpi-card__label">Total Spend</div><div class="kpi-card__value">${fmtDollar(summary.total_spend)}</div></div>
+            <div class="kpi-card"><div class="kpi-card__label">ACV Revenue</div><div class="kpi-card__value">${fmtDollar(summary.total_acv_revenue)}</div></div>
+            <div class="kpi-card"><div class="kpi-card__label">LTV Revenue</div><div class="kpi-card__value">${fmtDollar(summary.total_ltv_revenue)}</div></div>
+          </div>
+          <div class="verdict-count-grid snapshot-verdict-grid">
+            <div class="verdict-count-card verdict-count-card--scale"><div class="verdict-count-card__num">${fmt(summary.scale_count)}</div><div class="verdict-count-card__label">SCALE</div></div>
+            <div class="verdict-count-card verdict-count-card--hold"><div class="verdict-count-card__num">${fmt(summary.hold_count)}</div><div class="verdict-count-card__label">HOLD</div></div>
+            <div class="verdict-count-card verdict-count-card--fix"><div class="verdict-count-card__num">${fmt(summary.fix_count)}</div><div class="verdict-count-card__label">FIX</div></div>
+            <div class="verdict-count-card verdict-count-card--cut"><div class="verdict-count-card__num">${fmt(summary.cut_count)}</div><div class="verdict-count-card__label">CUT</div></div>
+            <div class="verdict-count-card"><div class="verdict-count-card__num">${fmt(summary.insufficient_data_count)}</div><div class="verdict-count-card__label">INSUFFICIENT</div></div>
+          </div>`;
+
+      // LTV/CAC and payback if available
+      if (ue.ltv_cac_ratio !== undefined && ue.ltv_cac_ratio !== null) {
+        html += `<div class="snapshot-economics"><span><strong>LTV/CAC:</strong> ${Number(ue.ltv_cac_ratio).toFixed(2)}x</span>`;
+        if (ue.payback_months !== undefined && ue.payback_months !== null) {
+          html += ` <span><strong>Payback:</strong> ${Number(ue.payback_months).toFixed(1)} months</span>`;
+        }
+        html += `</div>`;
+      }
+
+      // Warnings
+      const warnings = latestData.warnings || [];
+      if (warnings.length > 0) {
+        html += `<div class="snapshot-warnings"><strong>⚠ Warnings:</strong><ul>${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul></div>`;
+      }
+
+      html += `</div>`; // close snapshot-latest-card
+    }
+
+    // History table
+    if (snapshots.length > 0) {
+      html += `
+        <div class="panel" style="margin-top:var(--space-4)">
+          <div class="panel__header">Snapshot History (last ${snapshots.length} runs)</div>
+          <div class="panel__body panel__body--flush">
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead><tr>
+                  <th>Date</th>
+                  <th>Window</th>
+                  <th>Spend</th>
+                  <th>ACV Revenue</th>
+                  <th>LTV Revenue</th>
+                  <th>SCALE</th>
+                  <th>HOLD</th>
+                  <th>FIX</th>
+                  <th>CUT</th>
+                </tr></thead>
+                <tbody>`;
+      for (const snap of snapshots) {
+        const s = snap.summary || {};
+        html += `<tr>
+          <td>${escapeHtml(snap.snapshot_date || "—")}</td>
+          <td>${escapeHtml(snap.window || "—")}</td>
+          <td>${fmtDollar(s.total_spend)}</td>
+          <td>${fmtDollar(s.total_acv_revenue)}</td>
+          <td>${fmtDollar(s.total_ltv_revenue)}</td>
+          <td>${fmt(s.scale_count)}</td>
+          <td>${fmt(s.hold_count)}</td>
+          <td>${fmt(s.fix_count)}</td>
+          <td>${fmt(s.cut_count)}</td>
+        </tr>`;
+      }
+      html += `</tbody></table></div></div></div>`;
+    }
+
+    container.innerHTML = html;
+  } catch (err) {
+    console.error("[loadRevenueSnapshotHistory]", err);
+    snapshotHistoryStatus = "error";
+    container.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue snapshots.</p>';
+  }
+}
+
+function _isNotFoundError(err) {
+  if (err?.status === 404) return true;
+  const msg = String(err?.message ?? err ?? "");
+  return msg === "HTTP 404" || /not found/i.test(msg);
 }
