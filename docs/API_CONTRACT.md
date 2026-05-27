@@ -2173,3 +2173,217 @@ Update this file in the same PR that:
 - Removes an endpoint
 
 The reviewer will reject the PR if `api/server.py` and this file disagree.
+
+---
+
+## ROAS & Revenue Truth Endpoints (PR-ADS-080A)
+
+These endpoints form the Revenue Truth Layer. Revenue source is HubSpot won deals.
+Spend source is Windsor / Google Ads. **Google Ads conversion value is NOT used.**
+All route paths follow the repo convention and are mounted under `/api/...`.
+
+---
+
+### `GET /api/reports/roas/campaigns`
+
+**Auth:** Auth (any authenticated session)
+
+**Query params:**
+| Param  | Type   | Default | Description |
+|--------|--------|---------|-------------|
+| window | string | `60d`   | Time window. Valid: `7d`, `14d`, `30d`, `60d`, `90d`, `365d` |
+
+**Validation (400):**
+- Invalid `window` values return HTTP 400 with:
+  - `"detail": "Invalid window. Valid values: 7d, 14d, 30d, 60d, 90d, 365d"`
+
+**Response (200):**
+```json
+{
+  "window": "60d",
+  "generated_at": "2026-05-27T10:00:00+00:00",
+  "source_truth": "hubspot_won_deals_plus_windsor_spend",
+  "google_ads_conversion_value_used": false,
+  "campaigns": [
+    {
+      "campaign": "gulf",
+      "spend": 36852.25,
+      "deals_won": 6,
+      "acv_revenue": 23862.80,
+      "arr_revenue": 13072.80,
+      "mrr_revenue": 1101.80,
+      "ltv_revenue": 36393.00,
+      "acv_roas": 0.65,
+      "arr_roas": 0.35,
+      "ltv_roas": 0.99,
+      "cac": 6142.04,
+      "ltv_to_cac": 0.99,
+      "payback_months": 33.5,
+      "true_cpl": 142.50,
+      "close_rate": null,
+      "attribution_confidence": "tier_2_source_tag",
+      "verdict": "HOLD",
+      "warnings": []
+    }
+  ]
+}
+```
+
+**Attribution confidence values:**
+- `tier_1_gclid` — Exact GCLID match to Windsor click data
+- `tier_2_source_tag` — HubSpot analytics source matches campaign tag
+- `tier_3_spend_weighted` — Fallback estimate (never allows SCALE verdict)
+
+**Verdict values:**
+- `SCALE` — LTV/CAC >= 3.0 and payback <= 18 months (never from tier_3)
+- `HOLD` — 1.5 <= LTV/CAC < 3.0, or tier_3 attribution
+- `FIX` — LTV/CAC < 1.5 or payback > 36 months
+- `CUT` — LTV/CAC < 1.0
+- `INSUFFICIENT_DATA` — Fewer than configured min_deals_for_verdict
+
+---
+
+### `GET /api/reports/roas/countries`
+
+**Auth:** Auth (any authenticated session)
+
+**Query params:**
+| Param  | Type   | Default | Description |
+|--------|--------|---------|-------------|
+| window | string | `60d`   | Time window. Valid: `7d`, `14d`, `30d`, `60d`, `90d`, `365d` |
+
+**Validation (400):**
+- Invalid `window` values return HTTP 400 with:
+  - `"detail": "Invalid window. Valid values: 7d, 14d, 30d, 60d, 90d, 365d"`
+
+**Response (200):**
+```json
+{
+  "window": "60d",
+  "generated_at": "2026-05-27T10:00:00+00:00",
+  "source_truth": "hubspot_won_deals_plus_windsor_spend",
+  "google_ads_conversion_value_used": false,
+  "country_level_estimate": true,
+  "countries": [
+    {
+      "country": "uae",
+      "spend": 12000.00,
+      "deals_won": 3,
+      "acv_revenue": 9000.00,
+      "arr_revenue": 7200.00,
+      "mrr_revenue": 600.00,
+      "ltv_revenue": 20000.00,
+      "acv_roas": 0.75,
+      "arr_roas": 0.60,
+      "ltv_roas": 1.67,
+      "cac": 4000.00,
+      "ltv_to_cac": 1.67,
+      "payback_months": 20.0,
+      "true_cpl": 4000.00,
+      "close_rate": null,
+      "attribution_confidence": "tier_3_spend_weighted",
+      "verdict": "HOLD",
+      "warnings": [],
+      "country_level_estimate": true
+    }
+  ]
+}
+```
+
+**Hard rule:** `country_level_estimate: true` on every country row until GCLID attribution is fully wired. Attribution confidence defaults to `tier_3_spend_weighted` unless tier_1 GCLID match actually exists.
+
+---
+
+### `GET /api/reports/unit-economics`
+
+**Auth:** Auth (any authenticated session)
+
+**Query params:**
+| Param  | Type   | Default | Description |
+|--------|--------|---------|-------------|
+| window | string | `60d`   | Time window. Valid: `7d`, `14d`, `30d`, `60d`, `90d`, `365d` |
+
+**Validation (400):**
+- Invalid `window` values return HTTP 400 with:
+  - `"detail": "Invalid window. Valid values: 7d, 14d, 30d, 60d, 90d, 365d"`
+
+**Response (200):**
+```json
+{
+  "window": "60d",
+  "generated_at": "2026-05-27T10:00:00+00:00",
+  "overall": {
+    "ltv_to_cac": 1.4,
+    "payback_months": 26.0,
+    "avg_deal_acv": 4977,
+    "avg_deal_mrr": 184,
+    "monthly_churn_rate_used": 0.03,
+    "verdict": "HOLD"
+  },
+  "by_campaign": []
+}
+```
+
+---
+
+### `GET /api/admin/churn-input`
+
+**Auth:** Admin (admin role cookie or `ADMIN_API_TOKEN` token)
+
+**Response (200):**
+```json
+{
+  "default_monthly_churn": 0.03,
+  "monthly": {
+    "2026-05": 0.03
+  },
+  "campaign_overrides": {
+    "gulf": 0.022,
+    "mena": 0.035
+  }
+}
+```
+
+---
+
+### `POST /api/admin/churn-input`
+
+**Auth:** Admin (admin role cookie or `ADMIN_API_TOKEN` token)
+
+**Request body:**
+```json
+{
+  "month": "2026-05",
+  "rate": 0.029
+}
+```
+
+**Validation:**
+- `month` must be `YYYY-MM` format
+- `rate` must be `0 <= rate <= 1`
+
+**Response (200) — success:**
+```json
+{
+  "ok": true
+}
+```
+
+**Response (400) — invalid rate:**
+```json
+{
+  "detail": "rate must be between 0 and 1"
+}
+```
+
+**Response (400) — invalid month:**
+```json
+{
+  "detail": "month must be YYYY-MM format"
+}
+```
+
+**Notes:**
+- Local YAML config write only.
+- No HubSpot write.
+- No Google Ads write.

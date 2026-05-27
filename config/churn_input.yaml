@@ -1,0 +1,12 @@
+# Manual churn input source for LTV calculation
+# Updated via POST /api/admin/churn-input or manually by admin.
+# No HubSpot write. No Google Ads write.
+
+default_monthly_churn: 0.03
+
+monthly:
+  "2026-05": 0.03
+
+campaign_overrides:
+  gulf: 0.022
+  mena: 0.035

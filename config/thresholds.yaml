@@ -81,6 +81,18 @@ sync:
       hubspot_contacts: 14
       hubspot_deals: 30
 
+# ROAS and Unit Economics thresholds — consumed by analysis/roas_calculator.py
+# All verdict thresholds must live here, not hardcoded in Python.
+roas:
+  ltv_cac_scale_threshold: 3.0
+  ltv_cac_fix_threshold: 1.5
+  ltv_cac_cut_threshold: 1.0
+  payback_months_scale_max: 18
+  payback_months_fix_max: 36
+  min_deals_for_verdict: 5
+  default_monthly_churn: 0.03
+  allow_scale_on_spend_weighted_attribution: false
+
 # UI-safe display thresholds — consumed by GET /api/config/ui-thresholds
 # These values drive frontend visual classification only.
 # Do not change analysis thresholds above.
