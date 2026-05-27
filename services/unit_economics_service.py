@@ -15,7 +15,7 @@ def _dominant_attribution_from_campaigns(campaigns: list[dict]) -> str:
         weight = campaign.get("deals_won", 0)
         try:
             weight = int(weight)
-        except (TypeError, ValueError):
+        except (ValueError, TypeError):
             weight = 0
         if weight <= 0:
             continue

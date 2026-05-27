@@ -79,9 +79,9 @@ def generate_roas_snapshot(window: str = "60d") -> dict:
     # Compute overall unit economics using shared helper.
     unit_economics = compute_unit_economics_summary(campaigns)
     total_spend = unit_economics["total_spend"]
-    total_deals = sum(c.get("deals_won", 0) for c in campaigns)
-    total_acv = sum(c.get("acv_revenue", 0) for c in campaigns)
-    total_ltv = sum(c.get("ltv_revenue", 0) for c in campaigns)
+    total_deals = unit_economics["total_deals_won"]
+    total_acv = unit_economics["total_acv_revenue"]
+    total_ltv = unit_economics["total_ltv_revenue"]
 
     # Count verdicts
     verdict_counts = {"SCALE": 0, "HOLD": 0, "FIX": 0, "CUT": 0, "INSUFFICIENT_DATA": 0}
