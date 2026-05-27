@@ -93,9 +93,12 @@ def test_roas_campaigns_help_mentions_hubspot_revenue():
     """ROAS by Campaign help must mention HubSpot revenue."""
     # Find the roas-campaigns help block
     assert "HubSpot" in JS
-    # Must NOT reference Google Ads conversion value as a source
-    roas_section = JS[JS.find('"roas-campaigns"', JS.find("PAGE_HELP_CONTENT")):]
-    roas_section = roas_section[:roas_section.find('"roas-countries"')]
+    roas_start = JS.find('"roas-campaigns"', JS.find("PAGE_HELP_CONTENT"))
+    assert roas_start != -1, "roas-campaigns key not found in PAGE_HELP_CONTENT"
+    roas_section = JS[roas_start:]
+    roas_end = roas_section.find('"roas-countries"')
+    if roas_end != -1:
+        roas_section = roas_section[:roas_end]
     assert "HubSpot" in roas_section, "ROAS by Campaign help must mention HubSpot"
     assert "does NOT use Google Ads conversion value" in roas_section or \
            "not Google Ads conversion" in roas_section, \
@@ -105,6 +108,7 @@ def test_roas_campaigns_help_mentions_hubspot_revenue():
 def test_roas_countries_help_says_estimate():
     """Country ROAS help must say estimate until GCLID is wired."""
     roas_countries_start = JS.find('"roas-countries"', JS.find("PAGE_HELP_CONTENT"))
+    assert roas_countries_start != -1, "roas-countries key not found in PAGE_HELP_CONTENT"
     roas_countries_section = JS[roas_countries_start:roas_countries_start + 1500]
     assert "estimate" in roas_countries_section.lower(), \
         "ROAS by Country help must mention 'estimate'"
@@ -115,6 +119,7 @@ def test_roas_countries_help_says_estimate():
 def test_gclid_help_says_readiness_audit():
     """GCLID Attribution help must say readiness/confidence audit only."""
     gclid_start = JS.find('"gclid-attribution"', JS.find("PAGE_HELP_CONTENT"))
+    assert gclid_start != -1, "gclid-attribution key not found in PAGE_HELP_CONTENT"
     gclid_section = JS[gclid_start:gclid_start + 1500]
     assert "readiness" in gclid_section.lower() or "confidence audit" in gclid_section.lower(), \
         "GCLID Attribution help must mention readiness/confidence audit"
@@ -125,6 +130,7 @@ def test_gclid_help_says_readiness_audit():
 def test_churn_input_help_says_local_only():
     """Churn Input help must say local config only, no external writes."""
     churn_start = JS.find('"churn-input"', JS.find("PAGE_HELP_CONTENT"))
+    assert churn_start != -1, "churn-input key not found in PAGE_HELP_CONTENT"
     churn_section = JS[churn_start:churn_start + 1500]
     assert "local" in churn_section.lower(), \
         "Churn Input help must mention local configuration"
