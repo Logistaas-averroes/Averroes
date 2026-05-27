@@ -66,10 +66,8 @@ def _get_headers():
     """Return authorization headers for HubSpot API."""
     if not HUBSPOT_API_KEY:
         raise RuntimeError("HUBSPOT_API_KEY is not set")
-    bearer_scheme = "Bearer"
-    bearer_token = f"{bearer_scheme} {HUBSPOT_API_KEY}"
     return {
-        "Authorization": bearer_token,
+        "Authorization": f"Bearer {HUBSPOT_API_KEY}",
         "Content-Type": "application/json",
     }
 

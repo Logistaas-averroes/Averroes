@@ -279,8 +279,9 @@ def _filter_deals_by_window(deals: list, window_days: int) -> list:
         if closedate:
             try:
                 parsed = _parse_iso_datetime(closedate)
-                if parsed >= cutoff:
-                    filtered.append(deal)
+                if parsed < cutoff:
+                    continue
+                filtered.append(deal)
                 continue
             except (ValueError, TypeError):
                 invalid_closedate += 1

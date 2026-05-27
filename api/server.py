@@ -5716,12 +5716,14 @@ def _dominant_attribution_from_campaigns(campaigns: list[dict]) -> str:
     weighted = {}
     for campaign in campaigns:
         confidence = campaign.get("attribution_confidence") or "tier_3_spend_weighted"
-        weight = campaign.get("deals_won", 0) or 0
+        weight = campaign.get("deals_won", 0)
         try:
             weight = int(weight)
         except (ValueError, TypeError):
             weight = 0
-        weighted[confidence] = weighted.get(confidence, 0) + (weight if weight > 0 else 1)
+        if weight <= 0:
+            continue
+        weighted[confidence] = weighted.get(confidence, 0) + weight
 
     if not weighted:
         return "tier_3_spend_weighted"
