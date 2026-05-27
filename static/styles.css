@@ -4480,3 +4480,143 @@ a {
 .confidence-card--tier1 { border-left: 3px solid #1e40af; }
 .confidence-card--tier2 { border-left: 3px solid #4338ca; }
 .confidence-card--tier3 { border-left: 3px solid #94a3b8; }
+
+/* ── Page Help Drawer (PR-ADS-071) ─────────────────────────────────────── */
+
+.page-help-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-muted, #64748b);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  margin-left: auto;
+}
+.page-help-btn:hover {
+  color: var(--c-accent, #129ef5);
+  border-color: var(--c-accent, #129ef5);
+}
+.page-help-btn__label {
+  font-family: 'Sora', sans-serif;
+}
+
+.help-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(480px, 90vw);
+  height: 100vh;
+  background: var(--color-surface, #fff);
+  box-shadow: var(--shadow-lg, -4px 0 24px rgba(0,0,0,0.12));
+  z-index: 202;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.help-drawer__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4, 1rem) var(--space-5, 1.25rem);
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
+  flex-shrink: 0;
+}
+.help-drawer__title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text, #1e293b);
+}
+.help-drawer__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-5, 1.25rem);
+}
+.help-drawer__page-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text, #1e293b);
+  margin: 0 0 var(--space-4, 1rem) 0;
+}
+.help-drawer__section {
+  margin-bottom: var(--space-4, 1rem);
+  padding-bottom: var(--space-3, 0.75rem);
+  border-bottom: 1px solid var(--color-border-light, #f1f5f9);
+}
+.help-drawer__section:last-child {
+  border-bottom: none;
+}
+.help-drawer__section-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-muted, #64748b);
+  margin: 0 0 var(--space-2, 0.5rem) 0;
+}
+.help-drawer__section p {
+  font-size: 0.87rem;
+  line-height: 1.55;
+  color: var(--color-text, #334155);
+  margin: 0;
+}
+
+/* ── Revenue Snapshot History (PR-ADS-083A) ─────────────────────────────── */
+
+.snapshot-history-section {
+  margin-top: var(--space-5, 1.25rem);
+  border-top: 1px solid var(--color-border, #e2e8f0);
+  padding-top: var(--space-4, 1rem);
+}
+.snapshot-latest-card {
+  background: var(--color-surface-alt, #f8fafc);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 8px;
+  padding: var(--space-4, 1rem) var(--space-5, 1.25rem);
+}
+.snapshot-latest-card__title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-text, #1e293b);
+  margin: 0 0 var(--space-3, 0.75rem) 0;
+}
+.snapshot-latest-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2, 0.5rem);
+  margin-bottom: var(--space-3, 0.75rem);
+}
+.snapshot-kpi-grid {
+  margin-bottom: var(--space-3, 0.75rem);
+}
+.snapshot-verdict-grid {
+  margin-bottom: var(--space-3, 0.75rem);
+}
+.snapshot-economics {
+  display: flex;
+  gap: var(--space-4, 1rem);
+  font-size: 0.87rem;
+  color: var(--color-text, #334155);
+  margin-bottom: var(--space-3, 0.75rem);
+}
+.snapshot-warnings {
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  padding: var(--space-3, 0.75rem);
+  font-size: 0.82rem;
+  color: #92400e;
+  margin-top: var(--space-3, 0.75rem);
+}
+.snapshot-warnings ul {
+  margin: var(--space-1, 0.25rem) 0 0 var(--space-4, 1rem);
+  padding: 0;
+}
+.snapshot-warnings li {
+  margin-bottom: var(--space-1, 0.25rem);
+}
