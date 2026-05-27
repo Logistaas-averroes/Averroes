@@ -14,6 +14,7 @@ Validates:
 
 import os
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -131,6 +132,69 @@ def test_existing_live_endpoints_unchanged():
     assert '"/api/reports/unit-economics"' in source
 
 
+def test_snapshot_service_rejects_invalid_window():
+    """Snapshot generation rejects invalid windows with a clean ValueError."""
+    from services.roas_snapshot_service import generate_roas_snapshot
+
+    invalid_windows = ["", "60days", "99999d", "abc", "31d"]
+    for window in invalid_windows:
+        try:
+            generate_roas_snapshot(window=window)
+            assert False, f"Expected ValueError for window={window!r}"
+        except ValueError as exc:
+            assert "Invalid window" in str(exc)
+
+
+def test_snapshot_and_live_endpoint_use_shared_unit_economics_helper():
+    """Snapshot service and live endpoint both use shared helper."""
+    import services.roas_snapshot_service as snapshot_service
+    import inspect
+
+    server_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "api",
+        "server.py",
+    )
+    with open(server_path, "r", encoding="utf-8") as f:
+        server_source = f.read()
+
+    snapshot_source = inspect.getsource(snapshot_service)
+    assert "compute_unit_economics_summary" in server_source
+    assert "compute_unit_economics_summary" in snapshot_source
+
+
+def test_snapshot_service_valid_window_uses_allowlist_value():
+    """Allowed windows are converted to expected day values."""
+    from services.roas_snapshot_service import generate_roas_snapshot
+
+    with patch("services.roas_snapshot_service.compute_all_campaign_roas", return_value=[]) as campaign_mock, patch(
+        "services.roas_snapshot_service.compute_all_country_roas",
+        return_value=[],
+    ) as country_mock, patch(
+        "services.roas_snapshot_service.compute_unit_economics_summary",
+        return_value={
+            "ltv_to_cac": None,
+            "payback_months": None,
+            "avg_deal_acv": 0,
+            "avg_deal_mrr": 0,
+            "monthly_churn_rate_used": 0.0,
+            "total_spend": 0,
+            "total_deals_won": 0,
+            "total_acv_revenue": 0,
+            "total_ltv_revenue": 0,
+            "overall_attribution_confidence": "tier_3_spend_weighted",
+            "overall_verdict": "INSUFFICIENT_DATA",
+            "verdict": "INSUFFICIENT_DATA",
+        },
+    ) as economics_mock:
+        snapshot = generate_roas_snapshot(window="14d")
+
+    assert campaign_mock.call_args.kwargs == {"window_days": 14}
+    assert country_mock.call_args.kwargs == {"window_days": 14}
+    economics_mock.assert_called_once_with([])
+    assert snapshot["window"] == "14d"
+
+
 if __name__ == "__main__":
     tests = [
         test_snapshot_service_importable,
@@ -142,6 +206,9 @@ if __name__ == "__main__":
         test_data_dir_is_gitignored,
         test_snapshot_service_persistence_uses_data_dir,
         test_existing_live_endpoints_unchanged,
+        test_snapshot_service_rejects_invalid_window,
+        test_snapshot_and_live_endpoint_use_shared_unit_economics_helper,
+        test_snapshot_service_valid_window_uses_allowlist_value,
     ]
 
     passed = 0

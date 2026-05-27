@@ -18,25 +18,45 @@ What is NOT in this file:
 import json
 import logging
 import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from analysis.roas_calculator import (
     compute_all_campaign_roas,
     compute_all_country_roas,
-    compute_verdict,
 )
-from analysis.unit_economics import (
-    compute_cac,
-    compute_ltv_to_cac,
-    compute_payback_months,
-)
-from connectors.hubspot_churn import get_monthly_churn
+from services.unit_economics_service import compute_unit_economics_summary
 
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 SNAPSHOT_DIR = DATA_DIR / "roas_snapshots"
+VALID_WINDOWS = {"7d": 7, "14d": 14, "30d": 30, "60d": 60, "90d": 90, "365d": 365}
+
+
+def _parse_snapshot_window(window: str) -> int:
+    """Parse and validate ROAS window using strict allowlist."""
+    if window in VALID_WINDOWS:
+        return VALID_WINDOWS[window]
+    raise ValueError("Invalid window. Valid values: 7d, 14d, 30d, 60d, 90d, 365d")
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Atomically write JSON by replacing a temp file in the same directory."""
+    fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            json.dump(payload, tmp_file, indent=2, default=str)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 def generate_roas_snapshot(window: str = "60d") -> dict:
@@ -48,7 +68,7 @@ def generate_roas_snapshot(window: str = "60d") -> dict:
     Returns:
         Complete snapshot dict ready for persistence.
     """
-    window_days = int(window.replace("d", ""))
+    window_days = _parse_snapshot_window(window)
 
     logger.info("Generating ROAS snapshot for window=%s", window)
 
@@ -56,48 +76,12 @@ def generate_roas_snapshot(window: str = "60d") -> dict:
     campaigns = compute_all_campaign_roas(window_days=window_days)
     countries = compute_all_country_roas(window_days=window_days)
 
-    # Compute overall unit economics (mirrors /api/reports/unit-economics logic)
-    total_spend = sum(c.get("spend", 0) for c in campaigns)
+    # Compute overall unit economics using shared helper.
+    unit_economics = compute_unit_economics_summary(campaigns)
+    total_spend = unit_economics["total_spend"]
     total_deals = sum(c.get("deals_won", 0) for c in campaigns)
     total_acv = sum(c.get("acv_revenue", 0) for c in campaigns)
-    total_mrr = sum(c.get("mrr_revenue", 0) for c in campaigns)
     total_ltv = sum(c.get("ltv_revenue", 0) for c in campaigns)
-
-    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
-    churn_info = get_monthly_churn(current_month)
-    churn_rate = churn_info["monthly_churn_rate"]
-
-    avg_deal_acv = round(total_acv / total_deals) if total_deals > 0 else 0
-    avg_deal_mrr = round(total_mrr / total_deals) if total_deals > 0 else 0
-    avg_ltv = total_ltv / total_deals if total_deals > 0 else 0
-
-    cac = compute_cac(total_spend, total_deals)
-    ltv_cac = compute_ltv_to_cac(avg_ltv, cac) if cac else None
-    payback = compute_payback_months(cac, avg_deal_mrr) if cac and avg_deal_mrr > 0 else None
-
-    # Dominant attribution for overall verdict
-    weighted = {}
-    for campaign in campaigns:
-        confidence = campaign.get("attribution_confidence") or "tier_3_spend_weighted"
-        weight = campaign.get("deals_won", 0)
-        if weight > 0:
-            weighted[confidence] = weighted.get(confidence, 0) + weight
-    overall_attribution = max(weighted, key=weighted.get) if weighted else "tier_3_spend_weighted"
-    overall_verdict = compute_verdict(ltv_cac, payback, total_deals, overall_attribution)
-
-    unit_economics = {
-        "ltv_to_cac": round(ltv_cac, 2) if ltv_cac else None,
-        "payback_months": round(payback, 1) if payback else None,
-        "avg_deal_acv": avg_deal_acv,
-        "avg_deal_mrr": avg_deal_mrr,
-        "monthly_churn_rate_used": churn_rate,
-        "total_spend": round(total_spend, 2),
-        "total_deals_won": total_deals,
-        "total_acv_revenue": round(total_acv, 2),
-        "total_ltv_revenue": round(total_ltv, 2),
-        "overall_attribution_confidence": overall_attribution,
-        "overall_verdict": overall_verdict,
-    }
 
     # Count verdicts
     verdict_counts = {"SCALE": 0, "HOLD": 0, "FIX": 0, "CUT": 0, "INSUFFICIENT_DATA": 0}
@@ -146,7 +130,7 @@ def generate_roas_snapshot(window: str = "60d") -> dict:
         "ROAS snapshot generated: %d campaigns, %d countries, verdict=%s",
         len(campaigns),
         len(countries),
-        overall_verdict,
+        unit_economics.get("overall_verdict"),
     )
     return snapshot
 
@@ -174,11 +158,8 @@ def save_roas_snapshot(snapshot: dict) -> dict:
     latest_path = SNAPSHOT_DIR / f"latest_{window}.json"
 
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, indent=2, default=str)
-
-        with open(latest_path, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, indent=2, default=str)
+        _atomic_write_json(filepath, snapshot)
+        _atomic_write_json(latest_path, snapshot)
 
         logger.info("ROAS snapshot saved: %s", filepath)
         logger.info("Latest pointer updated: %s", latest_path)

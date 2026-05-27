@@ -30,10 +30,10 @@ def run_daily_pulse():
         from connectors.windsor_pull import pull_campaign_performance
         from connectors.hubspot_pull import pull_paid_search_contacts, get_lead_quality_summary
 
-        print("Step 1/5: Pulling Google Ads data (last 2 days)...")
+        print("Step 1/6: Pulling Google Ads data (last 2 days)...")
         campaigns = pull_campaign_performance(days_back=2)
 
-        print("Step 2/5: Pulling HubSpot contacts (last 2 days)...")
+        print("Step 2/6: Pulling HubSpot contacts (last 2 days)...")
         contacts = pull_paid_search_contacts(days_back=2)
         crm_summary = get_lead_quality_summary(contacts)
 
@@ -82,13 +82,13 @@ def run_daily_pulse():
             log.error("[daily] Skipping lead write and contacts sync tracking because write_run returned no run_id")
 
         # 2. Detect anomalies
-        print("Step 3/5: Running anomaly detection...")
+        print("Step 3/6: Running anomaly detection...")
         anomalies = detect_anomalies(campaigns)
         label = "anomaly" if len(anomalies) == 1 else "anomalies"
         print(f"  → {len(anomalies)} {label} found.")
 
         # 3. Check for new junk terms (quick pattern match)
-        print("Step 4/5: Checking for new junk search terms...")
+        print("Step 4/6: Checking for new junk search terms...")
         from connectors.windsor_pull import pull_search_terms
         search_terms = pull_search_terms(days_back=1)
         new_junk = detect_junk_terms(search_terms)
