@@ -2326,6 +2326,82 @@ All route paths follow the repo convention and are mounted under `/api/...`.
 
 ---
 
+## ROAS Snapshot Endpoints (PR-ADS-080C)
+
+These endpoints return **persisted** historical ROAS snapshots. Unlike the live-compute endpoints above (`/api/reports/roas/campaigns`, `/api/reports/roas/countries`, `/api/reports/unit-economics`), snapshot endpoints serve pre-generated daily records from `data/roas_snapshots/`.
+
+**Key difference:**
+- Live endpoints: compute ROAS on demand from current data.
+- Snapshot endpoints: return previously persisted daily snapshots.
+
+Snapshot files are runtime-only (`data/` is gitignored). No external writes.
+
+---
+
+### `GET /api/reports/roas/snapshots/latest`
+
+**Auth:** Auth (any authenticated session)
+
+**Query params:**
+| Param  | Type   | Default | Description |
+|--------|--------|---------|-------------|
+| window | string | `60d`   | Time window. Valid: `7d`, `14d`, `30d`, `60d`, `90d`, `365d` |
+
+**Response (200):**
+```json
+{
+  "snapshot_date": "2026-05-27",
+  "generated_at": "2026-05-27T07:00:00+00:00",
+  "window": "60d",
+  "source_truth": "hubspot_won_deals_plus_windsor_spend",
+  "google_ads_conversion_value_used": false,
+  "campaigns": [],
+  "countries": [],
+  "unit_economics": {},
+  "summary": {
+    "campaign_count": 12,
+    "country_count": 28,
+    "scale_count": 1,
+    "hold_count": 7,
+    "fix_count": 3,
+    "cut_count": 1,
+    "insufficient_data_count": 0,
+    "total_spend": 0,
+    "total_acv_revenue": 0,
+    "total_ltv_revenue": 0
+  },
+  "warnings": []
+}
+```
+
+**Response (404):** No snapshot exists for the requested window.
+
+---
+
+### `GET /api/reports/roas/snapshots`
+
+**Auth:** Auth (any authenticated session)
+
+**Query params:**
+| Param  | Type    | Default | Description |
+|--------|---------|---------|-------------|
+| window | string  | `60d`   | Time window. Valid: `7d`, `14d`, `30d`, `60d`, `90d`, `365d` |
+| limit  | integer | `30`    | Max snapshots to return (1–100) |
+
+**Response (200):**
+```json
+{
+  "window": "60d",
+  "limit": 30,
+  "count": 5,
+  "snapshots": []
+}
+```
+
+Each entry in `snapshots` has the same shape as the latest snapshot response above.
+
+---
+
 ### `GET /api/admin/churn-input`
 
 **Auth:** Admin (admin role cookie or `ADMIN_API_TOKEN` token)

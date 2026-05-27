@@ -78,6 +78,19 @@ All of these must be true:
 **Prerequisite:** Phase 1 validated
 **Duration:** 4–8 weeks minimum before advancing
 
+### Revenue Truth Persistence (PR-ADS-080C)
+
+**PR-ADS-080C — ROAS Daily Report Persistence & Scheduler Hook**
+- **Status:** Added daily ROAS snapshot generation and persistence.
+- **Depends on:** PR-ADS-080A (Revenue Truth Layer), PR-ADS-080B (Revenue-First Menu)
+- **Blocks:** PR-ADS-081 (GCLID Bridge Readiness Audit)
+- **Files:**
+  - `services/roas_snapshot_service.py` — snapshot generation and persistence
+  - `scheduler/daily.py` — scheduler hook for daily ROAS snapshot
+  - `api/server.py` — read-only snapshot endpoints
+  - `scripts/smoke_test_roas_snapshot.py` — smoke test
+  - `tests/test_roas_snapshot_service.py` — unit tests
+
 ### What it adds
 **OCT Uploader** (`connectors/oct_uploader.py`)
 - Reads HubSpot deal stage changes

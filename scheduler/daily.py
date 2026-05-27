@@ -157,8 +157,24 @@ def run_daily_pulse():
         # hubspot/deals     — not pulled in daily
         # gclid/matches     — no DB persistence path yet
 
-        # 4. CRM delta check + budget pacing
-        print("Step 5/5: Checking CRM delta and budget pacing...")
+        # 4a. Generate and persist daily ROAS snapshot (PR-ADS-080C)
+        print("Step 5/6: Generating daily ROAS snapshot...")
+        try:
+            from services.roas_snapshot_service import generate_roas_snapshot, save_roas_snapshot
+
+            roas_snapshot = generate_roas_snapshot(window="60d")
+            save_result = save_roas_snapshot(roas_snapshot)
+            if save_result.get("status") == "success":
+                print(f"  → ROAS snapshot saved: {save_result.get('snapshot_path')}")
+            else:
+                log.warning("[daily] ROAS snapshot save failed: %s", save_result.get("error"))
+                print(f"  → ROAS snapshot save failed: {save_result.get('error')}")
+        except Exception as roas_exc:  # noqa: BLE001
+            log.warning("[daily] ROAS snapshot generation failed (non-fatal): %s", roas_exc)
+            print(f"  → ROAS snapshot generation failed (non-fatal): {roas_exc}")
+
+        # 4b. CRM delta check + budget pacing
+        print("Step 6/6: Checking CRM delta and budget pacing...")
         crm_delta = check_crm_delta(campaigns, crm_summary)
         print(f"  → CRM delta alert: {crm_delta.get('alert', False)} ({crm_delta.get('message', '')})")
 

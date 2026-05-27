@@ -5848,6 +5848,56 @@ async def get_unit_economics(
     }
 
 
+# ---------------------------------------------------------------------------
+# ROAS Snapshot Endpoints (PR-ADS-080C)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/reports/roas/snapshots/latest")
+async def get_roas_snapshot_latest(
+    window: str = Query(default="60d"),
+    _user=Depends(require_auth),
+):
+    """Return the latest persisted ROAS snapshot for a given window.
+
+    This is a historical/persisted view — not live-computed.
+    """
+    from services.roas_snapshot_service import load_latest_roas_snapshot
+
+    window_days = _parse_window(window)  # validates window format
+
+    snapshot = load_latest_roas_snapshot(window=f"{window_days}d")
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No ROAS snapshot found for window={window_days}d",
+        )
+    return snapshot
+
+
+@app.get("/api/reports/roas/snapshots")
+async def get_roas_snapshots(
+    window: str = Query(default="60d"),
+    limit: int = Query(default=30, ge=1, le=100),
+    _user=Depends(require_auth),
+):
+    """Return historical ROAS snapshots (most recent first).
+
+    This is a historical/persisted view — not live-computed.
+    """
+    from services.roas_snapshot_service import load_roas_snapshots
+
+    window_days = _parse_window(window)  # validates window format
+
+    snapshots = load_roas_snapshots(limit=limit, window=f"{window_days}d")
+    return {
+        "window": f"{window_days}d",
+        "limit": limit,
+        "count": len(snapshots),
+        "snapshots": snapshots,
+    }
+
+
 @app.get("/api/admin/churn-input")
 async def get_churn_input(
     _user=Depends(check_admin_or_token),
