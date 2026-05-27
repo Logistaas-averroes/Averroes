@@ -5855,6 +5855,103 @@ async def get_roas_snapshots(
     }
 
 
+# ---------------------------------------------------------------------------
+# Attribution Confidence & GCLID Readiness Endpoints (PR-ADS-081/082)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/attribution/gclid-readiness")
+async def get_gclid_readiness(
+    window: str = Query(default="60d"),
+    _user=Depends(require_auth),
+):
+    """GCLID Bridge Readiness Audit (PR-ADS-081).
+
+    Read-only audit of whether the system is ready for click-level GCLID attribution.
+    Does not write to Google Ads, HubSpot, or any external system.
+    """
+    from analysis.gclid_readiness_audit import run_gclid_readiness_audit
+
+    window_days = _parse_window(window)
+
+    try:
+        result = run_gclid_readiness_audit(window_days=window_days)
+    except Exception as exc:
+        log.error("GCLID readiness audit failed: %s", exc)
+        raise HTTPException(status_code=500, detail="GCLID readiness audit failed") from exc
+
+    return result
+
+
+@app.get("/api/attribution/confidence-summary")
+async def get_attribution_confidence_summary(
+    window: str = Query(default="60d"),
+    _user=Depends(require_auth),
+):
+    """Attribution Confidence Summary (PR-ADS-082).
+
+    Returns confidence tier distribution across ROAS data.
+    Uses latest snapshot if available, otherwise computes live.
+    Read-only — no writes to any external system.
+    """
+    from analysis.attribution_confidence import (
+        CONFIDENCE_DEFINITIONS,
+        summarize_roas_confidence,
+    )
+    from services.roas_snapshot_service import load_latest_roas_snapshot
+
+    window_days = _parse_window(window)
+    window_str = f"{window_days}d"
+
+    # Try latest snapshot first, fall back to live computation
+    snapshot = load_latest_roas_snapshot(window=window_str)
+    if snapshot:
+        campaigns = snapshot.get("campaigns", [])
+        countries = snapshot.get("countries", [])
+    else:
+        from analysis.roas_calculator import (
+            compute_all_campaign_roas,
+            compute_all_country_roas,
+        )
+        try:
+            campaigns = compute_all_campaign_roas(window_days=window_days)
+            countries = compute_all_country_roas(window_days=window_days)
+        except Exception as exc:
+            log.error("Confidence summary computation failed: %s", exc)
+            raise HTTPException(
+                status_code=500, detail="Confidence summary computation failed"
+            ) from exc
+
+    summary = summarize_roas_confidence(campaigns, countries)
+
+    # Build definitions for response (label + trust_level + description only)
+    definitions = {}
+    for key, defn in CONFIDENCE_DEFINITIONS.items():
+        definitions[key] = {
+            "label": defn["label"],
+            "trust_level": defn["trust_level"],
+            "description": defn["description"],
+        }
+
+    return {
+        "window": window_str,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "overall_confidence": summary["overall_confidence"],
+        "summary": {
+            "campaign_rows": summary["campaign_rows"],
+            "country_rows": summary["country_rows"],
+            "tier_1_count": summary["tier_1_count"],
+            "tier_2_count": summary["tier_2_count"],
+            "tier_3_count": summary["tier_3_count"],
+            "tier_1_share": summary["tier_1_share"],
+            "tier_2_share": summary["tier_2_share"],
+            "tier_3_share": summary["tier_3_share"],
+        },
+        "definitions": definitions,
+        "message": summary["message"],
+    }
+
+
 @app.get("/api/admin/churn-input")
 async def get_churn_input(
     _user=Depends(check_admin_or_token),

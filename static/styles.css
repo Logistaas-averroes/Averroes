@@ -4285,3 +4285,198 @@ a {
   margin-top: var(--space-4, 1rem);
   font-style: italic;
 }
+
+/* ── GCLID Readiness & Attribution Confidence (PR-ADS-081/082) ─────────── */
+
+.readiness-summary,
+.confidence-summary {
+  margin-bottom: var(--space-4, 1rem);
+}
+
+.readiness-cards,
+.confidence-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-3, 0.75rem);
+  margin-bottom: var(--space-4, 1rem);
+}
+
+.readiness-card,
+.confidence-card {
+  background: var(--surface-card, #fff);
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--space-4, 1rem);
+  text-align: center;
+}
+
+.readiness-card__label,
+.confidence-card__label {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-text-muted, #64748b);
+  margin-bottom: var(--space-2, 0.5rem);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.readiness-card__value,
+.confidence-card__value {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--color-text, #1e293b);
+}
+
+.confidence-card__desc {
+  font-size: 0.7rem;
+  color: var(--color-text-muted, #94a3b8);
+  margin-top: var(--space-1, 0.25rem);
+}
+
+/* Readiness status badges */
+.readiness-status-badge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.readiness-status--ready {
+  background: var(--c-success-bg, #dcfce7);
+  color: var(--c-success, #15803d);
+}
+
+.readiness-status--partial {
+  background: var(--c-warning-bg, #fef3c7);
+  color: var(--c-warning, #b45309);
+}
+
+.readiness-status--not-ready {
+  background: var(--c-danger-bg, #fee2e2);
+  color: var(--c-danger, #b91c1c);
+}
+
+.readiness-status--unknown {
+  background: var(--c-neutral-bg, #f0f0f5);
+  color: var(--c-neutral, #6e6e73);
+}
+
+/* Confidence level badges */
+.confidence-level-badge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.confidence-level--high {
+  background: var(--c-success-bg, #dcfce7);
+  color: var(--c-success, #15803d);
+}
+
+.confidence-level--medium {
+  background: var(--c-warning-bg, #fef3c7);
+  color: var(--c-warning, #b45309);
+}
+
+.confidence-level--low {
+  background: var(--c-danger-bg, #fee2e2);
+  color: var(--c-danger, #b91c1c);
+}
+
+.confidence-level--unknown {
+  background: var(--c-neutral-bg, #f0f0f5);
+  color: var(--c-neutral, #6e6e73);
+}
+
+/* Readiness note */
+.readiness-note {
+  font-size: 0.8rem;
+  color: var(--color-text-muted, #64748b);
+  font-style: italic;
+  margin-top: var(--space-2, 0.5rem);
+}
+
+/* Confidence message */
+.confidence-message {
+  font-size: 0.8rem;
+  color: var(--color-text-muted, #64748b);
+  font-style: italic;
+  margin-top: var(--space-2, 0.5rem);
+}
+
+/* Blocker cards */
+.blocker-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 0.5rem);
+  margin-top: var(--space-3, 0.75rem);
+}
+
+.blocker-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3, 0.75rem);
+  padding: var(--space-3, 0.75rem) var(--space-4, 1rem);
+  border-radius: var(--radius-md, 8px);
+  border: 1px solid var(--border, #e2e8f0);
+}
+
+.blocker-card--high {
+  background: var(--c-danger-bg, #fee2e2);
+  border-color: #fca5a5;
+}
+
+.blocker-card--medium {
+  background: var(--c-warning-bg, #fef3c7);
+  border-color: #fcd34d;
+}
+
+.blocker-card--low {
+  background: var(--c-neutral-bg, #f0f0f5);
+  border-color: var(--border, #e2e8f0);
+}
+
+.blocker-severity {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  min-width: 50px;
+}
+
+.blocker-card--high .blocker-severity { color: var(--c-danger, #b91c1c); }
+.blocker-card--medium .blocker-severity { color: var(--c-warning, #b45309); }
+.blocker-card--low .blocker-severity { color: var(--c-neutral, #6e6e73); }
+
+.blocker-message {
+  font-size: 0.8rem;
+  color: var(--color-text, #1e293b);
+}
+
+/* Next checks list */
+.next-checks-list {
+  margin: var(--space-2, 0.5rem) 0 0 var(--space-4, 1rem);
+  padding: 0;
+  font-size: 0.8rem;
+  color: var(--color-text, #1e293b);
+}
+
+.next-checks-list li {
+  margin-bottom: var(--space-2, 0.5rem);
+}
+
+/* Readiness section titles */
+.readiness-section-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text, #1e293b);
+  margin: var(--space-4, 1rem) 0 var(--space-2, 0.5rem) 0;
+}
+
+/* Confidence tier card accents */
+.confidence-card--tier1 { border-left: 3px solid #1e40af; }
+.confidence-card--tier2 { border-left: 3px solid #4338ca; }
+.confidence-card--tier3 { border-left: 3px solid #94a3b8; }

@@ -2463,3 +2463,142 @@ Each entry in `snapshots` has the same shape as the latest snapshot response abo
 - Local YAML config write only.
 - No HubSpot write.
 - No Google Ads write.
+
+---
+
+#### `GET /api/attribution/gclid-readiness`
+
+GCLID Bridge Readiness Audit (PR-ADS-081). Read-only audit of whether the system is ready for click-level GCLID attribution.
+
+**Auth:** Auth (session cookie required)
+
+**Query parameters:**
+| Param  | Type   | Default | Valid values                       |
+|--------|--------|---------|-------------------------------------|
+| window | string | 60d     | 7d, 14d, 30d, 60d, 90d, 365d      |
+
+**Response (200):**
+```json
+{
+  "window": "60d",
+  "generated_at": "2026-05-27T12:00:00+00:00",
+  "readiness_status": "NOT_READY",
+  "readiness_score": 42,
+  "summary": {
+    "won_deals": 50,
+    "deals_with_direct_gclid": 0,
+    "deals_with_contact_gclid": 8,
+    "deals_without_gclid": 42,
+    "windsor_rows_with_gclid": 0,
+    "tier_1_possible_matches": 0,
+    "tier_2_source_tag_matches": 34,
+    "tier_3_estimated_required": 16
+  },
+  "blockers": [
+    {
+      "severity": "high",
+      "code": "WINDSOR_GCLID_MISSING",
+      "message": "Windsor campaign data does not currently expose click-level GCLID rows."
+    }
+  ],
+  "next_checks": [
+    "Confirm whether Windsor connector can pull click-level GCLID data."
+  ],
+  "notes": [
+    "This audit is read-only. It does not implement the GCLID bridge."
+  ]
+}
+```
+
+**Response (400) — invalid window:**
+```json
+{
+  "detail": "Invalid window. Valid values: 7d, 14d, 30d, 60d, 90d, 365d"
+}
+```
+
+**Readiness statuses:**
+- `READY` — Tier 1 possible matches exist and both HubSpot + Windsor expose GCLID.
+- `PARTIAL` — HubSpot has some GCLID coverage but Windsor/click matching is incomplete.
+- `NOT_READY` — No reliable Tier 1 GCLID match path exists.
+- `UNKNOWN` — Required source files are missing or empty.
+
+**Non-goals:**
+- Does not implement the GCLID bridge.
+- Does not write to Google Ads, HubSpot, or any external system.
+- Does not upload offline conversions.
+
+---
+
+#### `GET /api/attribution/confidence-summary`
+
+Attribution Confidence Summary (PR-ADS-082). Returns confidence tier distribution across ROAS data.
+
+**Auth:** Auth (session cookie required)
+
+**Query parameters:**
+| Param  | Type   | Default | Valid values                       |
+|--------|--------|---------|-------------------------------------|
+| window | string | 60d     | 7d, 14d, 30d, 60d, 90d, 365d      |
+
+**Response (200):**
+```json
+{
+  "window": "60d",
+  "generated_at": "2026-05-27T12:00:00+00:00",
+  "overall_confidence": "LOW",
+  "summary": {
+    "campaign_rows": 12,
+    "country_rows": 28,
+    "tier_1_count": 0,
+    "tier_2_count": 9,
+    "tier_3_count": 31,
+    "tier_1_share": 0.0,
+    "tier_2_share": 0.225,
+    "tier_3_share": 0.775
+  },
+  "definitions": {
+    "tier_1_gclid": {
+      "label": "Exact GCLID",
+      "trust_level": "exact",
+      "description": "Revenue is matched to ad interaction using GCLID-level evidence."
+    },
+    "tier_2_source_tag": {
+      "label": "Source Tag",
+      "trust_level": "directional",
+      "description": "Revenue is matched using HubSpot paid-search source/campaign tags."
+    },
+    "tier_3_spend_weighted": {
+      "label": "Estimate",
+      "trust_level": "estimated",
+      "description": "Revenue is estimated using fallback allocation. Use directionally, not as final truth."
+    }
+  },
+  "message": "Most ROAS rows are estimated. Use revenue pages directionally until GCLID matching is wired."
+}
+```
+
+**Response (400) — invalid window:**
+```json
+{
+  "detail": "Invalid window. Valid values: 7d, 14d, 30d, 60d, 90d, 365d"
+}
+```
+
+**Confidence definitions:**
+| Tier                    | Label       | Trust Level  | Description                                                |
+|-------------------------|-------------|--------------|-------------------------------------------------------------|
+| tier_1_gclid            | Exact GCLID | exact        | Revenue matched via GCLID-level evidence.                  |
+| tier_2_source_tag       | Source Tag  | directional  | Revenue matched via HubSpot paid-search source/campaign.   |
+| tier_3_spend_weighted   | Estimate    | estimated    | Revenue estimated via fallback allocation.                 |
+
+**Overall confidence rules:**
+- `HIGH` — tier_1_share >= 70%
+- `MEDIUM` — tier_1_share + tier_2_share >= 70%
+- `LOW` — tier_3_share > 50%
+- `UNKNOWN` — no rows available
+
+**Non-goals:**
+- Does not rewrite ROAS calculations.
+- Does not write to Google Ads, HubSpot, or any external system.
+- Does not upload offline conversions.

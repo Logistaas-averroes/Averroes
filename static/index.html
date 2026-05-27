@@ -872,6 +872,30 @@
         <div id="page-explanation-gclid-attribution" hidden></div>
         <p id="run-meta-gclid_attribution" class="run-meta" data-section="gclid_attribution"></p>
 
+        <!-- GCLID Readiness Audit (PR-ADS-081) -->
+        <div class="panel" id="gclid-readiness-panel">
+          <div class="panel__header">GCLID Bridge Readiness</div>
+          <div class="panel__body">
+            <p class="page-subtitle" style="margin-bottom:var(--space-4);">Are we ready for exact GCLID attribution? This audit is read-only.</p>
+            <div id="gclid-readiness-summary" class="readiness-summary">
+              <p class="empty-state">Loading GCLID readiness…</p>
+            </div>
+            <div id="gclid-readiness-blockers" class="readiness-blockers"></div>
+            <div id="gclid-readiness-next-checks" class="readiness-next-checks"></div>
+          </div>
+        </div>
+
+        <!-- Attribution Confidence Summary (PR-ADS-082) -->
+        <div class="panel" id="attribution-confidence-panel">
+          <div class="panel__header">Attribution Confidence</div>
+          <div class="panel__body">
+            <p class="page-subtitle" style="margin-bottom:var(--space-4);">What percentage of revenue rows are exact, source-tagged, or estimated?</p>
+            <div id="attribution-confidence-summary" class="confidence-summary">
+              <p class="empty-state">Loading confidence summary…</p>
+            </div>
+          </div>
+        </div>
+
         <div id="gclid-coverage-kpis" class="kpi-grid"></div>
         <p class="gclid-coverage-note">Coverage cards show local DB snapshots only, not live Google Ads status.</p>
 
