@@ -5711,25 +5711,6 @@ def _parse_window(window: str) -> int:
     )
 
 
-def _dominant_attribution_from_campaigns(campaigns: list[dict]) -> str:
-    """Derive overall attribution confidence, weighted by deals_won."""
-    weighted = {}
-    for campaign in campaigns:
-        confidence = campaign.get("attribution_confidence") or "tier_3_spend_weighted"
-        weight = campaign.get("deals_won", 0)
-        try:
-            weight = int(weight)
-        except (ValueError, TypeError):
-            weight = 0
-        if weight <= 0:
-            continue
-        weighted[confidence] = weighted.get(confidence, 0) + weight
-
-    if not weighted:
-        return "tier_3_spend_weighted"
-    return max(weighted, key=weighted.get)
-
-
 @app.get("/api/reports/roas/campaigns")
 async def get_roas_campaigns(
     window: str = Query(default="60d"),
@@ -5797,7 +5778,7 @@ async def get_unit_economics(
 ):
     """Unit economics report: LTV/CAC, payback, avg deal values."""
     from analysis.roas_calculator import compute_all_campaign_roas
-    from connectors.hubspot_churn import get_monthly_churn
+    from services.unit_economics_service import compute_unit_economics_summary
 
     window_days = _parse_window(window)
 
@@ -5807,44 +5788,70 @@ async def get_unit_economics(
         log.error("Unit economics computation failed: %s", exc)
         raise HTTPException(status_code=500, detail="Unit economics computation failed") from exc
 
-    # Aggregate overall
-    total_spend = sum(c.get("spend", 0) for c in campaigns)
-    total_deals = sum(c.get("deals_won", 0) for c in campaigns)
-    total_acv = sum(c.get("acv_revenue", 0) for c in campaigns)
-    total_mrr = sum(c.get("mrr_revenue", 0) for c in campaigns)
-    total_ltv = sum(c.get("ltv_revenue", 0) for c in campaigns)
-
-    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
-    churn_info = get_monthly_churn(current_month)
-    churn_rate = churn_info["monthly_churn_rate"]
-
-    from analysis.unit_economics import compute_cac, compute_ltv_to_cac, compute_payback_months
-
-    avg_deal_acv = round(total_acv / total_deals) if total_deals > 0 else 0
-    avg_deal_mrr = round(total_mrr / total_deals) if total_deals > 0 else 0
-    avg_ltv = total_ltv / total_deals if total_deals > 0 else 0
-
-    cac = compute_cac(total_spend, total_deals)
-    ltv_cac = compute_ltv_to_cac(avg_ltv, cac) if cac else None
-    payback = compute_payback_months(cac, avg_deal_mrr) if cac and avg_deal_mrr > 0 else None
-
-    # Overall verdict
-    from analysis.roas_calculator import compute_verdict
-    overall_attribution = _dominant_attribution_from_campaigns(campaigns)
-    overall_verdict = compute_verdict(ltv_cac, payback, total_deals, overall_attribution)
+    overall = compute_unit_economics_summary(campaigns)
 
     return {
         "window": f"{window_days}d",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "overall": {
-            "ltv_to_cac": round(ltv_cac, 2) if ltv_cac else None,
-            "payback_months": round(payback, 1) if payback else None,
-            "avg_deal_acv": avg_deal_acv,
-            "avg_deal_mrr": avg_deal_mrr,
-            "monthly_churn_rate_used": churn_rate,
-            "verdict": overall_verdict,
+            "ltv_to_cac": overall["ltv_to_cac"],
+            "payback_months": overall["payback_months"],
+            "avg_deal_acv": overall["avg_deal_acv"],
+            "avg_deal_mrr": overall["avg_deal_mrr"],
+            "monthly_churn_rate_used": overall["monthly_churn_rate_used"],
+            "verdict": overall["verdict"],
         },
         "by_campaign": campaigns,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ROAS Snapshot Endpoints (PR-ADS-080C)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/reports/roas/snapshots/latest")
+async def get_roas_snapshot_latest(
+    window: str = Query(default="60d"),
+    _user=Depends(require_auth),
+):
+    """Return the latest persisted ROAS snapshot for a given window.
+
+    This is a historical/persisted view — not live-computed.
+    """
+    from services.roas_snapshot_service import load_latest_roas_snapshot
+
+    window_days = _parse_window(window)  # validates window format
+
+    snapshot = load_latest_roas_snapshot(window=f"{window_days}d")
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No ROAS snapshot found for window={window_days}d",
+        )
+    return snapshot
+
+
+@app.get("/api/reports/roas/snapshots")
+async def get_roas_snapshots(
+    window: str = Query(default="60d"),
+    limit: int = Query(default=30, ge=1, le=100),
+    _user=Depends(require_auth),
+):
+    """Return historical ROAS snapshots (most recent first).
+
+    This is a historical/persisted view — not live-computed.
+    """
+    from services.roas_snapshot_service import load_roas_snapshots
+
+    window_days = _parse_window(window)  # validates window format
+
+    snapshots = load_roas_snapshots(limit=limit, window=f"{window_days}d")
+    return {
+        "window": f"{window_days}d",
+        "limit": limit,
+        "count": len(snapshots),
+        "snapshots": snapshots,
     }
 
 

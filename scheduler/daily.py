@@ -30,10 +30,10 @@ def run_daily_pulse():
         from connectors.windsor_pull import pull_campaign_performance
         from connectors.hubspot_pull import pull_paid_search_contacts, get_lead_quality_summary
 
-        print("Step 1/5: Pulling Google Ads data (last 2 days)...")
+        print("Step 1/6: Pulling Google Ads data (last 2 days)...")
         campaigns = pull_campaign_performance(days_back=2)
 
-        print("Step 2/5: Pulling HubSpot contacts (last 2 days)...")
+        print("Step 2/6: Pulling HubSpot contacts (last 2 days)...")
         contacts = pull_paid_search_contacts(days_back=2)
         crm_summary = get_lead_quality_summary(contacts)
 
@@ -82,13 +82,13 @@ def run_daily_pulse():
             log.error("[daily] Skipping lead write and contacts sync tracking because write_run returned no run_id")
 
         # 2. Detect anomalies
-        print("Step 3/5: Running anomaly detection...")
+        print("Step 3/6: Running anomaly detection...")
         anomalies = detect_anomalies(campaigns)
         label = "anomaly" if len(anomalies) == 1 else "anomalies"
         print(f"  → {len(anomalies)} {label} found.")
 
         # 3. Check for new junk terms (quick pattern match)
-        print("Step 4/5: Checking for new junk search terms...")
+        print("Step 4/6: Checking for new junk search terms...")
         from connectors.windsor_pull import pull_search_terms
         search_terms = pull_search_terms(days_back=1)
         new_junk = detect_junk_terms(search_terms)
@@ -157,8 +157,24 @@ def run_daily_pulse():
         # hubspot/deals     — not pulled in daily
         # gclid/matches     — no DB persistence path yet
 
-        # 4. CRM delta check + budget pacing
-        print("Step 5/5: Checking CRM delta and budget pacing...")
+        # 4a. Generate and persist daily ROAS snapshot (PR-ADS-080C)
+        print("Step 5/6: Generating daily ROAS snapshot...")
+        try:
+            from services.roas_snapshot_service import generate_roas_snapshot, save_roas_snapshot
+
+            roas_snapshot = generate_roas_snapshot(window="60d")
+            save_result = save_roas_snapshot(roas_snapshot)
+            if save_result.get("status") == "success":
+                print(f"  → ROAS snapshot saved: {save_result.get('snapshot_path')}")
+            else:
+                log.warning("[daily] ROAS snapshot save failed: %s", save_result.get("error"))
+                print(f"  → ROAS snapshot save failed: {save_result.get('error')}")
+        except Exception as roas_exc:  # noqa: BLE001
+            log.warning("[daily] ROAS snapshot generation failed (non-fatal): %s", roas_exc)
+            print(f"  → ROAS snapshot generation failed (non-fatal): {roas_exc}")
+
+        # 4b. CRM delta check + budget pacing
+        print("Step 6/6: Checking CRM delta and budget pacing...")
         crm_delta = check_crm_delta(campaigns, crm_summary)
         print(f"  → CRM delta alert: {crm_delta.get('alert', False)} ({crm_delta.get('message', '')})")
 
