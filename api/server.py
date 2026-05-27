@@ -5867,10 +5867,8 @@ async def update_churn_input(
       - Rate must be 0 <= rate <= 1.
       - Local config write only. No HubSpot write.
     """
-    import re as _re
-
     # Validate month format
-    if not _re.match(r"^\d{4}-\d{2}$", payload.month):
+    if not re.match(r"^\d{4}-\d{2}$", payload.month):
         raise HTTPException(status_code=400, detail="month must be YYYY-MM format")
 
     # Validate rate bounds
