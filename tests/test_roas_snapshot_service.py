@@ -12,7 +12,6 @@ Validates:
   - Runtime data paths are under data/ and not committed.
 """
 
-import ast
 import os
 import sys
 
