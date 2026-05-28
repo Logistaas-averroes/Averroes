@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=094" />
 </head>
 <body>
 
@@ -1232,7 +1232,7 @@
         <div id="page-explanation-roas-campaigns" hidden></div>
         <div class="roas-window-controls">
           <label class="roas-window-label">Window:</label>
-          <select id="roas-campaigns-window" class="waste-filter-select" aria-label="ROAS analysis window">
+          <select id="roas-campaigns-window" class="waste-filter-select" data-sync-window-select aria-label="ROAS analysis window">
             <option value="7d">7d</option>
             <option value="14d">14d</option>
             <option value="30d">30d</option>
@@ -1267,7 +1267,7 @@
         </div>
         <div class="roas-window-controls">
           <label class="roas-window-label">Window:</label>
-          <select id="roas-countries-window" class="waste-filter-select" aria-label="ROAS analysis window">
+          <select id="roas-countries-window" class="waste-filter-select" data-sync-window-select aria-label="ROAS analysis window">
             <option value="7d">7d</option>
             <option value="14d">14d</option>
             <option value="30d">30d</option>
@@ -1299,7 +1299,7 @@
         <div id="page-explanation-unit-economics" hidden></div>
         <div class="roas-window-controls">
           <label class="roas-window-label">Window:</label>
-          <select id="unit-economics-window" class="waste-filter-select" aria-label="Unit economics window">
+          <select id="unit-economics-window" class="waste-filter-select" data-sync-window-select aria-label="Unit economics window">
             <option value="7d">7d</option>
             <option value="14d">14d</option>
             <option value="30d">30d</option>
@@ -1395,6 +1395,6 @@
     </div>
   </aside>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=094"></script>
 </body>
 </html>
