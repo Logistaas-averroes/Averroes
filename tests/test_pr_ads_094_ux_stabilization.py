@@ -105,22 +105,25 @@ def test_no_hardcoded_60d_in_snapshot_history():
 
 def test_roas_campaigns_uses_global_window_fallback():
     """ROAS campaigns loader should use getCurrentWindowParam() as fallback."""
-    roas_section = JS[JS.find("function loadRoasCampaigns"):]
-    roas_section = roas_section[:500]
+    start = JS.find("function loadRoasCampaigns")
+    assert start != -1, "loadRoasCampaigns function not found"
+    roas_section = JS[start:start + 500]
     assert "getCurrentWindowParam()" in roas_section
 
 
 def test_roas_countries_uses_global_window_fallback():
     """ROAS countries loader should use getCurrentWindowParam() as fallback."""
-    roas_section = JS[JS.find("function loadRoasCountries"):]
-    roas_section = roas_section[:500]
+    start = JS.find("function loadRoasCountries")
+    assert start != -1, "loadRoasCountries function not found"
+    roas_section = JS[start:start + 500]
     assert "getCurrentWindowParam()" in roas_section
 
 
 def test_unit_economics_uses_global_window_fallback():
     """Unit economics loader should use getCurrentWindowParam() as fallback."""
-    ue_section = JS[JS.find("function loadUnitEconomics"):]
-    ue_section = ue_section[:500]
+    start = JS.find("function loadUnitEconomics")
+    assert start != -1, "loadUnitEconomics function not found"
+    ue_section = JS[start:start + 500]
     assert "getCurrentWindowParam()" in ue_section
 
 

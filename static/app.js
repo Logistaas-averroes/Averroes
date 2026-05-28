@@ -861,6 +861,16 @@ function updateWindowControls(days) {
   });
 }
 
+function windowParamToDays(value) {
+  const n = parseInt(String(value || "").replace("d", ""), 10);
+  return VALID_DAY_WINDOWS.includes(n) ? n : getCurrentDays();
+}
+
+function handleSyncedWindowSelectChange(e) {
+  const days = windowParamToDays(e.target.value);
+  setSelectedDays(days);
+}
+
 // ── Fetch helpers ──────────────────────────────────────────────────────────
 
 async function fetchJSON(url, options = {}) {
@@ -7028,19 +7038,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   const roasCampRefresh = document.getElementById("roas-campaigns-refresh-btn");
   const roasCampWindow  = document.getElementById("roas-campaigns-window");
   if (roasCampRefresh) roasCampRefresh.addEventListener("click", loadRoasCampaigns);
-  if (roasCampWindow)  roasCampWindow.addEventListener("change", loadRoasCampaigns);
+  if (roasCampWindow)  roasCampWindow.addEventListener("change", handleSyncedWindowSelectChange);
 
   // Wire up ROAS by Country controls
   const roasCountryRefresh = document.getElementById("roas-countries-refresh-btn");
   const roasCountryWindow  = document.getElementById("roas-countries-window");
   if (roasCountryRefresh) roasCountryRefresh.addEventListener("click", loadRoasCountries);
-  if (roasCountryWindow)  roasCountryWindow.addEventListener("change", loadRoasCountries);
+  if (roasCountryWindow)  roasCountryWindow.addEventListener("change", handleSyncedWindowSelectChange);
 
   // Wire up Unit Economics controls
   const ueRefresh = document.getElementById("unit-economics-refresh-btn");
   const ueWindow  = document.getElementById("unit-economics-window");
   if (ueRefresh) ueRefresh.addEventListener("click", loadUnitEconomics);
-  if (ueWindow)  ueWindow.addEventListener("change", loadUnitEconomics);
+  if (ueWindow)  ueWindow.addEventListener("change", handleSyncedWindowSelectChange);
 
   // Wire up Churn Input form
   const churnForm = document.getElementById("churn-input-form");
@@ -7269,8 +7279,7 @@ let roasCampaignsData = [];
 let roasCampaignsStatus = "idle";
 
 async function loadRoasCampaigns() {
-  const windowSel = document.getElementById("roas-campaigns-window");
-  const window_ = windowSel ? windowSel.value : getCurrentWindowParam();
+  const window_ = getCurrentWindowParam();
   if (!VALID_ROAS_WINDOWS.includes(window_)) return;
 
   roasCampaignsStatus = "loading";
@@ -7369,8 +7378,7 @@ let roasCountriesData = [];
 let roasCountriesStatus = "idle";
 
 async function loadRoasCountries() {
-  const windowSel = document.getElementById("roas-countries-window");
-  const window_ = windowSel ? windowSel.value : getCurrentWindowParam();
+  const window_ = getCurrentWindowParam();
   if (!VALID_ROAS_WINDOWS.includes(window_)) return;
 
   roasCountriesStatus = "loading";
@@ -7457,8 +7465,7 @@ let unitEconomicsData = null;
 let unitEconomicsStatus = "idle";
 
 async function loadUnitEconomics() {
-  const windowSel = document.getElementById("unit-economics-window");
-  const window_ = windowSel ? windowSel.value : getCurrentWindowParam();
+  const window_ = getCurrentWindowParam();
   if (!VALID_ROAS_WINDOWS.includes(window_)) return;
 
   unitEconomicsStatus = "loading";
