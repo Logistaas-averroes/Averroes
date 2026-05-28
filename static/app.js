@@ -671,22 +671,35 @@ function buildEmptyState({ pageKey, canonicalStatus, rowsInWindow, filtersActive
   const info = PAGE_EXPLANATIONS[pageKey] || {};
   const title = info.title || pageKey;
 
-  // Determine empty state type
+  // Determine empty state type — PR-ADS-095 wires in refined states so we
+  // avoid falling back to "unknown" for known canonical states.
   let stateType = "unknown";
   if (error) {
     stateType = "error";
   } else if (filtersActive) {
     stateType = "filtered_out";
-  } else if (canonicalStatus === "dependency_blocked") {
+  } else if (canonicalStatus === "dependency_blocked" || canonicalStatus === "blocked_by_dependency") {
     stateType = "dependency_blocked";
-  } else if (canonicalStatus === "fresh_but_empty") {
+  } else if (canonicalStatus === "fresh_but_empty" || canonicalStatus === "empty_success") {
     stateType = "fresh_but_empty";
-  } else if (canonicalStatus === "failed" || canonicalStatus === "stale_and_empty") {
+  } else if (canonicalStatus === "failed" || canonicalStatus === "failed_no_data" || canonicalStatus === "stale_and_empty") {
     stateType = "stale_or_failed";
+  } else if (canonicalStatus === "data_available_latest_sync_failed") {
+    stateType = "degraded_sync_failed";
+  } else if (canonicalStatus === "stale_with_data") {
+    stateType = "stale_with_data";
   } else if (canonicalStatus === "db_unavailable") {
     stateType = "db_unavailable";
+  } else if (canonicalStatus === "not_run_but_derivable") {
+    stateType = "not_run_but_derivable";
+  } else if (canonicalStatus === "not_run_no_upstream_data") {
+    stateType = "not_run_no_upstream_data";
   } else if (canonicalStatus === "not_run") {
     stateType = "not_run";
+  } else if (canonicalStatus === "row_count_not_enabled") {
+    stateType = "row_count_not_enabled";
+  } else if (canonicalStatus === "unknown_row_count") {
+    stateType = "unknown_row_count";
   } else if (rowsInWindow === 0) {
     stateType = "no_rows";
   }
@@ -697,8 +710,14 @@ function buildEmptyState({ pageKey, canonicalStatus, rowsInWindow, filtersActive
     stale_or_failed: "empty-state--error",
     db_unavailable: "empty-state--error",
     fresh_but_empty: "empty-state--warning",
+    degraded_sync_failed: "empty-state--warning",
+    stale_with_data: "empty-state--warning",
     filtered_out: "empty-state--info",
     not_run: "empty-state--info",
+    not_run_but_derivable: "empty-state--warning",
+    not_run_no_upstream_data: "empty-state--blocked",
+    row_count_not_enabled: "empty-state--info",
+    unknown_row_count: "empty-state--info",
     no_rows: "empty-state--info",
     unknown: "empty-state--info",
   }[stateType] || "empty-state--info";
@@ -725,12 +744,36 @@ function buildEmptyState({ pageKey, canonicalStatus, rowsInWindow, filtersActive
       body = `${title} data may be stale or the pipeline has failed.`;
       actionText = info.nextAction || "Check System Status for pipeline health.";
       break;
+    case "degraded_sync_failed":
+      body = `${title} latest sync failed, but usable rows still exist. The page is degraded, not blocked.`;
+      actionText = "Review latest sync error in System Status.";
+      break;
+    case "stale_with_data":
+      body = `${title} has data, but the latest sync is older than the freshness threshold.`;
+      actionText = "Trigger a fresh sync or check the scheduler schedule.";
+      break;
     case "db_unavailable":
       body = `${title} temporarily unavailable — database offline.`;
       actionText = "Check System Status for database connectivity.";
       break;
     case "not_run":
       body = info.emptyMeans || `${title} has not run yet.`;
+      break;
+    case "not_run_but_derivable":
+      body = `${title} has not run yet, but upstream data is available — analysis can be generated.`;
+      actionText = "Run the derived analysis from existing upstream data.";
+      break;
+    case "not_run_no_upstream_data":
+      body = `${title} has not run, and upstream data is also unavailable.`;
+      actionText = "Run the upstream source sync first; this analysis becomes available after.";
+      break;
+    case "row_count_not_enabled":
+      body = `${title} does not yet expose a row-count diagnostic for this window.`;
+      actionText = "Add a row-count query if this page depends on freshness.";
+      break;
+    case "unknown_row_count":
+      body = `${title} row-count query is unavailable.`;
+      actionText = "Check row-count support for this dataset.";
       break;
     default:
       body = info.emptyMeans || `No ${title} data found for this window.`;
@@ -755,16 +798,26 @@ function getPageCanonicalStatus(pageKey) {
   if (!deps || deps.length === 0) return null;
   if (Object.keys(_datasetFreshnessByKey).length === 0) return null;
 
-  // Severity order, most severe first — first match wins
+  // Severity order, most severe first — first match wins.
+  // PR-ADS-095 refined states are interleaved so the page roll-up picks the
+  // refined name (e.g. "data_available_latest_sync_failed") not "unknown".
   const SEVERITY_ORDER = [
     "db_unavailable",
+    "failed_no_data",
     "failed",
     "stale_and_empty",
+    "not_run_no_upstream_data",
+    "blocked_by_dependency",
     "dependency_blocked",
-    "stale_with_data",
     "fresh_but_empty",
+    "empty_success",
+    "data_available_latest_sync_failed",
+    "stale_with_data",
+    "not_run_but_derivable",
     "running",
     "not_run",
+    "row_count_not_enabled",
+    "unknown_row_count",
     "fresh_with_data",
   ];
 
@@ -1468,26 +1521,44 @@ function renderPageDatasetFreshness(sectionKey) {
     }
 
     const _csLabels = {
-      fresh_with_data:    "Fresh with data",
-      fresh_but_empty:    "Fresh but empty",
-      stale_with_data:    "Stale with data",
-      stale_and_empty:    "Stale and empty",
-      failed:             "Failed",
-      running:            "Running",
-      not_run:            "Not run",
-      dependency_blocked: "Blocked by dependency",
-      db_unavailable:     "DB unavailable",
+      fresh_with_data:                   "Fresh with data",
+      fresh_but_empty:                   "Fresh but empty",
+      stale_with_data:                   "Stale with data",
+      stale_and_empty:                   "Stale and empty",
+      failed:                            "Failed",
+      running:                           "Running",
+      not_run:                           "Not run",
+      dependency_blocked:                "Blocked by dependency",
+      db_unavailable:                    "DB unavailable",
+      // PR-ADS-095 refined states
+      data_available_latest_sync_failed: "Data available, latest sync failed",
+      failed_no_data:                    "Failed, no data",
+      not_run_but_derivable:             "Not run, but derivable",
+      not_run_no_upstream_data:          "Not run, no upstream data",
+      unknown_row_count:                 "Row count unavailable",
+      row_count_not_enabled:             "Row count not enabled",
+      blocked_by_dependency:             "Blocked by dependency",
+      empty_success:                     "Empty success",
     };
     const _csClasses = {
-      fresh_with_data:    "run-meta is-fresh",
-      fresh_but_empty:    "run-meta is-canonical-warning",
-      stale_with_data:    "run-meta is-stale",
-      stale_and_empty:    "run-meta is-stale",
-      failed:             "run-meta is-stale",
-      running:            "run-meta",
-      not_run:            "run-meta",
-      dependency_blocked: "run-meta is-canonical-warning",
-      db_unavailable:     "run-meta is-stale",
+      fresh_with_data:                   "run-meta is-fresh",
+      fresh_but_empty:                   "run-meta is-canonical-warning",
+      stale_with_data:                   "run-meta is-stale",
+      stale_and_empty:                   "run-meta is-stale",
+      failed:                            "run-meta is-stale",
+      running:                           "run-meta",
+      not_run:                           "run-meta",
+      dependency_blocked:                "run-meta is-canonical-warning",
+      db_unavailable:                    "run-meta is-stale",
+      // PR-ADS-095 refined states
+      data_available_latest_sync_failed: "run-meta is-canonical-warning",
+      failed_no_data:                    "run-meta is-stale",
+      not_run_but_derivable:             "run-meta is-canonical-warning",
+      not_run_no_upstream_data:          "run-meta is-stale",
+      unknown_row_count:                 "run-meta",
+      row_count_not_enabled:             "run-meta",
+      blocked_by_dependency:             "run-meta is-stale",
+      empty_success:                     "run-meta is-canonical-warning",
     };
 
     const prefix = isDerived ? _derivedPageLabel(sectionKey) : `Dataset freshness: ${dsName}`;
@@ -1505,10 +1576,19 @@ function renderPageDatasetFreshness(sectionKey) {
   });
 
   const freshCount   = statuses.filter((s) => s === "fresh_with_data" || s === "success").length;
-  const warningCount = statuses.filter((s) => s === "fresh_but_empty" || s === "stale_with_data" || s === "dependency_blocked").length;
-  const errorCount   = statuses.filter((s) => s === "failed" || s === "stale_and_empty" || s === "db_unavailable").length;
+  const warningCount = statuses.filter((s) =>
+    s === "fresh_but_empty" || s === "stale_with_data" || s === "dependency_blocked"
+    || s === "data_available_latest_sync_failed" || s === "not_run_but_derivable"
+    || s === "empty_success"
+  ).length;
+  const errorCount   = statuses.filter((s) =>
+    s === "failed" || s === "stale_and_empty" || s === "db_unavailable"
+    || s === "failed_no_data" || s === "not_run_no_upstream_data" || s === "blocked_by_dependency"
+  ).length;
   const runningCount = statuses.filter((s) => s === "running").length;
-  const unknownCount = statuses.filter((s) => s === "unknown" || s === "not_run").length;
+  const unknownCount = statuses.filter((s) =>
+    s === "unknown" || s === "not_run" || s === "row_count_not_enabled" || s === "unknown_row_count"
+  ).length;
   const totalCount   = datasetKeys.length;
 
   const detail = datasetKeys.map((key, i) => {
@@ -1517,6 +1597,15 @@ function renderPageDatasetFreshness(sectionKey) {
       stale_and_empty: "Stale+Empty", failed: "Failed", running: "Running",
       not_run: "Not run", dependency_blocked: "Blocked", db_unavailable: "DB down",
       unknown: "Unknown", success: "Fresh", stale: "Stale",
+      // PR-ADS-095 refined states
+      data_available_latest_sync_failed: "Degraded",
+      failed_no_data:                    "Failed",
+      not_run_but_derivable:             "Derivable",
+      not_run_no_upstream_data:          "No upstream",
+      unknown_row_count:                 "Row count?",
+      row_count_not_enabled:             "Counts off",
+      blocked_by_dependency:             "Blocked",
+      empty_success:                     "Empty (ok)",
     };
     return `${_datasetDisplayName(key)}: ${_shortLabels[statuses[i]] || "Unknown"}`;
   }).join(" · ");
