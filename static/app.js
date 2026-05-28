@@ -830,7 +830,8 @@ function getSelectedDays() {
 }
 
 function getCurrentDays() {
-  return _selectedDays || 60;
+  const d = _selectedDays || 60;
+  return VALID_DAY_WINDOWS.includes(d) ? d : 60;
 }
 
 function getCurrentWindowParam() {

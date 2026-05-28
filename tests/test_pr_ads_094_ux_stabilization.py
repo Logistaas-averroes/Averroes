@@ -77,25 +77,28 @@ def test_update_window_controls_function():
 
 def test_no_hardcoded_60d_in_gclid_readiness():
     """GCLID readiness must NOT use hardcoded window=60d."""
-    # Find the loadGclidReadiness function and check it uses getCurrentWindowParam
-    gclid_section = JS[JS.find("function loadGclidReadiness"):]
-    gclid_section = gclid_section[:gclid_section.find("function loadAttributionConfidenceSummary")]
+    start = JS.find("function loadGclidReadiness")
+    assert start != -1, "loadGclidReadiness function not found"
+    end = JS.find("function loadAttributionConfidenceSummary")
+    gclid_section = JS[start:end]
     assert 'window=60d' not in gclid_section
     assert "getCurrentWindowParam()" in gclid_section
 
 
 def test_no_hardcoded_60d_in_confidence_summary():
     """Attribution confidence must NOT use hardcoded window=60d."""
-    confidence_section = JS[JS.find("function loadAttributionConfidenceSummary"):]
-    confidence_section = confidence_section[:2000]
+    start = JS.find("function loadAttributionConfidenceSummary")
+    assert start != -1, "loadAttributionConfidenceSummary function not found"
+    confidence_section = JS[start:start + 2000]
     assert 'window=60d' not in confidence_section
     assert "getCurrentWindowParam()" in confidence_section
 
 
 def test_no_hardcoded_60d_in_snapshot_history():
     """Revenue snapshot history must NOT use hardcoded window=60d."""
-    snapshot_section = JS[JS.find("function loadRevenueSnapshotHistory"):]
-    snapshot_section = snapshot_section[:2000]
+    start = JS.find("function loadRevenueSnapshotHistory")
+    assert start != -1, "loadRevenueSnapshotHistory function not found"
+    snapshot_section = JS[start:start + 2000]
     assert 'window=60d' not in snapshot_section
     assert "getCurrentWindowParam()" in snapshot_section
 
