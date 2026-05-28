@@ -17,7 +17,7 @@ from services.freshness_service import (
 )
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────
 
 def _recent_sync() -> datetime:
     """Return a datetime 1 hour ago (fresh)."""
@@ -39,7 +39,7 @@ def _old_date(days: int = 10) -> date:
     return date.today() - timedelta(days=days)
 
 
-# ── fresh_with_data ─────────────────────────────────────────────────────────
+# ── fresh_with_data ───────────────────────────────────────
 
 def test_fresh_with_data():
     """Sync succeeded recently and rows exist in the selected window."""
@@ -59,10 +59,15 @@ def test_fresh_with_data():
     assert "No action" in result["next_action"]
 
 
-# ── fresh_but_empty ─────────────────────────────────────────────────────────
+# ── fresh_but_empty / empty_success ──────────────────────────────
 
-def test_fresh_but_empty():
-    """Sync succeeded recently but row count is zero."""
+def test_empty_success_when_sync_success_and_batch_row_count_zero():
+    """PR-ADS-095: latest sync succeeded AND batch returned zero rows → empty_success.
+
+    Previously this case emitted fresh_but_empty; the refined model
+    distinguishes "source explicitly returned 0 rows" (empty_success) from
+    "window query found 0 rows even though batch had rows" (fresh_but_empty).
+    """
     result = compute_canonical_freshness(
         dataset="search_terms",
         rows_in_window=0,
@@ -73,12 +78,30 @@ def test_fresh_but_empty():
         last_successful_sync_at=_recent_sync(),
         stale_threshold_days=8,
     )
+    assert result["canonical_status"] == CanonicalFreshnessStatus.EMPTY_SUCCESS
+    assert result["severity"] == "warning"
+    assert "zero rows" in result["reason"].lower()
+
+
+def test_fresh_but_empty_when_window_zero_but_batch_had_rows():
+    """Window query returns 0 but the latest batch had rows — data exists
+    outside the window, so this stays as fresh_but_empty (not empty_success)."""
+    result = compute_canonical_freshness(
+        dataset="search_terms",
+        rows_in_window=0,
+        latest_source_date=_recent_date(),
+        sync_status="success",
+        latest_batch_status="success",
+        latest_batch_row_count=13,
+        last_successful_sync_at=_recent_sync(),
+        stale_threshold_days=8,
+    )
     assert result["canonical_status"] == CanonicalFreshnessStatus.FRESH_BUT_EMPTY
     assert result["severity"] == "warning"
     assert "no rows" in result["reason"].lower()
 
 
-# ── stale_with_data ─────────────────────────────────────────────────────────
+# ── stale_with_data ───────────────────────────────────────
 
 def test_stale_with_data():
     """Rows exist, but latest source/sync date is older than threshold."""
@@ -97,7 +120,7 @@ def test_stale_with_data():
     assert "older than threshold" in result["reason"].lower()
 
 
-# ── stale_and_empty ─────────────────────────────────────────────────────────
+# ── stale_and_empty ───────────────────────────────────────
 
 def test_stale_and_empty():
     """No rows and no recent sync."""
@@ -115,7 +138,7 @@ def test_stale_and_empty():
     assert result["severity"] == "error"
 
 
-# ── failed ──────────────────────────────────────────────────────────────────
+# ── failed ──────────────────────────────────────────────
 
 def test_failed_batch_status_with_rows_is_data_available_latest_sync_failed():
     """Latest sync batch failed but usable rows still exist in the window.
@@ -154,7 +177,7 @@ def test_failed_sync_status_no_rows_is_failed_no_data():
     assert result["severity"] == "error"
 
 
-# ── running ─────────────────────────────────────────────────────────────────
+# ── running ─────────────────────────────────────────────
 
 def test_running():
     """Latest sync batch is currently running."""
@@ -172,7 +195,7 @@ def test_running():
     assert result["severity"] == "neutral"
 
 
-# ── not_run ─────────────────────────────────────────────────────────────────
+# ── not_run ─────────────────────────────────────────────
 
 def test_not_run():
     """No sync_state or sync_batches exist for this dataset."""
@@ -190,7 +213,7 @@ def test_not_run():
     assert result["severity"] == "neutral"
 
 
-# ── db_unavailable ──────────────────────────────────────────────────────────
+# ── db_unavailable ────────────────────────────────────────
 
 def test_db_unavailable():
     """Database connection unavailable."""
@@ -208,10 +231,11 @@ def test_db_unavailable():
     assert result["severity"] == "error"
 
 
-# ── dependency_blocked ──────────────────────────────────────────────────────
+# ── blocked_by_dependency / not_run_no_upstream_data ─────────────────────
 
-def test_dependency_blocked_waste_terms():
-    """Waste Terms blocked when Search Terms is empty."""
+def test_blocked_by_dependency_waste_terms_when_search_terms_empty():
+    """PR-ADS-095: Waste Terms emits BLOCKED_BY_DEPENDENCY when upstream is
+    actively broken (Search Terms is fresh_but_empty)."""
     result = compute_canonical_freshness(
         dataset="waste_terms",
         rows_in_window=0,
@@ -223,13 +247,13 @@ def test_dependency_blocked_waste_terms():
         stale_threshold_days=8,
         dependency_status=CanonicalFreshnessStatus.FRESH_BUT_EMPTY,
     )
-    assert result["canonical_status"] == CanonicalFreshnessStatus.DEPENDENCY_BLOCKED
-    assert result["severity"] == "warning"
+    assert result["canonical_status"] == CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY
+    assert result["severity"] == "error"
     assert "Search Terms" in result["reason"]
 
 
-def test_dependency_blocked_ngrams():
-    """N-Grams blocked when Search Terms is failed."""
+def test_blocked_by_dependency_ngrams_when_search_terms_failed():
+    """PR-ADS-095: N-Grams emits BLOCKED_BY_DEPENDENCY when upstream failed."""
     result = compute_canonical_freshness(
         dataset="ngrams",
         rows_in_window=0,
@@ -241,11 +265,11 @@ def test_dependency_blocked_ngrams():
         stale_threshold_days=8,
         dependency_status=CanonicalFreshnessStatus.FAILED,
     )
-    assert result["canonical_status"] == CanonicalFreshnessStatus.DEPENDENCY_BLOCKED
-    assert result["severity"] == "warning"
+    assert result["canonical_status"] == CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY
+    assert result["severity"] == "error"
 
 
-def test_dependency_blocked_not_triggered_when_dep_healthy():
+def test_dependency_not_triggered_when_dep_healthy():
     """Waste Terms NOT blocked when Search Terms is fresh_with_data."""
     result = compute_canonical_freshness(
         dataset="waste_terms",
@@ -261,7 +285,7 @@ def test_dependency_blocked_not_triggered_when_dep_healthy():
     assert result["canonical_status"] == CanonicalFreshnessStatus.FRESH_WITH_DATA
 
 
-# ── unknown ─────────────────────────────────────────────────────────────────
+# ── unknown ─────────────────────────────────────────────
 
 def test_unknown_fallback():
     """Unknown status when sync_status is unrecognized but not None."""
@@ -281,7 +305,7 @@ def test_unknown_fallback():
     assert result["canonical_status"] == CanonicalFreshnessStatus.STALE_AND_EMPTY
 
 
-# ── Config validation ───────────────────────────────────────────────────────
+# ── Config validation ──────────────────────────────────────
 
 def test_all_datasets_have_config():
     """All required datasets have configuration entries."""
@@ -331,7 +355,7 @@ def test_display_labels():
         assert label != "Unknown" or status == CanonicalFreshnessStatus.UNKNOWN
 
 
-# ── Edge cases ──────────────────────────────────────────────────────────────
+# ── Edge cases ───────────────────────────────────────────
 
 def test_fresh_but_empty_with_none_rows():
     """rows_in_window=None should be unknown_row_count, not empty.
@@ -363,12 +387,15 @@ def test_fresh_but_empty_reason_includes_latest_batch_count():
         last_successful_sync_at=_recent_sync(),
         stale_threshold_days=8,
     )
+    # PR-ADS-095: positive latest_batch_row_count keeps this as FRESH_BUT_EMPTY
+    # (not EMPTY_SUCCESS) since data exists outside the window.
     assert result["canonical_status"] == CanonicalFreshnessStatus.FRESH_BUT_EMPTY
     assert "13" in result["reason"]
 
 
-def test_dependency_blocked_takes_priority_over_not_run():
-    """Dependency blocked should take priority even if dataset has no sync state."""
+def test_not_run_no_upstream_data_when_both_downstream_and_upstream_not_run():
+    """PR-ADS-095: when both the derived dataset and its upstream are not_run,
+    emit NOT_RUN_NO_UPSTREAM_DATA (not the legacy DEPENDENCY_BLOCKED)."""
     result = compute_canonical_freshness(
         dataset="waste_terms",
         rows_in_window=None,
@@ -380,4 +407,57 @@ def test_dependency_blocked_takes_priority_over_not_run():
         stale_threshold_days=8,
         dependency_status=CanonicalFreshnessStatus.NOT_RUN,
     )
-    assert result["canonical_status"] == CanonicalFreshnessStatus.DEPENDENCY_BLOCKED
+    assert result["canonical_status"] == CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA
+    # PR-ADS-095: not_run_no_upstream_data is an error, not neutral.
+    assert result["severity"] == "error"
+
+
+def test_blocked_by_dependency_when_downstream_already_synced_but_upstream_not_run():
+    """If downstream has run but upstream is still NOT_RUN we treat it as a
+    real blocker (BLOCKED_BY_DEPENDENCY), not NOT_RUN_NO_UPSTREAM_DATA."""
+    result = compute_canonical_freshness(
+        dataset="waste_terms",
+        rows_in_window=0,
+        latest_source_date=_recent_date(),
+        sync_status="success",
+        latest_batch_status="success",
+        latest_batch_row_count=0,
+        last_successful_sync_at=_recent_sync(),
+        stale_threshold_days=8,
+        dependency_status=CanonicalFreshnessStatus.NOT_RUN,
+    )
+    assert result["canonical_status"] == CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY
+    assert result["severity"] == "error"
+
+
+def test_row_count_not_enabled_when_supported_is_false():
+    """PR-ADS-095: row_count_supported=False → ROW_COUNT_NOT_ENABLED."""
+    result = compute_canonical_freshness(
+        dataset="deals",
+        rows_in_window=None,
+        latest_source_date=_recent_date(),
+        sync_status="success",
+        latest_batch_status="success",
+        latest_batch_row_count=0,
+        last_successful_sync_at=_recent_sync(),
+        stale_threshold_days=8,
+        row_count_supported=False,
+    )
+    assert result["canonical_status"] == CanonicalFreshnessStatus.ROW_COUNT_NOT_ENABLED
+
+
+def test_row_count_unknown_when_supported_true_but_query_failed():
+    """PR-ADS-095: row_count_supported=True but rows_in_window=None →
+    UNKNOWN_ROW_COUNT (query attempted but failed)."""
+    result = compute_canonical_freshness(
+        dataset="campaigns",
+        rows_in_window=None,
+        latest_source_date=_recent_date(),
+        sync_status="success",
+        latest_batch_status="success",
+        latest_batch_row_count=0,
+        last_successful_sync_at=_recent_sync(),
+        stale_threshold_days=8,
+        row_count_supported=True,
+    )
+    assert result["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT

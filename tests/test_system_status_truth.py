@@ -41,7 +41,7 @@ def _recent_sync() -> datetime:
     return datetime.now(timezone.utc) - timedelta(hours=1)
 
 
-# ── Refined dataset status semantics ───────────────────────────────────────
+# ── Refined dataset status semantics ──────────────────────────────
 
 
 def test_failed_sync_with_rows_is_data_available_latest_sync_failed():
@@ -148,7 +148,35 @@ def test_severity_includes_new_states():
         assert state in SEVERITY_MAP, f"missing severity for {state}"
 
 
-# ── Source rollup ──────────────────────────────────────────────────────────
+def test_not_run_no_upstream_data_severity_is_error():
+    """PR-ADS-095 review: NOT_RUN_NO_UPSTREAM_DATA must roll up as error,
+    not neutral — derived datasets with no upstream data are blockers."""
+    assert SEVERITY_MAP[CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA] == "error"
+
+
+def test_not_run_no_upstream_data_overall_status_is_error():
+    """Confirms the severity flows up through compute_overall_status."""
+    statuses = {
+        "search_terms": CanonicalFreshnessStatus.NOT_RUN,
+        "waste_terms": CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA,
+    }
+    status, _ = compute_overall_status(statuses)
+    assert status == "error"
+
+
+def test_blocked_by_dependency_is_a_blocked_summary_count():
+    """PR-ADS-095 refined emission BLOCKED_BY_DEPENDENCY rolls up into the
+    summary's `blocked` bucket, not warning/error."""
+    counts = compute_summary_counts({
+        "waste_terms": CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY,
+        "ngrams": CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY,
+        "search_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
+    })
+    assert counts["blocked"] == 2
+    assert counts["ok"] == 1
+
+
+# ── Source rollup ───────────────────────────────────────
 
 
 def test_source_rollup_warning_when_only_degraded():
@@ -192,7 +220,7 @@ def test_source_rollup_ok_when_all_fresh():
     assert windsor["status"] == "ok"
 
 
-# ── Page impact ────────────────────────────────────────────────────────────
+# ── Page impact ─────────────────────────────────────────
 
 
 def test_page_status_helper_for_each_state():
@@ -260,7 +288,7 @@ def test_gclid_attribution_not_blocked_when_only_coverage_not_run():
     assert gclid_page["status"] == PAGE_STATUS_ACTION_NEEDED
 
 
-# ── Critical blockers ──────────────────────────────────────────────────────
+# ── Critical blockers ────────────────────────────────────
 
 
 def test_degraded_dataset_is_a_warning_not_error_blocker():
@@ -293,7 +321,7 @@ def test_derivable_dataset_creates_warning_blocker():
     assert derivable["severity"] == "warning"
 
 
-# ── Overall status ─────────────────────────────────────────────────────────
+# ── Overall status ───────────────────────────────────────
 
 
 def test_overall_status_warning_when_degraded_but_no_failure():
@@ -320,7 +348,7 @@ def test_overall_status_error_when_core_dataset_failed_no_data():
     assert status == "error"
 
 
-# ── Pipeline page_status field ─────────────────────────────────────────────
+# ── Pipeline page_status field ────────────────────────────────
 
 
 def test_pipelines_expose_page_status():
@@ -334,7 +362,7 @@ def test_pipelines_expose_page_status():
     assert by_key["waste_terms"]["page_status"] == PAGE_STATUS_ACTION_NEEDED
 
 
-# ── Scheduler diagnostics ──────────────────────────────────────────────────
+# ── Scheduler diagnostics ──────────────────────────────────
 
 
 def test_scheduler_diagnostic_when_runs_null_but_sources_synced():
@@ -361,7 +389,7 @@ def test_scheduler_no_diagnostic_when_runs_present():
     assert summary["latest_daily"]["status"] == "success"
 
 
-# ── Summary counts include new states ───────────────────────────────────────
+# ── Summary counts include new states ──────────────────────────────
 
 
 def test_summary_counts_degraded_counted_as_warning():
