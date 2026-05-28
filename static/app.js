@@ -677,16 +677,22 @@ function buildEmptyState({ pageKey, canonicalStatus, rowsInWindow, filtersActive
     stateType = "error";
   } else if (filtersActive) {
     stateType = "filtered_out";
-  } else if (canonicalStatus === "dependency_blocked") {
+  } else if (canonicalStatus === "dependency_blocked" || canonicalStatus === "blocked_by_dependency") {
     stateType = "dependency_blocked";
   } else if (canonicalStatus === "fresh_but_empty") {
     stateType = "fresh_but_empty";
-  } else if (canonicalStatus === "failed" || canonicalStatus === "stale_and_empty") {
+  } else if (canonicalStatus === "failed_no_data" || canonicalStatus === "failed" || canonicalStatus === "stale_and_empty") {
     stateType = "stale_or_failed";
+  } else if (canonicalStatus === "data_available_latest_sync_failed") {
+    stateType = "degraded";
+  } else if (canonicalStatus === "not_run_but_derivable") {
+    stateType = "action_needed";
   } else if (canonicalStatus === "db_unavailable") {
     stateType = "db_unavailable";
-  } else if (canonicalStatus === "not_run") {
+  } else if (canonicalStatus === "not_run" || canonicalStatus === "not_run_no_upstream_data") {
     stateType = "not_run";
+  } else if (canonicalStatus === "unknown_row_count" || canonicalStatus === "row_count_not_enabled") {
+    stateType = "unknown";
   } else if (rowsInWindow === 0) {
     stateType = "no_rows";
   }
@@ -696,6 +702,8 @@ function buildEmptyState({ pageKey, canonicalStatus, rowsInWindow, filtersActive
     dependency_blocked: "empty-state--blocked",
     stale_or_failed: "empty-state--error",
     db_unavailable: "empty-state--error",
+    degraded: "empty-state--warning",
+    action_needed: "empty-state--warning",
     fresh_but_empty: "empty-state--warning",
     filtered_out: "empty-state--info",
     not_run: "empty-state--info",
@@ -717,6 +725,14 @@ function buildEmptyState({ pageKey, canonicalStatus, rowsInWindow, filtersActive
     case "dependency_blocked":
       body = `${title} is blocked by a dependency.`;
       if (info.emptyMeans) body += ` ${info.emptyMeans}`;
+      break;
+    case "degraded":
+      body = `${title} latest sync failed, but existing data is still usable.`;
+      actionText = "Review sync errors. Page can render using existing data.";
+      break;
+    case "action_needed":
+      body = `${title} can be derived from existing upstream data but has not been generated yet.`;
+      actionText = "Run derived analysis from existing upstream data.";
       break;
     case "fresh_but_empty":
       body = info.emptyMeans || `No ${title} rows found for this window.`;
@@ -795,14 +811,24 @@ function verdictBadge(verdict) {
 function statusBadge(status) {
   const map = {
     ok: "badge--ok", pass: "badge--ok", success: "badge--ok",
+    fresh_with_data: "badge--ok",
     fail: "badge--error", failed: "badge--error", error: "badge--error",
+    failed_no_data: "badge--error", blocked_by_dependency: "badge--error",
     running: "badge--running",
     empty: "badge--warning", warning: "badge--warning", pending: "badge--warning",
+    degraded: "badge--warning", action_needed: "badge--warning",
+    data_available_latest_sync_failed: "badge--warning",
+    stale_with_data: "badge--warning",
+    not_run_but_derivable: "badge--warning",
     loading: "badge--loading",
+    unknown_row_count: "badge--neutral",
+    row_count_not_enabled: "badge--neutral",
+    not_run_no_upstream_data: "badge--neutral",
   };
-  const lower = (status || "").toLowerCase();
+  const lower = (status || "").toLowerCase().replace(/ /g, "_");
   const cls = map[lower] || "badge--neutral";
-  return `<span class="badge ${cls}"><span class="dot"></span>${escapeHtml(status || "unknown")}</span>`;
+  const displayLabel = (status || "unknown").replace(/_/g, " ");
+  return `<span class="badge ${cls}"><span class="dot"></span>${escapeHtml(displayLabel)}</span>`;
 }
 
 // Returns true when a lead's contact_id is a usable dedup key (non-null, non-empty).

@@ -5595,11 +5595,22 @@ def api_system_status_war_room(
                     batch_info = latest_batch_info.get((src, ds), {})
 
                     dep_status = None
+                    # PR-ADS-095: Check if upstream has data (for not_run_but_derivable)
+                    upstream_has_data = None
                     for dep in cfg["depends_on"]:
                         dep_st = canonical_status_map.get(dep)
                         if dep_st and dep_st in BLOCKING_STATES:
                             dep_status = dep_st
                             break
+                        # If upstream is fresh or has data, mark as derivable
+                        if dep_st in (
+                            "fresh_with_data",
+                            "stale_with_data",
+                            "data_available_latest_sync_failed",
+                        ):
+                            upstream_has_data = True
+                        elif dep_st in BLOCKING_STATES:
+                            upstream_has_data = False
 
                     verdict = compute_canonical_freshness(
                         dataset=cfg_key,
@@ -5611,6 +5622,7 @@ def api_system_status_war_room(
                         last_successful_sync_at=last_sync_at,
                         stale_threshold_days=cfg.get("stale_threshold_days", 8),
                         dependency_status=dep_status,
+                        upstream_has_data=upstream_has_data,
                     )
                     canonical_status_map[cfg_key] = verdict["canonical_status"]
                     dataset_details[cfg_key] = {
@@ -5679,12 +5691,19 @@ def api_system_status_war_room(
         for cfg_key in DATASET_FRESHNESS_CONFIG:
             dataset_statuses[cfg_key] = "db_unavailable"
 
+    # PR-ADS-095: Detect if any source sync timestamps exist
+    has_source_sync_timestamps = any(
+        v.get("last_successful_sync_at") is not None
+        for v in sync_source_info.values()
+    )
+
     result = build_war_room_response(
         days=days,
         dataset_statuses=dataset_statuses,
         dataset_details=dataset_details,
         sync_info=sync_source_info,
         runs_data=runs_data,
+        has_source_sync_timestamps=has_source_sync_timestamps,
     )
 
     store_ts = datetime.now(timezone.utc).timestamp()
@@ -5694,6 +5713,156 @@ def api_system_status_war_room(
             "data": result,
         }
     return result
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-095 — Window/Data Diagnostics Endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/api/diagnostics/window-semantics")
+def api_diagnostics_window_semantics(
+    request: Request,
+    windows: str = Query(default="7d,30d,60d", description="Comma-separated windows (e.g., 7d,30d,60d)"),
+) -> dict[str, Any]:
+    """Return window/data diagnostics comparing row counts across time windows.
+
+    Admin only. Read-only diagnostic endpoint.
+    No external API calls. No data mutation.
+    PR-ADS-095 — Phase 2 operational diagnostics.
+    """
+    check_admin_or_token(request)
+
+    from services.freshness_service import DATASET_FRESHNESS_CONFIG  # noqa: PLC0415
+    from db.connection import get_conn  # noqa: PLC0415
+    from psycopg2 import sql as _psql  # noqa: PLC0415
+
+    # Parse windows
+    valid_windows = {"7d": 7, "14d": 14, "30d": 30, "60d": 60, "90d": 90}
+    requested_windows: list[str] = []
+    window_days: list[int] = []
+    for w in windows.split(","):
+        w = w.strip()
+        if w in valid_windows:
+            requested_windows.append(w)
+            window_days.append(valid_windows[w])
+
+    if not requested_windows:
+        requested_windows = ["7d", "30d", "60d"]
+        window_days = [7, 30, 60]
+
+    datasets_result: list[dict[str, Any]] = []
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "windows": requested_windows,
+                    "datasets": [],
+                    "error": "Database connection unavailable",
+                }
+
+            with conn.cursor() as cur:
+                # Get sync state for all datasets
+                cur.execute("""
+                    SELECT source, dataset, status, last_successful_sync_at, last_source_date
+                    FROM sync_state
+                    ORDER BY source, dataset
+                """)
+                sync_rows = cur.fetchall()
+                sync_cols = [d[0] for d in cur.description]
+                sync_map: dict[tuple[str, str], dict] = {}
+                for row in sync_rows:
+                    r = dict(zip(sync_cols, row))
+                    sync_map[(r["source"], r["dataset"])] = r
+
+                for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
+                    table_name = str(cfg.get("table") or "")
+                    date_column = str(cfg.get("date_column") or "")
+                    if not table_name or not date_column:
+                        continue
+                    if not (_SAFE_SQL_IDENTIFIER_RE.match(table_name) and _SAFE_SQL_IDENTIFIER_RE.match(date_column)):
+                        continue
+
+                    # Get row counts for each window
+                    window_counts: dict[str, int | None] = {}
+                    for wlabel, wdays in zip(requested_windows, window_days):
+                        window_start = date.today() - timedelta(days=wdays)
+                        try:
+                            query = _psql.SQL("SELECT COUNT(*) FROM {} WHERE {} >= %s").format(
+                                _psql.Identifier(table_name),
+                                _psql.Identifier(date_column),
+                            )
+                            cur.execute(query, (window_start,))
+                            result_row = cur.fetchone()
+                            window_counts[wlabel] = int(result_row[0]) if result_row and result_row[0] is not None else 0
+                        except Exception:  # noqa: BLE001
+                            window_counts[wlabel] = None
+
+                    # Get latest source date
+                    latest_source_date = None
+                    try:
+                        query = _psql.SQL("SELECT MAX({}) FROM {}").format(
+                            _psql.Identifier(date_column),
+                            _psql.Identifier(table_name),
+                        )
+                        cur.execute(query)
+                        result_row = cur.fetchone()
+                        if result_row and result_row[0] is not None:
+                            latest_source_date = str(result_row[0])
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                    # Get sync status
+                    src = cfg["source"]
+                    ds = cfg["dataset"]
+                    sync_row = sync_map.get((src, ds), {})
+                    latest_sync_status = sync_row.get("status")
+
+                    # Determine diagnostic status and usability
+                    max_rows = max((v for v in window_counts.values() if v is not None), default=0)
+                    if latest_sync_status == "failed" and max_rows > 0:
+                        diagnostic_status = "data_available_latest_sync_failed"
+                        usable_for_page = True
+                    elif latest_sync_status == "failed" and max_rows == 0:
+                        diagnostic_status = "failed_no_data"
+                        usable_for_page = False
+                    elif max_rows > 0:
+                        diagnostic_status = "fresh_with_data"
+                        usable_for_page = True
+                    elif latest_sync_status is None:
+                        diagnostic_status = "not_run"
+                        usable_for_page = False
+                    else:
+                        diagnostic_status = "unknown"
+                        usable_for_page = False
+
+                    datasets_result.append({
+                        "key": cfg_key,
+                        "source": src,
+                        "window_counts": window_counts,
+                        "latest_source_date": latest_source_date,
+                        "latest_sync_status": latest_sync_status,
+                        "missing_date_rows": 0,
+                        "invalid_date_rows": 0,
+                        "diagnostic_status": diagnostic_status,
+                        "usable_for_page": usable_for_page,
+                    })
+
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/diagnostics/window-semantics] error: %s", exc, exc_info=True)
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "windows": requested_windows,
+            "datasets": [],
+            "error": str(exc),
+        }
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "windows": requested_windows,
+        "datasets": datasets_result,
+    }
 
 
 # ---------------------------------------------------------------------------
