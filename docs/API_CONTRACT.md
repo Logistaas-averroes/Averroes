@@ -950,19 +950,27 @@ Enhanced with canonical freshness semantics (PR-ADS-067).
 
 **Status values (legacy):** `success` | `failed` | `running` | `unknown`
 
-**Canonical status values (PR-ADS-067):**
+**Canonical status values (PR-ADS-067, extended by PR-ADS-095):**
 | Status | Severity | Description |
 |--------|----------|-------------|
 | `fresh_with_data` | ok | Sync succeeded recently and rows exist in window |
 | `fresh_but_empty` | warning | Sync succeeded but zero rows in window |
 | `stale_with_data` | warning | Rows exist but sync is older than threshold |
 | `stale_and_empty` | error | No rows and no recent sync |
-| `failed` | error | Latest sync/batch failed |
+| `failed` | error | Latest sync/batch failed (legacy, kept for backward compat) |
 | `running` | neutral | Sync currently in progress |
 | `not_run` | neutral | No sync recorded yet |
 | `dependency_blocked` | warning | Upstream dataset is unavailable |
 | `db_unavailable` | error | Database connection issue |
 | `unknown` | neutral | Could not classify |
+| `data_available_latest_sync_failed` | warning | Latest sync failed but usable rows exist (PR-ADS-095) |
+| `empty_success` | neutral | Sync succeeded, intentionally empty (PR-ADS-095) |
+| `failed_no_data` | error | Latest sync failed and no usable rows (PR-ADS-095) |
+| `not_run_but_derivable` | warning | Not run but upstream data exists (PR-ADS-095) |
+| `not_run_no_upstream_data` | neutral | Not run and upstream has no data (PR-ADS-095) |
+| `unknown_row_count` | neutral | Row count query unavailable (PR-ADS-095) |
+| `row_count_not_enabled` | neutral | Dataset does not expose row count (PR-ADS-095) |
+| `blocked_by_dependency` | error | Blocked by hard upstream dependency (PR-ADS-095) |
 
 **Response 200 (with sync data and canonical fields):**
 ```json
@@ -2147,6 +2155,56 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
 - Short-TTL cached (60s) to reduce DB load.
 - Combines canonical freshness, pipeline dependencies, source health, and scheduler run state.
 - Uses `services/system_status_service.py` for pure helper logic.
+- **PR-ADS-095 changes:**
+  - `page_impact` entries now use `status`: `blocked`, `degraded`, or `action_needed`
+  - `scheduler` may include `diagnostic_status`, `message`, `next_action` when all runs are null
+  - `data_available_latest_sync_failed` datasets are **degraded**, not error/blocked
+  - `not_run_but_derivable` datasets are **action_needed**, not blocked
+
+---
+
+## Window/Data Diagnostics (PR-ADS-095)
+
+### `GET /api/diagnostics/window-semantics`
+
+**Auth:** Admin only (session with admin role, or `ADMIN_API_TOKEN` ******  
+**Purpose:** Compare 7d/30d/60d row counts and determine dataset usability across time windows.  
+**Added:** PR-ADS-095
+
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `windows` | string | `7d,30d,60d` | Comma-separated window labels (valid: 7d, 14d, 30d, 60d, 90d) |
+
+#### Response Shape
+
+```json
+{
+  "generated_at": "2026-05-28T04:00:00+00:00",
+  "windows": ["7d", "30d", "60d"],
+  "datasets": [
+    {
+      "key": "campaigns",
+      "source": "windsor",
+      "window_counts": { "7d": 1200, "30d": 3900, "60d": 5707 },
+      "latest_source_date": "2026-05-25",
+      "latest_sync_status": "failed",
+      "missing_date_rows": 0,
+      "invalid_date_rows": 0,
+      "diagnostic_status": "data_available_latest_sync_failed",
+      "usable_for_page": true
+    }
+  ]
+}
+```
+
+#### Notes
+
+- **Read-only.** No external API calls. No data mutation.
+- Useful for diagnosing whether different time windows produce meaningfully different row counts.
+- `diagnostic_status` uses the same canonical states as the freshness system.
+- CLI equivalent: `python scripts/diagnose_window_semantics.py`
 
 ---
 

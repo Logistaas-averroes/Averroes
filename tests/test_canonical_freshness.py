@@ -118,7 +118,7 @@ def test_stale_and_empty():
 # ── failed ──────────────────────────────────────────────────────────────────
 
 def test_failed_batch_status():
-    """Latest sync batch failed."""
+    """Latest sync batch failed but rows exist → data_available_latest_sync_failed (PR-ADS-095)."""
     result = compute_canonical_freshness(
         dataset="campaigns",
         rows_in_window=50,
@@ -129,12 +129,12 @@ def test_failed_batch_status():
         last_successful_sync_at=_recent_sync(),
         stale_threshold_days=8,
     )
-    assert result["canonical_status"] == CanonicalFreshnessStatus.FAILED
-    assert result["severity"] == "error"
+    assert result["canonical_status"] == CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED
+    assert result["severity"] == "warning"
 
 
 def test_failed_sync_status():
-    """Sync state is failed."""
+    """Sync state is failed and no rows → failed_no_data (PR-ADS-095)."""
     result = compute_canonical_freshness(
         dataset="search_terms",
         rows_in_window=0,
@@ -145,7 +145,7 @@ def test_failed_sync_status():
         last_successful_sync_at=None,
         stale_threshold_days=8,
     )
-    assert result["canonical_status"] == CanonicalFreshnessStatus.FAILED
+    assert result["canonical_status"] == CanonicalFreshnessStatus.FAILED_NO_DATA
     assert result["severity"] == "error"
 
 
@@ -329,7 +329,7 @@ def test_display_labels():
 # ── Edge cases ──────────────────────────────────────────────────────────────
 
 def test_fresh_but_empty_with_none_rows():
-    """rows_in_window=None should be unknown (count unavailable), not empty."""
+    """rows_in_window=None should be unknown_row_count (PR-ADS-095), not empty."""
     result = compute_canonical_freshness(
         dataset="campaigns",
         rows_in_window=None,
@@ -340,7 +340,7 @@ def test_fresh_but_empty_with_none_rows():
         last_successful_sync_at=_recent_sync(),
         stale_threshold_days=8,
     )
-    assert result["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN
+    assert result["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT
 
 
 def test_fresh_but_empty_reason_includes_latest_batch_count():
