@@ -19,7 +19,14 @@ from typing import Any
 # ── Canonical Status Constants ──────────────────────────────────────────────
 
 class CanonicalFreshnessStatus:
-    """Enumeration of all possible canonical freshness states."""
+    """Enumeration of all possible canonical freshness states.
+
+    PR-ADS-095 refined the model so System Status can separate three signals
+    that were previously collapsed into ``failed``:
+      - ``data_available_latest_sync_failed`` — rows exist, just the last sync failed
+      - ``failed_no_data`` — sync failed and no usable rows are available
+      - ``not_run_but_derivable`` — derived dataset hasn't run but upstream has rows
+    """
 
     FRESH_WITH_DATA = "fresh_with_data"
     FRESH_BUT_EMPTY = "fresh_but_empty"
@@ -32,6 +39,16 @@ class CanonicalFreshnessStatus:
     DB_UNAVAILABLE = "db_unavailable"
     UNKNOWN = "unknown"
 
+    # PR-ADS-095 refined states
+    DATA_AVAILABLE_LATEST_SYNC_FAILED = "data_available_latest_sync_failed"
+    FAILED_NO_DATA = "failed_no_data"
+    NOT_RUN_BUT_DERIVABLE = "not_run_but_derivable"
+    NOT_RUN_NO_UPSTREAM_DATA = "not_run_no_upstream_data"
+    UNKNOWN_ROW_COUNT = "unknown_row_count"
+    ROW_COUNT_NOT_ENABLED = "row_count_not_enabled"
+    BLOCKED_BY_DEPENDENCY = "blocked_by_dependency"
+    EMPTY_SUCCESS = "empty_success"
+
     ALL = [
         FRESH_WITH_DATA,
         FRESH_BUT_EMPTY,
@@ -43,6 +60,14 @@ class CanonicalFreshnessStatus:
         DEPENDENCY_BLOCKED,
         DB_UNAVAILABLE,
         UNKNOWN,
+        DATA_AVAILABLE_LATEST_SYNC_FAILED,
+        FAILED_NO_DATA,
+        NOT_RUN_BUT_DERIVABLE,
+        NOT_RUN_NO_UPSTREAM_DATA,
+        UNKNOWN_ROW_COUNT,
+        ROW_COUNT_NOT_ENABLED,
+        BLOCKED_BY_DEPENDENCY,
+        EMPTY_SUCCESS,
     ]
 
 
@@ -59,7 +84,26 @@ SEVERITY_MAP: dict[str, str] = {
     CanonicalFreshnessStatus.DEPENDENCY_BLOCKED: "warning",
     CanonicalFreshnessStatus.DB_UNAVAILABLE: "error",
     CanonicalFreshnessStatus.UNKNOWN: "neutral",
+    # PR-ADS-095 refined states
+    CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED: "warning",
+    CanonicalFreshnessStatus.FAILED_NO_DATA: "error",
+    CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE: "warning",
+    CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA: "error",
+    CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT: "neutral",
+    CanonicalFreshnessStatus.ROW_COUNT_NOT_ENABLED: "neutral",
+    CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY: "error",
+    CanonicalFreshnessStatus.EMPTY_SUCCESS: "warning",
 }
+
+
+# ── Has-data states ─────────────────────────────────────────────────────────
+# States where usable rows exist in the selected window. Used to refine
+# downstream derived states (e.g. NOT_RUN_BUT_DERIVABLE).
+HAS_DATA_STATES = frozenset([
+    CanonicalFreshnessStatus.FRESH_WITH_DATA,
+    CanonicalFreshnessStatus.STALE_WITH_DATA,
+    CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
+])
 
 
 # ── Dataset Configuration ───────────────────────────────────────────────────
@@ -166,13 +210,16 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
     },
 }
 
-# States that block dependents
+# States that block dependents (upstream is unusable for downstream derivation)
 BLOCKING_STATES = frozenset([
     CanonicalFreshnessStatus.FRESH_BUT_EMPTY,
     CanonicalFreshnessStatus.FAILED,
+    CanonicalFreshnessStatus.FAILED_NO_DATA,
     CanonicalFreshnessStatus.DB_UNAVAILABLE,
     CanonicalFreshnessStatus.STALE_AND_EMPTY,
     CanonicalFreshnessStatus.NOT_RUN,
+    CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA,
+    CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY,
 ])
 
 
@@ -189,6 +236,7 @@ def compute_canonical_freshness(
     last_successful_sync_at: datetime | None,
     stale_threshold_days: int,
     dependency_status: str | None = None,
+    row_count_supported: bool | None = None,
 ) -> dict[str, Any]:
     """Compute the canonical freshness verdict for a single dataset.
 
@@ -196,15 +244,33 @@ def compute_canonical_freshness(
 
     Returns a dict with:
         canonical_status, severity, reason, next_action
+
+    PR-ADS-095: ``row_count_supported`` lets callers signal whether the dataset
+    is configured for row-count queries. When False, an absent ``rows_in_window``
+    yields ROW_COUNT_NOT_ENABLED instead of UNKNOWN_ROW_COUNT.
     """
 
-    # 1. Dependency blocked
+    downstream_not_run = sync_status is None and latest_batch_status is None
+
+    # 1. Dependency blocked (PR-ADS-095: emit BLOCKED_BY_DEPENDENCY for actively
+    #    broken upstream; emit NOT_RUN_NO_UPSTREAM_DATA when both upstream and
+    #    downstream haven't run yet).
     if dependency_status and dependency_status in BLOCKING_STATES:
         dep_cfg = DATASET_FRESHNESS_CONFIG.get(dataset, {})
         deps = dep_cfg.get("depends_on", [])
         dep_names = ", ".join(d.replace("_", " ").title() for d in deps) if deps else "upstream dataset"
+        upstream_not_run = dependency_status in (
+            CanonicalFreshnessStatus.NOT_RUN,
+            CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA,
+        )
+        if upstream_not_run and downstream_not_run:
+            return _result(
+                CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA,
+                reason=f"{dataset.replace('_', ' ').title()} has not run, and upstream ({dep_names}) has no data yet.",
+                next_action=f"Run {dep_names} sync first; derived analysis will become available after.",
+            )
         return _result(
-            CanonicalFreshnessStatus.DEPENDENCY_BLOCKED,
+            CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY,
             reason=f"{dataset.replace('_', ' ').title()} depends on {dep_names}. Dependency is {dependency_status.replace('_', ' ')}.",
             next_action=f"Fix {dep_names} first.",
         )
@@ -217,8 +283,17 @@ def compute_canonical_freshness(
             next_action="Check database connectivity and restart if needed.",
         )
 
-    # 3. Not run
-    if sync_status is None and latest_batch_status is None:
+    # 3. Not run (PR-ADS-095: refine if upstream has data, this is derivable)
+    if downstream_not_run:
+        if dependency_status in HAS_DATA_STATES:
+            dep_cfg = DATASET_FRESHNESS_CONFIG.get(dataset, {})
+            deps = dep_cfg.get("depends_on", [])
+            dep_names = ", ".join(d.replace("_", " ").title() for d in deps) if deps else "upstream dataset"
+            return _result(
+                CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE,
+                reason=f"Upstream data exists ({dep_names}), but derived analysis has not been generated.",
+                next_action="Run derived analysis from existing upstream data.",
+            )
         return _result(
             CanonicalFreshnessStatus.NOT_RUN,
             reason="No sync state or sync batches exist for this dataset.",
@@ -233,23 +308,37 @@ def compute_canonical_freshness(
             next_action="Wait for the current sync to complete.",
         )
 
-    # 5. Failed
+    # 5. Failed — PR-ADS-095: distinguish "failed but has data" from "failed no data"
     if latest_batch_status == "failed" or sync_status == "failed":
+        if rows_in_window is not None and rows_in_window > 0:
+            return _result(
+                CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
+                reason="Latest sync failed, but usable rows exist in the selected window.",
+                next_action="Review latest sync error, but page can still render using existing data.",
+            )
         return _result(
-            CanonicalFreshnessStatus.FAILED,
-            reason="Latest sync batch or sync state status is failed.",
-            next_action="Check error logs and retry sync.",
+            CanonicalFreshnessStatus.FAILED_NO_DATA,
+            reason="Latest sync failed and no usable rows are available.",
+            next_action="Check sync logs and retry source sync.",
         )
 
-    # 6. Row count unavailable (cannot safely classify empty vs with_data)
+    # 6. Row count unavailable (cannot safely classify empty vs with_data).
+    # PR-ADS-095: distinguish "not configured for row counts" from "row-count
+    # query failed at runtime".
     if rows_in_window is None:
         batch_hint = ""
         if latest_batch_row_count is not None:
             batch_hint = f" Latest batch row count: {latest_batch_row_count}."
+        if row_count_supported is False:
+            return _result(
+                CanonicalFreshnessStatus.ROW_COUNT_NOT_ENABLED,
+                reason=f"Row-count query is not enabled for this dataset.{batch_hint}",
+                next_action="Implement row-count diagnostic if this page depends on freshness.",
+            )
         return _result(
-            CanonicalFreshnessStatus.UNKNOWN,
-            reason=f"Row count is unavailable for the selected window; cannot determine dataset freshness.{batch_hint}",
-            next_action="Check dataset row-count query health and retry.",
+            CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT,
+            reason=f"Row count query unavailable or not implemented for this dataset.{batch_hint}",
+            next_action="Check row-count query support for this dataset.",
         )
 
     # 7. Determine staleness
@@ -284,6 +373,22 @@ def compute_canonical_freshness(
             batch_hint = ""
             if latest_batch_row_count is not None:
                 batch_hint = f" Latest batch row count: {latest_batch_row_count}."
+            # PR-ADS-095: when the latest sync batch succeeded AND reported zero
+            # rows from the source, emit EMPTY_SUCCESS to signal "source has
+            # nothing to deliver" rather than the more concerning
+            # FRESH_BUT_EMPTY (window is empty but source data may exist).
+            if (
+                latest_batch_status == "success"
+                and latest_batch_row_count == 0
+            ):
+                return _result(
+                    CanonicalFreshnessStatus.EMPTY_SUCCESS,
+                    reason=(
+                        "Latest sync succeeded and the source returned zero rows."
+                        f"{batch_hint}"
+                    ),
+                    next_action="Verify the source has data; otherwise this is a clean empty.",
+                )
             return _result(
                 CanonicalFreshnessStatus.FRESH_BUT_EMPTY,
                 reason=f"Latest sync succeeded but no rows exist in the selected window.{batch_hint}",
@@ -339,5 +444,14 @@ def canonical_status_display_label(status: str) -> str:
         CanonicalFreshnessStatus.DEPENDENCY_BLOCKED: "Blocked by dependency",
         CanonicalFreshnessStatus.DB_UNAVAILABLE: "Database unavailable",
         CanonicalFreshnessStatus.UNKNOWN: "Unknown",
+        # PR-ADS-095 refined states
+        CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED: "Data Available, Latest Sync Failed",
+        CanonicalFreshnessStatus.FAILED_NO_DATA: "Failed, No Data",
+        CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE: "Not Run, But Derivable",
+        CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA: "Not Run, No Upstream Data",
+        CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT: "Row Count Unavailable",
+        CanonicalFreshnessStatus.ROW_COUNT_NOT_ENABLED: "Row Count Not Enabled",
+        CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY: "Blocked by Dependency",
+        CanonicalFreshnessStatus.EMPTY_SUCCESS: "Empty Success",
     }
     return labels.get(status, "Unknown")

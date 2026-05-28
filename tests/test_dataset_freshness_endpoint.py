@@ -129,7 +129,8 @@ def test_row_count_query_failure_is_unknown_not_zero():
     payload = _call_endpoint(conn=conn, days=30)
     matches = next(d for d in payload["datasets"] if d["dataset_key"] == "gclid/matches")
     assert matches["rows_in_window"] is None
-    assert matches["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN
+    # PR-ADS-095: refined from UNKNOWN to UNKNOWN_ROW_COUNT for clarity
+    assert matches["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT
 
 
 def test_configured_datasets_get_count_coverage_or_unknown():
@@ -167,6 +168,8 @@ def test_configured_datasets_get_count_coverage_or_unknown():
 
 
 def test_dependency_blocked_still_applies_to_waste_terms_and_ngrams():
+    """PR-ADS-095: emits BLOCKED_BY_DEPENDENCY (refined) instead of legacy
+    DEPENDENCY_BLOCKED when upstream is actively empty/broken."""
     now = datetime.now(timezone.utc)
     conn, _ = _make_mock_conn(
         sync_rows=[
@@ -179,8 +182,41 @@ def test_dependency_blocked_still_applies_to_waste_terms_and_ngrams():
     payload = _call_endpoint(conn=conn, days=60)
     waste = next(d for d in payload["datasets"] if d["dataset_key"] == "analysis/waste_terms")
     ngrams = next(d for d in payload["datasets"] if d["dataset_key"] == "computed/ngrams")
-    assert waste["canonical_status"] == CanonicalFreshnessStatus.DEPENDENCY_BLOCKED
-    assert ngrams["canonical_status"] == CanonicalFreshnessStatus.DEPENDENCY_BLOCKED
+    assert waste["canonical_status"] == CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY
+    assert ngrams["canonical_status"] == CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY
+
+
+def test_freshness_endpoint_aligns_with_war_room_derivable_state():
+    """PR-ADS-095: /api/datasets/freshness uses the same HAS_DATA_STATES
+    upstream handling as the War Room — derived datasets without sync state
+    but with fresh upstream classify as NOT_RUN_BUT_DERIVABLE.
+    """
+    now = datetime.now(timezone.utc)
+    conn, _ = _make_mock_conn(
+        # Search Terms is fresh with data, but waste_terms/ngrams have no
+        # sync_state rows at all (placeholder rows). Counts default to 0 for
+        # tables we don't override.
+        sync_rows=[
+            ("windsor", "search_terms", "success", now, date.today(), 1, None, now),
+        ],
+        count_by_table={
+            "campaigns": 0,
+            "search_terms": 1200,
+            "keywords": 0,
+            "geo": 0,
+            "leads": 0,
+            "deals": 0,
+            "gclid_attribution": 0,
+            "gclid_coverage_snapshots": 0,
+            "waste_terms": 0,
+            "historical_intelligence": 0,
+        },
+    )
+    payload = _call_endpoint(conn=conn, days=60)
+    waste = next(d for d in payload["datasets"] if d["dataset_key"] == "analysis/waste_terms")
+    ngrams = next(d for d in payload["datasets"] if d["dataset_key"] == "computed/ngrams")
+    assert waste["canonical_status"] == CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE
+    assert ngrams["canonical_status"] == CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE
 
 
 def test_system_health_summary_renderer_uses_canonical_summary():

@@ -108,6 +108,23 @@ All of these must be true:
   - `tests/test_attribution_confidence.py` — confidence layer tests
   - `docs/26_ATTRIBUTION_CONFIDENCE_MODEL.md` — confidence model documentation
 
+### System Status Truth & Window/Data Diagnostics (PR-ADS-095)
+
+**PR-ADS-095 — System Status Truth & Window/Data Diagnostics**
+- **Status:** Backend diagnostics / system status semantics
+- **Depends on:** PR-ADS-094 (Production UX Stabilization)
+- **Blocks:** PR-ADS-096 (Snapshot Trend Delta Polish), PR-ADS-084 (Actual GCLID Bridge Plan)
+- **Scope:** Separate data availability from latest sync status. System Status no longer reports "critical failure" when usable rows exist — that case is now `data_available_latest_sync_failed` (warning), not `failed`. Pages report `degraded` / `action_needed` / `blocked` instead of a single blanket "blocked".
+- **Files:**
+  - `services/freshness_service.py` — new canonical states + refined `compute_canonical_freshness`
+  - `services/system_status_service.py` — `dataset_page_status`, refined source rollup, scheduler diagnostic, `build_window_diagnostics`
+  - `api/server.py` — refined war-room derivation pass + new `/api/diagnostics/window-semantics` endpoint
+  - `scripts/diagnose_window_semantics.py` — operator-facing window-counts diagnostic
+  - `static/app.js` — badge labels for new states; page-impact label mapping
+  - `tests/test_system_status_truth.py` — refined-state and page-status tests
+  - `tests/test_window_semantics_diagnostics.py` — window diagnostics tests
+  - `docs/API_CONTRACT.md` — `/api/diagnostics/window-semantics` documented; refined-state notes added under `/api/system/status-war-room`
+
 ### What it adds
 **OCT Uploader** (`connectors/oct_uploader.py`)
 - Reads HubSpot deal stage changes

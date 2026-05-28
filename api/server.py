@@ -51,6 +51,7 @@ Protected endpoints (require authenticated session):
   POST /api/backfill/run          — Trigger admin-only historical backfill (requires admin or ADMIN_API_TOKEN).
   GET  /api/backfill/status       — Latest backfill run state and summary (requires auth).
   GET  /api/historical-intelligence — Read-only historical trend analysis over local data (requires auth).
+  GET  /api/diagnostics/window-semantics — Read-only window-counts and diagnostic verdict per dataset (admin only; PR-ADS-095).
 """
 
 import base64
@@ -2869,6 +2870,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
     from services.freshness_service import (  # noqa: PLC0415
         DATASET_FRESHNESS_CONFIG,
         BLOCKING_STATES,
+        HAS_DATA_STATES,
         CanonicalFreshnessStatus,
         compute_canonical_freshness,
     )
@@ -2912,11 +2914,17 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
 
                 window_start = date.today() - timedelta(days=days)
                 _count_cache: dict[tuple[str, str], int | None] = {}
+                # PR-ADS-095: track whether row counting is even attempted for a
+                # dataset so compute_canonical_freshness can distinguish
+                # ROW_COUNT_NOT_ENABLED (no valid identifiers) from
+                # UNKNOWN_ROW_COUNT (query attempted but failed).
+                row_count_supported_map: dict[str, bool] = {}
 
                 for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
                     table_name = str(cfg.get("table") or "")
                     date_column = str(cfg.get("date_column") or "")
                     if not table_name or not date_column:
+                        row_count_supported_map[cfg_key] = False
                         continue
                     if not (_SAFE_SQL_IDENTIFIER_RE.match(table_name) and _SAFE_SQL_IDENTIFIER_RE.match(date_column)):
                         log.warning(
@@ -2925,8 +2933,10 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
                             table_name,
                             date_column,
                         )
+                        row_count_supported_map[cfg_key] = False
                         continue
 
+                    row_count_supported_map[cfg_key] = True
                     cache_key = (table_name, date_column)
                     if cache_key in _count_cache:
                         row_counts[cfg_key] = _count_cache[cache_key]
@@ -3084,6 +3094,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
                 last_successful_sync_at=last_sync_at,
                 stale_threshold_days=stale_days,
                 dependency_status=None,
+                row_count_supported=row_count_supported_map.get(cfg_key) if cfg_key else None,
             )
         else:
             verdict = None  # Placeholder, computed in second pass
@@ -3102,20 +3113,30 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
         if verdict:
             canonical_status_map[cfg_key or ds] = verdict["canonical_status"]
 
-    # Second pass: compute dependent datasets
+    # Second pass: compute dependent datasets.
+    # PR-ADS-095: forward both BLOCKING_STATES and HAS_DATA_STATES upstream so
+    # waste_terms/ngrams with fresh search_terms classify as
+    # NOT_RUN_BUT_DERIVABLE here just like in the War Room endpoint.
     for d in datasets:
         if d["_verdict"] is None:
             depends_on = d["_depends_on"]
-            # Check dependency status
             dep_status = None
+            has_data_upstream: str | None = None
             for dep in depends_on:
                 dep_st = canonical_status_map.get(dep)
-                if dep_st and dep_st in BLOCKING_STATES:
+                if not dep_st:
+                    continue
+                if dep_st in BLOCKING_STATES:
                     dep_status = dep_st
                     break
+                if dep_st in HAS_DATA_STATES and has_data_upstream is None:
+                    has_data_upstream = dep_st
+            if dep_status is None and has_data_upstream is not None:
+                dep_status = has_data_upstream
 
+            cfg_key_local = d["_cfg_key"]
             verdict = compute_canonical_freshness(
-                dataset=d["_cfg_key"] or d.get("dataset", ""),
+                dataset=cfg_key_local or d.get("dataset", ""),
                 rows_in_window=d["_rcount"],
                 latest_source_date=d["_latest_src_date"],
                 sync_status=d["_sync_status_for_canonical"],
@@ -3124,9 +3145,10 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
                 last_successful_sync_at=d["_last_sync_at"],
                 stale_threshold_days=d["_stale_days"],
                 dependency_status=dep_status,
+                row_count_supported=row_count_supported_map.get(cfg_key_local) if cfg_key_local else None,
             )
             d["_verdict"] = verdict
-            canonical_status_map[d["_cfg_key"] or d.get("dataset", "")] = verdict["canonical_status"]
+            canonical_status_map[cfg_key_local or d.get("dataset", "")] = verdict["canonical_status"]
 
     # Enrich each dataset record with canonical fields
     for d in datasets:
@@ -3150,11 +3172,21 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
         d["depends_on"] = depends_on
         d["dependency_status"] = None
         if depends_on:
+            # PR-ADS-095: surface the same upstream signal the second-pass
+            # verdict used — blocking states preferred; otherwise the first
+            # HAS_DATA upstream so consumers can render "derivable" hints.
+            has_data_dep: str | None = None
             for dep in depends_on:
                 dep_st = canonical_status_map.get(dep)
-                if dep_st and dep_st in BLOCKING_STATES:
+                if not dep_st:
+                    continue
+                if dep_st in BLOCKING_STATES:
                     d["dependency_status"] = dep_st
                     break
+                if dep_st in HAS_DATA_STATES and has_data_dep is None:
+                    has_data_dep = dep_st
+            if d["dependency_status"] is None and has_data_dep is not None:
+                d["dependency_status"] = has_data_dep
         d["reason"] = verdict.get("reason", "")
         d["next_action"] = verdict.get("next_action", "")
 
@@ -5399,6 +5431,7 @@ def api_system_status_war_room(
     from services.freshness_service import (  # noqa: PLC0415
         DATASET_FRESHNESS_CONFIG,
         BLOCKING_STATES,
+        HAS_DATA_STATES,
         compute_canonical_freshness,
     )
     from services.system_status_service import (  # noqa: PLC0415
@@ -5453,17 +5486,24 @@ def api_system_status_war_room(
                 window_start = date.today() - timedelta(days=days)
                 row_counts: dict[str, int | None] = {}
                 _count_cache: dict[tuple[str, str], int | None] = {}
+                # PR-ADS-095: track whether row counting is supported per
+                # dataset so compute_canonical_freshness can emit
+                # ROW_COUNT_NOT_ENABLED vs UNKNOWN_ROW_COUNT correctly.
+                war_row_count_supported: dict[str, bool] = {}
                 for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
                     table_name = str(cfg.get("table") or "")
                     date_column = str(cfg.get("date_column") or "")
                     if not table_name or not date_column:
+                        war_row_count_supported[cfg_key] = False
                         continue
                     if not (_SAFE_SQL_IDENTIFIER_RE.match(table_name) and _SAFE_SQL_IDENTIFIER_RE.match(date_column)):
                         log.warning(
                             "[api/status-war-room] invalid identifier for dataset %r: table=%r date_column=%r",
                             cfg_key, table_name, date_column,
                         )
+                        war_row_count_supported[cfg_key] = False
                         continue
+                    war_row_count_supported[cfg_key] = True
                     cache_key = (table_name, date_column)
                     if cache_key in _count_cache:
                         row_counts[cfg_key] = _count_cache[cache_key]
@@ -5557,6 +5597,7 @@ def api_system_status_war_room(
                         last_successful_sync_at=last_sync_at,
                         stale_threshold_days=cfg.get("stale_threshold_days", 8),
                         dependency_status=None,
+                        row_count_supported=war_row_count_supported.get(cfg_key),
                     )
                     canonical_status_map[cfg_key] = verdict["canonical_status"]
                     dataset_details[cfg_key] = {
@@ -5594,12 +5635,22 @@ def api_system_status_war_room(
 
                     batch_info = latest_batch_info.get((src, ds), {})
 
+                    # PR-ADS-095: pass upstream status whenever it's informative.
+                    # Blocking upstream → DEPENDENCY_BLOCKED; has-data upstream
+                    # combined with NOT_RUN derived → NOT_RUN_BUT_DERIVABLE.
                     dep_status = None
+                    has_data_upstream: str | None = None
                     for dep in cfg["depends_on"]:
                         dep_st = canonical_status_map.get(dep)
-                        if dep_st and dep_st in BLOCKING_STATES:
+                        if not dep_st:
+                            continue
+                        if dep_st in BLOCKING_STATES:
                             dep_status = dep_st
                             break
+                        if dep_st in HAS_DATA_STATES and has_data_upstream is None:
+                            has_data_upstream = dep_st
+                    if dep_status is None and has_data_upstream is not None:
+                        dep_status = has_data_upstream
 
                     verdict = compute_canonical_freshness(
                         dataset=cfg_key,
@@ -5611,6 +5662,7 @@ def api_system_status_war_room(
                         last_successful_sync_at=last_sync_at,
                         stale_threshold_days=cfg.get("stale_threshold_days", 8),
                         dependency_status=dep_status,
+                        row_count_supported=war_row_count_supported.get(cfg_key),
                     )
                     canonical_status_map[cfg_key] = verdict["canonical_status"]
                     dataset_details[cfg_key] = {
@@ -5694,6 +5746,83 @@ def api_system_status_war_room(
             "data": result,
         }
     return result
+
+
+# ---------------------------------------------------------------------------
+# Window/Data Diagnostics (PR-ADS-095)
+# ---------------------------------------------------------------------------
+
+_VALID_DIAGNOSTIC_WINDOWS = ("7d", "14d", "30d", "60d", "90d", "365d")
+
+
+@app.get("/api/diagnostics/window-semantics")
+def api_diagnostics_window_semantics(
+    request: Request,
+    windows: str = Query(
+        default="7d,30d,60d",
+        description="Comma-separated windows to compare (e.g. '7d,30d,60d')",
+    ),
+) -> dict[str, Any]:
+    """Compare per-dataset row counts across multiple windows.
+
+    PR-ADS-095. Admin only. Read-only diagnostic — does not call external
+    services and does not mutate state. Answers questions like:
+    "Do 7d / 30d / 60d windows actually produce different row counts for
+    Campaigns?" and "Is the row count unavailable for Deals because of a
+    query failure or because the dataset doesn't expose a row-count yet?"
+    """
+    check_admin_or_token(request)
+
+    requested_windows: list[str] = []
+    for raw in (windows or "").split(","):
+        w = raw.strip()
+        if not w:
+            continue
+        if w not in _VALID_DIAGNOSTIC_WINDOWS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid window '{w}'. Valid values: "
+                    + ", ".join(_VALID_DIAGNOSTIC_WINDOWS)
+                ),
+            )
+        if w not in requested_windows:
+            requested_windows.append(w)
+    if not requested_windows:
+        requested_windows = ["7d", "30d", "60d"]
+
+    from services.system_status_service import (  # noqa: PLC0415
+        build_window_diagnostics,
+        db_unavailable_window_payload,
+        gather_dataset_window_counts,
+    )
+    from db.connection import get_conn  # noqa: PLC0415
+
+    dataset_diagnostics: dict[str, dict[str, Any]] = {}
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return build_window_diagnostics(
+                    windows=requested_windows,
+                    dataset_diagnostics=db_unavailable_window_payload(),
+                )
+
+            with conn.cursor() as cur:
+                dataset_diagnostics = gather_dataset_window_counts(
+                    cur, windows=requested_windows
+                )
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/diagnostics/window-semantics] database error: %s", exc, exc_info=True)
+        return build_window_diagnostics(
+            windows=requested_windows,
+            dataset_diagnostics=db_unavailable_window_payload(),
+        )
+
+    return build_window_diagnostics(
+        windows=requested_windows,
+        dataset_diagnostics=dataset_diagnostics,
+    )
 
 
 # ---------------------------------------------------------------------------
