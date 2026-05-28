@@ -5601,6 +5601,7 @@ def api_system_status_war_room(
                         dep_st = canonical_status_map.get(dep)
                         if dep_st and dep_st in BLOCKING_STATES:
                             dep_status = dep_st
+                            upstream_has_data = False
                             break
                         # If upstream is fresh or has data, mark as derivable
                         if dep_st in (
@@ -5609,8 +5610,6 @@ def api_system_status_war_room(
                             "data_available_latest_sync_failed",
                         ):
                             upstream_has_data = True
-                        elif dep_st in BLOCKING_STATES:
-                            upstream_has_data = False
 
                     verdict = compute_canonical_freshness(
                         dataset=cfg_key,
@@ -5855,7 +5854,7 @@ def api_diagnostics_window_semantics(
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "windows": requested_windows,
             "datasets": [],
-            "error": str(exc),
+            "error": "Internal error while computing window diagnostics. Check server logs.",
         }
 
     return {
