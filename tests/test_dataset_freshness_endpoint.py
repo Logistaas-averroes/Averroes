@@ -129,7 +129,8 @@ def test_row_count_query_failure_is_unknown_not_zero():
     payload = _call_endpoint(conn=conn, days=30)
     matches = next(d for d in payload["datasets"] if d["dataset_key"] == "gclid/matches")
     assert matches["rows_in_window"] is None
-    assert matches["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN
+    # PR-ADS-095: refined from UNKNOWN to UNKNOWN_ROW_COUNT for clarity
+    assert matches["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT
 
 
 def test_configured_datasets_get_count_coverage_or_unknown():

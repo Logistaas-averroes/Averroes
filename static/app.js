@@ -5276,15 +5276,23 @@ function renderWarRoom(el, data) {
   }
   html += `</div></div>`;
 
-  // Page Impact
+  // Page Impact (PR-ADS-095: status is now ok/degraded/action_needed/blocked)
   const impacts = data.page_impact || [];
   if (impacts.length > 0) {
+    const _impactStatusLabel = {
+      blocked:        "Blocked",
+      degraded:       "Degraded",
+      action_needed:  "Action Needed",
+      ok:             "OK",
+      unknown:        "Unknown",
+    };
     html += `<div class="war-room-section"><h3 class="war-room-section__title">Page Impact</h3><div class="war-room-impacts">`;
     for (const imp of impacts) {
+      const statusLabel = _impactStatusLabel[imp.status] || escapeHtml(imp.status || "Unknown");
       html += `
         <div class="war-room-impact">
           <span class="war-room-impact__page">${escapeHtml(imp.page)}</span>
-          <span class="war-room-impact__status">Blocked</span>
+          <span class="war-room-impact__status">${escapeHtml(statusLabel)}</span>
           <span class="war-room-impact__reason">${escapeHtml(imp.reason || "")}</span>
         </div>`;
     }
@@ -5445,28 +5453,46 @@ function renderDatasetFreshness(data) {
   // Table rows — use canonical_status from backend (PR-ADS-067) when available,
   // fall back to legacy datasetDisplayStatus() for backward compat.
   const _canonicalBadgeCls = {
-    fresh_with_data:      "freshness-status-fresh-with-data",
-    fresh_but_empty:      "freshness-status-fresh-but-empty",
-    stale_with_data:      "freshness-status-stale-with-data",
-    stale_and_empty:      "freshness-status-stale-and-empty",
-    failed:               "freshness-status-failed",
-    running:              "freshness-status-running",
-    not_run:              "freshness-status-not-run",
-    dependency_blocked:   "freshness-status-dependency-blocked",
-    db_unavailable:       "freshness-status-db-unavailable",
-    unknown:              "freshness-status-unknown",
+    fresh_with_data:                      "freshness-status-fresh-with-data",
+    fresh_but_empty:                      "freshness-status-fresh-but-empty",
+    stale_with_data:                      "freshness-status-stale-with-data",
+    stale_and_empty:                      "freshness-status-stale-and-empty",
+    failed:                               "freshness-status-failed",
+    running:                              "freshness-status-running",
+    not_run:                              "freshness-status-not-run",
+    dependency_blocked:                   "freshness-status-dependency-blocked",
+    db_unavailable:                       "freshness-status-db-unavailable",
+    unknown:                              "freshness-status-unknown",
+    // PR-ADS-095 refined states
+    data_available_latest_sync_failed:    "freshness-status-stale-with-data",
+    failed_no_data:                       "freshness-status-failed",
+    not_run_but_derivable:                "freshness-status-stale-with-data",
+    not_run_no_upstream_data:             "freshness-status-not-run",
+    unknown_row_count:                    "freshness-status-unknown",
+    row_count_not_enabled:                "freshness-status-unknown",
+    blocked_by_dependency:                "freshness-status-dependency-blocked",
+    empty_success:                        "freshness-status-fresh-but-empty",
   };
   const _canonicalBadgeLabel = {
-    fresh_with_data:      "Fresh with data",
-    fresh_but_empty:      "Fresh but empty",
-    stale_with_data:      "Stale with data",
-    stale_and_empty:      "Stale and empty",
-    failed:               "Failed",
-    running:              "Running",
-    not_run:              "Not run",
-    dependency_blocked:   "Blocked",
-    db_unavailable:       "DB unavailable",
-    unknown:              "Unknown",
+    fresh_with_data:                      "Fresh with data",
+    fresh_but_empty:                      "Fresh but empty",
+    stale_with_data:                      "Stale with data",
+    stale_and_empty:                      "Stale and empty",
+    failed:                               "Failed",
+    running:                              "Running",
+    not_run:                              "Not run",
+    dependency_blocked:                   "Blocked",
+    db_unavailable:                       "DB unavailable",
+    unknown:                              "Unknown",
+    // PR-ADS-095 refined states
+    data_available_latest_sync_failed:    "Data Available, Latest Sync Failed",
+    failed_no_data:                       "Failed, No Data",
+    not_run_but_derivable:                "Not Run, But Derivable",
+    not_run_no_upstream_data:             "Not Run, No Upstream Data",
+    unknown_row_count:                    "Row Count Unavailable",
+    row_count_not_enabled:                "Row Count Not Enabled",
+    blocked_by_dependency:                "Blocked by Dependency",
+    empty_success:                        "Empty Success",
   };
 
   const rows = datasetFreshnessRows.map((row) => {

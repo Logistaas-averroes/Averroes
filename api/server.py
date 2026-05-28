@@ -51,6 +51,7 @@ Protected endpoints (require authenticated session):
   POST /api/backfill/run          — Trigger admin-only historical backfill (requires admin or ADMIN_API_TOKEN).
   GET  /api/backfill/status       — Latest backfill run state and summary (requires auth).
   GET  /api/historical-intelligence — Read-only historical trend analysis over local data (requires auth).
+  GET  /api/diagnostics/window-semantics — Read-only window-counts and diagnostic verdict per dataset (admin only; PR-ADS-095).
 """
 
 import base64
@@ -5399,6 +5400,7 @@ def api_system_status_war_room(
     from services.freshness_service import (  # noqa: PLC0415
         DATASET_FRESHNESS_CONFIG,
         BLOCKING_STATES,
+        HAS_DATA_STATES,
         compute_canonical_freshness,
     )
     from services.system_status_service import (  # noqa: PLC0415
@@ -5594,12 +5596,22 @@ def api_system_status_war_room(
 
                     batch_info = latest_batch_info.get((src, ds), {})
 
+                    # PR-ADS-095: pass upstream status whenever it's informative.
+                    # Blocking upstream → DEPENDENCY_BLOCKED; has-data upstream
+                    # combined with NOT_RUN derived → NOT_RUN_BUT_DERIVABLE.
                     dep_status = None
+                    has_data_upstream: str | None = None
                     for dep in cfg["depends_on"]:
                         dep_st = canonical_status_map.get(dep)
-                        if dep_st and dep_st in BLOCKING_STATES:
+                        if not dep_st:
+                            continue
+                        if dep_st in BLOCKING_STATES:
                             dep_status = dep_st
                             break
+                        if dep_st in HAS_DATA_STATES and has_data_upstream is None:
+                            has_data_upstream = dep_st
+                    if dep_status is None and has_data_upstream is not None:
+                        dep_status = has_data_upstream
 
                     verdict = compute_canonical_freshness(
                         dataset=cfg_key,
@@ -5694,6 +5706,165 @@ def api_system_status_war_room(
             "data": result,
         }
     return result
+
+
+# ---------------------------------------------------------------------------
+# Window/Data Diagnostics (PR-ADS-095)
+# ---------------------------------------------------------------------------
+
+_VALID_DIAGNOSTIC_WINDOWS = ("7d", "14d", "30d", "60d", "90d", "365d")
+
+
+@app.get("/api/diagnostics/window-semantics")
+def api_diagnostics_window_semantics(
+    request: Request,
+    windows: str = Query(
+        default="7d,30d,60d",
+        description="Comma-separated windows to compare (e.g. '7d,30d,60d')",
+    ),
+) -> dict[str, Any]:
+    """Compare per-dataset row counts across multiple windows.
+
+    PR-ADS-095. Admin only. Read-only diagnostic — does not call external
+    services and does not mutate state. Answers questions like:
+    "Do 7d / 30d / 60d windows actually produce different row counts for
+    Campaigns?" and "Is the row count unavailable for Deals because of a
+    query failure or because the dataset doesn't expose a row-count yet?"
+    """
+    check_admin_or_token(request)
+
+    requested_windows: list[str] = []
+    for raw in (windows or "").split(","):
+        w = raw.strip()
+        if not w:
+            continue
+        if w not in _VALID_DIAGNOSTIC_WINDOWS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid window '{w}'. Valid values: "
+                    + ", ".join(_VALID_DIAGNOSTIC_WINDOWS)
+                ),
+            )
+        if w not in requested_windows:
+            requested_windows.append(w)
+    if not requested_windows:
+        requested_windows = ["7d", "30d", "60d"]
+
+    window_days: dict[str, int] = {w: int(w.rstrip("d")) for w in requested_windows}
+
+    from services.freshness_service import DATASET_FRESHNESS_CONFIG  # noqa: PLC0415
+    from services.system_status_service import build_window_diagnostics  # noqa: PLC0415
+    from db.connection import get_conn  # noqa: PLC0415
+    from psycopg2 import sql as _psql  # noqa: PLC0415
+
+    dataset_diagnostics: dict[str, dict[str, Any]] = {}
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return build_window_diagnostics(
+                    windows=requested_windows,
+                    dataset_diagnostics={
+                        k: {"db_unavailable": True} for k in DATASET_FRESHNESS_CONFIG
+                    },
+                )
+
+            with conn.cursor() as cur:
+                # Load sync_state once for all datasets
+                cur.execute("""
+                    SELECT source, dataset, status, last_successful_sync_at,
+                           last_source_date
+                    FROM sync_state
+                """)
+                sync_rows = cur.fetchall()
+                sync_cols = [d[0] for d in cur.description]
+                sync_map: dict[tuple[str, str], dict[str, Any]] = {}
+                for row in sync_rows:
+                    r = dict(zip(sync_cols, row))
+                    sync_map[(r["source"], r["dataset"])] = r
+
+                for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
+                    table_name = str(cfg.get("table") or "")
+                    date_column = str(cfg.get("date_column") or "")
+                    diag: dict[str, Any] = {
+                        "source": cfg.get("source"),
+                        "table": table_name or None,
+                        "date_column": date_column or None,
+                        "window_counts": {},
+                        "row_count_available": False,
+                    }
+
+                    if not table_name or not date_column or not (
+                        _SAFE_SQL_IDENTIFIER_RE.match(table_name)
+                        and _SAFE_SQL_IDENTIFIER_RE.match(date_column)
+                    ):
+                        diag["row_count_unavailable_reason"] = (
+                            "row-count query not enabled for this dataset "
+                            "(missing or non-identifier table/date_column)"
+                        )
+                    else:
+                        diag["row_count_available"] = True
+                        for label, ndays in window_days.items():
+                            ws = date.today() - timedelta(days=ndays)
+                            try:
+                                q = _psql.SQL(
+                                    "SELECT COUNT(*) FROM {} WHERE {} >= %s"
+                                ).format(
+                                    _psql.Identifier(table_name),
+                                    _psql.Identifier(date_column),
+                                )
+                                cur.execute(q, (ws,))
+                                r2 = cur.fetchone()
+                                count = int(r2[0]) if r2 and r2[0] is not None else 0
+                                diag["window_counts"][label] = count
+                            except Exception:  # noqa: BLE001
+                                diag["window_counts"][label] = None
+                                diag["row_count_unavailable_reason"] = (
+                                    "row-count query failed at execution time"
+                                )
+
+                        # missing_date_rows + invalid_date_rows where supported.
+                        try:
+                            q = _psql.SQL(
+                                "SELECT COUNT(*) FROM {} WHERE {} IS NULL"
+                            ).format(
+                                _psql.Identifier(table_name),
+                                _psql.Identifier(date_column),
+                            )
+                            cur.execute(q)
+                            r3 = cur.fetchone()
+                            diag["missing_date_rows"] = (
+                                int(r3[0]) if r3 and r3[0] is not None else 0
+                            )
+                        except Exception:  # noqa: BLE001
+                            diag["missing_date_rows"] = None
+
+                    sync_row = sync_map.get((cfg.get("source"), cfg.get("dataset")), {})
+                    diag["latest_source_date"] = (
+                        str(sync_row["last_source_date"])
+                        if sync_row.get("last_source_date") else None
+                    )
+                    diag["latest_sync_status"] = sync_row.get("status")
+                    diag["last_successful_sync_at"] = (
+                        sync_row["last_successful_sync_at"].isoformat()
+                        if sync_row.get("last_successful_sync_at") else None
+                    )
+
+                    dataset_diagnostics[cfg_key] = diag
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/diagnostics/window-semantics] database error: %s", exc, exc_info=True)
+        return build_window_diagnostics(
+            windows=requested_windows,
+            dataset_diagnostics={
+                k: {"db_unavailable": True} for k in DATASET_FRESHNESS_CONFIG
+            },
+        )
+
+    return build_window_diagnostics(
+        windows=requested_windows,
+        dataset_diagnostics=dataset_diagnostics,
+    )
 
 
 # ---------------------------------------------------------------------------

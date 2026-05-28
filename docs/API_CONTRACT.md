@@ -2148,6 +2148,87 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
 - Combines canonical freshness, pipeline dependencies, source health, and scheduler run state.
 - Uses `services/system_status_service.py` for pure helper logic.
 
+#### PR-ADS-095 — Refined truth semantics
+
+PR-ADS-095 expanded the canonical state set so System Status can distinguish
+"sync failed but rows still available" from "sync failed and no data":
+
+- `data_available_latest_sync_failed` — sync failed, but `rows_in_window > 0`;
+  the page is **degraded**, not blocked.
+- `failed_no_data` — sync failed and no usable rows; the page is **blocked**.
+- `not_run_but_derivable` — derived dataset has not run, but its upstream has
+  rows; the page is **action_needed**, not blocked.
+- `not_run_no_upstream_data` — derived dataset has not run and upstream is
+  empty; effectively blocked but distinct from `not_run_but_derivable`.
+- `unknown_row_count` — the row-count query failed for this dataset.
+- `row_count_not_enabled` — this dataset doesn't expose a row-count diagnostic.
+- `blocked_by_dependency` — explicit name for the legacy `dependency_blocked`.
+
+`page_impact` entries now carry one of `ok | degraded | action_needed |
+blocked | unknown`. Pipelines now also include a `page_status` field with the
+same set. When the `scheduler` block is empty but `sync_info` shows successful
+syncs, the response includes:
+
+```json
+"scheduler": {
+  "latest_daily": null,
+  "latest_weekly": null,
+  "latest_monthly": null,
+  "latest_incremental": null,
+  "diagnostic_status": "no_scheduler_run_recorded",
+  "message": "Source sync timestamps exist, but no scheduler run records were found.",
+  "next_action": "Check whether background/manual syncs write scheduler metadata."
+}
+```
+
+---
+
+### `GET /api/diagnostics/window-semantics`
+
+**Auth:** Admin only (session with admin role, or `ADMIN_API_TOKEN` Bearer header)
+**Purpose:** Compare per-dataset row counts across multiple time windows to verify whether 7d / 30d / 60d windows actually produce different counts, and to surface whether row-count queries are unavailable due to a query failure or because the dataset doesn't expose row counts.
+**Added:** PR-ADS-095
+
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `windows` | string | `7d,30d,60d` | Comma-separated windows. Valid: `7d, 14d, 30d, 60d, 90d, 365d` |
+
+#### Response Shape
+
+```json
+{
+  "generated_at": "2026-05-28T04:00:00+00:00",
+  "windows": ["7d", "30d", "60d"],
+  "datasets": [
+    {
+      "key": "campaigns",
+      "source": "windsor",
+      "table": "campaigns",
+      "date_column": "run_date",
+      "window_counts": { "7d": 1200, "30d": 3900, "60d": 5707 },
+      "latest_source_date": "2026-05-25",
+      "latest_sync_status": "failed",
+      "last_successful_sync_at": "2026-05-25T07:04:00+00:00",
+      "missing_date_rows": 0,
+      "invalid_date_rows": null,
+      "diagnostic_status": "data_available_latest_sync_failed",
+      "usable_for_page": true,
+      "reason": "Latest sync failed, but usable rows exist in the selected window.",
+      "next_action": "Review latest sync error, but page can still render using existing data."
+    }
+  ]
+}
+```
+
+#### Notes
+
+- **Read-only.** No external API calls. No data mutation.
+- Mirrors the output of `python scripts/diagnose_window_semantics.py`.
+- `diagnostic_status` values are the same canonical states used by `/api/system/status-war-room`.
+- `usable_for_page` is `true` when rows exist in at least one of the requested windows, even if the latest sync failed.
+
 ---
 
 ## Forbidden Endpoints (Phase 1)

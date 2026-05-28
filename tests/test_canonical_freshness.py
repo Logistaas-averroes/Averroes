@@ -117,8 +117,12 @@ def test_stale_and_empty():
 
 # ── failed ──────────────────────────────────────────────────────────────────
 
-def test_failed_batch_status():
-    """Latest sync batch failed."""
+def test_failed_batch_status_with_rows_is_data_available_latest_sync_failed():
+    """Latest sync batch failed but usable rows still exist in the window.
+
+    PR-ADS-095: previously this would return FAILED; now it returns
+    data_available_latest_sync_failed because the page can still render.
+    """
     result = compute_canonical_freshness(
         dataset="campaigns",
         rows_in_window=50,
@@ -129,12 +133,13 @@ def test_failed_batch_status():
         last_successful_sync_at=_recent_sync(),
         stale_threshold_days=8,
     )
-    assert result["canonical_status"] == CanonicalFreshnessStatus.FAILED
-    assert result["severity"] == "error"
+    assert result["canonical_status"] == CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED
+    assert result["severity"] == "warning"
+    assert "usable rows exist" in result["reason"].lower()
 
 
-def test_failed_sync_status():
-    """Sync state is failed."""
+def test_failed_sync_status_no_rows_is_failed_no_data():
+    """Sync state failed and no usable rows — PR-ADS-095 failed_no_data."""
     result = compute_canonical_freshness(
         dataset="search_terms",
         rows_in_window=0,
@@ -145,7 +150,7 @@ def test_failed_sync_status():
         last_successful_sync_at=None,
         stale_threshold_days=8,
     )
-    assert result["canonical_status"] == CanonicalFreshnessStatus.FAILED
+    assert result["canonical_status"] == CanonicalFreshnessStatus.FAILED_NO_DATA
     assert result["severity"] == "error"
 
 
@@ -329,7 +334,10 @@ def test_display_labels():
 # ── Edge cases ──────────────────────────────────────────────────────────────
 
 def test_fresh_but_empty_with_none_rows():
-    """rows_in_window=None should be unknown (count unavailable), not empty."""
+    """rows_in_window=None should be unknown_row_count, not empty.
+
+    PR-ADS-095: renamed from UNKNOWN to UNKNOWN_ROW_COUNT for clarity.
+    """
     result = compute_canonical_freshness(
         dataset="campaigns",
         rows_in_window=None,
@@ -340,7 +348,7 @@ def test_fresh_but_empty_with_none_rows():
         last_successful_sync_at=_recent_sync(),
         stale_threshold_days=8,
     )
-    assert result["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN
+    assert result["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT
 
 
 def test_fresh_but_empty_reason_includes_latest_batch_count():
