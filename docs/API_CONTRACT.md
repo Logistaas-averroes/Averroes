@@ -2154,15 +2154,29 @@ PR-ADS-095 expanded the canonical state set so System Status can distinguish
 "sync failed but rows still available" from "sync failed and no data":
 
 - `data_available_latest_sync_failed` — sync failed, but `rows_in_window > 0`;
-  the page is **degraded**, not blocked.
+  the page is **degraded**, not blocked. Severity: **warning**.
 - `failed_no_data` — sync failed and no usable rows; the page is **blocked**.
+  Severity: **error**.
 - `not_run_but_derivable` — derived dataset has not run, but its upstream has
-  rows; the page is **action_needed**, not blocked.
+  rows; the page is **action_needed**, not blocked. Severity: **warning**.
 - `not_run_no_upstream_data` — derived dataset has not run and upstream is
-  empty; effectively blocked but distinct from `not_run_but_derivable`.
-- `unknown_row_count` — the row-count query failed for this dataset.
-- `row_count_not_enabled` — this dataset doesn't expose a row-count diagnostic.
-- `blocked_by_dependency` — explicit name for the legacy `dependency_blocked`.
+  also not run / empty; effectively blocked. Severity: **error**.
+- `unknown_row_count` — the row-count query was attempted but failed for this
+  dataset at runtime. Severity: **neutral**.
+- `row_count_not_enabled` — the dataset has no row-count query configured
+  (e.g. missing or non-identifier table/date_column). Severity: **neutral**.
+- `blocked_by_dependency` — refined emission for the previously-named
+  `dependency_blocked`; emitted when upstream is actively broken. Severity:
+  **error**. The legacy `dependency_blocked` state is still recognised
+  downstream so older sync_state rows render correctly.
+- `empty_success` — latest sync succeeded explicitly with zero rows from the
+  source (vs. `fresh_but_empty` which means "window query is zero, batch
+  reported rows"). Severity: **warning**.
+
+`/api/datasets/freshness` and `/api/system/status-war-room` now share the
+same upstream derivation logic: derived datasets whose upstream is in a
+HAS_DATA state (fresh, stale_with_data, or data_available_latest_sync_failed)
+are classified `not_run_but_derivable` in both endpoints.
 
 `page_impact` entries now carry one of `ok | degraded | action_needed |
 blocked | unknown`. Pipelines now also include a `page_status` field with the

@@ -26,14 +26,16 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import date, timedelta
 from typing import Any
 
 # Allow running from repo root without installing the package
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 
-from services.freshness_service import DATASET_FRESHNESS_CONFIG  # noqa: E402
-from services.system_status_service import build_window_diagnostics  # noqa: E402
+from services.system_status_service import (  # noqa: E402
+    build_window_diagnostics,
+    db_unavailable_window_payload,
+    gather_dataset_window_counts,
+)
 
 
 _VALID_WINDOWS = ("7d", "14d", "30d", "60d", "90d", "365d")
@@ -61,111 +63,24 @@ def _gather_diagnostics(
 ) -> dict[str, dict[str, Any]]:
     """Pull per-dataset window counts and sync state from the DB.
 
-    Returns the raw dict expected by ``build_window_diagnostics``.
+    Delegates to ``services.system_status_service.gather_dataset_window_counts``
+    so the script and the ``/api/diagnostics/window-semantics`` endpoint stay
+    in lockstep.
     """
     from db.connection import get_conn
-    from psycopg2 import sql as _psql
-    import re
-
-    _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-    window_days: dict[str, int] = {w: int(w.rstrip("d")) for w in windows}
-
-    diagnostics: dict[str, dict[str, Any]] = {}
-
-    def _db_unavailable_payload() -> dict[str, dict[str, Any]]:
-        keys = [k for k in DATASET_FRESHNESS_CONFIG if not only_dataset or k == only_dataset]
-        return {k: {"db_unavailable": True} for k in keys}
 
     try:
         with get_conn() as conn:
             if conn is None:
-                return _db_unavailable_payload()
+                return db_unavailable_window_payload(only_dataset)
 
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT source, dataset, status, last_successful_sync_at, last_source_date "
-                    "FROM sync_state"
+                return gather_dataset_window_counts(
+                    cur, windows=windows, only_dataset=only_dataset
                 )
-                sync_rows = cur.fetchall()
-                cols = [d[0] for d in cur.description]
-                sync_map: dict[tuple[str, str], dict] = {}
-                for row in sync_rows:
-                    r = dict(zip(cols, row))
-                    sync_map[(r["source"], r["dataset"])] = r
-
-                for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
-                    if only_dataset and cfg_key != only_dataset:
-                        continue
-                    table_name = str(cfg.get("table") or "")
-                    date_column = str(cfg.get("date_column") or "")
-                    diag: dict[str, Any] = {
-                        "source": cfg.get("source"),
-                        "table": table_name or None,
-                        "date_column": date_column or None,
-                        "window_counts": {},
-                        "row_count_available": False,
-                    }
-
-                    if not table_name or not date_column or not (
-                        _SAFE_IDENT.match(table_name) and _SAFE_IDENT.match(date_column)
-                    ):
-                        diag["row_count_unavailable_reason"] = (
-                            "row-count query not enabled for this dataset "
-                            "(missing or non-identifier table/date_column)"
-                        )
-                    else:
-                        diag["row_count_available"] = True
-                        for label, ndays in window_days.items():
-                            ws = date.today() - timedelta(days=ndays)
-                            try:
-                                q = _psql.SQL(
-                                    "SELECT COUNT(*) FROM {} WHERE {} >= %s"
-                                ).format(
-                                    _psql.Identifier(table_name),
-                                    _psql.Identifier(date_column),
-                                )
-                                cur.execute(q, (ws,))
-                                r2 = cur.fetchone()
-                                count = int(r2[0]) if r2 and r2[0] is not None else 0
-                                diag["window_counts"][label] = count
-                            except Exception:  # noqa: BLE001
-                                diag["window_counts"][label] = None
-                                diag["row_count_unavailable_reason"] = (
-                                    "row-count query failed at execution time"
-                                )
-
-                        try:
-                            q = _psql.SQL(
-                                "SELECT COUNT(*) FROM {} WHERE {} IS NULL"
-                            ).format(
-                                _psql.Identifier(table_name),
-                                _psql.Identifier(date_column),
-                            )
-                            cur.execute(q)
-                            r3 = cur.fetchone()
-                            diag["missing_date_rows"] = (
-                                int(r3[0]) if r3 and r3[0] is not None else 0
-                            )
-                        except Exception:  # noqa: BLE001
-                            diag["missing_date_rows"] = None
-
-                    sync_row = sync_map.get((cfg.get("source"), cfg.get("dataset")), {})
-                    diag["latest_source_date"] = (
-                        str(sync_row["last_source_date"])
-                        if sync_row.get("last_source_date") else None
-                    )
-                    diag["latest_sync_status"] = sync_row.get("status")
-                    diag["last_successful_sync_at"] = (
-                        sync_row["last_successful_sync_at"].isoformat()
-                        if sync_row.get("last_successful_sync_at") else None
-                    )
-                    diagnostics[cfg_key] = diag
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: database error during diagnostics: {exc}", file=sys.stderr)
-        return _db_unavailable_payload()
-
-    return diagnostics
+        return db_unavailable_window_payload(only_dataset)
 
 
 def _print_text(payload: dict[str, Any]) -> None:

@@ -148,6 +148,34 @@ def test_severity_includes_new_states():
         assert state in SEVERITY_MAP, f"missing severity for {state}"
 
 
+def test_not_run_no_upstream_data_severity_is_error():
+    """PR-ADS-095 review: NOT_RUN_NO_UPSTREAM_DATA must roll up as error,
+    not neutral — derived datasets with no upstream data are blockers."""
+    assert SEVERITY_MAP[CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA] == "error"
+
+
+def test_not_run_no_upstream_data_overall_status_is_error():
+    """Confirms the severity flows up through compute_overall_status."""
+    statuses = {
+        "search_terms": CanonicalFreshnessStatus.NOT_RUN,
+        "waste_terms": CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA,
+    }
+    status, _ = compute_overall_status(statuses)
+    assert status == "error"
+
+
+def test_blocked_by_dependency_is_a_blocked_summary_count():
+    """PR-ADS-095 refined emission BLOCKED_BY_DEPENDENCY rolls up into the
+    summary's `blocked` bucket, not warning/error."""
+    counts = compute_summary_counts({
+        "waste_terms": CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY,
+        "ngrams": CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY,
+        "search_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
+    })
+    assert counts["blocked"] == 2
+    assert counts["ok"] == 1
+
+
 # ── Source rollup ──────────────────────────────────────────────────────────
 
 

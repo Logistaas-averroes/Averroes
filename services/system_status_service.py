@@ -12,15 +12,20 @@ Phase 1 — Read Only. No external writes. No scheduler triggers.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import re
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from services.freshness_service import (
     BLOCKING_STATES,
+    DATASET_FRESHNESS_CONFIG,
     CanonicalFreshnessStatus,
     HAS_DATA_STATES,
     SEVERITY_MAP,
 )
+
+
+_SAFE_SQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # ── Page status (PR-ADS-095) ────────────────────────────────────────────────
@@ -41,6 +46,8 @@ PAGE_BLOCKING_STATES = frozenset([
     CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY,
     CanonicalFreshnessStatus.DEPENDENCY_BLOCKED,
     CanonicalFreshnessStatus.FRESH_BUT_EMPTY,
+    CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA,
+    CanonicalFreshnessStatus.EMPTY_SUCCESS,
     # Legacy alias still seen in the wild
     CanonicalFreshnessStatus.FAILED,
 ])
@@ -567,11 +574,9 @@ def dataset_page_status(canonical_status: str) -> str:
     if canonical_status in (
         CanonicalFreshnessStatus.RUNNING,
         CanonicalFreshnessStatus.NOT_RUN,
-        CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA,
         CanonicalFreshnessStatus.UNKNOWN,
         CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT,
         CanonicalFreshnessStatus.ROW_COUNT_NOT_ENABLED,
-        CanonicalFreshnessStatus.EMPTY_SUCCESS,
     ):
         return PAGE_STATUS_UNKNOWN
     return PAGE_STATUS_UNKNOWN
@@ -845,6 +850,118 @@ def diagnose_dataset_window(
         "reason": "Rows present in the requested windows.",
         "next_action": "No action needed.",
     }
+
+
+def gather_dataset_window_counts(
+    cur: Any,
+    *,
+    windows: list[str],
+    only_dataset: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Gather per-dataset window row counts and sync info from the DB.
+
+    Pure DB read against the provided psycopg2 cursor — callers manage the
+    cursor/transaction. Used by both the ``/api/diagnostics/window-semantics``
+    endpoint and ``scripts/diagnose_window_semantics.py`` so the script and
+    the API stay in lockstep.
+    """
+    from psycopg2 import sql as _psql  # noqa: PLC0415
+
+    window_days: dict[str, int] = {w: int(w.rstrip("d")) for w in windows}
+
+    cur.execute(
+        "SELECT source, dataset, status, last_successful_sync_at, last_source_date "
+        "FROM sync_state"
+    )
+    sync_rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    sync_map: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in sync_rows:
+        r = dict(zip(cols, row))
+        sync_map[(r["source"], r["dataset"])] = r
+
+    diagnostics: dict[str, dict[str, Any]] = {}
+    for cfg_key, cfg in DATASET_FRESHNESS_CONFIG.items():
+        if only_dataset and cfg_key != only_dataset:
+            continue
+        table_name = str(cfg.get("table") or "")
+        date_column = str(cfg.get("date_column") or "")
+        diag: dict[str, Any] = {
+            "source": cfg.get("source"),
+            "table": table_name or None,
+            "date_column": date_column or None,
+            "window_counts": {},
+            "row_count_available": False,
+        }
+
+        if not table_name or not date_column or not (
+            _SAFE_SQL_IDENT_RE.match(table_name)
+            and _SAFE_SQL_IDENT_RE.match(date_column)
+        ):
+            diag["row_count_unavailable_reason"] = (
+                "row-count query not enabled for this dataset "
+                "(missing or non-identifier table/date_column)"
+            )
+        else:
+            diag["row_count_available"] = True
+            for label, ndays in window_days.items():
+                ws = date.today() - timedelta(days=ndays)
+                try:
+                    q = _psql.SQL(
+                        "SELECT COUNT(*) FROM {} WHERE {} >= %s"
+                    ).format(
+                        _psql.Identifier(table_name),
+                        _psql.Identifier(date_column),
+                    )
+                    cur.execute(q, (ws,))
+                    r2 = cur.fetchone()
+                    count = int(r2[0]) if r2 and r2[0] is not None else 0
+                    diag["window_counts"][label] = count
+                except Exception:  # noqa: BLE001
+                    diag["window_counts"][label] = None
+                    diag["row_count_unavailable_reason"] = (
+                        "row-count query failed at execution time"
+                    )
+
+            try:
+                q = _psql.SQL(
+                    "SELECT COUNT(*) FROM {} WHERE {} IS NULL"
+                ).format(
+                    _psql.Identifier(table_name),
+                    _psql.Identifier(date_column),
+                )
+                cur.execute(q)
+                r3 = cur.fetchone()
+                diag["missing_date_rows"] = (
+                    int(r3[0]) if r3 and r3[0] is not None else 0
+                )
+            except Exception:  # noqa: BLE001
+                diag["missing_date_rows"] = None
+
+        sync_row = sync_map.get((cfg.get("source"), cfg.get("dataset")), {})
+        diag["latest_source_date"] = (
+            str(sync_row["last_source_date"])
+            if sync_row.get("last_source_date") else None
+        )
+        diag["latest_sync_status"] = sync_row.get("status")
+        last_sync_at = sync_row.get("last_successful_sync_at")
+        diag["last_successful_sync_at"] = (
+            last_sync_at.isoformat() if last_sync_at else None
+        )
+        diagnostics[cfg_key] = diag
+
+    return diagnostics
+
+
+def db_unavailable_window_payload(
+    only_dataset: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return the dataset_diagnostics payload for a DB-unavailable scenario."""
+    keys = [
+        k for k in DATASET_FRESHNESS_CONFIG
+        if not only_dataset or k == only_dataset
+    ]
+    return {k: {"db_unavailable": True} for k in keys}
 
 
 def build_window_diagnostics(
