@@ -1,8 +1,9 @@
 /**
  * static/app.js
  *
- * Logistaas Ads Intelligence — 5-page SPA frontend logic.
+ * Logistaas Ads Intelligence — SPA frontend logic.
  * PR-ADS-025B — Dashboard Live Data Upgrade
+ * PR-ADS-094 — Production UX Stabilization (hash routing, window truth, help drawer fix)
  *
  * Rules:
  *  - No hardcoded secrets.
@@ -10,7 +11,7 @@
  *  - No third-party JS dependencies.
  *  - Auth state managed via HTTP-only session cookie (not accessible to JS).
  *  - Role-based UI: admin sees run triggers + health page; viewer/mdr read-only.
- *  - SPA routing via show/hide — no window.location changes, no hash routing.
+ *  - SPA routing via hash (#/page-name) with show/hide DOM switching.
  */
 
 "use strict";
@@ -434,11 +435,13 @@ const PAGE_DEPENDENCIES = {
 
 let _currentUser   = null;  // { username, role } or null
 let _currentPage   = null;  // active page id string
+const VALID_DAY_WINDOWS = [7, 14, 30, 60, 90, 365];
+
 let _selectedDays  = (() => {
   try {
     const stored = sessionStorage.getItem("ads_days");
     const n = stored ? parseInt(stored, 10) : 30;
-    return [7, 14, 30, 60].includes(n) ? n : 30;
+    return VALID_DAY_WINDOWS.includes(n) ? n : 30;
   } catch (_) {
     return 30;
   }
@@ -826,18 +829,46 @@ function getSelectedDays() {
   return _selectedDays;
 }
 
+function getCurrentDays() {
+  const d = _selectedDays || 60;
+  return VALID_DAY_WINDOWS.includes(d) ? d : 60;
+}
+
+function getCurrentWindowParam() {
+  return `${getCurrentDays()}d`;
+}
+
 function setSelectedDays(days) {
-  _selectedDays = days;
-  try { sessionStorage.setItem("ads_days", String(days)); } catch (_) { /* ignore */ }
+  const normalized = VALID_DAY_WINDOWS.includes(Number(days)) ? Number(days) : 60;
+  _selectedDays = normalized;
+  try { sessionStorage.setItem("ads_days", String(normalized)); } catch (_) { /* ignore */ }
   // Update active button state
-  document.querySelectorAll(".time-range-btn").forEach((btn) => {
-    btn.classList.toggle("active", parseInt(btn.dataset.days, 10) === days);
-  });
+  updateWindowControls(normalized);
   // Close campaign drawer when selected reporting window changes to avoid stale detail.
   closeCampaignDrawer();
   // Reload current page with new window
   if (_currentPage) loadPage(_currentPage);
   loadDataFreshness();
+}
+
+function updateWindowControls(days) {
+  document.querySelectorAll(".time-range-btn").forEach((btn) => {
+    btn.classList.toggle("active", parseInt(btn.dataset.days, 10) === days);
+  });
+  // Sync any local ROAS/unit-economics window dropdowns to match global
+  document.querySelectorAll("[data-sync-window-select]").forEach((select) => {
+    select.value = `${days}d`;
+  });
+}
+
+function windowParamToDays(value) {
+  const n = parseInt(String(value || "").replace("d", ""), 10);
+  return VALID_DAY_WINDOWS.includes(n) ? n : getCurrentDays();
+}
+
+function handleSyncedWindowSelectChange(e) {
+  const days = windowParamToDays(e.target.value);
+  setSelectedDays(days);
 }
 
 // ── Fetch helpers ──────────────────────────────────────────────────────────
@@ -993,7 +1024,7 @@ async function handleLogin(e) {
       const user = await res.json();
       if (passwordEl) passwordEl.value = "";
       showApp(user);
-      navigate("dashboard");
+      navigate("dashboard", { updateHash: true, replace: true });
       // Load thresholds in background — do not block first page render.
       loadUiThresholds().then(() => {
         if (_currentPage) loadPage(_currentPage);
@@ -1025,12 +1056,48 @@ async function handleLogout() {
   showLogin();
 }
 
+// ── Hash Routing (PR-ADS-094) ──────────────────────────────────────────────
+
+const HASH_ROUTE_ALIASES = {
+  "ngrams": "search-terms",
+  "countries": "geo",
+  "data-runs": "scheduler",
+  "system-status": "health",
+};
+
+function pageToHash(page) {
+  return `#/${page}`;
+}
+
+function hashToPage(hash) {
+  const raw = (hash || "").replace(/^#\/?/, "").trim();
+  if (!raw) return "dashboard";
+  // Resolve aliases
+  if (HASH_ROUTE_ALIASES[raw]) return HASH_ROUTE_ALIASES[raw];
+  return raw;
+}
+
+function navigateToHash(page, options) {
+  options = options || {};
+  const hash = pageToHash(page);
+  if (window.location.hash !== hash) {
+    if (options.replace) {
+      history.replaceState(null, "", hash);
+    } else {
+      history.pushState(null, "", hash);
+    }
+  }
+}
+
 // ── Router ─────────────────────────────────────────────────────────────────
 
-function navigate(page) {
+function navigate(page, options) {
+  options = options || {};
+  const updateHash = options.updateHash !== false;
+
   // Route alias: "ngrams" redirects to search-terms with Patterns tab active
   if (page === "ngrams") {
-    navigate("search-terms");
+    navigate("search-terms", options);
     // Activate patterns tab after navigation
     setTimeout(() => {
       const patternsTab = document.getElementById("tab-btn-patterns");
@@ -1038,21 +1105,31 @@ function navigate(page) {
     }, 0);
     return;
   }
+
+  // Validate page exists — fallback to dashboard for invalid routes
+  if (!PAGES.includes(page)) {
+    navigate("dashboard", { updateHash: true, replace: true });
+    return;
+  }
+
   // Role enforcement: health page is admin-only
   if (page === "health" && (!_currentUser || _currentUser.role !== "admin")) {
-    navigate("dashboard");
+    navigate("dashboard", { updateHash: true, replace: true });
     return;
   }
   // Role enforcement: backfill page is admin-only
   if (page === "backfill" && (!_currentUser || _currentUser.role !== "admin")) {
-    navigate("dashboard");
+    navigate("dashboard", { updateHash: true, replace: true });
     return;
   }
   // Role enforcement: churn-input page is admin-only
   if (page === "churn-input" && (!_currentUser || _currentUser.role !== "admin")) {
-    navigate("dashboard");
+    navigate("dashboard", { updateHash: true, replace: true });
     return;
   }
+
+  // Close help drawer on page change
+  closeHelpDrawer();
 
   // Hide all pages
   PAGES.forEach((p) => {
@@ -1081,6 +1158,12 @@ function navigate(page) {
   });
 
   _currentPage = page;
+
+  // Update URL hash
+  if (updateHash) {
+    navigateToHash(page, { replace: options.replace });
+  }
+
   loadPage(page);
 }
 
@@ -5065,7 +5148,7 @@ async function loadHealth() {
   } catch (e) {
     if (e.message === "HTTP 401") return;
     if (e.message === "HTTP 403") {
-      navigate("dashboard");
+      navigate("dashboard", { updateHash: true, replace: true });
       return;
     }
     el.innerHTML = `<p class="empty-state">Could not load readiness data. Admin access required.</p>`;
@@ -6738,14 +6821,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll(".nav-item[data-page]").forEach((el) => {
     el.addEventListener("click", (e) => {
       e.preventDefault();
-      navigate(el.dataset.page);
+      navigate(el.dataset.page, { updateHash: true });
     });
     el.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        navigate(el.dataset.page);
+        navigate(el.dataset.page, { updateHash: true });
       }
     });
+  });
+
+  // Hash routing: listen for back/forward navigation
+  window.addEventListener("hashchange", () => {
+    const page = hashToPage(window.location.hash);
+    navigate(page, { updateHash: false });
   });
 
   // Wire up Page Help Drawer (PR-ADS-071)
@@ -6766,9 +6855,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     btn.addEventListener("click", () => setSelectedDays(parseInt(btn.dataset.days, 10)));
   });
   // Sync active state to the stored/default value on page load
-  document.querySelectorAll(".time-range-btn").forEach((btn) => {
-    btn.classList.toggle("active", parseInt(btn.dataset.days, 10) === _selectedDays);
-  });
+  updateWindowControls(_selectedDays);
 
   // Wire up waste filter controls
   const wasteSearch  = document.getElementById("waste-filter-search");
@@ -6951,19 +7038,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   const roasCampRefresh = document.getElementById("roas-campaigns-refresh-btn");
   const roasCampWindow  = document.getElementById("roas-campaigns-window");
   if (roasCampRefresh) roasCampRefresh.addEventListener("click", loadRoasCampaigns);
-  if (roasCampWindow)  roasCampWindow.addEventListener("change", loadRoasCampaigns);
+  if (roasCampWindow)  roasCampWindow.addEventListener("change", handleSyncedWindowSelectChange);
 
   // Wire up ROAS by Country controls
   const roasCountryRefresh = document.getElementById("roas-countries-refresh-btn");
   const roasCountryWindow  = document.getElementById("roas-countries-window");
   if (roasCountryRefresh) roasCountryRefresh.addEventListener("click", loadRoasCountries);
-  if (roasCountryWindow)  roasCountryWindow.addEventListener("change", loadRoasCountries);
+  if (roasCountryWindow)  roasCountryWindow.addEventListener("change", handleSyncedWindowSelectChange);
 
   // Wire up Unit Economics controls
   const ueRefresh = document.getElementById("unit-economics-refresh-btn");
   const ueWindow  = document.getElementById("unit-economics-window");
   if (ueRefresh) ueRefresh.addEventListener("click", loadUnitEconomics);
-  if (ueWindow)  ueWindow.addEventListener("change", loadUnitEconomics);
+  if (ueWindow)  ueWindow.addEventListener("change", handleSyncedWindowSelectChange);
 
   // Wire up Churn Input form
   const churnForm = document.getElementById("churn-input-form");
@@ -6972,7 +7059,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Check auth and load initial page
   const isAuth = await checkAuth();
   if (isAuth) {
-    navigate("dashboard");
+    const initialPage = hashToPage(window.location.hash);
+    navigate(initialPage, { updateHash: true, replace: true });
     // Load thresholds in background — do not block first page render.
     loadUiThresholds().then(() => {
       if (_currentPage) loadPage(_currentPage);
@@ -6995,7 +7083,7 @@ async function loadGclidReadiness() {
   if (checksEl) checksEl.innerHTML = "";
 
   try {
-    const data = await fetchJSON("/api/attribution/gclid-readiness?window=60d");
+    const data = await fetchJSON(`/api/attribution/gclid-readiness?window=${getCurrentWindowParam()}`);
     if (!data || data.error) {
       container.innerHTML = '<p class="empty-state">Could not load GCLID readiness audit.</p>';
       return;
@@ -7087,7 +7175,7 @@ async function loadAttributionConfidenceSummary() {
   container.innerHTML = '<p class="empty-state">Loading confidence summary…</p>';
 
   try {
-    const data = await fetchJSON("/api/attribution/confidence-summary?window=60d");
+    const data = await fetchJSON(`/api/attribution/confidence-summary?window=${getCurrentWindowParam()}`);
     if (!data || data.error) {
       container.innerHTML = '<p class="empty-state">Could not load attribution confidence.</p>';
       return;
@@ -7191,8 +7279,7 @@ let roasCampaignsData = [];
 let roasCampaignsStatus = "idle";
 
 async function loadRoasCampaigns() {
-  const windowSel = document.getElementById("roas-campaigns-window");
-  const window_ = windowSel ? windowSel.value : "60d";
+  const window_ = getCurrentWindowParam();
   if (!VALID_ROAS_WINDOWS.includes(window_)) return;
 
   roasCampaignsStatus = "loading";
@@ -7291,8 +7378,7 @@ let roasCountriesData = [];
 let roasCountriesStatus = "idle";
 
 async function loadRoasCountries() {
-  const windowSel = document.getElementById("roas-countries-window");
-  const window_ = windowSel ? windowSel.value : "60d";
+  const window_ = getCurrentWindowParam();
   if (!VALID_ROAS_WINDOWS.includes(window_)) return;
 
   roasCountriesStatus = "loading";
@@ -7379,8 +7465,7 @@ let unitEconomicsData = null;
 let unitEconomicsStatus = "idle";
 
 async function loadUnitEconomics() {
-  const windowSel = document.getElementById("unit-economics-window");
-  const window_ = windowSel ? windowSel.value : "60d";
+  const window_ = getCurrentWindowParam();
   if (!VALID_ROAS_WINDOWS.includes(window_)) return;
 
   unitEconomicsStatus = "loading";
@@ -7583,16 +7668,22 @@ let _helpDrawerOpen = false;
 let _helpDrawerFocusReturn = null;
 
 function openHelpDrawer(pageKey) {
+  const resolvedPageKey = pageKey || _currentPage;
   const overlay = document.getElementById("help-drawer-overlay");
   const drawer = document.getElementById("help-drawer");
   if (!overlay || !drawer) return;
   if (_helpDrawerOpen) return;
 
-  const content = PAGE_HELP_CONTENT[pageKey];
-  const explanation = PAGE_EXPLANATIONS[pageKey];
-  if (!content && !explanation) return;
+  if (!resolvedPageKey || !PAGE_HELP_CONTENT[resolvedPageKey]) {
+    console.warn("[helpDrawer] Missing help content for page:", resolvedPageKey);
+    closeHelpDrawer();
+    return;
+  }
 
-  const title = (explanation && explanation.title) || pageKey;
+  const content = PAGE_HELP_CONTENT[resolvedPageKey];
+  const explanation = PAGE_EXPLANATIONS[resolvedPageKey];
+
+  const title = (explanation && explanation.title) || resolvedPageKey;
 
   let bodyHtml = `<h2 class="help-drawer__page-title">${escapeHtml(title)}</h2>`;
 
@@ -7644,6 +7735,9 @@ function closeHelpDrawer() {
   if (drawer) drawer.hidden = true;
   _helpDrawerOpen = false;
   document.removeEventListener("keydown", _helpDrawerKeyHandler);
+  // Reset drawer body to empty state
+  const body = document.getElementById("help-drawer-body");
+  if (body) body.innerHTML = '<p class="empty-state">Select a page to view its help guide.</p>';
   if (
     _helpDrawerFocusReturn &&
     typeof _helpDrawerFocusReturn.focus === "function" &&
@@ -7706,8 +7800,8 @@ async function loadRevenueSnapshotHistory() {
 
   try {
     const [latestResult, listResult] = await Promise.allSettled([
-      fetchJSON("/api/reports/roas/snapshots/latest?window=60d"),
-      fetchJSON("/api/reports/roas/snapshots?window=60d&limit=30"),
+      fetchJSON(`/api/reports/roas/snapshots/latest?window=${getCurrentWindowParam()}`),
+      fetchJSON(`/api/reports/roas/snapshots?window=${getCurrentWindowParam()}&limit=30`),
     ]);
 
     let latestData = null;
