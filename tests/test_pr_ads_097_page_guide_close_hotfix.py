@@ -1,5 +1,5 @@
 """
-PR-ADS-097 — Page Guide Drawer Close Hotfix
+PR-ADS-097 — Page Guide Drawer Close Hotfix (updated in PR-ADS-098)
 Tests that:
 - closeHelpDrawer hides drawer even when _helpDrawerOpen is false (idempotent).
 - close button handler calls closeHelpDrawer with e.preventDefault/stopPropagation.
@@ -7,7 +7,8 @@ Tests that:
 - overlay click calls closeHelpDrawer only when target is overlay.
 - closeHelpDrawer resets help-drawer-body to placeholder text.
 - navigate() calls closeHelpDrawer.
-- Cache busting version is v=097.
+- Cache busting version is v=098.
+- Help drawer hidden rule is present in CSS.
 """
 from pathlib import Path
 import re
@@ -15,6 +16,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 JS = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+CSS = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
 
 
 # ── Idempotent closeHelpDrawer ─────────────────────────────────────────────
@@ -207,8 +209,15 @@ def test_startup_force_closes_help_drawer():
 
 # ── Cache busting ──────────────────────────────────────────────────────────
 
-def test_cache_busting_version_is_097():
-    """index.html must reference app.js?v=097."""
-    assert 'app.js?v=097' in HTML, (
-        "Cache busting version must be updated to v=097"
+def test_cache_busting_versions_are_098():
+    """index.html must reference app.js?v=098 and styles.css?v=098."""
+    assert "app.js?v=098" in HTML, "Cache busting version must be updated to v=098 (app.js)"
+    assert "styles.css?v=098" in HTML, "Cache busting version must be updated to v=098 (styles.css)"
+
+
+def test_help_drawer_hidden_rule_exists():
+    """Help drawer must have an explicit [hidden] display override."""
+    assert ".help-drawer[hidden]" in CSS, "Missing .help-drawer[hidden] selector"
+    assert re.search(r"\.help-drawer\[hidden\]\s*\{[^}]*display\s*:\s*none\s*;", CSS), (
+        "Missing display:none in .help-drawer[hidden] rule"
     )
