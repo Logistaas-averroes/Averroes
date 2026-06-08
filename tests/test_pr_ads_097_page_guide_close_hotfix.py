@@ -194,13 +194,15 @@ def test_navigate_calls_close_help_drawer():
 
 def test_startup_force_closes_help_drawer():
     """App startup must call closeHelpDrawer() to ensure clean initial state."""
-    # Should appear in the DOMContentLoaded handler, before checkAuth
-    dom_start = JS.rfind("DOMContentLoaded")
-    assert dom_start != -1, "DOMContentLoaded not found"
-    startup_block = JS[dom_start:]
-    assert "closeHelpDrawer()" in startup_block, (
-        "App startup must force-close the help drawer"
-    )
+    dom_start = JS.find('document.addEventListener("DOMContentLoaded", async () => {')
+    assert dom_start != -1, "Init DOMContentLoaded handler not found"
+
+    close_idx = JS.find("closeHelpDrawer()", dom_start)
+    assert close_idx != -1, "App startup must force-close the help drawer"
+
+    check_idx = JS.find("await checkAuth()", dom_start)
+    assert check_idx != -1, "checkAuth() call not found in startup handler"
+    assert close_idx < check_idx, "closeHelpDrawer() must run before checkAuth()"
 
 
 # ── Cache busting ──────────────────────────────────────────────────────────
