@@ -7181,7 +7181,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const churnForm = document.getElementById("churn-input-form");
   if (churnForm) churnForm.addEventListener("submit", handleChurnInputSubmit);
 
-  // Force-close help drawer on startup (PR-ADS-097: ensures clean state)
+  // Force-close help drawer on startup (PR-ADS-098: ensures clean state)
   closeHelpDrawer();
 
   // Check auth and load initial page

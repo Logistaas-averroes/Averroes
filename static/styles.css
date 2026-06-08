@@ -4519,6 +4519,9 @@ a {
   flex-direction: column;
   overflow: hidden;
 }
+.help-drawer[hidden] {
+  display: none;
+}
 .help-drawer__header {
   display: flex;
   align-items: center;
