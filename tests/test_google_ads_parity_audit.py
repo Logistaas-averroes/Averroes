@@ -262,6 +262,15 @@ class TestAggregateMetrics:
         result = aggregate_metrics(rows)
         assert result["keyword_count"] == 1
 
+    def test_campaign_count_does_not_double_count_name_and_id(self):
+        rows = [
+            {"spend": 1.0, "clicks": 1, "impressions": 10, "conversions": 0.0,
+             "campaign_id": 123, "campaign_name": "C1"},
+            {"spend": 2.0, "clicks": 2, "impressions": 20, "conversions": 0.0,
+             "campaign_id": 123, "campaign_name": "C1"},
+        ]
+        result = aggregate_metrics(rows)
+        assert result["campaign_count"] == 1
 
 # ---------------------------------------------------------------------------
 # Structural safety: No Google Ads mutate services
