@@ -6,6 +6,7 @@ behaviour without requiring live Google Ads credentials.
 """
 
 import ast
+import importlib
 import os
 import sys
 import types
@@ -48,28 +49,24 @@ def _import_adapter():
     googleads_stub.client = client_stub
     googleads_stub.errors = errors_stub
 
-    sys.modules.setdefault("google", google_stub)
-    sys.modules.setdefault("google.ads", ads_stub)
-    sys.modules.setdefault("google.ads.googleads", googleads_stub)
-    sys.modules.setdefault("google.ads.googleads.client", client_stub)
-    sys.modules.setdefault("google.ads.googleads.errors", errors_stub)
-
-    # Also stub dotenv
     dotenv_stub = types.ModuleType("dotenv")
     dotenv_stub.load_dotenv = lambda: None
-    sys.modules.setdefault("dotenv", dotenv_stub)
+    module_stubs = {
+        "google": google_stub,
+        "google.ads": ads_stub,
+        "google.ads.googleads": googleads_stub,
+        "google.ads.googleads.client": client_stub,
+        "google.ads.googleads.errors": errors_stub,
+        "dotenv": dotenv_stub,
+    }
 
-    # Force reimport from file
-    if "connectors.google_ads_source" in sys.modules:
-        del sys.modules["connectors.google_ads_source"]
-    if "connectors.google_ads_direct" in sys.modules:
-        del sys.modules["connectors.google_ads_direct"]
-    if "connectors" in sys.modules:
-        del sys.modules["connectors"]
+    # Force reimport of only the adapter module.
+    sys.modules.pop("connectors.google_ads_source", None)
+    if REPO_ROOT not in sys.path:
+        sys.path.insert(0, REPO_ROOT)
 
-    sys.path.insert(0, REPO_ROOT)
-    import connectors.google_ads_source as adapter  # noqa: PLC0415
-    return adapter
+    with patch.dict(sys.modules, module_stubs):
+        return importlib.import_module("connectors.google_ads_source")
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +93,7 @@ PUBLIC_FUNCTIONS = [
     "pull_keyword_performance_range",
     "pull_geo_performance_range",
     "safe_divide",
+    "normalize_id",
     "normalize_campaign_row",
     "normalize_search_term_row",
     "normalize_keyword_row",
@@ -130,6 +128,18 @@ def test_safe_divide_zero_both(adapter):
     assert adapter.safe_divide(0, 0) == 0.0
 
 
+def test_normalize_id_none_returns_empty_string(adapter):
+    assert adapter.normalize_id(None) == ""
+
+
+def test_normalize_id_string_none_returns_empty_string(adapter):
+    assert adapter.normalize_id("None") == ""
+
+
+def test_normalize_id_numeric_returns_string(adapter):
+    assert adapter.normalize_id(123456) == "123456"
+
+
 # ---------------------------------------------------------------------------
 # 3. normalize_campaign_row
 # ---------------------------------------------------------------------------
@@ -157,6 +167,16 @@ def test_campaign_id_is_string(adapter):
     out = adapter.normalize_campaign_row(CAMPAIGN_ROW)
     assert isinstance(out["campaign_id"], str)
     assert out["campaign_id"] == "22546856086"
+
+
+def test_campaign_id_none_maps_to_empty_string(adapter):
+    out = adapter.normalize_campaign_row({**CAMPAIGN_ROW, "campaign_id": None})
+    assert out["campaign_id"] == ""
+
+
+def test_campaign_id_string_none_maps_to_empty_string(adapter):
+    out = adapter.normalize_campaign_row({**CAMPAIGN_ROW, "campaign_id": "None"})
+    assert out["campaign_id"] == ""
 
 
 def test_campaign_spend_preserved(adapter):
@@ -280,6 +300,18 @@ def test_search_term_ad_group_id_is_string(adapter):
     assert out["ad_group_id"] == "175677406221"
 
 
+def test_search_term_campaign_id_none_maps_to_empty_string(adapter):
+    out = adapter.normalize_search_term_row({**SEARCH_TERM_ROW, "campaign_id": None})
+    assert out is not None
+    assert out["campaign_id"] == ""
+
+
+def test_search_term_ad_group_id_none_maps_to_empty_string(adapter):
+    out = adapter.normalize_search_term_row({**SEARCH_TERM_ROW, "ad_group_id": None})
+    assert out is not None
+    assert out["ad_group_id"] == ""
+
+
 def test_search_term_blank_returns_none(adapter):
     row = {**SEARCH_TERM_ROW, "search_term": ""}
     assert adapter.normalize_search_term_row(row) is None
@@ -369,6 +401,16 @@ def test_keyword_ad_group_id_is_string(adapter):
     assert isinstance(out["ad_group_id"], str)
 
 
+def test_keyword_campaign_id_none_maps_to_empty_string(adapter):
+    out = adapter.normalize_keyword_row({**KEYWORD_ROW, "campaign_id": None})
+    assert out["campaign_id"] == ""
+
+
+def test_keyword_ad_group_id_none_maps_to_empty_string(adapter):
+    out = adapter.normalize_keyword_row({**KEYWORD_ROW, "ad_group_id": None})
+    assert out["ad_group_id"] == ""
+
+
 def test_keyword_source_field(adapter):
     out = adapter.normalize_keyword_row(KEYWORD_ROW)
     assert out["source"] == "google_ads_api"
@@ -415,6 +457,16 @@ def test_geo_no_fake_country_names(adapter):
 def test_geo_campaign_id_is_string(adapter):
     out = adapter.normalize_geo_row(GEO_ROW)
     assert isinstance(out["campaign_id"], str)
+
+
+def test_geo_campaign_id_none_maps_to_empty_string(adapter):
+    out = adapter.normalize_geo_row({**GEO_ROW, "campaign_id": None})
+    assert out["campaign_id"] == ""
+
+
+def test_geo_country_criterion_id_none_maps_to_empty_string(adapter):
+    out = adapter.normalize_geo_row({**GEO_ROW, "country_criterion_id": None})
+    assert out["country_criterion_id"] == ""
 
 
 def test_geo_source_field(adapter):
@@ -486,25 +538,25 @@ def test_pull_geo_performance_calls_range(adapter):
 # ---------------------------------------------------------------------------
 
 def test_pull_campaign_range_calls_fetch_campaign(adapter):
-    with patch("connectors.google_ads_source.fetch_campaign_performance", return_value=[]) as mock_fn:
+    with patch.object(adapter, "fetch_campaign_performance", return_value=[]) as mock_fn:
         adapter.pull_campaign_performance_range("2026-05-01", "2026-05-31")
         mock_fn.assert_called_once_with("2026-05-01", "2026-05-31")
 
 
 def test_pull_search_terms_range_calls_fetch_search_terms(adapter):
-    with patch("connectors.google_ads_source.fetch_search_terms", return_value=[]) as mock_fn:
+    with patch.object(adapter, "fetch_search_terms", return_value=[]) as mock_fn:
         adapter.pull_search_terms_range("2026-05-01", "2026-05-31")
         mock_fn.assert_called_once_with("2026-05-01", "2026-05-31")
 
 
 def test_pull_keyword_range_calls_fetch_keyword(adapter):
-    with patch("connectors.google_ads_source.fetch_keyword_performance", return_value=[]) as mock_fn:
+    with patch.object(adapter, "fetch_keyword_performance", return_value=[]) as mock_fn:
         adapter.pull_keyword_performance_range("2026-05-01", "2026-05-31")
         mock_fn.assert_called_once_with("2026-05-01", "2026-05-31")
 
 
 def test_pull_geo_range_calls_fetch_geo(adapter):
-    with patch("connectors.google_ads_source.fetch_geo_performance", return_value=[]) as mock_fn:
+    with patch.object(adapter, "fetch_geo_performance", return_value=[]) as mock_fn:
         adapter.pull_geo_performance_range("2026-05-01", "2026-05-31")
         mock_fn.assert_called_once_with("2026-05-01", "2026-05-31")
 
@@ -519,14 +571,14 @@ def test_pull_search_terms_range_skips_blank(adapter):
         {**SEARCH_TERM_ROW, "search_term": ""},
         {**SEARCH_TERM_ROW, "search_term": None},
     ]
-    with patch("connectors.google_ads_source.fetch_search_terms", return_value=raw):
+    with patch.object(adapter, "fetch_search_terms", return_value=raw):
         result = adapter.pull_search_terms_range("2026-05-01", "2026-05-31")
     assert len(result) == 1
     assert result[0]["search_term"] == "valid term"
 
 
 def test_pull_campaign_range_normalises_source(adapter):
-    with patch("connectors.google_ads_source.fetch_campaign_performance", return_value=[CAMPAIGN_ROW]):
+    with patch.object(adapter, "fetch_campaign_performance", return_value=[CAMPAIGN_ROW]):
         result = adapter.pull_campaign_performance_range("2026-05-01", "2026-05-31")
     assert result[0]["source"] == "google_ads_api"
 

@@ -87,6 +87,14 @@ def safe_divide(numerator: float, denominator: float) -> float:
     return numerator / denominator
 
 
+def normalize_id(value) -> str:
+    """Normalize identifier values to non-null string form."""
+    if value is None:
+        return ""
+    value = str(value).strip()
+    return "" if value.lower() == "none" else value
+
+
 def normalize_campaign_row(row: dict) -> dict:
     """Convert a google_ads_direct campaign row to the internal contract shape.
 
@@ -107,7 +115,7 @@ def normalize_campaign_row(row: dict) -> dict:
     return {
         "date": row.get("date"),
         "campaign": row.get("campaign_name"),
-        "campaign_id": str(row.get("campaign_id", "")),
+        "campaign_id": normalize_id(row.get("campaign_id")),
         "spend": spend,
         "clicks": clicks,
         "impressions": impressions,
@@ -147,9 +155,9 @@ def normalize_search_term_row(row: dict) -> dict | None:
         "date": row.get("date"),
         "search_term": search_term,
         "campaign": row.get("campaign_name"),
-        "campaign_id": str(row.get("campaign_id", "")),
+        "campaign_id": normalize_id(row.get("campaign_id")),
         "ad_group": row.get("ad_group_name"),
-        "ad_group_id": str(row.get("ad_group_id", "")),
+        "ad_group_id": normalize_id(row.get("ad_group_id")),
         "impressions": row.get("impressions", 0) or 0,
         "clicks": row.get("clicks", 0) or 0,
         "spend": row.get("spend", 0.0) or 0.0,
@@ -182,9 +190,9 @@ def normalize_keyword_row(row: dict) -> dict:
     return {
         "date": row.get("date"),
         "campaign": row.get("campaign_name"),
-        "campaign_id": str(row.get("campaign_id", "")),
+        "campaign_id": normalize_id(row.get("campaign_id")),
         "ad_group": row.get("ad_group_name"),
-        "ad_group_id": str(row.get("ad_group_id", "")),
+        "ad_group_id": normalize_id(row.get("ad_group_id")),
         "keyword": row.get("keyword_text"),
         "match_type": match_type,
         "spend": spend,
@@ -216,8 +224,8 @@ def normalize_geo_row(row: dict) -> dict:
     return {
         "date": row.get("date"),
         "campaign": row.get("campaign_name"),
-        "campaign_id": str(row.get("campaign_id", "")),
-        "country_criterion_id": str(row.get("country_criterion_id", "")),
+        "campaign_id": normalize_id(row.get("campaign_id")),
+        "country_criterion_id": normalize_id(row.get("country_criterion_id")),
         "country": None,
         "spend": row.get("spend", 0.0) or 0.0,
         "clicks": row.get("clicks", 0) or 0,
