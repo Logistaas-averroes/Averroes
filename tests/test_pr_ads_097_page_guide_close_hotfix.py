@@ -1,5 +1,5 @@
 """
-PR-ADS-098 — Page Guide Drawer Close Hotfix
+PR-ADS-097 — Page Guide Drawer Close Hotfix (updated in PR-ADS-098)
 Tests that:
 - closeHelpDrawer hides drawer even when _helpDrawerOpen is false (idempotent).
 - close button handler calls closeHelpDrawer with e.preventDefault/stopPropagation.
