@@ -159,9 +159,11 @@ def test_refresh_token_script_warns_not_to_commit():
 def test_refresh_token_script_does_not_save_to_disk():
     """Refresh token generator must not write the token to a file."""
     source = _read_source("scripts/google_ads_generate_refresh_token.py")
-    # Check there is no open()/write() call that would persist the token
-    assert "open(" not in source or "write" not in source, (
-        "Refresh token script must not save the token to disk"
+    assert "open(" not in source, (
+        "Refresh token script must not open files (would save token to disk)"
+    )
+    assert "write(" not in source, (
+        "Refresh token script must not call write() (would save token to disk)"
     )
 
 

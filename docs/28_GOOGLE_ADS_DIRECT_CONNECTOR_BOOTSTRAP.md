@@ -103,7 +103,7 @@ Expected output (all vars present):
 Google Ads API readiness
 ----------------------------------------
   GOOGLE_ADS_DEVELOPER_TOKEN: present  ****abcd
-  GOOGLE_ADS_CLIENT_ID: present  ****apps.googleusercontent.com
+  GOOGLE_ADS_CLIENT_ID: present  ****abcd
   GOOGLE_ADS_CLIENT_SECRET: present  ****1234
   GOOGLE_ADS_REFRESH_TOKEN: present  ****5678
   GOOGLE_ADS_LOGIN_CUSTOMER_ID: present  2020447570

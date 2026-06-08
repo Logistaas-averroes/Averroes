@@ -101,10 +101,25 @@ def test_connection() -> bool:
         return False
 
 
-def _run_search_stream(client: GoogleAdsClient, customer_id: str, query: str) -> list:
+def _run_search_stream(
+    client: GoogleAdsClient,
+    customer_id: str,
+    query: str,
+    *,
+    raise_on_error: bool = True,
+) -> list:
     """Execute a GAQL query using SearchStream and return a list of row objects.
 
     Read-only. Uses SearchStream for efficient large result sets.
+
+    Args:
+        client: Authenticated GoogleAdsClient instance.
+        customer_id: Google Ads customer ID (without dashes).
+        query: GAQL query string.
+        raise_on_error: When True (default) re-raises API and unexpected
+            exceptions after logging so callers (e.g. smoke tests) detect
+            failures instead of silently returning empty results.  Set False
+            only for intentional fallback paths such as fetch_geo_performance.
     """
     ga_service = client.get_service("GoogleAdsService")
     request = client.get_type("SearchGoogleAdsStreamRequest")
@@ -119,8 +134,12 @@ def _run_search_stream(client: GoogleAdsClient, customer_id: str, query: str) ->
     except GoogleAdsException as exc:
         for error in exc.failure.errors:
             logger.error("Google Ads API error: %s", error.message)
+        if raise_on_error:
+            raise
     except Exception as exc:  # noqa: BLE001
         logger.error("Unexpected error in search stream: %s", exc)
+        if raise_on_error:
+            raise
     return rows
 
 
@@ -317,7 +336,9 @@ def fetch_geo_performance(start_date: str, end_date: str) -> list:
         ORDER BY segments.date DESC
     """
 
-    rows = _run_search_stream(client, customer_id, query)
+    # geographic_view may be unavailable for some account types; treat
+    # API errors as an intentional fallback and return an empty list.
+    rows = _run_search_stream(client, customer_id, query, raise_on_error=False)
     result = []
     for row in rows:
         result.append({
