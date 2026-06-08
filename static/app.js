@@ -7873,7 +7873,7 @@ function closeHelpDrawer() {
 
   const body = document.getElementById("help-drawer-body");
   if (body) {
-    body.innerHTML = '<p>Select a page to view its help guide.</p>';
+    body.innerHTML = '<p class="empty-state">Select a page to view its help guide.</p>';
   }
 
   if (

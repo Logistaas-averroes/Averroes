@@ -81,6 +81,9 @@ def test_close_help_drawer_resets_body():
     assert "Select a page to view its help guide." in fn_body, (
         "closeHelpDrawer must reset body to placeholder text"
     )
+    assert '<p class="empty-state">Select a page to view its help guide.</p>' in fn_body, (
+        "closeHelpDrawer must use empty-state class on placeholder paragraph"
+    )
 
 
 # ── Close button handler ───────────────────────────────────────────────────
