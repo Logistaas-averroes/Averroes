@@ -5,9 +5,9 @@ Validates structural safety and documentation completeness without requiring
 live Google Ads credentials.
 """
 
+import ast
 import importlib.util
 import os
-import re
 import sys
 
 import pytest
@@ -296,28 +296,58 @@ def test_readiness_check_ready_when_all_vars_present(monkeypatch):
 def test_login_customer_id_not_in_required_env_vars():
     """GOOGLE_ADS_LOGIN_CUSTOMER_ID must not be in _REQUIRED_ENV_VARS."""
     source = _read_source("connectors/google_ads_direct.py")
-    required_match = re.search(r"_REQUIRED_ENV_VARS\s*=\s*\[(.*?)\]", source, re.DOTALL)
-    assert required_match, "Connector must define _REQUIRED_ENV_VARS"
-    required_block = required_match.group(1)
-    assert '"GOOGLE_ADS_CUSTOMER_ID"' in required_block, (
+    tree = ast.parse(source)
+
+    required_vars = None
+    optional_vars = None
+
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "_REQUIRED_ENV_VARS":
+                required_vars = ast.literal_eval(node.value)
+            if isinstance(target, ast.Name) and target.id == "_OPTIONAL_ENV_VARS":
+                optional_vars = ast.literal_eval(node.value)
+
+    assert required_vars is not None, "Connector must define _REQUIRED_ENV_VARS"
+    assert "GOOGLE_ADS_CUSTOMER_ID" in required_vars, (
         "_REQUIRED_ENV_VARS must include GOOGLE_ADS_CUSTOMER_ID"
     )
-    assert '"GOOGLE_ADS_LOGIN_CUSTOMER_ID"' not in required_block, (
+    assert "GOOGLE_ADS_LOGIN_CUSTOMER_ID" not in required_vars, (
         "_REQUIRED_ENV_VARS must not include GOOGLE_ADS_LOGIN_CUSTOMER_ID"
     )
 
-    optional_match = re.search(r"_OPTIONAL_ENV_VARS\s*=\s*\[(.*?)\]", source, re.DOTALL)
-    assert optional_match, "Connector must define _OPTIONAL_ENV_VARS"
-    optional_block = optional_match.group(1)
-    assert '"GOOGLE_ADS_LOGIN_CUSTOMER_ID"' in optional_block, (
+    assert optional_vars is not None, "Connector must define _OPTIONAL_ENV_VARS"
+    assert "GOOGLE_ADS_LOGIN_CUSTOMER_ID" in optional_vars, (
         "_OPTIONAL_ENV_VARS must include GOOGLE_ADS_LOGIN_CUSTOMER_ID"
     )
 
-    conditional_match = re.search(
-        r'if\s+login_customer_id\s*:\s*[\s\S]*?config\[\s*["\']login_customer_id["\']\s*\]',
-        source,
-    )
-    assert conditional_match, (
+    def _is_login_customer_config_assign(stmt: ast.stmt) -> bool:
+        if not isinstance(stmt, ast.Assign):
+            return False
+        for target in stmt.targets:
+            if not isinstance(target, ast.Subscript):
+                continue
+            if not isinstance(target.value, ast.Name) or target.value.id != "config":
+                continue
+            key = target.slice
+            if isinstance(key, ast.Constant) and key.value == "login_customer_id":
+                return True
+        return False
+
+    conditional_assign_found = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        if isinstance(node.test, ast.Name) and node.test.id == "login_customer_id":
+            conditional_assign_found = any(
+                _is_login_customer_config_assign(stmt) for stmt in node.body
+            )
+            if conditional_assign_found:
+                break
+
+    assert conditional_assign_found, (
         "GOOGLE_ADS_LOGIN_CUSTOMER_ID must only be handled via conditional config inclusion"
     )
 
