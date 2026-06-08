@@ -27,9 +27,9 @@ logger = logging.getLogger(__name__)
 def percent_delta(google_ads_value: float, windsor_value: float) -> float | None:
     """Calculate percent delta between Google Ads and Windsor values.
 
-    Returns None if both values are zero (undefined comparison).
+    Returns 0.0 if both values are zero.
     Returns the percentage difference relative to Windsor as baseline.
-    Handles zero Windsor value safely by returning None.
+    Returns None when Windsor baseline is zero and Google Ads is non-zero.
     """
     if windsor_value == 0 and google_ads_value == 0:
         return 0.0
