@@ -207,11 +207,13 @@ def fetch_windsor_data(dataset: str, days_back: int) -> dict:
             pull_geo_performance,
         )
 
+        windsor_days_back = max(days_back - 1, 0)
+
         fetchers = {
-            "campaigns": lambda: pull_campaign_performance(days_back=days_back),
-            "search_terms": lambda: pull_search_terms(days_back=days_back),
-            "keywords": lambda: pull_keyword_performance(days_back=days_back),
-            "geo": lambda: pull_geo_performance(days_back=days_back),
+            "campaigns": lambda: pull_campaign_performance(days_back=windsor_days_back),
+            "search_terms": lambda: pull_search_terms(days_back=windsor_days_back),
+            "keywords": lambda: pull_keyword_performance(days_back=windsor_days_back),
+            "geo": lambda: pull_geo_performance(days_back=windsor_days_back),
         }
 
         fetcher = fetchers.get(dataset)
