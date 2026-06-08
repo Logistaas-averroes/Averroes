@@ -124,6 +124,7 @@ class TestReviewFeedbackWindowSemantics:
 
     def test_daily_search_terms_pull_uses_two_days(self):
         tree = _parse_source("scheduler/daily.py")
+        matching_calls = 0
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -131,21 +132,22 @@ class TestReviewFeedbackWindowSemantics:
             if not isinstance(func, ast.Name) or func.id != "pull_search_terms":
                 continue
 
+            matching_calls += 1
             days_back_arg = next((kw for kw in node.keywords if kw.arg == "days_back"), None)
             assert days_back_arg is not None, "daily pull_search_terms call must set days_back"
             assert isinstance(days_back_arg.value, ast.Constant)
             assert days_back_arg.value.value == 2, (
                 "scheduler/daily.py must use pull_search_terms(days_back=2)"
             )
-            return
-        pytest.fail("pull_search_terms() call not found in scheduler/daily.py")
+        assert matching_calls > 0, "pull_search_terms() call not found in scheduler/daily.py"
 
     def test_daily_window_wording_matches_two_day_window(self):
         src = _read_source("scheduler/daily.py")
-        assert "1-day window" not in src
-        assert (
-            "2-day window" in src or "today-1 through today" in src
-        ), "scheduler/daily.py must describe the daily search-terms window as 2 days"
+        literals = _all_string_literals(_parse_source("scheduler/daily.py"))
+        assert all("1-day window" not in literal for literal in literals)
+        assert "# Windsor returned nothing for daily 1-day window." not in src
+        assert "2-day window" in src
+        assert "today-1 through today" in src
 
 
 # ---------------------------------------------------------------------------
