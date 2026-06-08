@@ -131,10 +131,10 @@ class TestReviewFeedbackWindowSemantics:
             if not isinstance(func, ast.Name) or func.id != "pull_search_terms":
                 continue
 
-            days_back_kw = next((kw for kw in node.keywords if kw.arg == "days_back"), None)
-            assert days_back_kw is not None, "daily pull_search_terms call must set days_back"
-            assert isinstance(days_back_kw.value, ast.Constant)
-            assert days_back_kw.value.value == 2, (
+            days_back_arg = next((kw for kw in node.keywords if kw.arg == "days_back"), None)
+            assert days_back_arg is not None, "daily pull_search_terms call must set days_back"
+            assert isinstance(days_back_arg.value, ast.Constant)
+            assert days_back_arg.value.value == 2, (
                 "scheduler/daily.py must use pull_search_terms(days_back=2)"
             )
             return
