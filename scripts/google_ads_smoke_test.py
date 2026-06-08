@@ -106,6 +106,7 @@ def main() -> None:
         sys.exit(1)
 
     # ── Campaign performance ───────────────────────────────────────────────
+    campaign_ok = True
     try:
         campaigns = fetch_campaign_performance(start_str, end_str)
         print(f"Campaign rows: {len(campaigns)}")
@@ -113,8 +114,10 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"Campaign query FAILED: {exc}", file=sys.stderr)
         campaigns = []
+        campaign_ok = False
 
     # ── Search terms ───────────────────────────────────────────────────────
+    search_terms_ok = True
     try:
         search_terms = fetch_search_terms(start_str, end_str)
         print(f"Search term rows: {len(search_terms)}")
@@ -122,8 +125,10 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"Search term query FAILED: {exc}", file=sys.stderr)
         search_terms = []
+        search_terms_ok = False
 
     # ── Keywords ───────────────────────────────────────────────────────────
+    keywords_ok = True
     try:
         keywords = fetch_keyword_performance(start_str, end_str)
         print(f"Keyword rows: {len(keywords)}")
@@ -131,13 +136,11 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"Keyword query FAILED: {exc}", file=sys.stderr)
         keywords = []
+        keywords_ok = False
 
     print()
 
-    all_ok = all(
-        not isinstance(v, Exception)
-        for v in [campaigns, search_terms, keywords]
-    )
+    all_ok = campaign_ok and search_terms_ok and keywords_ok
 
     if all_ok:
         print("Status: PASS")
