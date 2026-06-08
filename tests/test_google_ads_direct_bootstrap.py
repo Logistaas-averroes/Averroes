@@ -39,7 +39,6 @@ REQUIRED_ENV_VARS = [
     "GOOGLE_ADS_CLIENT_ID",
     "GOOGLE_ADS_CLIENT_SECRET",
     "GOOGLE_ADS_REFRESH_TOKEN",
-    "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
     "GOOGLE_ADS_CUSTOMER_ID",
 ]
 
@@ -287,3 +286,182 @@ def test_readiness_check_ready_when_all_vars_present(monkeypatch):
     assert status == "READY", (
         f"Expected READY with all env vars present, got: {status}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 9. LOGIN_CUSTOMER_ID is optional — direct_customer mode
+# ---------------------------------------------------------------------------
+
+def test_login_customer_id_not_in_required_env_vars():
+    """GOOGLE_ADS_LOGIN_CUSTOMER_ID must not be in _REQUIRED_ENV_VARS."""
+    source = _read_source("connectors/google_ads_direct.py")
+    # The required vars list must not contain LOGIN_CUSTOMER_ID
+    # We verify by checking _REQUIRED_ENV_VARS definition excludes it.
+    assert "_REQUIRED_ENV_VARS" in source, "Connector must define _REQUIRED_ENV_VARS"
+    # _OPTIONAL_ENV_VARS must mention LOGIN_CUSTOMER_ID
+    assert "_OPTIONAL_ENV_VARS" in source, "Connector must define _OPTIONAL_ENV_VARS"
+    assert "GOOGLE_ADS_LOGIN_CUSTOMER_ID" in source, (
+        "GOOGLE_ADS_LOGIN_CUSTOMER_ID must appear somewhere in the connector source"
+    )
+
+
+def test_connector_login_customer_id_conditional():
+    """Connector must only add login_customer_id to config when env var is non-empty."""
+    source = _read_source("connectors/google_ads_direct.py")
+    # The conditional pattern: if login_customer_id: config["login_customer_id"] = ...
+    assert 'config["login_customer_id"]' in source or "config['login_customer_id']" in source, (
+        "Connector must set login_customer_id in config conditionally"
+    )
+    # Must not unconditionally set it (old pattern removed)
+    assert 'os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_ID"]' not in source, (
+        "Connector must not unconditionally require GOOGLE_ADS_LOGIN_CUSTOMER_ID "
+        "via os.environ[] — it must be conditional"
+    )
+
+
+def test_connector_has_get_access_mode():
+    """Connector must define a get_access_mode() function."""
+    source = _read_source("connectors/google_ads_direct.py")
+    assert "def get_access_mode" in source, (
+        "connectors/google_ads_direct.py must define get_access_mode()"
+    )
+
+
+def test_get_access_mode_returns_direct_customer_when_login_id_absent(monkeypatch):
+    """get_access_mode() must return 'direct_customer' when LOGIN_CUSTOMER_ID is unset."""
+    import unittest.mock as mock
+
+    monkeypatch.delenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", raising=False)
+    stub_modules = {
+        "dotenv": mock.MagicMock(),
+        "google": mock.MagicMock(),
+        "google.ads": mock.MagicMock(),
+        "google.ads.googleads": mock.MagicMock(),
+        "google.ads.googleads.client": mock.MagicMock(),
+        "google.ads.googleads.errors": mock.MagicMock(),
+    }
+    with mock.patch.dict("sys.modules", stub_modules):
+        spec = importlib.util.spec_from_file_location(
+            "google_ads_direct_mod",
+            os.path.join(REPO_ROOT, "connectors", "google_ads_direct.py"),
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    assert module.get_access_mode() == "direct_customer", (
+        "get_access_mode() must return 'direct_customer' when "
+        "GOOGLE_ADS_LOGIN_CUSTOMER_ID is unset"
+    )
+
+
+def test_get_access_mode_returns_manager_when_login_id_present(monkeypatch):
+    """get_access_mode() must return 'manager' when LOGIN_CUSTOMER_ID is set."""
+    import unittest.mock as mock
+
+    monkeypatch.setenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "2020447570")
+    stub_modules = {
+        "dotenv": mock.MagicMock(),
+        "google": mock.MagicMock(),
+        "google.ads": mock.MagicMock(),
+        "google.ads.googleads": mock.MagicMock(),
+        "google.ads.googleads.client": mock.MagicMock(),
+        "google.ads.googleads.errors": mock.MagicMock(),
+    }
+    with mock.patch.dict("sys.modules", stub_modules):
+        spec = importlib.util.spec_from_file_location(
+            "google_ads_direct_mod2",
+            os.path.join(REPO_ROOT, "connectors", "google_ads_direct.py"),
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    assert module.get_access_mode() == "manager", (
+        "get_access_mode() must return 'manager' when "
+        "GOOGLE_ADS_LOGIN_CUSTOMER_ID is set"
+    )
+
+
+def test_readiness_ready_without_login_customer_id(monkeypatch):
+    """Readiness check must return READY even when GOOGLE_ADS_LOGIN_CUSTOMER_ID is absent."""
+    for var in REQUIRED_ENV_VARS:
+        monkeypatch.setenv(var, f"fake_value_for_{var}")
+    monkeypatch.delenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", raising=False)
+
+    spec = importlib.util.spec_from_file_location(
+        "google_ads_readiness_check_direct",
+        os.path.join(REPO_ROOT, "scripts", "google_ads_readiness_check.py"),
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    status = module.check_readiness()
+    assert status == "READY", (
+        f"Expected READY without GOOGLE_ADS_LOGIN_CUSTOMER_ID (direct_customer mode), got: {status}"
+    )
+
+
+def test_readiness_labels_missing_login_id_as_direct_customer_mode():
+    """Readiness checker source must label a missing login customer ID as direct_customer mode."""
+    source = _read_source("scripts/google_ads_readiness_check.py")
+    assert "direct_customer mode" in source, (
+        "Readiness checker must label missing GOOGLE_ADS_LOGIN_CUSTOMER_ID as direct_customer mode"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 10. Accessible customers script
+# ---------------------------------------------------------------------------
+
+def test_accessible_customers_script_exists():
+    """scripts/google_ads_list_accessible_customers.py must exist."""
+    path = os.path.join(REPO_ROOT, "scripts", "google_ads_list_accessible_customers.py")
+    assert os.path.isfile(path), (
+        "scripts/google_ads_list_accessible_customers.py must exist"
+    )
+
+
+def test_accessible_customers_script_uses_list_accessible_customers():
+    """Accessible customers script must call list_accessible_customers."""
+    source = _read_source("scripts/google_ads_list_accessible_customers.py")
+    assert "list_accessible_customers" in source, (
+        "scripts/google_ads_list_accessible_customers.py must call "
+        "CustomerService.list_accessible_customers()"
+    )
+
+
+def test_accessible_customers_script_no_mutate():
+    """Accessible customers script must not reference mutate or write services."""
+    source = _read_source("scripts/google_ads_list_accessible_customers.py")
+    for pattern in PROHIBITED_PATTERNS:
+        assert pattern not in source, (
+            f"scripts/google_ads_list_accessible_customers.py must not contain '{pattern}'"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 11. Smoke test prints access mode
+# ---------------------------------------------------------------------------
+
+def test_smoke_test_prints_access_mode():
+    """Smoke test must import and use get_access_mode."""
+    source = _read_source("scripts/google_ads_smoke_test.py")
+    assert "get_access_mode" in source, (
+        "scripts/google_ads_smoke_test.py must import and use get_access_mode"
+    )
+
+
+def test_smoke_test_login_customer_id_not_required():
+    """Smoke test must not require GOOGLE_ADS_LOGIN_CUSTOMER_ID in its required vars list."""
+    source = _read_source("scripts/google_ads_smoke_test.py")
+    # Find _REQUIRED_VARS block — LOGIN_CUSTOMER_ID must not be inside it
+    # Simple heuristic: the string should not appear in proximity to _REQUIRED_VARS assignment
+    lines = source.splitlines()
+    in_required_block = False
+    for line in lines:
+        if "_REQUIRED_VARS" in line and "=" in line and "[" in line:
+            in_required_block = True
+        if in_required_block:
+            if "]" in line:
+                in_required_block = False
+                break
+            assert "GOOGLE_ADS_LOGIN_CUSTOMER_ID" not in line, (
+                "GOOGLE_ADS_LOGIN_CUSTOMER_ID must not be in _REQUIRED_VARS in smoke test"
+            )

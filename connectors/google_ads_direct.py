@@ -21,20 +21,37 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Required environment variables
+# Required and optional environment variables
 # ---------------------------------------------------------------------------
 _REQUIRED_ENV_VARS = [
     "GOOGLE_ADS_DEVELOPER_TOKEN",
     "GOOGLE_ADS_CLIENT_ID",
     "GOOGLE_ADS_CLIENT_SECRET",
     "GOOGLE_ADS_REFRESH_TOKEN",
-    "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
     "GOOGLE_ADS_CUSTOMER_ID",
 ]
+
+# Optional: omit to use direct customer mode; set to enable manager mode.
+_OPTIONAL_ENV_VARS = [
+    "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
+]
+
+
+def get_access_mode() -> str:
+    """Return the current access mode.
+
+    Returns 'manager' when GOOGLE_ADS_LOGIN_CUSTOMER_ID is set and non-empty,
+    'direct_customer' otherwise.
+    """
+    return "manager" if os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "").strip() else "direct_customer"
 
 
 def build_google_ads_client() -> GoogleAdsClient:
     """Build a GoogleAdsClient from environment variables.
+
+    Supports two modes:
+    - Manager mode: GOOGLE_ADS_LOGIN_CUSTOMER_ID is set → included in config.
+    - Direct customer mode: GOOGLE_ADS_LOGIN_CUSTOMER_ID is absent/empty → omitted.
 
     Raises:
         EnvironmentError: If any required env var is missing.
@@ -50,9 +67,16 @@ def build_google_ads_client() -> GoogleAdsClient:
         "client_id": os.environ["GOOGLE_ADS_CLIENT_ID"],
         "client_secret": os.environ["GOOGLE_ADS_CLIENT_SECRET"],
         "refresh_token": os.environ["GOOGLE_ADS_REFRESH_TOKEN"],
-        "login_customer_id": os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_ID"],
         "use_proto_plus": True,
     }
+
+    login_customer_id = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "").strip()
+    if login_customer_id:
+        config["login_customer_id"] = login_customer_id
+        logger.info("Google Ads direct connector mode: manager")
+    else:
+        logger.info("Google Ads direct connector mode: direct_customer")
+
     return GoogleAdsClient.load_from_dict(config)
 
 

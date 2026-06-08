@@ -15,8 +15,9 @@ Prerequisites:
     GOOGLE_ADS_CLIENT_ID
     GOOGLE_ADS_CLIENT_SECRET
     GOOGLE_ADS_REFRESH_TOKEN
-    GOOGLE_ADS_LOGIN_CUSTOMER_ID
     GOOGLE_ADS_CUSTOMER_ID
+  Optional:
+    GOOGLE_ADS_LOGIN_CUSTOMER_ID  (omit for direct customer mode)
 """
 
 import os
@@ -31,6 +32,7 @@ from connectors.google_ads_direct import (
     fetch_campaign_performance,
     fetch_keyword_performance,
     fetch_search_terms,
+    get_access_mode,
     get_customer_id,
 )
 
@@ -39,7 +41,6 @@ _REQUIRED_VARS = [
     "GOOGLE_ADS_CLIENT_ID",
     "GOOGLE_ADS_CLIENT_SECRET",
     "GOOGLE_ADS_REFRESH_TOKEN",
-    "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
     "GOOGLE_ADS_CUSTOMER_ID",
 ]
 
@@ -88,6 +89,8 @@ def main() -> None:
         sys.exit(1)
 
     customer_id = get_customer_id()
+    mode = get_access_mode()
+    print(f"Mode: {mode}")
     print(f"Customer ID: {customer_id}")
 
     end = datetime.utcnow().date()
