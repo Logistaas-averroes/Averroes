@@ -123,13 +123,11 @@ def aggregate_metrics(rows: list, spend_key: str = "spend") -> dict:
         total_conversions += float(row.get("conversions", 0) or 0)
 
         # Collect unique counts
-        if row.get("campaign_name"):
-            campaigns.add(row["campaign_name"])
-        elif row.get("campaign"):
-            campaigns.add(row["campaign"])
-        if row.get("campaign_id"):
-            campaigns.add(row["campaign_id"])
-
+        campaign_key = row.get("campaign_id")
+        if campaign_key in (None, ""):
+            campaign_key = row.get("campaign_name") or row.get("campaign")
+        if campaign_key not in (None, ""):
+            campaigns.add(campaign_key)
         if row.get("ad_group_id"):
             ad_groups.add(row["ad_group_id"])
         elif row.get("ad_group"):
