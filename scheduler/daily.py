@@ -90,7 +90,7 @@ def run_daily_pulse():
         # 3. Check for new junk terms (quick pattern match)
         print("Step 4/6: Checking for new junk search terms...")
         from connectors.google_ads_source import pull_search_terms
-        search_terms = pull_search_terms(days_back=1)
+        search_terms = pull_search_terms(days_back=2)
         new_junk = detect_junk_terms(search_terms)
         label = "junk term" if len(new_junk) == 1 else "junk terms"
         print(f"  → {len(new_junk)} new {label} found.")
@@ -111,7 +111,7 @@ def run_daily_pulse():
             # PR-ADS-065: Distinguish empty pull from write failure
             fetched_count = len(search_terms or [])
             if fetched_count == 0:
-                # Windsor returned nothing for daily 1-day window.
+                # Google Ads API returned nothing for the daily 2-day window.
                 if st_batch_id:
                     db_writers.finish_sync_batch(
                         batch_id=st_batch_id,
@@ -120,7 +120,8 @@ def run_daily_pulse():
                         last_source_date=today,
                         error_message=(
                             "Google Ads API returned zero search-term rows for daily pull; "
-                            "this may be normal for a 1-day window or may indicate issues."
+                            "this may be normal for the 2-day window (today-1 through today) "
+                            "or may indicate issues."
                         ),
                     )
                 log.info("[daily] Google Ads API search-term daily pull returned 0 rows (success)")

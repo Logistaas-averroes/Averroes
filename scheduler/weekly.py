@@ -33,7 +33,10 @@ def run_weekly_report():
 
     try:
         # Step 1: Pull Google Ads data (30-day window)
-        print("Step 1/6: Pulling Google Ads data via direct Google Ads API (30 days)...")
+        print(
+            "Step 1/6: Pulling Google Ads data via direct Google Ads API "
+            "(campaigns/keywords/geo=30d, search_terms=60d)..."
+        )
         from connectors.google_ads_source import (
             pull_campaign_performance,
             pull_search_terms,
