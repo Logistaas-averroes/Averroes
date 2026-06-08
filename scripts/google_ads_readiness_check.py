@@ -18,8 +18,12 @@ _REQUIRED_VARS = [
     "GOOGLE_ADS_CLIENT_ID",
     "GOOGLE_ADS_CLIENT_SECRET",
     "GOOGLE_ADS_REFRESH_TOKEN",
-    "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
     "GOOGLE_ADS_CUSTOMER_ID",
+]
+
+# Optional: omit for direct customer mode; provide for manager mode.
+_OPTIONAL_VARS = [
+    "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
 ]
 
 # Non-secret vars shown in full; all others are redacted.
@@ -37,7 +41,10 @@ def _redact(value: str) -> str:
 
 
 def check_readiness() -> str:
-    """Return 'READY', 'PARTIAL', or 'NOT_READY' based on env var presence."""
+    """Return 'READY', 'PARTIAL', or 'NOT_READY' based on env var presence.
+
+    READY requires all _REQUIRED_VARS; _OPTIONAL_VARS are not required.
+    """
     missing = [v for v in _REQUIRED_VARS if not os.getenv(v)]
     if not missing:
         return "READY"
@@ -63,6 +70,15 @@ def main() -> None:
             print(f"  {var}: present  {display}")
         else:
             print(f"  {var}: missing")
+
+    # Optional vars
+    for var in _OPTIONAL_VARS:
+        value = os.getenv(var, "").strip()
+        if var == "GOOGLE_ADS_LOGIN_CUSTOMER_ID":
+            if value:
+                print(f"  {var}: present  {value} — manager mode")
+            else:
+                print(f"  {var}: optional missing — direct_customer mode")
 
     status = check_readiness()
     print()
