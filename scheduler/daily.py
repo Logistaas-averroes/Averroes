@@ -27,7 +27,7 @@ def run_daily_pulse():
 
     try:
         # 1. Pull fresh data
-        from connectors.windsor_pull import pull_campaign_performance
+        from connectors.google_ads_source import pull_campaign_performance
         from connectors.hubspot_pull import pull_paid_search_contacts, get_lead_quality_summary
 
         print("Step 1/6: Pulling Google Ads data (last 2 days)...")
@@ -89,15 +89,15 @@ def run_daily_pulse():
 
         # 3. Check for new junk terms (quick pattern match)
         print("Step 4/6: Checking for new junk search terms...")
-        from connectors.windsor_pull import pull_search_terms
+        from connectors.google_ads_source import pull_search_terms
         search_terms = pull_search_terms(days_back=1)
         new_junk = detect_junk_terms(search_terms)
         label = "junk term" if len(new_junk) == 1 else "junk terms"
         print(f"  → {len(new_junk)} new {label} found.")
 
-        # Track Windsor search_terms daily sync
+        # Track Google Ads search_terms daily sync
         st_batch_id = db_writers.start_sync_batch(
-            source="windsor",
+            source="google_ads_api",
             dataset="search_terms",
             sync_type="daily",
             date_from=today - timedelta(days=1),
@@ -119,14 +119,14 @@ def run_daily_pulse():
                         row_count=0,
                         last_source_date=today,
                         error_message=(
-                            "Windsor returned zero search-term rows for daily pull; "
+                            "Google Ads API returned zero search-term rows for daily pull; "
                             "this may be normal for a 1-day window or may indicate issues."
                         ),
                     )
-                log.info("[daily] Windsor search-term daily pull returned 0 rows (success)")
+                log.info("[daily] Google Ads API search-term daily pull returned 0 rows (success)")
             elif not persistence_succeeded(search_terms, st_count):
                 raise RuntimeError(
-                    f"Windsor search_terms persistence failed: "
+                    f"Google Ads search_terms persistence failed: "
                     f"fetched {fetched_count} rows but wrote {st_count}"
                 )
             else:
@@ -151,9 +151,9 @@ def run_daily_pulse():
         # Do not update sync_state for datasets that are pulled but not persisted
         # as durable source facts. Freshness means "stored locally and queryable",
         # not merely "fetched from an external API".
-        # windsor/campaigns — campaign data is analysis output only, not raw Windsor facts
-        # windsor/keywords  — not pulled in daily
-        # windsor/geo       — not pulled in daily
+        # google_ads_api/campaigns — campaign data is analysis output only, not raw source facts
+        # google_ads_api/keywords  — not pulled in daily
+        # google_ads_api/geo       — not pulled in daily
         # hubspot/deals     — not pulled in daily
         # gclid/matches     — no DB persistence path yet
 

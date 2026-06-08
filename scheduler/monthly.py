@@ -1,7 +1,7 @@
 """
 Monthly Report Scheduler
 Runs on the 1st of each month at 7am GMT via Render cron.
-Orchestrates: windsor_pull → hubspot_pull → waste_detection → lead_quality → campaign_truth → advisor
+Orchestrates: google_ads_source → hubspot_pull → waste_detection → lead_quality → campaign_truth → advisor
 No business logic lives here. This module only sequences the steps.
 
 Report generation uses the deterministic advisor by default (ADVISOR_MODE=deterministic).
@@ -43,30 +43,30 @@ def run_monthly_report():
     run_id = None
 
     # Step 1: Pull Google Ads data (30-day window)
-    log.info("Step 1/6 START: Pulling Google Ads data via Windsor.ai (30 days)...")
+    log.info("Step 1/6 START: Pulling Google Ads data via direct Google Ads API (30 days)...")
     try:
-        from connectors.windsor_pull import (
+        from connectors.google_ads_source import (
             pull_campaign_performance,
             pull_search_terms,
             pull_keyword_performance,
             pull_geo_performance,
-            save_output as windsor_save,
+            save_output as google_ads_save,
         )
         campaigns = pull_campaign_performance(days_back=30)
         search_terms = pull_search_terms(days_back=30)
         keywords = pull_keyword_performance(days_back=30)
         geos = pull_geo_performance(days_back=30)
-        windsor_save(campaigns, search_terms, keywords, geos)
+        google_ads_save(campaigns, search_terms, keywords, geos)
         log.info(
-            f"Step 1/6 END: Windsor pull complete — "
+            f"Step 1/6 END: Google Ads API pull complete — "
             f"{len(campaigns)} campaign rows, {len(search_terms)} search terms"
         )
     except Exception as e:
-        log.error(f"Step 1/6 FAILED: Windsor pull error — {e}")
+        log.error(f"Step 1/6 FAILED: Google Ads API pull error — {e}")
         finish_run(
             run_record,
             status="failed",
-            failed_step="Step 1/6: Windsor pull",
+            failed_step="Step 1/6: Google Ads API pull",
             error_message=str(e),
         )
         if run_id is not None:
@@ -152,7 +152,7 @@ def run_monthly_report():
         try:
             if run_id is not None:
                 geo_batch_id = db_writers.start_sync_batch(
-                    source="windsor",
+                    source="google_ads_api",
                     dataset="geo",
                     sync_type="monthly",
                     date_from=run_date - timedelta(days=30),
@@ -179,7 +179,7 @@ def run_monthly_report():
         try:
             if run_id is not None:
                 kw_batch_id = db_writers.start_sync_batch(
-                    source="windsor",
+                    source="google_ads_api",
                     dataset="keywords",
                     sync_type="monthly",
                     date_from=run_date - timedelta(days=30),
@@ -203,16 +203,13 @@ def run_monthly_report():
             log.error("DB write keywords failed: %s", db_exc)
 
         # Write search term rows to database (non-fatal)
-        # Note: monthly pull_search_terms(days_back=30) maps to Windsor last_14d window;
-        # do not claim full 30-day coverage — write whatever Windsor returns.
+        # Google Ads API honours the requested window (days_back=30) directly.
         try:
             st_batch_id = None
             window_end = datetime.utcnow().date()
-            # Windsor search terms still map to an inclusive 14-day window:
-            # today minus 13 days through today, even on the monthly scheduler.
-            window_start = window_end - timedelta(days=13)
+            window_start = window_end - timedelta(days=29)
             st_batch_id = db_writers.start_sync_batch(
-                source="windsor",
+                source="google_ads_api",
                 dataset="search_terms",
                 sync_type="monthly",
                 date_from=window_start,
@@ -343,7 +340,7 @@ def run_monthly_report():
             if run_id is not None and campaign_truth:
                 campaign_rows = campaign_truth.get("campaigns", [])
                 campaigns_batch_id = db_writers.start_sync_batch(
-                    source="windsor",
+                    source="google_ads_api",
                     dataset="campaigns",
                     sync_type="monthly",
                     date_from=run_date - timedelta(days=30),

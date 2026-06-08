@@ -1,7 +1,7 @@
 """
 Weekly Report Scheduler
 Runs every Monday at 7am GMT via Render cron.
-Orchestrates: windsor_pull → hubspot_pull → waste_detection → lead_quality → campaign_truth → advisor
+Orchestrates: google_ads_source → hubspot_pull → waste_detection → lead_quality → campaign_truth → advisor
 No business logic lives here. This module only sequences the steps.
 
 Report generation uses the deterministic advisor by default (ADVISOR_MODE=deterministic).
@@ -33,20 +33,20 @@ def run_weekly_report():
 
     try:
         # Step 1: Pull Google Ads data (30-day window)
-        print("Step 1/6: Pulling Google Ads data via Windsor.ai (30 days)...")
-        from connectors.windsor_pull import (
+        print("Step 1/6: Pulling Google Ads data via direct Google Ads API (30 days)...")
+        from connectors.google_ads_source import (
             pull_campaign_performance,
             pull_search_terms,
             pull_keyword_performance,
             pull_geo_performance,
-            save_output as windsor_save,
+            save_output as google_ads_save,
         )
         campaigns = pull_campaign_performance(days_back=30)
-        search_terms = pull_search_terms(days_back=60)  # Windsor MCP contract uses date_preset=last_60d
+        search_terms = pull_search_terms(days_back=60)
         keywords = pull_keyword_performance(days_back=30)
         geos = pull_geo_performance(days_back=30)
-        windsor_save(campaigns, search_terms, keywords, geos)
-        print(f"  Windsor pull complete — {len(campaigns)} campaign rows, {len(search_terms)} search terms")
+        google_ads_save(campaigns, search_terms, keywords, geos)
+        print(f"  Google Ads API pull complete — {len(campaigns)} campaign rows, {len(search_terms)} search terms")
 
         # Step 2: Pull HubSpot CRM data (30-day window)
         print("Step 2/6: Pulling HubSpot CRM data (30 days)...")
@@ -120,7 +120,7 @@ def run_weekly_report():
         try:
             if run_id is not None:
                 geo_batch_id = db_writers.start_sync_batch(
-                    source="windsor",
+                    source="google_ads_api",
                     dataset="geo",
                     sync_type="weekly",
                     date_from=run_date - timedelta(days=30),
@@ -147,7 +147,7 @@ def run_weekly_report():
         try:
             if run_id is not None:
                 kw_batch_id = db_writers.start_sync_batch(
-                    source="windsor",
+                    source="google_ads_api",
                     dataset="keywords",
                     sync_type="weekly",
                     date_from=run_date - timedelta(days=30),
@@ -174,11 +174,9 @@ def run_weekly_report():
         try:
             st_batch_id = None
             window_end = datetime.utcnow().date()
-            # Windsor MCP search-term contract uses date_preset=last_60d.
-            # Rows may not include a source date unless `date` is explicitly requested.
             window_start = window_end - timedelta(days=59)
             st_batch_id = db_writers.start_sync_batch(
-                source="windsor",
+                source="google_ads_api",
                 dataset="search_terms",
                 sync_type="weekly",
                 date_from=window_start,
@@ -203,12 +201,12 @@ def run_weekly_report():
                         row_count=0,
                         last_source_date=window_end,
                         error_message=(
-                            "Windsor returned zero search-term rows for last_60d; "
+                            "Google Ads API returned zero search-term rows for last 60 days; "
                             "evidence pipeline unavailable."
                         ),
                     )
                 log.warning(
-                    "[weekly] Windsor search-term pull returned 0 rows; "
+                    "[weekly] Google Ads API search-term pull returned 0 rows; "
                     "marking sync as success with row_count=0"
                 )
             elif not persistence_succeeded(search_terms, st_count):
@@ -262,7 +260,7 @@ def run_weekly_report():
             if run_id is not None and campaign_truth:
                 campaign_rows = campaign_truth.get("campaigns", [])
                 campaigns_batch_id = db_writers.start_sync_batch(
-                    source="windsor",
+                    source="google_ads_api",
                     dataset="campaigns",
                     sync_type="weekly",
                     date_from=run_date - timedelta(days=30),
