@@ -65,8 +65,13 @@ def _import_adapter():
     if REPO_ROOT not in sys.path:
         sys.path.insert(0, REPO_ROOT)
 
-    with patch.dict(sys.modules, module_stubs):
-        return importlib.import_module("connectors.google_ads_source")
+    patcher = patch.dict(sys.modules, module_stubs)
+    patcher.start()
+    try:
+        return importlib.import_module("connectors.google_ads_source"), patcher
+    except Exception:
+        patcher.stop()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +80,12 @@ def _import_adapter():
 
 @pytest.fixture(scope="module")
 def adapter():
-    return _import_adapter()
+    adapter_module, patcher = _import_adapter()
+    try:
+        yield adapter_module
+    finally:
+        patcher.stop()
+        sys.modules.pop("connectors.google_ads_source", None)
 
 
 # ---------------------------------------------------------------------------
