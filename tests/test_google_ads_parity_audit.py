@@ -10,7 +10,6 @@ Validates:
 - Docs mention read-only audit and no production cutover
 """
 
-import ast
 import os
 import sys
 
