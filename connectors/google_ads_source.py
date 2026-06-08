@@ -8,10 +8,9 @@ Read-only adapter layer. Guarantees:
 - No writes to Google Ads (no mutate operations).
 - No writes to the database.
 - No Windsor imports.
-- No scheduler changes.
 
 This adapter is the replacement interface for Windsor pull functions.
-It does NOT switch the production scheduler — that is PR-ADS-104.
+The production scheduler cutover (Windsor → Google Ads) is PR-ADS-104.
 
 Public API:
     get_date_range(days_back)
@@ -26,6 +25,8 @@ Public API:
     pull_keyword_performance_range(date_from, date_to)
     pull_geo_performance_range(date_from, date_to)
 
+    save_output(campaigns, search_terms, keywords, geos)
+
 Internal helpers (pure, no I/O):
     safe_divide(numerator, denominator)
     normalize_campaign_row(row)
@@ -34,7 +35,9 @@ Internal helpers (pure, no I/O):
     normalize_geo_row(row)
 """
 
+import json
 import logging
+import os
 from datetime import timedelta, timezone, datetime
 
 from connectors.google_ads_direct import (
@@ -374,3 +377,38 @@ def pull_geo_performance(days_back: int = 30) -> list[dict]:
     """
     start, end = get_date_range(days_back)
     return pull_geo_performance_range(start, end)
+
+
+# ---------------------------------------------------------------------------
+# Output persistence (local files only — no Google Ads writes)
+# ---------------------------------------------------------------------------
+
+
+def save_output(campaigns: list, search_terms: list, keywords: list, geos: list):
+    """Save all Google Ads data to the data/ directory.
+
+    Writes the same compatibility files expected by downstream analysis logic:
+        data/ads_campaigns.json
+        data/ads_search_terms.json
+        data/ads_keywords.json
+        data/ads_geos.json
+
+    This is local app output only.  No writes to Google Ads.
+    No database writes.
+    """
+    os.makedirs("data", exist_ok=True)
+
+    with open("data/ads_campaigns.json", "w") as f:
+        json.dump(campaigns, f, indent=2)
+
+    with open("data/ads_search_terms.json", "w") as f:
+        json.dump(search_terms, f, indent=2)
+
+    with open("data/ads_keywords.json", "w") as f:
+        json.dump(keywords, f, indent=2)
+
+    with open("data/ads_geos.json", "w") as f:
+        json.dump(geos, f, indent=2)
+
+    logger.info("Saved Google Ads data to data/ (%d campaigns, %d search terms, %d keywords, %d geos)",
+                len(campaigns or []), len(search_terms or []), len(keywords or []), len(geos or []))
