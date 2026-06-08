@@ -69,10 +69,12 @@ def classify_status(
     # Cannot compute meaningful deltas
     if spend_delta_pct is None:
         return "NOT_AVAILABLE"
+    if clicks_delta_pct is None or impressions_delta_pct is None:
+        return "NOT_AVAILABLE"
 
     abs_spend = abs(spend_delta_pct)
-    abs_clicks = abs(clicks_delta_pct) if clicks_delta_pct is not None else 0.0
-    abs_impressions = abs(impressions_delta_pct) if impressions_delta_pct is not None else 0.0
+    abs_clicks = abs(clicks_delta_pct)
+    abs_impressions = abs(impressions_delta_pct)
 
     # PASS: spend <= 3% and clicks/impressions <= 5%
     if abs_spend <= 3.0 and abs_clicks <= 5.0 and abs_impressions <= 5.0:
