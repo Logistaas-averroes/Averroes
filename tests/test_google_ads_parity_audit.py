@@ -183,6 +183,16 @@ class TestClassifyStatus:
         )
         assert status == "NOT_AVAILABLE"
 
+    def test_not_available_when_clicks_or_impressions_delta_is_none(self):
+        """If any required delta is None, parity cannot be assessed."""
+        status = classify_status(
+            spend_delta_pct=1.0,
+            clicks_delta_pct=None,
+            impressions_delta_pct=1.0,
+            row_count_google=100,
+            row_count_windsor=100,
+        )
+        assert status == "NOT_AVAILABLE"
 
 # ---------------------------------------------------------------------------
 # format_delta tests
