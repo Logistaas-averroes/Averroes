@@ -323,7 +323,7 @@ def test_login_customer_id_not_in_required_env_vars():
         "_OPTIONAL_ENV_VARS must include GOOGLE_ADS_LOGIN_CUSTOMER_ID"
     )
 
-    def _is_login_customer_config_assign(stmt: ast.stmt) -> bool:
+    def _is_login_customer_config_assign(stmt: ast.AST) -> bool:
         if not isinstance(stmt, ast.Assign):
             return False
         for target in stmt.targets:
