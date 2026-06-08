@@ -59,21 +59,21 @@ let _latestRunForMeta = null;
 // to the canonical dataset keys that power it.  Keys are "source/dataset"
 // strings matching the sync_state table values returned by /api/datasets/freshness.
 //
-// Derived pages (ngrams, waste) share their source dataset (windsor/search_terms)
+// Derived pages (ngrams, waste) share their source dataset (google_ads_api/search_terms)
 // because no separate freshness record exists for the derived output.
 const PAGE_DATASET_MAP = {
-  campaigns:         ["windsor/campaigns"],
-  waste:             ["windsor/search_terms"],   // waste_terms derived from search_terms
-  search_terms:      ["windsor/search_terms"],
-  ngrams:            ["windsor/search_terms"],   // n-grams derived from search_terms
-  geo:               ["windsor/geo"],
-  keywords:          ["windsor/keywords"],
+  campaigns:         ["google_ads_api/campaigns"],
+  waste:             ["google_ads_api/search_terms"],   // waste_terms derived from search_terms
+  search_terms:      ["google_ads_api/search_terms"],
+  ngrams:            ["google_ads_api/search_terms"],   // n-grams derived from search_terms
+  geo:               ["google_ads_api/geo"],
+  keywords:          ["google_ads_api/keywords"],
   lead_quality:      ["hubspot/contacts"],
   deals:             ["hubspot/deals"],
   gclid_attribution: ["gclid/matches"],
   in_progress_leads: ["hubspot/contacts"],
-  action_queue:      ["windsor/campaigns", "hubspot/contacts", "hubspot/deals"],
-  reports:           ["windsor/campaigns", "hubspot/contacts", "hubspot/deals", "windsor/search_terms"],
+  action_queue:      ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals"],
+  reports:           ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals", "google_ads_api/search_terms"],
 };
 
 // Pages whose output is derived/computed from the source datasets above rather
@@ -114,15 +114,15 @@ const PAGE_EXPLANATIONS = {
   campaigns: {
     title: "Campaigns",
     purpose: "Campaign truth table — spend, quality, verdict, and performance metrics.",
-    source: "Windsor / Google Ads campaign data.",
+    source: "Google Ads API campaign data.",
     dependsOn: ["campaigns"],
-    emptyMeans: "No campaign performance rows found for this window. Windsor campaign data may not have synced.",
-    nextAction: "Check System Status → Windsor / Campaigns."
+    emptyMeans: "No campaign performance rows found for this window. Google Ads API campaign data may not have synced.",
+    nextAction: "Check System Status → Google Ads API / Campaigns."
   },
   "search-terms": {
     title: "Search Term Universe",
-    purpose: "Raw Google Ads search terms pulled from Windsor.",
-    source: "Windsor / Google Ads search-term data.",
+    purpose: "Raw Google Ads search terms sourced directly from Google Ads API.",
+    source: "Google Ads API search-term data.",
     dependsOn: ["search_terms"],
     emptyMeans: "This does not mean the account is clean. It means no search-term rows are currently available for this window.",
     nextAction: "Check System Status → Search Terms Pipeline."
@@ -146,18 +146,18 @@ const PAGE_EXPLANATIONS = {
   geo: {
     title: "Country Performance",
     purpose: "Geographic intelligence — performance and quality by country.",
-    source: "Windsor / Google Ads geo data.",
+    source: "Google Ads API geo data.",
     dependsOn: ["geo"],
     emptyMeans: "No geo intelligence available for the selected window.",
-    nextAction: "Check System Status → Windsor / Geo."
+    nextAction: "Check System Status → Google Ads API / Geo."
   },
   keywords: {
     title: "Keyword Performance",
     purpose: "Keyword-level performance metrics and quality signals.",
-    source: "Windsor / Google Ads keyword data.",
+    source: "Google Ads API keyword data.",
     dependsOn: ["keywords"],
     emptyMeans: "No keyword data available for the selected window.",
-    nextAction: "Check System Status → Windsor / Keywords."
+    nextAction: "Check System Status → Google Ads API / Keywords."
   },
   leads: {
     title: "Lead Quality",
