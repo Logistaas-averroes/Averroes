@@ -247,7 +247,8 @@ If the smoke test fails with `USER_PERMISSION_DENIED`:
    - Redeploy, then re-run the smoke test.
 
 3. If `customers/3059734490` does **not** appear:
-   - Grant the OAuth Google user (`youssef.awwad@logistaas.com`) access to account `305-973-4490` in Google Ads.
+   - Grant the OAuth Google user (the Google user used to generate the refresh token) access to account `305-973-4490` in Google Ads.
+   - Ensure this is a Google Ads user with access to the target customer account.
    - Regenerate the refresh token using `scripts/google_ads_generate_refresh_token.py`.
    - Update `GOOGLE_ADS_REFRESH_TOKEN` in Render and redeploy.
 

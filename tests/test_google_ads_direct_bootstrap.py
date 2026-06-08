@@ -7,6 +7,7 @@ live Google Ads credentials.
 
 import importlib.util
 import os
+import re
 import sys
 
 import pytest
@@ -295,13 +296,29 @@ def test_readiness_check_ready_when_all_vars_present(monkeypatch):
 def test_login_customer_id_not_in_required_env_vars():
     """GOOGLE_ADS_LOGIN_CUSTOMER_ID must not be in _REQUIRED_ENV_VARS."""
     source = _read_source("connectors/google_ads_direct.py")
-    # The required vars list must not contain LOGIN_CUSTOMER_ID
-    # We verify by checking _REQUIRED_ENV_VARS definition excludes it.
-    assert "_REQUIRED_ENV_VARS" in source, "Connector must define _REQUIRED_ENV_VARS"
-    # _OPTIONAL_ENV_VARS must mention LOGIN_CUSTOMER_ID
-    assert "_OPTIONAL_ENV_VARS" in source, "Connector must define _OPTIONAL_ENV_VARS"
-    assert "GOOGLE_ADS_LOGIN_CUSTOMER_ID" in source, (
-        "GOOGLE_ADS_LOGIN_CUSTOMER_ID must appear somewhere in the connector source"
+    required_match = re.search(r"_REQUIRED_ENV_VARS\s*=\s*\[(.*?)\]", source, re.DOTALL)
+    assert required_match, "Connector must define _REQUIRED_ENV_VARS"
+    required_block = required_match.group(1)
+    assert '"GOOGLE_ADS_CUSTOMER_ID"' in required_block, (
+        "_REQUIRED_ENV_VARS must include GOOGLE_ADS_CUSTOMER_ID"
+    )
+    assert '"GOOGLE_ADS_LOGIN_CUSTOMER_ID"' not in required_block, (
+        "_REQUIRED_ENV_VARS must not include GOOGLE_ADS_LOGIN_CUSTOMER_ID"
+    )
+
+    optional_match = re.search(r"_OPTIONAL_ENV_VARS\s*=\s*\[(.*?)\]", source, re.DOTALL)
+    assert optional_match, "Connector must define _OPTIONAL_ENV_VARS"
+    optional_block = optional_match.group(1)
+    assert '"GOOGLE_ADS_LOGIN_CUSTOMER_ID"' in optional_block, (
+        "_OPTIONAL_ENV_VARS must include GOOGLE_ADS_LOGIN_CUSTOMER_ID"
+    )
+
+    conditional_match = re.search(
+        r'if\s+login_customer_id\s*:\s*[\s\S]*?config\[\s*["\']login_customer_id["\']\s*\]',
+        source,
+    )
+    assert conditional_match, (
+        "GOOGLE_ADS_LOGIN_CUSTOMER_ID must only be handled via conditional config inclusion"
     )
 
 

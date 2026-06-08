@@ -72,11 +72,13 @@ def main() -> None:
             print(f"  {var}: missing")
 
     # Optional vars
-    login_customer_id = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "").strip()
-    if login_customer_id:
-        print(f"  GOOGLE_ADS_LOGIN_CUSTOMER_ID: present  {login_customer_id} — manager mode")
-    else:
-        print("  GOOGLE_ADS_LOGIN_CUSTOMER_ID: optional missing — direct_customer mode")
+    for var in _OPTIONAL_VARS:
+        value = os.getenv(var, "").strip()
+        if var == "GOOGLE_ADS_LOGIN_CUSTOMER_ID":
+            if value:
+                print(f"  {var}: present  {value} — manager mode")
+            else:
+                print(f"  {var}: optional missing — direct_customer mode")
 
     status = check_readiness()
     print()
