@@ -4,6 +4,7 @@
 anthropic>=0.40.0
 hubspot-api-client>=9.0.0
 google-ads>=24.0.0
+google-auth-oauthlib>=1.2.0
 requests>=2.32.0
 
 # Data processing
