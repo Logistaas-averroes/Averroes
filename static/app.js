@@ -6961,9 +6961,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
   const helpCloseBtn = document.getElementById("help-drawer-close-btn");
-  if (helpCloseBtn) helpCloseBtn.addEventListener("click", closeHelpDrawer);
+  if (helpCloseBtn) {
+    helpCloseBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeHelpDrawer();
+    });
+  }
   const helpOverlay = document.getElementById("help-drawer-overlay");
-  if (helpOverlay) helpOverlay.addEventListener("click", closeHelpDrawer);
+  if (helpOverlay) {
+    helpOverlay.addEventListener("click", (e) => {
+      if (e.target === helpOverlay) closeHelpDrawer();
+    });
+  }
 
   // Wire up time range buttons
   document.querySelectorAll(".time-range-btn").forEach((btn) => {
@@ -7170,6 +7180,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Wire up Churn Input form
   const churnForm = document.getElementById("churn-input-form");
   if (churnForm) churnForm.addEventListener("submit", handleChurnInputSubmit);
+
+  // Force-close help drawer on startup (PR-ADS-097: ensures clean state)
+  closeHelpDrawer();
 
   // Check auth and load initial page
   const isAuth = await checkAuth();
@@ -7843,16 +7856,26 @@ function openHelpDrawer(pageKey) {
 }
 
 function closeHelpDrawer() {
-  if (!_helpDrawerOpen) return;
   const overlay = document.getElementById("help-drawer-overlay");
   const drawer = document.getElementById("help-drawer");
-  if (overlay) { overlay.hidden = true; overlay.setAttribute("aria-hidden", "true"); }
-  if (drawer) drawer.hidden = true;
+
+  if (overlay) {
+    overlay.hidden = true;
+    overlay.setAttribute("aria-hidden", "true");
+  }
+
+  if (drawer) {
+    drawer.hidden = true;
+  }
+
   _helpDrawerOpen = false;
   document.removeEventListener("keydown", _helpDrawerKeyHandler);
-  // Reset drawer body to empty state
+
   const body = document.getElementById("help-drawer-body");
-  if (body) body.innerHTML = '<p class="empty-state">Select a page to view its help guide.</p>';
+  if (body) {
+    body.innerHTML = '<p>Select a page to view its help guide.</p>';
+  }
+
   if (
     _helpDrawerFocusReturn &&
     typeof _helpDrawerFocusReturn.focus === "function" &&
@@ -7861,17 +7884,17 @@ function closeHelpDrawer() {
   ) {
     _helpDrawerFocusReturn.focus();
   }
+
   _helpDrawerFocusReturn = null;
 }
 
 function _helpDrawerKeyHandler(e) {
-  if (!_helpDrawerOpen) return;
   if (e.key === "Escape") {
     e.preventDefault();
     closeHelpDrawer();
     return;
   }
-  if (e.key === "Tab") {
+  if (e.key === "Tab" && _helpDrawerOpen) {
     _trapHelpDrawerFocus(e);
   }
 }
