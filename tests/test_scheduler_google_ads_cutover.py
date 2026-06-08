@@ -184,8 +184,8 @@ class TestGoogleAdsSourceSaveOutput:
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == "save_output":
                 arg_names = [a.arg for a in node.args.args]
-                assert len(arg_names) == 4, (
-                    f"save_output must take 4 positional args; got {arg_names}"
+                assert arg_names == ["campaigns", "search_terms", "keywords", "geos"], (
+                    f"save_output must have args (campaigns, search_terms, keywords, geos); got {arg_names}"
                 )
                 return
         pytest.fail("save_output not found")

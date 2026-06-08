@@ -207,6 +207,7 @@ def run_monthly_report():
         try:
             st_batch_id = None
             window_end = datetime.utcnow().date()
+            # days_back=30 means 30 inclusive days (today − 29 through today).
             window_start = window_end - timedelta(days=29)
             st_batch_id = db_writers.start_sync_batch(
                 source="google_ads_api",
