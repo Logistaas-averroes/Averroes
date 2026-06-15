@@ -2843,10 +2843,12 @@ def api_action_queue(
 
 # Known source/dataset pairs — returned as placeholders when sync_state is empty.
 _KNOWN_DATASETS: list[tuple[str, str]] = [
-    ("windsor", "campaigns"),
-    ("windsor", "keywords"),
-    ("windsor", "search_terms"),
-    ("windsor", "geo"),
+    # PR-ADS-105: Platform Evidence datasets are sourced from the Google Ads API
+    # directly (scheduler cutover landed in PR-ADS-104). Windsor is legacy only.
+    ("google_ads_api", "campaigns"),
+    ("google_ads_api", "keywords"),
+    ("google_ads_api", "search_terms"),
+    ("google_ads_api", "geo"),
     ("hubspot", "contacts"),
     ("hubspot", "deals"),
     ("gclid",   "matches"),
@@ -3355,7 +3357,7 @@ def api_search_terms(
             "has_more":    False,
         },
         "data_quality": {
-            "source":  "windsor",
+            "source":  "google_ads_api",
             "dataset": "search_terms",
             "status":  "db_unavailable",
         },
@@ -3497,7 +3499,7 @@ def api_search_terms(
     # PR-ADS-065: Enhanced data_quality block
     is_empty = len(out) == 0
     data_quality: dict[str, Any] = {
-        "source": "windsor",
+        "source": "google_ads_api",
         "dataset": "search_terms",
         "table": "search_terms",
         "days": days,
@@ -3605,7 +3607,7 @@ def api_search_terms_summary(
         "summary": _zero_summary,
         "analysis_state": _zero_state,
         "data_quality": {
-            "source":  "windsor",
+            "source":  "google_ads_api",
             "dataset": "search_terms",
             "status":  "db_unavailable",
         },
@@ -3747,7 +3749,7 @@ def api_search_terms_summary(
     # PR-ADS-065: Enhanced data_quality for summary
     is_empty = total_terms == 0
     data_quality_out: dict[str, Any] = {
-        "source": "windsor",
+        "source": "google_ads_api",
         "dataset": "search_terms",
         "table": "search_terms",
         "days": days,
@@ -5676,7 +5678,7 @@ def api_system_status_war_room(
                 dataset_statuses = canonical_status_map
 
                 # 5. Source sync info
-                for src_key in ["windsor", "hubspot", "gclid", "analysis", "computed"]:
+                for src_key in ["google_ads_api", "hubspot", "gclid", "analysis", "computed"]:
                     # Find best last_successful_sync_at for this source
                     best_sync = None
                     for (s, d), srow in sync_map.items():

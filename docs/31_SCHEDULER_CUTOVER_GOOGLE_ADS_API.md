@@ -78,8 +78,8 @@ Writes the four local compatibility files expected by downstream analysis:
 |----------|--------|
 | Historical backfill | Deferred to PR-ADS-108 |
 | Windsor deletion / env cleanup | Deferred to PR-ADS-109 |
-| UI page cutover | Out of scope |
-| Platform Evidence page rewrite | Out of scope |
+| UI page cutover | Handled in **PR-ADS-105** (see `docs/32_PLATFORM_EVIDENCE_SOURCE_LABEL_CUTOVER.md`) |
+| Platform Evidence page rewrite | Out of scope (PR-ADS-105 is a label cutover only, not a rewrite) |
 | Lead Intelligence rewrite | Out of scope |
 | ROAS math changes | Out of scope |
 | GCLID bridge implementation | Out of scope |

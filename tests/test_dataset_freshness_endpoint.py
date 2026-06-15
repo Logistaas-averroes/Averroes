@@ -100,7 +100,7 @@ def _call_endpoint(*, conn, days: int):
 def test_placeholder_unknown_sync_maps_to_not_run():
     conn, _ = _make_mock_conn()
     payload = _call_endpoint(conn=conn, days=60)
-    campaigns = next(d for d in payload["datasets"] if d["dataset_key"] == "windsor/campaigns")
+    campaigns = next(d for d in payload["datasets"] if d["dataset_key"] == "google_ads_api/campaigns")
     assert campaigns["status"] == "unknown"
     assert campaigns["canonical_status"] == CanonicalFreshnessStatus.NOT_RUN
 
@@ -108,11 +108,11 @@ def test_placeholder_unknown_sync_maps_to_not_run():
 def test_days_one_uses_exact_one_day_window_for_counts():
     now = datetime.now(timezone.utc)
     conn, executed = _make_mock_conn(
-        sync_rows=[("windsor", "campaigns", "success", now, date.today(), 11, None, now)],
+        sync_rows=[("google_ads_api", "campaigns", "success", now, date.today(), 11, None, now)],
         count_by_table={"campaigns": 7},
     )
     payload = _call_endpoint(conn=conn, days=1)
-    campaigns = next(d for d in payload["datasets"] if d["dataset_key"] == "windsor/campaigns")
+    campaigns = next(d for d in payload["datasets"] if d["dataset_key"] == "google_ads_api/campaigns")
     assert campaigns["rows_in_window"] == 7
     campaign_count_calls = [c for c in executed if c.get("kind") == "count" and c.get("table") == "campaigns"]
     assert campaign_count_calls, "Expected count query for campaigns table"
@@ -153,7 +153,7 @@ def test_configured_datasets_get_count_coverage_or_unknown():
             ("analysis", "historical_intelligence", "success", now, date.today(), 2, None, now),
             ("gclid", "matches", "success", now, date.today(), 3, None, now),
             ("gclid", "coverage_snapshots", "success", now, date.today(), 4, None, now),
-            ("windsor", "search_terms", "success", now, date.today(), 5, None, now),
+            ("google_ads_api", "search_terms", "success", now, date.today(), 5, None, now),
         ],
         count_by_table=counts,
     )
@@ -173,7 +173,7 @@ def test_dependency_blocked_still_applies_to_waste_terms_and_ngrams():
     now = datetime.now(timezone.utc)
     conn, _ = _make_mock_conn(
         sync_rows=[
-            ("windsor", "search_terms", "success", now, date.today(), 1, None, now),
+            ("google_ads_api", "search_terms", "success", now, date.today(), 1, None, now),
             ("analysis", "waste_terms", "success", now, date.today(), 2, None, now),
             ("computed", "ngrams", "success", now, date.today(), 3, None, now),
         ],
@@ -197,7 +197,7 @@ def test_freshness_endpoint_aligns_with_war_room_derivable_state():
         # sync_state rows at all (placeholder rows). Counts default to 0 for
         # tables we don't override.
         sync_rows=[
-            ("windsor", "search_terms", "success", now, date.today(), 1, None, now),
+            ("google_ads_api", "search_terms", "success", now, date.today(), 1, None, now),
         ],
         count_by_table={
             "campaigns": 0,

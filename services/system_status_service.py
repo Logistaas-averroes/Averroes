@@ -69,14 +69,14 @@ PAGE_ACTION_NEEDED_STATES = frozenset([
 PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
     "campaigns": {
         "label": "Campaigns",
-        "source": "windsor",
+        "source": "google_ads_api",
         "page": "Campaigns",
         "depends_on": [],
         "blocks": [],
     },
     "search_terms": {
         "label": "Search Terms",
-        "source": "windsor",
+        "source": "google_ads_api",
         "page": "Search Terms",
         "depends_on": [],
         "blocks": ["waste_terms", "ngrams"],
@@ -97,14 +97,14 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
     },
     "keywords": {
         "label": "Keywords",
-        "source": "windsor",
+        "source": "google_ads_api",
         "page": "Keywords",
         "depends_on": [],
         "blocks": [],
     },
     "geo": {
         "label": "Geo",
-        "source": "windsor",
+        "source": "google_ads_api",
         "page": "Geo",
         "depends_on": [],
         "blocks": [],
@@ -149,8 +149,11 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
 # ── Source Definitions ──────────────────────────────────────────────────────
 
 SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
-    "windsor": {
-        "label": "Windsor / Google Ads",
+    # PR-ADS-105: Google Ads API is the active platform-evidence source for
+    # campaigns/search_terms/keywords/geo (scheduler cutover landed in PR-ADS-104).
+    # Windsor remains only as legacy/deprecated history, not the active source.
+    "google_ads_api": {
+        "label": "Google Ads API",
         "datasets": ["campaigns", "search_terms", "keywords", "geo"],
     },
     "hubspot": {
@@ -385,7 +388,7 @@ def compute_critical_blockers(
             "title": "Search Terms has no usable rows",
             "affected_pages": ["Search Terms", "Waste Terms", "N-Grams"],
             "reason": "Search Terms is fresh_but_empty.",
-            "next_action": "Check Search Terms verdict and Windsor REST/MCP parity.",
+            "next_action": "Check Search Terms verdict and Google Ads API search-term sync.",
         })
 
     # Dependency blocked datasets
@@ -507,11 +510,11 @@ def _source_next_action(
     if derivable:
         names = ", ".join(d.replace("_", " ").title() for d in derivable)
         return f"{names} not run yet. Run derived analysis from existing upstream data."
-    if source_key == "windsor":
+    if source_key == "google_ads_api":
         st = dataset_statuses.get("search_terms")
         if st == CanonicalFreshnessStatus.FRESH_BUT_EMPTY:
             return "Check Search Terms if empty."
-        return "Check Windsor sync status."
+        return "Check Google Ads API sync status."
     if source_key == "hubspot":
         return "Check HubSpot connector logs."
     if source_key == "gclid":

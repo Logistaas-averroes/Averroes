@@ -135,13 +135,13 @@ class TestPageDependenciesCoverage:
             assert found, f"PAGE_DEPENDENCIES missing entry for route: '{route}'"
 
     def test_dependencies_use_source_qualified_keys(self):
-        """PAGE_DEPENDENCIES must use source-qualified keys (e.g. windsor/search_terms)."""
+        """PAGE_DEPENDENCIES must use source-qualified keys (e.g. google_ads_api/search_terms)."""
         block = extract_js_object_block(APP_JS, "PAGE_DEPENDENCIES")
         assert block is not None, "Could not extract PAGE_DEPENDENCIES block"
         # At least the core data pages should reference source-qualified dataset keys
         qualified_keys = [
-            "windsor/search_terms",
-            "windsor/campaigns",
+            "google_ads_api/search_terms",
+            "google_ads_api/campaigns",
             "hubspot/contacts",
         ]
         for key in qualified_keys:
@@ -255,9 +255,17 @@ class TestNgramsExplanation:
         )
 
     def test_ngrams_empty_state_mentions_search_terms(self):
-        assert "computed from Search Term Universe" in APP_JS or \
-               "Computed from Search Term Universe" in APP_JS, (
-            "N-Grams explanation must state it is computed from Search Term Universe"
+        # PR-ADS-105: Patterns are now described as calculated from Google Ads
+        # API search-term evidence, while still depending on Search Term Universe.
+        block = extract_js_object_block(APP_JS, "PAGE_EXPLANATIONS")
+        ngrams_entry = get_route_entry_slice(block, "ngrams")
+        assert ngrams_entry is not None, "No ngrams entry in PAGE_EXPLANATIONS"
+        assert "Search Term Universe" in ngrams_entry, (
+            "N-Grams explanation must reference Search Term Universe"
+        )
+        assert "Google Ads API search-term evidence" in ngrams_entry, (
+            "N-Grams/Patterns explanation must state patterns are calculated "
+            "from Google Ads API search-term evidence"
         )
 
 

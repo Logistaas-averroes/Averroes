@@ -20,7 +20,7 @@
 | Group | Purpose | Pages |
 |-------|---------|-------|
 | **Command Center** | Daily operator pages | Dashboard, Action Queue, Reports |
-| **Platform Evidence** | Raw ad platform data and analytics | Campaigns, Search Terms, Keywords, Countries |
+| **Platform Evidence** | Raw ad platform data and analytics (active source: **Google Ads API** — see PR-ADS-105; Windsor is legacy) | Campaigns, Search Terms, Keywords, Countries |
 | **Lead Intelligence** | Lead quality review and exception queues | Lead Quality, In Progress Leads, Flagged Waste Terms |
 | **Revenue & Attribution** | Revenue-truth ROAS, deal attribution, unit economics | Deals, ROAS by Campaign, ROAS by Country, GCLID Attribution, Unit Economics |
 | **Admin** | System operation, diagnostics, and configuration | Data Runs, System Status, Admin Backfill, Churn Input |
