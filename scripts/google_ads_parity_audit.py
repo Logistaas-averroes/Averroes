@@ -13,7 +13,7 @@ import argparse
 import logging
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Ensure repo root is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -105,22 +105,63 @@ def format_delta(value: float | None) -> str:
 # Data aggregation helpers
 # ---------------------------------------------------------------------------
 
+def _row_spend(row: dict, spend_key: str) -> float:
+    """Return normalized spend for a row.
+
+    Google Ads API reports cost in micros (`cost_micros`); spend must be
+    normalized to currency units as ``cost_micros / 1_000_000``. The direct
+    connector already exposes a pre-normalized ``spend`` field, but this helper
+    falls back to normalizing ``cost_micros`` itself so the audit is correct
+    even if a raw row is passed in.
+    """
+    val = row.get(spend_key)
+    if val in (None, ""):
+        # Fall back to a generic spend field, then to cost_micros normalization.
+        val = row.get("spend")
+    if val in (None, ""):
+        cost_micros = row.get("cost_micros")
+        if cost_micros not in (None, ""):
+            return float(cost_micros) / 1_000_000
+        return 0.0
+    return float(val or 0)
+
+
+def _row_conversion_value(row: dict) -> float:
+    """Return conversion value for a row, supporting both source field names.
+
+    Google Ads API uses ``conversions_value``; some sources use
+    ``conversion_value``. Windsor REST does not currently expose conversion
+    value at all, so this returns 0.0 for those rows (reported as N/A in the
+    parity delta — see docs/29).
+    """
+    for key in ("conversions_value", "conversion_value"):
+        val = row.get(key)
+        if val not in (None, ""):
+            return float(val or 0)
+    return 0.0
+
+
 def aggregate_metrics(rows: list, spend_key: str = "spend") -> dict:
     """Aggregate common metrics from a list of row dicts."""
     total_spend = 0.0
     total_clicks = 0
     total_impressions = 0
     total_conversions = 0.0
+    total_conversion_value = 0.0
+    rows_with_conversion_value = 0
     campaigns = set()
     ad_groups = set()
     search_terms = set()
     keywords = set()
 
     for row in rows:
-        total_spend += float(row.get(spend_key, 0) or 0)
+        total_spend += _row_spend(row, spend_key)
         total_clicks += int(row.get("clicks", 0) or 0)
         total_impressions += int(row.get("impressions", 0) or 0)
         total_conversions += float(row.get("conversions", 0) or 0)
+        if row.get("conversions_value") not in (None, "") or row.get("conversion_value") not in (None, ""):
+            rows_with_conversion_value += 1
+        total_conversion_value += _row_conversion_value(row)
 
         # Collect unique counts
         campaign_key = row.get("campaign_id")
@@ -147,6 +188,8 @@ def aggregate_metrics(rows: list, spend_key: str = "spend") -> dict:
         "clicks": total_clicks,
         "impressions": total_impressions,
         "conversions": round(total_conversions, 2),
+        "conversion_value": round(total_conversion_value, 2),
+        "has_conversion_value": rows_with_conversion_value > 0,
         "campaign_count": len(campaigns),
         "ad_group_count": len(ad_groups),
         "search_term_count": len(search_terms),
@@ -194,38 +237,54 @@ def fetch_google_ads_data(dataset: str, start_date: str, end_date: str) -> dict:
 # Data fetching — Windsor/current source
 # ---------------------------------------------------------------------------
 
-def fetch_windsor_data(dataset: str, days_back: int) -> dict:
-    """Fetch data from Windsor connector (current source).
+def fetch_windsor_data(
+    dataset: str,
+    start_date: str,
+    end_date: str,
+    days_back: int,
+) -> dict:
+    """Fetch data from Windsor connector (current source) for a closed window.
 
-    Returns dict with 'rows' and 'error' keys.
+    For campaigns/keywords/geo, the explicit-range Windsor pulls
+    (``pull_*_performance_range``) are used so both sources cover the **same**
+    closed ``start_date → end_date`` window (yesterday-back, excluding today).
+
+    Windsor search terms only support preset windows (``last_7d``/``last_30d``…)
+    and have no explicit-range API, so they fall back to the preset
+    ``pull_search_terms(days_back=...)`` path. This is a known/explained
+    difference (see docs/29) — the preset window includes today, so search-term
+    parity is treated as informational, not gating.
+
+    Returns dict with 'rows', 'error', and 'window_mode' keys.
     """
     try:
         from connectors.windsor_pull import (
-            pull_campaign_performance,
+            pull_campaign_performance_range,
             pull_search_terms,
-            pull_keyword_performance,
-            pull_geo_performance,
+            pull_keyword_performance_range,
+            pull_geo_performance_range,
         )
 
-        windsor_days_back = max(days_back - 1, 0)
-
-        fetchers = {
-            "campaigns": lambda: pull_campaign_performance(days_back=windsor_days_back),
-            "search_terms": lambda: pull_search_terms(days_back=windsor_days_back),
-            "keywords": lambda: pull_keyword_performance(days_back=windsor_days_back),
-            "geo": lambda: pull_geo_performance(days_back=windsor_days_back),
+        range_fetchers = {
+            "campaigns": lambda: pull_campaign_performance_range(start_date, end_date),
+            "keywords": lambda: pull_keyword_performance_range(start_date, end_date),
+            "geo": lambda: pull_geo_performance_range(start_date, end_date),
         }
 
-        fetcher = fetchers.get(dataset)
-        if not fetcher:
-            return {"rows": [], "error": f"Unknown dataset: {dataset}"}
+        if dataset in range_fetchers:
+            rows = range_fetchers[dataset]()
+            return {"rows": rows, "error": None, "window_mode": "closed_range"}
 
-        rows = fetcher()
-        return {"rows": rows, "error": None}
+        if dataset == "search_terms":
+            # No explicit-range API for Windsor search terms — preset window only.
+            rows = pull_search_terms(days_back=days_back)
+            return {"rows": rows, "error": None, "window_mode": "preset"}
+
+        return {"rows": [], "error": f"Unknown dataset: {dataset}", "window_mode": None}
 
     except Exception as exc:
         logger.error("Windsor fetch error (%s): %s", dataset, exc)
-        return {"rows": [], "error": str(exc)}
+        return {"rows": [], "error": str(exc), "window_mode": None}
 
 
 # ---------------------------------------------------------------------------
@@ -242,9 +301,9 @@ def compare_dataset(
 
     Returns a parity result dict.
     """
-    # Fetch from both sources
+    # Fetch from both sources (closed window — yesterday-back, excludes today)
     gads_result = fetch_google_ads_data(dataset, start_date, end_date)
-    windsor_result = fetch_windsor_data(dataset, days_back)
+    windsor_result = fetch_windsor_data(dataset, start_date, end_date, days_back)
 
     source_error = bool(gads_result["error"] or windsor_result["error"])
 
@@ -257,6 +316,12 @@ def compare_dataset(
     clicks_delta = percent_delta(gads_metrics["clicks"], windsor_metrics["clicks"])
     impressions_delta = percent_delta(gads_metrics["impressions"], windsor_metrics["impressions"])
     conversions_delta = percent_delta(gads_metrics["conversions"], windsor_metrics["conversions"])
+    # Conversion value is only available where the source reports it. Windsor
+    # REST does not currently expose conversion value, so this delta is usually
+    # N/A — reported for information, never used to gate the PASS/WARN/FAIL verdict.
+    conversion_value_delta = percent_delta(
+        gads_metrics["conversion_value"], windsor_metrics["conversion_value"]
+    )
 
     # Row delta
     row_delta = gads_metrics["row_count"] - windsor_metrics["row_count"]
@@ -277,6 +342,12 @@ def compare_dataset(
         notes.append(f"Google Ads error: {gads_result['error']}")
     if windsor_result["error"]:
         notes.append(f"Windsor error: {windsor_result['error']}")
+    if windsor_result.get("window_mode") == "preset":
+        notes.append(
+            "Windsor search terms use a preset window (includes today); "
+            "Google Ads uses the closed yesterday-back window — small "
+            "partial-day differences are expected"
+        )
     if windsor_metrics["row_count"] > 0:
         row_ratio = abs(row_delta) / windsor_metrics["row_count"]
         if row_ratio > 0.5 and status != "FAIL":
@@ -284,10 +355,18 @@ def compare_dataset(
                 "Row count differs materially — expected for search terms "
                 "where direct API returns more granular rows"
             )
+    if not windsor_metrics["has_conversion_value"] and gads_metrics["has_conversion_value"]:
+        notes.append(
+            "Conversion value reported by Google Ads only — Windsor REST does "
+            "not expose it, so conversion-value parity is N/A (informational)"
+        )
 
     return {
         "dataset": dataset,
         "window": f"{days_back}d",
+        "window_start": start_date,
+        "window_end": end_date,
+        "windsor_window_mode": windsor_result.get("window_mode"),
         "google_ads_rows": gads_metrics["row_count"],
         "windsor_rows": windsor_metrics["row_count"],
         "row_delta": row_delta,
@@ -297,6 +376,12 @@ def compare_dataset(
         "clicks_delta_pct": clicks_delta,
         "impressions_delta_pct": impressions_delta,
         "conversions_delta_pct": conversions_delta,
+        "google_ads_conversion_value": gads_metrics["conversion_value"],
+        "windsor_conversion_value": windsor_metrics["conversion_value"],
+        "conversion_value_delta_pct": conversion_value_delta,
+        "conversion_value_available": (
+            gads_metrics["has_conversion_value"] and windsor_metrics["has_conversion_value"]
+        ),
         "google_ads_campaign_count": gads_metrics["campaign_count"],
         "windsor_campaign_count": windsor_metrics["campaign_count"],
         "google_ads_ad_group_count": gads_metrics["ad_group_count"],
@@ -319,7 +404,8 @@ def format_report(results: list) -> str:
     lines = []
     lines.append("=" * 70)
     lines.append("Google Ads vs Windsor Parity Audit")
-    lines.append(f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    lines.append(f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    lines.append("Windows are closed (yesterday-back, excluding today) to avoid partial-day mismatch.")
     lines.append("=" * 70)
 
     current_window = None
@@ -327,7 +413,10 @@ def format_report(results: list) -> str:
         if r["window"] != current_window:
             current_window = r["window"]
             lines.append("")
-            lines.append(f"Window: {current_window}")
+            window_range = ""
+            if r.get("window_start") and r.get("window_end"):
+                window_range = f"  ({r['window_start']} → {r['window_end']})"
+            lines.append(f"Window: {current_window}{window_range}")
             lines.append("-" * 40)
 
         lines.append("")
@@ -341,6 +430,10 @@ def format_report(results: list) -> str:
         lines.append(f"    Clicks delta:        {format_delta(r['clicks_delta_pct'])}")
         lines.append(f"    Impressions delta:   {format_delta(r['impressions_delta_pct'])}")
         lines.append(f"    Conversions delta:   {format_delta(r['conversions_delta_pct'])}")
+        if r.get("conversion_value_available"):
+            lines.append(f"    Conv. value delta:   {format_delta(r['conversion_value_delta_pct'])}")
+        else:
+            lines.append("    Conv. value delta:   N/A (not exposed by both sources)")
         lines.append(f"    Status:              {r['status']}")
         if r["notes"]:
             lines.append(f"    Notes:               {r['notes']}")
@@ -386,7 +479,10 @@ def run_audit(windows: list[int] = None, datasets: list[str] = None) -> list[dic
 
     results = []
     for days_back in windows:
-        end_date = datetime.utcnow().date()
+        # Closed window: end on yesterday (UTC) and exclude today so neither
+        # source compares a partial, still-accumulating current day.
+        today = datetime.now(timezone.utc).date()
+        end_date = today - timedelta(days=1)
         start_date = end_date - timedelta(days=days_back - 1)
 
         for dataset in datasets:

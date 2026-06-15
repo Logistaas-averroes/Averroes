@@ -22,7 +22,7 @@ Prerequisites:
 
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Ensure repo root is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -93,7 +93,7 @@ def main() -> None:
     print(f"Mode: {mode}")
     print(f"Customer ID: {customer_id}")
 
-    end = datetime.utcnow().date()
+    end = datetime.now(timezone.utc).date()
     start = end - timedelta(days=6)
     start_str = str(start)
     end_str = str(end)
