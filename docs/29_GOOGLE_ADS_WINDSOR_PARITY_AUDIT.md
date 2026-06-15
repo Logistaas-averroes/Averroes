@@ -1,6 +1,6 @@
 # 29 — Google Ads vs Windsor Parity Audit
 
-**PR:** PR-ADS-099
+**PR:** PR-ADS-099 (initial) · **PR-ADS-106** (closed-window hardening)
 **Status:** Read-only audit — no production cutover
 **Scope:** Compare direct Google Ads API data against Windsor/current source
 
@@ -12,6 +12,28 @@ production data source for campaigns, search terms, keywords, and geo data.
 
 **Important:** This audit does NOT switch production data sources. It produces
 a comparison report only. There is no production source switch in this PR.
+
+## PR-ADS-106 — Closed-Window Hardening
+
+PR-ADS-106 hardened the audit so comparisons are apples-to-apples:
+
+- **Closed date windows only.** Each window ends on **yesterday (UTC)** and
+  excludes today, so neither source is compared on a partial, still-accumulating
+  current day. A `7d` window covers `today-7 → today-1` (7 closed days).
+- **Same explicit range on both sides.** Campaigns, keywords, and geo use
+  Windsor's explicit-range pulls (`pull_*_performance_range`) with the identical
+  `start → end` dates the Google Ads API is queried with.
+- **Conversion value parity** is reported where both sources expose it.
+- **Timezone-aware timestamps.** `datetime.utcnow()` was replaced with
+  `datetime.now(timezone.utc)` in the audit and the smoke test to remove the
+  Python deprecation warning.
+
+### Spend normalization (cost_micros)
+
+The Google Ads API reports cost in **micros**. Spend is normalized to currency
+units as `spend = cost_micros / 1_000_000`. The direct connector exposes a
+pre-normalized `spend` field; the audit additionally falls back to normalizing
+`cost_micros` itself so totals are correct even for raw rows.
 
 ## How to Run
 
@@ -58,6 +80,19 @@ python scripts/google_ads_parity_audit.py --windows 7,30,60 --datasets campaigns
 - **NOT_AVAILABLE**: Windsor/current source is missing or returned zero rows
 
 ## Known Expected Differences
+
+These differences are **acceptable** and explained — they should not, on their
+own, be read as a parity failure:
+
+| Source of difference | Why it happens | Expected magnitude |
+|----------------------|----------------|--------------------|
+| **Privacy thresholds** | Google Ads suppresses low-volume search terms and segments to protect user privacy; Windsor may aggregate differently. | Search-term row counts and long-tail spend can differ. |
+| **Date freshness** | The Google Ads API reflects up-to-yesterday data; Windsor sync can lag 24–48h. | Small recent-date metric differences. |
+| **Timezone** | The Google Ads account timezone vs UTC vs Windsor's reporting timezone can shift a row across a day boundary at window edges. | Edge-of-window metric shuffling. |
+| **Campaign status filtering** | Removed/paused entities may be included or excluded differently between sources. | Row-count and entity-count differences. |
+| **Attribution timing** | Different conversion attribution windows / models change when a conversion lands. | Conversion and conversion-value deltas < ~5%. |
+| **Search-term visibility** | The direct API returns all search terms that triggered ads; Windsor may filter or aggregate low-impression terms. | Search-term row counts can differ 50–100%. |
+| **Conversion value exposure** | Windsor REST does not currently expose conversion value; the direct API does. | Conversion-value parity reported as **N/A** (informational only). |
 
 ### Search Term Row Counts
 
@@ -121,11 +156,11 @@ scripts/google_ads_parity_audit.py
 │   ├── fetch_search_terms()
 │   ├── fetch_keyword_performance()
 │   └── fetch_geo_performance()
-├── fetch_windsor_data()       → connectors/windsor_pull.py
-│   ├── pull_campaign_performance()
-│   ├── pull_search_terms()
-│   ├── pull_keyword_performance()
-│   └── pull_geo_performance()
+├── fetch_windsor_data()       → connectors/windsor_pull.py (closed window)
+│   ├── pull_campaign_performance_range(start, end)
+│   ├── pull_keyword_performance_range(start, end)
+│   ├── pull_geo_performance_range(start, end)
+│   └── pull_search_terms(days_back)   # preset window — no explicit-range API
 ├── compare_dataset()          → Computes deltas and classifies status
 ├── format_report()            → Human-readable output
 └── run_audit()                → Orchestrates full audit
@@ -144,10 +179,11 @@ scripts/google_ads_parity_audit.py
 ```
 ======================================================================
 Google Ads vs Windsor Parity Audit
-Generated: 2026-06-08 14:00:00 UTC
+Generated: 2026-06-15 06:00:00 UTC
+Windows are closed (yesterday-back, excluding today) to avoid partial-day mismatch.
 ======================================================================
 
-Window: 7d
+Window: 7d  (2026-06-08 → 2026-06-14)
 ----------------------------------------
 
   CAMPAIGNS
@@ -160,6 +196,7 @@ Window: 7d
     Clicks delta:        -0.4%
     Impressions delta:   +0.2%
     Conversions delta:   +1.1%
+    Conv. value delta:   N/A (not exposed by both sources)
     Status:              PASS
 
   SEARCH_TERMS

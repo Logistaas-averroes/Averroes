@@ -1,5 +1,6 @@
 """
 Tests for PR-ADS-099: Google Ads API vs Windsor Dataset Parity Audit
+PR-ADS-106: Closed-Window Hardening
 
 Validates:
 - Parity math functions
@@ -8,21 +9,30 @@ Validates:
 - No Google Ads mutate services referenced
 - No database writes in audit script
 - Docs mention read-only audit and no production cutover
+- Closed (yesterday-back, UTC) date windows
+- conversion_value aggregation and cost_micros normalization
+- Windsor closed-window range fetch vs preset search-terms fallback
 """
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
+import scripts.google_ads_parity_audit as audit
 from scripts.google_ads_parity_audit import (
     percent_delta,
     classify_status,
     format_delta,
     aggregate_metrics,
+    fetch_windsor_data,
+    run_audit,
+    _row_spend,
+    _row_conversion_value,
 )
 
 
@@ -379,3 +389,179 @@ class TestDocumentation:
         assert "PASS" in doc
         assert "WARNING" in doc
         assert "FAIL" in doc
+
+    def test_docs_mention_closed_windows(self):
+        """PR-ADS-106: docs must explain closed yesterday-back windows."""
+        doc = _read_source("docs/29_GOOGLE_ADS_WINDSOR_PARITY_AUDIT.md").lower()
+        assert "closed" in doc
+        assert "yesterday" in doc
+
+    def test_docs_mention_conversion_value(self):
+        """PR-ADS-106: docs must mention conversion value parity."""
+        doc = _read_source("docs/29_GOOGLE_ADS_WINDSOR_PARITY_AUDIT.md").lower()
+        assert "conversion value" in doc
+
+    def test_docs_mention_cost_micros_normalization(self):
+        """PR-ADS-106: docs must explain cost_micros normalization."""
+        doc = _read_source("docs/29_GOOGLE_ADS_WINDSOR_PARITY_AUDIT.md").lower()
+        assert "cost_micros" in doc
+        assert "1_000_000" in doc or "1,000,000" in doc
+
+    def test_docs_mention_acceptable_difference_categories(self):
+        """PR-ADS-106: docs must explain each acceptable-difference category."""
+        doc = _read_source("docs/29_GOOGLE_ADS_WINDSOR_PARITY_AUDIT.md").lower()
+        for term in (
+            "privacy",
+            "timezone",
+            "status filtering",
+            "attribution",
+            "search-term visibility",
+        ):
+            assert term in doc, f"Docs must explain acceptable difference: {term}"
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-106: cost_micros normalization
+# ---------------------------------------------------------------------------
+
+class TestCostMicrosNormalization:
+    """Spend must be normalized from cost_micros when no spend field exists."""
+
+    def test_row_spend_prefers_spend_field(self):
+        row = {"spend": 2.0, "cost_micros": 999_000_000}
+        assert _row_spend(row, "spend") == 2.0
+
+    def test_row_spend_falls_back_to_cost_micros(self):
+        row = {"cost_micros": 1_500_000}
+        assert _row_spend(row, "spend") == pytest.approx(1.5)
+
+    def test_row_spend_zero_when_no_signal(self):
+        assert _row_spend({"clicks": 3}, "spend") == 0.0
+
+    def test_aggregate_normalizes_cost_micros(self):
+        rows = [
+            {"cost_micros": 1_500_000, "clicks": 1, "impressions": 10},
+            {"cost_micros": 2_500_000, "clicks": 2, "impressions": 20},
+        ]
+        result = aggregate_metrics(rows)
+        assert result["spend"] == pytest.approx(4.0)
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-106: conversion value aggregation
+# ---------------------------------------------------------------------------
+
+class TestConversionValueAggregation:
+    """Conversion value must aggregate from either field name, where available."""
+
+    def test_conversions_value_field(self):
+        result = aggregate_metrics([{"conversions_value": 100.0}, {"conversions_value": 50.0}])
+        assert result["conversion_value"] == pytest.approx(150.0)
+        assert result["has_conversion_value"] is True
+
+    def test_conversion_value_alt_field(self):
+        result = aggregate_metrics([{"conversion_value": 25.0}])
+        assert result["conversion_value"] == pytest.approx(25.0)
+        assert result["has_conversion_value"] is True
+
+    def test_absent_conversion_value(self):
+        result = aggregate_metrics([{"spend": 1.0, "clicks": 1}])
+        assert result["conversion_value"] == 0.0
+        assert result["has_conversion_value"] is False
+
+    def test_row_conversion_value_helper(self):
+        assert _row_conversion_value({"conversions_value": 9.0}) == 9.0
+        assert _row_conversion_value({"conversion_value": 4.0}) == 4.0
+        assert _row_conversion_value({"spend": 1.0}) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-106: closed (yesterday-back, UTC) date windows
+# ---------------------------------------------------------------------------
+
+class TestClosedWindows:
+    """run_audit must use closed windows that exclude today."""
+
+    def _patch_sources(self, monkeypatch):
+        monkeypatch.setattr(
+            audit, "fetch_google_ads_data",
+            lambda dataset, start, end: {"rows": [], "error": None},
+        )
+        monkeypatch.setattr(
+            audit, "fetch_windsor_data",
+            lambda dataset, start, end, days_back: {
+                "rows": [], "error": None, "window_mode": "closed_range",
+            },
+        )
+
+    def test_window_end_is_yesterday_utc(self, monkeypatch):
+        self._patch_sources(monkeypatch)
+        results = run_audit(windows=[7], datasets=["campaigns"])
+        today = datetime.now(timezone.utc).date()
+        assert results[0]["window_end"] == str(today - timedelta(days=1))
+
+    def test_window_does_not_include_today(self, monkeypatch):
+        self._patch_sources(monkeypatch)
+        results = run_audit(windows=[30], datasets=["campaigns"])
+        today = datetime.now(timezone.utc).date()
+        assert results[0]["window_end"] != str(today)
+
+    def test_window_span_matches_days_back(self, monkeypatch):
+        self._patch_sources(monkeypatch)
+        for days_back in (7, 30, 60):
+            results = run_audit(windows=[days_back], datasets=["campaigns"])
+            start = datetime.fromisoformat(results[0]["window_start"]).date()
+            end = datetime.fromisoformat(results[0]["window_end"]).date()
+            # Inclusive span: end - start + 1 == days_back
+            assert (end - start).days + 1 == days_back
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-106: Windsor closed-window range fetch vs preset search terms
+# ---------------------------------------------------------------------------
+
+class TestWindsorClosedWindowFetch:
+    """Campaigns/keywords/geo use explicit-range pulls; search terms use preset."""
+
+    def test_campaigns_use_explicit_range(self, monkeypatch):
+        import connectors.windsor_pull as wp
+        captured = {}
+        monkeypatch.setattr(
+            wp, "pull_campaign_performance_range",
+            lambda date_from, date_to: captured.update(args=(date_from, date_to)) or [],
+        )
+        result = fetch_windsor_data("campaigns", "2026-06-08", "2026-06-14", 7)
+        assert result["window_mode"] == "closed_range"
+        assert captured["args"] == ("2026-06-08", "2026-06-14")
+
+    def test_geo_and_keywords_use_explicit_range(self, monkeypatch):
+        import connectors.windsor_pull as wp
+        monkeypatch.setattr(wp, "pull_keyword_performance_range", lambda f, t: [])
+        monkeypatch.setattr(wp, "pull_geo_performance_range", lambda f, t: [])
+        assert fetch_windsor_data("keywords", "2026-06-08", "2026-06-14", 7)["window_mode"] == "closed_range"
+        assert fetch_windsor_data("geo", "2026-06-08", "2026-06-14", 7)["window_mode"] == "closed_range"
+
+    def test_search_terms_use_preset(self, monkeypatch):
+        import connectors.windsor_pull as wp
+        captured = {}
+        monkeypatch.setattr(
+            wp, "pull_search_terms",
+            lambda days_back=0: captured.update(days_back=days_back) or [],
+        )
+        result = fetch_windsor_data("search_terms", "2026-06-08", "2026-06-14", 7)
+        assert result["window_mode"] == "preset"
+        assert captured["days_back"] == 7
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-106: no datetime.utcnow() (deprecation) in audit or smoke test
+# ---------------------------------------------------------------------------
+
+class TestNoDeprecatedUtcnow:
+    def test_audit_script_has_no_utcnow(self):
+        source = _read_source("scripts/google_ads_parity_audit.py")
+        assert "utcnow" not in source, "Use datetime.now(timezone.utc), not utcnow()"
+
+    def test_smoke_test_has_no_utcnow(self):
+        source = _read_source("scripts/google_ads_smoke_test.py")
+        assert "utcnow" not in source, "Use datetime.now(timezone.utc), not utcnow()"
