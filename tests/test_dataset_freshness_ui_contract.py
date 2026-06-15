@@ -6,7 +6,7 @@ PR-ADS-074 — Dataset-Level Freshness Truth Across Dashboard Pages.
 Tests cover:
   - PAGE_DATASET_MAP includes all major data pages.
   - Every dataset key in PAGE_DATASET_MAP is a known "source/dataset" string.
-  - Derived pages (ngrams, waste) map to windsor/search_terms.
+  - Derived pages (ngrams, waste) map to google_ads_api/search_terms.
   - Multi-dataset pages (action_queue) reference the expected composite keys.
   - "Unknown" state is described as freshness-unverified, never as "failed".
   - No unsafe action wording appears in the freshness display copy.
@@ -34,10 +34,10 @@ _APP_JS_TEXT = _APP_JS.read_text(encoding="utf-8")
 
 # Known canonical freshness dataset keys (must match _KNOWN_DATASETS in server.py)
 KNOWN_DATASET_KEYS: set[str] = {
-    "windsor/campaigns",
-    "windsor/keywords",
-    "windsor/search_terms",
-    "windsor/geo",
+    "google_ads_api/campaigns",
+    "google_ads_api/keywords",
+    "google_ads_api/search_terms",
+    "google_ads_api/geo",
     "hubspot/contacts",
     "hubspot/deals",
     "gclid/matches",
@@ -58,7 +58,7 @@ EXPECTED_PAGES: set[str] = {
     "action_queue",
 }
 
-# Derived pages whose mapping must point exclusively at windsor/search_terms
+# Derived pages whose mapping must point exclusively at google_ads_api/search_terms
 DERIVED_PAGES: set[str] = {"ngrams", "waste"}
 
 # ---------------------------------------------------------------------------
@@ -151,14 +151,14 @@ class TestDerivedPages:
 
     def test_ngrams_maps_to_search_terms(self):
         assert "ngrams" in _PAGE_MAP, "ngrams not in PAGE_DATASET_MAP"
-        assert "windsor/search_terms" in _PAGE_MAP["ngrams"], (
-            "ngrams page must map to windsor/search_terms (derived dataset)"
+        assert "google_ads_api/search_terms" in _PAGE_MAP["ngrams"], (
+            "ngrams page must map to google_ads_api/search_terms (derived dataset)"
         )
 
     def test_waste_maps_to_search_terms(self):
         assert "waste" in _PAGE_MAP, "waste not in PAGE_DATASET_MAP"
-        assert "windsor/search_terms" in _PAGE_MAP["waste"], (
-            "waste page must map to windsor/search_terms (derived dataset)"
+        assert "google_ads_api/search_terms" in _PAGE_MAP["waste"], (
+            "waste page must map to google_ads_api/search_terms (derived dataset)"
         )
 
     def test_derived_pages_not_mapped_to_nonexistent_waste_terms_key(self):
@@ -167,7 +167,7 @@ class TestDerivedPages:
             if page in _PAGE_MAP:
                 assert "waste_terms" not in _PAGE_MAP[page], (
                     f"{page} maps to 'waste_terms' which is not a tracked sync_state dataset. "
-                    "Use windsor/search_terms instead."
+                    "Use google_ads_api/search_terms instead."
                 )
 
 
@@ -186,7 +186,7 @@ class TestMultiDatasetPages:
 
     def test_action_queue_includes_campaigns_and_contacts(self):
         keys = _PAGE_MAP.get("action_queue", [])
-        assert "windsor/campaigns" in keys, "action_queue must include windsor/campaigns"
+        assert "google_ads_api/campaigns" in keys, "action_queue must include google_ads_api/campaigns"
         assert "hubspot/contacts" in keys, "action_queue must include hubspot/contacts"
 
     def test_multi_dataset_summary_tracks_running_and_unknown(self):

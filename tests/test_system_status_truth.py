@@ -188,9 +188,9 @@ def test_source_rollup_warning_when_only_degraded():
         "geo": CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
     }
     sources = compute_source_health(statuses)
-    windsor = next(s for s in sources if s["source"] == "windsor")
-    assert windsor["status"] == "warning"
-    action = windsor["next_action"].lower()
+    google_ads = next(s for s in sources if s["source"] == "google_ads_api")
+    assert google_ads["status"] == "warning"
+    action = google_ads["next_action"].lower()
     assert "usable data" in action
     assert "degraded" in action
 
@@ -203,9 +203,9 @@ def test_source_rollup_error_when_failed_no_data_child():
         "geo": CanonicalFreshnessStatus.FRESH_WITH_DATA,
     }
     sources = compute_source_health(statuses)
-    windsor = next(s for s in sources if s["source"] == "windsor")
-    assert windsor["status"] == "error"
-    assert "campaigns" in windsor["next_action"].lower()
+    google_ads = next(s for s in sources if s["source"] == "google_ads_api")
+    assert google_ads["status"] == "error"
+    assert "campaigns" in google_ads["next_action"].lower()
 
 
 def test_source_rollup_ok_when_all_fresh():
@@ -216,8 +216,8 @@ def test_source_rollup_ok_when_all_fresh():
         "geo": CanonicalFreshnessStatus.FRESH_WITH_DATA,
     }
     sources = compute_source_health(statuses)
-    windsor = next(s for s in sources if s["source"] == "windsor")
-    assert windsor["status"] == "ok"
+    google_ads = next(s for s in sources if s["source"] == "google_ads_api")
+    assert google_ads["status"] == "ok"
 
 
 # ── Page impact ────────────────────────────────────────────────────────────
@@ -367,7 +367,7 @@ def test_pipelines_expose_page_status():
 
 def test_scheduler_diagnostic_when_runs_null_but_sources_synced():
     sync_info = {
-        "windsor": {"last_successful_sync_at": "2026-05-25T07:04:00+00:00"},
+        "google_ads_api": {"last_successful_sync_at": "2026-05-25T07:04:00+00:00"},
         "hubspot": {"last_successful_sync_at": None},
     }
     summary = compute_scheduler_summary(None, sync_info)

@@ -153,8 +153,8 @@ def test_failed_dataset_creates_blocker():
 # ── Source Health ──────────────────────────────────────────────────────────
 
 
-def test_source_health_groups_windsor_datasets():
-    """Windsor source includes campaigns, search_terms, keywords, geo."""
+def test_source_health_groups_google_ads_api_datasets():
+    """Google Ads API source includes campaigns, search_terms, keywords, geo."""
     statuses = {
         "campaigns": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "search_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
@@ -162,13 +162,13 @@ def test_source_health_groups_windsor_datasets():
         "geo": CanonicalFreshnessStatus.FRESH_WITH_DATA,
     }
     sources = compute_source_health(statuses)
-    windsor = next((s for s in sources if s["source"] == "windsor"), None)
-    assert windsor is not None
-    assert windsor["status"] == "ok"
-    assert "campaigns" in windsor["datasets"]
-    assert "search_terms" in windsor["datasets"]
-    assert "keywords" in windsor["datasets"]
-    assert "geo" in windsor["datasets"]
+    google_ads = next((s for s in sources if s["source"] == "google_ads_api"), None)
+    assert google_ads is not None
+    assert google_ads["status"] == "ok"
+    assert "campaigns" in google_ads["datasets"]
+    assert "search_terms" in google_ads["datasets"]
+    assert "keywords" in google_ads["datasets"]
+    assert "geo" in google_ads["datasets"]
 
 
 def test_source_health_groups_hubspot_datasets():
@@ -194,9 +194,9 @@ def test_source_health_warning_when_dataset_empty():
         "geo": CanonicalFreshnessStatus.FRESH_WITH_DATA,
     }
     sources = compute_source_health(statuses)
-    windsor = next((s for s in sources if s["source"] == "windsor"), None)
-    assert windsor is not None
-    assert windsor["status"] == "warning"
+    google_ads = next((s for s in sources if s["source"] == "google_ads_api"), None)
+    assert google_ads is not None
+    assert google_ads["status"] == "warning"
 
 
 # ── Page Impact ────────────────────────────────────────────────────────────

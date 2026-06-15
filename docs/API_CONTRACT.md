@@ -389,7 +389,7 @@ When database is unavailable: `{ "days": 30, "runs": [], "db_unavailable": true 
 ---
 
 #### `GET /api/geo?days=30`
-Windsor geo performance data aggregated by country and campaign for the last N days.
+Google Ads API geo performance data aggregated by country and campaign for the last N days.
 
 **Auth:** Auth
 **Query params:** `days` (integer, default 30, max 365)
@@ -411,8 +411,8 @@ Windsor geo performance data aggregated by country and campaign for the last N d
   ]
 }
 ```
-`country` may be `null`/blank if the upstream Windsor data does not include a country value.
-Data represents Google Ads/Windsor geo performance — not HubSpot lead quality.
+`country` may be `null`/blank if the upstream Google Ads API data does not include a country value.
+Data represents Google Ads API geo performance — not HubSpot lead quality.
 No write operations are performed by this endpoint.
 Used by the Geo Intelligence page (PR-ADS-030).
 When database is unavailable: `{ "days": 30, "rows": [], "db_unavailable": true }`
@@ -420,12 +420,12 @@ When database is unavailable: `{ "days": 30, "rows": [], "db_unavailable": true 
 ---
 
 #### `GET /api/keywords?days=30`
-Windsor keyword performance data aggregated by campaign, ad group, keyword, and match type for the last N days.
+Google Ads API keyword performance data aggregated by campaign, ad group, keyword, and match type for the last N days.
 
 **Auth:** Auth
 **Query params:** `days` (integer, default 30, max 365)
 **Read-only:** Yes — no write to Google Ads or any external system
-**Source:** `keywords` table — Windsor keyword performance data persisted per run
+**Source:** `keywords` table — Google Ads API keyword performance data persisted per run
 
 **Response 200:**
 ```json
@@ -453,12 +453,12 @@ Windsor keyword performance data aggregated by campaign, ad group, keyword, and 
 **Important scope notes:**
 - This endpoint returns Google Ads keyword performance only — it does not include HubSpot lead quality.
 - It does not include actual user search terms (those are in `/api/waste`).
-- `match_type` may be `null`/blank if the upstream Windsor data does not include a match type value.
-- `quality_score` may be `null` if not reported by Windsor for a keyword.
+- `match_type` may be `null`/blank if the upstream Google Ads API data does not include a match type value.
+- `quality_score` may be `null` if not reported by the Google Ads API for a keyword.
 - `cpc_usd` is recalculated server-side from `spend / clicks` where clicks > 0; otherwise 0.
 - Rows are aggregated over the selected window — `spend_usd`, `clicks`, `impressions`, and `conversions` are summed; `quality_score` is averaged.
 - `runs` is the count of distinct run IDs contributing to each aggregated row.
-- Rendered by the Keywords page as of PR-ADS-032. Shows Google Ads/Windsor keyword performance only — not HubSpot lead-quality data. Does not include full user search terms. Quality score and match type may be null/unknown.
+- Rendered by the Keywords page as of PR-ADS-032. Shows Google Ads API keyword performance only — not HubSpot lead-quality data. Does not include full user search terms. Quality score and match type may be null/unknown.
 
 When database is unavailable: `{ "days": 30, "rows": [], "db_unavailable": true }`
 
@@ -632,7 +632,7 @@ Campaign drill-down detail — full investigation context for a single campaign.
   "data_sources": {
     "campaign": "PostgreSQL campaigns table",
     "lead_quality": "HubSpot-derived leads table",
-    "keywords": "Windsor keyword performance",
+    "keywords": "Google Ads API keyword performance",
     "waste_terms": "Waste detection from search terms"
   }
 }
@@ -652,7 +652,7 @@ Example partial response:
 - `campaign` — latest snapshot row from the campaigns table for the campaign name in the selected window. `total_leads` uses latest-snapshot semantics (not summed across overlapping runs).
 - `lead_quality` — HubSpot-derived `status_category` from the leads table, deduplicated by `contact_id` (latest run per contact wins; null `contact_id` rows treated as unique).
 - `countries` — deduped leads grouped by `COALESCE(NULLIF(BTRIM(country), ''), '(unknown)')`, sorted by total leads descending. Includes `in_progress` in both the response and the verdicted_leads denominator (consistent with lead-quality).
-- `keywords` — top 10 keyword rows by spend from the keywords table, aggregated by keyword + match_type. Google Ads/Windsor platform metrics only — no HubSpot lead quality joined.
+- `keywords` — top 10 keyword rows by spend from the keywords table, aggregated by keyword + match_type. Google Ads API platform metrics only — no HubSpot lead quality joined.
 - `waste_terms` — top 10 waste term rows by spend from the waste_terms table, aggregated by search_term + junk_category + matched_pattern.
 - `recent_leads` — 10 most recent deduped leads for this campaign (by run_date descending). Does not expose contact_id.
 - `lead_quality.junk_rate_pct` — `confirmed_junk / verdicted_leads × 100`; `null` when `verdicted_leads = 0`. Unknown contacts (including `OPEN - Connecting`) are **excluded** from the denominator.
@@ -660,7 +660,7 @@ Example partial response:
 **Scope boundaries:**
 - Does not write to Google Ads.
 - Does not write to HubSpot.
-- Keyword section is Google Ads/Windsor platform metrics only.
+- Keyword section is Google Ads API platform metrics only.
 - Waste section shows flagged waste terms only — no apply/push action.
 - Lead quality uses HubSpot-derived `status_category` only.
 - Phase 1 read-only — no AI inference, no recommendations, no bid/budget changes.
@@ -866,7 +866,7 @@ Data quality:
 - Severity is display-only.
 - No writes are performed by this endpoint.
 - No external API calls are made.
-- Keyword `evidence.google_ads_conversions` reflects Google Ads/Windsor platform conversions only, not HubSpot SQLs.
+- Keyword `evidence.google_ads_conversions` reflects Google Ads API platform conversions only, not HubSpot SQLs.
 
 **Response 200:**
 ```json
@@ -936,10 +936,16 @@ Enhanced with canonical freshness semantics (PR-ADS-067).
 | `days` | int | 60 | Window for row count queries (clamped to 1–90) |
 
 **Known datasets:**
-- `windsor` / `campaigns`
-- `windsor` / `keywords`
-- `windsor` / `search_terms`
-- `windsor` / `geo`
+
+> **PR-ADS-105:** Platform Evidence datasets are sourced directly from the
+> Google Ads API (scheduler cutover landed in PR-ADS-104, which writes sync
+> batches with `source="google_ads_api"`). Windsor remains only as
+> legacy/deprecated history, not the active source.
+
+- `google_ads_api` / `campaigns`
+- `google_ads_api` / `keywords`
+- `google_ads_api` / `search_terms`
+- `google_ads_api` / `geo`
 - `hubspot` / `contacts`
 - `hubspot` / `deals`
 - `gclid` / `matches`
@@ -969,7 +975,7 @@ Enhanced with canonical freshness semantics (PR-ADS-067).
 {
   "datasets": [
     {
-      "source": "windsor",
+      "source": "google_ads_api",
       "dataset": "campaigns",
       "status": "success",
       "last_successful_sync_at": "2026-05-04T06:00:00+00:00",
@@ -1011,7 +1017,7 @@ Enhanced with canonical freshness semantics (PR-ADS-067).
 ```json
 {
   "datasets": [
-    { "source": "windsor",  "dataset": "campaigns",    "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null, "canonical_status": "not_run", "severity": "neutral", "rows_in_window": null, "latest_source_date": null, "last_batch_row_count": 0, "stale_threshold_days": 8, "depends_on": [], "dependency_status": null, "reason": "No sync state or sync batches exist for this dataset.", "next_action": "Trigger a sync via scheduler or manual run." }
+    { "source": "google_ads_api",  "dataset": "campaigns",    "status": "unknown", "last_successful_sync_at": null, "last_source_date": null, "last_batch_id": null, "error_message": null, "updated_at": null, "canonical_status": "not_run", "severity": "neutral", "rows_in_window": null, "latest_source_date": null, "last_batch_row_count": 0, "stale_threshold_days": 8, "depends_on": [], "dependency_status": null, "reason": "No sync state or sync batches exist for this dataset.", "next_action": "Trigger a sync via scheduler or manual run." }
   ],
   "summary": {
     "total": 11,
@@ -1047,7 +1053,7 @@ Enhanced with canonical freshness semantics (PR-ADS-067).
   not a successful upstream fetch by itself.
 - Batch writer row counts may represent attempted upserts, not confirmed physical inserts. Schedulers treat
   non-empty fetched data with zero written rows as failed freshness and must not mark the dataset fresh.
-- As of PR-ADS-051, tracked raw-fact freshness includes `windsor/search_terms` on daily/weekly/monthly runs,
+- As of PR-ADS-051, tracked raw-fact freshness includes `google_ads_api/search_terms` on daily/weekly/monthly runs,
   `hubspot/contacts` on daily runs, and `gclid/matches` on weekly/monthly runs. Other datasets may remain
   `unknown` until their raw-fact sync path is implemented. `unknown` does not mean failed; it means no
   successful tracked sync has been recorded yet.
@@ -1120,7 +1126,7 @@ Paginated raw search-term fact rows for the last N days.
     "has_more": true
   },
   "data_quality": {
-    "source": "windsor",
+    "source": "google_ads_api",
     "dataset": "search_terms",
     "table": "search_terms",
     "days": 14,
@@ -1144,7 +1150,7 @@ Paginated raw search-term fact rows for the last N days.
   },
   "rows": [],
   "pagination": { "limit": 100, "next_cursor": null, "has_more": false },
-  "data_quality": { "source": "windsor", "dataset": "search_terms", "status": "db_unavailable" },
+  "data_quality": { "source": "google_ads_api", "dataset": "search_terms", "status": "db_unavailable" },
   "db_unavailable": true
 }
 ```
@@ -1233,7 +1239,7 @@ Aggregate summary counts for the selected filter/window.
     "unanalyzed": { "rows": 70, "spend_usd": 1130.15 }
   },
   "data_quality": {
-    "source": "windsor",
+    "source": "google_ads_api",
     "dataset": "search_terms",
     "table": "search_terms",
     "days": 14,
@@ -1267,7 +1273,7 @@ Aggregate summary counts for the selected filter/window.
     "clean":      { "rows": 0, "spend_usd": 0 },
     "unanalyzed": { "rows": 0, "spend_usd": 0 }
   },
-  "data_quality": { "source": "windsor", "dataset": "search_terms", "status": "db_unavailable" },
+  "data_quality": { "source": "google_ads_api", "dataset": "search_terms", "status": "db_unavailable" },
   "db_unavailable": true
 }
 ```
@@ -1682,7 +1688,7 @@ One row per dataset sync operation (backfill, daily, weekly, monthly, manual).
 |--------|------|-------|
 | `id` | SERIAL PK | Auto-generated batch ID |
 | `run_id` | INTEGER (nullable FK → runs) | Nullable — manual backfills may run outside scheduler runs |
-| `source` | TEXT NOT NULL | `windsor` \| `hubspot` \| `gclid` |
+| `source` | TEXT NOT NULL | `google_ads_api` \| `hubspot` \| `gclid` \| `windsor` (legacy) |
 | `dataset` | TEXT NOT NULL | `campaigns` \| `keywords` \| `search_terms` \| `geo` \| `contacts` \| `deals` \| `matches` |
 | `sync_type` | TEXT NOT NULL | `backfill` \| `daily` \| `weekly` \| `monthly` \| `manual` |
 | `date_from` | DATE | Nullable — start of data range synced |
@@ -1830,8 +1836,8 @@ One GCLID coverage snapshot per run, capturing aggregate coverage statistics.
 | GET | `/api/waste` | Auth | Waste terms (DB, ?days=) |
 | GET | `/api/runs` | Auth | Run records (DB, ?days=) |
 | GET | `/api/summary` | Auth | Headline metrics (DB, ?days=) |
-| GET | `/api/geo` | Auth | Windsor geo performance by country/campaign (DB, ?days=) |
-| GET | `/api/keywords` | Auth | Windsor keyword performance by campaign/ad group/keyword (DB, ?days=) |
+| GET | `/api/geo` | Auth | Google Ads API geo performance by country/campaign (DB, ?days=) |
+| GET | `/api/keywords` | Auth | Google Ads API keyword performance by campaign/ad group/keyword (DB, ?days=) |
 | GET | `/api/leads/country-summary` | Auth | HubSpot lead quality by country (DB, ?days=) |
 | GET | `/api/config/ui-thresholds` | Auth | UI-safe display thresholds from config/thresholds.yaml |
 | GET | `/api/dashboard/trends` | Auth | Previous-period trend comparison for dashboard (DB, ?days=) |
@@ -2021,7 +2027,7 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
       "rows_60d": 0,
       "latest_date": null,
       "freshness_status": "success",
-      "source": "windsor",
+      "source": "google_ads_api",
       "last_sync_type": "weekly/daily",
       "last_sync_status": "success",
       "verdict": "FRESH_BUT_EMPTY",
@@ -2093,13 +2099,13 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
       "title": "Search Terms has no usable rows",
       "affected_pages": ["Search Terms", "Waste Terms", "N-Grams"],
       "reason": "Search Terms is fresh_but_empty.",
-      "next_action": "Check Search Terms verdict and Windsor REST/MCP parity."
+      "next_action": "Check Search Terms verdict and Google Ads API search-term sync."
     }
   ],
   "sources": [
     {
-      "source": "windsor",
-      "label": "Windsor / Google Ads",
+      "source": "google_ads_api",
+      "label": "Google Ads API",
       "status": "warning",
       "datasets": ["campaigns", "search_terms", "keywords", "geo"],
       "last_successful_sync_at": "2026-05-25T07:04:00+00:00",
@@ -2111,7 +2117,7 @@ See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` for the full policy.
     {
       "key": "search_terms",
       "label": "Search Terms Pipeline",
-      "source": "windsor",
+      "source": "google_ads_api",
       "page": "Search Terms",
       "canonical_status": "fresh_but_empty",
       "severity": "warning",
@@ -2218,7 +2224,7 @@ syncs, the response includes:
   "datasets": [
     {
       "key": "campaigns",
-      "source": "windsor",
+      "source": "google_ads_api",
       "table": "campaigns",
       "date_column": "run_date",
       "window_counts": { "7d": 1200, "30d": 3900, "60d": 5707 },
@@ -2274,7 +2280,7 @@ The reviewer will reject the PR if `api/server.py` and this file disagree.
 ## ROAS & Revenue Truth Endpoints (PR-ADS-080A)
 
 These endpoints form the Revenue Truth Layer. Revenue source is HubSpot won deals.
-Spend source is Windsor / Google Ads. **Google Ads conversion value is NOT used.**
+Spend source is the Google Ads API. **Google Ads conversion value is NOT used.**
 All route paths follow the repo convention and are mounted under `/api/...`.
 
 ---

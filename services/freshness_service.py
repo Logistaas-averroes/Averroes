@@ -112,7 +112,7 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
     "campaigns": {
         "table": "campaigns",
         "date_column": "run_date",
-        "source": "windsor",
+        "source": "google_ads_api",
         "dataset": "campaigns",
         "stale_threshold_days": 8,
         "depends_on": [],
@@ -121,7 +121,7 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
     "search_terms": {
         "table": "search_terms",
         "date_column": "source_date",
-        "source": "windsor",
+        "source": "google_ads_api",
         "dataset": "search_terms",
         "stale_threshold_days": 8,
         "depends_on": [],
@@ -148,7 +148,7 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
     "keywords": {
         "table": "keywords",
         "date_column": "run_date",
-        "source": "windsor",
+        "source": "google_ads_api",
         "dataset": "keywords",
         "stale_threshold_days": 8,
         "depends_on": [],
@@ -157,7 +157,7 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
     "geo": {
         "table": "geo",
         "date_column": "run_date",
-        "source": "windsor",
+        "source": "google_ads_api",
         "dataset": "geo",
         "stale_threshold_days": 8,
         "depends_on": [],

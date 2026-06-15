@@ -324,3 +324,12 @@ When fully built, this system is Logistaas's permanent paid media intelligence l
 |----|--------|-------------|--------|
 | PR-ADS-069 | `static/` + `docs/` + `tests/` | Sidebar grouped into Command Center / Evidence / Review & Quality / Admin; page labels renamed to operator language; route keys unchanged | ✅ Complete |
 | PR-ADS-070 | `static/` + `docs/` + `tests/` | Empty State & Page Explanation Upgrade — every page explains itself, critical empty states are contextual, not generic | 🔨 In progress |
+
+---
+
+### Google Ads API Direct Source Cutover (Phase 3)
+
+| PR | Module | Description | Status |
+|----|--------|-------------|--------|
+| PR-ADS-104 | `scheduler/` + `connectors/` | Incremental scheduler cutover — daily/weekly/monthly pulls moved from Windsor.ai to the direct Google Ads API; sync batches use `source="google_ads_api"` | ✅ Complete |
+| PR-ADS-105 | `static/` + `api/` + `services/` + `docs/` + `tests/` | Platform Evidence & Admin source-label cutover — visible app layer + freshness/source mapping now show **Google Ads API** as the active platform source; Windsor demoted to legacy. Route keys unchanged | ✅ Complete |

@@ -59,21 +59,21 @@ let _latestRunForMeta = null;
 // to the canonical dataset keys that power it.  Keys are "source/dataset"
 // strings matching the sync_state table values returned by /api/datasets/freshness.
 //
-// Derived pages (ngrams, waste) share their source dataset (windsor/search_terms)
+// Derived pages (ngrams, waste) share their source dataset (google_ads_api/search_terms)
 // because no separate freshness record exists for the derived output.
 const PAGE_DATASET_MAP = {
-  campaigns:         ["windsor/campaigns"],
-  waste:             ["windsor/search_terms"],   // waste_terms derived from search_terms
-  search_terms:      ["windsor/search_terms"],
-  ngrams:            ["windsor/search_terms"],   // n-grams derived from search_terms
-  geo:               ["windsor/geo"],
-  keywords:          ["windsor/keywords"],
+  campaigns:         ["google_ads_api/campaigns"],
+  waste:             ["google_ads_api/search_terms"],   // waste_terms derived from search_terms
+  search_terms:      ["google_ads_api/search_terms"],
+  ngrams:            ["google_ads_api/search_terms"],   // n-grams derived from search_terms
+  geo:               ["google_ads_api/geo"],
+  keywords:          ["google_ads_api/keywords"],
   lead_quality:      ["hubspot/contacts"],
   deals:             ["hubspot/deals"],
   gclid_attribution: ["gclid/matches"],
   in_progress_leads: ["hubspot/contacts"],
-  action_queue:      ["windsor/campaigns", "hubspot/contacts", "hubspot/deals"],
-  reports:           ["windsor/campaigns", "hubspot/contacts", "hubspot/deals", "windsor/search_terms"],
+  action_queue:      ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals"],
+  reports:           ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals", "google_ads_api/search_terms"],
 };
 
 // Pages whose output is derived/computed from the source datasets above rather
@@ -114,23 +114,23 @@ const PAGE_EXPLANATIONS = {
   campaigns: {
     title: "Campaigns",
     purpose: "Campaign truth table — spend, quality, verdict, and performance metrics.",
-    source: "Windsor / Google Ads campaign data.",
+    source: "Google Ads API campaign data.",
     dependsOn: ["campaigns"],
-    emptyMeans: "No campaign performance rows found for this window. Windsor campaign data may not have synced.",
-    nextAction: "Check System Status → Windsor / Campaigns."
+    emptyMeans: "No Google Ads API campaign data has been synced yet for this window. Run the daily/weekly scheduler or check System Status.",
+    nextAction: "Check System Status → Google Ads API / Campaigns."
   },
   "search-terms": {
     title: "Search Term Universe",
-    purpose: "Raw Google Ads search terms pulled from Windsor.",
-    source: "Windsor / Google Ads search-term data.",
+    purpose: "Raw Google Ads search terms sourced directly from the Google Ads API.",
+    source: "Google Ads API search-term data.",
     dependsOn: ["search_terms"],
-    emptyMeans: "This does not mean the account is clean. It means no search-term rows are currently available for this window.",
+    emptyMeans: "This does not mean the account is clean. It means no Google Ads API search-term rows are currently available for this window.",
     nextAction: "Check System Status → Search Terms Pipeline."
   },
   ngrams: {
     title: "Search Pattern Analysis",
     purpose: "Recurring words and phrases extracted from stored search terms.",
-    source: "Computed from Search Term Universe.",
+    source: "Patterns are calculated from Google Ads API search-term evidence.",
     dependsOn: ["search_terms"],
     emptyMeans: "If Search Term Universe is empty or blocked, pattern analysis cannot run.",
     nextAction: "Fix Search Term Universe first."
@@ -146,18 +146,18 @@ const PAGE_EXPLANATIONS = {
   geo: {
     title: "Country Performance",
     purpose: "Geographic intelligence — performance and quality by country.",
-    source: "Windsor / Google Ads geo data.",
+    source: "Google Ads API geo data.",
     dependsOn: ["geo"],
-    emptyMeans: "No geo intelligence available for the selected window.",
-    nextAction: "Check System Status → Windsor / Geo."
+    emptyMeans: "No Google Ads API geo data has been synced yet for this window. Run the weekly/monthly scheduler or check System Status.",
+    nextAction: "Check System Status → Google Ads API / Geo."
   },
   keywords: {
     title: "Keyword Performance",
     purpose: "Keyword-level performance metrics and quality signals.",
-    source: "Windsor / Google Ads keyword data.",
+    source: "Google Ads API keyword data.",
     dependsOn: ["keywords"],
-    emptyMeans: "No keyword data available for the selected window.",
-    nextAction: "Check System Status → Windsor / Keywords."
+    emptyMeans: "No Google Ads API keyword data has been synced yet for this window. Run the weekly/monthly scheduler or check System Status.",
+    nextAction: "Check System Status → Google Ads API / Keywords."
   },
   leads: {
     title: "Lead Quality",
@@ -227,7 +227,7 @@ const PAGE_EXPLANATIONS = {
     title: "ROAS by Campaign",
     purpose: "HubSpot Revenue Truth ROAS — shows which campaigns produce profitable customers based on closed-won revenue.",
     source: "Revenue Truth Layer (HubSpot deals + Windsor campaigns).",
-    dependsOn: ["hubspot/deals", "windsor/campaigns"],
+    dependsOn: ["hubspot/deals", "google_ads_api/campaigns"],
     emptyMeans: "No closed-won deals attributed to campaigns in this window, or the revenue truth layer has not computed results yet.",
     nextAction: "Check that HubSpot deals are synced and campaigns have spend data."
   },
@@ -235,7 +235,7 @@ const PAGE_EXPLANATIONS = {
     title: "ROAS by Country",
     purpose: "Country-level Revenue Truth ROAS — estimated until GCLID attribution is fully wired.",
     source: "Revenue Truth Layer (HubSpot deals + Windsor geo).",
-    dependsOn: ["hubspot/deals", "windsor/geo"],
+    dependsOn: ["hubspot/deals", "google_ads_api/geo"],
     emptyMeans: "No country-level revenue data available for this window.",
     nextAction: "Check that geo and deal data are synced."
   },
@@ -243,7 +243,7 @@ const PAGE_EXPLANATIONS = {
     title: "Unit Economics",
     purpose: "Executive SaaS economics — LTV/CAC, payback, and profitability verdicts.",
     source: "Revenue Truth Layer.",
-    dependsOn: ["hubspot/deals", "windsor/campaigns"],
+    dependsOn: ["hubspot/deals", "google_ads_api/campaigns"],
     emptyMeans: "Not enough closed-won volume to compute unit economics.",
     nextAction: "Ensure sufficient deal volume exists in the selected window."
   },
@@ -265,7 +265,7 @@ const PAGE_EXPLANATIONS = {
 const PAGE_HELP_CONTENT = {
   dashboard: {
     what: "High-level summary of paid media performance across campaigns, leads, deals, and waste. Designed for a quick daily health check.",
-    source: "Aggregated from Windsor campaigns, HubSpot contacts/deals, and waste analysis.",
+    source: "Aggregated from Google Ads API campaigns, HubSpot contacts/deals, and waste analysis.",
     howToUse: "Scan KPI cards for anomalies. Click into specific pages for drill-down. Use the time window selector to compare periods.",
     doNotAssume: "Dashboard totals may lag if upstream pipelines have not completed. A green status dot means the API is online, not that data is fresh.",
     checkNext: "System Status for pipeline health, or Action Queue for items needing human review."
@@ -286,28 +286,28 @@ const PAGE_HELP_CONTENT = {
   },
   campaigns: {
     what: "Campaign truth table — every campaign with its spend, quality score, verdict (SCALE/HOLD/FIX/CUT), and key performance metrics.",
-    source: "Windsor / Google Ads campaign data synced via the campaign pipeline.",
+    source: "Google Ads API campaign data synced via the campaign pipeline.",
     howToUse: "Sort by verdict or spend to prioritise attention. Click a campaign name to open the detail drawer. Use the time window to compare periods.",
     doNotAssume: "Verdicts are computed from available data. A HOLD verdict does not mean the campaign is bad — it means insufficient signal to recommend scaling.",
     checkNext: "Campaign detail drawer for drill-down, or ROAS by Campaign for revenue attribution."
   },
   "search-terms": {
-    what: "Raw Google Ads search terms pulled from Windsor. Browse, filter, and export the full search-term universe.",
-    source: "Windsor / Google Ads search-term reports.",
+    what: "Raw Google Ads search terms sourced directly from the Google Ads API. Browse, filter, and export the full search-term universe.",
+    source: "Google Ads API search-term reports.",
     howToUse: "Use filters to narrow by campaign, match type, waste state, or minimum spend. Switch to the Patterns tab for n-gram analysis.",
     doNotAssume: "This page does not add negative keywords or modify Google Ads. It is read-only evidence.",
     checkNext: "Flagged Waste Terms for terms already flagged, or Patterns tab for recurring word analysis."
   },
   keywords: {
     what: "Keyword-level performance metrics — impressions, clicks, spend, conversions, and quality signals per keyword.",
-    source: "Windsor / Google Ads keyword data.",
+    source: "Google Ads API keyword data.",
     howToUse: "Sort by spend or quality score. Filter to find high-spend low-quality keywords that may need attention.",
     doNotAssume: "Keyword data reflects Google Ads reporting. Quality scores are Google's metric, not an internal calculation.",
     checkNext: "Campaigns page for campaign-level context, or Search Terms to see what queries matched each keyword."
   },
   geo: {
     what: "Country-level ad performance and HubSpot lead quality shown side by side. Identify which countries produce quality leads vs. waste.",
-    source: "Windsor / Google Ads geo reports merged with HubSpot lead quality by country.",
+    source: "Google Ads API geo reports merged with HubSpot lead quality by country.",
     howToUse: "Compare spend, lead count, and junk rate across countries. Look for high-spend countries with poor lead quality.",
     doNotAssume: "Country attribution uses Google Ads geographic reporting. It does not use IP geolocation or GCLID-level precision.",
     checkNext: "ROAS by Country for revenue attribution at the country level."
@@ -341,15 +341,15 @@ const PAGE_HELP_CONTENT = {
     checkNext: "ROAS by Campaign for campaign-level profitability, or Unit Economics for LTV/CAC."
   },
   "roas-campaigns": {
-    what: "Revenue Truth ROAS by campaign — shows which campaigns produce profitable customers based on closed-won HubSpot revenue and Windsor spend.",
-    source: "HubSpot closed-won deal revenue + Windsor campaign spend. This does NOT use Google Ads conversion value.",
+    what: "Revenue Truth ROAS by campaign — shows which campaigns produce profitable customers based on closed-won HubSpot revenue and Google Ads API spend.",
+    source: "HubSpot closed-won deal revenue + Google Ads API campaign spend. This does NOT use Google Ads conversion value.",
     howToUse: "Compare campaigns by LTV ROAS, ACV ROAS, and verdict. Use the window selector to analyse different time periods. SCALE campaigns are profitable; CUT campaigns are losing money.",
     doNotAssume: "This is HubSpot revenue truth, not Google Ads conversion tracking. Revenue comes from actual closed-won deals, not estimated conversion values. INSUFFICIENT_DATA means not enough signal to judge.",
     checkNext: "Unit Economics for portfolio-level LTV/CAC, or ROAS by Country for geographic breakdown."
   },
   "roas-countries": {
     what: "Country-level Revenue Truth ROAS — estimated until GCLID attribution is fully wired. Shows directional profitability by geography.",
-    source: "HubSpot closed-won deal revenue + Windsor geo spend. Country ROAS is an estimate because deal-to-country mapping is approximate without full GCLID coverage.",
+    source: "HubSpot closed-won deal revenue + Google Ads API geo spend. Country ROAS is an estimate because deal-to-country mapping is approximate without full GCLID coverage.",
     howToUse: "Use for directional diagnosis — identify countries that are clearly profitable or clearly losing money. Do not use for precise budget allocation until GCLID attribution is fully wired.",
     doNotAssume: "These are estimates, not exact figures. Country attribution precision will improve as GCLID coverage increases. Do not make final budget decisions based solely on these numbers.",
     checkNext: "GCLID Attribution page to check coverage readiness, or ROAS by Campaign for campaign-level precision."
@@ -363,21 +363,21 @@ const PAGE_HELP_CONTENT = {
   },
   "unit-economics": {
     what: "Executive SaaS economics — LTV, CAC, LTV/CAC ratio, payback months, and profitability verdicts at the portfolio level.",
-    source: "Revenue Truth Layer computed from HubSpot deals + Windsor campaigns + churn rate configuration.",
+    source: "Revenue Truth Layer computed from HubSpot deals + Google Ads API campaigns + churn rate configuration.",
     howToUse: "Review overall LTV/CAC and payback. Compare with industry benchmarks. A ratio above 3:1 generally indicates healthy unit economics.",
     doNotAssume: "LTV calculations use the configured churn rate (default 3%). If actual churn differs, LTV will be inaccurate. Adjust via Churn Input page.",
     checkNext: "Churn Input to verify/update churn rate, or ROAS by Campaign for campaign-level detail."
   },
   scheduler: {
     what: "Scheduler job status — run history, next scheduled runs, and manual trigger buttons for daily/weekly/monthly jobs.",
-    source: "Internal scheduler and run tracking system.",
+    source: "Internal scheduler and run tracking. Ad-platform datasets (campaigns, search terms, keywords, geo) sync from the Google Ads API; lead/deal data syncs from HubSpot. Source labels: Google Ads API, HubSpot, GCLID Attribution, and Windsor legacy.",
     howToUse: "Check that jobs ran recently and completed successfully. Use manual triggers (admin only) to force a run if needed.",
     doNotAssume: "A successful run does not guarantee data quality — it means the job completed without errors. Check specific pages for data validation.",
     checkNext: "System Status for overall pipeline health, or the specific data page to verify output."
   },
   health: {
     what: "War Room — system-wide health dashboard showing blockers, source connectivity, pipeline status, and data freshness across all datasets.",
-    source: "Internal system status checks, freshness records, and connectivity probes.",
+    source: "Internal system status checks, freshness records, and connectivity probes. The active ad-platform source is the Google Ads API (campaigns, search terms, keywords, geo); Windsor is legacy only.",
     howToUse: "Scan for red/amber indicators. Address blockers first. Freshness shows when each dataset was last successfully synced.",
     doNotAssume: "Green status means the last check passed — it does not guarantee future reliability. Monitor trends, not single readings.",
     checkNext: "Data Runs for detailed run logs, or the specific blocked page for investigation."
@@ -408,15 +408,15 @@ const PAGE_HELP_CONTENT = {
 // use empty arrays — they have their own status mechanisms.
 
 const PAGE_DEPENDENCIES = {
-  dashboard:               ["windsor/campaigns", "hubspot/contacts", "hubspot/deals", "windsor/search_terms"],
-  "action-queue":          ["windsor/campaigns", "windsor/search_terms", "hubspot/contacts"],
-  reports:                 ["windsor/campaigns", "hubspot/contacts", "hubspot/deals"],
-  campaigns:               ["windsor/campaigns"],
-  waste:                   ["windsor/search_terms"],
-  "search-terms":          ["windsor/search_terms"],
-  ngrams:                  ["windsor/search_terms"],
-  geo:                     ["windsor/geo"],
-  keywords:                ["windsor/keywords"],
+  dashboard:               ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals", "google_ads_api/search_terms"],
+  "action-queue":          ["google_ads_api/campaigns", "google_ads_api/search_terms", "hubspot/contacts"],
+  reports:                 ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals"],
+  campaigns:               ["google_ads_api/campaigns"],
+  waste:                   ["google_ads_api/search_terms"],
+  "search-terms":          ["google_ads_api/search_terms"],
+  ngrams:                  ["google_ads_api/search_terms"],
+  geo:                     ["google_ads_api/geo"],
+  keywords:                ["google_ads_api/keywords"],
   leads:                   ["hubspot/contacts"],
   deals:                   ["hubspot/deals"],
   "gclid-attribution":     ["gclid/matches"],
@@ -425,9 +425,9 @@ const PAGE_DEPENDENCIES = {
   health:                  [],
   backfill:                [],
   "historical-intelligence": [],
-  "roas-campaigns":          ["hubspot/deals", "windsor/campaigns"],
-  "roas-countries":          ["hubspot/deals", "windsor/geo"],
-  "unit-economics":          ["hubspot/deals", "windsor/campaigns"],
+  "roas-campaigns":          ["hubspot/deals", "google_ads_api/campaigns"],
+  "roas-countries":          ["hubspot/deals", "google_ads_api/geo"],
+  "unit-economics":          ["hubspot/deals", "google_ads_api/campaigns"],
   "churn-input":             [],
 };
 
@@ -503,7 +503,7 @@ let datasetFreshnessRows = [];
 let datasetFreshnessStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
 
 // Per-dataset freshness cache — populated by loadDatasetFreshness() and used by
-// renderPageDatasetFreshness().  Keyed by "source/dataset" (e.g. "windsor/campaigns").
+// renderPageDatasetFreshness().  Keyed by "source/dataset" (e.g. "google_ads_api/campaigns").
 let _datasetFreshnessByKey = {};
 
 // Historical Intelligence page state
@@ -1458,16 +1458,23 @@ function renderRunMeta(sectionKey) {
 // freshness table: Fresh / Stale / Failed / Running / Unknown.
 
 function _sourceDisplayName(source) {
-  const names = { windsor: "Windsor", hubspot: "HubSpot", gclid: "GCLID" };
+  // PR-ADS-105: Google Ads API is the active platform-evidence source.
+  // Windsor remains only as a legacy/deprecated source label.
+  const names = {
+    google_ads_api: "Google Ads API",
+    hubspot: "HubSpot",
+    gclid: "GCLID Attribution",
+    windsor: "Windsor legacy",
+  };
   return names[source] || escapeHtml(source);
 }
 
 function _datasetDisplayName(key) {
   const labels = {
-    "windsor/campaigns":    "Campaign data",
-    "windsor/search_terms": "Search-term data",
-    "windsor/keywords":     "Keyword data",
-    "windsor/geo":          "Geo data",
+    "google_ads_api/campaigns":    "Campaign data",
+    "google_ads_api/search_terms": "Search-term data",
+    "google_ads_api/keywords":     "Keyword data",
+    "google_ads_api/geo":          "Geo data",
     "hubspot/contacts":     "Contacts data",
     "hubspot/deals":        "Deals data",
     "gclid/matches":        "Attribution data",
@@ -2904,7 +2911,7 @@ async function loadGeo() {
     if (tableEl) tableEl.innerHTML = `
       <div class="geo-empty-state">
         <p class="empty-state">No geo intelligence available for the selected window.</p>
-        <p class="geo-empty-subtext">Geo data appears after a weekly or monthly run writes Windsor country performance to the database.</p>
+        <p class="geo-empty-subtext">No Google Ads API geo data has been synced yet. Run the weekly or monthly scheduler or check System Status.</p>
       </div>`;
     return;
   }
@@ -4528,7 +4535,7 @@ function renderKeywordsTable(rows) {
       tableEl.innerHTML = `
         <div class="keywords-empty-state">
           <p class="empty-state">No keyword data available for the selected window.</p>
-          <p class="keywords-empty-subtext">Keyword rows appear after weekly or monthly runs persist Windsor keyword performance.</p>
+          <p class="keywords-empty-subtext">No Google Ads API keyword data has been synced yet. Run the weekly or monthly scheduler or check System Status.</p>
         </div>`;
     } else {
       tableEl.innerHTML =
@@ -5321,7 +5328,7 @@ function renderWarRoom(el, data) {
       const blocksStr = (p.blocks || []).map(b => b.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())).join(", ") || "—";
       const statusLabel = (p.canonical_status || "unknown").replace(/_/g, " ");
       html += `<tr>
-        <td>${escapeHtml(p.source || "")} → ${escapeHtml(p.label || "")}</td>
+        <td>${p.source ? _sourceDisplayName(p.source) : ""} → ${escapeHtml(p.label || "")}</td>
         <td><span class="war-room-pill ${sevCls}">${escapeHtml(statusLabel)}</span></td>
         <td>${p.rows_in_window != null ? Number(p.rows_in_window).toLocaleString() : "—"}</td>
         <td>${escapeHtml(blocksStr)}</td>
@@ -5402,10 +5409,10 @@ document.addEventListener("DOMContentLoaded", () => {
 function datasetRelatedPage(source, dataset) {
   const key = `${source}/${dataset}`;
   const map = {
-    "windsor/search_terms": { page: "search-terms", label: "Search Term Universe" },
-    "windsor/keywords":     { page: "keywords",     label: "Keyword Performance" },
-    "windsor/geo":          { page: "geo",           label: "Country Performance" },
-    "windsor/campaigns":    { page: "campaigns",     label: "Campaigns"    },
+    "google_ads_api/search_terms": { page: "search-terms", label: "Search Term Universe" },
+    "google_ads_api/keywords":     { page: "keywords",     label: "Keyword Performance" },
+    "google_ads_api/geo":          { page: "geo",           label: "Country Performance" },
+    "google_ads_api/campaigns":    { page: "campaigns",     label: "Campaigns"    },
     "hubspot/contacts":     { page: "leads",         label: "Lead Quality" },
     "hubspot/deals":        { page: "deals",         label: "Deals"        },
     "gclid/matches":        { page: "gclid-attribution", label: "GCLID Attribution" },
@@ -5621,7 +5628,7 @@ function renderDatasetFreshness(data) {
 
     return `
       <tr>
-        <td>${escapeHtml(row.source || "—")}</td>
+        <td>${row.source ? _sourceDisplayName(row.source) : "—"}</td>
         <td class="td--name">${escapeHtml(fmt(row.dataset).replace(/_/g, " "))}</td>
         <td><span class="freshness-status-badge ${badgeCls}"${reasonTip}>${badgeLabel}</span></td>
         <td>${rowsCell}</td>
@@ -6332,7 +6339,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
           </thead>
           <tbody>${kwRows}</tbody>
         </table>
-        <p class="drawer-source-note">Keyword metrics are Google Ads/Windsor platform metrics only.</p>
+        <p class="drawer-source-note">Keyword metrics are Google Ads API platform metrics only.</p>
       </div>`;
   }
 
@@ -6652,7 +6659,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
       <p class="drawer-source-note">
         Data sources: ${escapeHtml(src.campaign || "campaigns table")},
         ${escapeHtml(src.lead_quality || "HubSpot-derived leads table")},
-        ${escapeHtml(src.keywords || "Windsor keyword performance")},
+        ${escapeHtml(src.keywords || "Google Ads API keyword performance")},
         ${escapeHtml(src.waste_terms || "waste_terms table")}.
       </p>
     </div>`;
