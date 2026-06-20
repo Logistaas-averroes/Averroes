@@ -7192,6 +7192,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     roasCountryWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
 
+  // PR-ADS-109: attribution audit button is re-rendered inside the banner, so
+  // bind it via delegation.
+  document.addEventListener("click", (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest("#roas-audit-btn") : null;
+    if (btn) loadRevenueAttributionAudit();
+  });
+
   // Wire up Unit Economics controls
   const ueRefresh = document.getElementById("unit-economics-refresh-btn");
   const ueWindow  = document.getElementById("unit-economics-window");
@@ -7500,13 +7507,78 @@ const BUSINESS_VERDICT_ORDER = { winner: 0, watch: 1, waste: 2, learning: 3 };
 let roasRevenueWindow = null;
 let roasRevenueSummary = null;
 let roasRevenueWarnings = [];
+let roasRevenueSourceHealth = null;
 
-function roasWarningsBanner() {
-  if (!roasRevenueWarnings || !roasRevenueWarnings.length) return "";
-  const items = roasRevenueWarnings.map((w) => "<li>" + escapeHtml(w) + "</li>").join("");
-  return `<div class="empty-state empty-state--warning" style="margin:0 0 var(--space-4)">
-    <div class="empty-state__title">Data source notes</div>
-    <div class="empty-state__body"><ul>${items}</ul></div>
+// PR-ADS-109: truth-layer banner + always-available attribution audit control.
+// Warns when lead/SQL metrics are not business-window safe (sync-date
+// contamination) or when revenue attribution is not wired (ROAS unavailable).
+function roasTruthBanner() {
+  const sh = roasRevenueSourceHealth || {};
+  const lines = [];
+  if (sh.lead_date_grain_status && sh.lead_date_grain_status !== "event_date") {
+    lines.push("Lead/SQL metrics are not business-window safe yet. The system is detecting sync-date contamination. Treat SQL counts as withheld until the audit passes.");
+  }
+  if (sh.revenue_attribution_status === "not_wired_or_no_closed_won") {
+    lines.push("Revenue attribution is not connected for this window. ROAS is unavailable, not zero.");
+  }
+  if (!lines.length && sh.data_is_partial) {
+    lines.push("Some data is partial for this business window. Open the attribution audit for the exact coverage and blockers.");
+  }
+  const banner = lines.length
+    ? `<div class="empty-state empty-state--warning" style="margin:0 0 var(--space-4)">
+         <div class="empty-state__title">Truth-layer warning</div>
+         <div class="empty-state__body"><ul>${lines.map((l) => "<li>" + escapeHtml(l) + "</li>").join("")}</ul></div>
+       </div>`
+    : "";
+  const audit = `<div class="roas-audit-control" style="margin:0 0 var(--space-4)">
+       <button id="roas-audit-btn" type="button" class="btn btn--secondary">View attribution audit</button>
+       <div id="roas-audit-output" class="roas-audit-output"></div>
+     </div>`;
+  return banner + audit;
+}
+
+async function loadRevenueAttributionAudit() {
+  const out = document.getElementById("roas-audit-output");
+  if (out) out.innerHTML = '<p class="empty-state">Loading attribution audit…</p>';
+  try {
+    const res = await fetch(`/api/revenue-attribution/audit?window=${encodeURIComponent(getRoasBusinessWindow())}`, { credentials: "same-origin" });
+    if (!res.ok) {
+      if (out) out.innerHTML = '<p class="empty-state">Failed to load attribution audit.</p>';
+      return;
+    }
+    const a = await res.json();
+    if (out) out.innerHTML = renderAttributionAuditSummary(a);
+  } catch (err) {
+    console.error("[loadRevenueAttributionAudit]", err);
+    if (out) out.innerHTML = '<p class="empty-state">Error loading attribution audit.</p>';
+  }
+}
+
+function renderAttributionAuditSummary(a) {
+  const dg = a.date_grain_health || {};
+  const mark = (b) => (b ? "✅" : "❌");
+  const wc = a.window_comparison || {};
+  const wcLine = (k) => {
+    const s = wc[k] || {};
+    const n = (v) => (v === null || v === undefined ? "—" : v);
+    return `${k}: spend $${n(s.spend)} · leads ${n(s.leads)} · SQLs ${n(s.sqls)} · customers ${n(s.customers)} · won $${n(s.won_revenue)}`;
+  };
+  const blockers = (a.blockers || []).length
+    ? `<p><strong>Blockers:</strong></p><ul>${a.blockers.map((b) => "<li>" + escapeHtml(b) + "</li>").join("")}</ul>`
+    : "<p>No blockers.</p>";
+  return `<div class="audit-summary">
+    <p><strong>Verdict:</strong> <span class="audit-verdict audit-verdict--${escapeHtml((a.verdict || "").toLowerCase())}">${escapeHtml(a.verdict || "")}</span></p>
+    <ul>
+      <li>Lead window safe: ${mark(dg.lead_window_safe)} <code>${escapeHtml(dg.lead_date_field_current || "")}</code></li>
+      <li>Spend window safe: ${mark(dg.spend_window_safe)} <code>${escapeHtml(dg.spend_date_field || "")}</code></li>
+      <li>Revenue window safe: ${mark(dg.revenue_window_safe)} <code>${escapeHtml(dg.deal_date_field || "")}</code></li>
+      <li>Revenue attribution wired: ${mark(a.revenue_attribution_wired)}</li>
+      <li>Pseudo-campaign rows: ${(a.pseudo_campaign_rows || []).length}</li>
+      <li>Zero-spend campaigns with leads: ${(a.zero_spend_campaigns_with_leads || []).length}</li>
+    </ul>
+    ${blockers}
+    <p class="muted">Window comparison:</p>
+    <ul><li>${wcLine("current_quarter")}</li><li>${wcLine("ytd")}</li><li>${wcLine("all_time")}</li></ul>
   </div>`;
 }
 
@@ -7530,13 +7602,21 @@ function renderRoasSummaryKpis(gridId) {
   const grid = document.getElementById(gridId);
   if (!grid) return;
   const s = roasRevenueSummary || {};
+  const sh = roasRevenueSourceHealth || {};
+  // PR-ADS-109: gray out lead/SQL cards when metrics are withheld (unsafe grain).
+  const withheld = sh.lead_metrics_status === "withheld";
+  const leadsCell = withheld ? '<span class="kpi-withheld">Withheld</span>' : fmtCount(s.leads || 0);
+  const sqlsCell = withheld ? '<span class="kpi-withheld">Withheld</span>' : fmtCount(s.sqls || 0);
+  // ROAS unavailable (not zero) when revenue attribution is not wired.
+  const roasNotWired = sh.revenue_attribution_status === "not_wired_or_no_closed_won";
+  const roasCell = roasNotWired ? '<span class="kpi-withheld">Unavailable</span>' : fmtRoas(s.roas);
   grid.innerHTML = `
     <div class="kpi-card"><div class="kpi-card__label">Spend</div><div class="kpi-card__value">${fmtMoney(s.spend || 0)}</div></div>
-    <div class="kpi-card"><div class="kpi-card__label">Leads</div><div class="kpi-card__value">${fmtCount(s.leads || 0)}</div></div>
-    <div class="kpi-card"><div class="kpi-card__label">SQLs</div><div class="kpi-card__value">${fmtCount(s.sqls || 0)}</div></div>
+    <div class="kpi-card${withheld ? " kpi-card--withheld" : ""}"><div class="kpi-card__label">Leads</div><div class="kpi-card__value">${leadsCell}</div></div>
+    <div class="kpi-card${withheld ? " kpi-card--withheld" : ""}"><div class="kpi-card__label">SQLs</div><div class="kpi-card__value">${sqlsCell}</div></div>
     <div class="kpi-card"><div class="kpi-card__label">Customers</div><div class="kpi-card__value">${fmtCount(s.customers || 0)}</div></div>
     <div class="kpi-card"><div class="kpi-card__label">Won Revenue</div><div class="kpi-card__value">${fmtMoney(s.won_revenue || 0)}</div></div>
-    <div class="kpi-card"><div class="kpi-card__label">ROAS</div><div class="kpi-card__value">${fmtRoas(s.roas)}</div></div>
+    <div class="kpi-card${roasNotWired ? " kpi-card--withheld" : ""}"><div class="kpi-card__label">ROAS</div><div class="kpi-card__value">${roasCell}</div></div>
     <div class="kpi-card"><div class="kpi-card__label">CAC</div><div class="kpi-card__value">${fmtMoney(s.cac)}</div></div>
     <div class="kpi-card"><div class="kpi-card__label">Confidence</div><div class="kpi-card__value">${getConfidenceBadge(s.confidence)}</div></div>
   `;
@@ -7565,6 +7645,7 @@ async function loadRoasCampaigns() {
     roasRevenueWindow = data.window || null;
     roasRevenueSummary = data.summary || null;
     roasRevenueWarnings = data.warnings || [];
+    roasRevenueSourceHealth = data.source_health || null;
     roasCampaignsData = data.campaigns || [];
     roasCampaignsStatus = roasCampaignsData.length ? "ok" : "empty";
     renderRoasCampaignsPage();
@@ -7581,7 +7662,7 @@ function renderRoasCampaignsPage() {
 
   if (roasCampaignsStatus === "empty" || !roasCampaignsData.length) {
     if (kpiGrid) kpiGrid.innerHTML = "";
-    if (tableBody) tableBody.innerHTML = roasEmptyStateHtml("campaign");
+    if (tableBody) tableBody.innerHTML = roasTruthBanner() + roasEmptyStateHtml("campaign");
     renderPageExplanation("roas-campaigns", { forceVisible: true });
     return;
   }
@@ -7614,7 +7695,7 @@ function renderRoasCampaignsPage() {
       <td>${getBusinessVerdictBadge(r.verdict)}</td>
       <td class="roas-warnings">${(r.attribution_notes || []).map((n) => '<span class="roas-warning-chip">' + escapeHtml(n) + '</span>').join(" ")}</td>
     </tr>`).join("");
-    tableBody.innerHTML = roasWarningsBanner() + `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
+    tableBody.innerHTML = roasTruthBanner() + `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
   }
 }
 
@@ -7641,6 +7722,7 @@ async function loadRoasCountries() {
     roasRevenueWindow = data.window || null;
     roasRevenueSummary = data.summary || null;
     roasRevenueWarnings = data.warnings || [];
+    roasRevenueSourceHealth = data.source_health || null;
     roasCountriesData = data.countries || [];
     roasCountriesStatus = roasCountriesData.length ? "ok" : "empty";
     renderRoasCountriesPage();
@@ -7657,7 +7739,7 @@ function renderRoasCountriesPage() {
 
   if (roasCountriesStatus === "empty" || !roasCountriesData.length) {
     if (kpiGrid) kpiGrid.innerHTML = "";
-    if (tableBody) tableBody.innerHTML = roasEmptyStateHtml("country");
+    if (tableBody) tableBody.innerHTML = roasTruthBanner() + roasEmptyStateHtml("country");
     renderPageExplanation("roas-countries", { forceVisible: true });
     return;
   }
@@ -7690,7 +7772,7 @@ function renderRoasCountriesPage() {
       <td>${getBusinessVerdictBadge(r.verdict)}</td>
       <td class="roas-warnings">${(r.attribution_notes || []).map((n) => '<span class="roas-warning-chip">' + escapeHtml(n) + '</span>').join(" ")}</td>
     </tr>`).join("");
-    tableBody.innerHTML = roasWarningsBanner() + `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
+    tableBody.innerHTML = roasTruthBanner() + `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
   }
 }
 

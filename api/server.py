@@ -53,6 +53,7 @@ Protected endpoints (require authenticated session):
   GET  /api/historical-intelligence — Read-only historical trend analysis over local data (requires auth).
   GET  /api/diagnostics/window-semantics — Read-only window-counts and diagnostic verdict per dataset (admin only; PR-ADS-095).
   GET  /api/revenue-attribution   — Shared revenue-attribution contract by business window for ROAS campaign/country pages (requires auth; PR-ADS-107A).
+  GET  /api/revenue-attribution/audit — Read-only truth audit of revenue-attribution date grain / source pollution per window (requires auth; PR-ADS-109).
 """
 
 import base64
@@ -5848,7 +5849,7 @@ async def get_revenue_attribution(
     window: str = Query(default="current_quarter"),
     _user=Depends(require_auth),
 ):
-    """Shared revenue-attribution contract (PR-ADS-107A).
+    """Shared revenue-attribution contract (PR-ADS-107A, durable in 108/109).
 
     Single read-only truth source for the ROAS by Campaign and ROAS by Country
     pages. Uses business-revenue windows rather than ad-style day windows:
@@ -5857,6 +5858,14 @@ async def get_revenue_attribution(
     Revenue truth: HubSpot closed-won deals.
     Spend / platform evidence: Google Ads API.
     Google Ads conversion value is NOT used as revenue truth.
+
+    Date-grain doctrine (PR-ADS-109): lead/SQL metrics are only trusted when the
+    HubSpot contact_created_at (business event date) is available — run_date is
+    the scheduler/sync date and must NOT be used as a business event date. When
+    the lead date grain is unsafe, lead/SQL metrics are withheld. When revenue
+    attribution is not wired, ROAS is null (not zero). See the audit endpoint
+    GET /api/revenue-attribution/audit for the full truth diagnosis.
+
     Read-only — no writes to Google Ads, HubSpot, or any external system.
     """
     from services.revenue_attribution_service import build_revenue_attribution
@@ -5869,6 +5878,34 @@ async def get_revenue_attribution(
         log.error("Revenue attribution computation failed: %s", exc)
         raise HTTPException(
             status_code=500, detail="Revenue attribution computation failed"
+        ) from exc
+
+
+@app.get("/api/revenue-attribution/audit")
+async def get_revenue_attribution_audit(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Revenue-attribution truth audit (PR-ADS-109).
+
+    Read-only. Explains exactly why a business window is SAFE or UNSAFE:
+      - whether spend / leads / revenue filter by business event dates
+      - whether non-paid or pseudo-campaign rows contaminate the ROAS universe
+      - whether Current Quarter / YTD / All Time actually differ
+      - whether revenue attribution is wired
+
+    No writes to Google Ads, HubSpot, or any external system.
+    """
+    from services.revenue_attribution_service import build_revenue_attribution_audit
+
+    try:
+        return build_revenue_attribution_audit(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Revenue attribution audit failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Revenue attribution audit failed"
         ) from exc
 
 

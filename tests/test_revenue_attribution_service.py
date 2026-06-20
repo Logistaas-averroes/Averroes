@@ -67,7 +67,10 @@ def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
     spend_obj = {"available": True, "rows": spend if spend is not None else _spend_rows(),
                  "coverage_start": spend_cov[0], "coverage_end": spend_cov[1], "table": "geo"}
     leads_obj = {"available": True, "rows": leads if leads is not None else _lead_rows(),
-                 "coverage_start": None, "coverage_end": None, "table": "leads"}
+                 "coverage_start": None, "coverage_end": None, "table": "leads",
+                 "event_date_safe": True, "lead_event_date_field_available": True,
+                 "missing_contact_created_at_count": 0,
+                 "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0}
     revenue_obj = {"available": True, "rows": revenue if revenue is not None else _revenue_rows(),
                    "coverage_start": revenue_cov[0], "coverage_end": revenue_cov[1], "table": "gclid_attribution"}
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend_obj), \

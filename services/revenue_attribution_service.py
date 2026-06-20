@@ -336,20 +336,46 @@ def _row_notes(bucket: dict, confidence: str) -> list:
     return notes
 
 
-def _finalize_row(bucket: dict, *, legacy_gclid: bool = False, extra_notes: list | None = None) -> dict:
+def _finalize_row(
+    bucket: dict,
+    *,
+    legacy_gclid: bool = False,
+    extra_notes: list | None = None,
+    revenue_available: bool = True,
+    lead_metrics_withheld: bool = False,
+) -> dict:
     spend = round(bucket["spend"], 2)
     won_revenue = round(bucket["won_revenue"], 2)
     customers = bucket["customers"]
-    roas = compute_roas(won_revenue, spend)
+    # ROAS is null (not 0) when the revenue source is not wired — a 0 would
+    # falsely imply "spent and earned nothing" when we simply have no truth.
+    roas = compute_roas(won_revenue, spend) if revenue_available else None
     cac = compute_cac(spend, customers)
 
     raw_confidence = confidence_from_tiers(bucket["tiers"])
     downgraded = legacy_gclid and raw_confidence == "high"
     confidence = "medium" if downgraded else raw_confidence
 
-    verdict = classify_verdict(spend, bucket["sqls"], customers, won_revenue, roas)
+    leads_val = None if lead_metrics_withheld else bucket["leads"]
+    sqls_val = None if lead_metrics_withheld else bucket["sqls"]
+    sqls_for_verdict = 0 if lead_metrics_withheld else bucket["sqls"]
+
+    has_revenue = customers > 0 or won_revenue > 0
+    verdict = classify_verdict(spend, sqls_for_verdict, customers, won_revenue, roas)
+    if lead_metrics_withheld and not has_revenue:
+        # Without trusted lead/SQL signal we cannot call a spend-only row "waste".
+        verdict = "learning"
 
     notes = _row_notes(bucket, confidence)
+    if lead_metrics_withheld:
+        notes.append(
+            "Lead/SQL metrics withheld — HubSpot contact_created_at (business event "
+            "date) is not available, so this window is not lead-safe."
+        )
+    if not revenue_available:
+        notes.append(
+            "Revenue attribution not wired for this window — ROAS is unavailable, not zero."
+        )
     if downgraded:
         notes.append(
             "GCLID attribution index is legacy (data/campaign_performance.json); "
@@ -360,8 +386,8 @@ def _finalize_row(bucket: dict, *, legacy_gclid: bool = False, extra_notes: list
 
     return {
         "spend": spend,
-        "leads": bucket["leads"],
-        "sqls": bucket["sqls"],
+        "leads": leads_val,
+        "sqls": sqls_val,
         "customers": customers,
         "won_revenue": won_revenue,
         "roas": roas,
@@ -540,10 +566,12 @@ def _match_status_to_tier(match_status) -> str:
     return "tier_3_spend_weighted"
 
 
-def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, group_field: str):
+def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, group_field: str,
+                   revenue_available: bool = True, lead_metrics_withheld: bool = False):
     """Aggregate durable DB rows into finished campaign or country rows.
 
-    group_field is "campaign_name" or "country". Returns (rows, country_spend_available).
+    group_field is "campaign_name" or "country". Buckets with an empty/unknown
+    key are dropped — the ROAS truth table never shows an "unknown" row.
     """
     buckets: dict[str, dict] = {}
 
@@ -559,6 +587,7 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
         b["spend"] += _safe_float(row.get("spend"))
 
     # lead rows: {campaign_name, country, status_category, has_gclid}
+    # (empty when lead metrics are withheld for an unsafe date grain)
     for row in lead_rows:
         _, b = bucket_for(row.get(group_field))
         b["leads"] += 1
@@ -574,9 +603,15 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
 
     rows = []
     for key, bucket in buckets.items():
-        finalized = _finalize_row(bucket, legacy_gclid=False)
+        if not key:
+            continue  # drop unknown / blank campaign or country
+        finalized = _finalize_row(
+            bucket, legacy_gclid=False,
+            revenue_available=revenue_available,
+            lead_metrics_withheld=lead_metrics_withheld,
+        )
         if group_field == "campaign_name":
-            finalized["campaign_id"] = key or "unknown"
+            finalized["campaign_id"] = key
             finalized["campaign_name"] = bucket["display"] or "unknown"
         else:
             display = bucket["display"] or "unknown"
@@ -612,10 +647,13 @@ def _db_top_campaign(country_key: str, revenue_rows: list, spend_rows: list) -> 
     return None
 
 
-def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list) -> dict:
+def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
+                      revenue_available: bool = True, lead_metrics_withheld: bool = False) -> dict:
     spend = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
-    leads = len(lead_rows)
-    sqls = sum(1 for r in lead_rows if r.get("status_category") == "qualified")
+    leads = None if lead_metrics_withheld else len(lead_rows)
+    sqls = None if lead_metrics_withheld else sum(
+        1 for r in lead_rows if r.get("status_category") == "qualified"
+    )
     customers = len(revenue_rows)
     won_revenue = round(sum(_safe_float(r.get("deal_amount_usd")) for r in revenue_rows), 2)
     tiers = [_match_status_to_tier(r.get("match_status")) for r in revenue_rows]
@@ -625,7 +663,7 @@ def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list) -> 
         "sqls": sqls,
         "customers": customers,
         "won_revenue": won_revenue,
-        "roas": compute_roas(won_revenue, spend),
+        "roas": compute_roas(won_revenue, spend) if revenue_available else None,
         "cac": compute_cac(spend, customers),
         "confidence": confidence_from_tiers(tiers),
     }
@@ -654,55 +692,84 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     sync = repo.fetch_sync_state()
 
     spend_rows = spend["rows"]
-    lead_rows = leads["rows"]
     revenue_rows = revenue["rows"]
+
+    # PR-ADS-109: lead metrics are trusted only when the business event date
+    # (HubSpot contact_created_at) is available. Otherwise withhold them — never
+    # compute SQLs from sync-date-contaminated rows.
+    lead_event_date_safe = bool(leads.get("event_date_safe"))
+    lead_metrics_withheld = not lead_event_date_safe
+    lead_rows = [] if lead_metrics_withheld else leads["rows"]
+
+    # Revenue is "wired" only when there are closed-won attributed rows; without
+    # them ROAS is null (not zero) and the status says so.
+    revenue_available = bool(revenue_rows)
 
     named_spend = [r for r in spend_rows if r.get("country")]
     country_spend_available = bool(named_spend)
 
-    campaigns = _build_db_rows(spend_rows, lead_rows, revenue_rows, group_field="campaign_name")
-    countries = _build_db_rows(spend_rows, lead_rows, revenue_rows, group_field="country")
-    summary = _build_db_summary(spend_rows, lead_rows, revenue_rows)
+    campaigns = _build_db_rows(
+        spend_rows, lead_rows, revenue_rows, group_field="campaign_name",
+        revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
+    )
+    countries = _build_db_rows(
+        spend_rows, lead_rows, revenue_rows, group_field="country",
+        revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
+    )
+    summary = _build_db_summary(
+        spend_rows, lead_rows, revenue_rows,
+        revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
+    )
 
     campaign_spend_status = "db" if spend_rows else "db_empty"
-    contacts_status = "db" if lead_rows else "db_empty"
+    contacts_status = "db" if leads.get("rows") else "db_empty"
     deals_status = "db" if revenue_rows else "db_empty"
-    if revenue_rows:
+
+    lead_date_grain_status = "event_date" if lead_event_date_safe else "unsafe_sync_date"
+    lead_metrics_status = "withheld" if lead_metrics_withheld else (
+        "db" if leads.get("rows") else "db_empty"
+    )
+    revenue_attribution_status = (
+        "gclid_attribution_db" if revenue_available else "not_wired_or_no_closed_won"
+    )
+    # Top-level attribution_source_status retained for backward compatibility.
+    if revenue_available:
         attribution_status = "gclid_attribution_db"
-    elif lead_rows:
+    elif not lead_metrics_withheld and leads.get("rows"):
         attribution_status = "hubspot_source_tags_only"
     else:
         attribution_status = "none"
 
-    # Partial when spend coverage does not reach back to the window start.
-    data_is_partial = False
+    # Partial when spend coverage does not reach back to the window start, or
+    # when lead metrics are withheld, or revenue is not wired.
+    data_is_partial = lead_metrics_withheld or not revenue_available
     cov_start = spend.get("coverage_start")
-    if start_date is not None:
-        if cov_start is None or cov_start > resolved["start_date"]:
-            data_is_partial = True
+    if start_date is not None and (cov_start is None or cov_start > resolved["start_date"]):
+        data_is_partial = True
 
     warnings: list[str] = []
+    if lead_metrics_withheld:
+        warnings.append(
+            "Lead/SQL metrics withheld: HubSpot contact_created_at (business event "
+            "date) is missing for historical rows, so this window is not lead-safe. "
+            "Treat SQL counts as withheld until the audit passes."
+        )
+    if not revenue_available:
+        warnings.append(
+            "Revenue attribution is not connected for this window — ROAS is "
+            "unavailable (null), not zero."
+        )
     if campaign_spend_status == "db_empty":
+        warnings.append("No Google Ads spend rows in durable table 'geo' for this window.")
+    if data_is_partial and cov_start and start_date is not None and cov_start > resolved["start_date"]:
         warnings.append(
-            "No Google Ads spend rows in durable table 'geo' for this window."
-        )
-    if deals_status == "db_empty":
-        warnings.append(
-            "No closed-won revenue in durable table 'gclid_attribution' for this window."
-        )
-    if data_is_partial:
-        warnings.append(
-            f"Partial data: durable spend coverage starts {cov_start or 'unknown'}, "
-            f"after the requested window start {resolved['start_date']}."
-        )
-    if not country_spend_available and spend_rows:
-        warnings.append(
-            "Country-level spend rows are present but missing country names."
+            f"Partial data: durable spend coverage starts {cov_start}, after the "
+            f"requested window start {resolved['start_date']}."
         )
 
     db_tables_used = [t for t, present in (
         ("geo", bool(spend_rows)),
-        ("leads", bool(lead_rows)),
+        ("leads", bool(leads.get("rows"))),
         ("gclid_attribution", bool(revenue_rows)),
     ) if present]
 
@@ -712,9 +779,15 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "hubspot_contacts_status": contacts_status,
         "hubspot_deals_status": deals_status,
         "attribution_status": attribution_status,
+        "lead_date_grain_status": lead_date_grain_status,
+        "lead_metrics_status": lead_metrics_status,
+        "revenue_attribution_status": revenue_attribution_status,
         "data_is_partial": data_is_partial,
         "coverage_start": spend.get("coverage_start") or revenue.get("coverage_start"),
         "coverage_end": spend.get("coverage_end") or revenue.get("coverage_end"),
+        "missing_contact_created_at_count": leads.get("missing_contact_created_at_count", 0),
+        "excluded_non_paid_count": leads.get("excluded_non_paid_count", 0),
+        "excluded_pseudo_campaign_count": leads.get("excluded_pseudo_campaign_count", 0),
         "files_used": {},
         "db_tables_used": db_tables_used,
         "sync_state": sync.get("datasets", {}),
@@ -732,6 +805,9 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "google_ads_conversion_value_used": False,
         "campaign_spend_source_status": campaign_spend_status,
         "attribution_source_status": attribution_status,
+        "lead_date_grain_status": lead_date_grain_status,
+        "lead_metrics_status": lead_metrics_status,
+        "revenue_attribution_status": revenue_attribution_status,
         "country_spend_available": country_spend_available,
         "geo_country_mapping_status": "available" if country_spend_available else (
             "no_geo_data" if not spend_rows else "partial"
@@ -823,12 +899,19 @@ def _build_from_json(resolved, start_dt, end_dt) -> dict:
         "contacts": _rel(CONTACTS_FILE) if contacts else None,
     }
 
+    # The JSON fallback filters contacts by HubSpot createdate, so leads are
+    # event-date based; revenue is wired only when attributed deals exist.
+    revenue_attribution_status = "local_json_fallback" if deals_w else "not_wired_or_no_closed_won"
+
     source_health = {
         "mode": "local_json_fallback" if has_any_local else "source_unavailable",
         "campaign_spend_status": campaign_spend_status,
         "hubspot_contacts_status": "local_json_fallback" if contacts else "source_unavailable",
         "hubspot_deals_status": "local_json_fallback" if deals else "source_unavailable",
         "attribution_status": attribution_status_json,
+        "lead_date_grain_status": "event_date",
+        "lead_metrics_status": "local_json_fallback" if contacts else "source_unavailable",
+        "revenue_attribution_status": revenue_attribution_status,
         "data_is_partial": True,
         "coverage_start": None,
         "coverage_end": None,
@@ -849,6 +932,9 @@ def _build_from_json(resolved, start_dt, end_dt) -> dict:
         "google_ads_conversion_value_used": False,
         "campaign_spend_source_status": campaign_spend_status,
         "attribution_source_status": attribution_status_json,
+        "lead_date_grain_status": "event_date",
+        "lead_metrics_status": "local_json_fallback" if contacts else "source_unavailable",
+        "revenue_attribution_status": revenue_attribution_status,
         "country_spend_available": country_spend_available,
         "geo_country_mapping_status": geo_country_mapping_status,
         "data_is_partial": True,
@@ -892,3 +978,77 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     # Database unavailable — diagnostic fallback to local JSON.
     start_dt, end_dt = get_window_bounds(window, now=now)
     return _build_from_json(resolved, start_dt, end_dt)
+
+
+def build_revenue_attribution_audit(window: str, now: datetime | None = None) -> dict:
+    """Truth audit for /api/revenue-attribution (PR-ADS-109).
+
+    Read-only. Proves *why* the windows are safe or unsafe: whether each metric
+    filters by a business event date, whether non-paid / pseudo rows contaminate
+    the campaign universe, whether revenue attribution is wired, and whether the
+    business windows actually differ.
+
+    Raises:
+        ValueError: If ``window`` is not a supported business window.
+    """
+    resolved, start_date, end_date = _window_date_bounds(window, now)
+
+    grain = repo.fetch_lead_date_grain_health(start_date, end_date)
+    pollution = repo.fetch_campaign_pollution_report(start_date, end_date)
+    revenue = repo.fetch_won_revenue(start_date, end_date)
+
+    lead_window_safe = bool(grain.get("lead_window_safe"))
+    spend_window_safe = True   # geo.run_date is the per-day source date
+    revenue_window_safe = True  # gclid_attribution.deal_close_date is the close date
+
+    date_grain_health = {
+        "spend_date_field": "geo.run_date",
+        "lead_date_field_current": "leads.contact_created_at",
+        "lead_event_date_field_available": bool(grain.get("lead_event_date_field_available")),
+        "deal_date_field": "gclid_attribution.deal_close_date",
+        "lead_window_safe": lead_window_safe,
+        "spend_window_safe": spend_window_safe,
+        "revenue_window_safe": revenue_window_safe,
+    }
+
+    # Window comparison — proves Current Quarter / YTD / All Time differ (or
+    # explains why they don't) using the same safe build logic.
+    window_comparison = {}
+    for wk in ("current_quarter", "ytd", "all_time"):
+        try:
+            window_comparison[wk] = build_revenue_attribution(wk, now=now)["summary"]
+        except Exception:  # noqa: BLE001
+            window_comparison[wk] = {}
+
+    blockers: list[str] = []
+    if not grain.get("available"):
+        blockers.append("Database unavailable — cannot audit durable lead date grain.")
+    if not lead_window_safe:
+        blockers.append("leads.contact_created_at missing for historical rows")
+    if pollution.get("pseudo_campaign_rows"):
+        blockers.append("Pseudo-traffic campaign rows present in the leads table.")
+    if pollution.get("email_campaign_rows"):
+        blockers.append("Email-campaign rows present in the leads table.")
+
+    verdict = "SAFE" if not blockers else "UNSAFE"
+
+    return {
+        "window": {
+            "key": resolved["key"],
+            "start_date": resolved["start_date"],
+            "end_date": resolved["end_date"],
+        },
+        "date_grain_health": date_grain_health,
+        "counts_by_source_type": grain.get("counts_by_source_type", {}),
+        "excluded_non_paid_count": grain.get("excluded_non_paid_count", 0),
+        "excluded_pseudo_campaign_count": grain.get("excluded_pseudo_campaign_count", 0),
+        "missing_contact_created_at_count": grain.get("missing_contact_created_at_count", 0),
+        "pseudo_campaign_rows": pollution.get("pseudo_campaign_rows", []),
+        "email_campaign_rows": pollution.get("email_campaign_rows", []),
+        "zero_spend_campaigns_with_leads": pollution.get("zero_spend_campaigns_with_leads", []),
+        "revenue_attribution_wired": bool(revenue.get("rows")),
+        "window_comparison": window_comparison,
+        "verdict": verdict,
+        "blockers": blockers,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }

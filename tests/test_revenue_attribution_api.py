@@ -102,7 +102,10 @@ def _patched_service():
     leads = {"available": True, "table": "leads",
              "rows": [{"campaign_name": "gulf", "country": "Saudi Arabia",
                        "status_category": "qualified", "has_gclid": True}],
-             "coverage_start": None, "coverage_end": None}
+             "coverage_start": None, "coverage_end": None,
+             "event_date_safe": True, "lead_event_date_field_available": True,
+             "missing_contact_created_at_count": 0,
+             "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0}
     revenue = {"available": True, "table": "gclid_attribution",
                "rows": [{"campaign_name": "gulf", "country": "Saudi Arabia", "deal_id": "d1",
                          "deal_amount_usd": 10000.0, "match_status": "matched"}],
