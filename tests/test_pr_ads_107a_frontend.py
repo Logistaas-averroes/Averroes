@@ -124,30 +124,39 @@ def test_no_windsor_in_roas_page_explanations():
 # ── Source labels ────────────────────────────────────────────────────────────
 
 
-def test_source_labels_present_on_roas_pages():
+def test_clean_subtitles_on_roas_pages():
+    """PR-ADS-110: one short subtitle, no repeated doctrine wall."""
+    camp = _section("page-roas-campaigns")
+    assert "Campaign-level Google Ads spend compared with HubSpot closed-won revenue." in camp
+    country = _section("page-roas-countries")
+    assert "Country-level Google Ads spend compared with HubSpot closed-won revenue." in country
+    # The repeated exact doctrine phrase is demolished from the pages.
     for page_id in ("page-roas-campaigns", "page-roas-countries"):
-        section = _section(page_id)
-        assert "Google Ads API = spend/platform evidence" in section
-        assert "HubSpot = revenue truth" in section
+        assert "Google Ads API = spend/platform evidence" not in _section(page_id)
 
 
 # ── New revenue columns + badges ─────────────────────────────────────────────
 
 
-def test_campaign_render_has_business_columns():
+def test_campaign_render_has_simple_columns():
+    """PR-ADS-110: simplified table — no CAC/Confidence/Notes clutter."""
     idx = JS.find("function renderRoasCampaignsPage")
     assert idx != -1
     body = JS[idx:idx + 2500]
-    for col in ("Leads", "SQLs", "Customers", "Won Revenue", "ROAS", "CAC", "Confidence", "Verdict"):
+    for col in ("Campaign", "Spend", "Leads", "SQLs", "Customers", "Won Revenue", "ROAS", "Decision"):
         assert f">{col}<" in body, f"Missing campaign column header: {col}"
+    for gone in ("CAC", "Confidence", "Notes"):
+        assert f">{gone}<" not in body, f"Column should be removed: {gone}"
 
 
-def test_country_render_has_business_columns():
+def test_country_render_has_simple_columns():
     idx = JS.find("function renderRoasCountriesPage")
     assert idx != -1
     body = JS[idx:idx + 2500]
-    for col in ("Leads", "SQLs", "Customers", "Won Revenue", "ROAS", "CAC", "Top Campaign", "Confidence", "Verdict"):
+    for col in ("Country", "Spend", "Leads", "SQLs", "Customers", "Won Revenue", "ROAS", "Decision"):
         assert f">{col}<" in body, f"Missing country column header: {col}"
+    for gone in ("Top Campaign", "CAC", "Confidence", "Notes"):
+        assert f">{gone}<" not in body, f"Column should be removed: {gone}"
 
 
 def test_confidence_and_verdict_badge_helpers_exist():
@@ -158,9 +167,11 @@ def test_confidence_and_verdict_badge_helpers_exist():
         assert f">{label}<" in JS, f"Missing business verdict label: {label}"
 
 
-def test_empty_state_explains_business_window():
-    idx = JS.find("function roasEmptyStateHtml")
+def test_empty_state_uses_clean_copy():
+    """PR-ADS-110: clean safe-empty copy, distinct from the blocked state."""
+    idx = JS.find("function renderRevenueEmptyState")
     assert idx != -1
     body = JS[idx:idx + 800]
-    assert "No attributed revenue found" in body
-    assert "no HubSpot closed-won attribution matched" in body
+    assert "No closed-won revenue found for this window" in body
+    assert "no HubSpot closed-won deals are attributed" in body
+    assert "Revenue ROAS is not ready yet" not in body

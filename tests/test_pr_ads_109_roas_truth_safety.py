@@ -132,25 +132,8 @@ def test_no_windsor_in_service_or_repo():
 
 
 # ── Frontend truth-layer behavior ────────────────────────────────────────────
-
-
-def test_frontend_truth_banner_messages_present():
-    assert "function roasTruthBanner" in JS
-    assert "Lead/SQL metrics are not business-window safe yet" in JS
-    assert "Revenue attribution is not connected for this window. ROAS is unavailable, not zero." in JS
-
-
-def test_frontend_withholds_sql_cards():
-    assert 'lead_metrics_status === "withheld"' in JS
-    assert "kpi-withheld" in JS
-
-
-def test_frontend_has_attribution_audit_button():
-    assert 'id="roas-audit-btn"' in JS
-    assert "View attribution audit" in JS
-    assert "/api/revenue-attribution/audit" in JS
-    assert "function loadRevenueAttributionAudit" in JS
-
-
-def test_frontend_warns_on_unsafe_lead_grain():
-    assert 'lead_date_grain_status !== "event_date"' in JS
+# NOTE: the PR-ADS-109 truth-banner / audit-button UI was demolished in
+# PR-ADS-110 (business pages are decision pages, not diagnostics). The frontend
+# truth-safety behavior is now asserted in tests/test_pr_ads_110_revenue_ui_demolition.py
+# (clean blocked card when unsafe, no audit button on business pages).
+# The backend safety contract above remains the durable proof.

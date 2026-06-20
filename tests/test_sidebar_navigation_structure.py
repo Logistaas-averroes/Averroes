@@ -169,16 +169,16 @@ def test_frontend_uses_api_reports_routes():
     assert not bare_roas, f"Found bare /reports/roas routes (should use /api/-prefixed): {bare_roas}"
 
 
-def test_country_roas_estimate_warning():
-    """Country ROAS page must include the estimate warning copy."""
+def test_country_roas_estimate_warning_removed():
+    """PR-ADS-110: the big yellow country-level estimate warning is demolished —
+    ROAS pages are clean business decision pages."""
     page_match = re.search(
         r'id="page-roas-countries".*?</section>', HTML, re.DOTALL
     )
     assert page_match, "Could not find page-roas-countries section"
     page = page_match.group(0)
-    assert "Country-level ROAS is an estimate" in page, (
-        "Missing country-level estimate warning in ROAS by Country page"
-    )
+    assert "Country-level ROAS is an estimate" not in page
+    assert "roas-estimate-warning" not in page
 
 
 def test_section_labels_are_non_clickable():

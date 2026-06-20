@@ -34,9 +34,11 @@ def _navigate_fn():
 def test_navigate_hides_global_time_range_bar_on_roas_pages():
     body = _navigate_fn()
     assert "time-range-bar" in body, "navigate() must control the global time-range bar"
-    assert "roas-campaigns" in body and "roas-countries" in body, (
-        "navigate() must decouple the global ad-window bar on ROAS pages"
+    assert "isRevenuePage(page)" in body, (
+        "navigate() must decouple the global ad-window bar on revenue pages"
     )
+    # The revenue page list must include both ROAS pages.
+    assert 'REVENUE_PAGES = ["roas-campaigns", "roas-countries"]' in JS
 
 
 def test_global_time_range_bar_uses_ad_windows_only():

@@ -1227,9 +1227,8 @@
       <section id="page-roas-campaigns" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">ROAS by Campaign</h1>
-          <p class="page-subtitle">HubSpot Revenue ROAS — campaign-level spend vs. closed-won revenue.</p>
+          <p class="page-subtitle">Campaign-level Google Ads spend compared with HubSpot closed-won revenue.</p>
         </header>
-        <div id="page-explanation-roas-campaigns" hidden></div>
         <div class="roas-window-controls">
           <label class="roas-window-label">Window:</label>
           <select id="roas-campaigns-window" class="waste-filter-select" data-business-window-select aria-label="Revenue window">
@@ -1243,27 +1242,18 @@
         </div>
         <div id="roas-campaigns-kpis" class="kpi-grid"></div>
         <div class="panel">
-          <div class="panel__header">Revenue Truth ROAS — Campaign Decision Table</div>
           <div class="panel__body panel__body--flush" id="roas-campaigns-table-body">
-            <p class="empty-state" style="padding: var(--space-5);">Loading ROAS by campaign…</p>
+            <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
           </div>
         </div>
-        <p class="grace-note">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Google Ads API = spend/platform evidence. HubSpot = revenue truth. Revenue uses HubSpot closed-won data, not Google Ads conversion values. Read-only — no writes to any external system.
-        </p>
       </section>
 
       <!-- ROAS by Country -->
       <section id="page-roas-countries" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">ROAS by Country</h1>
-          <p class="page-subtitle">Country-level Revenue Truth ROAS — estimated until GCLID attribution is fully wired.</p>
+          <p class="page-subtitle">Country-level Google Ads spend compared with HubSpot closed-won revenue.</p>
         </header>
-        <div id="page-explanation-roas-countries" hidden></div>
-        <div class="roas-estimate-warning" role="alert">
-          <strong>⚠ Country-level ROAS is an estimate</strong> until GCLID attribution is fully wired. Use it for directional diagnosis, not final budget decisions.
-        </div>
         <div class="roas-window-controls">
           <label class="roas-window-label">Window:</label>
           <select id="roas-countries-window" class="waste-filter-select" data-business-window-select aria-label="Revenue window">
@@ -1277,15 +1267,10 @@
         </div>
         <div id="roas-countries-kpis" class="kpi-grid"></div>
         <div class="panel">
-          <div class="panel__header">Country ROAS Estimates</div>
           <div class="panel__body panel__body--flush" id="roas-countries-table-body">
-            <p class="empty-state" style="padding: var(--space-5);">Loading ROAS by country…</p>
+            <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
           </div>
         </div>
-        <p class="grace-note">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Google Ads API = spend/platform evidence. HubSpot = revenue truth. Country ROAS reads local data only. No writes to Google Ads, HubSpot, or any external system.
-        </p>
       </section>
 
       <!-- Unit Economics -->
