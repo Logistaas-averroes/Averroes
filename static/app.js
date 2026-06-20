@@ -20,6 +20,15 @@
 
 const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input"];
 
+// PR-ADS-110: Revenue & Attribution business pages. These are business decision
+// pages, not diagnostics pages — the global ad-window bar, monitoring warning,
+// help/explanation blocks, and attribution-audit controls are suppressed here.
+const REVENUE_PAGES = ["roas-campaigns", "roas-countries"];
+
+function isRevenuePage(pageId) {
+  return REVENUE_PAGES.includes(pageId);
+}
+
 // Deal pipeline stages (Phase 1 read-only reference)
 const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
 
@@ -1194,21 +1203,32 @@ function navigate(page, options) {
   const target = document.getElementById(`page-${page}`);
   if (target) target.hidden = false;
 
-  // PR-ADS-108: ROAS pages use business windows, not the global 7d/14d/30d/60d
-  // ad-window selector. Hide the global time-range bar on those pages so it is
-  // not mistaken for the business-window filter.
+  // PR-ADS-110: Revenue & Attribution pages are clean business decision pages.
+  // Suppress the global ad-window bar, the monitoring warning, the help button,
+  // and the page-explanation block on these pages. Diagnostics live elsewhere
+  // (System Status / Data Runs / Scheduler).
+  const revenuePage = isRevenuePage(page);
+
   const timeRangeBar = document.getElementById("time-range-bar");
-  if (timeRangeBar) {
-    timeRangeBar.hidden = (page === "roas-campaigns" || page === "roas-countries");
+  if (timeRangeBar) timeRangeBar.hidden = revenuePage;
+
+  const monitoringBanner = document.getElementById("monitoring-banner");
+  if (monitoringBanner && revenuePage) monitoringBanner.hidden = true;
+
+  // Render page explanation panel (PR-ADS-070) — not on revenue pages.
+  const explanationEl = document.getElementById(`page-explanation-${page}`);
+  if (revenuePage) {
+    if (explanationEl) { explanationEl.hidden = true; explanationEl.innerHTML = ""; }
+  } else {
+    renderPageExplanation(page);
+    // Non-revenue navigation: re-evaluate the monitoring banner.
+    loadMonitoringStatus();
   }
 
-  // Render page explanation panel (PR-ADS-070)
-  renderPageExplanation(page);
-
-  // Update help drawer button state (PR-ADS-071)
+  // Update help drawer button state (PR-ADS-071) — hidden on revenue pages.
   const helpBtn = document.getElementById("page-help-btn");
   if (helpBtn) {
-    const hasHelp = !!PAGE_HELP_CONTENT[page];
+    const hasHelp = !revenuePage && !!PAGE_HELP_CONTENT[page];
     helpBtn.hidden = !hasHelp;
     helpBtn.dataset.page = page;
   }
@@ -1380,6 +1400,9 @@ async function loadMonitoringStatus() {
   // Hide by default; only show when warnings are present.
   bannerEl.hidden = true;
   bannerEl.className = "monitoring-banner";
+
+  // PR-ADS-110: the monitoring warning never belongs on a revenue decision page.
+  if (isRevenuePage(_currentPage)) return;
 
   let data = null;
   try {
@@ -7192,12 +7215,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     roasCountryWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
 
-  // PR-ADS-109: attribution audit button is re-rendered inside the banner, so
-  // bind it via delegation.
-  document.addEventListener("click", (e) => {
-    const btn = e.target && e.target.closest ? e.target.closest("#roas-audit-btn") : null;
-    if (btn) loadRevenueAttributionAudit();
-  });
 
   // Wire up Unit Economics controls
   const ueRefresh = document.getElementById("unit-economics-refresh-btn");
@@ -7506,120 +7523,53 @@ const BUSINESS_VERDICT_ORDER = { winner: 0, watch: 1, waste: 2, learning: 3 };
 // Shared revenue-attribution payload state for both ROAS pages.
 let roasRevenueWindow = null;
 let roasRevenueSummary = null;
-let roasRevenueWarnings = [];
 let roasRevenueSourceHealth = null;
 
-// PR-ADS-109: truth-layer banner + always-available attribution audit control.
-// Warns when lead/SQL metrics are not business-window safe (sync-date
-// contamination) or when revenue attribution is not wired (ROAS unavailable).
-function roasTruthBanner() {
-  const sh = roasRevenueSourceHealth || {};
-  const lines = [];
-  if (sh.lead_date_grain_status && sh.lead_date_grain_status !== "event_date") {
-    lines.push("Lead/SQL metrics are not business-window safe yet. The system is detecting sync-date contamination. Treat SQL counts as withheld until the audit passes.");
-  }
-  if (sh.revenue_attribution_status === "not_wired_or_no_closed_won") {
-    lines.push("Revenue attribution is not connected for this window. ROAS is unavailable, not zero.");
-  }
-  if (!lines.length && sh.data_is_partial) {
-    lines.push("Some data is partial for this business window. Open the attribution audit for the exact coverage and blockers.");
-  }
-  const banner = lines.length
-    ? `<div class="empty-state empty-state--warning" style="margin:0 0 var(--space-4)">
-         <div class="empty-state__title">Truth-layer warning</div>
-         <div class="empty-state__body"><ul>${lines.map((l) => "<li>" + escapeHtml(l) + "</li>").join("")}</ul></div>
-       </div>`
-    : "";
-  const audit = `<div class="roas-audit-control" style="margin:0 0 var(--space-4)">
-       <button id="roas-audit-btn" type="button" class="btn btn--secondary">View attribution audit</button>
-       <div id="roas-audit-output" class="roas-audit-output"></div>
+// PR-ADS-110: ROAS by Campaign / Country are business decision pages, not
+// diagnostics pages. Decisions are shown only when the truth layer is safe;
+// otherwise a single clean blocked card explains why — no debug/audit clutter.
+// (Diagnostics live in System Status / Revenue Attribution Health.)
+function isRevenueDecisionReady(sourceHealth) {
+  const sh = sourceHealth || {};
+  return (
+    sh.lead_date_grain_status === "event_date" &&
+    sh.lead_metrics_status !== "withheld" &&
+    sh.revenue_attribution_status !== "not_wired_or_no_closed_won"
+  );
+}
+
+function renderRevenueBlockedState(sourceHealth) {
+  const sh = sourceHealth || {};
+  const leadsReady = sh.lead_date_grain_status === "event_date" && sh.lead_metrics_status !== "withheld";
+  const revenueReady = sh.revenue_attribution_status !== "not_wired_or_no_closed_won";
+  const chip = (label, ok, okText, warnText) =>
+    `<div class="revenue-status-chip revenue-status-chip--${ok ? "ok" : "warning"}">
+       <span>${label}</span><strong>${ok ? okText : warnText}</strong>
      </div>`;
-  return banner + audit;
-}
-
-async function loadRevenueAttributionAudit() {
-  const out = document.getElementById("roas-audit-output");
-  if (out) out.innerHTML = '<p class="empty-state">Loading attribution audit…</p>';
-  try {
-    const res = await fetch(`/api/revenue-attribution/audit?window=${encodeURIComponent(getRoasBusinessWindow())}`, { credentials: "same-origin" });
-    if (!res.ok) {
-      if (out) out.innerHTML = '<p class="empty-state">Failed to load attribution audit.</p>';
-      return;
-    }
-    const a = await res.json();
-    if (out) out.innerHTML = renderAttributionAuditSummary(a);
-  } catch (err) {
-    console.error("[loadRevenueAttributionAudit]", err);
-    if (out) out.innerHTML = '<p class="empty-state">Error loading attribution audit.</p>';
-  }
-}
-
-function renderAttributionAuditSummary(a) {
-  const dg = a.date_grain_health || {};
-  const mark = (b) => (b ? "✅" : "❌");
-  const wc = a.window_comparison || {};
-  const wcLine = (k) => {
-    const s = wc[k] || {};
-    const n = (v) => (v === null || v === undefined ? "—" : v);
-    return `${k}: spend $${n(s.spend)} · leads ${n(s.leads)} · SQLs ${n(s.sqls)} · customers ${n(s.customers)} · won $${n(s.won_revenue)}`;
-  };
-  const blockers = (a.blockers || []).length
-    ? `<p><strong>Blockers:</strong></p><ul>${a.blockers.map((b) => "<li>" + escapeHtml(b) + "</li>").join("")}</ul>`
-    : "<p>No blockers.</p>";
-  return `<div class="audit-summary">
-    <p><strong>Verdict:</strong> <span class="audit-verdict audit-verdict--${escapeHtml((a.verdict || "").toLowerCase())}">${escapeHtml(a.verdict || "")}</span></p>
-    <ul>
-      <li>Lead window safe: ${mark(dg.lead_window_safe)} <code>${escapeHtml(dg.lead_date_field_current || "")}</code></li>
-      <li>Spend window safe: ${mark(dg.spend_window_safe)} <code>${escapeHtml(dg.spend_date_field || "")}</code></li>
-      <li>Revenue window safe: ${mark(dg.revenue_window_safe)} <code>${escapeHtml(dg.deal_date_field || "")}</code></li>
-      <li>Revenue attribution wired: ${mark(a.revenue_attribution_wired)}</li>
-      <li>Pseudo-campaign rows: ${(a.pseudo_campaign_rows || []).length}</li>
-      <li>Zero-spend campaigns with leads: ${(a.zero_spend_campaigns_with_leads || []).length}</li>
-    </ul>
-    ${blockers}
-    <p class="muted">Window comparison:</p>
-    <ul><li>${wcLine("current_quarter")}</li><li>${wcLine("ytd")}</li><li>${wcLine("all_time")}</li></ul>
-  </div>`;
-}
-
-function roasEmptyStateHtml(scope) {
-  const label = roasRevenueWindow && roasRevenueWindow.label
-    ? escapeHtml(roasRevenueWindow.label)
-    : "this business window";
-  const grain = scope === "country" ? "countries" : "campaigns";
   return `
-    <div class="empty-state empty-state--info" style="padding:var(--space-5)">
-      <div class="empty-state__title">No attributed revenue found for ${label}.</div>
-      <div class="empty-state__body">
-        <p>Spend exists but no HubSpot closed-won attribution matched, or</p>
-        <p>SQL/customer data may exist in HubSpot but is not mapped to ${grain} yet.</p>
-        <p>Google Ads API = spend/platform evidence. HubSpot = revenue truth.</p>
+    <div class="revenue-blocked-card">
+      <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
+      <h3>Revenue ROAS is not ready yet</h3>
+      <p>This page is blocked because the data is not safe enough for business decisions.</p>
+      <div class="revenue-status-grid">
+        ${chip("Spend", true, "Available", "Available")}
+        ${chip("Leads / SQLs", leadsReady, "Available", "Rebuilding")}
+        ${chip("Revenue", revenueReady, "Connected", "Not connected")}
+      </div>
+      <div class="revenue-next-step">
+        <strong>Next step:</strong> Run HubSpot lead re-sync, then re-check this page.
       </div>
     </div>`;
 }
 
-function renderRoasSummaryKpis(gridId) {
-  const grid = document.getElementById(gridId);
-  if (!grid) return;
-  const s = roasRevenueSummary || {};
-  const sh = roasRevenueSourceHealth || {};
-  // PR-ADS-109: gray out lead/SQL cards when metrics are withheld (unsafe grain).
-  const withheld = sh.lead_metrics_status === "withheld";
-  const leadsCell = withheld ? '<span class="kpi-withheld">Withheld</span>' : fmtCount(s.leads || 0);
-  const sqlsCell = withheld ? '<span class="kpi-withheld">Withheld</span>' : fmtCount(s.sqls || 0);
-  // ROAS unavailable (not zero) when revenue attribution is not wired.
-  const roasNotWired = sh.revenue_attribution_status === "not_wired_or_no_closed_won";
-  const roasCell = roasNotWired ? '<span class="kpi-withheld">Unavailable</span>' : fmtRoas(s.roas);
-  grid.innerHTML = `
-    <div class="kpi-card"><div class="kpi-card__label">Spend</div><div class="kpi-card__value">${fmtMoney(s.spend || 0)}</div></div>
-    <div class="kpi-card${withheld ? " kpi-card--withheld" : ""}"><div class="kpi-card__label">Leads</div><div class="kpi-card__value">${leadsCell}</div></div>
-    <div class="kpi-card${withheld ? " kpi-card--withheld" : ""}"><div class="kpi-card__label">SQLs</div><div class="kpi-card__value">${sqlsCell}</div></div>
-    <div class="kpi-card"><div class="kpi-card__label">Customers</div><div class="kpi-card__value">${fmtCount(s.customers || 0)}</div></div>
-    <div class="kpi-card"><div class="kpi-card__label">Won Revenue</div><div class="kpi-card__value">${fmtMoney(s.won_revenue || 0)}</div></div>
-    <div class="kpi-card${roasNotWired ? " kpi-card--withheld" : ""}"><div class="kpi-card__label">ROAS</div><div class="kpi-card__value">${roasCell}</div></div>
-    <div class="kpi-card"><div class="kpi-card__label">CAC</div><div class="kpi-card__value">${fmtMoney(s.cac)}</div></div>
-    <div class="kpi-card"><div class="kpi-card__label">Confidence</div><div class="kpi-card__value">${getConfidenceBadge(s.confidence)}</div></div>
-  `;
+function renderRevenueEmptyState(scope) {
+  const grain = scope === "country" ? "countries" : "campaigns";
+  return `
+    <div class="revenue-blocked-card revenue-empty-card">
+      <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
+      <h3>No closed-won revenue found for this window</h3>
+      <p>Spend data is available, but no HubSpot closed-won deals are attributed to ${grain} in this business window.</p>
+    </div>`;
 }
 
 // ── ROAS by Campaign ──────────────────────────────────────────────────────
@@ -7644,7 +7594,6 @@ async function loadRoasCampaigns() {
     const data = await res.json();
     roasRevenueWindow = data.window || null;
     roasRevenueSummary = data.summary || null;
-    roasRevenueWarnings = data.warnings || [];
     roasRevenueSourceHealth = data.source_health || null;
     roasCampaignsData = data.campaigns || [];
     roasCampaignsStatus = roasCampaignsData.length ? "ok" : "empty";
@@ -7659,17 +7608,21 @@ async function loadRoasCampaigns() {
 function renderRoasCampaignsPage() {
   const kpiGrid = document.getElementById("roas-campaigns-kpis");
   const tableBody = document.getElementById("roas-campaigns-table-body");
+  if (kpiGrid) kpiGrid.innerHTML = "";
+  if (!tableBody) return;
 
-  if (roasCampaignsStatus === "empty" || !roasCampaignsData.length) {
-    if (kpiGrid) kpiGrid.innerHTML = "";
-    if (tableBody) tableBody.innerHTML = roasTruthBanner() + roasEmptyStateHtml("campaign");
-    renderPageExplanation("roas-campaigns", { forceVisible: true });
+  // Blocked: truth layer is not safe for business decisions.
+  if (!isRevenueDecisionReady(roasRevenueSourceHealth)) {
+    tableBody.innerHTML = renderRevenueBlockedState(roasRevenueSourceHealth);
     return;
   }
 
-  renderRoasSummaryKpis("roas-campaigns-kpis");
+  // Safe but no closed-won revenue rows.
+  if (!roasCampaignsData.length) {
+    tableBody.innerHTML = renderRevenueEmptyState("campaign");
+    return;
+  }
 
-  // Sort by business verdict priority, then won revenue, then spend.
   const sorted = [...roasCampaignsData].sort((a, b) => {
     const va = BUSINESS_VERDICT_ORDER[a.verdict] ?? 9;
     const vb = BUSINESS_VERDICT_ORDER[b.verdict] ?? 9;
@@ -7677,26 +7630,21 @@ function renderRoasCampaignsPage() {
     return (b.won_revenue || 0) - (a.won_revenue || 0) || (b.spend || 0) - (a.spend || 0);
   });
 
-  if (tableBody) {
-    const headerRow = `<tr>
-      <th>Campaign</th><th>Spend</th><th>Leads</th><th>SQLs</th><th>Customers</th>
-      <th>Won Revenue</th><th>ROAS</th><th>CAC</th><th>Confidence</th><th>Verdict</th><th>Notes</th>
-    </tr>`;
-    const rows = sorted.map((r) => `<tr>
-      <td>${escapeHtml(r.campaign_name || "")}</td>
-      <td>${fmtMoney(r.spend)}</td>
-      <td>${fmtCount(r.leads)}</td>
-      <td>${fmtCount(r.sqls)}</td>
-      <td>${fmtCount(r.customers)}</td>
-      <td>${fmtMoney(r.won_revenue)}</td>
-      <td>${fmtRoas(r.roas)}</td>
-      <td>${fmtMoney(r.cac)}</td>
-      <td>${getConfidenceBadge(r.confidence)}</td>
-      <td>${getBusinessVerdictBadge(r.verdict)}</td>
-      <td class="roas-warnings">${(r.attribution_notes || []).map((n) => '<span class="roas-warning-chip">' + escapeHtml(n) + '</span>').join(" ")}</td>
-    </tr>`).join("");
-    tableBody.innerHTML = roasTruthBanner() + `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
-  }
+  const headerRow = `<tr>
+    <th>Campaign</th><th>Spend</th><th>Leads</th><th>SQLs</th><th>Customers</th>
+    <th>Won Revenue</th><th>ROAS</th><th>Decision</th>
+  </tr>`;
+  const rows = sorted.map((r) => `<tr>
+    <td>${escapeHtml(r.campaign_name || "")}</td>
+    <td>${fmtMoney(r.spend)}</td>
+    <td>${fmtCount(r.leads)}</td>
+    <td>${fmtCount(r.sqls)}</td>
+    <td>${fmtCount(r.customers)}</td>
+    <td>${fmtMoney(r.won_revenue)}</td>
+    <td>${fmtRoas(r.roas)}</td>
+    <td>${getBusinessVerdictBadge(r.verdict)}</td>
+  </tr>`).join("");
+  tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
 }
 
 // ── ROAS by Country ───────────────────────────────────────────────────────
@@ -7721,7 +7669,6 @@ async function loadRoasCountries() {
     const data = await res.json();
     roasRevenueWindow = data.window || null;
     roasRevenueSummary = data.summary || null;
-    roasRevenueWarnings = data.warnings || [];
     roasRevenueSourceHealth = data.source_health || null;
     roasCountriesData = data.countries || [];
     roasCountriesStatus = roasCountriesData.length ? "ok" : "empty";
@@ -7736,15 +7683,18 @@ async function loadRoasCountries() {
 function renderRoasCountriesPage() {
   const kpiGrid = document.getElementById("roas-countries-kpis");
   const tableBody = document.getElementById("roas-countries-table-body");
+  if (kpiGrid) kpiGrid.innerHTML = "";
+  if (!tableBody) return;
 
-  if (roasCountriesStatus === "empty" || !roasCountriesData.length) {
-    if (kpiGrid) kpiGrid.innerHTML = "";
-    if (tableBody) tableBody.innerHTML = roasTruthBanner() + roasEmptyStateHtml("country");
-    renderPageExplanation("roas-countries", { forceVisible: true });
+  if (!isRevenueDecisionReady(roasRevenueSourceHealth)) {
+    tableBody.innerHTML = renderRevenueBlockedState(roasRevenueSourceHealth);
     return;
   }
 
-  renderRoasSummaryKpis("roas-countries-kpis");
+  if (!roasCountriesData.length) {
+    tableBody.innerHTML = renderRevenueEmptyState("country");
+    return;
+  }
 
   const sorted = [...roasCountriesData].sort((a, b) => {
     const va = BUSINESS_VERDICT_ORDER[a.verdict] ?? 9;
@@ -7753,27 +7703,21 @@ function renderRoasCountriesPage() {
     return (b.won_revenue || 0) - (a.won_revenue || 0) || (b.spend || 0) - (a.spend || 0);
   });
 
-  if (tableBody) {
-    const headerRow = `<tr>
-      <th>Country</th><th>Spend</th><th>Leads</th><th>SQLs</th><th>Customers</th>
-      <th>Won Revenue</th><th>ROAS</th><th>CAC</th><th>Top Campaign</th><th>Confidence</th><th>Verdict</th><th>Notes</th>
-    </tr>`;
-    const rows = sorted.map((r) => `<tr>
-      <td>${escapeHtml(r.country || "")}${r.country_code ? ' <span class="country-code">(' + escapeHtml(r.country_code) + ')</span>' : ""}</td>
-      <td>${fmtMoney(r.spend)}</td>
-      <td>${fmtCount(r.leads)}</td>
-      <td>${fmtCount(r.sqls)}</td>
-      <td>${fmtCount(r.customers)}</td>
-      <td>${fmtMoney(r.won_revenue)}</td>
-      <td>${fmtRoas(r.roas)}</td>
-      <td>${fmtMoney(r.cac)}</td>
-      <td>${escapeHtml(r.top_campaign || "—")}</td>
-      <td>${getConfidenceBadge(r.confidence)}</td>
-      <td>${getBusinessVerdictBadge(r.verdict)}</td>
-      <td class="roas-warnings">${(r.attribution_notes || []).map((n) => '<span class="roas-warning-chip">' + escapeHtml(n) + '</span>').join(" ")}</td>
-    </tr>`).join("");
-    tableBody.innerHTML = roasTruthBanner() + `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
-  }
+  const headerRow = `<tr>
+    <th>Country</th><th>Spend</th><th>Leads</th><th>SQLs</th><th>Customers</th>
+    <th>Won Revenue</th><th>ROAS</th><th>Decision</th>
+  </tr>`;
+  const rows = sorted.map((r) => `<tr>
+    <td>${escapeHtml(r.country || "")}</td>
+    <td>${fmtMoney(r.spend)}</td>
+    <td>${fmtCount(r.leads)}</td>
+    <td>${fmtCount(r.sqls)}</td>
+    <td>${fmtCount(r.customers)}</td>
+    <td>${fmtMoney(r.won_revenue)}</td>
+    <td>${fmtRoas(r.roas)}</td>
+    <td>${getBusinessVerdictBadge(r.verdict)}</td>
+  </tr>`).join("");
+  tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
 }
 
 // ── Unit Economics ─────────────────────────────────────────────────────────
