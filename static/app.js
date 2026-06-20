@@ -225,19 +225,19 @@ const PAGE_EXPLANATIONS = {
   },
   "roas-campaigns": {
     title: "ROAS by Campaign",
-    purpose: "HubSpot Revenue Truth ROAS — shows which campaigns produce profitable customers based on closed-won revenue.",
-    source: "Revenue Truth Layer (HubSpot deals + Windsor campaigns).",
+    purpose: "Revenue attribution by campaign over business windows — which campaigns produce SQLs, customers, and closed-won revenue.",
+    source: "Google Ads API = spend/platform evidence. HubSpot = revenue truth (closed-won deals).",
     dependsOn: ["hubspot/deals", "google_ads_api/campaigns"],
-    emptyMeans: "No closed-won deals attributed to campaigns in this window, or the revenue truth layer has not computed results yet.",
-    nextAction: "Check that HubSpot deals are synced and campaigns have spend data."
+    emptyMeans: "No attributed revenue found for this business window. Spend may exist without a HubSpot closed-won match, or SQL/customer data may not be mapped to campaigns yet.",
+    nextAction: "Check that HubSpot deals are synced and campaigns have Google Ads API spend data for the selected window."
   },
   "roas-countries": {
     title: "ROAS by Country",
-    purpose: "Country-level Revenue Truth ROAS — estimated until GCLID attribution is fully wired.",
-    source: "Revenue Truth Layer (HubSpot deals + Windsor geo).",
+    purpose: "Revenue attribution by country over business windows — where SQLs, customers, and closed-won revenue come from.",
+    source: "Google Ads API = spend/platform evidence. HubSpot = revenue truth (closed-won deals).",
     dependsOn: ["hubspot/deals", "google_ads_api/geo"],
-    emptyMeans: "No country-level revenue data available for this window.",
-    nextAction: "Check that geo and deal data are synced."
+    emptyMeans: "No attributed revenue found for this business window. Spend may exist without a HubSpot closed-won match, or attribution may be missing/low confidence for these countries.",
+    nextAction: "Check that geo spend and HubSpot deal data are synced for the selected window."
   },
   "unit-economics": {
     title: "Unit Economics",
@@ -7166,17 +7166,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
 
-  // Wire up ROAS by Campaign controls
+  // Wire up ROAS by Campaign controls (business windows — PR-ADS-107A)
   const roasCampRefresh = document.getElementById("roas-campaigns-refresh-btn");
   const roasCampWindow  = document.getElementById("roas-campaigns-window");
   if (roasCampRefresh) roasCampRefresh.addEventListener("click", loadRoasCampaigns);
-  if (roasCampWindow)  roasCampWindow.addEventListener("change", handleSyncedWindowSelectChange);
+  if (roasCampWindow) {
+    roasCampWindow.value = getRoasBusinessWindow();
+    roasCampWindow.addEventListener("change", handleBusinessWindowSelectChange);
+  }
 
-  // Wire up ROAS by Country controls
+  // Wire up ROAS by Country controls (business windows — PR-ADS-107A)
   const roasCountryRefresh = document.getElementById("roas-countries-refresh-btn");
   const roasCountryWindow  = document.getElementById("roas-countries-window");
   if (roasCountryRefresh) roasCountryRefresh.addEventListener("click", loadRoasCountries);
-  if (roasCountryWindow)  roasCountryWindow.addEventListener("change", handleSyncedWindowSelectChange);
+  if (roasCountryWindow) {
+    roasCountryWindow.value = getRoasBusinessWindow();
+    roasCountryWindow.addEventListener("change", handleBusinessWindowSelectChange);
+  }
 
   // Wire up Unit Economics controls
   const ueRefresh = document.getElementById("unit-economics-refresh-btn");
@@ -7408,34 +7414,145 @@ function fmtNum(v, decimals) {
   return Number(v).toFixed(decimals !== undefined ? decimals : 1);
 }
 
+function fmtCount(v) {
+  if (v === null || v === undefined) return "—";
+  return Number(v).toLocaleString();
+}
+
+// ── Business revenue windows (PR-ADS-107A) ────────────────────────────────
+// ROAS by Campaign / ROAS by Country use business windows (not ad-style
+// 7d/14d/30d/60d day windows). Spend = Google Ads API platform evidence;
+// revenue = HubSpot closed-won truth. Both pages share one truth contract.
+const BUSINESS_WINDOWS = [
+  { key: "current_quarter", label: "Current Quarter" },
+  { key: "last_quarter",    label: "Last Quarter" },
+  { key: "last_6_months",   label: "Last 6 Months" },
+  { key: "ytd",             label: "YTD" },
+  { key: "all_time",        label: "All Time" },
+];
+const VALID_BUSINESS_WINDOWS = BUSINESS_WINDOWS.map((w) => w.key);
+const DEFAULT_BUSINESS_WINDOW = "current_quarter";
+
+let _roasBusinessWindow = (() => {
+  try {
+    const stored = sessionStorage.getItem("ads_business_window");
+    return VALID_BUSINESS_WINDOWS.includes(stored) ? stored : DEFAULT_BUSINESS_WINDOW;
+  } catch (_) {
+    return DEFAULT_BUSINESS_WINDOW;
+  }
+})();
+
+function getRoasBusinessWindow() {
+  return VALID_BUSINESS_WINDOWS.includes(_roasBusinessWindow)
+    ? _roasBusinessWindow
+    : DEFAULT_BUSINESS_WINDOW;
+}
+
+function setRoasBusinessWindow(key) {
+  const normalized = VALID_BUSINESS_WINDOWS.includes(key) ? key : DEFAULT_BUSINESS_WINDOW;
+  _roasBusinessWindow = normalized;
+  try { sessionStorage.setItem("ads_business_window", normalized); } catch (_) { /* ignore */ }
+  // Keep both ROAS business-window selects in sync.
+  document.querySelectorAll("[data-business-window-select]").forEach((sel) => {
+    sel.value = normalized;
+  });
+}
+
+function handleBusinessWindowSelectChange(e) {
+  setRoasBusinessWindow(e.target.value);
+  if (_currentPage === "roas-countries") {
+    loadRoasCountries();
+  } else {
+    loadRoasCampaigns();
+  }
+}
+
+function getConfidenceBadge(confidence) {
+  switch ((confidence || "").toLowerCase()) {
+    case "high":   return '<span class="confidence-badge confidence-badge--high" title="High — GCLID / strong attribution">High</span>';
+    case "medium": return '<span class="confidence-badge confidence-badge--medium" title="Medium — UTM campaign / clean campaign match">Medium</span>';
+    case "low":    return '<span class="confidence-badge confidence-badge--low" title="Low — inferred campaign/country match">Low</span>';
+    default:       return '<span class="confidence-badge">' + escapeHtml(confidence || "—") + '</span>';
+  }
+}
+
+function getBusinessVerdictBadge(verdict) {
+  switch ((verdict || "").toLowerCase()) {
+    case "winner":   return '<span class="roas-verdict-badge roas-verdict-badge--scale" title="Revenue/customers exist and ROAS is healthy">Winner</span>';
+    case "watch":    return '<span class="roas-verdict-badge roas-verdict-badge--hold" title="SQLs exist but weak customers/revenue">Watch</span>';
+    case "waste":    return '<span class="roas-verdict-badge roas-verdict-badge--cut" title="Spend exists but no SQLs/customers/revenue">Waste</span>';
+    case "learning": return '<span class="roas-verdict-badge roas-verdict-badge--insufficient" title="Low spend or insufficient data">Learning</span>';
+    default:         return '<span class="roas-verdict-badge">' + escapeHtml(verdict || "—") + '</span>';
+  }
+}
+
+const BUSINESS_VERDICT_ORDER = { winner: 0, watch: 1, waste: 2, learning: 3 };
+
+// Shared revenue-attribution payload state for both ROAS pages.
+let roasRevenueWindow = null;
+let roasRevenueSummary = null;
+
+function roasEmptyStateHtml(scope) {
+  const label = roasRevenueWindow && roasRevenueWindow.label
+    ? escapeHtml(roasRevenueWindow.label)
+    : "this business window";
+  const grain = scope === "country" ? "countries" : "campaigns";
+  return `
+    <div class="empty-state empty-state--info" style="padding:var(--space-5)">
+      <div class="empty-state__title">No attributed revenue found for ${label}.</div>
+      <div class="empty-state__body">
+        <p>Spend exists but no HubSpot closed-won attribution matched, or</p>
+        <p>SQL/customer data may exist in HubSpot but is not mapped to ${grain} yet.</p>
+        <p>Google Ads API = spend/platform evidence. HubSpot = revenue truth.</p>
+      </div>
+    </div>`;
+}
+
+function renderRoasSummaryKpis(gridId) {
+  const grid = document.getElementById(gridId);
+  if (!grid) return;
+  const s = roasRevenueSummary || {};
+  grid.innerHTML = `
+    <div class="kpi-card"><div class="kpi-card__label">Spend</div><div class="kpi-card__value">${fmtMoney(s.spend || 0)}</div></div>
+    <div class="kpi-card"><div class="kpi-card__label">Leads</div><div class="kpi-card__value">${fmtCount(s.leads || 0)}</div></div>
+    <div class="kpi-card"><div class="kpi-card__label">SQLs</div><div class="kpi-card__value">${fmtCount(s.sqls || 0)}</div></div>
+    <div class="kpi-card"><div class="kpi-card__label">Customers</div><div class="kpi-card__value">${fmtCount(s.customers || 0)}</div></div>
+    <div class="kpi-card"><div class="kpi-card__label">Won Revenue</div><div class="kpi-card__value">${fmtMoney(s.won_revenue || 0)}</div></div>
+    <div class="kpi-card"><div class="kpi-card__label">ROAS</div><div class="kpi-card__value">${fmtRoas(s.roas)}</div></div>
+    <div class="kpi-card"><div class="kpi-card__label">CAC</div><div class="kpi-card__value">${fmtMoney(s.cac)}</div></div>
+    <div class="kpi-card"><div class="kpi-card__label">Confidence</div><div class="kpi-card__value">${getConfidenceBadge(s.confidence)}</div></div>
+  `;
+}
+
 // ── ROAS by Campaign ──────────────────────────────────────────────────────
 
 let roasCampaignsData = [];
 let roasCampaignsStatus = "idle";
 
 async function loadRoasCampaigns() {
-  const window_ = getCurrentWindowParam();
-  if (!VALID_ROAS_WINDOWS.includes(window_)) return;
+  const window_ = getRoasBusinessWindow();
 
   roasCampaignsStatus = "loading";
   const body = document.getElementById("roas-campaigns-table-body");
-  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading ROAS by campaign…</p>';
+  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue attribution by campaign…</p>';
 
   try {
-    const res = await fetch(`/api/reports/roas/campaigns?window=${window_}`, { credentials: "same-origin" });
+    const res = await fetch(`/api/revenue-attribution?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
     if (!res.ok) {
       roasCampaignsStatus = "error";
-      if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load ROAS data.</p>';
+      if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue attribution data.</p>';
       return;
     }
     const data = await res.json();
-    roasCampaignsData = data.campaigns || data.rows || [];
+    roasRevenueWindow = data.window || null;
+    roasRevenueSummary = data.summary || null;
+    roasCampaignsData = data.campaigns || [];
     roasCampaignsStatus = roasCampaignsData.length ? "ok" : "empty";
     renderRoasCampaignsPage();
   } catch (err) {
     console.error("[loadRoasCampaigns]", err);
     roasCampaignsStatus = "error";
-    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading ROAS data.</p>';
+    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue attribution data.</p>';
   }
 }
 
@@ -7445,63 +7562,38 @@ function renderRoasCampaignsPage() {
 
   if (roasCampaignsStatus === "empty" || !roasCampaignsData.length) {
     if (kpiGrid) kpiGrid.innerHTML = "";
-    if (tableBody) tableBody.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">No ROAS data available for this window. Ensure closed-won deals exist and campaign data is synced.</p>';
+    if (tableBody) tableBody.innerHTML = roasEmptyStateHtml("campaign");
     renderPageExplanation("roas-campaigns", { forceVisible: true });
     return;
   }
 
-  // Summary KPIs
-  const totalSpend = roasCampaignsData.reduce((s, r) => s + (r.spend || 0), 0);
-  const totalAcv = roasCampaignsData.reduce((s, r) => s + (r.acv_revenue || 0), 0);
-  const totalLtv = roasCampaignsData.reduce((s, r) => s + (r.ltv_revenue || 0), 0);
-  const bestLtvCac = roasCampaignsData.reduce((best, r) => (r.ltv_to_cac || 0) > (best.ltv_to_cac || 0) ? r : best, roasCampaignsData[0]);
-  const verdictCounts = {};
-  roasCampaignsData.forEach((r) => { verdictCounts[r.verdict] = (verdictCounts[r.verdict] || 0) + 1; });
+  renderRoasSummaryKpis("roas-campaigns-kpis");
 
-  if (kpiGrid) {
-    kpiGrid.innerHTML = `
-      <div class="kpi-card"><div class="kpi-card__label">Total Spend</div><div class="kpi-card__value">${fmtMoney(totalSpend)}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Total ACV Revenue</div><div class="kpi-card__value">${fmtMoney(totalAcv)}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Total LTV Revenue</div><div class="kpi-card__value">${fmtMoney(totalLtv)}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Best LTV/CAC</div><div class="kpi-card__value">${escapeHtml(bestLtvCac.campaign || "—")} (${fmtNum(bestLtvCac.ltv_to_cac)}x)</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">SCALE</div><div class="kpi-card__value">${verdictCounts.SCALE || 0}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">HOLD</div><div class="kpi-card__value">${verdictCounts.HOLD || 0}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">FIX</div><div class="kpi-card__value">${verdictCounts.FIX || 0}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">CUT</div><div class="kpi-card__value">${verdictCounts.CUT || 0}</div></div>
-    `;
-  }
-
-  // Sort by verdict priority then LTV/CAC
-  const verdictOrder = { SCALE: 0, HOLD: 1, FIX: 2, CUT: 3, INSUFFICIENT_DATA: 4 };
+  // Sort by business verdict priority, then won revenue, then spend.
   const sorted = [...roasCampaignsData].sort((a, b) => {
-    const va = verdictOrder[a.verdict] ?? 5;
-    const vb = verdictOrder[b.verdict] ?? 5;
+    const va = BUSINESS_VERDICT_ORDER[a.verdict] ?? 9;
+    const vb = BUSINESS_VERDICT_ORDER[b.verdict] ?? 9;
     if (va !== vb) return va - vb;
-    return (b.ltv_to_cac || 0) - (a.ltv_to_cac || 0);
+    return (b.won_revenue || 0) - (a.won_revenue || 0) || (b.spend || 0) - (a.spend || 0);
   });
 
   if (tableBody) {
     const headerRow = `<tr>
-      <th>Campaign</th><th>Spend</th><th>Deals Won</th><th>ACV Revenue</th><th>ARR Revenue</th>
-      <th>LTV Revenue</th><th>ACV ROAS</th><th>ARR ROAS</th><th>LTV ROAS</th><th>CAC</th>
-      <th>LTV/CAC</th><th>Payback Mo.</th><th>Attribution</th><th>Verdict</th><th>Warnings</th>
+      <th>Campaign</th><th>Spend</th><th>Leads</th><th>SQLs</th><th>Customers</th>
+      <th>Won Revenue</th><th>ROAS</th><th>CAC</th><th>Confidence</th><th>Verdict</th><th>Notes</th>
     </tr>`;
     const rows = sorted.map((r) => `<tr>
-      <td>${escapeHtml(r.campaign || "")}</td>
+      <td>${escapeHtml(r.campaign_name || "")}</td>
       <td>${fmtMoney(r.spend)}</td>
-      <td>${fmt(r.deals_won)}</td>
-      <td>${fmtMoney(r.acv_revenue)}</td>
-      <td>${fmtMoney(r.arr_revenue)}</td>
-      <td>${fmtMoney(r.ltv_revenue)}</td>
-      <td>${fmtRoas(r.acv_roas)}</td>
-      <td>${fmtRoas(r.arr_roas)}</td>
-      <td>${fmtRoas(r.ltv_roas)}</td>
+      <td>${fmtCount(r.leads)}</td>
+      <td>${fmtCount(r.sqls)}</td>
+      <td>${fmtCount(r.customers)}</td>
+      <td>${fmtMoney(r.won_revenue)}</td>
+      <td>${fmtRoas(r.roas)}</td>
       <td>${fmtMoney(r.cac)}</td>
-      <td>${fmtNum(r.ltv_to_cac)}x</td>
-      <td>${fmtNum(r.payback_months)}</td>
-      <td>${getAttributionBadge(r.attribution_confidence)}</td>
-      <td><span class="${getVerdictBadgeClass(r.verdict)}">${escapeHtml(r.verdict || "")}</span></td>
-      <td class="roas-warnings">${(r.warnings || []).map((w) => '<span class="roas-warning-chip">' + escapeHtml(w) + '</span>').join(" ")}</td>
+      <td>${getConfidenceBadge(r.confidence)}</td>
+      <td>${getBusinessVerdictBadge(r.verdict)}</td>
+      <td class="roas-warnings">${(r.attribution_notes || []).map((n) => '<span class="roas-warning-chip">' + escapeHtml(n) + '</span>').join(" ")}</td>
     </tr>`).join("");
     tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
   }
@@ -7513,28 +7605,29 @@ let roasCountriesData = [];
 let roasCountriesStatus = "idle";
 
 async function loadRoasCountries() {
-  const window_ = getCurrentWindowParam();
-  if (!VALID_ROAS_WINDOWS.includes(window_)) return;
+  const window_ = getRoasBusinessWindow();
 
   roasCountriesStatus = "loading";
   const body = document.getElementById("roas-countries-table-body");
-  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading ROAS by country…</p>';
+  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue attribution by country…</p>';
 
   try {
-    const res = await fetch(`/api/reports/roas/countries?window=${window_}`, { credentials: "same-origin" });
+    const res = await fetch(`/api/revenue-attribution?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
     if (!res.ok) {
       roasCountriesStatus = "error";
-      if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load country ROAS data.</p>';
+      if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue attribution data.</p>';
       return;
     }
     const data = await res.json();
-    roasCountriesData = data.countries || data.rows || [];
+    roasRevenueWindow = data.window || null;
+    roasRevenueSummary = data.summary || null;
+    roasCountriesData = data.countries || [];
     roasCountriesStatus = roasCountriesData.length ? "ok" : "empty";
     renderRoasCountriesPage();
   } catch (err) {
     console.error("[loadRoasCountries]", err);
     roasCountriesStatus = "error";
-    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading country ROAS data.</p>';
+    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue attribution data.</p>';
   }
 }
 
@@ -7544,51 +7637,38 @@ function renderRoasCountriesPage() {
 
   if (roasCountriesStatus === "empty" || !roasCountriesData.length) {
     if (kpiGrid) kpiGrid.innerHTML = "";
-    if (tableBody) tableBody.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">No country ROAS data available for this window.</p>';
+    if (tableBody) tableBody.innerHTML = roasEmptyStateHtml("country");
     renderPageExplanation("roas-countries", { forceVisible: true });
     return;
   }
 
-  const totalSpend = roasCountriesData.reduce((s, r) => s + (r.spend || 0), 0);
-  const totalLtv = roasCountriesData.reduce((s, r) => s + (r.ltv_revenue || 0), 0);
+  renderRoasSummaryKpis("roas-countries-kpis");
 
-  if (kpiGrid) {
-    kpiGrid.innerHTML = `
-      <div class="kpi-card"><div class="kpi-card__label">Countries</div><div class="kpi-card__value">${roasCountriesData.length}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Total Spend</div><div class="kpi-card__value">${fmtMoney(totalSpend)}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Total LTV Revenue</div><div class="kpi-card__value">${fmtMoney(totalLtv)}</div></div>
-    `;
-  }
-
-  const verdictOrder = { SCALE: 0, HOLD: 1, FIX: 2, CUT: 3, INSUFFICIENT_DATA: 4 };
   const sorted = [...roasCountriesData].sort((a, b) => {
-    const va = verdictOrder[a.verdict] ?? 5;
-    const vb = verdictOrder[b.verdict] ?? 5;
+    const va = BUSINESS_VERDICT_ORDER[a.verdict] ?? 9;
+    const vb = BUSINESS_VERDICT_ORDER[b.verdict] ?? 9;
     if (va !== vb) return va - vb;
-    return (b.ltv_to_cac || 0) - (a.ltv_to_cac || 0);
+    return (b.won_revenue || 0) - (a.won_revenue || 0) || (b.spend || 0) - (a.spend || 0);
   });
 
   if (tableBody) {
     const headerRow = `<tr>
-      <th>Country</th><th>Spend</th><th>Deals Won</th><th>ACV Revenue</th><th>LTV Revenue</th>
-      <th>ACV ROAS</th><th>LTV ROAS</th><th>CAC</th><th>LTV/CAC</th><th>Payback Mo.</th>
-      <th>Attribution</th><th>Estimate</th><th>Verdict</th><th>Warnings</th>
+      <th>Country</th><th>Spend</th><th>Leads</th><th>SQLs</th><th>Customers</th>
+      <th>Won Revenue</th><th>ROAS</th><th>CAC</th><th>Top Campaign</th><th>Confidence</th><th>Verdict</th><th>Notes</th>
     </tr>`;
     const rows = sorted.map((r) => `<tr>
-      <td>${escapeHtml(r.country || "")}</td>
+      <td>${escapeHtml(r.country || "")}${r.country_code ? ' <span class="country-code">(' + escapeHtml(r.country_code) + ')</span>' : ""}</td>
       <td>${fmtMoney(r.spend)}</td>
-      <td>${fmt(r.deals_won)}</td>
-      <td>${fmtMoney(r.acv_revenue)}</td>
-      <td>${fmtMoney(r.ltv_revenue)}</td>
-      <td>${fmtRoas(r.acv_roas)}</td>
-      <td>${fmtRoas(r.ltv_roas)}</td>
+      <td>${fmtCount(r.leads)}</td>
+      <td>${fmtCount(r.sqls)}</td>
+      <td>${fmtCount(r.customers)}</td>
+      <td>${fmtMoney(r.won_revenue)}</td>
+      <td>${fmtRoas(r.roas)}</td>
       <td>${fmtMoney(r.cac)}</td>
-      <td>${fmtNum(r.ltv_to_cac)}x</td>
-      <td>${fmtNum(r.payback_months)}</td>
-      <td>${getAttributionBadge(r.attribution_confidence)}</td>
-      <td>${r.country_level_estimate ? '<span class="estimate-badge">Estimate</span>' : '<span class="estimate-badge estimate-badge--confirmed">Confirmed</span>'}</td>
-      <td><span class="${getVerdictBadgeClass(r.verdict)}">${escapeHtml(r.verdict || "")}</span></td>
-      <td class="roas-warnings">${(r.warnings || []).map((w) => '<span class="roas-warning-chip">' + escapeHtml(w) + '</span>').join(" ")}</td>
+      <td>${escapeHtml(r.top_campaign || "—")}</td>
+      <td>${getConfidenceBadge(r.confidence)}</td>
+      <td>${getBusinessVerdictBadge(r.verdict)}</td>
+      <td class="roas-warnings">${(r.attribution_notes || []).map((n) => '<span class="roas-warning-chip">' + escapeHtml(n) + '</span>').join(" ")}</td>
     </tr>`).join("");
     tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
   }

@@ -1232,13 +1232,12 @@
         <div id="page-explanation-roas-campaigns" hidden></div>
         <div class="roas-window-controls">
           <label class="roas-window-label">Window:</label>
-          <select id="roas-campaigns-window" class="waste-filter-select" data-sync-window-select aria-label="ROAS analysis window">
-            <option value="7d">7d</option>
-            <option value="14d">14d</option>
-            <option value="30d">30d</option>
-            <option value="60d" selected>60d</option>
-            <option value="90d">90d</option>
-            <option value="365d">365d</option>
+          <select id="roas-campaigns-window" class="waste-filter-select" data-business-window-select aria-label="Revenue window">
+            <option value="current_quarter" selected>Current Quarter</option>
+            <option value="last_quarter">Last Quarter</option>
+            <option value="last_6_months">Last 6 Months</option>
+            <option value="ytd">YTD</option>
+            <option value="all_time">All Time</option>
           </select>
           <button id="roas-campaigns-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
         </div>
@@ -1251,7 +1250,7 @@
         </div>
         <p class="grace-note">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Revenue Truth ROAS uses HubSpot closed-won data, not Google Ads conversion values. Read-only — no writes to any external system.
+          Google Ads API = spend/platform evidence. HubSpot = revenue truth. Revenue uses HubSpot closed-won data, not Google Ads conversion values. Read-only — no writes to any external system.
         </p>
       </section>
 
@@ -1267,13 +1266,12 @@
         </div>
         <div class="roas-window-controls">
           <label class="roas-window-label">Window:</label>
-          <select id="roas-countries-window" class="waste-filter-select" data-sync-window-select aria-label="ROAS analysis window">
-            <option value="7d">7d</option>
-            <option value="14d">14d</option>
-            <option value="30d">30d</option>
-            <option value="60d" selected>60d</option>
-            <option value="90d">90d</option>
-            <option value="365d">365d</option>
+          <select id="roas-countries-window" class="waste-filter-select" data-business-window-select aria-label="Revenue window">
+            <option value="current_quarter" selected>Current Quarter</option>
+            <option value="last_quarter">Last Quarter</option>
+            <option value="last_6_months">Last 6 Months</option>
+            <option value="ytd">YTD</option>
+            <option value="all_time">All Time</option>
           </select>
           <button id="roas-countries-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
         </div>
@@ -1286,7 +1284,7 @@
         </div>
         <p class="grace-note">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Country ROAS reads local data only. No writes to Google Ads, HubSpot, or any external system.
+          Google Ads API = spend/platform evidence. HubSpot = revenue truth. Country ROAS reads local data only. No writes to Google Ads, HubSpot, or any external system.
         </p>
       </section>
 

@@ -52,6 +52,7 @@ Protected endpoints (require authenticated session):
   GET  /api/backfill/status       — Latest backfill run state and summary (requires auth).
   GET  /api/historical-intelligence — Read-only historical trend analysis over local data (requires auth).
   GET  /api/diagnostics/window-semantics — Read-only window-counts and diagnostic verdict per dataset (admin only; PR-ADS-095).
+  GET  /api/revenue-attribution   — Shared revenue-attribution contract by business window for ROAS campaign/country pages (requires auth; PR-ADS-107A).
 """
 
 import base64
@@ -5842,16 +5843,48 @@ def _parse_window(window: str) -> int:
     )
 
 
+@app.get("/api/revenue-attribution")
+async def get_revenue_attribution(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Shared revenue-attribution contract (PR-ADS-107A).
+
+    Single read-only truth source for the ROAS by Campaign and ROAS by Country
+    pages. Uses business-revenue windows rather than ad-style day windows:
+    current_quarter, last_quarter, last_6_months, ytd, all_time.
+
+    Revenue truth: HubSpot closed-won deals.
+    Spend / platform evidence: Google Ads API.
+    Google Ads conversion value is NOT used as revenue truth.
+    Read-only — no writes to Google Ads, HubSpot, or any external system.
+    """
+    from services.revenue_attribution_service import build_revenue_attribution
+
+    try:
+        return build_revenue_attribution(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Revenue attribution computation failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Revenue attribution computation failed"
+        ) from exc
+
+
 @app.get("/api/reports/roas/campaigns")
 async def get_roas_campaigns(
     window: str = Query(default="60d"),
     _user=Depends(require_auth),
 ):
-    """Campaign-level ROAS report.
+    """Campaign-level ROAS report (legacy ad-window contract).
 
     Revenue source: HubSpot won deals.
-    Spend source: Windsor / Google Ads.
+    Spend source: Google Ads API.
     Google Ads conversion value is NOT used.
+
+    Note: the ROAS pages now consume GET /api/revenue-attribution (business
+    windows). This endpoint is retained for backward compatibility.
     """
     from analysis.roas_calculator import compute_all_campaign_roas
 

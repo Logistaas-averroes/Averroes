@@ -103,20 +103,24 @@ def test_no_hardcoded_60d_in_snapshot_history():
     assert "getCurrentWindowParam()" in snapshot_section
 
 
-def test_roas_campaigns_uses_global_window_fallback():
-    """ROAS campaigns loader should use getCurrentWindowParam() as fallback."""
+def test_roas_campaigns_uses_business_window():
+    """PR-ADS-107A: ROAS campaigns loader uses the business-window resolver,
+    not the ad-style global day window."""
     start = JS.find("function loadRoasCampaigns")
     assert start != -1, "loadRoasCampaigns function not found"
     roas_section = JS[start:start + 500]
-    assert "getCurrentWindowParam()" in roas_section
+    assert "getRoasBusinessWindow()" in roas_section
+    assert "getCurrentWindowParam()" not in roas_section
 
 
-def test_roas_countries_uses_global_window_fallback():
-    """ROAS countries loader should use getCurrentWindowParam() as fallback."""
+def test_roas_countries_uses_business_window():
+    """PR-ADS-107A: ROAS countries loader uses the business-window resolver,
+    not the ad-style global day window."""
     start = JS.find("function loadRoasCountries")
     assert start != -1, "loadRoasCountries function not found"
     roas_section = JS[start:start + 500]
-    assert "getCurrentWindowParam()" in roas_section
+    assert "getRoasBusinessWindow()" in roas_section
+    assert "getCurrentWindowParam()" not in roas_section
 
 
 def test_unit_economics_uses_global_window_fallback():
@@ -153,20 +157,23 @@ def test_help_drawer_resets_body_on_close():
 
 # ── ROAS Dropdowns Sync ────────────────────────────────────────────────────
 
-def test_roas_campaigns_dropdown_has_sync_attr():
-    """ROAS campaigns window dropdown must have data-sync-window-select."""
+def test_roas_campaigns_dropdown_is_business_window():
+    """PR-ADS-107A: ROAS campaigns window dropdown is a business-window select,
+    decoupled from the ad-style global day window."""
     assert 'id="roas-campaigns-window"' in HTML
-    # Check the attribute is on the same element
     match = re.search(r'<select[^>]*id="roas-campaigns-window"[^>]*>', HTML)
     assert match, "roas-campaigns-window select not found"
-    assert "data-sync-window-select" in match.group(0)
+    assert "data-business-window-select" in match.group(0)
+    assert "data-sync-window-select" not in match.group(0)
 
 
-def test_roas_countries_dropdown_has_sync_attr():
-    """ROAS countries window dropdown must have data-sync-window-select."""
+def test_roas_countries_dropdown_is_business_window():
+    """PR-ADS-107A: ROAS countries window dropdown is a business-window select,
+    decoupled from the ad-style global day window."""
     match = re.search(r'<select[^>]*id="roas-countries-window"[^>]*>', HTML)
     assert match, "roas-countries-window select not found"
-    assert "data-sync-window-select" in match.group(0)
+    assert "data-business-window-select" in match.group(0)
+    assert "data-sync-window-select" not in match.group(0)
 
 
 def test_unit_economics_dropdown_has_sync_attr():
