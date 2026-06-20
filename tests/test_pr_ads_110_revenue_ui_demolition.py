@@ -143,11 +143,15 @@ def test_safe_empty_state_distinct_from_blocked():
 
 
 def test_render_flow_blocked_then_empty_then_table():
-    for fn_name, col in (("function renderRoasCampaignsPage", ">Campaign<"),
-                         ("function renderRoasCountriesPage", ">Country<")):
+    # ROAS by Campaign was rebuilt in PR-ADS-111 and uses a campaign-specific
+    # safe empty renderer; ROAS by Country still uses the shared one.
+    for fn_name, empty_fn, col in (
+        ("function renderRoasCampaignsPage", "renderRoasCampaignSafeEmptyState", ">Campaign<"),
+        ("function renderRoasCountriesPage", "renderRevenueEmptyState", ">Country<"),
+    ):
         body = _fn(fn_name, span=2600)
         i_block = body.find("renderRevenueBlockedState")
-        i_empty = body.find("renderRevenueEmptyState")
+        i_empty = body.find(empty_fn)
         i_table = body.find(col)
         assert i_block < i_empty < i_table, f"{fn_name}: flow must be blocked -> empty -> table"
 

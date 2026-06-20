@@ -7572,10 +7572,87 @@ function renderRevenueEmptyState(scope) {
     </div>`;
 }
 
-// ── ROAS by Campaign ──────────────────────────────────────────────────────
+// ── ROAS by Campaign (PR-ADS-111) ─────────────────────────────────────────
+// Executive decision page: "Which Google Ads campaigns are producing qualified
+// pipeline, customers, and closed-won revenue?" — not a diagnostics page.
+// Blocked card when the truth layer is unsafe; otherwise a summary strip,
+// decision filter chips, and a single clean decision table. No debug clutter.
 
 let roasCampaignsData = [];
 let roasCampaignsStatus = "idle";
+
+// Frontend-only decision-bucket filter (does not affect ROAS by Country).
+let roasCampaignFilter = "all";
+
+function campaignDecisionLabel(verdict) {
+  const labels = {
+    winner: "Winner",
+    watch: "Watch",
+    waste: "Waste",
+    learning: "Learning",
+  };
+  return labels[verdict] || "Learning";
+}
+
+function filterRoasCampaignRows(rows, filter) {
+  if (!filter || filter === "all") return rows;
+  return rows.filter((r) => r.verdict === filter);
+}
+
+// Business-value sort: a campaign with customers and revenue matters more than
+// a prettier verdict label, so we sort by outcome, not by verdict bucket.
+function sortRoasCampaignRows(rows) {
+  return [...rows].sort((a, b) =>
+    (b.customers || 0) - (a.customers || 0) ||
+    (b.won_revenue || 0) - (a.won_revenue || 0) ||
+    (b.sqls || 0) - (a.sqls || 0) ||
+    (b.spend || 0) - (a.spend || 0)
+  );
+}
+
+function renderRoasCampaignSummary(summary) {
+  const s = summary || {};
+  return `
+    <div class="revenue-summary-strip">
+      <div><span>Spend</span><strong>${fmtMoney(s.spend)}</strong></div>
+      <div><span>Leads</span><strong>${fmtCount(s.leads)}</strong></div>
+      <div><span>SQLs</span><strong>${fmtCount(s.sqls)}</strong></div>
+      <div><span>Customers</span><strong>${fmtCount(s.customers)}</strong></div>
+      <div><span>Won Revenue</span><strong>${fmtMoney(s.won_revenue)}</strong></div>
+      <div><span>ROAS</span><strong>${s.roas === null || s.roas === undefined ? "Unavailable" : fmtRoas(s.roas)}</strong></div>
+    </div>
+  `;
+}
+
+function renderRoasCampaignFilters() {
+  const filters = [
+    ["all", "All"],
+    ["winner", "Winners"],
+    ["watch", "Watch"],
+    ["waste", "Waste"],
+    ["learning", "Learning"],
+  ];
+  return `
+    <div class="revenue-filter-chips" id="roas-campaign-filter-chips">
+      ${filters.map(([key, label]) => `
+        <button
+          type="button"
+          class="revenue-filter-chip ${roasCampaignFilter === key ? "is-active" : ""}"
+          data-roas-campaign-filter="${key}"
+        >${label}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderRoasCampaignSafeEmptyState() {
+  return `
+    <div class="revenue-blocked-card revenue-empty-card">
+      <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
+      <h3>No campaign revenue found for this window</h3>
+      <p>Spend and revenue sources are ready, but no HubSpot closed-won deals are attributed to campaigns in this business window.</p>
+    </div>`;
+}
 
 async function loadRoasCampaigns() {
   const window_ = getRoasBusinessWindow();
@@ -7617,35 +7694,77 @@ function renderRoasCampaignsPage() {
     return;
   }
 
-  // Safe but no closed-won revenue rows.
+  // Safe but no closed-won revenue rows attributed to campaigns.
   if (!roasCampaignsData.length) {
-    tableBody.innerHTML = renderRevenueEmptyState("campaign");
+    tableBody.innerHTML = renderRoasCampaignSafeEmptyState();
     return;
   }
 
-  const sorted = [...roasCampaignsData].sort((a, b) => {
-    const va = BUSINESS_VERDICT_ORDER[a.verdict] ?? 9;
-    const vb = BUSINESS_VERDICT_ORDER[b.verdict] ?? 9;
-    if (va !== vb) return va - vb;
-    return (b.won_revenue || 0) - (a.won_revenue || 0) || (b.spend || 0) - (a.spend || 0);
-  });
+  const sorted = sortRoasCampaignRows(roasCampaignsData);
+  const filtered = filterRoasCampaignRows(sorted, roasCampaignFilter);
 
-  const headerRow = `<tr>
-    <th>Campaign</th><th>Spend</th><th>Leads</th><th>SQLs</th><th>Customers</th>
-    <th>Won Revenue</th><th>ROAS</th><th>Decision</th>
-  </tr>`;
-  const rows = sorted.map((r) => `<tr>
-    <td>${escapeHtml(r.campaign_name || "")}</td>
-    <td>${fmtMoney(r.spend)}</td>
-    <td>${fmtCount(r.leads)}</td>
-    <td>${fmtCount(r.sqls)}</td>
-    <td>${fmtCount(r.customers)}</td>
-    <td>${fmtMoney(r.won_revenue)}</td>
-    <td>${fmtRoas(r.roas)}</td>
-    <td>${getBusinessVerdictBadge(r.verdict)}</td>
-  </tr>`).join("");
-  tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
+  tableBody.innerHTML = `
+    ${renderRoasCampaignSummary(roasRevenueSummary)}
+    ${renderRoasCampaignFilters()}
+    ${renderRoasCampaignTable(filtered)}
+    <p class="revenue-footnote">Google Ads provides spend. HubSpot closed-won deals provide revenue.</p>
+  `;
 }
+
+function renderRoasCampaignTable(rows) {
+  if (!rows.length) {
+    return `
+      <div class="revenue-empty-inline">
+        No campaigns match this decision filter.
+      </div>
+    `;
+  }
+
+  const headerRow = `
+    <tr>
+      <th>Campaign</th>
+      <th>Spend</th>
+      <th>Leads</th>
+      <th>SQLs</th>
+      <th>Customers</th>
+      <th>Won Revenue</th>
+      <th>ROAS</th>
+      <th>Decision</th>
+    </tr>
+  `;
+
+  const bodyRows = rows.map((r) => `
+    <tr>
+      <td>${escapeHtml(r.campaign_name || "")}</td>
+      <td>${fmtMoney(r.spend)}</td>
+      <td>${fmtCount(r.leads)}</td>
+      <td>${fmtCount(r.sqls)}</td>
+      <td>${fmtCount(r.customers)}</td>
+      <td>${fmtMoney(r.won_revenue)}</td>
+      <td>${fmtRoas(r.roas)}</td>
+      <td>${getBusinessVerdictBadge(r.verdict)}</td>
+    </tr>
+  `).join("");
+
+  return `
+    <div class="table-scroll">
+      <table class="data-table roas-table revenue-decision-table">
+        ${headerRow}
+        <tbody>${bodyRows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+// Decision-bucket filter chips (campaign page only) — event delegation so the
+// chips work after every re-render. Scoped via the data attribute so the
+// ROAS by Country page is unaffected.
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-roas-campaign-filter]");
+  if (!btn) return;
+  roasCampaignFilter = btn.dataset.roasCampaignFilter || "all";
+  renderRoasCampaignsPage();
+});
 
 // ── ROAS by Country ───────────────────────────────────────────────────────
 
