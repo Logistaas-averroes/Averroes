@@ -1194,6 +1194,14 @@ function navigate(page, options) {
   const target = document.getElementById(`page-${page}`);
   if (target) target.hidden = false;
 
+  // PR-ADS-108: ROAS pages use business windows, not the global 7d/14d/30d/60d
+  // ad-window selector. Hide the global time-range bar on those pages so it is
+  // not mistaken for the business-window filter.
+  const timeRangeBar = document.getElementById("time-range-bar");
+  if (timeRangeBar) {
+    timeRangeBar.hidden = (page === "roas-campaigns" || page === "roas-countries");
+  }
+
   // Render page explanation panel (PR-ADS-070)
   renderPageExplanation(page);
 

@@ -8,17 +8,24 @@ per campaign and per country.
 
 Data doctrine:
   - HubSpot closed-won deals are revenue truth.
-  - Google Ads API spend is platform/spend evidence — read from the ACTIVE
-    scheduler-cutover compatibility files written by
-    connectors/google_ads_source.save_output (PR-ADS-104):
-        data/ads_campaigns.json   (campaign spend)
-        data/ads_geos.json        (geo spend; country is currently unmapped)
-    The legacy pre-cutover data/campaign_performance.json is NOT the primary
-    source. It is only used as an explicit, clearly-labeled fallback.
+  - Google Ads API spend is platform/spend evidence.
+  - Durable sources first (PR-ADS-108): the endpoint reads persisted PostgreSQL
+    tables populated by the scheduler, NOT ephemeral local JSON files that only
+    exist as a side effect of the weekly run on the box that ran it:
+        geo                -> campaign + country spend (per-day, real country)
+        leads              -> leads + SQLs (status_category)
+        gclid_attribution  -> closed-won revenue/customers (by deal_close_date)
+    Local JSON (data/ads_campaigns.json, etc.) is a DIAGNOSTIC FALLBACK only,
+    used when the database is unavailable, and is clearly labeled as such.
+    When neither a durable DB source nor a local file exists, the response says
+    "source_unavailable" with the exact missing dependency — it never shows a
+    silently-empty dashboard.
   - Google Ads conversion value is NOT used as revenue truth.
   - Attribution uncertainty is surfaced, never hidden (High / Medium / Low).
-    GCLID attribution derived from the legacy campaign_performance.json index is
-    downgraded (never claimed as high confidence) and labeled.
+    DB GCLID attribution (gclid_attribution.match_status) is durable and is not
+    downgraded. GCLID attribution derived from the legacy local
+    campaign_performance.json index (fallback path only) is downgraded and
+    labeled.
 
 Metrics per row:
   - spend         Google Ads API spend in the window
@@ -44,13 +51,14 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from analysis.attribution_confidence import get_confidence_severity
 from analysis.attribution_matcher import attribute_deals
 from analysis.business_windows import get_window_bounds, resolve_window
 from analysis.core import QUALIFIED
+from db import revenue_repository as repo
 from services.country_codes import get_country_code
 
 logger = logging.getLogger(__name__)
@@ -519,44 +527,246 @@ def _build_summary(deals: list, spend_rows: list, contacts: list, *, legacy_gcli
     }
 
 
-def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
-    """Build the shared revenue-attribution contract for a business window.
+# ── Durable DB path (PR-ADS-108) ─────────────────────────────────────────────
 
-    Spend is read from the active Google Ads API scheduler-cutover files
-    (data/ads_campaigns.json, data/ads_geos.json). Revenue is HubSpot closed-won.
-    Source diagnostics (files_used, statuses, warnings) are included so the UI
-    can never imply a freshness/source it does not have.
 
-    Args:
-        window: A business-window key (see analysis.business_windows.WINDOW_KEYS).
-        now: Optional reference time for deterministic resolution/testing.
+def _match_status_to_tier(match_status) -> str:
+    """Map a gclid_attribution.match_status to an attribution tier."""
+    ms = (match_status or "").strip().lower()
+    if ms == "matched":
+        return "tier_1_gclid"
+    if ms == "url_fallback":
+        return "tier_2_source_tag"
+    return "tier_3_spend_weighted"
 
-    Returns:
-        Dict with window, summary, campaigns, countries, and source diagnostics.
 
-    Raises:
-        ValueError: If ``window`` is not a supported business window.
+def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, group_field: str):
+    """Aggregate durable DB rows into finished campaign or country rows.
+
+    group_field is "campaign_name" or "country". Returns (rows, country_spend_available).
     """
-    resolved = resolve_window(window, now=now)
-    start_dt, end_dt = get_window_bounds(window, now=now)
+    buckets: dict[str, dict] = {}
 
+    def bucket_for(name):
+        key = _norm(name)
+        if key not in buckets:
+            buckets[key] = _new_bucket(name or "unknown")
+        return key, buckets[key]
+
+    # spend rows: {campaign_name, country, spend}
+    for row in spend_rows:
+        _, b = bucket_for(row.get(group_field))
+        b["spend"] += _safe_float(row.get("spend"))
+
+    # lead rows: {campaign_name, country, status_category, has_gclid}
+    for row in lead_rows:
+        _, b = bucket_for(row.get(group_field))
+        b["leads"] += 1
+        if row.get("status_category") == "qualified":
+            b["sqls"] += 1
+
+    # revenue rows: {campaign_name, country, deal_id, deal_amount_usd, match_status}
+    for row in revenue_rows:
+        _, b = bucket_for(row.get(group_field))
+        b["customers"] += 1
+        b["won_revenue"] += _safe_float(row.get("deal_amount_usd"))
+        b["tiers"].append(_match_status_to_tier(row.get("match_status")))
+
+    rows = []
+    for key, bucket in buckets.items():
+        finalized = _finalize_row(bucket, legacy_gclid=False)
+        if group_field == "campaign_name":
+            finalized["campaign_id"] = key or "unknown"
+            finalized["campaign_name"] = bucket["display"] or "unknown"
+        else:
+            display = bucket["display"] or "unknown"
+            finalized["country"] = display
+            finalized["country_code"] = get_country_code(display)
+            finalized["top_campaign"] = _db_top_campaign(key, revenue_rows, spend_rows)
+        rows.append(finalized)
+
+    rows.sort(key=lambda r: (r["spend"], r["won_revenue"]), reverse=True)
+    return rows
+
+
+def _db_top_campaign(country_key: str, revenue_rows: list, spend_rows: list) -> str | None:
+    """Top campaign in a country by won revenue, falling back to spend (DB rows)."""
+    by_rev: dict[str, float] = {}
+    for r in revenue_rows:
+        if _norm(r.get("country")) == country_key:
+            name = r.get("campaign_name") or "unknown"
+            by_rev[name] = by_rev.get(name, 0.0) + _safe_float(r.get("deal_amount_usd"))
+    if by_rev:
+        best = max(by_rev, key=by_rev.get)
+        if by_rev[best] > 0:
+            return best
+    by_spend: dict[str, float] = {}
+    for r in spend_rows:
+        if _norm(r.get("country")) == country_key:
+            name = r.get("campaign_name") or "unknown"
+            by_spend[name] = by_spend.get(name, 0.0) + _safe_float(r.get("spend"))
+    if by_spend:
+        best = max(by_spend, key=by_spend.get)
+        if by_spend[best] > 0:
+            return best
+    return None
+
+
+def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list) -> dict:
+    spend = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
+    leads = len(lead_rows)
+    sqls = sum(1 for r in lead_rows if r.get("status_category") == "qualified")
+    customers = len(revenue_rows)
+    won_revenue = round(sum(_safe_float(r.get("deal_amount_usd")) for r in revenue_rows), 2)
+    tiers = [_match_status_to_tier(r.get("match_status")) for r in revenue_rows]
+    return {
+        "spend": spend,
+        "leads": leads,
+        "sqls": sqls,
+        "customers": customers,
+        "won_revenue": won_revenue,
+        "roas": compute_roas(won_revenue, spend),
+        "cac": compute_cac(spend, customers),
+        "confidence": confidence_from_tiers(tiers),
+    }
+
+
+def _window_date_bounds(window: str, now: datetime | None):
+    """Return (start_date, end_date) as date objects (start may be None)."""
+    resolved = resolve_window(window, now=now)
+    start_date = date.fromisoformat(resolved["start_date"]) if resolved["start_date"] else None
+    end_date = date.fromisoformat(resolved["end_date"])
+    return resolved, start_date, end_date
+
+
+def _build_from_db(resolved, start_date, end_date) -> dict | None:
+    """Build the contract from durable DB sources.
+
+    Returns the full contract dict, or None when the database is unavailable
+    (so the caller can fall back to the local-JSON diagnostic path).
+    """
+    spend = repo.fetch_campaign_country_spend(start_date, end_date)
+    if not spend["available"]:
+        return None  # DB unreachable — signal caller to fall back
+
+    leads = repo.fetch_lead_quality(start_date, end_date)
+    revenue = repo.fetch_won_revenue(start_date, end_date)
+    sync = repo.fetch_sync_state()
+
+    spend_rows = spend["rows"]
+    lead_rows = leads["rows"]
+    revenue_rows = revenue["rows"]
+
+    named_spend = [r for r in spend_rows if r.get("country")]
+    country_spend_available = bool(named_spend)
+
+    campaigns = _build_db_rows(spend_rows, lead_rows, revenue_rows, group_field="campaign_name")
+    countries = _build_db_rows(spend_rows, lead_rows, revenue_rows, group_field="country")
+    summary = _build_db_summary(spend_rows, lead_rows, revenue_rows)
+
+    campaign_spend_status = "db" if spend_rows else "db_empty"
+    contacts_status = "db" if lead_rows else "db_empty"
+    deals_status = "db" if revenue_rows else "db_empty"
+    if revenue_rows:
+        attribution_status = "gclid_attribution_db"
+    elif lead_rows:
+        attribution_status = "hubspot_source_tags_only"
+    else:
+        attribution_status = "none"
+
+    # Partial when spend coverage does not reach back to the window start.
+    data_is_partial = False
+    cov_start = spend.get("coverage_start")
+    if start_date is not None:
+        if cov_start is None or cov_start > resolved["start_date"]:
+            data_is_partial = True
+
+    warnings: list[str] = []
+    if campaign_spend_status == "db_empty":
+        warnings.append(
+            "No Google Ads spend rows in durable table 'geo' for this window."
+        )
+    if deals_status == "db_empty":
+        warnings.append(
+            "No closed-won revenue in durable table 'gclid_attribution' for this window."
+        )
+    if data_is_partial:
+        warnings.append(
+            f"Partial data: durable spend coverage starts {cov_start or 'unknown'}, "
+            f"after the requested window start {resolved['start_date']}."
+        )
+    if not country_spend_available and spend_rows:
+        warnings.append(
+            "Country-level spend rows are present but missing country names."
+        )
+
+    db_tables_used = [t for t, present in (
+        ("geo", bool(spend_rows)),
+        ("leads", bool(lead_rows)),
+        ("gclid_attribution", bool(revenue_rows)),
+    ) if present]
+
+    source_health = {
+        "mode": "database",
+        "campaign_spend_status": campaign_spend_status,
+        "hubspot_contacts_status": contacts_status,
+        "hubspot_deals_status": deals_status,
+        "attribution_status": attribution_status,
+        "data_is_partial": data_is_partial,
+        "coverage_start": spend.get("coverage_start") or revenue.get("coverage_start"),
+        "coverage_end": spend.get("coverage_end") or revenue.get("coverage_end"),
+        "files_used": {},
+        "db_tables_used": db_tables_used,
+        "sync_state": sync.get("datasets", {}),
+        "warnings": warnings,
+    }
+
+    return {
+        "window": resolved,
+        "summary": summary,
+        "campaigns": campaigns,
+        "countries": countries,
+        "spend_source": "google_ads_api",
+        "revenue_source": "hubspot_closed_won",
+        "source_truth": "hubspot_closed_won_revenue",
+        "google_ads_conversion_value_used": False,
+        "campaign_spend_source_status": campaign_spend_status,
+        "attribution_source_status": attribution_status,
+        "country_spend_available": country_spend_available,
+        "geo_country_mapping_status": "available" if country_spend_available else (
+            "no_geo_data" if not spend_rows else "partial"
+        ),
+        "data_is_partial": data_is_partial,
+        "source_health": source_health,
+        "files_used": {},
+        "db_tables_used": db_tables_used,
+        "warnings": warnings,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ── Local-JSON diagnostic fallback (used only when the DB is unavailable) ────
+
+
+def _build_from_json(resolved, start_dt, end_dt) -> dict:
+    """Diagnostic fallback: build the contract from local JSON files.
+
+    Used only when the durable database is unavailable. Clearly labeled so the
+    UI never implies a production/durable source it does not have.
+    """
     deals = _load_attributed_deals()
     contacts = _load_contacts()
     campaign_spend = _load_campaign_spend()
     geo_spend = _load_geo_spend()
-    attribution_status = _attribution_source_status()
-    legacy_gclid = attribution_status == "legacy_gclid_index"
+    attribution_status_json = _attribution_source_status()
+    legacy_gclid = attribution_status_json == "legacy_gclid_index"
 
-    deals_w = [
-        d for d in deals if _in_window(_parse_dt(d.get("closedate")), start_dt, end_dt)
-    ]
+    deals_w = [d for d in deals if _in_window(_parse_dt(d.get("closedate")), start_dt, end_dt)]
     contacts_w = [
-        c
-        for c in contacts
+        c for c in contacts
         if _in_window(
             _parse_dt((c.get("properties", {}) if isinstance(c, dict) else {}).get("createdate")),
-            start_dt,
-            end_dt,
+            start_dt, end_dt,
         )
     ]
     campaign_spend_w = [
@@ -566,7 +776,6 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
         r for r in geo_spend["rows"] if _in_window(_parse_dt(_row_date(r)), start_dt, end_dt)
     ]
 
-    # Geo country-resolution diagnostics.
     named_geo = [r for r in geo_spend_w if r.get("country")]
     country_spend_available = bool(named_geo)
     if not geo_spend_w:
@@ -581,35 +790,30 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     summary = _build_summary(deals_w, campaign_spend_w, contacts_w, legacy_gclid=legacy_gclid)
     campaigns = _build_campaign_rows(deals_w, campaign_spend_w, contacts_w, legacy_gclid=legacy_gclid)
     countries = _build_country_rows(
-        deals_w,
-        geo_spend_w,
-        contacts_w,
-        legacy_gclid=legacy_gclid,
-        country_spend_available=country_spend_available,
+        deals_w, geo_spend_w, contacts_w,
+        legacy_gclid=legacy_gclid, country_spend_available=country_spend_available,
     )
 
-    warnings: list[str] = []
-    if campaign_spend["status"] == "legacy_fallback":
+    has_any_local = bool(campaign_spend["rows"] or geo_spend["rows"] or deals or contacts)
+
+    if campaign_spend["rows"]:
+        campaign_spend_status = "local_json_fallback"
+    else:
+        campaign_spend_status = "source_unavailable"
+
+    warnings: list[str] = [
+        "Database unavailable — served from local JSON diagnostic fallback, "
+        "not a durable production source.",
+    ]
+    if campaign_spend_status == "source_unavailable":
         warnings.append(
-            "Campaign spend loaded from legacy data/campaign_performance.json — "
-            "not the active Google Ads API scheduler output (data/ads_campaigns.json)."
-        )
-    elif campaign_spend["status"] == "no_spend_data":
-        warnings.append(
-            "No active Google Ads API campaign spend found "
-            "(data/ads_campaigns.json missing or empty)."
-        )
-    if not country_spend_available:
-        warnings.append(
-            "Country-level Google Ads spend is not available: geo rows are not "
-            "country-resolved (geo country mapping not implemented). Country spend "
-            "is shown as 0; leads/SQLs/customers/revenue are HubSpot-side."
+            "No durable campaign spend source: DB table 'geo' unreachable and "
+            "data/ads_campaigns.json missing or empty."
         )
     if legacy_gclid:
         warnings.append(
-            "GCLID attribution index is sourced from legacy "
-            "data/campaign_performance.json; high-confidence GCLID claims are "
-            "downgraded to medium."
+            "GCLID attribution index is sourced from legacy local "
+            "data/campaign_performance.json; high-confidence claims downgraded to medium."
         )
 
     files_used = {
@@ -619,21 +823,72 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
         "contacts": _rel(CONTACTS_FILE) if contacts else None,
     }
 
+    source_health = {
+        "mode": "local_json_fallback" if has_any_local else "source_unavailable",
+        "campaign_spend_status": campaign_spend_status,
+        "hubspot_contacts_status": "local_json_fallback" if contacts else "source_unavailable",
+        "hubspot_deals_status": "local_json_fallback" if deals else "source_unavailable",
+        "attribution_status": attribution_status_json,
+        "data_is_partial": True,
+        "coverage_start": None,
+        "coverage_end": None,
+        "files_used": files_used,
+        "db_tables_used": [],
+        "sync_state": {},
+        "warnings": warnings,
+    }
+
     return {
         "window": resolved,
         "summary": summary,
         "campaigns": campaigns,
         "countries": countries,
-        # Source diagnostics (PR-ADS-107A patch).
         "spend_source": "google_ads_api",
         "revenue_source": "hubspot_closed_won",
         "source_truth": "hubspot_closed_won_revenue",
         "google_ads_conversion_value_used": False,
-        "campaign_spend_source_status": campaign_spend["status"],
-        "attribution_source_status": attribution_status,
+        "campaign_spend_source_status": campaign_spend_status,
+        "attribution_source_status": attribution_status_json,
         "country_spend_available": country_spend_available,
         "geo_country_mapping_status": geo_country_mapping_status,
+        "data_is_partial": True,
+        "source_health": source_health,
         "files_used": files_used,
+        "db_tables_used": [],
         "warnings": warnings,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
+    """Build the shared revenue-attribution contract for a business window.
+
+    Durable-source strategy (PR-ADS-108):
+      1. Read from persisted PostgreSQL tables (geo / leads / gclid_attribution).
+      2. If the database is unavailable, fall back to local JSON files, clearly
+         labeled as a diagnostic fallback (source_health.mode).
+      3. If neither a durable DB source nor a local file exists, the response
+         reports "source_unavailable" with the exact missing dependency.
+
+    The response always includes a source_health block so the UI can never imply
+    a source/freshness it does not have.
+
+    Args:
+        window: A business-window key (see analysis.business_windows.WINDOW_KEYS).
+        now: Optional reference time for deterministic resolution/testing.
+
+    Returns:
+        Dict with window, summary, campaigns, countries, and source_health.
+
+    Raises:
+        ValueError: If ``window`` is not a supported business window.
+    """
+    resolved, start_date, end_date = _window_date_bounds(window, now)
+
+    db_result = _build_from_db(resolved, start_date, end_date)
+    if db_result is not None:
+        return db_result
+
+    # Database unavailable — diagnostic fallback to local JSON.
+    start_dt, end_dt = get_window_bounds(window, now=now)
+    return _build_from_json(resolved, start_dt, end_dt)
