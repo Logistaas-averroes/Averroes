@@ -32,6 +32,15 @@ logger = logging.getLogger(__name__)
 WON_DEAL_STAGE_ID = "326093516"
 _WON_LABEL_LIKE = "%won%"
 
+# HubSpot traffic-source pseudo-names that must never appear as ROAS campaigns.
+_PSEUDO_CAMPAIGNS = (
+    "(direct)", "(organic)", "(referral)", "(not set)",
+    "(cross-network)", "(none)", "(content)", "(social)",
+)
+
+# Stable per-contact identity for dedup / distinct counts across run snapshots.
+_CONTACT_KEY = "COALESCE(NULLIF(contact_id, ''), 'id:' || id::text)"
+
 
 def _unavailable(table: str, extra: dict | None = None) -> dict:
     result = {"available": False, "rows": [], "table": table,
@@ -115,41 +124,115 @@ def fetch_campaign_country_spend(start: date | None, end: date) -> dict:
 
 
 def fetch_lead_quality(start: date | None, end: date) -> dict:
-    """Leads + SQLs from the durable `leads` table, deduped per contact.
+    """Leads + SQLs from the durable `leads` table — business-event-date safe.
+
+    PR-ADS-109: filters by HubSpot contact_created_at (the business event date),
+    NOT run_date (the scheduler/sync date), so recently-synced or backfilled old
+    contacts are not counted inside the current window. Includes paid-search
+    leads only, and excludes pseudo-/email campaigns.
 
     SQL = status_category 'qualified' (the existing lead-quality definition).
-    Returns rows [{campaign_name, country, status_category, has_gclid}].
+
+    Returns rows [{campaign_name, country, status_category, has_gclid}] plus date
+    grain diagnostics (event_date_safe, missing_contact_created_at_count, etc.).
     """
     try:
         with get_conn() as conn:
             if conn is None:
-                return _unavailable("leads")
+                return _unavailable("leads", {"event_date_safe": False})
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     WITH deduped AS (
-                        SELECT DISTINCT ON (COALESCE(NULLIF(contact_id, ''), 'id:' || id::text))
+                        SELECT DISTINCT ON ({_CONTACT_KEY})
                             campaign_name,
                             country,
                             status_category,
                             (gclid IS NOT NULL AND gclid <> '') AS has_gclid
                         FROM leads
-                        WHERE (%s::date IS NULL OR run_date >= %s)
-                          AND run_date <= %s
-                        ORDER BY COALESCE(NULLIF(contact_id, ''), 'id:' || id::text),
-                                 run_date DESC, id DESC
+                        WHERE source_type = 'paid_search'
+                          AND contact_created_at IS NOT NULL
+                          AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
+                          AND contact_created_at < (%s::date + INTERVAL '1 day')
+                          AND campaign_name IS NOT NULL
+                          AND lower(campaign_name) NOT IN %s
+                          AND campaign_name !~* 'email_campaign'
+                        ORDER BY {_CONTACT_KEY}, run_date DESC, id DESC
                     )
                     SELECT campaign_name, country, status_category, has_gclid
                     FROM deduped
                     """,
-                    (start, start, end),
+                    (start, end, _PSEUDO_CAMPAIGNS),
                 )
                 rows = _rows_as_dicts(cur)
-            return {"available": True, "rows": rows, "table": "leads",
-                    "coverage_start": None, "coverage_end": None}
+
+                # Paid contacts that have NO business event date in ANY row.
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*) FROM (
+                        SELECT {_CONTACT_KEY} AS k, MAX(contact_created_at) AS mc
+                        FROM leads
+                        WHERE source_type = 'paid_search'
+                        GROUP BY 1
+                    ) t WHERE t.mc IS NULL
+                    """
+                )
+                missing_event = cur.fetchone()[0]
+
+                cur.execute(
+                    "SELECT EXISTS (SELECT 1 FROM leads "
+                    "WHERE source_type = 'paid_search' AND contact_created_at IS NOT NULL)"
+                )
+                has_event_date = bool(cur.fetchone()[0])
+
+                # Non-paid contacts inside the window (excluded from ROAS rows).
+                cur.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT {_CONTACT_KEY})
+                    FROM leads
+                    WHERE source_type IS DISTINCT FROM 'paid_search'
+                      AND contact_created_at IS NOT NULL
+                      AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
+                      AND contact_created_at < (%s::date + INTERVAL '1 day')
+                    """,
+                    (start, end),
+                )
+                excluded_non_paid = cur.fetchone()[0]
+
+                # Paid contacts inside the window with a pseudo / email / null campaign.
+                cur.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT {_CONTACT_KEY})
+                    FROM leads
+                    WHERE source_type = 'paid_search'
+                      AND contact_created_at IS NOT NULL
+                      AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
+                      AND contact_created_at < (%s::date + INTERVAL '1 day')
+                      AND (campaign_name IS NULL
+                           OR lower(campaign_name) IN %s
+                           OR campaign_name ~* 'email_campaign')
+                    """,
+                    (start, end, _PSEUDO_CAMPAIGNS),
+                )
+                excluded_pseudo = cur.fetchone()[0]
+
+            event_date_safe = (missing_event == 0)
+            return {
+                "available": True,
+                "rows": rows,
+                "table": "leads",
+                "date_field": "contact_created_at",
+                "event_date_safe": event_date_safe,
+                "lead_event_date_field_available": has_event_date,
+                "missing_contact_created_at_count": int(missing_event),
+                "excluded_non_paid_count": int(excluded_non_paid),
+                "excluded_pseudo_campaign_count": int(excluded_pseudo),
+                "coverage_start": None,
+                "coverage_end": None,
+            }
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_lead_quality failed: %s", exc)
-        return _unavailable("leads")
+        return _unavailable("leads", {"event_date_safe": False})
 
 
 def fetch_won_revenue(start: date | None, end: date) -> dict:
@@ -209,6 +292,105 @@ def fetch_won_revenue(start: date | None, end: date) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_won_revenue failed: %s", exc)
         return _unavailable("gclid_attribution")
+
+
+def fetch_lead_date_grain_health(start: date | None, end: date) -> dict:
+    """Lead date-grain + source-type diagnostics for the audit endpoint.
+
+    Reuses fetch_lead_quality's safety counts and adds counts_by_source_type
+    (distinct contacts in the window, by source_type). Read-only.
+    """
+    base = fetch_lead_quality(start, end)
+    counts = {k: 0 for k in
+              ("paid_search", "organic_search", "direct", "referral", "email", "other", "null")}
+    try:
+        with get_conn() as conn:
+            if conn is not None:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT COALESCE(source_type, 'null') AS st,
+                               COUNT(DISTINCT {_CONTACT_KEY}) AS n
+                        FROM leads
+                        WHERE contact_created_at IS NOT NULL
+                          AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
+                          AND contact_created_at < (%s::date + INTERVAL '1 day')
+                        GROUP BY COALESCE(source_type, 'null')
+                        """,
+                        (start, end),
+                    )
+                    for st, n in cur.fetchall():
+                        counts[st if st in counts else "other"] = (
+                            counts.get(st if st in counts else "other", 0) + int(n)
+                        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_lead_date_grain_health counts failed: %s", exc)
+
+    return {
+        "available": base.get("available", False),
+        "lead_event_date_field_available": base.get("lead_event_date_field_available", False),
+        "lead_window_safe": base.get("event_date_safe", False),
+        "missing_contact_created_at_count": base.get("missing_contact_created_at_count", 0),
+        "excluded_non_paid_count": base.get("excluded_non_paid_count", 0),
+        "excluded_pseudo_campaign_count": base.get("excluded_pseudo_campaign_count", 0),
+        "counts_by_source_type": counts,
+    }
+
+
+def fetch_campaign_pollution_report(start: date | None, end: date) -> dict:
+    """Report campaign-universe pollution for the audit endpoint (read-only).
+
+    - pseudo_campaign_rows / email_campaign_rows: pseudo or email campaign names
+      still present in the leads table (should be empty — cleaned at write time).
+    - zero_spend_campaigns_with_leads: paid-search lead campaigns in the window
+      that have NO matching Google Ads spend in `geo` (legacy/UTM variants).
+    """
+    result = {"available": False, "pseudo_campaign_rows": [],
+              "email_campaign_rows": [], "zero_spend_campaigns_with_leads": []}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return result
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT campaign_name FROM leads "
+                    "WHERE campaign_name IS NOT NULL AND lower(campaign_name) IN %s",
+                    (_PSEUDO_CAMPAIGNS,),
+                )
+                result["pseudo_campaign_rows"] = [r[0] for r in cur.fetchall()]
+
+                cur.execute(
+                    "SELECT DISTINCT campaign_name FROM leads "
+                    "WHERE campaign_name IS NOT NULL AND campaign_name ~* 'email_campaign'"
+                )
+                result["email_campaign_rows"] = [r[0] for r in cur.fetchall()]
+
+                cur.execute(
+                    f"""
+                    SELECT DISTINCT l.campaign_name
+                    FROM leads l
+                    WHERE l.source_type = 'paid_search'
+                      AND l.campaign_name IS NOT NULL
+                      AND lower(l.campaign_name) NOT IN %s
+                      AND l.campaign_name !~* 'email_campaign'
+                      AND l.contact_created_at IS NOT NULL
+                      AND l.contact_created_at >= COALESCE(%s::timestamptz, l.contact_created_at)
+                      AND l.contact_created_at < (%s::date + INTERVAL '1 day')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM geo g
+                          WHERE lower(g.campaign_name) = lower(l.campaign_name)
+                            AND (%s::date IS NULL OR g.run_date >= %s)
+                            AND g.run_date <= %s
+                      )
+                    """,
+                    (_PSEUDO_CAMPAIGNS, start, end, start, start, end),
+                )
+                result["zero_spend_campaigns_with_leads"] = [r[0] for r in cur.fetchall()]
+            result["available"] = True
+            return result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_campaign_pollution_report failed: %s", exc)
+        return result
 
 
 def fetch_sync_state() -> dict:

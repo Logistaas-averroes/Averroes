@@ -130,6 +130,18 @@ CREATE INDEX IF NOT EXISTS idx_leads_source_type    ON leads(source_type);
 -- PR-ADS-025E-FIX: index on leads(campaign_name) to prevent full table scans on backfill UPDATEs
 CREATE INDEX IF NOT EXISTS idx_leads_campaign_name  ON leads(campaign_name);
 
+-- PR-ADS-109: business event date + raw HubSpot source on leads (idempotent migration)
+-- run_date stays the scheduler/sync date. contact_created_at is the HubSpot
+-- contact creation date (business event date) used for business-window filtering.
+-- Existing rows written before this migration will have contact_created_at NULL
+-- until the next sync repopulates them; the revenue-attribution audit reports this
+-- as an unsafe date grain (lead metrics withheld) rather than miscounting windows.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS contact_created_at TIMESTAMPTZ;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS hs_analytics_source TEXT;
+CREATE INDEX IF NOT EXISTS idx_leads_contact_created_at      ON leads(contact_created_at);
+CREATE INDEX IF NOT EXISTS idx_leads_source_type_created     ON leads(source_type, contact_created_at);
+CREATE INDEX IF NOT EXISTS idx_leads_paid_campaign_created   ON leads(source_type, campaign_name, contact_created_at);
+
 -- PR-ADS-025E: canonicalise Windsor variant campaign names (idempotent)
 -- Authoritative source: _CAMPAIGN_CANONICAL dict in db/writers.py.
 -- If you add a new Windsor→canonical mapping there, add the matching UPDATE pair here too.

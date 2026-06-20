@@ -56,6 +56,29 @@ def _today() -> date:
     return datetime.now(timezone.utc).date()
 
 
+def _parse_ts(value):
+    """Parse a HubSpot timestamp (ISO string or epoch-ms) to a datetime, or None.
+
+    Used to persist the real business event date (contact createdate). Returns
+    None for missing/invalid values so the row is stored with a NULL event date
+    and flagged unsafe by the revenue-attribution audit rather than miscounted.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if text.isdigit() and len(text) >= 12:  # epoch milliseconds
+        try:
+            return datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Campaign name normalisation and source type helpers
 # ---------------------------------------------------------------------------
@@ -338,6 +361,8 @@ def write_leads(run_id: int, contacts: list) -> int:
 
         source_type = _map_source_type(hs_source, campaign_name)
         campaign_name_clean = _clean_campaign_name(campaign_name)
+        # PR-ADS-109: persist the real HubSpot business event date and raw source.
+        contact_created_at = _parse_ts(props.get("createdate"))
 
         rows.append((
             run_id,
@@ -351,6 +376,8 @@ def write_leads(run_id: int, contacts: list) -> int:
             gclid,
             source_type,
             company,
+            contact_created_at,
+            hs_source or None,
         ))
     try:
         with get_conn() as conn:
@@ -361,8 +388,9 @@ def write_leads(run_id: int, contacts: list) -> int:
                     """
                     INSERT INTO leads (
                         run_id, run_date, contact_id, campaign_name,
-                        keyword, country, mql_status, status_category, gclid, source_type, company
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        keyword, country, mql_status, status_category, gclid, source_type, company,
+                        contact_created_at, hs_analytics_source
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     rows,
                 )

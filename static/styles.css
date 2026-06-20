@@ -4188,6 +4188,43 @@ a {
   font-weight: 500;
 }
 
+/* ── Truth-layer safety (PR-ADS-109) ─────────────────────────────────────── */
+
+.kpi-card--withheld {
+  opacity: 0.6;
+}
+
+.kpi-withheld {
+  color: var(--color-text-muted, #64748b);
+  font-size: 0.85rem;
+  font-style: italic;
+  font-weight: 600;
+}
+
+.roas-audit-control .btn {
+  margin-bottom: var(--space-2, 0.5rem);
+}
+
+.roas-audit-output {
+  font-size: 0.8rem;
+}
+
+.audit-summary code {
+  background: #f1f5f9;
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+}
+
+.audit-verdict--safe {
+  color: #166534;
+  font-weight: 700;
+}
+
+.audit-verdict--unsafe {
+  color: #991b1b;
+  font-weight: 700;
+}
+
 /* ── Unit Economics ─────────────────────────────────────────────────────── */
 
 .unit-economics-verdict-card {
