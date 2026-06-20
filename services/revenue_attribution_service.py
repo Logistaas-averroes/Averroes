@@ -8,9 +8,17 @@ per campaign and per country.
 
 Data doctrine:
   - HubSpot closed-won deals are revenue truth.
-  - Google Ads API spend is platform/spend evidence.
+  - Google Ads API spend is platform/spend evidence — read from the ACTIVE
+    scheduler-cutover compatibility files written by
+    connectors/google_ads_source.save_output (PR-ADS-104):
+        data/ads_campaigns.json   (campaign spend)
+        data/ads_geos.json        (geo spend; country is currently unmapped)
+    The legacy pre-cutover data/campaign_performance.json is NOT the primary
+    source. It is only used as an explicit, clearly-labeled fallback.
   - Google Ads conversion value is NOT used as revenue truth.
   - Attribution uncertainty is surfaced, never hidden (High / Medium / Low).
+    GCLID attribution derived from the legacy campaign_performance.json index is
+    downgraded (never claimed as high confidence) and labeled.
 
 Metrics per row:
   - spend         Google Ads API spend in the window
@@ -28,6 +36,7 @@ What is NOT in this file:
   - No external API calls (no HubSpot, Google Ads, or network requests).
   - No Google Ads writes. No HubSpot writes.
   - No bid/budget/campaign/keyword changes. No OCT.
+  - No legacy/pre-cutover spend source used as primary.
   - No frontend formatting.
 """
 
@@ -47,15 +56,26 @@ from services.country_codes import get_country_code
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent.parent / "data"
-SPEND_FILE = DATA_DIR / "campaign_performance.json"
+
+# Active Google Ads API scheduler-cutover output files (PR-ADS-104).
+ADS_CAMPAIGNS_FILE = DATA_DIR / "ads_campaigns.json"
+ADS_GEOS_FILE = DATA_DIR / "ads_geos.json"
+
+# Legacy pre-cutover spend file — explicit fallback only, never primary.
+LEGACY_SPEND_FILE = DATA_DIR / "campaign_performance.json"
+
+# HubSpot-side inputs.
 CONTACTS_FILE = DATA_DIR / "crm_contacts.json"
+WON_DEALS_FILE = DATA_DIR / "hubspot_won_deals.json"
 
 # Verdict thresholds. Kept deliberately simple — see classify_verdict.
 HEALTHY_ROAS = 1.0            # won_revenue >= spend is considered healthy
 MIN_SPEND_FOR_VERDICT = 50.0  # below this (and no revenue) we are still learning
 
-# Map an attribution tier severity to the public confidence label.
-# get_confidence_severity already returns "high" | "medium" | "low".
+
+def _rel(path: Path) -> str:
+    """Render a data path as a stable 'data/<name>' string for diagnostics."""
+    return f"data/{path.name}"
 
 
 # ── Data loaders (module-level so tests can patch them) ─────────────────────
@@ -79,14 +99,53 @@ def _load_attributed_deals() -> list:
     return attribute_deals() or []
 
 
-def _load_spend_rows() -> list:
-    """Google Ads API spend/performance rows (campaign + country + date)."""
-    return _load_json(SPEND_FILE)
+def _load_campaign_spend() -> dict:
+    """Campaign spend from the active Google Ads API file, with legacy fallback.
+
+    Returns a dict: {"rows": [...], "status": "...", "file": "data/..." | None}
+
+    status:
+        google_ads_api  — data/ads_campaigns.json (active scheduler output)
+        legacy_fallback — data/campaign_performance.json (pre-cutover; flagged)
+        no_spend_data   — neither file present / non-empty
+    """
+    rows = _load_json(ADS_CAMPAIGNS_FILE)
+    if rows:
+        return {"rows": rows, "status": "google_ads_api", "file": _rel(ADS_CAMPAIGNS_FILE)}
+    legacy = _load_json(LEGACY_SPEND_FILE)
+    if legacy:
+        return {"rows": legacy, "status": "legacy_fallback", "file": _rel(LEGACY_SPEND_FILE)}
+    return {"rows": [], "status": "no_spend_data", "file": None}
+
+
+def _load_geo_spend() -> dict:
+    """Geo spend from the active Google Ads API file (data/ads_geos.json).
+
+    No legacy fallback: the pre-cutover country attribution is exactly what the
+    cutover replaces. Geo rows currently carry country=None (criterion-ID -> name
+    mapping is not implemented), so geo spend is generally NOT country-resolved.
+
+    Returns: {"rows": [...], "file": "data/ads_geos.json" | None}
+    """
+    rows = _load_json(ADS_GEOS_FILE)
+    return {"rows": rows, "file": _rel(ADS_GEOS_FILE) if rows else None}
 
 
 def _load_contacts() -> list:
     """HubSpot paid-search contacts used for lead / SQL counts."""
     return _load_json(CONTACTS_FILE)
+
+
+def _attribution_source_status() -> str:
+    """Describe where the deal attribution / GCLID index comes from.
+
+    attribute_deals() builds its GCLID->campaign index from the legacy
+    data/campaign_performance.json. When that file is present, GCLID-derived
+    confidence is legacy and must be downgraded (never claimed as high).
+    """
+    if LEGACY_SPEND_FILE.exists():
+        return "legacy_gclid_index"
+    return "hubspot_source_tags_only"
 
 
 # ── Parsing / safety helpers ────────────────────────────────────────────────
@@ -159,6 +218,11 @@ def _spend_value(row: dict) -> float:
     return _safe_float(value)
 
 
+def _row_date(row: dict):
+    """Date value for a spend row (active uses 'date'; legacy may use source_date)."""
+    return row.get("date") or row.get("source_date")
+
+
 def compute_roas(won_revenue: float, spend: float):
     """ROAS = won_revenue / spend. None when spend is zero (never Infinity)."""
     if not spend or spend <= 0:
@@ -167,7 +231,14 @@ def compute_roas(won_revenue: float, spend: float):
 
 
 def compute_cac(spend: float, customers: int):
-    """CAC = spend / customers. None when customers is zero (never Infinity)."""
+    """CAC = spend / customers.
+
+    None when customers is zero OR spend is zero/unavailable — a $0 CAC would
+    falsely imply free acquisition (e.g. countries where Google Ads spend is not
+    country-resolved). Never returns Infinity.
+    """
+    if not spend or spend <= 0:
+        return None
     if not customers or customers <= 0:
         return None
     return round(spend / customers, 2)
@@ -177,7 +248,7 @@ def confidence_from_tiers(tiers: list) -> str:
     """Reduce a list of attribution tiers to a confidence label.
 
     Returns high | medium | low. Rows with no attributed deals are treated as
-    low-confidence (inferred match).
+    low-confidence (inferred match). Callers apply the legacy-GCLID downgrade.
     """
     if not tiers:
         return "low"
@@ -239,7 +310,7 @@ def _new_bucket(display_name: str) -> dict:
 
 
 def _row_notes(bucket: dict, confidence: str) -> list:
-    """Build attribution notes for a finished row."""
+    """Build base attribution notes for a finished row."""
     notes = []
     if confidence == "low":
         notes.append("Low-confidence attribution — campaign/country match inferred.")
@@ -257,16 +328,28 @@ def _row_notes(bucket: dict, confidence: str) -> list:
     return notes
 
 
-def _finalize_row(bucket: dict) -> dict:
+def _finalize_row(bucket: dict, *, legacy_gclid: bool = False, extra_notes: list | None = None) -> dict:
     spend = round(bucket["spend"], 2)
     won_revenue = round(bucket["won_revenue"], 2)
     customers = bucket["customers"]
     roas = compute_roas(won_revenue, spend)
     cac = compute_cac(spend, customers)
-    confidence = confidence_from_tiers(bucket["tiers"])
-    verdict = classify_verdict(
-        spend, bucket["sqls"], customers, won_revenue, roas
-    )
+
+    raw_confidence = confidence_from_tiers(bucket["tiers"])
+    downgraded = legacy_gclid and raw_confidence == "high"
+    confidence = "medium" if downgraded else raw_confidence
+
+    verdict = classify_verdict(spend, bucket["sqls"], customers, won_revenue, roas)
+
+    notes = _row_notes(bucket, confidence)
+    if downgraded:
+        notes.append(
+            "GCLID attribution index is legacy (data/campaign_performance.json); "
+            "confidence downgraded from high to medium."
+        )
+    if extra_notes:
+        notes.extend(extra_notes)
+
     return {
         "spend": spend,
         "leads": bucket["leads"],
@@ -277,11 +360,11 @@ def _finalize_row(bucket: dict) -> dict:
         "cac": cac,
         "confidence": confidence,
         "verdict": verdict,
-        "attribution_notes": _row_notes(bucket, confidence),
+        "attribution_notes": notes,
     }
 
 
-def _build_campaign_rows(deals: list, spend_rows: list, contacts: list) -> list:
+def _build_campaign_rows(deals: list, spend_rows: list, contacts: list, *, legacy_gclid: bool) -> list:
     buckets: dict[str, dict] = {}
 
     def bucket_for(name, display=None):
@@ -315,9 +398,7 @@ def _build_campaign_rows(deals: list, spend_rows: list, contacts: list) -> list:
 
     rows = []
     for key, bucket in buckets.items():
-        if not key:
-            bucket["display"] = bucket["display"] or "unknown"
-        finalized = _finalize_row(bucket)
+        finalized = _finalize_row(bucket, legacy_gclid=legacy_gclid)
         finalized["campaign_id"] = bucket["campaign_id"] or (key or "unknown")
         finalized["campaign_name"] = bucket["display"] or "unknown"
         rows.append(finalized)
@@ -326,8 +407,12 @@ def _build_campaign_rows(deals: list, spend_rows: list, contacts: list) -> list:
     return rows
 
 
-def _top_campaign_for_country(country_key: str, deals: list, spend_rows: list) -> str | None:
-    """Best campaign in a country by won revenue, falling back to spend."""
+def _top_campaign_for_country(country_key: str, deals: list) -> str | None:
+    """Best campaign in a country by won revenue.
+
+    Derived from HubSpot deals only: Google Ads geo rows are not country-resolved
+    (country=None), so geo spend cannot be linked to a named country/campaign.
+    """
     by_revenue: dict[str, dict] = {}
     for deal in deals:
         if _norm(deal.get("country")) != country_key:
@@ -339,23 +424,17 @@ def _top_campaign_for_country(country_key: str, deals: list, spend_rows: list) -
         best = max(by_revenue.values(), key=lambda e: e["revenue"])
         if best["revenue"] > 0:
             return best["name"]
-
-    by_spend: dict[str, dict] = {}
-    for row in spend_rows:
-        if _norm(row.get("country")) != country_key:
-            continue
-        name = row.get("campaign") or "unknown"
-        entry = by_spend.setdefault(name, {"name": name, "spend": 0.0})
-        entry["spend"] += _spend_value(row)
-    if by_spend:
-        best = max(by_spend.values(), key=lambda e: e["spend"])
-        if best["spend"] > 0:
-            return best["name"]
-
     return None
 
 
-def _build_country_rows(deals: list, spend_rows: list, contacts: list) -> list:
+def _build_country_rows(
+    deals: list,
+    geo_rows: list,
+    contacts: list,
+    *,
+    legacy_gclid: bool,
+    country_spend_available: bool,
+) -> list:
     buckets: dict[str, dict] = {}
 
     def bucket_for(name, display=None):
@@ -366,8 +445,14 @@ def _build_country_rows(deals: list, spend_rows: list, contacts: list) -> list:
             buckets[key]["display"] = display
         return buckets[key]
 
-    for row in spend_rows:
-        b = bucket_for(row.get("country"), row.get("country"))
+    # Geo spend is only attributed to a country when the geo row is actually
+    # country-resolved (row["country"] is not None). Unmapped geo spend is NEVER
+    # merged into a named country bucket.
+    for row in geo_rows:
+        country = row.get("country")
+        if not country:
+            continue
+        b = bucket_for(country, country)
         b["spend"] += _spend_value(row)
 
     for contact in contacts:
@@ -387,18 +472,25 @@ def _build_country_rows(deals: list, spend_rows: list, contacts: list) -> list:
 
     rows = []
     for key, bucket in buckets.items():
-        finalized = _finalize_row(bucket)
+        extra_notes = []
+        if not country_spend_available:
+            extra_notes.append(
+                "Country-level Google Ads spend is not available: geo rows are not "
+                "country-resolved (geo country mapping not implemented). Spend shown "
+                "is 0; leads/SQLs/customers/revenue are HubSpot contact/deal-side."
+            )
+        finalized = _finalize_row(bucket, legacy_gclid=legacy_gclid, extra_notes=extra_notes)
         display = bucket["display"] or "unknown"
         finalized["country"] = display
         finalized["country_code"] = get_country_code(display)
-        finalized["top_campaign"] = _top_campaign_for_country(key, deals, spend_rows)
+        finalized["top_campaign"] = _top_campaign_for_country(key, deals)
         rows.append(finalized)
 
     rows.sort(key=lambda r: (r["spend"], r["won_revenue"]), reverse=True)
     return rows
 
 
-def _build_summary(deals: list, spend_rows: list, contacts: list) -> dict:
+def _build_summary(deals: list, spend_rows: list, contacts: list, *, legacy_gclid: bool) -> dict:
     spend = round(sum(_spend_value(r) for r in spend_rows), 2)
     leads = len(contacts)
     sqls = sum(
@@ -412,7 +504,8 @@ def _build_summary(deals: list, spend_rows: list, contacts: list) -> dict:
     roas = compute_roas(won_revenue, spend)
     cac = compute_cac(spend, customers)
     tiers = [d.get("attribution_confidence") for d in deals if d.get("attribution_confidence")]
-    confidence = confidence_from_tiers(tiers)
+    raw_confidence = confidence_from_tiers(tiers)
+    confidence = "medium" if (legacy_gclid and raw_confidence == "high") else raw_confidence
 
     return {
         "spend": spend,
@@ -429,12 +522,17 @@ def _build_summary(deals: list, spend_rows: list, contacts: list) -> dict:
 def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     """Build the shared revenue-attribution contract for a business window.
 
+    Spend is read from the active Google Ads API scheduler-cutover files
+    (data/ads_campaigns.json, data/ads_geos.json). Revenue is HubSpot closed-won.
+    Source diagnostics (files_used, statuses, warnings) are included so the UI
+    can never imply a freshness/source it does not have.
+
     Args:
         window: A business-window key (see analysis.business_windows.WINDOW_KEYS).
         now: Optional reference time for deterministic resolution/testing.
 
     Returns:
-        Dict with window, summary, campaigns, countries, and source metadata.
+        Dict with window, summary, campaigns, countries, and source diagnostics.
 
     Raises:
         ValueError: If ``window`` is not a supported business window.
@@ -443,16 +541,14 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     start_dt, end_dt = get_window_bounds(window, now=now)
 
     deals = _load_attributed_deals()
-    spend_rows = _load_spend_rows()
     contacts = _load_contacts()
+    campaign_spend = _load_campaign_spend()
+    geo_spend = _load_geo_spend()
+    attribution_status = _attribution_source_status()
+    legacy_gclid = attribution_status == "legacy_gclid_index"
 
     deals_w = [
         d for d in deals if _in_window(_parse_dt(d.get("closedate")), start_dt, end_dt)
-    ]
-    spend_w = [
-        r
-        for r in spend_rows
-        if _in_window(_parse_dt(r.get("date") or r.get("source_date")), start_dt, end_dt)
     ]
     contacts_w = [
         c
@@ -463,18 +559,81 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
             end_dt,
         )
     ]
+    campaign_spend_w = [
+        r for r in campaign_spend["rows"] if _in_window(_parse_dt(_row_date(r)), start_dt, end_dt)
+    ]
+    geo_spend_w = [
+        r for r in geo_spend["rows"] if _in_window(_parse_dt(_row_date(r)), start_dt, end_dt)
+    ]
 
-    summary = _build_summary(deals_w, spend_w, contacts_w)
-    campaigns = _build_campaign_rows(deals_w, spend_w, contacts_w)
-    countries = _build_country_rows(deals_w, spend_w, contacts_w)
+    # Geo country-resolution diagnostics.
+    named_geo = [r for r in geo_spend_w if r.get("country")]
+    country_spend_available = bool(named_geo)
+    if not geo_spend_w:
+        geo_country_mapping_status = "no_geo_data"
+    elif len(named_geo) == len(geo_spend_w):
+        geo_country_mapping_status = "available"
+    elif named_geo:
+        geo_country_mapping_status = "partial"
+    else:
+        geo_country_mapping_status = "not_implemented"
+
+    summary = _build_summary(deals_w, campaign_spend_w, contacts_w, legacy_gclid=legacy_gclid)
+    campaigns = _build_campaign_rows(deals_w, campaign_spend_w, contacts_w, legacy_gclid=legacy_gclid)
+    countries = _build_country_rows(
+        deals_w,
+        geo_spend_w,
+        contacts_w,
+        legacy_gclid=legacy_gclid,
+        country_spend_available=country_spend_available,
+    )
+
+    warnings: list[str] = []
+    if campaign_spend["status"] == "legacy_fallback":
+        warnings.append(
+            "Campaign spend loaded from legacy data/campaign_performance.json — "
+            "not the active Google Ads API scheduler output (data/ads_campaigns.json)."
+        )
+    elif campaign_spend["status"] == "no_spend_data":
+        warnings.append(
+            "No active Google Ads API campaign spend found "
+            "(data/ads_campaigns.json missing or empty)."
+        )
+    if not country_spend_available:
+        warnings.append(
+            "Country-level Google Ads spend is not available: geo rows are not "
+            "country-resolved (geo country mapping not implemented). Country spend "
+            "is shown as 0; leads/SQLs/customers/revenue are HubSpot-side."
+        )
+    if legacy_gclid:
+        warnings.append(
+            "GCLID attribution index is sourced from legacy "
+            "data/campaign_performance.json; high-confidence GCLID claims are "
+            "downgraded to medium."
+        )
+
+    files_used = {
+        "campaign_spend": campaign_spend["file"],
+        "geo_spend": geo_spend["file"],
+        "revenue": _rel(WON_DEALS_FILE) if deals else None,
+        "contacts": _rel(CONTACTS_FILE) if contacts else None,
+    }
 
     return {
         "window": resolved,
         "summary": summary,
         "campaigns": campaigns,
         "countries": countries,
-        "source_truth": "hubspot_closed_won_revenue",
+        # Source diagnostics (PR-ADS-107A patch).
         "spend_source": "google_ads_api",
+        "revenue_source": "hubspot_closed_won",
+        "source_truth": "hubspot_closed_won_revenue",
         "google_ads_conversion_value_used": False,
+        "campaign_spend_source_status": campaign_spend["status"],
+        "attribution_source_status": attribution_status,
+        "country_spend_available": country_spend_available,
+        "geo_country_mapping_status": geo_country_mapping_status,
+        "files_used": files_used,
+        "warnings": warnings,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

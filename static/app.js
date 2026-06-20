@@ -7491,6 +7491,16 @@ const BUSINESS_VERDICT_ORDER = { winner: 0, watch: 1, waste: 2, learning: 3 };
 // Shared revenue-attribution payload state for both ROAS pages.
 let roasRevenueWindow = null;
 let roasRevenueSummary = null;
+let roasRevenueWarnings = [];
+
+function roasWarningsBanner() {
+  if (!roasRevenueWarnings || !roasRevenueWarnings.length) return "";
+  const items = roasRevenueWarnings.map((w) => "<li>" + escapeHtml(w) + "</li>").join("");
+  return `<div class="empty-state empty-state--warning" style="margin:0 0 var(--space-4)">
+    <div class="empty-state__title">Data source notes</div>
+    <div class="empty-state__body"><ul>${items}</ul></div>
+  </div>`;
+}
 
 function roasEmptyStateHtml(scope) {
   const label = roasRevenueWindow && roasRevenueWindow.label
@@ -7546,6 +7556,7 @@ async function loadRoasCampaigns() {
     const data = await res.json();
     roasRevenueWindow = data.window || null;
     roasRevenueSummary = data.summary || null;
+    roasRevenueWarnings = data.warnings || [];
     roasCampaignsData = data.campaigns || [];
     roasCampaignsStatus = roasCampaignsData.length ? "ok" : "empty";
     renderRoasCampaignsPage();
@@ -7595,7 +7606,7 @@ function renderRoasCampaignsPage() {
       <td>${getBusinessVerdictBadge(r.verdict)}</td>
       <td class="roas-warnings">${(r.attribution_notes || []).map((n) => '<span class="roas-warning-chip">' + escapeHtml(n) + '</span>').join(" ")}</td>
     </tr>`).join("");
-    tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
+    tableBody.innerHTML = roasWarningsBanner() + `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
   }
 }
 
@@ -7621,6 +7632,7 @@ async function loadRoasCountries() {
     const data = await res.json();
     roasRevenueWindow = data.window || null;
     roasRevenueSummary = data.summary || null;
+    roasRevenueWarnings = data.warnings || [];
     roasCountriesData = data.countries || [];
     roasCountriesStatus = roasCountriesData.length ? "ok" : "empty";
     renderRoasCountriesPage();
@@ -7670,7 +7682,7 @@ function renderRoasCountriesPage() {
       <td>${getBusinessVerdictBadge(r.verdict)}</td>
       <td class="roas-warnings">${(r.attribution_notes || []).map((n) => '<span class="roas-warning-chip">' + escapeHtml(n) + '</span>').join(" ")}</td>
     </tr>`).join("");
-    tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
+    tableBody.innerHTML = roasWarningsBanner() + `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
   }
 }
 
