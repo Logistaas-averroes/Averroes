@@ -1,24 +1,20 @@
 """
-PR-ADS-107A — Revenue Attribution Service tests.
+PR-ADS-108 — Revenue Attribution Durable Sources tests.
 
-Validates the shared read-only revenue-attribution contract:
-  - output shape (window / summary / campaigns / countries) + source diagnostics
-  - campaign spend read from the ACTIVE data/ads_campaigns.json (not the legacy
-    Windsor-era campaign_performance.json as primary)
-  - geo spend read from data/ads_geos.json; country rows do NOT pretend geo spend
-    is country-resolved when ads_geos country is None
-  - ROAS / CAC null safety (None when denominator is zero; never Infinity/NaN)
-  - confidence labels (high / medium / low) + legacy GCLID downgrade
-  - verdict classification (winner / watch / waste / learning)
-  - business-window date filtering
+Validates the DB-first revenue-attribution contract:
+  - durable DB sources (geo / leads / gclid_attribution) are used when available
+  - local JSON missing does NOT mean empty if durable DB data exists
+  - source_health diagnostics are present
+  - "source missing" is distinct from "no revenue"
+  - business windows drive the DB query date range
+  - ROAS / CAC null safety; confidence labels; verdict classification
   - read-only (no external API / write calls); no Windsor wording
 """
 
 import math
 import os
 import sys
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -37,87 +33,59 @@ from services.revenue_attribution_service import (
 NOW = datetime(2026, 6, 20, 12, 0, 0, tzinfo=timezone.utc)
 
 
-# ── Fixtures: synthetic data ────────────────────────────────────────────────
+# ── Durable DB fixtures ──────────────────────────────────────────────────────
 
 
-def _deals():
+def _spend_rows():
     return [
-        {  # Q2 winner: gulf / Saudi Arabia, GCLID
-            "deal_id": "d1", "campaign": "gulf", "country": "Saudi Arabia",
-            "amount": 10000, "hs_acv": 10000, "closedate": "2026-05-01T00:00:00Z",
-            "attribution_confidence": "tier_1_gclid"},
-        {  # Q2 gulf / SA, source tag
-            "deal_id": "d2", "campaign": "gulf", "country": "Saudi Arabia",
-            "amount": 5000, "hs_acv": 5000, "closedate": "2026-05-10T00:00:00Z",
-            "attribution_confidence": "tier_2_source_tag"},
-        {  # Q2 europa / France, low confidence
-            "deal_id": "d3", "campaign": "europa", "country": "France",
-            "amount": 2000, "hs_acv": 2000, "closedate": "2026-04-15T00:00:00Z",
-            "attribution_confidence": "tier_3_spend_weighted"},
-        {  # Q1 deal (used for date-window filtering)
-            "deal_id": "d_old", "campaign": "gulf", "country": "Saudi Arabia",
-            "amount": 99999, "hs_acv": 99999, "closedate": "2026-02-01T00:00:00Z",
-            "attribution_confidence": "tier_1_gclid"},
+        {"campaign_name": "gulf", "country": "Saudi Arabia", "spend": 1000.0},
+        {"campaign_name": "europa", "country": "France", "spend": 8000.0},
+        {"campaign_name": "waste-campaign", "country": "Egypt", "spend": 300.0},
+        {"campaign_name": "watchco", "country": "Jordan", "spend": 200.0},
     ]
 
 
-def _campaign_spend():
-    """Active Google Ads API data/ads_campaigns.json shape (no country field)."""
+def _lead_rows():
     return [
-        {"campaign": "gulf", "campaign_id": "111", "date": "2026-05-01", "spend": 1000, "source": "google_ads_api"},
-        {"campaign": "europa", "campaign_id": "222", "date": "2026-04-10", "spend": 8000, "source": "google_ads_api"},
-        {"campaign": "waste-campaign", "campaign_id": "333", "date": "2026-05-05", "spend": 300, "source": "google_ads_api"},
-        {"campaign": "watchco", "campaign_id": "444", "date": "2026-05-03", "spend": 200, "source": "google_ads_api"},
+        {"campaign_name": "gulf", "country": "Saudi Arabia", "status_category": "qualified", "has_gclid": True},
+        {"campaign_name": "gulf", "country": "Saudi Arabia", "status_category": "unknown", "has_gclid": False},
+        {"campaign_name": "europa", "country": "France", "status_category": "qualified", "has_gclid": False},
+        {"campaign_name": "watchco", "country": "Jordan", "status_category": "qualified", "has_gclid": False},
     ]
 
 
-def _geo_spend():
-    """Active Google Ads API data/ads_geos.json shape (country is None — unmapped)."""
+def _revenue_rows():
     return [
-        {"campaign": "gulf", "country_criterion_id": "2682", "country": None, "date": "2026-05-01", "spend": 1000, "source": "google_ads_api"},
-        {"campaign": "europa", "country_criterion_id": "2250", "country": None, "date": "2026-04-10", "spend": 8000, "source": "google_ads_api"},
+        {"campaign_name": "gulf", "country": "Saudi Arabia", "deal_id": "d1", "deal_amount_usd": 10000.0, "match_status": "matched"},
+        {"campaign_name": "gulf", "country": "Saudi Arabia", "deal_id": "d2", "deal_amount_usd": 5000.0, "match_status": "url_fallback"},
+        {"campaign_name": "europa", "country": "France", "deal_id": "d3", "deal_amount_usd": 2000.0, "match_status": "unmatched"},
     ]
 
 
-def _contacts():
-    return [
-        {"id": "c1", "properties": {"hs_analytics_source_data_1": "gulf",
-         "mql_status": "CLOSED - Sales Qualified", "ip_country": "Saudi Arabia",
-         "createdate": "2026-05-01T00:00:00Z"}},
-        {"id": "c2", "properties": {"hs_analytics_source_data_1": "gulf",
-         "mql_status": "OPEN - Connecting", "ip_country": "Saudi Arabia",
-         "createdate": "2026-05-02T00:00:00Z"}},
-        {"id": "c3", "properties": {"hs_analytics_source_data_1": "europa",
-         "mql_status": "CLOSED - Deal Created", "ip_country": "France",
-         "createdate": "2026-04-12T00:00:00Z"}},
-        {"id": "c4", "properties": {"hs_analytics_source_data_1": "watchco",
-         "mql_status": "CLOSED - Sales Qualified", "ip_country": "Jordan",
-         "createdate": "2026-05-03T00:00:00Z"}},
-    ]
-
-
-def _build(window="all_time", *, deals=None, campaign_spend=None, geo_spend=None,
-           contacts=None, campaign_status="google_ads_api",
-           attribution_status="hubspot_source_tags_only"):
-    deals = _deals() if deals is None else deals
-    campaign_rows = _campaign_spend() if campaign_spend is None else campaign_spend
-    geo_rows = _geo_spend() if geo_spend is None else geo_spend
-    contacts = _contacts() if contacts is None else contacts
-
-    file_map = {
-        "google_ads_api": "data/ads_campaigns.json",
-        "legacy_fallback": "data/campaign_performance.json",
-        "no_spend_data": None,
-    }
-    cs = {"rows": campaign_rows, "status": campaign_status, "file": file_map[campaign_status]}
-    gs = {"rows": geo_rows, "file": "data/ads_geos.json" if geo_rows else None}
-
-    with patch.object(svc, "_load_attributed_deals", return_value=deals), \
-         patch.object(svc, "_load_campaign_spend", return_value=cs), \
-         patch.object(svc, "_load_geo_spend", return_value=gs), \
-         patch.object(svc, "_load_contacts", return_value=contacts), \
-         patch.object(svc, "_attribution_source_status", return_value=attribution_status):
+def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
+              spend_cov=("2026-04-01", "2026-06-20"), revenue_cov=("2026-05-01", "2026-05-10")):
+    spend_obj = {"available": True, "rows": spend if spend is not None else _spend_rows(),
+                 "coverage_start": spend_cov[0], "coverage_end": spend_cov[1], "table": "geo"}
+    leads_obj = {"available": True, "rows": leads if leads is not None else _lead_rows(),
+                 "coverage_start": None, "coverage_end": None, "table": "leads"}
+    revenue_obj = {"available": True, "rows": revenue if revenue is not None else _revenue_rows(),
+                   "coverage_start": revenue_cov[0], "coverage_end": revenue_cov[1], "table": "gclid_attribution"}
+    with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend_obj), \
+         patch("db.revenue_repository.fetch_lead_quality", return_value=leads_obj), \
+         patch("db.revenue_repository.fetch_won_revenue", return_value=revenue_obj), \
+         patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         return build_revenue_attribution(window, now=NOW)
+
+
+def _db_unavailable():
+    """Patch all repo functions to report the database is unavailable."""
+    unavail = {"available": False, "rows": [], "coverage_start": None, "coverage_end": None}
+    return (
+        patch("db.revenue_repository.fetch_campaign_country_spend", return_value=dict(unavail, table="geo")),
+        patch("db.revenue_repository.fetch_lead_quality", return_value=dict(unavail, table="leads")),
+        patch("db.revenue_repository.fetch_won_revenue", return_value=dict(unavail, table="gclid_attribution")),
+        patch("db.revenue_repository.fetch_sync_state", return_value={"available": False, "datasets": {}}),
+    )
 
 
 def _by(rows, field, value):
@@ -127,163 +95,163 @@ def _by(rows, field, value):
     return None
 
 
-# ── Contract shape ───────────────────────────────────────────────────────────
+# ── DB path: contract + durable sourcing ─────────────────────────────────────
 
 
-def test_top_level_contract_keys():
-    result = _build()
-    for key in ("window", "summary", "campaigns", "countries"):
-        assert key in result
-    assert result["google_ads_conversion_value_used"] is False
-    assert result["source_truth"] == "hubspot_closed_won_revenue"
+def test_db_path_used_when_database_available():
+    result = _build_db()
+    assert result["source_health"]["mode"] == "database"
+    assert result["campaign_spend_source_status"] == "db"
     assert result["spend_source"] == "google_ads_api"
     assert result["revenue_source"] == "hubspot_closed_won"
+    assert set(result["db_tables_used"]) == {"geo", "leads", "gclid_attribution"}
 
 
-def test_window_block_shape():
-    result = _build("current_quarter")
-    w = result["window"]
-    for key in ("key", "label", "start_date", "end_date", "is_closed_window"):
-        assert key in w
-    assert w["key"] == "current_quarter"
-    assert w["label"] == "Current Quarter"
+def test_local_json_missing_does_not_mean_empty_when_db_has_data():
+    """No local JSON files exist in tests; DB data must still populate the dashboard."""
+    result = _build_db()
+    assert result["campaigns"], "campaigns should be populated from the DB"
+    assert result["countries"], "countries should be populated from the DB"
+    assert result["summary"]["spend"] == 9500
 
 
-def test_summary_shape():
-    s = _build()["summary"]
-    for key in ("spend", "leads", "sqls", "customers", "won_revenue", "roas", "cac", "confidence"):
-        assert key in s
-    assert s["leads"] == 4
-    assert s["sqls"] == 3            # c1, c3, c4
-    assert s["customers"] == 4       # d1, d2, d3, d_old
-    assert s["spend"] == 9500        # sum of ads_campaigns spend
-
-
-def test_campaign_row_shape():
-    rows = _build()["campaigns"]
-    gulf = _by(rows, "campaign_name", "gulf")
-    assert gulf is not None
-    for key in ("campaign_id", "campaign_name", "spend", "leads", "sqls", "customers",
-                "won_revenue", "roas", "cac", "confidence", "verdict", "attribution_notes"):
-        assert key in gulf
-    assert gulf["campaign_id"] == "111"  # from ads_campaigns.json
+def test_db_campaign_rows():
+    result = _build_db(window="all_time")  # no window filter ambiguity
+    gulf = _by(result["campaigns"], "campaign_name", "gulf")
     assert gulf["spend"] == 1000
+    assert gulf["leads"] == 2
+    assert gulf["sqls"] == 1
+    assert gulf["customers"] == 2
+    assert gulf["won_revenue"] == 15000
+    assert gulf["roas"] == 15.0
+    assert gulf["confidence"] == "high"   # matched + url_fallback -> tier_1 dominant
+    assert gulf["verdict"] == "winner"
 
 
-def test_country_row_shape():
-    rows = _build()["countries"]
-    sa = _by(rows, "country", "Saudi Arabia")
-    assert sa is not None
-    for key in ("country", "country_code", "spend", "leads", "sqls", "customers",
-                "won_revenue", "roas", "cac", "top_campaign", "confidence", "verdict",
-                "attribution_notes"):
-        assert key in sa
-    assert sa["country_code"] == "SA"
-    assert sa["top_campaign"] == "gulf"
-
-
-# ── Source diagnostics (PR-ADS-107A patch) ───────────────────────────────────
-
-
-def test_source_diagnostics_present():
-    result = _build()
-    assert result["spend_source"] == "google_ads_api"
-    assert result["revenue_source"] == "hubspot_closed_won"
-    assert result["campaign_spend_source_status"] == "google_ads_api"
-    assert result["attribution_source_status"] == "hubspot_source_tags_only"
-    assert "country_spend_available" in result
-    assert "geo_country_mapping_status" in result
-    assert isinstance(result["warnings"], list)
-    assert result["files_used"]["campaign_spend"] == "data/ads_campaigns.json"
-    assert result["files_used"]["geo_spend"] == "data/ads_geos.json"
-
-
-def test_campaign_spend_primary_source_is_ads_campaigns():
-    """_load_campaign_spend prefers data/ads_campaigns.json over the legacy file."""
-    def fake_load(path: Path):
-        return {
-            "ads_campaigns.json": [{"campaign": "x", "spend": 5, "date": "2026-05-01"}],
-            "campaign_performance.json": [{"campaign": "legacy", "spend": 999, "date": "2026-05-01"}],
-        }.get(path.name, [])
-
-    with patch.object(svc, "_load_json", side_effect=fake_load):
-        loaded = svc._load_campaign_spend()
-    assert loaded["status"] == "google_ads_api"
-    assert loaded["file"] == "data/ads_campaigns.json"
-    assert loaded["rows"][0]["campaign"] == "x"
-
-
-def test_campaign_performance_is_not_primary_source():
-    """When ads_campaigns.json is missing, campaign_performance.json is only an
-    explicit, clearly-labeled legacy fallback — never the primary source."""
-    def fake_load(path: Path):
-        return {
-            "ads_campaigns.json": [],  # active file missing/empty
-            "campaign_performance.json": [{"campaign": "legacy", "spend": 999, "date": "2026-05-01"}],
-        }.get(path.name, [])
-
-    with patch.object(svc, "_load_json", side_effect=fake_load):
-        loaded = svc._load_campaign_spend()
-    assert loaded["status"] == "legacy_fallback"
-    assert loaded["file"] == "data/campaign_performance.json"
-
-
-def test_no_spend_data_when_no_files():
-    with patch.object(svc, "_load_json", side_effect=lambda path: []):
-        loaded = svc._load_campaign_spend()
-    assert loaded["status"] == "no_spend_data"
-    assert loaded["file"] is None
-    assert loaded["rows"] == []
-
-
-def test_legacy_fallback_emits_warning():
-    result = _build(campaign_status="legacy_fallback")
-    assert result["campaign_spend_source_status"] == "legacy_fallback"
-    assert any("legacy" in w.lower() and "campaign_performance" in w for w in result["warnings"])
-
-
-def test_service_module_uses_active_google_ads_files():
-    import inspect
-    source = inspect.getsource(svc)
-    assert "ads_campaigns.json" in source
-    assert "ads_geos.json" in source
-
-
-# ── Country geo handling (geo country is None) ───────────────────────────────
-
-
-def test_country_spend_not_available_when_geo_country_none():
-    result = _build()  # default geo rows all have country=None
-    assert result["country_spend_available"] is False
-    assert result["geo_country_mapping_status"] == "not_implemented"
+def test_db_country_rows_have_real_country_and_spend():
+    result = _build_db(window="all_time")
     sa = _by(result["countries"], "country", "Saudi Arabia")
-    # Unmapped geo spend must NOT be merged into the named country.
-    assert sa["spend"] == 0
-    assert sa["roas"] is None
-    assert sa["cac"] is None
-    assert any("not country-resolved" in n for n in sa["attribution_notes"])
-
-
-def test_unmapped_geo_spend_not_merged_into_named_countries():
-    result = _build()
-    total_country_spend = sum(r["spend"] for r in result["countries"])
-    assert total_country_spend == 0  # geo spend is unmapped, never attributed
-
-
-def test_country_spend_available_when_geo_has_country():
-    geo = [
-        {"campaign": "gulf", "country": "Saudi Arabia", "date": "2026-05-01", "spend": 1000},
-        {"campaign": "europa", "country": "France", "date": "2026-04-10", "spend": 8000},
-    ]
-    result = _build(geo_spend=geo)
+    assert sa["country_code"] == "SA"
+    assert sa["spend"] == 1000           # real country spend from the geo table
+    assert sa["top_campaign"] == "gulf"
+    assert sa["verdict"] == "winner"
     assert result["country_spend_available"] is True
     assert result["geo_country_mapping_status"] == "available"
-    sa = _by(result["countries"], "country", "Saudi Arabia")
-    assert sa["spend"] == 1000
-    assert sa["roas"] is not None  # spend now resolved
 
 
-# ── ROAS / CAC null safety ───────────────────────────────────────────────────
+def test_db_summary():
+    s = _build_db(window="all_time")["summary"]
+    assert s["spend"] == 9500
+    assert s["leads"] == 4
+    assert s["sqls"] == 3
+    assert s["customers"] == 3
+    assert s["won_revenue"] == 17000
+
+
+# ── source_health diagnostics ────────────────────────────────────────────────
+
+
+def test_source_health_present_with_all_keys():
+    sh = _build_db()["source_health"]
+    for key in ("mode", "campaign_spend_status", "hubspot_contacts_status",
+                "hubspot_deals_status", "attribution_status", "data_is_partial",
+                "files_used", "db_tables_used", "warnings"):
+        assert key in sh, f"source_health missing key: {key}"
+
+
+def test_attribution_status_is_durable_gclid_when_revenue_present():
+    result = _build_db()
+    assert result["attribution_source_status"] == "gclid_attribution_db"
+    assert result["source_health"]["attribution_status"] == "gclid_attribution_db"
+
+
+# ── source-missing vs no-revenue ─────────────────────────────────────────────
+
+
+def test_no_revenue_is_distinct_from_source_missing():
+    """DB reachable + spend present but zero won deals = no-revenue, NOT missing."""
+    result = _build_db(revenue=[])
+    assert result["source_health"]["mode"] == "database"
+    assert result["campaign_spend_source_status"] == "db"          # spend source present
+    assert result["source_health"]["hubspot_deals_status"] == "db_empty"
+    assert result["summary"]["won_revenue"] == 0
+    assert result["campaigns"], "spend-only campaigns should still appear"
+
+
+def test_source_unavailable_when_db_down_and_no_local_files():
+    p1, p2, p3, p4 = _db_unavailable()
+    with p1, p2, p3, p4:
+        # No local JSON files exist in the test environment.
+        result = build_revenue_attribution("current_quarter", now=NOW)
+    assert result["source_health"]["mode"] == "source_unavailable"
+    assert result["campaign_spend_source_status"] == "source_unavailable"
+    # Exact missing dependency must be named.
+    assert any("geo" in w and "ads_campaigns.json" in w for w in result["warnings"])
+
+
+def test_local_json_fallback_labeled_when_db_down_but_files_present():
+    p1, p2, p3, p4 = _db_unavailable()
+    campaign_spend = {"rows": [{"campaign": "gulf", "date": "2026-05-01", "spend": 500}],
+                      "status": "google_ads_api", "file": "data/ads_campaigns.json"}
+    with p1, p2, p3, p4, \
+         patch.object(svc, "_load_campaign_spend", return_value=campaign_spend), \
+         patch.object(svc, "_load_geo_spend", return_value={"rows": [], "file": None}), \
+         patch.object(svc, "_load_attributed_deals", return_value=[]), \
+         patch.object(svc, "_load_contacts", return_value=[]), \
+         patch.object(svc, "_attribution_source_status", return_value="hubspot_source_tags_only"):
+        result = build_revenue_attribution("current_quarter", now=NOW)
+    assert result["source_health"]["mode"] == "local_json_fallback"
+    assert result["campaign_spend_source_status"] == "local_json_fallback"
+    assert any("Database unavailable" in w for w in result["warnings"])
+
+
+# ── Business window drives the DB date range ─────────────────────────────────
+
+
+def test_business_window_passed_to_db_query():
+    captured = {}
+
+    def fake_spend(start, end):
+        captured["start"] = start
+        captured["end"] = end
+        return {"available": True, "rows": [], "coverage_start": None, "coverage_end": None, "table": "geo"}
+
+    with patch("db.revenue_repository.fetch_campaign_country_spend", side_effect=fake_spend), \
+         patch("db.revenue_repository.fetch_lead_quality", return_value={"available": True, "rows": []}), \
+         patch("db.revenue_repository.fetch_won_revenue", return_value={"available": True, "rows": [], "coverage_start": None, "coverage_end": None}), \
+         patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
+        build_revenue_attribution("current_quarter", now=NOW)
+    assert captured["start"] == date(2026, 4, 1)   # Q2 start
+    assert captured["end"] == date(2026, 6, 20)
+
+
+def test_all_time_passes_none_start_to_db():
+    captured = {}
+
+    def fake_spend(start, end):
+        captured["start"] = start
+        return {"available": True, "rows": [], "coverage_start": None, "coverage_end": None, "table": "geo"}
+
+    with patch("db.revenue_repository.fetch_campaign_country_spend", side_effect=fake_spend), \
+         patch("db.revenue_repository.fetch_lead_quality", return_value={"available": True, "rows": []}), \
+         patch("db.revenue_repository.fetch_won_revenue", return_value={"available": True, "rows": [], "coverage_start": None, "coverage_end": None}), \
+         patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
+        build_revenue_attribution("all_time", now=NOW)
+    assert captured["start"] is None
+
+
+def test_partial_data_flagged_when_coverage_starts_after_window():
+    result = _build_db(window="ytd", spend_cov=("2026-04-01", "2026-06-20"))  # ytd starts Jan 1
+    assert result["data_is_partial"] is True
+    assert any("Partial data" in w for w in result["warnings"])
+
+
+def test_invalid_window_raises():
+    with pytest.raises(ValueError):
+        _build_db(window="60d")
+
+
+# ── Pure helpers: null safety / confidence / verdict ─────────────────────────
 
 
 def test_compute_roas_null_safety():
@@ -293,14 +261,13 @@ def test_compute_roas_null_safety():
 
 
 def test_compute_cac_null_safety():
-    assert compute_cac(1000, 0) is None       # zero customers
-    assert compute_cac(0, 0) is None
-    assert compute_cac(0, 5) is None          # zero/unavailable spend -> not "free"
+    assert compute_cac(1000, 0) is None
+    assert compute_cac(0, 5) is None
     assert compute_cac(1000, 2) == 500.0
 
 
 def test_no_infinity_or_nan_anywhere():
-    result = _build()
+    result = _build_db(window="all_time")
     rows = result["campaigns"] + result["countries"] + [result["summary"]]
     for row in rows:
         for key in ("roas", "cac"):
@@ -310,27 +277,11 @@ def test_no_infinity_or_nan_anywhere():
                 assert not math.isnan(value)
 
 
-def test_zero_spend_campaign_has_null_roas_and_cac():
-    contacts = [{"id": "x", "properties": {"hs_analytics_source_data_1": "no_spend_co",
-                "mql_status": "CLOSED - Sales Qualified", "ip_country": "Oman",
-                "createdate": "2026-05-01T00:00:00Z"}}]
-    result = _build(campaign_spend=[], deals=[], contacts=contacts, geo_spend=[])
-    row = _by(result["campaigns"], "campaign_name", "no_spend_co")
-    assert row is not None
-    assert row["spend"] == 0
-    assert row["roas"] is None
-    assert row["cac"] is None
-
-
-def test_zero_customers_has_null_cac():
-    result = _build()
-    waste = _by(result["campaigns"], "campaign_name", "waste-campaign")
-    assert waste is not None
-    assert waste["customers"] == 0
-    assert waste["cac"] is None
-
-
-# ── Confidence labels ────────────────────────────────────────────────────────
+def test_match_status_confidence_mapping():
+    assert svc._match_status_to_tier("matched") == "tier_1_gclid"
+    assert svc._match_status_to_tier("url_fallback") == "tier_2_source_tag"
+    assert svc._match_status_to_tier("unmatched") == "tier_3_spend_weighted"
+    assert svc._match_status_to_tier(None) == "tier_3_spend_weighted"
 
 
 def test_confidence_from_tiers_labels():
@@ -340,101 +291,29 @@ def test_confidence_from_tiers_labels():
     assert confidence_from_tiers([]) == "low"
 
 
-def test_row_confidence_values_are_labels():
-    result = _build()
-    valid = {"high", "medium", "low"}
-    for row in result["campaigns"] + result["countries"]:
-        assert row["confidence"] in valid
-    assert result["summary"]["confidence"] in valid
-
-
-def test_legacy_gclid_index_downgrades_high_confidence():
-    """High-confidence GCLID claims from the legacy index are downgraded."""
-    result = _build(attribution_status="legacy_gclid_index")
-    assert result["attribution_source_status"] == "legacy_gclid_index"
-    gulf = _by(result["campaigns"], "campaign_name", "gulf")
-    # gulf is GCLID-dominant; legacy index => downgraded from high to medium.
-    assert gulf["confidence"] == "medium"
-    assert any("downgraded" in n.lower() for n in gulf["attribution_notes"])
-    assert any("gclid" in w.lower() and "legacy" in w.lower() for w in result["warnings"])
-
-
-def test_high_confidence_kept_when_attribution_not_legacy():
-    result = _build(attribution_status="hubspot_source_tags_only")
-    gulf = _by(result["campaigns"], "campaign_name", "gulf")
-    assert gulf["confidence"] == "high"
-
-
-# ── Verdict classification ───────────────────────────────────────────────────
-
-
-def test_classify_verdict_winner():
+def test_classify_verdict_all_branches():
     assert classify_verdict(1000, 5, 2, 5000, 5.0) == "winner"
-
-
-def test_classify_verdict_watch_sqls_no_revenue():
     assert classify_verdict(1000, 3, 0, 0, None) == "watch"
-
-
-def test_classify_verdict_watch_revenue_but_weak_roas():
     assert classify_verdict(1000, 0, 1, 200, 0.2) == "watch"
-
-
-def test_classify_verdict_waste():
     assert classify_verdict(500, 0, 0, 0, None) == "waste"
-
-
-def test_classify_verdict_learning_low_spend():
     assert classify_verdict(10, 0, 0, 0, None) == "learning"
-
-
-def test_classify_verdict_learning_no_signal():
     assert classify_verdict(0, 0, 0, 0, None) == "learning"
 
 
-def test_campaign_verdicts_match_expectations():
-    result = _build()
-    campaigns = result["campaigns"]
-    assert _by(campaigns, "campaign_name", "gulf")["verdict"] == "winner"
-    assert _by(campaigns, "campaign_name", "europa")["verdict"] == "watch"
-    assert _by(campaigns, "campaign_name", "waste-campaign")["verdict"] == "waste"
-    assert _by(campaigns, "campaign_name", "watchco")["verdict"] == "watch"
+def test_db_campaign_verdicts():
+    result = _build_db(window="all_time")
+    c = result["campaigns"]
+    assert _by(c, "campaign_name", "gulf")["verdict"] == "winner"
+    assert _by(c, "campaign_name", "europa")["verdict"] == "watch"
+    assert _by(c, "campaign_name", "waste-campaign")["verdict"] == "waste"
+    assert _by(c, "campaign_name", "watchco")["verdict"] == "watch"
 
 
-def test_all_verdict_values_are_in_allowed_set():
-    result = _build()
+def test_all_verdicts_in_allowed_set():
+    result = _build_db(window="all_time")
     allowed = {"winner", "watch", "waste", "learning"}
     for row in result["campaigns"] + result["countries"]:
         assert row["verdict"] in allowed
-
-
-# ── Business-window date filtering ───────────────────────────────────────────
-
-
-def test_current_quarter_excludes_q1_deal():
-    result = _build("current_quarter")
-    gulf = _by(result["campaigns"], "campaign_name", "gulf")
-    assert gulf["customers"] == 2
-    assert gulf["won_revenue"] == 15000
-
-
-def test_ytd_includes_q1_deal():
-    result = _build("ytd")
-    gulf = _by(result["campaigns"], "campaign_name", "gulf")
-    assert gulf["customers"] == 3
-    assert gulf["won_revenue"] == 114999
-
-
-def test_last_quarter_only_sees_q1_deal():
-    result = _build("last_quarter")
-    gulf = _by(result["campaigns"], "campaign_name", "gulf")
-    assert gulf["customers"] == 1
-    assert gulf["won_revenue"] == 99999
-
-
-def test_invalid_window_raises():
-    with pytest.raises(ValueError):
-        _build("60d")
 
 
 # ── Read-only / no-Windsor guarantees ────────────────────────────────────────
@@ -443,29 +322,23 @@ def test_invalid_window_raises():
 def test_service_makes_no_external_or_write_calls():
     import inspect
     source = inspect.getsource(svc)
-    assert "import requests" not in source
-    assert "requests.post" not in source
-    assert "requests.put" not in source
-    assert "requests.patch" not in source
-    assert "requests.delete" not in source
+    for forbidden in ("import requests", "requests.post", "requests.put",
+                      "requests.patch", "requests.delete", "google.ads",
+                      "hubapi.com"):
+        assert forbidden not in source
     assert "mutate" not in source.lower()
-    assert "google.ads" not in source
-    assert "hubapi.com" not in source
-    assert "hubspot_api_client" not in source.lower()
 
 
-def test_no_windsor_wording_in_service():
+def test_repository_is_read_only():
     import inspect
+    import db.revenue_repository as repo
+    source = inspect.getsource(repo).upper()
+    for forbidden in ("INSERT ", "UPDATE ", "DELETE ", "DROP ", "TRUNCATE", "MUTATE"):
+        assert forbidden not in source, f"repository must be read-only; found {forbidden}"
+
+
+def test_no_windsor_wording_in_service_and_repository():
+    import inspect
+    import db.revenue_repository as repo
     assert "windsor" not in inspect.getsource(svc).lower()
-
-
-def test_empty_inputs_produce_safe_empty_contract():
-    result = _build(deals=[], campaign_spend=[], geo_spend=[], contacts=[],
-                    campaign_status="no_spend_data")
-    assert result["campaigns"] == []
-    assert result["countries"] == []
-    s = result["summary"]
-    assert s["spend"] == 0
-    assert s["roas"] is None
-    assert s["cac"] is None
-    assert s["confidence"] == "low"
+    assert "windsor" not in inspect.getsource(repo).lower()

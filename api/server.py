@@ -5877,14 +5877,15 @@ async def get_roas_campaigns(
     window: str = Query(default="60d"),
     _user=Depends(require_auth),
 ):
-    """Campaign-level ROAS report (legacy ad-window contract).
+    """DEPRECATED (PR-ADS-108) — legacy ad-window campaign ROAS report.
+
+    Superseded by GET /api/revenue-attribution (business windows + durable
+    sources). Retained only for backward compatibility; no frontend path uses
+    it. This is NOT competing truth — do not build new consumers on it.
 
     Revenue source: HubSpot won deals.
     Spend source: Google Ads API.
     Google Ads conversion value is NOT used.
-
-    Note: the ROAS pages now consume GET /api/revenue-attribution (business
-    windows). This endpoint is retained for backward compatibility.
     """
     from analysis.roas_calculator import compute_all_campaign_roas
 
@@ -5901,6 +5902,8 @@ async def get_roas_campaigns(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_truth": "hubspot_won_deals_plus_windsor_spend",
         "google_ads_conversion_value_used": False,
+        "deprecated": True,
+        "superseded_by": "/api/revenue-attribution",
         "campaigns": campaigns,
     }
 
@@ -5910,10 +5913,11 @@ async def get_roas_countries(
     window: str = Query(default="60d"),
     _user=Depends(require_auth),
 ):
-    """Country-level ROAS report.
+    """DEPRECATED (PR-ADS-108) — legacy ad-window country ROAS report.
 
-    Hard rule: country_level_estimate = true until GCLID is fully wired.
-    All rows include attribution_confidence.
+    Superseded by GET /api/revenue-attribution (business windows + durable
+    sources). Retained only for backward compatibility; no frontend path uses
+    it. This is NOT competing truth — do not build new consumers on it.
     """
     from analysis.roas_calculator import compute_all_country_roas
 
@@ -5931,6 +5935,8 @@ async def get_roas_countries(
         "source_truth": "hubspot_won_deals_plus_windsor_spend",
         "google_ads_conversion_value_used": False,
         "country_level_estimate": True,
+        "deprecated": True,
+        "superseded_by": "/api/revenue-attribution",
         "countries": countries,
     }
 

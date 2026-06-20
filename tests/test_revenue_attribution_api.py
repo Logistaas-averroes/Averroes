@@ -95,33 +95,22 @@ def _make_admin_cookie():
 
 @contextmanager
 def _patched_service():
-    """Patch the service data loaders to deterministic non-empty data."""
-    import services.revenue_attribution_service as svc
-
-    deals = [
-        {"deal_id": "d1", "campaign": "gulf", "country": "Saudi Arabia",
-         "amount": 10000, "hs_acv": 10000, "closedate": "2026-05-01T00:00:00Z",
-         "attribution_confidence": "tier_1_gclid"},
-    ]
-    campaign_spend = {
-        "rows": [{"campaign": "gulf", "campaign_id": "111", "date": "2026-05-01", "spend": 1000}],
-        "status": "google_ads_api",
-        "file": "data/ads_campaigns.json",
-    }
-    geo_spend = {
-        "rows": [{"campaign": "gulf", "country": None, "date": "2026-05-01", "spend": 1000}],
-        "file": "data/ads_geos.json",
-    }
-    contacts = [
-        {"id": "c1", "properties": {"hs_analytics_source_data_1": "gulf",
-         "mql_status": "CLOSED - Sales Qualified", "ip_country": "Saudi Arabia",
-         "createdate": "2026-05-01T00:00:00Z"}},
-    ]
-    with patch.object(svc, "_load_attributed_deals", return_value=deals), \
-         patch.object(svc, "_load_campaign_spend", return_value=campaign_spend), \
-         patch.object(svc, "_load_geo_spend", return_value=geo_spend), \
-         patch.object(svc, "_load_contacts", return_value=contacts), \
-         patch.object(svc, "_attribution_source_status", return_value="hubspot_source_tags_only"):
+    """Patch the durable DB repository to deterministic non-empty data."""
+    spend = {"available": True, "table": "geo",
+             "rows": [{"campaign_name": "gulf", "country": "Saudi Arabia", "spend": 1000.0}],
+             "coverage_start": "2026-01-01", "coverage_end": "2026-06-20"}
+    leads = {"available": True, "table": "leads",
+             "rows": [{"campaign_name": "gulf", "country": "Saudi Arabia",
+                       "status_category": "qualified", "has_gclid": True}],
+             "coverage_start": None, "coverage_end": None}
+    revenue = {"available": True, "table": "gclid_attribution",
+               "rows": [{"campaign_name": "gulf", "country": "Saudi Arabia", "deal_id": "d1",
+                         "deal_amount_usd": 10000.0, "match_status": "matched"}],
+               "coverage_start": "2026-05-01", "coverage_end": "2026-05-01"}
+    with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend), \
+         patch("db.revenue_repository.fetch_lead_quality", return_value=leads), \
+         patch("db.revenue_repository.fetch_won_revenue", return_value=revenue), \
+         patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         yield
 
 
@@ -157,7 +146,7 @@ class TestRevenueAttributionEndpoint:
         assert data["window"]["label"] == "YTD"
         assert data["google_ads_conversion_value_used"] is False
 
-    def test_source_diagnostics_in_contract(self, client, admin_cookie):
+    def test_source_health_in_contract(self, client, admin_cookie):
         with _patched_service():
             res = client.get(
                 "/api/revenue-attribution?window=ytd",
@@ -173,7 +162,14 @@ class TestRevenueAttributionEndpoint:
         assert "country_spend_available" in data
         assert "geo_country_mapping_status" in data
         assert "warnings" in data and isinstance(data["warnings"], list)
-        assert data["files_used"]["campaign_spend"] == "data/ads_campaigns.json"
+        # source_health block with durable-source diagnostics.
+        sh = data["source_health"]
+        for key in ("mode", "campaign_spend_status", "hubspot_contacts_status",
+                    "hubspot_deals_status", "attribution_status", "data_is_partial",
+                    "files_used", "db_tables_used", "warnings"):
+            assert key in sh
+        assert sh["mode"] == "database"
+        assert "geo" in data["db_tables_used"]
 
     def test_default_window_is_current_quarter(self, client, admin_cookie):
         with _patched_service():
