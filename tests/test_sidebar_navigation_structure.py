@@ -153,16 +153,20 @@ def test_search_terms_has_tabs():
 
 
 def test_frontend_uses_api_reports_routes():
-    """Frontend JS must use /api/reports/... not /reports/..."""
+    """Frontend JS must use /api/-prefixed routes, not bare /reports/...
+
+    PR-ADS-107A: the ROAS by Campaign / Country pages now consume the shared
+    /api/revenue-attribution endpoint (business windows). Unit economics and
+    churn-input continue to use their /api/ routes.
+    """
     js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
-    # Must contain /api/reports/ references
-    assert "/api/reports/roas/campaigns" in js
-    assert "/api/reports/roas/countries" in js
+    # ROAS pages use the shared revenue-attribution contract.
+    assert "/api/revenue-attribution" in js
     assert "/api/reports/unit-economics" in js
     assert "/api/admin/churn-input" in js
     # Must NOT use bare /reports/ routes for ROAS
     bare_roas = re.findall(r'["\']\/reports\/roas', js)
-    assert not bare_roas, f"Found bare /reports/roas routes (should use /api/reports/): {bare_roas}"
+    assert not bare_roas, f"Found bare /reports/roas routes (should use /api/-prefixed): {bare_roas}"
 
 
 def test_country_roas_estimate_warning():
