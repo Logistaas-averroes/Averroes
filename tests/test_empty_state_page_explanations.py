@@ -334,10 +334,13 @@ class TestPageExplanationContainers:
         self.html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
     def test_explanation_containers_exist(self):
+        # "deals" was rebuilt into the Closed-Won revenue ledger in PR-ADS-113
+        # and is now a clean revenue page without a page-explanation container
+        # (same precedent as the ROAS pages in PR-ADS-110).
         key_pages = [
             "dashboard", "action-queue", "reports", "campaigns",
             "waste", "search-terms", "ngrams", "geo", "keywords",
-            "leads", "deals", "gclid-attribution", "opportunities",
+            "leads", "gclid-attribution", "opportunities",
             "scheduler", "health", "backfill", "historical-intelligence",
         ]
         for page in key_pages:

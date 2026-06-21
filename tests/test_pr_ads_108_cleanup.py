@@ -37,8 +37,12 @@ def test_navigate_hides_global_time_range_bar_on_roas_pages():
     assert "isRevenuePage(page)" in body, (
         "navigate() must decouple the global ad-window bar on revenue pages"
     )
-    # The revenue page list must include both ROAS pages.
-    assert 'REVENUE_PAGES = ["roas-campaigns", "roas-countries"]' in JS
+    # The revenue page list must include both ROAS pages. (PR-ADS-113 also added
+    # the Deals ledger and Revenue Health pages to this set.)
+    m = re.search(r'REVENUE_PAGES = \[([^\]]*)\]', JS)
+    assert m
+    names = [n.strip().strip('"').strip("'") for n in m.group(1).split(",") if n.strip()]
+    assert "roas-campaigns" in names and "roas-countries" in names
 
 
 def test_global_time_range_bar_uses_ad_windows_only():

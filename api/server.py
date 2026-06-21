@@ -54,6 +54,7 @@ Protected endpoints (require authenticated session):
   GET  /api/diagnostics/window-semantics — Read-only window-counts and diagnostic verdict per dataset (admin only; PR-ADS-095).
   GET  /api/revenue-attribution   — Shared revenue-attribution contract by business window for ROAS campaign/country pages (requires auth; PR-ADS-107A).
   GET  /api/revenue-attribution/audit — Read-only truth audit of revenue-attribution date grain / source pollution per window (requires auth; PR-ADS-109).
+  GET  /api/revenue-deals          — Read-only Closed-Won Revenue Ledger by business window (deal_close_date truth; requires auth; PR-ADS-113).
 """
 
 import base64
@@ -5906,6 +5907,38 @@ async def get_revenue_attribution_audit(
         log.error("Revenue attribution audit failed: %s", exc)
         raise HTTPException(
             status_code=500, detail="Revenue attribution audit failed"
+        ) from exc
+
+
+@app.get("/api/revenue-deals")
+async def get_revenue_deals(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Closed-Won Revenue Ledger (PR-ADS-113).
+
+    Read-only deal-level revenue truth for the rebuilt Deals page. Sourced from
+    the durable gclid_attribution table, windowed by the real deal_close_date
+    (NEVER the scheduler run_date). Only closed-won deals count as revenue.
+    Business-revenue windows only: current_quarter, last_quarter, last_6_months,
+    ytd, all_time.
+
+    No Google Ads conversion value. No scheduler-date revenue windows. When the
+    durable ledger cannot be read, source_health.ledger_status is
+    "database_unavailable" (distinct from a safe-empty window).
+
+    Read-only — no writes to Google Ads, HubSpot, or any external system.
+    """
+    from services.revenue_attribution_service import build_revenue_deals
+
+    try:
+        return build_revenue_deals(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Revenue deals computation failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Revenue deals computation failed"
         ) from exc
 
 

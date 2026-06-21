@@ -18,19 +18,18 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input", "revenue-health"];
 
-// PR-ADS-110: Revenue & Attribution business pages. These are business decision
-// pages, not diagnostics pages — the global ad-window bar, monitoring warning,
-// help/explanation blocks, and attribution-audit controls are suppressed here.
-const REVENUE_PAGES = ["roas-campaigns", "roas-countries"];
+// PR-ADS-110/113: Revenue & Attribution pages. These use business-revenue
+// windows (not ad-style 7d/14d/30d/60d) and a clean readiness model — the global
+// ad-window bar, monitoring warning, help/explanation blocks, and any
+// attribution-audit controls are suppressed here. Deals (Closed-Won Revenue
+// Ledger) and Revenue Health (admin diagnostics) joined in PR-ADS-113.
+const REVENUE_PAGES = ["roas-campaigns", "roas-countries", "deals", "revenue-health"];
 
 function isRevenuePage(pageId) {
   return REVENUE_PAGES.includes(pageId);
 }
-
-// Deal pipeline stages (Phase 1 read-only reference)
-const DEAL_PIPELINE_STAGES = ["Proposal", "Trials", "Pricing Acceptance", "Invoice Sent", "Won"];
 
 // ── UI threshold state ─────────────────────────────────────────────────────
 
@@ -1023,6 +1022,9 @@ function showApp(user) {
   // Show/hide Churn Input nav item
   const churnInputNav = document.getElementById("nav-churn-input-item");
   if (churnInputNav) churnInputNav.hidden = user.role !== "admin";
+  // Show/hide Revenue Health nav item (admin-only — PR-ADS-113)
+  const revenueHealthNav = document.getElementById("nav-revenue-health-item");
+  if (revenueHealthNav) revenueHealthNav.hidden = user.role !== "admin";
   // Start with sidebar health check and data freshness
   loadSidebarHealth();
   loadDataFreshness();
@@ -1189,6 +1191,11 @@ function navigate(page, options) {
     navigate("dashboard", { updateHash: true, replace: true });
     return;
   }
+  // Role enforcement: revenue-health page is admin-only (PR-ADS-113)
+  if (page === "revenue-health" && (!_currentUser || _currentUser.role !== "admin")) {
+    navigate("dashboard", { updateHash: true, replace: true });
+    return;
+  }
 
   // Close help drawer on page change
   closeHelpDrawer();
@@ -1289,6 +1296,7 @@ function loadPage(page) {
     case "roas-countries":  loadRoasCountries();  break;
     case "unit-economics":  loadUnitEconomics();  break;
     case "churn-input":     loadChurnInput();     break;
+    case "revenue-health":  loadRevenueHealth();  break;
   }
 }
 
@@ -2720,82 +2728,289 @@ async function loadLeads() {
 
 // ── Deals page ─────────────────────────────────────────────────────────────
 
-async function loadDeals() {
-  renderPageDatasetFreshness("deals");
-  const funnelEl = document.getElementById("deals-funnel-body");
-  const tableEl  = document.getElementById("deals-table-body");
-  const EMPTY    = "No GCLID-matched deals found yet. Deals appear here once HubSpot deal attribution is active.";
+// ── Closed-Won Deals — revenue ledger (PR-ADS-113) ──────────────────────────
+// Deal-level revenue truth: HubSpot closed-won deals attributed to Google Ads,
+// windowed by deal_close_date (NEVER the scheduler run_date). This is revenue
+// truth, not an active pipeline funnel (active pipeline lives in In Progress
+// Leads). Two distinct unhappy states: the durable ledger is unavailable, vs a
+// safe-empty window with no closed-won deals.
 
-  if (funnelEl) funnelEl.innerHTML = `<p class="empty-state">${EMPTY}</p>`;
-  if (tableEl)  tableEl.innerHTML  = `<p class="empty-state" style="padding:var(--space-5)">${EMPTY}</p>`;
+let revenueDealsData = [];
+let revenueDealsSummary = null;
+let revenueDealsLedgerStatus = null;
+
+function dealAttributionBadge(matchSource) {
+  switch ((matchSource || "").trim().toLowerCase()) {
+    case "gclid":     return '<span class="attribution-badge attribution-badge--tier1" title="Click-level match using GCLID evidence">Exact GCLID</span>';
+    case "crm_field": return '<span class="attribution-badge attribution-badge--tier2" title="Matched using a HubSpot CRM campaign field">CRM Match</span>';
+    case "first_url": return '<span class="attribution-badge attribution-badge--tier3" title="Matched using the landing-page URL">URL Match</span>';
+    default:          return '<span class="attribution-badge" title="No reliable attribution evidence — review needed">Needs Review</span>';
+  }
+}
+
+function renderRevenueDealsUnavailable() {
+  return `
+    <div class="revenue-blocked-card">
+      <div class="revenue-blocked-card__eyebrow">Revenue ledger</div>
+      <h3>Closed-won revenue is unavailable</h3>
+      <p>The durable attribution ledger cannot be read right now.</p>
+    </div>`;
+}
+
+function renderRevenueDealsSafeEmptyState() {
+  return `
+    <div class="revenue-blocked-card revenue-empty-card">
+      <div class="revenue-blocked-card__eyebrow">Revenue ledger</div>
+      <h3>No closed-won deals found for this window</h3>
+      <p>The attribution ledger is available, but no HubSpot closed-won deals closed in this business window.</p>
+    </div>`;
+}
+
+function renderRevenueDealsSummary(summary) {
+  const s = summary || {};
+  return `
+    <div class="revenue-summary-strip revenue-summary-strip--four">
+      <div><span>Closed-Won Deals</span><strong>${fmtCount(s.deal_count)}</strong></div>
+      <div><span>Won Revenue</span><strong>${fmtMoney(s.won_revenue)}</strong></div>
+      <div><span>Average Deal Value</span><strong>${fmtMoney(s.average_deal_value)}</strong></div>
+      <div><span>Exact GCLID Matches</span><strong>${fmtCount(s.exact_gclid_count)}</strong></div>
+    </div>
+  `;
+}
+
+// Sort: most recent close first, then largest revenue.
+function sortRevenueDealRows(rows) {
+  return [...rows].sort((a, b) =>
+    String(b.deal_close_date || "").localeCompare(String(a.deal_close_date || "")) ||
+    (b.deal_amount_usd || 0) - (a.deal_amount_usd || 0)
+  );
+}
+
+function renderRevenueDealsTable(rows) {
+  const headerRow = `
+    <tr>
+      <th>Company</th>
+      <th>Closed</th>
+      <th>Country</th>
+      <th>Campaign</th>
+      <th>Won Revenue</th>
+      <th>Attribution</th>
+    </tr>
+  `;
+  const bodyRows = rows.map((r) => `
+    <tr>
+      <td>${escapeHtml(r.company || "—")}</td>
+      <td>${escapeHtml(r.deal_close_date || "—")}</td>
+      <td>${escapeHtml(r.country || "—")}</td>
+      <td>${escapeHtml(r.campaign_name || "—")}</td>
+      <td>${fmtMoney(r.deal_amount_usd)}</td>
+      <td>${dealAttributionBadge(r.match_source)}</td>
+    </tr>
+  `).join("");
+  return `
+    <div class="table-scroll">
+      <table class="data-table roas-table revenue-decision-table">
+        ${headerRow}
+        <tbody>${bodyRows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderRevenueDealsPage() {
+  const kpiGrid = document.getElementById("revenue-deals-kpis");
+  const tableBody = document.getElementById("revenue-deals-table-body");
+  if (kpiGrid) kpiGrid.innerHTML = "";
+  if (!tableBody) return;
+
+  // Unavailable: the durable ledger/database cannot be read.
+  if (revenueDealsLedgerStatus === "database_unavailable") {
+    tableBody.innerHTML = renderRevenueDealsUnavailable();
+    return;
+  }
+
+  // Safe-empty: ledger available but no closed-won deals in this window.
+  if (!revenueDealsData.length) {
+    tableBody.innerHTML = renderRevenueDealsSafeEmptyState();
+    return;
+  }
+
+  const sorted = sortRevenueDealRows(revenueDealsData);
+  tableBody.innerHTML = `
+    ${renderRevenueDealsSummary(revenueDealsSummary)}
+    ${renderRevenueDealsTable(sorted)}
+    <p class="revenue-footnote">HubSpot closed-won deals provide revenue, attributed to Google Ads by deal close date.</p>
+  `;
+}
+
+async function loadDeals() {
+  const window_ = getRoasBusinessWindow();
+  const kpiGrid = document.getElementById("revenue-deals-kpis");
+  const tableBody = document.getElementById("revenue-deals-table-body");
+  if (kpiGrid) kpiGrid.innerHTML = "";
+  if (tableBody) tableBody.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading closed-won deals…</p>';
 
   try {
-    const data  = await fetchJSON(`/api/deals?days=${getSelectedDays()}`);
-    const deals = data.deals || [];
-
-    if (deals.length === 0) return; // Empty state already set
-
-    // Count by stage
-    const stageCounts = {};
-    DEAL_PIPELINE_STAGES.forEach((s) => { stageCounts[s] = 0; });
-    deals.forEach((d) => {
-      // Use deal_stage (raw DB value) for pipeline stage matching
-      const stage = d.deal_stage || "";
-      const match = DEAL_PIPELINE_STAGES.find((s) =>
-        stage.toLowerCase().includes(s.toLowerCase())
-      );
-      if (match) stageCounts[match]++;
-    });
-
-    const maxCount = Math.max(...Object.values(stageCounts), 1);
-
-    if (funnelEl) {
-      funnelEl.innerHTML = `
-        <div class="funnel">
-          ${DEAL_PIPELINE_STAGES.map((s) => {
-            const count = stageCounts[s];
-            const w     = Math.max(30, Math.round((count / maxCount) * 400));
-            return `
-              <div class="funnel-stage">
-                <div class="funnel-stage__label">${escapeHtml(s)}</div>
-                <div class="funnel-stage__bar" style="width:${w}px">
-                  <span class="funnel-stage__count">${count}</span>
-                </div>
-              </div>`;
-          }).join("")}
-        </div>`;
+    const res = await fetch(`/api/revenue-deals?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
+    if (!res.ok) {
+      revenueDealsLedgerStatus = "database_unavailable";
+      revenueDealsData = [];
+      revenueDealsSummary = null;
+      renderRevenueDealsPage();
+      return;
     }
+    const data = await res.json();
+    const sh = data.source_health || {};
+    revenueDealsLedgerStatus = sh.ledger_status || "available";
+    revenueDealsSummary = data.summary || null;
+    revenueDealsData = data.deals || [];
+    renderRevenueDealsPage();
+  } catch (err) {
+    console.error("[loadDeals]", err);
+    revenueDealsLedgerStatus = "database_unavailable";
+    revenueDealsData = [];
+    revenueDealsSummary = null;
+    renderRevenueDealsPage();
+  }
+}
 
-    const thead = `
-      <thead>
-        <tr>
-          <th>Company</th>
-          <th>Country</th>
-          <th>Stage</th>
-          <th class="td--num">Amount</th>
-          <th>Campaign</th>
-          <th>Keyword</th>
-        </tr>
-      </thead>`;
+// ── Revenue Attribution Health — admin diagnostics (PR-ADS-113) ─────────────
+// Read-only data health for revenue decisions, backed by the existing audit
+// endpoint. This is diagnostics, not a decision page. Critical doctrine: a SAFE
+// audit verdict ALONE does not mean Revenue Ready — revenue is ready only when
+// the audit verdict is SAFE AND revenue attribution is wired.
 
-    const tbody = deals.map((d) => {
-      const isWon = (d.deal_stage || "").toLowerCase().includes("won");
-      return `
-        <tr${isWon ? ' class="row--won"' : ""}>
-          <td class="td--name">${escapeHtml(d.company || "—")}</td>
-          <td>${escapeHtml(d.country || "—")}</td>
-          <td>${escapeHtml(d.deal_stage_label || d.deal_stage || "—")}</td><!-- prefer human-readable label -->
-          <td class="td--num">${d.deal_amount_usd != null ? fmtDollar(d.deal_amount_usd) : "—"}</td>
-          <td>${escapeHtml(d.campaign_name || "—")}</td>
-          <td>${escapeHtml(d.keyword || "—")}</td>
-        </tr>`;
-    }).join("");
+function revenueHealthCheckChip(label, ok, okText, warnText) {
+  return `<div class="revenue-status-chip revenue-status-chip--${ok ? "ok" : "warning"}">
+    <span>${label}</span><strong>${ok ? okText : warnText}</strong>
+  </div>`;
+}
 
-    if (tableEl) tableEl.innerHTML =
-      `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+function renderRevenueHealth(audit) {
+  const dg = audit.date_grain_health || {};
+  const wc = audit.window_comparison || {};
+  const pollutionCount =
+    (audit.pseudo_campaign_rows || []).length + (audit.email_campaign_rows || []).length;
 
-  } catch (_) {
-    // Empty state already set — silently fail
+  const leadGrainOk = !!dg.lead_window_safe;
+  const revenueWired = audit.revenue_attribution_wired === true;
+  const pollutionOk = pollutionCount === 0;
+
+  // Window integrity: the business windows must actually differ when data exists.
+  const cmpKeys = ["current_quarter", "ytd", "all_time"];
+  const signatures = cmpKeys.map((k) => {
+    const s = wc[k] || {};
+    return `${s.spend}|${s.won_revenue}|${s.leads}`;
+  });
+  const anyData = cmpKeys.some((k) => {
+    const s = wc[k] || {};
+    return (s.spend || 0) > 0 || (s.won_revenue || 0) > 0;
+  });
+  const windowIntegrityOk = !anyData || new Set(signatures).size > 1;
+
+  // SAFE alone is NOT Revenue Ready — both conditions are required.
+  const revenueReady = audit.verdict === "SAFE" && revenueWired;
+
+  const blockers = (audit.blockers || []).slice();
+  if (!revenueWired) {
+    blockers.push("Revenue attribution is not wired: no closed-won deals attributed for this window.");
+  }
+
+  let nextAction = "Revenue attribution is ready — no action needed.";
+  if (!revenueWired) {
+    nextAction = "Connect revenue attribution: ensure HubSpot closed-won deals sync with deal_close_date into gclid_attribution, then re-check this page.";
+  } else if (!leadGrainOk) {
+    nextAction = "Run a HubSpot lead re-sync to backfill contact_created_at, then re-check this page.";
+  } else if (!pollutionOk) {
+    nextAction = "Clean pseudo/email campaign rows from the leads table, then re-check this page.";
+  }
+
+  const readinessCard = revenueReady
+    ? `<div class="revenue-blocked-card revenue-empty-card">
+         <div class="revenue-blocked-card__eyebrow">Revenue readiness</div>
+         <h3>Revenue Ready</h3>
+         <p>The audit verdict is SAFE and revenue attribution is wired for this window.</p>
+       </div>`
+    : `<div class="revenue-blocked-card">
+         <div class="revenue-blocked-card__eyebrow">Revenue readiness</div>
+         <h3>Revenue is not ready for this window</h3>
+         <p>A SAFE audit verdict alone does not mean Revenue Ready — revenue is ready only when the audit is SAFE and revenue attribution is wired.</p>
+         <ul class="revenue-health-blockers">${blockers.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}</ul>
+         <div class="revenue-next-step"><strong>Next step:</strong> ${escapeHtml(nextAction)}</div>
+       </div>`;
+
+  const cmpRow = (k, label) => {
+    const s = wc[k] || {};
+    const leads = (s.leads === null || s.leads === undefined) ? "Withheld" : fmtCount(s.leads);
+    return `<tr>
+      <td>${label}</td>
+      <td>${fmtMoney(s.spend)}</td>
+      <td>${leads}</td>
+      <td>${fmtMoney(s.won_revenue)}</td>
+    </tr>`;
+  };
+
+  return `
+    <div class="revenue-health-note">A SAFE audit verdict alone does not mean Revenue Ready.</div>
+
+    <div class="revenue-status-grid revenue-health-checks">
+      ${revenueHealthCheckChip("Lead date grain", leadGrainOk, "Event-date safe", "Unsafe (sync date)")}
+      ${revenueHealthCheckChip("Revenue attribution", revenueWired, "Wired", "Not wired")}
+      ${revenueHealthCheckChip("Campaign pollution", pollutionOk, "Clean", `${pollutionCount} polluted row(s)`)}
+      ${revenueHealthCheckChip("Window integrity", windowIntegrityOk, "Windows differ", "Windows identical")}
+    </div>
+
+    ${readinessCard}
+
+    <div class="revenue-health-rails">
+      <h3>Source date rails</h3>
+      <ul>
+        <li><span>Spend</span><code>${escapeHtml(dg.spend_date_field || "geo.run_date")}</code></li>
+        <li><span>Leads</span><code>${escapeHtml(dg.lead_date_field_current || "leads.contact_created_at")}</code></li>
+        <li><span>Revenue</span><code>${escapeHtml(dg.deal_date_field || "gclid_attribution.deal_close_date")}</code></li>
+      </ul>
+    </div>
+
+    <div class="revenue-summary-strip revenue-summary-strip--three">
+      <div><span>Missing contact dates</span><strong>${fmtCount(audit.missing_contact_created_at_count)}</strong></div>
+      <div><span>Excluded non-paid rows</span><strong>${fmtCount(audit.excluded_non_paid_count)}</strong></div>
+      <div><span>Excluded pseudo campaigns</span><strong>${fmtCount(audit.excluded_pseudo_campaign_count)}</strong></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel__header">Window comparison</div>
+      <div class="panel__body panel__body--flush">
+        <div class="table-scroll">
+          <table class="data-table">
+            <tr><th>Window</th><th>Spend</th><th>Leads</th><th>Won Revenue</th></tr>
+            <tbody>
+              ${cmpRow("current_quarter", "Current Quarter")}
+              ${cmpRow("ytd", "YTD")}
+              ${cmpRow("all_time", "All Time")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function loadRevenueHealth() {
+  const body = document.getElementById("revenue-health-body");
+  if (!body) return;
+  body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue attribution health…</p>';
+  const window_ = getRoasBusinessWindow();
+  try {
+    const res = await fetch(`/api/revenue-attribution/audit?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
+    if (!res.ok) {
+      body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Revenue attribution health is unavailable right now.</p>';
+      return;
+    }
+    const audit = await res.json();
+    body.innerHTML = renderRevenueHealth(audit);
+  } catch (err) {
+    console.error("[loadRevenueHealth]", err);
+    body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue attribution health.</p>';
   }
 }
 
@@ -7216,6 +7431,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
 
+  // Wire up Closed-Won Deals controls (business windows — PR-ADS-113)
+  const dealsRefresh = document.getElementById("revenue-deals-refresh-btn");
+  const dealsWindow  = document.getElementById("revenue-deals-window");
+  if (dealsRefresh) dealsRefresh.addEventListener("click", loadDeals);
+  if (dealsWindow) {
+    dealsWindow.value = getRoasBusinessWindow();
+    dealsWindow.addEventListener("change", handleBusinessWindowSelectChange);
+  }
+
+  // Wire up Revenue Attribution Health controls (business windows — PR-ADS-113)
+  const revHealthRefresh = document.getElementById("revenue-health-refresh-btn");
+  const revHealthWindow  = document.getElementById("revenue-health-window");
+  if (revHealthRefresh) revHealthRefresh.addEventListener("click", loadRevenueHealth);
+  if (revHealthWindow) {
+    revHealthWindow.value = getRoasBusinessWindow();
+    revHealthWindow.addEventListener("change", handleBusinessWindowSelectChange);
+  }
+
   // Wire up Unit Economics controls
   const ueRefresh = document.getElementById("unit-economics-refresh-btn");
   const ueWindow  = document.getElementById("unit-economics-window");
@@ -7492,10 +7725,11 @@ function setRoasBusinessWindow(key) {
 
 function handleBusinessWindowSelectChange(e) {
   setRoasBusinessWindow(e.target.value);
-  if (_currentPage === "roas-countries") {
-    loadRoasCountries();
-  } else {
-    loadRoasCampaigns();
+  switch (_currentPage) {
+    case "roas-countries":  loadRoasCountries(); break;
+    case "deals":           loadDeals();         break;
+    case "revenue-health":  loadRevenueHealth(); break;
+    default:                loadRoasCampaigns();
   }
 }
 

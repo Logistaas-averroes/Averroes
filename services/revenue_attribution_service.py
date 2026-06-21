@@ -980,6 +980,103 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     return _build_from_json(resolved, start_dt, end_dt)
 
 
+def build_revenue_deals(window: str, now: datetime | None = None) -> dict:
+    """Build the Closed-Won Revenue Ledger contract for a business window.
+
+    PR-ADS-113. Read-only deal-level revenue truth from the durable
+    gclid_attribution table, windowed by deal_close_date (NEVER the scheduler
+    run_date). Only closed-won deals count as revenue. One latest row per
+    deal_id (deduped in the repository).
+
+    Distinct states:
+      - ledger_status="database_unavailable" when the durable ledger cannot be
+        read. This is NOT the same as a safe-empty window.
+      - safe-empty: ledger available but no closed-won deals in the window
+        (deals == [], summary totals zeroed).
+
+    Returns a contract with window, summary, deals, source_health, generated_at.
+
+    Raises:
+        ValueError: If ``window`` is not a supported business window.
+    """
+    resolved, start_date, end_date = _window_date_bounds(window, now)
+
+    ledger = repo.fetch_revenue_deals(start_date, end_date)
+    generated_at = datetime.now(timezone.utc).isoformat()
+
+    if not ledger.get("available"):
+        # The durable ledger/database cannot be read — distinct from safe-empty.
+        return {
+            "window": resolved,
+            "summary": {
+                "deal_count": 0,
+                "won_revenue": None,
+                "average_deal_value": None,
+                "exact_gclid_count": 0,
+            },
+            "deals": [],
+            "source_health": {
+                "ledger_status": "database_unavailable",
+                "revenue_attribution_status": "database_unavailable",
+            },
+            "generated_at": generated_at,
+        }
+
+    rows = ledger.get("rows", [])
+
+    deals = []
+    won_revenue = 0.0
+    exact_gclid_count = 0
+    for row in rows:
+        amount = _safe_float(row.get("deal_amount_usd"))
+        won_revenue += amount
+        match_source = (row.get("match_source") or "").strip().lower()
+        if match_source == "gclid":
+            exact_gclid_count += 1
+        deals.append({
+            "deal_id": row.get("deal_id"),
+            "company": row.get("company"),
+            "country": row.get("country"),
+            "campaign_name": row.get("campaign_name"),
+            "deal_close_date": row.get("deal_close_date"),
+            "deal_amount_usd": round(amount, 2),
+            "deal_stage_label": row.get("deal_stage_label"),
+            "match_status": row.get("match_status"),
+            "match_source": row.get("match_source"),
+        })
+
+    # Sort: most recent close first, then largest revenue.
+    deals.sort(
+        key=lambda d: (d.get("deal_close_date") or "", d.get("deal_amount_usd") or 0.0),
+        reverse=True,
+    )
+
+    deal_count = len(deals)
+    revenue_wired = deal_count > 0
+    summary = {
+        "deal_count": deal_count,
+        # No closed-won deals -> revenue is unavailable (None), never a fake $0.
+        "won_revenue": round(won_revenue, 2) if revenue_wired else None,
+        "average_deal_value": (
+            round(won_revenue / deal_count, 2) if revenue_wired else None
+        ),
+        "exact_gclid_count": exact_gclid_count,
+    }
+
+    return {
+        "window": resolved,
+        "summary": summary,
+        "deals": deals,
+        "source_health": {
+            "ledger_status": "available",
+            "revenue_attribution_status": (
+                "gclid_attribution_db" if revenue_wired else "not_wired_or_no_closed_won"
+            ),
+        },
+        "generated_at": generated_at,
+    }
+
+
 def build_revenue_attribution_audit(window: str, now: datetime | None = None) -> dict:
     """Truth audit for /api/revenue-attribution (PR-ADS-109).
 
