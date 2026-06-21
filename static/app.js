@@ -3019,6 +3019,8 @@ async function loadRevenueHealth() {
     }
     const audit = await res.json();
     body.innerHTML = renderRevenueHealth(audit);
+    // Surface the included missing-event-date count on the reconciliation panel.
+    loadLeadReconciliationStatus(audit.missing_contact_created_at_count);
   } catch (err) {
     console.error("[loadRevenueHealth]", err);
     body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue attribution health.</p>';
@@ -3194,6 +3196,170 @@ document.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-recovery-action]");
   if (!btn) return;
   runRevenueRecoveryJob(btn.dataset.recoveryAction === "dry-run");
+});
+
+// ── Lead Event-Date Reconciliation panel (PR-ADS-115, admin-only) ───────────
+// Resolves paid leads missing a HubSpot event date: recover from real createdate,
+// exclude verifiable legacy/orphan rows (audited), or leave transient failures
+// unresolved. Reads HubSpot only; never writes to HubSpot or invents dates.
+
+let leadReconJobId = null;
+let leadReconPollTimer = null;
+let leadReconMissingCount = null;
+let leadReconNotice = "";
+const LEAD_RECON_POLL_MS = 2500;
+
+function renderReconResult(status) {
+  const s = (status && status.summary) || null;
+  if (!s) return "";
+  const excluded = (s.no_usable_contact_identity || 0) + (s.hubspot_contact_not_found || 0) + (s.hubspot_contact_no_createdate || 0);
+  const unresolved = s.remaining_unresolved || 0;
+  const mode = status.dry_run ? "Preview (no writes)" : "Reconciliation";
+  const ready = !status.dry_run && status.status === "success" && unresolved === 0;
+  const rows = [
+    ["Missing event dates", s.missing_event_dates],
+    ["Recoverable by Contact ID", s.recoverable_by_contact_id],
+    ["Recovered from HubSpot", s.recovered_from_createdate],
+    ["No usable contact identity", s.no_usable_contact_identity],
+    ["HubSpot contact not found", s.hubspot_contact_not_found],
+    ["HubSpot contact has no createdate", s.hubspot_contact_no_createdate],
+    ["Already excluded legacy rows", s.already_excluded_legacy],
+    ["Remaining unresolved", unresolved],
+  ];
+  const errorsHtml = (status.errors && status.errors.length)
+    ? `<div class="revenue-next-step"><strong>Errors:</strong><ul class="revenue-health-blockers">${status.errors.map((e) => `<li>${escapeHtml(String(e))}</li>`).join("")}</ul></div>`
+    : "";
+  const readyLine = status.dry_run ? "" :
+    `<div class="recovery-result__head">Revenue truth lead dates: <strong>${ready ? "Ready" : "Blocked"}</strong></div>`;
+  return `
+    <div class="recovery-result">
+      <div class="recovery-result__head">${escapeHtml(mode)} · <strong>${escapeHtml(status.status || "")}</strong></div>
+      <div class="revenue-summary-strip revenue-summary-strip--four">
+        ${rows.map(([label, val]) => `<div><span>${label}</span><strong>${fmtCount(val)}</strong></div>`).join("")}
+      </div>
+      ${readyLine}
+      ${errorsHtml}
+    </div>
+  `;
+}
+
+function renderLeadReconciliationPanel(status) {
+  const panel = document.getElementById("lead-reconciliation-panel");
+  if (!panel) return;
+  const st = status || {};
+  const running = st.running === true;
+  const missingLabel = (leadReconMissingCount === null || leadReconMissingCount === undefined)
+    ? "—" : fmtCount(leadReconMissingCount);
+  const progressHtml = running
+    ? `<div class="recovery-progress">Running… phase: <strong>${escapeHtml(st.phase || "loading")}</strong>${st.current_chunk ? ` · ${escapeHtml(st.current_chunk)}` : ""}</div>`
+    : "";
+  const noticeHtml = leadReconNotice ? `<p class="revenue-footnote">${escapeHtml(leadReconNotice)}</p>` : "";
+  panel.innerHTML = `
+    <div class="panel recovery-panel">
+      <div class="panel__header">Lead Event-Date Reconciliation</div>
+      <div class="panel__body">
+        <div class="recovery-statuses">
+          <div>Included paid leads missing an event date: <strong>${missingLabel}</strong></div>
+        </div>
+        <div class="recovery-actions">
+          <button type="button" class="btn btn--secondary" data-reconcile-action="preview" ${running ? "disabled" : ""}>Preview reconciliation</button>
+          <button type="button" class="btn btn--primary" data-reconcile-action="run" ${running ? "disabled" : ""}>Run reconciliation</button>
+        </div>
+        <p class="revenue-footnote">This reads HubSpot only. It never writes to HubSpot or invents dates.</p>
+        ${progressHtml}
+        ${noticeHtml}
+        ${renderReconResult(st)}
+      </div>
+    </div>
+  `;
+}
+
+function stopLeadReconPolling() {
+  if (leadReconPollTimer) { clearTimeout(leadReconPollTimer); leadReconPollTimer = null; }
+}
+
+async function fetchLeadReconStatus() {
+  const url = leadReconJobId
+    ? `/api/lead-reconciliation/status?job_id=${encodeURIComponent(leadReconJobId)}`
+    : "/api/lead-reconciliation/status";
+  const res = await fetch(url, { credentials: "same-origin" });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+async function pollLeadReconOnce() {
+  if (_currentPage !== "revenue-health") { stopLeadReconPolling(); return; }
+  try {
+    const status = await fetchLeadReconStatus();
+    if (status) {
+      if (status.job_id) leadReconJobId = status.job_id;
+      renderLeadReconciliationPanel(status);
+      if (status.running) {
+        leadReconPollTimer = setTimeout(pollLeadReconOnce, LEAD_RECON_POLL_MS);
+        return;
+      }
+      // Job finished: refresh the source-health driven count + health body.
+      loadRevenueHealth();
+    }
+  } catch (err) {
+    console.error("[pollLeadRecon]", err);
+  }
+  stopLeadReconPolling();
+}
+
+async function loadLeadReconciliationStatus(missingCount) {
+  const panel = document.getElementById("lead-reconciliation-panel");
+  if (!panel) return;
+  if (missingCount !== undefined) leadReconMissingCount = missingCount;
+  stopLeadReconPolling();
+  leadReconNotice = "";
+  try {
+    const status = await fetchLeadReconStatus();
+    if (!status) { renderLeadReconciliationPanel(null); return; }
+    if (status.job_id) leadReconJobId = status.job_id;
+    renderLeadReconciliationPanel(status);
+    if (status.running) leadReconPollTimer = setTimeout(pollLeadReconOnce, LEAD_RECON_POLL_MS);
+  } catch (err) {
+    console.error("[loadLeadReconciliationStatus]", err);
+    renderLeadReconciliationPanel(null);
+  }
+}
+
+async function runLeadReconciliationJob(dryRun) {
+  leadReconNotice = "";
+  renderLeadReconciliationPanel({ running: true, phase: dryRun ? "preview" : "loading" });
+  try {
+    const res = await fetch("/api/lead-reconciliation/run", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: dryRun }),
+    });
+    if (res.status === 409) {
+      leadReconNotice = "A reconciliation job is already running.";
+      loadLeadReconciliationStatus();
+      return;
+    }
+    if (!res.ok) {
+      leadReconNotice = "Lead reconciliation could not be started.";
+      renderLeadReconciliationPanel(null);
+      return;
+    }
+    const accepted = await res.json();
+    leadReconJobId = accepted.job_id || null;
+    stopLeadReconPolling();
+    pollLeadReconOnce();
+  } catch (err) {
+    console.error("[runLeadReconciliationJob]", err);
+    leadReconNotice = "Lead reconciliation request failed.";
+    renderLeadReconciliationPanel(null);
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-reconcile-action]");
+  if (!btn) return;
+  runLeadReconciliationJob(btn.dataset.reconcileAction === "preview");
 });
 
 function junkRateBadge(junkPct) {
@@ -7945,23 +8111,40 @@ let roasRevenueSourceHealth = null;
 // diagnostics pages. Decisions are shown only when the truth layer is safe;
 // otherwise a single clean blocked card explains why — no debug/audit clutter.
 // (Diagnostics live in System Status / Revenue Attribution Health.)
+// PR-ADS-115: revenue truth is two independent facts. Readiness requires safe
+// lead event dates AND a connected revenue integration. A connected integration
+// whose selected window has no closed-won deals is a SAFE EMPTY state (handled
+// downstream), NOT a block.
+function isRevenueIntegrationConnected(sh) {
+  const s = sh || {};
+  if (s.revenue_integration_status) return s.revenue_integration_status === "connected";
+  // Backward-compatible fallback for older payloads.
+  return s.revenue_attribution_status !== "not_wired_or_no_closed_won";
+}
+
 function isRevenueDecisionReady(sourceHealth) {
   const sh = sourceHealth || {};
   return (
     sh.lead_date_grain_status === "event_date" &&
     sh.lead_metrics_status !== "withheld" &&
-    sh.revenue_attribution_status !== "not_wired_or_no_closed_won"
+    isRevenueIntegrationConnected(sh)
   );
 }
 
 function renderRevenueBlockedState(sourceHealth) {
   const sh = sourceHealth || {};
   const leadsReady = sh.lead_date_grain_status === "event_date" && sh.lead_metrics_status !== "withheld";
-  const revenueReady = sh.revenue_attribution_status !== "not_wired_or_no_closed_won";
+  const revenueReady = isRevenueIntegrationConnected(sh);
+  const missing = sh.missing_contact_created_at_count;
   const chip = (label, ok, okText, warnText) =>
     `<div class="revenue-status-chip revenue-status-chip--${ok ? "ok" : "warning"}">
        <span>${label}</span><strong>${ok ? okText : warnText}</strong>
      </div>`;
+  // The next action points at the real Revenue Health reconciliation workflow —
+  // there is no generic "HubSpot lead re-sync" admin action.
+  const nextStep = !leadsReady
+    ? `<strong>Next step:</strong> Open <strong>System Status → Revenue Health</strong> and run <strong>Lead Event-Date Reconciliation</strong>${(missing || missing === 0) ? ` (${fmtCount(missing)} included paid leads still missing an event date)` : ""}.`
+    : `<strong>Next step:</strong> Connect revenue attribution by running <strong>Revenue Truth Recovery</strong> in <strong>System Status → Revenue Health</strong>.`;
   return `
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
@@ -7973,7 +8156,7 @@ function renderRevenueBlockedState(sourceHealth) {
         ${chip("Revenue", revenueReady, "Connected", "Not connected")}
       </div>
       <div class="revenue-next-step">
-        <strong>Next step:</strong> Run HubSpot lead re-sync, then re-check this page.
+        ${nextStep}
       </div>
     </div>`;
 }
@@ -8299,11 +8482,16 @@ function renderCountryRevenueBlockedState(sourceHealth) {
   const sh = sourceHealth || {};
   const countrySpendReady = sh.country_spend_available === true && sh.geo_country_mapping_status === "available";
   const leadsReady = sh.lead_date_grain_status === "event_date" && sh.lead_metrics_status !== "withheld";
-  const revenueReady = sh.revenue_attribution_status !== "not_wired_or_no_closed_won";
+  const revenueReady = isRevenueIntegrationConnected(sh);
   const chip = (label, ok, okText, warnText) =>
     `<div class="revenue-status-chip revenue-status-chip--${ok ? "ok" : "warning"}">
        <span>${label}</span><strong>${ok ? okText : warnText}</strong>
      </div>`;
+  const nextStep = !leadsReady
+    ? `<strong>Next step:</strong> Open <strong>System Status → Revenue Health</strong> and run <strong>Lead Event-Date Reconciliation</strong>${!countrySpendReady ? ", then run the Google Ads geo sync" : ""}.`
+    : (!countrySpendReady
+        ? "<strong>Next step:</strong> Run the Google Ads geo sync, then re-check this page."
+        : "<strong>Next step:</strong> Connect revenue attribution via <strong>Revenue Truth Recovery</strong> in <strong>System Status → Revenue Health</strong>.");
   return `
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
@@ -8315,7 +8503,7 @@ function renderCountryRevenueBlockedState(sourceHealth) {
         ${chip("Revenue", revenueReady, "Connected", "Not connected")}
       </div>
       <div class="revenue-next-step">
-        <strong>Next step:</strong> Run the Google Ads geo sync and HubSpot lead re-sync, then re-check this page.
+        ${nextStep}
       </div>
     </div>`;
 }

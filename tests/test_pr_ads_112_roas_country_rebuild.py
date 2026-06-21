@@ -101,10 +101,14 @@ def test_blocked_state_returns_before_summary_and_table():
 
 
 def test_country_blocked_copy():
-    fn = _fn("function renderCountryRevenueBlockedState", span=1600)
+    fn = _fn("function renderCountryRevenueBlockedState", span=1800)
     assert "Country ROAS is not ready yet" in fn
-    assert "Run the Google Ads geo sync and HubSpot lead re-sync" in fn
     assert "Country spend" in fn
+    # PR-ADS-115: next action points at the real Lead Event-Date Reconciliation
+    # workflow and the geo sync — never the nonexistent "HubSpot lead re-sync".
+    assert "Lead Event-Date Reconciliation" in fn
+    assert "Google Ads geo sync" in fn
+    assert "HubSpot lead re-sync" not in fn
 
 
 # ── 5. Summary derived from country rows, not the global summary ──────────────

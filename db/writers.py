@@ -1409,10 +1409,11 @@ def create_recovery_job(
     date_from,
     date_to,
     chunk_months: int,
+    job_type: str = "revenue_recovery",
 ) -> bool:
-    """Insert a queued revenue-recovery job. Returns True on success.
+    """Insert a queued background job (revenue_recovery or lead_reconciliation).
 
-    Never raises.
+    Returns True on success. Never raises.
     """
     try:
         with get_conn() as conn:
@@ -1422,11 +1423,11 @@ def create_recovery_job(
                 cur.execute(
                     """
                     INSERT INTO revenue_recovery_jobs (
-                        job_id, status, dry_run, date_from, date_to,
+                        job_id, job_type, status, dry_run, date_from, date_to,
                         chunk_months, completed_chunks, errors, started_at
-                    ) VALUES (%s, 'queued', %s, %s, %s, %s, '[]'::jsonb, '[]'::jsonb, NOW())
+                    ) VALUES (%s, %s, 'queued', %s, %s, %s, %s, '[]'::jsonb, '[]'::jsonb, NOW())
                     """,
-                    (job_id, bool(dry_run), date_from, date_to, int(chunk_months)),
+                    (job_id, job_type, bool(dry_run), date_from, date_to, int(chunk_months)),
                 )
         return True
     except Exception as exc:  # noqa: BLE001
@@ -1492,16 +1493,26 @@ def get_recovery_job(job_id: str) -> Optional[dict]:
         return None
 
 
-def get_latest_recovery_job() -> Optional[dict]:
-    """Return the most recently created recovery job, or None. Never raises."""
+def get_latest_recovery_job(job_type: Optional[str] = None) -> Optional[dict]:
+    """Return the most recent job (optionally filtered by job_type), or None.
+
+    Never raises.
+    """
     try:
         with get_conn() as conn:
             if conn is None:
                 return None
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM revenue_recovery_jobs ORDER BY created_at DESC LIMIT 1",
-                )
+                if job_type:
+                    cur.execute(
+                        "SELECT * FROM revenue_recovery_jobs WHERE job_type = %s "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (job_type,),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT * FROM revenue_recovery_jobs ORDER BY created_at DESC LIMIT 1",
+                    )
                 row = cur.fetchone()
                 if not row:
                     return None
@@ -1510,3 +1521,89 @@ def get_latest_recovery_job() -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001
         log.error("get_latest_recovery_job failed: %s", exc)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Lead-truth exclusions (PR-ADS-115) — auditable revenue-truth decisions.
+# Local DB only. Never overwrites or deletes historical `leads` rows.
+# ---------------------------------------------------------------------------
+
+def write_lead_exclusion(
+    lead_id: str,
+    reason: str,
+    *,
+    details: Optional[str] = None,
+    reconciliation_job_id: Optional[str] = None,
+) -> bool:
+    """Upsert a durable lead-truth exclusion (keyed by lead_id). Never raises.
+
+    A re-run refreshes the reason/details/job but preserves the original
+    excluded_at timestamp for the audit trail.
+    """
+    if not lead_id:
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO lead_truth_exclusions (
+                        lead_id, reason, details, reconciliation_job_id
+                    ) VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (lead_id) DO UPDATE SET
+                        reason                = EXCLUDED.reason,
+                        details               = EXCLUDED.details,
+                        reconciliation_job_id = EXCLUDED.reconciliation_job_id,
+                        updated_at            = NOW()
+                    """,
+                    (lead_id, reason, details, reconciliation_job_id),
+                )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_lead_exclusion failed (lead_id=%s): %s", lead_id, exc)
+        return False
+
+
+def count_lead_exclusions() -> int:
+    """Return the number of durable lead-truth exclusions. Never raises."""
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM lead_truth_exclusions")
+                return int(cur.fetchone()[0])
+    except Exception as exc:  # noqa: BLE001
+        log.error("count_lead_exclusions failed: %s", exc)
+        return 0
+
+
+def backfill_event_date_for_contact(contact_id, created_at) -> int:
+    """Backfill contact_created_at for ALL local lead snapshots of a contact_id
+    that currently lack it (PR-ADS-115 reconciliation).
+
+    Uses ONLY the supplied HubSpot createdate — never a run/sync/current date,
+    and only when a real created date exists. Returns the number of rows updated.
+    Never raises.
+    """
+    if not contact_id or not created_at:
+        return 0
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE leads
+                    SET contact_created_at = %s::timestamptz
+                    WHERE contact_id = %s AND contact_created_at IS NULL
+                    """,
+                    (created_at, contact_id),
+                )
+                return cur.rowcount or 0
+    except Exception as exc:  # noqa: BLE001
+        log.error("backfill_event_date_for_contact failed (contact_id=%s): %s", contact_id, exc)
+        return 0

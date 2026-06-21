@@ -482,6 +482,7 @@ END $$;
 CREATE TABLE IF NOT EXISTS revenue_recovery_jobs (
   id                SERIAL PRIMARY KEY,
   job_id            TEXT NOT NULL UNIQUE,
+  job_type          TEXT NOT NULL DEFAULT 'revenue_recovery',  -- revenue_recovery|lead_reconciliation
   status            TEXT NOT NULL DEFAULT 'queued',  -- queued|running|success|partial|failed
   dry_run           BOOLEAN NOT NULL DEFAULT TRUE,
   date_from         DATE,
@@ -499,8 +500,30 @@ CREATE TABLE IF NOT EXISTS revenue_recovery_jobs (
   updated_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Existing installs: add job_type so the durable-job table is reused for the
+-- PR-ADS-115 lead-reconciliation job (idempotent).
+ALTER TABLE revenue_recovery_jobs
+  ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'revenue_recovery';
+
 CREATE INDEX IF NOT EXISTS idx_revenue_recovery_jobs_created
   ON revenue_recovery_jobs(created_at DESC);
+
+-- PR-ADS-115: durable lead-truth exclusions. A missing-event-date paid lead with
+-- no verifiable HubSpot identity / created date is excluded from revenue-truth
+-- metrics with an explicit, auditable reason. Historical `leads` rows are NEVER
+-- overwritten or deleted; exclusion is a separate, reversible truth decision.
+CREATE TABLE IF NOT EXISTS lead_truth_exclusions (
+  id                     SERIAL PRIMARY KEY,
+  lead_id                TEXT NOT NULL UNIQUE,  -- COALESCE(contact_id, 'id:'||leads.id)
+  reason                 TEXT NOT NULL,         -- no_contact_identity|hubspot_contact_not_found|hubspot_contact_no_createdate
+  details                TEXT,
+  reconciliation_job_id  TEXT,
+  excluded_at            TIMESTAMPTZ DEFAULT NOW(),
+  updated_at             TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_lead_truth_exclusions_reason
+  ON lead_truth_exclusions(reason);
 """
 
 
