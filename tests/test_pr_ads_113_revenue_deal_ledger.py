@@ -15,8 +15,11 @@ Health is admin-only, read-only against the audit endpoint, and never shows a
 SAFE-but-not-wired window as Revenue Ready. Campaign/Country pages are unchanged.
 """
 
+import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -85,6 +88,38 @@ def _load_build_revenue_deals():
         return build_revenue_deals
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"service import unavailable in this environment: {exc}")
+
+
+def _load_build_audit():
+    try:
+        from services.revenue_attribution_service import build_revenue_attribution_audit
+        return build_revenue_attribution_audit
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"service import unavailable in this environment: {exc}")
+
+
+def _patched_audit_repo():
+    """Patch the durable repository so the audit builds deterministically."""
+    grain = {"available": True, "lead_window_safe": True,
+             "lead_event_date_field_available": True,
+             "missing_contact_created_at_count": 0, "excluded_non_paid_count": 0,
+             "excluded_pseudo_campaign_count": 0, "counts_by_source_type": {}}
+    pollution = {"available": True, "pseudo_campaign_rows": [],
+                 "email_campaign_rows": [], "zero_spend_campaigns_with_leads": []}
+    empty_rows = {"available": True, "rows": [], "coverage_start": None, "coverage_end": None}
+    leads = {"available": True, "rows": [], "event_date_safe": True,
+             "lead_event_date_field_available": True,
+             "missing_contact_created_at_count": 0, "excluded_non_paid_count": 0,
+             "excluded_pseudo_campaign_count": 0, "coverage_start": None, "coverage_end": None}
+    return patch.multiple(
+        "db.revenue_repository",
+        fetch_lead_date_grain_health=lambda *a, **k: grain,
+        fetch_campaign_pollution_report=lambda *a, **k: pollution,
+        fetch_won_revenue=lambda *a, **k: empty_rows,
+        fetch_campaign_country_spend=lambda *a, **k: empty_rows,
+        fetch_lead_quality=lambda *a, **k: leads,
+        fetch_sync_state=lambda *a, **k: {"available": True, "datasets": {}},
+    )
 
 
 # ════════════════════════════ BACKEND ════════════════════════════
@@ -316,6 +351,98 @@ def test_health_shows_four_checks_and_rails():
         assert rail in region, f"missing source-date rail: {rail}"
     for count in ("Missing contact dates", "Excluded non-paid rows", "Excluded pseudo campaigns"):
         assert count in region
+
+
+# ════════════════════ WINDOW INTEGRITY CORRECTION ════════════════════════
+
+
+def test_audit_includes_window_ranges():
+    build_audit = _load_build_audit()
+    with _patched_audit_repo():
+        audit = build_audit("current_quarter", now=FIXED_NOW)
+    wr = audit.get("window_ranges")
+    assert isinstance(wr, dict)
+    for k in ("current_quarter", "ytd", "all_time"):
+        assert k in wr
+        assert "start_date" in wr[k] and "end_date" in wr[k]
+    # Resolved by date boundaries (2026-06-21 is Q2).
+    assert wr["current_quarter"]["start_date"] == "2026-04-01"
+    assert wr["ytd"]["start_date"] == "2026-01-01"
+    assert wr["all_time"]["start_date"] is None
+
+
+def test_health_integrity_uses_date_ranges_not_values():
+    region = _health_region()
+    # Date-boundary based, not value-signature based.
+    assert "window_ranges" in region
+    assert "rangeSignatures" in region
+    assert "new Set(rangeSignatures)" in region
+    # The old value-signature integrity test must be gone.
+    assert "${s.won_revenue}|${s.leads}" not in region
+    assert "anyData" not in region
+    # The page states windows differ by date boundaries, values may be equal.
+    assert "differ by their date boundaries" in region
+
+
+def _extract_integrity_snippet():
+    region = _health_region()
+    m = re.search(
+        r"const ranges = audit\.window_ranges.*?const windowIntegrityOk = .*?;",
+        region, re.DOTALL,
+    )
+    assert m, "could not locate window-integrity computation"
+    return m.group(0)
+
+
+def _eval_window_integrity(audit):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available to evaluate frontend integrity logic")
+    snippet = _extract_integrity_snippet()
+    script = (
+        f"const audit = {json.dumps(audit)};\n"
+        "const dg = audit.date_grain_health || {};\n"
+        "const pollutionCount = 0;\n"
+        f"{snippet}\n"
+        "console.log(JSON.stringify(windowIntegrityOk));"
+    )
+    out = subprocess.check_output([node, "-e", script]).decode().strip()
+    return json.loads(out)
+
+
+def test_window_integrity_ok_when_values_equal_but_ranges_differ():
+    # All three summaries identical, but the resolved date ranges differ.
+    identical = {"spend": 1000, "won_revenue": 5000, "leads": 10}
+    audit = {
+        "revenue_attribution_wired": True,
+        "window_ranges": {
+            "current_quarter": {"start_date": "2026-04-01", "end_date": "2026-06-21"},
+            "ytd": {"start_date": "2026-01-01", "end_date": "2026-06-21"},
+            "all_time": {"start_date": None, "end_date": "2026-06-21"},
+        },
+        "window_comparison": {
+            "current_quarter": dict(identical),
+            "ytd": dict(identical),
+            "all_time": dict(identical),
+        },
+    }
+    assert _eval_window_integrity(audit) is True, (
+        "identical totals with differing date ranges must NOT warn"
+    )
+
+
+def test_window_integrity_warns_only_when_ranges_collapse():
+    # Genuine bug: windows fail to resolve to distinct date ranges.
+    same_range = {"start_date": "2026-04-01", "end_date": "2026-06-21"}
+    audit = {
+        "window_ranges": {
+            "current_quarter": dict(same_range),
+            "ytd": dict(same_range),
+            "all_time": dict(same_range),
+        },
+        "window_comparison": {},
+    }
+    assert _eval_window_integrity(audit) is False
 
 
 # ════════════════════════════ NON-REGRESSION ════════════════════════════

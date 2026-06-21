@@ -2892,21 +2892,22 @@ function renderRevenueHealth(audit) {
   const pollutionCount =
     (audit.pseudo_campaign_rows || []).length + (audit.email_campaign_rows || []).length;
 
+  const ranges = audit.window_ranges || {};
+  const cmpKeys = ["current_quarter", "ytd", "all_time"];
+
   const leadGrainOk = !!dg.lead_window_safe;
   const revenueWired = audit.revenue_attribution_wired === true;
   const pollutionOk = pollutionCount === 0;
 
-  // Window integrity: the business windows must actually differ when data exists.
-  const cmpKeys = ["current_quarter", "ytd", "all_time"];
-  const signatures = cmpKeys.map((k) => {
-    const s = wc[k] || {};
-    return `${s.spend}|${s.won_revenue}|${s.leads}`;
+  // Window integrity is a property of the resolved DATE BOUNDARIES, never the
+  // aggregates: identical Current Quarter / YTD / All Time totals are correct
+  // when all available data falls inside the current quarter. We only flag a
+  // genuine bug where the windows fail to resolve to distinct date ranges.
+  const rangeSignatures = cmpKeys.map((k) => {
+    const r = ranges[k] || {};
+    return `${r.start_date}|${r.end_date}`;
   });
-  const anyData = cmpKeys.some((k) => {
-    const s = wc[k] || {};
-    return (s.spend || 0) > 0 || (s.won_revenue || 0) > 0;
-  });
-  const windowIntegrityOk = !anyData || new Set(signatures).size > 1;
+  const windowIntegrityOk = !audit.window_ranges || new Set(rangeSignatures).size > 1;
 
   // SAFE alone is NOT Revenue Ready — both conditions are required.
   const revenueReady = audit.verdict === "SAFE" && revenueWired;
@@ -2939,11 +2940,17 @@ function renderRevenueHealth(audit) {
          <div class="revenue-next-step"><strong>Next step:</strong> ${escapeHtml(nextAction)}</div>
        </div>`;
 
+  const fmtRange = (r) => {
+    if (!r || (!r.start_date && !r.end_date)) return "—";
+    return `${r.start_date || "Earliest"} → ${r.end_date || "—"}`;
+  };
+
   const cmpRow = (k, label) => {
     const s = wc[k] || {};
     const leads = (s.leads === null || s.leads === undefined) ? "Withheld" : fmtCount(s.leads);
     return `<tr>
       <td>${label}</td>
+      <td class="revenue-health-range">${escapeHtml(fmtRange(ranges[k]))}</td>
       <td>${fmtMoney(s.spend)}</td>
       <td>${leads}</td>
       <td>${fmtMoney(s.won_revenue)}</td>
@@ -2982,7 +2989,7 @@ function renderRevenueHealth(audit) {
       <div class="panel__body panel__body--flush">
         <div class="table-scroll">
           <table class="data-table">
-            <tr><th>Window</th><th>Spend</th><th>Leads</th><th>Won Revenue</th></tr>
+            <tr><th>Window</th><th>Date range</th><th>Spend</th><th>Leads</th><th>Won Revenue</th></tr>
             <tbody>
               ${cmpRow("current_quarter", "Current Quarter")}
               ${cmpRow("ytd", "YTD")}
@@ -2992,6 +2999,7 @@ function renderRevenueHealth(audit) {
         </div>
       </div>
     </div>
+    <p class="revenue-footnote">These windows differ by their date boundaries (shown above). Their totals may legitimately be equal when all available data falls within the current quarter.</p>
   `;
 }
 

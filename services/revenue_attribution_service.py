@@ -1108,14 +1108,26 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
         "revenue_window_safe": revenue_window_safe,
     }
 
-    # Window comparison — proves Current Quarter / YTD / All Time differ (or
-    # explains why they don't) using the same safe build logic.
+    # Window comparison — Current Quarter / YTD / All Time totals via the same
+    # safe build logic. Identical totals are NOT a problem: they are correct when
+    # all available data falls inside the current quarter. Window integrity is a
+    # property of the resolved DATE BOUNDARIES (window_ranges), not the aggregates.
     window_comparison = {}
+    window_ranges = {}
     for wk in ("current_quarter", "ytd", "all_time"):
         try:
             window_comparison[wk] = build_revenue_attribution(wk, now=now)["summary"]
         except Exception:  # noqa: BLE001
             window_comparison[wk] = {}
+        try:
+            wr = resolve_window(wk, now=now)
+            window_ranges[wk] = {
+                "key": wr["key"],
+                "start_date": wr["start_date"],
+                "end_date": wr["end_date"],
+            }
+        except Exception:  # noqa: BLE001
+            window_ranges[wk] = {}
 
     blockers: list[str] = []
     if not grain.get("available"):
@@ -1145,6 +1157,7 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
         "zero_spend_campaigns_with_leads": pollution.get("zero_spend_campaigns_with_leads", []),
         "revenue_attribution_wired": bool(revenue.get("rows")),
         "window_comparison": window_comparison,
+        "window_ranges": window_ranges,
         "verdict": verdict,
         "blockers": blockers,
         "generated_at": datetime.now(timezone.utc).isoformat(),
