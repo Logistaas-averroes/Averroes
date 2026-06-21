@@ -24,7 +24,8 @@ def _fn(name, span=2600):
 
 
 def _navigate():
-    return _fn("function navigate(page, options)", span=2600)
+    # Span widened in PR-ADS-113 (added revenue-health admin role enforcement).
+    return _fn("function navigate(page, options)", span=3200)
 
 
 def _section(page_id):
@@ -37,7 +38,9 @@ def _section(page_id):
 
 
 def test_revenue_pages_constant_includes_both_roas_pages():
-    assert 'REVENUE_PAGES = ["roas-campaigns", "roas-countries"]' in JS
+    # PR-ADS-113 added the Deals (Closed-Won ledger) and Revenue Health pages to
+    # the revenue-page set so the global ad-window bar is suppressed there too.
+    assert 'REVENUE_PAGES = ["roas-campaigns", "roas-countries", "deals", "revenue-health"]' in JS
     assert "function isRevenuePage" in JS
 
 
@@ -65,8 +68,13 @@ def test_audit_button_removed_from_business_pages():
     assert "View attribution audit" not in JS
     assert 'id="roas-audit-btn"' not in JS
     assert "function loadRevenueAttributionAudit" not in JS
-    # The business pages must not call the audit endpoint.
-    assert "/api/revenue-attribution/audit" not in JS
+    # The ROAS business decision pages must not call the audit endpoint. (The
+    # admin-only Revenue Health diagnostics page added in PR-ADS-113 legitimately
+    # uses it via loadRevenueHealth — assert the ROAS renderers stay clean.)
+    for fn_name in ("function renderRoasCampaignsPage", "function renderRoasCountriesPage",
+                    "function loadRoasCampaigns", "function loadRoasCountries"):
+        body = _fn(fn_name, span=2600)
+        assert "/api/revenue-attribution/audit" not in body
 
 
 # ── 3. Help / explanation blocks removed ─────────────────────────────────────
@@ -184,8 +192,9 @@ def test_other_pages_not_treated_as_revenue_pages():
     assert "loadLeads" in JS
 
 
-def test_revenue_pages_list_is_exactly_two():
+def test_revenue_pages_list():
+    # PR-ADS-113 extended the revenue-page set with Deals + Revenue Health.
     m = re.search(r'REVENUE_PAGES = \[([^\]]*)\]', JS)
     assert m
     names = [n.strip().strip('"').strip("'") for n in m.group(1).split(",") if n.strip()]
-    assert names == ["roas-campaigns", "roas-countries"]
+    assert names == ["roas-campaigns", "roas-countries", "deals", "revenue-health"]
