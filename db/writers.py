@@ -1386,3 +1386,127 @@ def write_gclid_coverage_snapshot(
     except Exception as exc:  # noqa: BLE001
         log.error("write_gclid_coverage_snapshot failed (run_id=%s): %s", run_id, exc)
         return 0
+
+
+# ---------------------------------------------------------------------------
+# Revenue Truth Recovery jobs (PR-ADS-114) — durable background-job state.
+# Local DB only. Never writes to any external platform.
+# ---------------------------------------------------------------------------
+
+def _recovery_job_row_to_dict(cols, row) -> dict:
+    d = dict(zip(cols, row))
+    for k in ("date_from", "date_to", "started_at", "finished_at",
+              "created_at", "updated_at"):
+        if d.get(k) is not None:
+            d[k] = str(d[k])
+    return d
+
+
+def create_recovery_job(
+    job_id: str,
+    *,
+    dry_run: bool,
+    date_from,
+    date_to,
+    chunk_months: int,
+) -> bool:
+    """Insert a queued revenue-recovery job. Returns True on success.
+
+    Never raises.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO revenue_recovery_jobs (
+                        job_id, status, dry_run, date_from, date_to,
+                        chunk_months, completed_chunks, errors, started_at
+                    ) VALUES (%s, 'queued', %s, %s, %s, %s, '[]'::jsonb, '[]'::jsonb, NOW())
+                    """,
+                    (job_id, bool(dry_run), date_from, date_to, int(chunk_months)),
+                )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("create_recovery_job failed (job_id=%s): %s", job_id, exc)
+        return False
+
+
+def update_recovery_job(job_id: str, **fields) -> None:
+    """Update mutable fields of a recovery job. JSON fields are serialised.
+
+    Supported fields: status, phase, current_chunk, completed_chunks (list),
+    summary (dict), chunks (list), errors (list), finished_at (str/dt).
+    Never raises.
+    """
+    if not fields:
+        return
+    json_fields = {"completed_chunks", "summary", "chunks", "errors"}
+    sets, values = [], []
+    for key, value in fields.items():
+        if key not in {"status", "phase", "current_chunk", "completed_chunks",
+                       "summary", "chunks", "errors", "finished_at"}:
+            continue
+        if key in json_fields:
+            sets.append(f"{key} = %s::jsonb")
+            values.append(json.dumps(value))
+        else:
+            sets.append(f"{key} = %s")
+            values.append(value)
+    if not sets:
+        return
+    sets.append("updated_at = NOW()")
+    values.append(job_id)
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE revenue_recovery_jobs SET {', '.join(sets)} WHERE job_id = %s",
+                    tuple(values),
+                )
+    except Exception as exc:  # noqa: BLE001
+        log.error("update_recovery_job failed (job_id=%s): %s", job_id, exc)
+
+
+def get_recovery_job(job_id: str) -> Optional[dict]:
+    """Return the durable state of a recovery job, or None. Never raises."""
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM revenue_recovery_jobs WHERE job_id = %s", (job_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                return _recovery_job_row_to_dict(cols, row)
+    except Exception as exc:  # noqa: BLE001
+        log.error("get_recovery_job failed (job_id=%s): %s", job_id, exc)
+        return None
+
+
+def get_latest_recovery_job() -> Optional[dict]:
+    """Return the most recently created recovery job, or None. Never raises."""
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM revenue_recovery_jobs ORDER BY created_at DESC LIMIT 1",
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                return _recovery_job_row_to_dict(cols, row)
+    except Exception as exc:  # noqa: BLE001
+        log.error("get_latest_recovery_job failed: %s", exc)
+        return None

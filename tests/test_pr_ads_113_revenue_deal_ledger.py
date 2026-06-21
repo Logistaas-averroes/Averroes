@@ -330,9 +330,16 @@ def test_health_page_is_admin_only():
 def test_health_uses_audit_endpoint_read_only():
     region = _health_region()
     assert "/api/revenue-attribution/audit?window=" in region
-    # Read-only: no writes from the health page.
-    assert "method: \"POST\"" not in region
-    assert "method: 'POST'" not in region
+    # The audit/health diagnostics must be read-only: the audit endpoint is only
+    # ever fetched (GET), never POSTed to. (PR-ADS-114 adds an admin Revenue
+    # Recovery action that POSTs to a DIFFERENT endpoint, /api/revenue-recovery
+    # — that is a local-DB recovery trigger, not an external-platform write.)
+    audit_idx = region.find("/api/revenue-attribution/audit")
+    around = region[max(0, audit_idx - 200):audit_idx + 200]
+    assert "POST" not in around
+    assert "/api/revenue-attribution/audit" not in region.replace(
+        "/api/revenue-attribution/audit?window=", "", 1
+    ) or region.count("/api/revenue-attribution/audit") == 1
 
 
 def test_health_safe_alone_is_not_revenue_ready():

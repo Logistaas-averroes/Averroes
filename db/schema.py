@@ -475,6 +475,32 @@ BEGIN
         TRUNCATE TABLE campaigns;
     END IF;
 END $$;
+
+-- PR-ADS-114: durable Revenue Truth Recovery jobs. Background recovery runs
+-- persist their metadata, chunk checkpoints, counts, status, and errors here so
+-- progress survives a process restart and resume reads completed chunks from DB.
+CREATE TABLE IF NOT EXISTS revenue_recovery_jobs (
+  id                SERIAL PRIMARY KEY,
+  job_id            TEXT NOT NULL UNIQUE,
+  status            TEXT NOT NULL DEFAULT 'queued',  -- queued|running|success|partial|failed
+  dry_run           BOOLEAN NOT NULL DEFAULT TRUE,
+  date_from         DATE,
+  date_to           DATE,
+  chunk_months      INTEGER NOT NULL DEFAULT 1,
+  phase             TEXT,
+  current_chunk     TEXT,
+  completed_chunks  JSONB NOT NULL DEFAULT '[]'::jsonb,
+  summary           JSONB,
+  chunks            JSONB,
+  errors            JSONB NOT NULL DEFAULT '[]'::jsonb,
+  started_at        TIMESTAMPTZ,
+  finished_at       TIMESTAMPTZ,
+  created_at        TIMESTAMPTZ DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_revenue_recovery_jobs_created
+  ON revenue_recovery_jobs(created_at DESC);
 """
 
 

@@ -4414,6 +4414,46 @@ a {
   font-size: 13px;
 }
 
+/* ── Revenue Truth Recovery panel (PR-ADS-114) ───────────────────────────── */
+
+.recovery-panel {
+  margin-bottom: 18px;
+}
+
+.recovery-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-bottom: 8px;
+  color: #334155;
+}
+
+.recovery-actions {
+  display: flex;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.recovery-progress {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e3a8a;
+  font-weight: 600;
+}
+
+.recovery-result {
+  margin-top: 12px;
+}
+
+.recovery-result__head {
+  margin-bottom: 10px;
+  color: #475569;
+  font-size: 13px;
+}
+
 /* ── Truth-layer safety (PR-ADS-109) ─────────────────────────────────────── */
 
 .kpi-card--withheld {

@@ -55,6 +55,8 @@ Protected endpoints (require authenticated session):
   GET  /api/revenue-attribution   — Shared revenue-attribution contract by business window for ROAS campaign/country pages (requires auth; PR-ADS-107A).
   GET  /api/revenue-attribution/audit — Read-only truth audit of revenue-attribution date grain / source pollution per window (requires auth; PR-ADS-109).
   GET  /api/revenue-deals          — Read-only Closed-Won Revenue Ledger by business window (deal_close_date truth; requires auth; PR-ADS-113).
+  POST /api/revenue-recovery/run   — Admin-only Revenue Truth Recovery (local DB writes only; reads HubSpot read-only; PR-ADS-114).
+  GET  /api/revenue-recovery/status — Latest Revenue Recovery progress/result (admin-only; PR-ADS-114).
 """
 
 import base64
@@ -65,6 +67,7 @@ import logging
 import os
 import re
 import threading
+import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -216,6 +219,25 @@ class BackfillRunRequest(BaseModel):
 
 _backfill_lock: threading.Lock = threading.Lock()
 _backfill_state: dict[str, Any] = {"running": False, "latest": None}
+
+
+# ---------------------------------------------------------------------------
+# Revenue Truth Recovery (PR-ADS-114) — admin-only, local DB writes only.
+# Reads HubSpot read-only; NEVER writes to HubSpot, Google Ads, bids, budgets,
+# or conversions. _recovery_progress carries live phase/chunk state for the
+# status endpoint and the admin Revenue Recovery panel.
+# ---------------------------------------------------------------------------
+
+class RevenueRecoveryRequest(BaseModel):
+    date_from: Optional[str] = None  # None → All Time (default recovery range)
+    date_to: Optional[str] = None
+    chunk_months: int = 1
+    dry_run: bool = True
+    resume: bool = False
+
+
+_recovery_lock: threading.Lock = threading.Lock()
+_recovery_progress: dict[str, Any] = {"running": False, "latest": None}
 
 
 # ---------------------------------------------------------------------------
@@ -5940,6 +5962,159 @@ async def get_revenue_deals(
         raise HTTPException(
             status_code=500, detail="Revenue deals computation failed"
         ) from exc
+
+
+def _run_recovery_worker(job_id: str, body: "RevenueRecoveryRequest") -> None:
+    """Background worker: run recovery and persist durable checkpoints to the DB.
+
+    Resume reads completed chunks from the DB (durable), so progress survives a
+    process restart. Local DB writes only; never writes to any external platform.
+    """
+    import db.writers as db_writers  # noqa: PLC0415
+    from services.revenue_recovery_service import run_revenue_recovery  # noqa: PLC0415
+
+    def _load_completed():
+        job = db_writers.get_recovery_job(job_id) or {}
+        return job.get("completed_chunks", []) or []
+
+    def _checkpoint(jid, snap):
+        fields = {
+            "status": snap.get("status"),
+            "phase": snap.get("phase"),
+            "current_chunk": snap.get("current_chunk"),
+            "completed_chunks": snap.get("completed_chunks", []),
+            "summary": snap.get("summary"),
+            "chunks": snap.get("chunks"),
+            "errors": snap.get("errors", []),
+        }
+        if "finished_at" in snap:
+            fields["finished_at"] = snap["finished_at"]
+        db_writers.update_recovery_job(jid, **fields)
+
+    try:
+        db_writers.update_recovery_job(job_id, status="running", phase="starting")
+        result = run_revenue_recovery(
+            date_from=body.date_from,
+            date_to=body.date_to,
+            dry_run=body.dry_run,
+            chunk_months=body.chunk_months,
+            resume=body.resume,
+            job_id=job_id,
+            load_completed=_load_completed,
+            checkpoint=_checkpoint,
+            progress=_recovery_progress,
+        )
+        # Final state is also written by the service's closing checkpoint.
+        db_writers.update_recovery_job(
+            job_id,
+            status=result.get("status", "success"),
+            phase="done",
+            summary=result.get("summary"),
+            chunks=result.get("chunks"),
+            errors=result.get("errors", []),
+            finished_at=result.get("finished_at"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error("[revenue-recovery worker] job %s failed: %s", job_id, exc, exc_info=True)
+        db_writers.update_recovery_job(
+            job_id, status="failed", phase="done",
+            errors=[f"{type(exc).__name__}: recovery worker failed"],
+            finished_at=datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    finally:
+        with _recovery_lock:
+            _recovery_progress["running"] = False
+
+
+@app.post("/api/revenue-recovery/run", status_code=202)
+def api_revenue_recovery_run(body: RevenueRecoveryRequest, request: Request) -> dict[str, Any]:
+    """Start the Revenue Truth Recovery job in the background (PR-ADS-114).
+
+    Admin-only. Returns 202 immediately with a job_id; the recovery runs in a
+    background worker and persists durable checkpoints to local PostgreSQL, so
+    the All-Time run never blocks the request and resume survives a restart.
+
+    Reads HubSpot read-only and writes ONLY to the local DB (only when
+    dry_run is False). NEVER writes to HubSpot, Google Ads, bids, budgets, or
+    conversions. Default range is All Time. Returns 409 if a job is already
+    running, 422 on invalid parameters.
+    """
+    check_admin_or_token(request)
+
+    if body.chunk_months < 1:
+        raise HTTPException(status_code=422, detail="chunk_months must be >= 1")
+    for label, value in (("date_from", body.date_from), ("date_to", body.date_to)):
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"{label} '{value}' is not a valid ISO date",
+                ) from exc
+
+    import db.writers as db_writers  # noqa: PLC0415
+
+    # Durable single-run guard: a job already queued/running blocks a new one.
+    latest = db_writers.get_latest_recovery_job()
+    if latest and latest.get("status") in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="revenue recovery already running")
+
+    with _recovery_lock:
+        if _recovery_progress["running"]:
+            raise HTTPException(status_code=409, detail="revenue recovery already running")
+        _recovery_progress["running"] = True
+
+    job_id = uuid.uuid4().hex
+    created = db_writers.create_recovery_job(
+        job_id,
+        dry_run=body.dry_run,
+        date_from=body.date_from,
+        date_to=body.date_to,
+        chunk_months=body.chunk_months,
+    )
+    if not created:
+        with _recovery_lock:
+            _recovery_progress["running"] = False
+        raise HTTPException(status_code=503, detail="recovery job store unavailable")
+
+    threading.Thread(
+        target=_run_recovery_worker, args=(job_id, body), daemon=True,
+    ).start()
+
+    return {"job_id": job_id, "status": "queued", "dry_run": body.dry_run}
+
+
+@app.get("/api/revenue-recovery/status")
+def api_revenue_recovery_status(request: Request, job_id: Optional[str] = None) -> dict[str, Any]:
+    """Return durable Revenue Recovery job state (admin-only).
+
+    Reads from local PostgreSQL: the specific job_id when provided, otherwise the
+    most recent job. The UI polls this every few seconds while a job is running.
+    """
+    check_admin_or_token(request)
+    import db.writers as db_writers  # noqa: PLC0415
+
+    job = db_writers.get_recovery_job(job_id) if job_id else db_writers.get_latest_recovery_job()
+    if not job:
+        return {"running": False, "job": None}
+
+    return {
+        "running": job.get("status") in ("queued", "running"),
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "phase": job.get("phase"),
+        "current_chunk": job.get("current_chunk"),
+        "completed_chunks": job.get("completed_chunks", []),
+        "summary": job.get("summary"),
+        "chunks": job.get("chunks"),
+        "errors": job.get("errors", []),
+        "dry_run": job.get("dry_run"),
+        "date_from": job.get("date_from"),
+        "date_to": job.get("date_to"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "job": job,
+    }
 
 
 @app.get("/api/reports/roas/campaigns")

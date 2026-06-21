@@ -335,6 +335,159 @@ def pull_deals_with_gclid(contacts: list) -> list:
     return deals
 
 
+def pull_closed_won_deals_in_range(date_from: str, date_to: str) -> list:
+    """Pull HubSpot closed-won deals by **closedate** (revenue truth) — PR-ADS-114.
+
+    This is the revenue-recovery / daily revenue source. It fetches deals
+    DIRECTLY by dealstage = Deal Won / Payment Received and closedate in range —
+    it does NOT walk recently-created contacts (which misses historical revenue).
+
+    For each won deal it resolves the associated contact and captures the real
+    GCLID / campaign / keyword / country evidence. NO synthetic GCLID is ever
+    created: deals without click evidence are returned with gclid=None so the
+    caller can report (and never attribute) them honestly.
+
+    Returns a list of normalised dicts:
+        {deal_id, contact_id, gclid, campaign_name, keyword, country, company,
+         deal_close_date, deal_amount_usd, deal_stage, deal_stage_label}
+
+    NEVER writes to HubSpot.
+    """
+    client = get_client()
+
+    from datetime import timezone, time as _time
+    from datetime import date as _date
+
+    def _to_ms(d: str, start: bool) -> int:
+        parsed = _date.fromisoformat(d)
+        edge = _time.min if start else _time.max
+        return int(datetime.combine(parsed, edge, tzinfo=timezone.utc).timestamp() * 1000)
+
+    from_ms = _to_ms(str(date_from), start=True)
+    to_ms = _to_ms(str(date_to), start=False)
+
+    deals: list = []
+    after = None
+    while True:
+        try:
+            response = client.crm.deals.search_api.do_search(
+                public_object_search_request={
+                    "filterGroups": [
+                        {
+                            "filters": [
+                                {"propertyName": "dealstage", "operator": "IN",
+                                 "values": WON_DEAL_STAGES},
+                                {"propertyName": "closedate", "operator": "GTE",
+                                 "value": str(from_ms)},
+                                {"propertyName": "closedate", "operator": "LTE",
+                                 "value": str(to_ms)},
+                            ]
+                        }
+                    ],
+                    "properties": ["dealname", "dealstage", "amount", "closedate",
+                                   "createdate", "pipeline"],
+                    "limit": 100,
+                    "after": after,
+                }
+            )
+            for d in response.results:
+                deals.append(_normalise_won_deal(d.to_dict()))
+            if response.paging and response.paging.next:
+                after = response.paging.next.after
+            else:
+                break
+        except ApiException as exc:
+            if exc.status == 429:
+                wait = INITIAL_BACKOFF_SECONDS * 2
+                logger.warning("HubSpot rate limited pulling closed-won deals — waiting %ds", wait)
+                time.sleep(wait)
+                continue
+            logger.error("HubSpot API error pulling closed-won deals: %s", exc)
+            break
+
+    logger.info(
+        "Pulled %d closed-won deals by closedate (range %s → %s)",
+        len(deals), date_from, date_to,
+    )
+    return deals
+
+
+def _normalise_won_deal(deal_dict: dict) -> dict:
+    """Normalise a raw HubSpot deal into a recovery row, resolving its contact.
+
+    Click evidence is read from the associated contact:
+      - direct ``hs_google_click_id``           → match_source "gclid"
+      - GCLID extracted from ``hs_analytics_first_url`` → match_source "first_url"
+    Missing evidence stays None (gclid=None, match_source=None) — never fabricated.
+    """
+    from connectors.gclid_match import _extract_gclid_from_url  # noqa: PLC0415
+
+    props = deal_dict.get("properties", {}) or {}
+    deal_id = deal_dict.get("id")
+    stage = props.get("dealstage", "")
+
+    contact = _fetch_primary_contact_for_deal(deal_id)
+    cprops = (contact or {}).get("properties", {}) if contact else {}
+
+    first_url = cprops.get("hs_analytics_first_url") or ""
+    direct_gclid = (cprops.get("hs_google_click_id") or "").strip()
+    if direct_gclid:
+        gclid, match_source = direct_gclid, "gclid"
+    else:
+        url_gclid = _extract_gclid_from_url(first_url)
+        if url_gclid:
+            gclid, match_source = url_gclid, "first_url"
+        else:
+            gclid, match_source = None, None
+
+    return {
+        "deal_id": str(deal_id) if deal_id is not None else None,
+        "contact_id": (contact or {}).get("id"),
+        "gclid": gclid,
+        "match_source": match_source,
+        "first_url": first_url or None,
+        "campaign_name": cprops.get("hs_analytics_source_data_1") or None,
+        "keyword": cprops.get("hs_analytics_source_data_2") or None,
+        "country": cprops.get("ip_country") or cprops.get("country") or None,
+        "company": cprops.get("company") or None,
+        "deal_close_date": props.get("closedate") or None,
+        "deal_amount_usd": props.get("amount"),
+        "deal_stage": stage or None,
+        "deal_stage_label": DEAL_STAGE_MAP.get(stage, "Deal Won / Payment Received"),
+    }
+
+
+def _fetch_primary_contact_for_deal(deal_id) -> dict | None:
+    """Return the first associated contact (with properties) for a deal, or None.
+
+    Uses the version-agnostic CRM v4 associations REST endpoint, then fetches the
+    contact's properties. Read-only; tolerant of transient errors.
+    """
+    if not deal_id:
+        return None
+    client = get_client()
+    try:
+        assoc_url = (
+            f"{HUBSPOT_API_BASE_URL}/crm/v4/objects/deals/{deal_id}/associations/contacts"
+        )
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+        resp = requests.get(assoc_url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if not results:
+            return None
+        contact_id = results[0].get("toObjectId") or results[0].get("id")
+        if not contact_id:
+            return None
+        contact = client.crm.contacts.basic_api.get_by_id(
+            contact_id=str(contact_id), properties=CONTACT_PROPERTIES,
+        )
+        return contact.to_dict()
+    except (requests.exceptions.RequestException, ApiException) as exc:
+        logger.warning("Failed to resolve contact for deal %s: %s", deal_id, exc)
+        return None
+
+
 def get_lead_quality_summary(contacts: list) -> dict:
     """
     Aggregate MQL status breakdown from contacts.
