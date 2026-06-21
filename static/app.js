@@ -7584,6 +7584,14 @@ let roasCampaignsStatus = "idle";
 // Frontend-only decision-bucket filter (does not affect ROAS by Country).
 let roasCampaignFilter = "all";
 
+// Executive ROAS notation for the Campaign page: a multiple (2.20x), not a
+// percent. "Unavailable" when null. Campaign-only — ROAS by Country still
+// uses fmtRoas() until PR-ADS-112.
+function fmtRoasMultiple(v) {
+  if (v === null || v === undefined) return "Unavailable";
+  return v.toFixed(2) + "x";
+}
+
 function campaignDecisionLabel(verdict) {
   const labels = {
     winner: "Winner",
@@ -7619,7 +7627,7 @@ function renderRoasCampaignSummary(summary) {
       <div><span>SQLs</span><strong>${fmtCount(s.sqls)}</strong></div>
       <div><span>Customers</span><strong>${fmtCount(s.customers)}</strong></div>
       <div><span>Won Revenue</span><strong>${fmtMoney(s.won_revenue)}</strong></div>
-      <div><span>ROAS</span><strong>${s.roas === null || s.roas === undefined ? "Unavailable" : fmtRoas(s.roas)}</strong></div>
+      <div><span>ROAS</span><strong>${fmtRoasMultiple(s.roas)}</strong></div>
     </div>
   `;
 }
@@ -7741,7 +7749,7 @@ function renderRoasCampaignTable(rows) {
       <td>${fmtCount(r.sqls)}</td>
       <td>${fmtCount(r.customers)}</td>
       <td>${fmtMoney(r.won_revenue)}</td>
-      <td>${fmtRoas(r.roas)}</td>
+      <td>${fmtRoasMultiple(r.roas)}</td>
       <td>${getBusinessVerdictBadge(r.verdict)}</td>
     </tr>
   `).join("");

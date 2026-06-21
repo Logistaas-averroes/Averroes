@@ -152,6 +152,31 @@ def test_table_columns_are_correct():
         assert forbidden not in fn, f"forbidden column present: {forbidden}"
 
 
+# ── ROAS rendered as a multiple (2.20x), not a percent ───────────────────────
+
+
+def test_campaign_roas_uses_multiple_notation():
+    # Campaign-specific formatter renders a multiple and "Unavailable" when null.
+    assert "function fmtRoasMultiple" in JS
+    fn = _fn("function fmtRoasMultiple", span=300)
+    assert '.toFixed(2) + "x"' in fn
+    assert "Unavailable" in fn
+    # Summary strip and campaign table use the multiple formatter, not fmtRoas.
+    summary = _fn("function renderRoasCampaignSummary", span=900)
+    assert "fmtRoasMultiple(s.roas)" in summary
+    assert "fmtRoas(s.roas)" not in summary
+    table = _fn("function renderRoasCampaignTable", span=1600)
+    assert "fmtRoasMultiple(r.roas)" in table
+    assert "fmtRoas(r.roas)" not in table
+
+
+def test_country_roas_renderer_unchanged():
+    # ROAS by Country still uses the percent formatter until PR-ADS-112.
+    body = _fn("function renderRoasCountriesPage", span=2600)
+    assert "fmtRoas(r.roas)" in body
+    assert "fmtRoasMultiple" not in body
+
+
 # ── 9. ROAS by Country untouched ─────────────────────────────────────────────
 
 
