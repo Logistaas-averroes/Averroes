@@ -3004,6 +3004,9 @@ function renderRevenueHealth(audit) {
 }
 
 async function loadRevenueHealth() {
+  // Admin-only Revenue Recovery panel (PR-ADS-114) sits above the diagnostics.
+  loadRevenueRecoveryStatus();
+
   const body = document.getElementById("revenue-health-body");
   if (!body) return;
   body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue attribution health…</p>';
@@ -3021,6 +3024,134 @@ async function loadRevenueHealth() {
     body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue attribution health.</p>';
   }
 }
+
+// ── Revenue Truth Recovery panel (PR-ADS-114, admin-only) ───────────────────
+// Reads HubSpot read-only and writes ONLY to the local DB; never writes to any
+// external platform. Dry Run reports expected impact; Run Recovery executes.
+
+let revenueRecoveryBusy = false;
+
+function recoveryStatusLabel(latest) {
+  if (!latest) return "Not yet run";
+  const s = latest.summary || {};
+  if (latest.dry_run) return "Dry run complete";
+  return `${s.attributed_deal_rows_written || 0} attributed rows written`;
+}
+
+function renderRecoveryResult(result) {
+  if (!result) return "";
+  const s = result.summary || {};
+  const mode = result.dry_run ? "Dry run (no writes)" : "Recovery";
+  const rows = [
+    ["Paid contacts recovered", s.paid_contacts_recovered],
+    ["Contacts still missing createdate", s.contacts_still_missing_createdate],
+    ["Closed-won deals found", s.closed_won_deals_found],
+    ["Closed-won deals with GCLID", s.closed_won_deals_with_gclid],
+    ["Attributed deal rows written", s.attributed_deal_rows_written],
+    ["Closed-won deals without GCLID", s.closed_won_deals_without_gclid],
+    ["Deals without campaign mapping", s.deals_without_campaign_mapping],
+  ];
+  const errorsHtml = (result.errors && result.errors.length)
+    ? `<div class="revenue-next-step"><strong>Errors:</strong><ul class="revenue-health-blockers">${result.errors.map((e) => `<li>${escapeHtml(String(e))}</li>`).join("")}</ul></div>`
+    : "";
+  return `
+    <div class="recovery-result">
+      <div class="recovery-result__head">${escapeHtml(mode)} · ${escapeHtml(result.date_from || "")} → ${escapeHtml(result.date_to || "")} · <strong>${escapeHtml(result.status || "")}</strong></div>
+      <div class="revenue-summary-strip revenue-summary-strip--four">
+        ${rows.map(([label, val]) => `<div><span>${label}</span><strong>${fmtCount(val)}</strong></div>`).join("")}
+      </div>
+      ${errorsHtml}
+    </div>
+  `;
+}
+
+function renderRevenueRecoveryPanel(status) {
+  const panel = document.getElementById("revenue-recovery-panel");
+  if (!panel) return;
+  const st = status || {};
+  const latest = st.latest || null;
+  const running = st.running === true || revenueRecoveryBusy;
+
+  const contactsStatus = latest
+    ? `${(latest.summary || {}).paid_contacts_recovered || 0} recovered`
+    : "Not yet run";
+  const attributionStatus = latest
+    ? `${(latest.summary || {}).attributed_deal_rows_written || 0} attributed rows`
+    : "Not yet run";
+
+  const progressHtml = running
+    ? `<div class="recovery-progress">Running… phase: <strong>${escapeHtml(st.phase || "starting")}</strong>${st.current_chunk ? ` · chunk ${escapeHtml(st.current_chunk)}` : ""}</div>`
+    : "";
+
+  panel.innerHTML = `
+    <div class="panel recovery-panel">
+      <div class="panel__header">Revenue Truth Recovery</div>
+      <div class="panel__body">
+        <div class="recovery-statuses">
+          <div>Historical paid contacts: <strong>${escapeHtml(contactsStatus)}</strong></div>
+          <div>Closed-won attribution: <strong>${escapeHtml(attributionStatus)}</strong></div>
+        </div>
+        <p class="revenue-footnote">Reads HubSpot read-only and writes only to the local database. Never writes to HubSpot or Google Ads, and never fabricates attribution. Default range: All Time.</p>
+        <div class="recovery-actions">
+          <button type="button" class="btn btn--secondary" data-recovery-action="dry-run" ${running ? "disabled" : ""}>Dry Run</button>
+          <button type="button" class="btn btn--primary" data-recovery-action="run" ${running ? "disabled" : ""}>Run Recovery</button>
+        </div>
+        ${progressHtml}
+        ${renderRecoveryResult(latest)}
+      </div>
+    </div>
+  `;
+}
+
+async function loadRevenueRecoveryStatus() {
+  const panel = document.getElementById("revenue-recovery-panel");
+  if (!panel) return;
+  try {
+    const res = await fetch("/api/revenue-recovery/status", { credentials: "same-origin" });
+    if (!res.ok) {
+      renderRevenueRecoveryPanel(null);
+      return;
+    }
+    renderRevenueRecoveryPanel(await res.json());
+  } catch (err) {
+    console.error("[loadRevenueRecoveryStatus]", err);
+    renderRevenueRecoveryPanel(null);
+  }
+}
+
+async function runRevenueRecoveryJob(dryRun) {
+  if (revenueRecoveryBusy) return;
+  revenueRecoveryBusy = true;
+  renderRevenueRecoveryPanel({ running: true, phase: dryRun ? "dry-run" : "starting" });
+  try {
+    const res = await fetch("/api/revenue-recovery/run", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: dryRun }),
+    });
+    if (!res.ok) {
+      const detail = res.status === 409 ? "A recovery is already running." : "Revenue recovery failed.";
+      renderRevenueRecoveryPanel({ latest: null });
+      const panel = document.getElementById("revenue-recovery-panel");
+      if (panel) panel.insertAdjacentHTML("beforeend", `<p class="revenue-footnote">${detail}</p>`);
+      return;
+    }
+    const result = await res.json();
+    renderRevenueRecoveryPanel({ latest: result });
+  } catch (err) {
+    console.error("[runRevenueRecoveryJob]", err);
+    renderRevenueRecoveryPanel({ latest: null });
+  } finally {
+    revenueRecoveryBusy = false;
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-recovery-action]");
+  if (!btn) return;
+  runRevenueRecoveryJob(btn.dataset.recoveryAction === "dry-run");
+});
 
 function junkRateBadge(junkPct) {
   if (junkPct === null || junkPct === undefined) {

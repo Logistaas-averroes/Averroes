@@ -55,6 +55,8 @@ Protected endpoints (require authenticated session):
   GET  /api/revenue-attribution   — Shared revenue-attribution contract by business window for ROAS campaign/country pages (requires auth; PR-ADS-107A).
   GET  /api/revenue-attribution/audit — Read-only truth audit of revenue-attribution date grain / source pollution per window (requires auth; PR-ADS-109).
   GET  /api/revenue-deals          — Read-only Closed-Won Revenue Ledger by business window (deal_close_date truth; requires auth; PR-ADS-113).
+  POST /api/revenue-recovery/run   — Admin-only Revenue Truth Recovery (local DB writes only; reads HubSpot read-only; PR-ADS-114).
+  GET  /api/revenue-recovery/status — Latest Revenue Recovery progress/result (admin-only; PR-ADS-114).
 """
 
 import base64
@@ -216,6 +218,25 @@ class BackfillRunRequest(BaseModel):
 
 _backfill_lock: threading.Lock = threading.Lock()
 _backfill_state: dict[str, Any] = {"running": False, "latest": None}
+
+
+# ---------------------------------------------------------------------------
+# Revenue Truth Recovery (PR-ADS-114) — admin-only, local DB writes only.
+# Reads HubSpot read-only; NEVER writes to HubSpot, Google Ads, bids, budgets,
+# or conversions. _recovery_progress carries live phase/chunk state for the
+# status endpoint and the admin Revenue Recovery panel.
+# ---------------------------------------------------------------------------
+
+class RevenueRecoveryRequest(BaseModel):
+    date_from: Optional[str] = None  # None → All Time (default recovery range)
+    date_to: Optional[str] = None
+    chunk_months: int = 1
+    dry_run: bool = True
+    resume: bool = False
+
+
+_recovery_lock: threading.Lock = threading.Lock()
+_recovery_progress: dict[str, Any] = {"running": False, "latest": None}
 
 
 # ---------------------------------------------------------------------------
@@ -5940,6 +5961,73 @@ async def get_revenue_deals(
         raise HTTPException(
             status_code=500, detail="Revenue deals computation failed"
         ) from exc
+
+
+@app.post("/api/revenue-recovery/run")
+def api_revenue_recovery_run(body: RevenueRecoveryRequest, request: Request) -> dict[str, Any]:
+    """Run (or dry-run) the Revenue Truth Recovery job (PR-ADS-114).
+
+    Admin-only. Reads HubSpot read-only and writes ONLY to the local DB (and
+    only when dry_run is False). NEVER writes to HubSpot, Google Ads, bids,
+    budgets, or conversions. Default range is All Time. Returns 409 if a
+    recovery is already running, 422 on invalid parameters.
+    """
+    check_admin_or_token(request)
+
+    if body.chunk_months < 1:
+        raise HTTPException(status_code=422, detail="chunk_months must be >= 1")
+    for label, value in (("date_from", body.date_from), ("date_to", body.date_to)):
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"{label} '{value}' is not a valid ISO date",
+                ) from exc
+
+    with _recovery_lock:
+        if _recovery_progress["running"]:
+            raise HTTPException(status_code=409, detail="revenue recovery already running")
+        _recovery_progress["running"] = True
+
+    try:
+        from services.revenue_recovery_service import run_revenue_recovery  # noqa: PLC0415
+        result = run_revenue_recovery(
+            date_from=body.date_from,
+            date_to=body.date_to,
+            dry_run=body.dry_run,
+            chunk_months=body.chunk_months,
+            resume=body.resume,
+            progress=_recovery_progress,
+        )
+        with _recovery_lock:
+            _recovery_progress["latest"] = result
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/revenue-recovery/run] failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=500, detail="revenue recovery execution failed",
+        ) from exc
+    finally:
+        with _recovery_lock:
+            _recovery_progress["running"] = False
+
+
+@app.get("/api/revenue-recovery/status")
+def api_revenue_recovery_status(request: Request) -> dict[str, Any]:
+    """Return the latest Revenue Recovery progress / result (admin-only)."""
+    check_admin_or_token(request)
+    with _recovery_lock:
+        return {
+            "running": _recovery_progress.get("running", False),
+            "phase": _recovery_progress.get("phase"),
+            "current_chunk": _recovery_progress.get("current_chunk"),
+            "completed_chunks": _recovery_progress.get("completed_chunks", []),
+            "last_chunk_result": _recovery_progress.get("last_chunk_result"),
+            "latest": _recovery_progress.get("latest"),
+        }
 
 
 @app.get("/api/reports/roas/campaigns")

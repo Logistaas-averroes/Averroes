@@ -139,26 +139,36 @@ def run_daily_incremental_sync(
     datasets: dict[str, dict] = {}
     errors: list[str] = []
 
+    # PR-ADS-114: create a genuine local run record so HubSpot contact/deal
+    # persistence is attributed to a real run_id (never None). The per-dataset
+    # persistence guard still prevents reporting success when rows were fetched
+    # but zero rows were persisted.
+    run_id = db_writers.write_run({
+        "run_type": "daily_incremental_sync",
+        "started_at": started_at,
+        "status": "running",
+    })
+
     log.info(
-        "[incremental_sync] started reason=%s ads_lookback=%d "
+        "[incremental_sync] started reason=%s run_id=%s ads_lookback=%d "
         "contacts_lookback=%d deals_lookback=%d",
-        run_reason, lookback_days_ads,
+        run_reason, run_id, lookback_days_ads,
         lookback_days_hubspot_contacts, lookback_days_hubspot_deals,
     )
 
     # ── windsor/campaigns ────────────────────────────────────────────────────
     datasets["windsor/campaigns"] = _sync_windsor_campaigns(
-        date_from=date_from_ads, date_to=today, errors=errors,
+        run_id=run_id, date_from=date_from_ads, date_to=today, errors=errors,
     )
 
     # ── windsor/keywords ─────────────────────────────────────────────────────
     datasets["windsor/keywords"] = _sync_windsor_keywords(
-        date_from=date_from_ads, date_to=today, errors=errors,
+        run_id=run_id, date_from=date_from_ads, date_to=today, errors=errors,
     )
 
     # ── windsor/geo ──────────────────────────────────────────────────────────
     datasets["windsor/geo"] = _sync_windsor_geo(
-        date_from=date_from_ads, date_to=today, errors=errors,
+        run_id=run_id, date_from=date_from_ads, date_to=today, errors=errors,
     )
 
     # ── windsor/search_terms — unsupported for reliable incremental sync ──────
@@ -170,29 +180,38 @@ def run_daily_incremental_sync(
 
     # ── hubspot/contacts ──────────────────────────────────────────────────────
     datasets["hubspot/contacts"] = _sync_hubspot_contacts(
-        date_from=date_from_contacts, date_to=today, errors=errors,
+        run_id=run_id, date_from=date_from_contacts, date_to=today, errors=errors,
     )
 
     # ── hubspot/deals (via GCLID contacts in the deal window) ────────────────
     datasets["hubspot/deals"] = _sync_hubspot_deals(
-        date_from=date_from_deals, date_to=today, errors=errors,
+        run_id=run_id, date_from=date_from_deals, date_to=today, errors=errors,
     )
 
-    # ── gclid/matches — no incremental persistence path yet ──────────────────
-    datasets["gclid/matches"] = {
-        "status": "skipped",
-        "note": _GCLID_NOTE,
-    }
-    log.info("[incremental_sync] gclid/matches: %s", _GCLID_NOTE)
+    # ── gclid/matches — closed-won deals by closedate → gclid_attribution ────
+    # PR-ADS-114: this dataset now has a real persistence path. It pulls
+    # closed-won deals DIRECTLY by closedate and writes GCLID-only attribution
+    # rows (no synthetic GCLIDs) into gclid_attribution.
+    datasets["gclid/matches"] = _sync_gclid_attribution(
+        run_id=run_id, date_from=date_from_deals, date_to=today, errors=errors,
+    )
 
     finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     overall_status = _overall_status(datasets)
 
+    # Reflect the true final state on the local run record.
+    db_writers.update_run(run_id, {
+        "finished_at": finished_at,
+        "status": "success" if overall_status in ("success", "partial") else "failed",
+        "error_message": "; ".join(errors)[:1000] if errors else None,
+    })
+
     summary = {
         "status": overall_status,
         "run_type": "daily_incremental_sync",
         "run_reason": run_reason,
+        "run_id": run_id,
         "started_at": started_at,
         "finished_at": finished_at,
         "lookback": {
@@ -216,7 +235,7 @@ def run_daily_incremental_sync(
 # ---------------------------------------------------------------------------
 
 def _sync_windsor_campaigns(
-    *, date_from, date_to, errors: list
+    *, run_id, date_from, date_to, errors: list
 ) -> dict:
     """Pull and persist windsor/campaigns for the given date range."""
     from connectors.windsor_pull import pull_campaign_performance_range  # noqa: PLC0415
@@ -234,9 +253,7 @@ def _sync_windsor_campaigns(
         )
         rows_pulled = len(rows)
 
-        # write_campaigns needs a run_id; use None for incremental syncs that
-        # are not associated with a pulse run.  Writers accept None safely.
-        rows_written = db_writers.write_campaigns(None, rows)
+        rows_written = db_writers.write_campaigns(run_id, rows)
 
         if not persistence_succeeded(rows, rows_written):
             raise RuntimeError(
@@ -268,7 +285,7 @@ def _sync_windsor_campaigns(
 
 
 def _sync_windsor_keywords(
-    *, date_from, date_to, errors: list
+    *, run_id, date_from, date_to, errors: list
 ) -> dict:
     """Pull and persist windsor/keywords for the given date range."""
     from connectors.windsor_pull import pull_keyword_performance_range  # noqa: PLC0415
@@ -285,7 +302,7 @@ def _sync_windsor_keywords(
             date_from=str(date_from), date_to=str(date_to),
         )
         rows_pulled = len(rows)
-        rows_written = db_writers.write_keywords(None, rows)
+        rows_written = db_writers.write_keywords(run_id, rows)
 
         if not persistence_succeeded(rows, rows_written):
             raise RuntimeError(
@@ -317,7 +334,7 @@ def _sync_windsor_keywords(
 
 
 def _sync_windsor_geo(
-    *, date_from, date_to, errors: list
+    *, run_id, date_from, date_to, errors: list
 ) -> dict:
     """Pull and persist windsor/geo for the given date range."""
     from connectors.windsor_pull import pull_geo_performance_range  # noqa: PLC0415
@@ -334,7 +351,7 @@ def _sync_windsor_geo(
             date_from=str(date_from), date_to=str(date_to),
         )
         rows_pulled = len(rows)
-        rows_written = db_writers.write_geo(None, rows)
+        rows_written = db_writers.write_geo(run_id, rows)
 
         if not persistence_succeeded(rows, rows_written):
             raise RuntimeError(
@@ -366,7 +383,7 @@ def _sync_windsor_geo(
 
 
 def _sync_hubspot_contacts(
-    *, date_from, date_to, errors: list
+    *, run_id, date_from, date_to, errors: list
 ) -> dict:
     """Pull and persist hubspot/contacts for the given date range."""
     from connectors.hubspot_pull import pull_paid_search_contacts_in_range  # noqa: PLC0415
@@ -383,7 +400,7 @@ def _sync_hubspot_contacts(
             date_from=str(date_from), date_to=str(date_to),
         )
         rows_pulled = len(rows)
-        rows_written = db_writers.write_leads(None, rows)
+        rows_written = db_writers.write_leads(run_id, rows)
 
         if not persistence_succeeded(rows, rows_written):
             raise RuntimeError(
@@ -415,7 +432,7 @@ def _sync_hubspot_contacts(
 
 
 def _sync_hubspot_deals(
-    *, date_from, date_to, errors: list
+    *, run_id, date_from, date_to, errors: list
 ) -> dict:
     """Pull and persist hubspot/deals for contacts created in the deals window.
 
@@ -444,7 +461,7 @@ def _sync_hubspot_deals(
         )
         rows = pull_deals_with_gclid(contacts)
         rows_pulled = len(rows)
-        rows_written = db_writers.write_deals(None, rows)
+        rows_written = db_writers.write_deals(run_id, rows)
 
         if not persistence_succeeded(rows, rows_written):
             raise RuntimeError(
@@ -464,6 +481,75 @@ def _sync_hubspot_deals(
 
     except Exception as exc:  # noqa: BLE001
         err = f"hubspot/deals: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+        if batch_id:
+            db_writers.finish_sync_batch(
+                batch_id=batch_id,
+                status="failed",
+                error_message=str(exc)[:1000],
+            )
+        return {"status": "failed", "error": str(exc)[:500]}
+
+
+def _sync_gclid_attribution(
+    *, run_id, date_from, date_to, errors: list
+) -> dict:
+    """Pull closed-won deals by closedate and persist GCLID attribution rows.
+
+    PR-ADS-114: the daily revenue path. Fetches closed-won deals DIRECTLY by
+    closedate (never via recently-created contacts) and writes GCLID-only
+    attribution rows into gclid_attribution. No synthetic GCLIDs are created;
+    deals without click evidence are reported, not attributed.
+    """
+    from connectors.hubspot_pull import pull_closed_won_deals_in_range  # noqa: PLC0415
+    from services.revenue_recovery_service import build_attribution_rows_from_deals  # noqa: PLC0415
+
+    batch_id = db_writers.start_sync_batch(
+        source="hubspot",
+        dataset="gclid_matches",
+        sync_type="daily",
+        date_from=date_from,
+        date_to=date_to,
+        run_id=run_id,
+    )
+    try:
+        deals = pull_closed_won_deals_in_range(
+            date_from=str(date_from), date_to=str(date_to),
+        )
+        rows, counts = build_attribution_rows_from_deals(deals)
+        rows_pulled = len(rows)
+        rows_written = db_writers.write_gclid_attribution(run_id, rows)
+
+        # Attribution rows are GCLID-only by construction; if any were prepared
+        # but none persisted, that is a real persistence failure.
+        if not persistence_succeeded(rows, rows_written):
+            raise RuntimeError(
+                f"gclid/matches persistence failed: "
+                f"{rows_pulled} attributable, {rows_written} written"
+            )
+
+        last_date = max_source_date(
+            [{"date": d.get("deal_close_date")} for d in deals], fallback_date=date_to,
+        )
+        if batch_id:
+            db_writers.finish_sync_batch(
+                batch_id=batch_id,
+                status="success",
+                row_count=rows_written,
+                last_source_date=last_date,
+            )
+        return {
+            "status": "success",
+            "rows_pulled": rows_pulled,
+            "rows_written": rows_written,
+            "closed_won_deals_found": counts["closed_won_deals_found"],
+            "closed_won_deals_with_gclid": counts["closed_won_deals_with_gclid"],
+            "closed_won_deals_without_gclid": counts["closed_won_deals_without_gclid"],
+        }
+
+    except Exception as exc:  # noqa: BLE001
+        err = f"gclid/matches: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         if batch_id:
