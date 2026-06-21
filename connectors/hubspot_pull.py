@@ -415,9 +415,13 @@ def pull_closed_won_deals_in_range(date_from: str, date_to: str) -> list:
 def _normalise_won_deal(deal_dict: dict) -> dict:
     """Normalise a raw HubSpot deal into a recovery row, resolving its contact.
 
-    Click evidence (GCLID/campaign/keyword/country/company) is read from the
-    associated contact. Missing evidence stays None — never fabricated.
+    Click evidence is read from the associated contact:
+      - direct ``hs_google_click_id``           → match_source "gclid"
+      - GCLID extracted from ``hs_analytics_first_url`` → match_source "first_url"
+    Missing evidence stays None (gclid=None, match_source=None) — never fabricated.
     """
+    from connectors.gclid_match import _extract_gclid_from_url  # noqa: PLC0415
+
     props = deal_dict.get("properties", {}) or {}
     deal_id = deal_dict.get("id")
     stage = props.get("dealstage", "")
@@ -425,10 +429,23 @@ def _normalise_won_deal(deal_dict: dict) -> dict:
     contact = _fetch_primary_contact_for_deal(deal_id)
     cprops = (contact or {}).get("properties", {}) if contact else {}
 
+    first_url = cprops.get("hs_analytics_first_url") or ""
+    direct_gclid = (cprops.get("hs_google_click_id") or "").strip()
+    if direct_gclid:
+        gclid, match_source = direct_gclid, "gclid"
+    else:
+        url_gclid = _extract_gclid_from_url(first_url)
+        if url_gclid:
+            gclid, match_source = url_gclid, "first_url"
+        else:
+            gclid, match_source = None, None
+
     return {
         "deal_id": str(deal_id) if deal_id is not None else None,
         "contact_id": (contact or {}).get("id"),
-        "gclid": cprops.get("hs_google_click_id") or None,
+        "gclid": gclid,
+        "match_source": match_source,
+        "first_url": first_url or None,
         "campaign_name": cprops.get("hs_analytics_source_data_1") or None,
         "keyword": cprops.get("hs_analytics_source_data_2") or None,
         "country": cprops.get("ip_country") or cprops.get("country") or None,

@@ -84,6 +84,11 @@ def build_attribution_rows_from_deals(deals: list) -> tuple[list, dict]:
         if not gclid:
             continue  # no real click evidence — never attribute
         with_gclid += 1
+        # Preserve the supplied evidence quality: a direct GCLID stays "gclid";
+        # a GCLID recovered from the landing-page URL is "first_url". Default to
+        # "gclid" only when the caller did not specify a source.
+        match_source = (d.get("match_source") or "gclid").strip().lower()
+        match_status = "matched" if match_source == "gclid" else "url_fallback"
         rows.append({
             "gclid": gclid,
             "contact_id": d.get("contact_id"),
@@ -92,13 +97,13 @@ def build_attribution_rows_from_deals(deals: list) -> tuple[list, dict]:
             "keyword": d.get("keyword"),
             "country": d.get("country"),
             "company": d.get("company"),
+            "first_url": d.get("first_url"),
             "deal_close_date": d.get("deal_close_date"),
             "deal_amount_usd": d.get("deal_amount_usd") or d.get("deal_amount"),
             "deal_stage": d.get("deal_stage") or WON_DEAL_STAGE_ID,
             "deal_stage_label": d.get("deal_stage_label") or "Deal Won / Payment Received",
-            # Real GCLID evidence → click-level match.
-            "match_status": "matched",
-            "match_source": "gclid",
+            "match_status": match_status,
+            "match_source": match_source,
         })
 
     counts = {
@@ -138,6 +143,9 @@ def run_revenue_recovery(
     resume: bool = False,
     progress: dict | None = None,
     run_id: int | None = None,
+    job_id: str | None = None,
+    load_completed=None,
+    checkpoint=None,
 ) -> dict:
     """Recover the revenue truth layer over a date range, in resumable chunks.
 
@@ -148,9 +156,14 @@ def run_revenue_recovery(
         date_from / date_to: ISO dates. Defaults to All Time.
         dry_run: when True, pull read-only and report expected impact; write nothing.
         chunk_months: chunk size in months.
-        resume: skip chunks already recorded complete in ``progress``.
+        resume: skip chunks already completed (loaded durably via ``load_completed``).
         progress: shared mutable state dict (for live status); created if None.
         run_id: local run id to attribute writes to (a real one is created when None).
+        job_id: durable job identifier passed to ``checkpoint``.
+        load_completed: optional () -> iterable of completed chunk keys, read from
+            durable storage so resume survives a process restart (not in-memory).
+        checkpoint: optional (job_id, snapshot_dict) -> None, called after each
+            chunk and at completion to persist progress to durable storage.
 
     Returns a structured result dict with summary, per-chunk detail, and errors.
     """
@@ -176,17 +189,44 @@ def run_revenue_recovery(
         "running": True,
         "dry_run": dry_run,
         "phase": "starting",
+        "job_id": job_id,
         "date_from": start.isoformat(),
         "date_to": end.isoformat(),
         "chunk_months": chunk_months,
         "started_at": started_at,
     })
-    completed = set(state.get("completed_chunks", []) if resume else [])
+
+    # Resume reads completed chunks from DURABLE storage when available, so a
+    # restarted process picks up exactly where it left off (not from memory).
+    if resume and load_completed is not None:
+        try:
+            completed = set(load_completed() or [])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[revenue_recovery] load_completed failed: %s", exc)
+            completed = set()
+    else:
+        completed = set(state.get("completed_chunks", []) if resume else [])
     state["completed_chunks"] = list(completed)
 
     summary = _empty_summary()
     chunks_detail: list = []
     errors: list = []
+
+    def _emit_checkpoint(status: str) -> None:
+        if checkpoint is None:
+            return
+        try:
+            checkpoint(job_id, {
+                "status": status,
+                "phase": state.get("phase"),
+                "current_chunk": state.get("current_chunk"),
+                "completed_chunks": list(completed),
+                "summary": dict(summary),
+                "chunks": list(chunks_detail),
+                "errors": list(errors),
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[revenue_recovery] checkpoint failed: %s", exc)
 
     for chunk_from, chunk_to in _iter_chunks(start, end, chunk_months):
         chunk_key = f"{chunk_from.isoformat()}:{chunk_to.isoformat()}"
@@ -250,6 +290,9 @@ def run_revenue_recovery(
         completed.add(chunk_key)
         state["completed_chunks"] = list(completed)
         state["last_chunk_result"] = chunk_result
+        # Persist a durable checkpoint after every chunk so progress (and the
+        # completed-chunk set used by resume) survives a process restart.
+        _emit_checkpoint("running")
 
     finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     status = "failed" if errors and not chunks_detail else ("partial" if errors else "success")
@@ -279,6 +322,21 @@ def run_revenue_recovery(
         "finished_at": finished_at,
         "latest": result,
     })
+    state["phase"] = "done"
+    if checkpoint is not None:
+        try:
+            checkpoint(job_id, {
+                "status": status,
+                "phase": "done",
+                "current_chunk": None,
+                "completed_chunks": list(completed),
+                "summary": dict(summary),
+                "chunks": list(chunks_detail),
+                "errors": list(errors),
+                "finished_at": finished_at,
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[revenue_recovery] final checkpoint failed: %s", exc)
     return result
 
 
