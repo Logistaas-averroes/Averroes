@@ -41,15 +41,15 @@ def _campaign_region():
 
 def test_scope_campaign_only_no_country_rebuild():
     region = _campaign_region()
-    # Campaign decision view exists.
+    # Campaign decision view exists and is self-contained.
     assert "renderRoasCampaignSummary" in region
     assert "renderRoasCampaignFilters" in region
     assert "data-roas-campaign-filter" in region
-    # Country must NOT get a parallel filter/summary rebuild in this PR.
-    assert "roasCountryFilter" not in JS
-    assert "data-roas-country-filter" not in JS
-    assert "renderRoasCountrySummary" not in JS
-    assert "renderRoasCountryFilters" not in JS
+    # The Campaign page must not reach into Country state/renderers. (ROAS by
+    # Country was rebuilt separately in PR-ADS-112.)
+    assert "roasCountryFilter" not in region
+    assert "data-roas-country-filter" not in region
+    assert "renderRoasCountrySummary" not in region
 
 
 # ── 2. Campaign summary strip exists ─────────────────────────────────────────
@@ -170,23 +170,19 @@ def test_campaign_roas_uses_multiple_notation():
     assert "fmtRoas(r.roas)" not in table
 
 
-def test_country_roas_renderer_unchanged():
-    # ROAS by Country still uses the percent formatter until PR-ADS-112.
-    body = _fn("function renderRoasCountriesPage", span=2600)
-    assert "fmtRoas(r.roas)" in body
-    assert "fmtRoasMultiple" not in body
+# ── 9. Campaign page does not depend on Country state ────────────────────────
 
 
-# ── 9. ROAS by Country untouched ─────────────────────────────────────────────
-
-
-def test_country_page_untouched():
-    assert "roasCountryFilter" not in JS
-    assert "data-roas-country-filter" not in JS
-    assert "renderRoasCountrySummary" not in JS
-    # Country page still exists and still renders.
+def test_campaign_page_self_contained():
+    # The Campaign decision flow must not reference Country renderers/state, so
+    # the two pages stay independent (Country was rebuilt in PR-ADS-112).
+    region = _campaign_region()
+    assert "renderRoasCountryTable" not in region
+    assert "renderRoasCountrySummary" not in region
+    assert "roasCountryFilter" not in region
+    # Both pages exist.
+    assert "function renderRoasCampaignsPage" in JS
     assert "function renderRoasCountriesPage" in JS
-    assert "renderRoasCountrySafeEmptyState" not in JS
 
 
 # ── Header / window selector preserved ───────────────────────────────────────

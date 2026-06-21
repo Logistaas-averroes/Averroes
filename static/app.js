@@ -7779,6 +7779,140 @@ document.addEventListener("click", (e) => {
 let roasCountriesData = [];
 let roasCountriesStatus = "idle";
 
+// PR-ADS-112: ROAS by Country is its own decision page. Its readiness needs the
+// shared revenue truth layer to be safe AND country-level Google Ads geo spend
+// to be available — Campaign ROAS being ready does not imply Country is ready.
+let roasCountrySourceHealth = null;
+
+// Frontend-only decision-bucket filter (independent of the Campaign page).
+let roasCountryFilter = "all";
+
+function countryNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+// Country totals are derived from the actual loaded country rows — NOT from the
+// global account summary, which may include spend not represented as country
+// rows (e.g. unmapped geo). Honesty over a prettier number.
+function summarizeRoasCountryRows(rows) {
+  const totals = rows.reduce((sum, row) => ({
+    spend: sum.spend + countryNumber(row.spend),
+    leads: sum.leads + countryNumber(row.leads),
+    sqls: sum.sqls + countryNumber(row.sqls),
+    customers: sum.customers + countryNumber(row.customers),
+    won_revenue: sum.won_revenue + countryNumber(row.won_revenue),
+  }), {
+    spend: 0, leads: 0, sqls: 0, customers: 0, won_revenue: 0,
+  });
+
+  return {
+    ...totals,
+    roas: totals.spend > 0 ? totals.won_revenue / totals.spend : null,
+  };
+}
+
+function filterRoasCountryRows(rows, filter) {
+  if (!filter || filter === "all") return rows;
+  return rows.filter((r) => r.verdict === filter);
+}
+
+// Business-value sort: outcomes (customers, revenue) outrank verdict labels.
+function sortRoasCountryRows(rows) {
+  return [...rows].sort((a, b) =>
+    (b.customers || 0) - (a.customers || 0) ||
+    (b.won_revenue || 0) - (a.won_revenue || 0) ||
+    (b.sqls || 0) - (a.sqls || 0) ||
+    (b.spend || 0) - (a.spend || 0)
+  );
+}
+
+// Unmapped spend stays visible rather than quietly disappearing.
+function countryDisplayName(value) {
+  const name = (value || "").trim();
+  if (!name || name.toLowerCase() === "unknown") return "Unmapped";
+  return name;
+}
+
+function isCountryRevenueDecisionReady(sourceHealth) {
+  const sh = sourceHealth || {};
+  return (
+    isRevenueDecisionReady(sh) &&
+    sh.country_spend_available === true &&
+    sh.geo_country_mapping_status === "available"
+  );
+}
+
+function renderRoasCountrySummary(summary) {
+  const s = summary || {};
+  return `
+    <h3 class="revenue-summary-heading">Country-attributed totals</h3>
+    <div class="revenue-summary-strip">
+      <div><span>Spend</span><strong>${fmtMoney(s.spend)}</strong></div>
+      <div><span>Leads</span><strong>${fmtCount(s.leads)}</strong></div>
+      <div><span>SQLs</span><strong>${fmtCount(s.sqls)}</strong></div>
+      <div><span>Customers</span><strong>${fmtCount(s.customers)}</strong></div>
+      <div><span>Won Revenue</span><strong>${fmtMoney(s.won_revenue)}</strong></div>
+      <div><span>ROAS</span><strong>${fmtRoasMultiple(s.roas)}</strong></div>
+    </div>
+  `;
+}
+
+function renderRoasCountryFilters() {
+  const filters = [
+    ["all", "All"],
+    ["winner", "Winners"],
+    ["watch", "Watch"],
+    ["waste", "Waste"],
+    ["learning", "Learning"],
+  ];
+  return `
+    <div class="revenue-filter-chips" id="roas-country-filter-chips">
+      ${filters.map(([key, label]) => `
+        <button
+          type="button"
+          class="revenue-filter-chip ${roasCountryFilter === key ? "is-active" : ""}"
+          data-roas-country-filter="${key}"
+        >${label}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderCountryRevenueBlockedState(sourceHealth) {
+  const sh = sourceHealth || {};
+  const countrySpendReady = sh.country_spend_available === true && sh.geo_country_mapping_status === "available";
+  const leadsReady = sh.lead_date_grain_status === "event_date" && sh.lead_metrics_status !== "withheld";
+  const revenueReady = sh.revenue_attribution_status !== "not_wired_or_no_closed_won";
+  const chip = (label, ok, okText, warnText) =>
+    `<div class="revenue-status-chip revenue-status-chip--${ok ? "ok" : "warning"}">
+       <span>${label}</span><strong>${ok ? okText : warnText}</strong>
+     </div>`;
+  return `
+    <div class="revenue-blocked-card">
+      <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
+      <h3>Country ROAS is not ready yet</h3>
+      <p>This page is blocked because country-level data is not safe enough for business decisions.</p>
+      <div class="revenue-status-grid">
+        ${chip("Country spend", countrySpendReady, "Available", "Rebuilding")}
+        ${chip("Leads / SQLs", leadsReady, "Available", "Rebuilding")}
+        ${chip("Revenue", revenueReady, "Connected", "Not connected")}
+      </div>
+      <div class="revenue-next-step">
+        <strong>Next step:</strong> Run the Google Ads geo sync and HubSpot lead re-sync, then re-check this page.
+      </div>
+    </div>`;
+}
+
+function renderRoasCountrySafeEmptyState() {
+  return `
+    <div class="revenue-blocked-card revenue-empty-card">
+      <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
+      <h3>No country revenue found for this window</h3>
+      <p>Country spend and revenue sources are ready, but no HubSpot closed-won deals are attributed to countries in this business window.</p>
+    </div>`;
+}
+
 async function loadRoasCountries() {
   const window_ = getRoasBusinessWindow();
 
@@ -7797,6 +7931,12 @@ async function loadRoasCountries() {
     roasRevenueWindow = data.window || null;
     roasRevenueSummary = data.summary || null;
     roasRevenueSourceHealth = data.source_health || null;
+    // Country readiness layers geo-spend availability on top of shared safety.
+    roasCountrySourceHealth = {
+      ...(data.source_health || {}),
+      country_spend_available: data.country_spend_available === true,
+      geo_country_mapping_status: data.geo_country_mapping_status || "no_geo_data",
+    };
     roasCountriesData = data.countries || [];
     roasCountriesStatus = roasCountriesData.length ? "ok" : "empty";
     renderRoasCountriesPage();
@@ -7813,39 +7953,83 @@ function renderRoasCountriesPage() {
   if (kpiGrid) kpiGrid.innerHTML = "";
   if (!tableBody) return;
 
-  if (!isRevenueDecisionReady(roasRevenueSourceHealth)) {
-    tableBody.innerHTML = renderRevenueBlockedState(roasRevenueSourceHealth);
+  // Blocked: shared truth layer unsafe, or country geo spend not available.
+  if (!isCountryRevenueDecisionReady(roasCountrySourceHealth)) {
+    tableBody.innerHTML = renderCountryRevenueBlockedState(roasCountrySourceHealth);
     return;
   }
 
+  // Safe but no closed-won revenue attributed to countries.
   if (!roasCountriesData.length) {
-    tableBody.innerHTML = renderRevenueEmptyState("country");
+    tableBody.innerHTML = renderRoasCountrySafeEmptyState();
     return;
   }
 
-  const sorted = [...roasCountriesData].sort((a, b) => {
-    const va = BUSINESS_VERDICT_ORDER[a.verdict] ?? 9;
-    const vb = BUSINESS_VERDICT_ORDER[b.verdict] ?? 9;
-    if (va !== vb) return va - vb;
-    return (b.won_revenue || 0) - (a.won_revenue || 0) || (b.spend || 0) - (a.spend || 0);
-  });
+  const sorted = sortRoasCountryRows(roasCountriesData);
+  const filtered = filterRoasCountryRows(sorted, roasCountryFilter);
+  const summary = summarizeRoasCountryRows(roasCountriesData);
 
-  const headerRow = `<tr>
-    <th>Country</th><th>Spend</th><th>Leads</th><th>SQLs</th><th>Customers</th>
-    <th>Won Revenue</th><th>ROAS</th><th>Decision</th>
-  </tr>`;
-  const rows = sorted.map((r) => `<tr>
-    <td>${escapeHtml(r.country || "")}</td>
-    <td>${fmtMoney(r.spend)}</td>
-    <td>${fmtCount(r.leads)}</td>
-    <td>${fmtCount(r.sqls)}</td>
-    <td>${fmtCount(r.customers)}</td>
-    <td>${fmtMoney(r.won_revenue)}</td>
-    <td>${fmtRoas(r.roas)}</td>
-    <td>${getBusinessVerdictBadge(r.verdict)}</td>
-  </tr>`).join("");
-  tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
+  tableBody.innerHTML = `
+    ${renderRoasCountrySummary(summary)}
+    ${renderRoasCountryFilters()}
+    ${renderRoasCountryTable(filtered)}
+    <p class="revenue-footnote">Google Ads geo data provides country spend. HubSpot closed-won deals provide revenue.</p>
+  `;
 }
+
+function renderRoasCountryTable(rows) {
+  if (!rows.length) {
+    return `
+      <div class="revenue-empty-inline">
+        No countries match this decision filter.
+      </div>
+    `;
+  }
+
+  const headerRow = `
+    <tr>
+      <th>Country</th>
+      <th>Spend</th>
+      <th>Leads</th>
+      <th>SQLs</th>
+      <th>Customers</th>
+      <th>Won Revenue</th>
+      <th>ROAS</th>
+      <th>Decision</th>
+    </tr>
+  `;
+
+  const bodyRows = rows.map((r) => `
+    <tr>
+      <td>${escapeHtml(countryDisplayName(r.country))}</td>
+      <td>${fmtMoney(r.spend)}</td>
+      <td>${fmtCount(r.leads)}</td>
+      <td>${fmtCount(r.sqls)}</td>
+      <td>${fmtCount(r.customers)}</td>
+      <td>${fmtMoney(r.won_revenue)}</td>
+      <td>${fmtRoasMultiple(r.roas)}</td>
+      <td>${getBusinessVerdictBadge(r.verdict)}</td>
+    </tr>
+  `).join("");
+
+  return `
+    <div class="table-scroll">
+      <table class="data-table roas-table revenue-decision-table">
+        ${headerRow}
+        <tbody>${bodyRows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+// Decision-bucket filter chips (country page only) — event delegation keyed off
+// the country-specific data attribute so the Campaign page is unaffected.
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-roas-country-filter]");
+  if (!btn) return;
+  roasCountryFilter = btn.dataset.roasCountryFilter || "all";
+  renderRoasCountriesPage();
+});
 
 // ── Unit Economics ─────────────────────────────────────────────────────────
 

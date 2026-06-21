@@ -125,7 +125,8 @@ def test_blocked_state_returns_before_table_campaign():
 
 def test_blocked_state_returns_before_table_country():
     body = _fn("function renderRoasCountriesPage", span=2600)
-    i_block = body.find("renderRevenueBlockedState")
+    # PR-ADS-112 rebuilt this page with a country-specific blocked renderer.
+    i_block = body.find("renderCountryRevenueBlockedState")
     i_table = body.find(">Country<")
     assert i_block != -1 and i_table != -1
     assert i_block < i_table
@@ -143,14 +144,16 @@ def test_safe_empty_state_distinct_from_blocked():
 
 
 def test_render_flow_blocked_then_empty_then_table():
-    # ROAS by Campaign was rebuilt in PR-ADS-111 and uses a campaign-specific
-    # safe empty renderer; ROAS by Country still uses the shared one.
-    for fn_name, empty_fn, col in (
-        ("function renderRoasCampaignsPage", "renderRoasCampaignSafeEmptyState", ">Campaign<"),
-        ("function renderRoasCountriesPage", "renderRevenueEmptyState", ">Country<"),
+    # ROAS by Campaign (PR-ADS-111) and ROAS by Country (PR-ADS-112) were each
+    # rebuilt with page-specific blocked + safe-empty renderers.
+    for fn_name, block_fn, empty_fn, col in (
+        ("function renderRoasCampaignsPage", "renderRevenueBlockedState",
+         "renderRoasCampaignSafeEmptyState", ">Campaign<"),
+        ("function renderRoasCountriesPage", "renderCountryRevenueBlockedState",
+         "renderRoasCountrySafeEmptyState", ">Country<"),
     ):
         body = _fn(fn_name, span=2600)
-        i_block = body.find("renderRevenueBlockedState")
+        i_block = body.find(block_fn)
         i_empty = body.find(empty_fn)
         i_table = body.find(col)
         assert i_block < i_empty < i_table, f"{fn_name}: flow must be blocked -> empty -> table"
