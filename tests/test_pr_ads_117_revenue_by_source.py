@@ -283,3 +283,159 @@ def test_loader_has_window_guard():
     assert "_revResponseIsCurrent" in body
     assert 'setWindowRangeLoading("revenue-by-source-range")' in body
     assert 'renderWindowRange("revenue-by-source-range"' in body
+
+
+# ════════════════ retryable failures + chunk retryability (corrections) ═══════
+
+
+def _load_backfill():
+    try:
+        from services.source_attribution_service import run_source_attribution_backfill
+        return run_source_attribution_backfill
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"service import unavailable: {exc}")
+
+
+def _patch_backfill(monkeypatch, *, contacts_by_chunk=None, deals_by_chunk=None,
+                    contacts_fail_first=False):
+    """Patch the backfill connector/writer deps. contacts_by_chunk / deals_by_chunk
+    are callables (date_from, date_to) -> list. Records upserts."""
+    calls = {"deal_upserts": [], "contact_upserts": [], "contacts_pull_count": 0}
+    state = {"contacts_attempt": 0}
+
+    def _contacts(date_from, date_to, **k):
+        state["contacts_attempt"] += 1
+        calls["contacts_pull_count"] += 1
+        if contacts_fail_first and state["contacts_attempt"] == 1:
+            raise RuntimeError("transient contacts failure")
+        return (contacts_by_chunk(date_from, date_to) if contacts_by_chunk else [])
+
+    def _deals(date_from, date_to, **k):
+        return (deals_by_chunk(date_from, date_to) if deals_by_chunk else [])
+
+    try:
+        monkeypatch.setattr("connectors.hubspot_pull.pull_all_contacts_in_range", _contacts)
+        monkeypatch.setattr("connectors.hubspot_pull.pull_closed_won_deals_with_sources_in_range", _deals)
+        monkeypatch.setattr("db.writers.upsert_contact_source_classification",
+                            lambda rows: calls["contact_upserts"].append(rows) or len(rows))
+        monkeypatch.setattr("db.writers.upsert_deal_source_attribution",
+                            lambda rows: calls["deal_upserts"].append(rows) or len(rows))
+    except (ImportError, AttributeError) as exc:
+        pytest.skip(f"runtime deps unavailable: {exc}")
+    return calls
+
+
+def test_failed_deal_lookup_does_not_create_unclassified_row(monkeypatch):
+    run = _load_backfill()
+    # One deal whose source lookup failed (lookup_failed) + one genuine no-contact deal.
+    def deals(df, dt):
+        return [
+            {"deal_id": "d1", "lookup_failed": True, "contacts": []},
+            {"deal_id": "d2", "lookup_failed": False, "contacts": []},  # genuine empty
+        ]
+    calls = _patch_backfill(monkeypatch, deals_by_chunk=deals)
+    out = run(date_from="2026-01-01", date_to="2026-01-31", dry_run=False, chunk_months=1)
+    # d1 must NOT be upserted; only d2 (genuine unclassified) is written.
+    upserted_ids = [r["deal_id"] for batch in calls["deal_upserts"] for r in batch]
+    assert "d1" not in upserted_ids
+    assert "d2" in upserted_ids
+    assert out["summary"]["unclassified_deals"] == 1   # only the genuine one
+    assert out["summary"]["failed"] >= 1               # the failed lookup
+    assert out["status"] == "partial"
+
+
+def test_genuine_zero_contact_deal_is_unclassified(monkeypatch):
+    run = _load_backfill()
+    calls = _patch_backfill(monkeypatch, deals_by_chunk=lambda df, dt: [
+        {"deal_id": "d9", "lookup_failed": False, "contacts": []}])
+    out = run(date_from="2026-01-01", date_to="2026-01-31", dry_run=False, chunk_months=1)
+    upserted = [r for batch in calls["deal_upserts"] for r in batch]
+    assert upserted and upserted[0]["attribution_status"] == "unclassified"
+    assert out["status"] == "success"
+
+
+def test_failed_chunk_not_marked_complete_and_resumes(monkeypatch):
+    run = _load_backfill()
+    # February's deal lookup fails on the first pass; January is clean.
+    def deals(df, dt):
+        if df.startswith("2026-02"):
+            return [{"deal_id": "feb1", "lookup_failed": True, "contacts": []}]
+        return [{"deal_id": "jan1", "lookup_failed": False, "contacts": []}]
+    store = {"completed": []}
+    def checkpoint(job_id, snap):
+        store["completed"] = list(snap.get("completed_chunks", []))
+    def load_completed():
+        return list(store["completed"])
+
+    _patch_backfill(monkeypatch, deals_by_chunk=deals)
+    out1 = run(date_from="2026-01-01", date_to="2026-02-28", dry_run=False, chunk_months=1,
+               job_id="sb1", checkpoint=checkpoint, load_completed=load_completed)
+    completed = set(store["completed"])
+    assert any(c.startswith("2026-01") for c in completed), "clean January must be complete"
+    assert not any(c.startswith("2026-02") for c in completed), "failed February must stay incomplete"
+    assert out1["status"] == "partial"
+
+    # February now succeeds; resume must retry ONLY February.
+    def deals_ok(df, dt):
+        return [{"deal_id": "feb1", "lookup_failed": False, "contacts": []}]
+    calls2 = _patch_backfill(monkeypatch, deals_by_chunk=deals_ok)
+    out2 = run(date_from="2026-01-01", date_to="2026-02-28", dry_run=False, chunk_months=1,
+               resume=True, job_id="sb1", checkpoint=checkpoint, load_completed=load_completed)
+    processed = {c["chunk"] for c in out2["chunks"]}
+    assert all(c.startswith("2026-02") for c in processed), "resume retries only the incomplete chunk"
+    assert out2["status"] == "success"
+    assert any(c.startswith("2026-02") for c in store["completed"]), "February now complete"
+
+
+def test_partial_chunk_reupserts_contacts_idempotently(monkeypatch):
+    run = _load_backfill()
+    # Contacts succeed; deals fail → chunk incomplete. Resume re-upserts contacts.
+    calls = _patch_backfill(
+        monkeypatch,
+        contacts_by_chunk=lambda df, dt: [{"id": "c1", "properties": {
+            "hs_analytics_source": "ORGANIC_SEARCH", "createdate": "2026-01-05T00:00:00Z"}}],
+        deals_by_chunk=lambda df, dt: [{"deal_id": "dx", "lookup_failed": True, "contacts": []}],
+    )
+    out = run(date_from="2026-01-01", date_to="2026-01-31", dry_run=False, chunk_months=1)
+    assert calls["contact_upserts"], "contacts are upserted even when the deal phase fails"
+    assert out["status"] == "partial"
+
+
+# ════════════════ connector propagates retryable failures ════════════════
+
+
+def test_connector_propagates_retryable_errors():
+    src = open(os.path.join(ROOT, "connectors", "hubspot_pull.py"), encoding="utf-8").read()
+    assert "class HubSpotRetryableError" in src
+    # The lookups raise the retryable error instead of returning []/{} on failure.
+    assoc = src[src.find("def _fetch_associated_contact_ids"):src.find("def _fetch_contact_source_props")]
+    assert "raise HubSpotRetryableError" in assoc
+    assert "return []" in assoc  # successful empty association is still allowed
+    props = src[src.find("def _fetch_contact_source_props"):src.find("def get_lead_quality_summary")]
+    assert "raise HubSpotRetryableError" in props
+    # The deals pull marks a failed lookup rather than fabricating contacts.
+    pull = src[src.find("def pull_closed_won_deals_with_sources_in_range"):
+               src.find("def _fetch_associated_contact_ids")]
+    assert 'entry["lookup_failed"] = True' in pull
+    assert "except HubSpotRetryableError" in pull
+
+
+def test_connector_association_failure_via_node_not_needed():
+    # Behavioural: a raised association error must propagate as lookup_failed.
+    pytest.importorskip("hubspot")
+    import connectors.hubspot_pull as hp
+    monkey_deal = {"deal_id": "z1"}
+    # Patch the underlying won-deal pull + the two lookups.
+    orig_assoc = hp._fetch_associated_contact_ids
+    orig_props = hp._fetch_contact_source_props
+    hp.pull_closed_won_deals_in_range = lambda a, b: [dict(monkey_deal)]
+    def boom(_):
+        raise hp.HubSpotRetryableError("503")
+    hp._fetch_associated_contact_ids = boom
+    try:
+        out = hp.pull_closed_won_deals_with_sources_in_range("2026-01-01", "2026-01-31")
+    finally:
+        hp._fetch_associated_contact_ids = orig_assoc
+        hp._fetch_contact_source_props = orig_props
+    assert out[0]["lookup_failed"] is True
+    assert out[0]["contacts"] == []

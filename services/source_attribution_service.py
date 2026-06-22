@@ -255,10 +255,11 @@ def run_source_attribution_backfill(
             cursor = chunk_to + relativedelta(days=1)
             continue
         state["current_chunk"] = chunk_key
-        chunk = {"chunk": chunk_key, "contacts": 0, "deals": 0}
+        chunk = {"chunk": chunk_key, "contacts": 0, "deals": 0, "deal_lookups_failed": 0}
 
-        # Contacts → classify.
+        # Contacts → classify. (Re-upserting on a retried chunk is idempotent.)
         state["phase"] = "contacts"
+        contacts_ok = True
         try:
             contacts = pull_all_contacts_in_range(
                 date_from=cursor.isoformat(), date_to=chunk_to.isoformat())
@@ -268,16 +269,29 @@ def run_source_attribution_backfill(
             if not dry_run and rows:
                 db_writers.upsert_contact_source_classification(rows)
         except Exception as exc:  # noqa: BLE001
+            contacts_ok = False
             errors.append(f"contacts {chunk_key}: {exc}")
             summary["failed"] += 1
 
-        # Closed-won deals → attribute.
+        # Closed-won deals → attribute. A deal whose HubSpot association/source
+        # lookup failed is NOT turned into an Unclassified row — it is skipped
+        # (existing durable attribution untouched), counted failed, and keeps the
+        # chunk incomplete so resume retries it. Only a SUCCESSFUL zero-contact
+        # lookup becomes Unclassified.
         state["phase"] = "deals"
+        deals_ok = True
         try:
             deals = pull_closed_won_deals_with_sources_in_range(
                 date_from=cursor.isoformat(), date_to=chunk_to.isoformat())
-            drows = [attribute_deal_row(d) for d in deals]
+            drows = []
+            failed_lookups = 0
+            for d in deals:
+                if d.get("lookup_failed"):
+                    failed_lookups += 1
+                    continue
+                drows.append(attribute_deal_row(d))
             chunk["deals"] = len(drows)
+            chunk["deal_lookups_failed"] = failed_lookups
             for dr in drows:
                 st = dr["attribution_status"]
                 if st == "attributed":
@@ -288,12 +302,21 @@ def run_source_attribution_backfill(
                     summary["unclassified_deals"] += 1
             if not dry_run and drows:
                 db_writers.upsert_deal_source_attribution(drows)
+            if failed_lookups:
+                deals_ok = False
+                summary["failed"] += failed_lookups
+                errors.append(
+                    f"deals {chunk_key}: {failed_lookups} deal source lookup(s) failed (retryable)")
         except Exception as exc:  # noqa: BLE001
+            deals_ok = False
             errors.append(f"deals {chunk_key}: {exc}")
             summary["failed"] += 1
 
         chunks_detail.append(chunk)
-        completed.add(chunk_key)
+        # Only a fully-successful chunk is recorded complete; an incomplete chunk
+        # is retried on resume.
+        if contacts_ok and deals_ok:
+            completed.add(chunk_key)
         state["completed_chunks"] = list(completed)
         _emit("running")
         cursor = chunk_to + relativedelta(days=1)
