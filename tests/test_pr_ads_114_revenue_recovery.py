@@ -406,6 +406,15 @@ def _patch_incremental(monkeypatch, *, contacts_write=None, contacts_pull=None):
         monkeypatch.setattr("db.writers.write_leads", contacts_write or _spy_write)
         monkeypatch.setattr("db.writers.write_deals", _spy_write)
         monkeypatch.setattr("db.writers.write_gclid_attribution", lambda *a, **k: 0)
+        # PR-ADS-118 canonical-spend daily step — patch the spend seam (so the
+        # google-ads SDK is never imported) and the canonical writers.
+        monkeypatch.setattr(
+            "services.google_ads_spend_service.fetch_daily_spend",
+            lambda *a, **k: {"customer_id": "123", "currency_code": "USD",
+                             "source_query_version": "campaign_daily_v1", "rows": []},
+        )
+        monkeypatch.setattr("db.writers.upsert_campaign_daily_spend", lambda rows, **k: len(rows))
+        monkeypatch.setattr("db.writers.upsert_spend_coverage", lambda *a, **k: True)
         monkeypatch.setattr("db.writers.write_run", lambda *a, **k: 4242)
         monkeypatch.setattr("db.writers.update_run", lambda *a, **k: None)
         monkeypatch.setattr("db.writers.start_sync_batch", lambda *a, **k: 1)

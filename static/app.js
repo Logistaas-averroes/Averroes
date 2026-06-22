@@ -3024,6 +3024,8 @@ function renderRevenueHealth(audit) {
 }
 
 async function loadRevenueHealth() {
+  // Google Ads Spend Truth panel (PR-ADS-118) sits at the top of diagnostics.
+  loadSpendTruth();
   // Admin-only Revenue Recovery panel (PR-ADS-114) sits above the diagnostics.
   loadRevenueRecoveryStatus();
 
@@ -3600,6 +3602,154 @@ document.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-source-backfill-action]");
   if (!btn) return;
   runSourceBackfillJob(btn.dataset.sourceBackfillAction === "preview");
+});
+
+// ── Google Ads Spend Truth panel (PR-ADS-118) ──────────────────────────────
+// Forensic audit of canonical API / canonical local / legacy geo spend, with an
+// admin spend-backfill action. Read-only to Google Ads.
+
+let spendBackfillJobId = null;
+let spendBackfillPollTimer = null;
+let spendTruthNotice = "";
+
+const SPEND_STATE_LABEL = {
+  VERIFIED: "Verified", PARTIAL: "Partial coverage",
+  GEO_MISMATCH: "Geo mismatch", UNAVAILABLE: "Unavailable",
+};
+
+function renderSpendTruth(audit, backfill) {
+  const panel = document.getElementById("spend-truth-panel");
+  if (!panel) return;
+  const a = audit || {};
+  const win = a.window || {};
+  const stateLabel = SPEND_STATE_LABEL[a.state] || (a.state || "—");
+  const isAdmin = _currentUser && _currentUser.role === "admin";
+  const running = backfill && backfill.running === true;
+  const bs = backfill && backfill.summary;
+
+  const adminPanel = isAdmin ? `
+    <div class="recovery-actions">
+      <button type="button" class="btn btn--secondary" data-spend-backfill-action="preview" ${running ? "disabled" : ""}>Preview Google Ads spend backfill</button>
+      <button type="button" class="btn btn--primary" data-spend-backfill-action="run" ${running ? "disabled" : ""}>Run Google Ads spend backfill</button>
+    </div>
+    ${running ? `<div class="recovery-progress">Running… ${escapeHtml((backfill && backfill.phase) || "starting")}${backfill && backfill.current_chunk ? ` · ${escapeHtml(backfill.current_chunk)}` : ""}</div>` : ""}
+    ${spendTruthNotice ? `<p class="revenue-footnote">${escapeHtml(spendTruthNotice)}</p>` : ""}
+    ${bs ? `<div class="revenue-summary-strip revenue-summary-strip--four">
+        <div><span>Chunks verified</span><strong>${fmtCount(bs.chunks_verified)}</strong></div>
+        <div><span>Chunks failed</span><strong>${fmtCount(bs.chunks_failed)}</strong></div>
+        <div><span>Rows written</span><strong>${fmtCount(bs.rows_written)}</strong></div>
+        <div><span>API spend total</span><strong>${fmtMoney(bs.api_total_spend)}</strong></div>
+      </div>` : ""}
+  ` : "";
+
+  panel.innerHTML = `
+    <div class="panel recovery-panel">
+      <div class="panel__header">Google Ads Spend Truth</div>
+      <div class="panel__body">
+        <div class="recovery-statuses">
+          <div>Window: <strong>${escapeHtml(win.label || "")}</strong> · ${escapeHtml(win.start_date || "")} → ${escapeHtml(win.end_date || "")}</div>
+          <div>State: <strong class="spend-state spend-state--${escapeHtml((a.state || "").toLowerCase())}">${escapeHtml(stateLabel)}</strong></div>
+        </div>
+        <div class="recovery-statuses">
+          <div>Customer: <strong>${escapeHtml(a.customer_id || "—")}</strong> (${escapeHtml(a.currency_code || "—")})</div>
+          <div>Canonical campaigns: <strong>${fmtCount(a.canonical_campaign_count)}</strong></div>
+          <div>Geo reconciliation: <strong>${escapeHtml(a.geo_reconciliation_status || "—")}</strong></div>
+        </div>
+        <div class="revenue-summary-strip revenue-summary-strip--four">
+          <div><span>Canonical API total</span><strong>${a.canonical_api_total === null || a.canonical_api_total === undefined ? "Unavailable" : fmtMoney(a.canonical_api_total)}</strong></div>
+          <div><span>Canonical local total</span><strong>${a.canonical_local_total === null || a.canonical_local_total === undefined ? "Unavailable" : fmtMoney(a.canonical_local_total)}</strong></div>
+          <div><span>Legacy geo total</span><strong>${a.legacy_geo_total === null || a.legacy_geo_total === undefined ? "Unavailable" : fmtMoney(a.legacy_geo_total)}</strong></div>
+          <div><span>Variance</span><strong>${a.variance_amount === null || a.variance_amount === undefined ? "—" : fmtMoney(a.variance_amount)}${a.variance_pct != null ? ` (${(a.variance_pct * 100).toFixed(1)}%)` : ""}</strong></div>
+        </div>
+        ${(a.missing_chunks && a.missing_chunks.length) ? `<p class="revenue-footnote">Missing / unverified chunks: ${a.missing_chunks.map((c) => escapeHtml(`${c.start}→${c.end}`)).join(", ")}. Missing rows are never treated as $0 spend.</p>` : ""}
+        ${adminPanel}
+      </div>
+    </div>
+  `;
+}
+
+async function loadSpendTruth() {
+  const panel = document.getElementById("spend-truth-panel");
+  if (!panel) return;
+  stopSpendBackfillPolling();
+  spendTruthNotice = "";
+  const window_ = getRoasBusinessWindow();
+  let audit = null, backfill = null;
+  try {
+    const res = await fetch(`/api/google-ads-spend-audit?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
+    if (res.ok) audit = await res.json();
+  } catch (err) { console.error("[loadSpendTruth audit]", err); }
+  try {
+    const bres = await fetch("/api/google-ads-spend-backfill/status", { credentials: "same-origin" });
+    if (bres.ok) backfill = await bres.json();
+  } catch (_) { /* non-admin or unavailable */ }
+  if (backfill && backfill.job_id) spendBackfillJobId = backfill.job_id;
+  renderSpendTruth(audit, backfill);
+  if (backfill && backfill.running) spendBackfillPollTimer = setTimeout(pollSpendBackfillOnce, 2500);
+}
+
+function stopSpendBackfillPolling() {
+  if (spendBackfillPollTimer) { clearTimeout(spendBackfillPollTimer); spendBackfillPollTimer = null; }
+}
+
+async function pollSpendBackfillOnce() {
+  if (_currentPage !== "revenue-health") { stopSpendBackfillPolling(); return; }
+  try {
+    const url = spendBackfillJobId
+      ? `/api/google-ads-spend-backfill/status?job_id=${encodeURIComponent(spendBackfillJobId)}`
+      : "/api/google-ads-spend-backfill/status";
+    const res = await fetch(url, { credentials: "same-origin" });
+    if (res.ok) {
+      const backfill = await res.json();
+      if (backfill.job_id) spendBackfillJobId = backfill.job_id;
+      if (backfill.running) {
+        loadSpendTruthRenderOnly(backfill);
+        spendBackfillPollTimer = setTimeout(pollSpendBackfillOnce, 2500);
+        return;
+      }
+      loadSpendTruth();  // finished → refresh audit too
+    }
+  } catch (err) { console.error("[pollSpendBackfill]", err); }
+  stopSpendBackfillPolling();
+}
+
+async function loadSpendTruthRenderOnly(backfill) {
+  // Re-render only the backfill portion while a job runs (keeps last audit).
+  const window_ = getRoasBusinessWindow();
+  let audit = null;
+  try {
+    const res = await fetch(`/api/google-ads-spend-audit?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
+    if (res.ok) audit = await res.json();
+  } catch (_) { /* ignore */ }
+  renderSpendTruth(audit, backfill);
+}
+
+async function runSpendBackfillJob(dryRun) {
+  spendTruthNotice = "";
+  try {
+    const res = await fetch("/api/google-ads-spend-backfill/run", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: dryRun }),
+    });
+    if (res.status === 409) { spendTruthNotice = "A spend backfill is already running."; loadSpendTruth(); return; }
+    if (!res.ok) { spendTruthNotice = "Spend backfill could not be started."; loadSpendTruth(); return; }
+    const accepted = await res.json();
+    spendBackfillJobId = accepted.job_id || null;
+    stopSpendBackfillPolling();
+    pollSpendBackfillOnce();
+  } catch (err) {
+    console.error("[runSpendBackfillJob]", err);
+    spendTruthNotice = "Spend backfill request failed.";
+    loadSpendTruth();
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-spend-backfill-action]");
+  if (!btn) return;
+  runSpendBackfillJob(btn.dataset.spendBackfillAction === "preview");
 });
 
 function junkRateBadge(junkPct) {
@@ -8510,8 +8660,9 @@ function sortRoasCampaignRows(rows) {
   );
 }
 
-function renderRoasCampaignSummary(summary) {
+function renderRoasCampaignSummary(summary, spendIncomplete) {
   const s = summary || {};
+  const roasCell = spendIncomplete ? "Unavailable" : fmtRoasMultiple(s.roas);
   return `
     <div class="revenue-summary-strip">
       <div><span>Spend</span><strong>${fmtMoney(s.spend)}</strong></div>
@@ -8519,7 +8670,7 @@ function renderRoasCampaignSummary(summary) {
       <div><span>SQLs</span><strong>${fmtCount(s.sqls)}</strong></div>
       <div><span>Customers</span><strong>${fmtCount(s.customers)}</strong></div>
       <div><span>Won Revenue</span><strong>${fmtMoney(s.won_revenue)}</strong></div>
-      <div><span>ROAS</span><strong>${fmtRoasMultiple(s.roas)}</strong></div>
+      <div><span>ROAS</span><strong>${roasCell}</strong></div>
     </div>
   `;
 }
@@ -8590,6 +8741,20 @@ async function loadRoasCampaigns() {
   }
 }
 
+// PR-ADS-118 spend-coverage helpers.
+function spendCoverageIncomplete(sh) {
+  return (sh || {}).spend_coverage_status === "incomplete";
+}
+
+function renderSpendCoverageNotice() {
+  return `
+    <div class="revenue-blocked-card revenue-empty-card">
+      <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
+      <h3>Spend coverage incomplete — ROAS unavailable</h3>
+      <p>Canonical Google Ads spend for this window has missing or unverified date chunks, so ROAS would use a partial denominator. Run the Google Ads spend backfill in System Status → Revenue Health. Observed partial spend is shown below for diagnostics only.</p>
+    </div>`;
+}
+
 function renderRoasCampaignsPage() {
   const kpiGrid = document.getElementById("roas-campaigns-kpis");
   const tableBody = document.getElementById("roas-campaigns-table-body");
@@ -8610,16 +8775,21 @@ function renderRoasCampaignsPage() {
 
   const sorted = sortRoasCampaignRows(roasCampaignsData);
   const filtered = filterRoasCampaignRows(sorted, roasCampaignFilter);
+  // PR-ADS-118: when canonical Google Ads spend coverage is incomplete for this
+  // window, ROAS must NOT be shown from a partial denominator. Show the observed
+  // spend as diagnostic detail but render ROAS as unavailable.
+  const spendIncomplete = spendCoverageIncomplete(roasCampaignSourceHealth);
 
   tableBody.innerHTML = `
-    ${renderRoasCampaignSummary(roasCampaignSummary)}
+    ${spendIncomplete ? renderSpendCoverageNotice() : ""}
+    ${renderRoasCampaignSummary(roasCampaignSummary, spendIncomplete)}
     ${renderRoasCampaignFilters()}
-    ${renderRoasCampaignTable(filtered)}
-    <p class="revenue-footnote">Google Ads provides spend. HubSpot closed-won deals provide revenue.</p>
+    ${renderRoasCampaignTable(filtered, spendIncomplete)}
+    <p class="revenue-footnote">Google Ads canonical spend powers ROAS. HubSpot closed-won deals provide revenue.</p>
   `;
 }
 
-function renderRoasCampaignTable(rows) {
+function renderRoasCampaignTable(rows, spendIncomplete) {
   if (!rows.length) {
     return `
       <div class="revenue-empty-inline">
@@ -8649,7 +8819,7 @@ function renderRoasCampaignTable(rows) {
       <td>${fmtCount(r.sqls)}</td>
       <td>${fmtCount(r.customers)}</td>
       <td>${fmtMoney(r.won_revenue)}</td>
-      <td>${fmtRoasMultiple(r.roas)}</td>
+      <td>${spendIncomplete ? "Unavailable" : fmtRoasMultiple(r.roas)}</td>
       <td>${getBusinessVerdictBadge(r.verdict)}</td>
     </tr>
   `).join("");
@@ -8869,6 +9039,14 @@ function renderRoasCountriesPage() {
     return;
   }
 
+  // PR-ADS-118: Country ROAS uses the geo denominator only when geo reconciles
+  // to canonical campaign spend for the window. An unreconciled denominator is
+  // never used for ROAS.
+  if (roasCountrySourceHealth && roasCountrySourceHealth.country_spend_reconciled === false) {
+    tableBody.innerHTML = renderCountrySpendUnreconciledState();
+    return;
+  }
+
   // Safe but no closed-won revenue attributed to countries.
   if (!roasCountriesData.length) {
     tableBody.innerHTML = renderRoasCountrySafeEmptyState();
@@ -8885,6 +9063,15 @@ function renderRoasCountriesPage() {
     ${renderRoasCountryTable(filtered)}
     <p class="revenue-footnote">Google Ads geo data provides country spend. HubSpot closed-won deals provide revenue.</p>
   `;
+}
+
+function renderCountrySpendUnreconciledState() {
+  return `
+    <div class="revenue-blocked-card">
+      <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
+      <h3>Country spend coverage incomplete — ROAS unavailable</h3>
+      <p>Geo-table spend does not reconcile with canonical Google Ads campaign spend for this window, so a country ROAS denominator cannot be trusted. Run the Google Ads geo sync and the spend backfill, then re-check this page.</p>
+    </div>`;
 }
 
 function renderRoasCountryTable(rows) {

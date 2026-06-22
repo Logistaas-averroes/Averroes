@@ -694,6 +694,45 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     spend_rows = spend["rows"]
     revenue_rows = revenue["rows"]
 
+    # PR-ADS-118: Campaign ROAS spend truth comes from the canonical Google Ads
+    # campaign-daily table, NOT the geo table. When canonical spend exists for the
+    # window it is preferred; otherwise we fall back to the geo-derived campaign
+    # spend (clearly labelled) so behaviour is unchanged until the backfill runs.
+    canonical = repo.fetch_canonical_campaign_spend(start_date, end_date)
+    canonical_available = bool(canonical.get("available") and canonical.get("rows"))
+    if canonical_available:
+        campaign_spend_rows = [
+            {"campaign_name": r.get("campaign_name"), "country": None, "spend": r.get("spend")}
+            for r in canonical["rows"]
+        ]
+        spend_source = "canonical_google_ads_api"
+    else:
+        campaign_spend_rows = spend_rows  # geo fallback (pre-backfill)
+        spend_source = "geo_fallback"
+
+    # Spend coverage: ROAS may only be trusted when the canonical window coverage
+    # is complete; a missing chunk must never be read as zero spend.
+    if canonical_available:
+        from services.google_ads_spend_service import (  # noqa: PLC0415
+            analyze_coverage as _analyze_cov, SPEND_VARIANCE_TOLERANCE,
+        )
+        coverage = repo.fetch_spend_coverage(start_date, end_date)
+        _cov = _analyze_cov(start_date, end_date, coverage.get("chunks", []))
+        spend_coverage_status = "complete" if _cov.get("complete") else "incomplete"
+        canonical_total = round(float(canonical.get("total_spend") or 0), 2)
+        geo_total_for_recon = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
+        if canonical_total > 0:
+            country_spend_reconciled = (
+                abs(geo_total_for_recon - canonical_total) / canonical_total
+                <= SPEND_VARIANCE_TOLERANCE
+            )
+        else:
+            country_spend_reconciled = (geo_total_for_recon == 0)
+    else:
+        spend_coverage_status = "geo_fallback"
+        canonical_total = None
+        country_spend_reconciled = None
+
     # PR-ADS-109: lead metrics are trusted only when the business event date
     # (HubSpot contact_created_at) is available. Otherwise withhold them — never
     # compute SQLs from sync-date-contaminated rows.
@@ -709,7 +748,7 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     country_spend_available = bool(named_spend)
 
     campaigns = _build_db_rows(
-        spend_rows, lead_rows, revenue_rows, group_field="campaign_name",
+        campaign_spend_rows, lead_rows, revenue_rows, group_field="campaign_name",
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
     )
     countries = _build_db_rows(
@@ -717,7 +756,7 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
     )
     summary = _build_db_summary(
-        spend_rows, lead_rows, revenue_rows,
+        campaign_spend_rows, lead_rows, revenue_rows,
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
     )
 
@@ -791,6 +830,13 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "revenue_attribution_status": revenue_attribution_status,
         "revenue_integration_status": revenue_integration_status,
         "revenue_window_status": revenue_window_status,
+        # PR-ADS-118 spend-truth contract for Campaign / Country ROAS gating.
+        "spend_source": spend_source,
+        "spend_coverage_status": spend_coverage_status,
+        "campaign_spend_total": canonical_total,
+        "country_spend_reconciled": country_spend_reconciled,
+        "canonical_customer_id": canonical.get("customer_id") if canonical_available else None,
+        "canonical_currency": canonical.get("currency_code") if canonical_available else None,
         "data_is_partial": data_is_partial,
         "coverage_start": spend.get("coverage_start") or revenue.get("coverage_start"),
         "coverage_end": spend.get("coverage_end") or revenue.get("coverage_end"),

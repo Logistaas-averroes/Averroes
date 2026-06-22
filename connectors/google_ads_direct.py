@@ -395,3 +395,56 @@ def _get_default_date_range(days_back: int = 7) -> tuple:
     end = datetime.utcnow().date()
     start = end - timedelta(days=days_back - 1)
     return str(start), str(end)
+
+
+# PR-ADS-118 — canonical campaign-daily spend. Bump when the query shape changes.
+SPEND_QUERY_VERSION = "campaign_daily_v1"
+
+
+def fetch_campaign_daily_spend(start_date: str, end_date: str) -> dict:
+    """Read canonical Google Ads campaign-daily spend directly from the API.
+
+    This is the spend-truth source for PR-ADS-118: a direct campaign-date query
+    independent of the geo table. Raw micros are preserved (never rounded before
+    aggregation). Read-only — a pure SELECT that never writes to Google Ads.
+
+    Returns {customer_id, currency_code, source_query_version,
+             rows:[{campaign_id, campaign_name, spend_date, cost_micros,
+                    currency_code, customer_id}]}.
+    """
+    client = build_google_ads_client()
+    customer_id = get_customer_id()
+
+    query = f"""
+        SELECT
+          campaign.id,
+          campaign.name,
+          segments.date,
+          metrics.cost_micros,
+          customer.currency_code
+        FROM campaign
+        WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
+        ORDER BY segments.date
+    """
+
+    rows = _run_search_stream(client, customer_id, query)
+    currency_code = None
+    out = []
+    for row in rows:
+        currency_code = row.customer.currency_code or currency_code
+        out.append({
+            "customer_id": str(customer_id),
+            "currency_code": row.customer.currency_code,
+            "campaign_id": str(row.campaign.id),
+            "campaign_name": row.campaign.name,
+            "spend_date": row.segments.date,
+            "cost_micros": int(row.metrics.cost_micros),
+        })
+    logger.info(
+        "fetch_campaign_daily_spend: %d rows (%s → %s)", len(out), start_date, end_date)
+    return {
+        "customer_id": str(customer_id),
+        "currency_code": currency_code,
+        "source_query_version": SPEND_QUERY_VERSION,
+        "rows": out,
+    }

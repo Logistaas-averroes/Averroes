@@ -1752,3 +1752,103 @@ def source_attribution_health_counts() -> dict:
     except Exception as exc:  # noqa: BLE001
         log.error("source_attribution_health_counts failed: %s", exc)
         return out
+
+
+# ---------------------------------------------------------------------------
+# Canonical Google Ads spend (PR-ADS-118) — local DB only; never writes to
+# Google Ads. Idempotent upserts keyed by (customer_id, campaign_id, spend_date)
+# so duplicate sync/backfill rows never double-count spend.
+# ---------------------------------------------------------------------------
+
+def upsert_campaign_daily_spend(rows: list, sync_run_id: Optional[str] = None) -> int:
+    """Upsert canonical campaign-daily spend rows. Idempotent. Never raises.
+
+    Each row: {customer_id, currency_code, campaign_id, campaign_name,
+    spend_date, cost_micros, source_query_version}. spend_account_currency is
+    derived from raw micros (no early rounding of aggregates). Returns count.
+    """
+    if not rows:
+        return 0
+    prepared = []
+    for r in rows:
+        cust = (r.get("customer_id") or "").strip()
+        camp = (r.get("campaign_id") or "").strip()
+        spend_date = r.get("spend_date")
+        if not cust or not camp or not spend_date:
+            continue
+        micros = int(r.get("cost_micros") or 0)
+        prepared.append((
+            cust, r.get("currency_code"), camp, r.get("campaign_name"),
+            spend_date, micros, micros / 1_000_000,
+            sync_run_id, r.get("source_query_version"),
+        ))
+    if not prepared:
+        return 0
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO google_ads_campaign_daily_spend (
+                        customer_id, currency_code, campaign_id, campaign_name,
+                        spend_date, cost_micros, spend_account_currency,
+                        sync_run_id, source_query_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (customer_id, campaign_id, spend_date) DO UPDATE SET
+                        currency_code          = EXCLUDED.currency_code,
+                        campaign_name          = EXCLUDED.campaign_name,
+                        cost_micros            = EXCLUDED.cost_micros,
+                        spend_account_currency = EXCLUDED.spend_account_currency,
+                        sync_run_id            = EXCLUDED.sync_run_id,
+                        source_query_version   = EXCLUDED.source_query_version,
+                        updated_at             = NOW()
+                    """,
+                    prepared,
+                )
+        return len(prepared)
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_campaign_daily_spend failed: %s", exc)
+        return 0
+
+
+def upsert_spend_coverage(
+    customer_id: str, chunk_start, chunk_end, status: str,
+    *, rows_written: int = 0, cost_micros_total: int = 0,
+    source_query_version: Optional[str] = None, sync_run_id: Optional[str] = None,
+) -> bool:
+    """Record a fetched spend chunk (verified|failed). Idempotent. Never raises.
+
+    The coverage ledger lets the audit treat a zero-spend day inside a verified
+    chunk as real, while a never-fetched range is reported missing — never zero.
+    """
+    if not customer_id or not chunk_start or not chunk_end:
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO google_ads_spend_coverage (
+                        customer_id, chunk_start, chunk_end, status,
+                        rows_written, cost_micros_total, source_query_version, sync_run_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (customer_id, chunk_start, chunk_end) DO UPDATE SET
+                        status               = EXCLUDED.status,
+                        rows_written         = EXCLUDED.rows_written,
+                        cost_micros_total    = EXCLUDED.cost_micros_total,
+                        source_query_version = EXCLUDED.source_query_version,
+                        sync_run_id          = EXCLUDED.sync_run_id,
+                        fetched_at           = NOW(),
+                        updated_at           = NOW()
+                    """,
+                    (customer_id, chunk_start, chunk_end, status,
+                     int(rows_written), int(cost_micros_total), source_query_version, sync_run_id),
+                )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_spend_coverage failed: %s", exc)
+        return False
