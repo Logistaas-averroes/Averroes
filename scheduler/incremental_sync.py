@@ -196,6 +196,13 @@ def run_daily_incremental_sync(
         run_id=run_id, date_from=date_from_deals, date_to=today, errors=errors,
     )
 
+    # ── hubspot/source_classification — keep acquisition-source classification
+    # current (PR-ADS-117): classify newly-created contacts (all sources) and
+    # attribute recent closed-won deals. Read-only from HubSpot; local DB only.
+    datasets["hubspot/source_classification"] = _sync_source_classification(
+        run_id=run_id, date_from=date_from_contacts, date_to=today, errors=errors,
+    )
+
     finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     overall_status = _overall_status(datasets)
@@ -558,6 +565,57 @@ def _sync_gclid_attribution(
                 status="failed",
                 error_message=str(exc)[:1000],
             )
+        return {"status": "failed", "error": str(exc)[:500]}
+
+
+def _sync_source_classification(
+    *, run_id, date_from, date_to, errors: list
+) -> dict:
+    """Classify recent all-source contacts and attribute recent closed-won deals.
+
+    PR-ADS-117: keeps the acquisition-source classification current between full
+    backfills. Reads HubSpot read-only and writes only the local classification
+    tables; never writes to HubSpot or Google Ads.
+    """
+    from connectors.hubspot_pull import (  # noqa: PLC0415
+        pull_all_contacts_in_range,
+        pull_closed_won_deals_with_sources_in_range,
+    )
+    from services.source_attribution_service import (  # noqa: PLC0415
+        classify_contact_row, attribute_deal_row,
+    )
+
+    batch_id = db_writers.start_sync_batch(
+        source="hubspot", dataset="source_classification", sync_type="daily",
+        date_from=date_from, date_to=date_to, run_id=run_id,
+    )
+    try:
+        contacts = pull_all_contacts_in_range(date_from=str(date_from), date_to=str(date_to))
+        contact_rows = [classify_contact_row(c) for c in contacts]
+        contacts_written = db_writers.upsert_contact_source_classification(contact_rows)
+
+        deals = pull_closed_won_deals_with_sources_in_range(
+            date_from=str(date_from), date_to=str(date_to))
+        deal_rows = [attribute_deal_row(d) for d in deals]
+        deals_written = db_writers.upsert_deal_source_attribution(deal_rows)
+
+        if batch_id:
+            db_writers.finish_sync_batch(
+                batch_id=batch_id, status="success",
+                row_count=contacts_written + deals_written, last_source_date=date_to,
+            )
+        return {
+            "status": "success",
+            "contacts_classified": len(contact_rows),
+            "deals_attributed": len(deal_rows),
+        }
+    except Exception as exc:  # noqa: BLE001
+        err = f"hubspot/source_classification: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+        if batch_id:
+            db_writers.finish_sync_batch(
+                batch_id=batch_id, status="failed", error_message=str(exc)[:1000])
         return {"status": "failed", "error": str(exc)[:500]}
 
 

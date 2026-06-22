@@ -1607,3 +1607,148 @@ def backfill_event_date_for_contact(contact_id, created_at) -> int:
     except Exception as exc:  # noqa: BLE001
         log.error("backfill_event_date_for_contact failed (contact_id=%s): %s", contact_id, exc)
         return 0
+
+
+# ---------------------------------------------------------------------------
+# Acquisition-source classification (PR-ADS-117) — durable, auditable. Local DB
+# only; never writes to or deletes raw HubSpot data.
+# ---------------------------------------------------------------------------
+
+def upsert_contact_source_classification(rows: list) -> int:
+    """Upsert contact source classifications (keyed by contact_key). Never raises.
+
+    Each row: {contact_key, contact_id, source_primary_raw, source_detail_raw,
+    acquisition_group, classification_rule_version, contact_created_at,
+    status_category}. Returns count attempted.
+    """
+    if not rows:
+        return 0
+    prepared = []
+    for r in rows:
+        key = (r.get("contact_key") or "").strip()
+        if not key:
+            continue
+        prepared.append((
+            key, r.get("contact_id"), r.get("source_primary_raw"),
+            r.get("source_detail_raw"), r.get("acquisition_group"),
+            r.get("classification_rule_version"),
+            _parse_ts_or_none(r.get("contact_created_at")),
+            r.get("status_category"),
+        ))
+    if not prepared:
+        return 0
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO contact_source_classification (
+                        contact_key, contact_id, source_primary_raw, source_detail_raw,
+                        acquisition_group, classification_rule_version,
+                        contact_created_at, status_category
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (contact_key) DO UPDATE SET
+                        contact_id                  = EXCLUDED.contact_id,
+                        source_primary_raw          = EXCLUDED.source_primary_raw,
+                        source_detail_raw           = EXCLUDED.source_detail_raw,
+                        acquisition_group           = EXCLUDED.acquisition_group,
+                        classification_rule_version = EXCLUDED.classification_rule_version,
+                        contact_created_at          = EXCLUDED.contact_created_at,
+                        status_category             = EXCLUDED.status_category,
+                        updated_at                  = NOW()
+                    """,
+                    prepared,
+                )
+        return len(prepared)
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_contact_source_classification failed: %s", exc)
+        return 0
+
+
+def upsert_deal_source_attribution(rows: list) -> int:
+    """Upsert per-deal source attribution (keyed by deal_id). Never raises.
+
+    Each row: {deal_id, associated_contact_id, acquisition_group,
+    source_primary_raw, source_detail_raw, attribution_status,
+    attribution_reason, deal_close_date, deal_amount_usd,
+    classification_rule_version}. Returns count attempted.
+    """
+    if not rows:
+        return 0
+    prepared = []
+    for r in rows:
+        deal_id = (r.get("deal_id") or "").strip()
+        if not deal_id:
+            continue
+        prepared.append((
+            deal_id, r.get("associated_contact_id"), r.get("acquisition_group"),
+            r.get("source_primary_raw"), r.get("source_detail_raw"),
+            r.get("attribution_status"), r.get("attribution_reason"),
+            _parse_ts_or_none(r.get("deal_close_date")),
+            _float_or_none(r.get("deal_amount_usd")),
+            r.get("classification_rule_version"),
+        ))
+    if not prepared:
+        return 0
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO deal_source_attribution (
+                        deal_id, associated_contact_id, acquisition_group,
+                        source_primary_raw, source_detail_raw,
+                        attribution_status, attribution_reason,
+                        deal_close_date, deal_amount_usd, classification_rule_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (deal_id) DO UPDATE SET
+                        associated_contact_id       = EXCLUDED.associated_contact_id,
+                        acquisition_group           = EXCLUDED.acquisition_group,
+                        source_primary_raw          = EXCLUDED.source_primary_raw,
+                        source_detail_raw           = EXCLUDED.source_detail_raw,
+                        attribution_status          = EXCLUDED.attribution_status,
+                        attribution_reason          = EXCLUDED.attribution_reason,
+                        deal_close_date             = EXCLUDED.deal_close_date,
+                        deal_amount_usd             = EXCLUDED.deal_amount_usd,
+                        classification_rule_version = EXCLUDED.classification_rule_version,
+                        updated_at                  = NOW()
+                    """,
+                    prepared,
+                )
+        return len(prepared)
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_deal_source_attribution failed: %s", exc)
+        return 0
+
+
+def source_attribution_health_counts() -> dict:
+    """Return {contacts_classified, deals_attributed, ambiguous_deals,
+    unclassified_deals} from the durable source tables. Never raises."""
+    out = {"contacts_classified": 0, "deals_attributed": 0,
+           "ambiguous_deals": 0, "unclassified_deals": 0}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return out
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM contact_source_classification")
+                out["contacts_classified"] = int(cur.fetchone()[0])
+                cur.execute(
+                    "SELECT attribution_status, COUNT(*) FROM deal_source_attribution "
+                    "GROUP BY attribution_status"
+                )
+                for status, n in cur.fetchall():
+                    if status == "attributed":
+                        out["deals_attributed"] += int(n)
+                    elif status == "ambiguous":
+                        out["ambiguous_deals"] += int(n)
+                    elif status == "unclassified":
+                        out["unclassified_deals"] += int(n)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.error("source_attribution_health_counts failed: %s", exc)
+        return out

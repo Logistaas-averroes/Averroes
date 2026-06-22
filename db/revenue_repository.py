@@ -542,3 +542,62 @@ def revenue_integration_connected() -> bool:
     except Exception as exc:  # noqa: BLE001
         logger.warning("revenue_integration_connected failed: %s", exc)
         return False
+
+
+# ── Revenue by acquisition source (PR-ADS-117) ───────────────────────────────
+
+
+def fetch_source_leads(start: date | None, end: date) -> dict:
+    """Classified contacts in the window, by acquisition group. Read-only.
+
+    Windowed by contact_created_at (the business event date). Returns
+    {available, rows:[{acquisition_group, status_category}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT acquisition_group, status_category
+                    FROM contact_source_classification
+                    WHERE contact_created_at IS NOT NULL
+                      AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
+                      AND contact_created_at < (%s::date + INTERVAL '1 day')
+                    """,
+                    (start, end),
+                )
+                return {"available": True, "rows": _rows_as_dicts(cur)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_source_leads failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
+def fetch_source_revenue(start: date | None, end: date) -> dict:
+    """Closed-won deals in the window, by acquisition group. Read-only.
+
+    Windowed by deal_close_date. Each deal appears once (deal_id is unique in
+    deal_source_attribution). Returns {available, rows:[{acquisition_group,
+    attribution_status, deal_amount_usd}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT acquisition_group, attribution_status,
+                           deal_amount_usd::float AS deal_amount_usd
+                    FROM deal_source_attribution
+                    WHERE deal_close_date IS NOT NULL
+                      AND deal_close_date >= COALESCE(%s::timestamptz, deal_close_date)
+                      AND deal_close_date < (%s::date + INTERVAL '1 day')
+                    """,
+                    (start, end),
+                )
+                return {"available": True, "rows": _rows_as_dicts(cur)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_source_revenue failed: %s", exc)
+        return {"available": False, "rows": []}

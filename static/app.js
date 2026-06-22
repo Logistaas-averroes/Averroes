@@ -18,14 +18,14 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input", "revenue-health"];
+const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input", "revenue-health", "revenue-by-source"];
 
 // PR-ADS-110/113: Revenue & Attribution pages. These use business-revenue
 // windows (not ad-style 7d/14d/30d/60d) and a clean readiness model — the global
 // ad-window bar, monitoring warning, help/explanation blocks, and any
 // attribution-audit controls are suppressed here. Deals (Closed-Won Revenue
 // Ledger) and Revenue Health (admin diagnostics) joined in PR-ADS-113.
-const REVENUE_PAGES = ["roas-campaigns", "roas-countries", "deals", "revenue-health"];
+const REVENUE_PAGES = ["roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source"];
 
 function isRevenuePage(pageId) {
   return REVENUE_PAGES.includes(pageId);
@@ -1297,6 +1297,7 @@ function loadPage(page) {
     case "unit-economics":  loadUnitEconomics();  break;
     case "churn-input":     loadChurnInput();     break;
     case "revenue-health":  loadRevenueHealth();  break;
+    case "revenue-by-source": loadRevenueBySource(); break;
   }
 }
 
@@ -3386,6 +3387,219 @@ document.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-reconcile-action]");
   if (!btn) return;
   runLeadReconciliationJob(btn.dataset.reconcileAction === "preview");
+});
+
+// ── Revenue by Acquisition Source (PR-ADS-117) ──────────────────────────────
+// Google Ads is the only group with connected spend, so the only group that may
+// show ROAS. Every other group is revenue-only (ROAS unavailable, never $0/0x).
+
+function renderSourceSectionTable(group) {
+  const isGoogle = group.has_spend === true;
+  const header = isGoogle
+    ? `<tr><th>Source</th><th>Spend</th><th>Leads</th><th>SQLs</th><th>Customers</th><th>Won Revenue</th><th>ROAS</th></tr>`
+    : `<tr><th>Source</th><th>Leads</th><th>SQLs</th><th>Customers</th><th>Won Revenue</th><th>Attribution Status</th></tr>`;
+  const row = isGoogle
+    ? `<tr>
+         <td>${escapeHtml(group.label)}</td>
+         <td>${fmtMoney(group.spend)}</td>
+         <td>${fmtCount(group.leads)}</td>
+         <td>${fmtCount(group.sqls)}</td>
+         <td>${fmtCount(group.customers)}</td>
+         <td>${fmtMoney(group.won_revenue)}</td>
+         <td>${group.roas === null || group.roas === undefined ? "Unavailable" : fmtRoasMultiple(group.roas)}</td>
+       </tr>`
+    : `<tr>
+         <td>${escapeHtml(group.label)}</td>
+         <td>${fmtCount(group.leads)}</td>
+         <td>${fmtCount(group.sqls)}</td>
+         <td>${fmtCount(group.customers)}</td>
+         <td>${fmtMoney(group.won_revenue)}</td>
+         <td><span class="attribution-badge" title="No connected spend source for this group">ROAS unavailable — no connected spend source</span></td>
+       </tr>`;
+  return `
+    <div class="panel revenue-source-section">
+      <div class="panel__header">${escapeHtml(group.label)}</div>
+      <div class="panel__body panel__body--flush">
+        <div class="table-scroll">
+          <table class="data-table roas-table revenue-decision-table">
+            ${header}
+            <tbody>${row}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderRevenueBySourceHealth(summary) {
+  const s = summary || {};
+  return `
+    <div class="revenue-summary-strip revenue-summary-strip--four">
+      <div><span>Contacts classified</span><strong>${fmtCount(s.contacts_classified)}</strong></div>
+      <div><span>Deals attributed</span><strong>${fmtCount(s.deals_attributed)}</strong></div>
+      <div><span>Ambiguous deals</span><strong>${fmtCount(s.ambiguous_deals)}</strong></div>
+      <div><span>Unclassified deals</span><strong>${fmtCount(s.unclassified_deals)}</strong></div>
+    </div>
+  `;
+}
+
+function renderRevenueBySourcePage(data) {
+  const body = document.getElementById("revenue-by-source-body");
+  if (!body) return;
+  const groups = (data && data.groups) || [];
+  body.innerHTML = `
+    ${renderRevenueBySourceHealth((data && data.summary) || {})}
+    ${groups.map(renderSourceSectionTable).join("")}
+    <p class="revenue-footnote">Google Ads provides spend; ROAS is shown only for Google Ads. Other groups are revenue-only — no connected spend source, so ROAS is never fabricated.</p>
+  `;
+}
+
+async function loadRevenueBySource() {
+  const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.bySource;
+  setWindowRangeLoading("revenue-by-source-range");
+  renderSourceBackfillPanelInit();
+  const body = document.getElementById("revenue-by-source-body");
+  if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue by source…</p>';
+  try {
+    const res = await fetch(`/api/revenue-by-source?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
+    const data = res.ok ? await res.json() : null;
+    if (token !== _revReqSeq.bySource) return;  // stale response superseded
+    if (!res.ok || !_revResponseIsCurrent("bySource", token, data)) {
+      if (!res.ok && body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue by source.</p>';
+      return;
+    }
+    renderWindowRange("revenue-by-source-range", data.window || null);
+    renderRevenueBySourcePage(data);
+  } catch (err) {
+    console.error("[loadRevenueBySource]", err);
+    if (token !== _revReqSeq.bySource) return;
+    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue by source.</p>';
+  }
+}
+
+// ── Source Attribution Backfill panel (admin-only) ──────────────────────────
+
+let sourceBackfillJobId = null;
+let sourceBackfillPollTimer = null;
+let sourceBackfillNotice = "";
+
+function renderSourceBackfillPanelInit() {
+  const panel = document.getElementById("source-backfill-panel");
+  if (!panel) return;
+  if (!_currentUser || _currentUser.role !== "admin") { panel.innerHTML = ""; return; }
+  loadSourceBackfillStatus();
+}
+
+function renderSourceBackfillPanel(status) {
+  const panel = document.getElementById("source-backfill-panel");
+  if (!panel) return;
+  if (!_currentUser || _currentUser.role !== "admin") { panel.innerHTML = ""; return; }
+  const st = status || {};
+  const running = st.running === true;
+  const s = st.summary || null;
+  const progressHtml = running
+    ? `<div class="recovery-progress">Running… phase: <strong>${escapeHtml(st.phase || "starting")}</strong>${st.current_chunk ? ` · chunk ${escapeHtml(st.current_chunk)}` : ""}</div>`
+    : "";
+  const resultHtml = s
+    ? `<div class="revenue-summary-strip revenue-summary-strip--four">
+         <div><span>Contacts classified</span><strong>${fmtCount(s.contacts_classified)}</strong></div>
+         <div><span>Deals attributed</span><strong>${fmtCount(s.deals_attributed)}</strong></div>
+         <div><span>Ambiguous</span><strong>${fmtCount(s.ambiguous_deals)}</strong></div>
+         <div><span>Unclassified / failed</span><strong>${fmtCount((s.unclassified_deals || 0) + (s.failed || 0))}</strong></div>
+       </div>` : "";
+  const noticeHtml = sourceBackfillNotice ? `<p class="revenue-footnote">${escapeHtml(sourceBackfillNotice)}</p>` : "";
+  panel.innerHTML = `
+    <div class="panel recovery-panel">
+      <div class="panel__header">Source Attribution Backfill</div>
+      <div class="panel__body">
+        <p class="revenue-footnote">Classifies all historical contacts by HubSpot Original Source and attributes closed-won deals. Reads HubSpot only and writes only to the local database. Default range: All Time.</p>
+        <div class="recovery-actions">
+          <button type="button" class="btn btn--secondary" data-source-backfill-action="preview" ${running ? "disabled" : ""}>Preview backfill</button>
+          <button type="button" class="btn btn--primary" data-source-backfill-action="run" ${running ? "disabled" : ""}>Run backfill</button>
+        </div>
+        ${progressHtml}
+        ${noticeHtml}
+        ${resultHtml}
+      </div>
+    </div>
+  `;
+}
+
+function stopSourceBackfillPolling() {
+  if (sourceBackfillPollTimer) { clearTimeout(sourceBackfillPollTimer); sourceBackfillPollTimer = null; }
+}
+
+async function fetchSourceBackfillStatus() {
+  const url = sourceBackfillJobId
+    ? `/api/source-attribution-backfill/status?job_id=${encodeURIComponent(sourceBackfillJobId)}`
+    : "/api/source-attribution-backfill/status";
+  const res = await fetch(url, { credentials: "same-origin" });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+async function pollSourceBackfillOnce() {
+  if (_currentPage !== "revenue-by-source") { stopSourceBackfillPolling(); return; }
+  try {
+    const status = await fetchSourceBackfillStatus();
+    if (status) {
+      if (status.job_id) sourceBackfillJobId = status.job_id;
+      renderSourceBackfillPanel(status);
+      if (status.running) {
+        sourceBackfillPollTimer = setTimeout(pollSourceBackfillOnce, 2500);
+        return;
+      }
+      loadRevenueBySource();
+    }
+  } catch (err) {
+    console.error("[pollSourceBackfill]", err);
+  }
+  stopSourceBackfillPolling();
+}
+
+async function loadSourceBackfillStatus() {
+  stopSourceBackfillPolling();
+  sourceBackfillNotice = "";
+  try {
+    const status = await fetchSourceBackfillStatus();
+    if (!status) { renderSourceBackfillPanel(null); return; }
+    if (status.job_id) sourceBackfillJobId = status.job_id;
+    renderSourceBackfillPanel(status);
+    if (status.running) sourceBackfillPollTimer = setTimeout(pollSourceBackfillOnce, 2500);
+  } catch (err) {
+    console.error("[loadSourceBackfillStatus]", err);
+    renderSourceBackfillPanel(null);
+  }
+}
+
+async function runSourceBackfillJob(dryRun) {
+  sourceBackfillNotice = "";
+  renderSourceBackfillPanel({ running: true, phase: dryRun ? "preview" : "starting" });
+  try {
+    const res = await fetch("/api/source-attribution-backfill/run", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: dryRun }),
+    });
+    if (res.status === 409) { sourceBackfillNotice = "A backfill is already running."; loadSourceBackfillStatus(); return; }
+    if (!res.ok) { sourceBackfillNotice = "Source backfill could not be started."; renderSourceBackfillPanel(null); return; }
+    const accepted = await res.json();
+    sourceBackfillJobId = accepted.job_id || null;
+    stopSourceBackfillPolling();
+    pollSourceBackfillOnce();
+  } catch (err) {
+    console.error("[runSourceBackfillJob]", err);
+    sourceBackfillNotice = "Source backfill request failed.";
+    renderSourceBackfillPanel(null);
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-source-backfill-action]");
+  if (!btn) return;
+  runSourceBackfillJob(btn.dataset.sourceBackfillAction === "preview");
 });
 
 function junkRateBadge(junkPct) {
@@ -7823,6 +8037,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     revHealthWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
 
+  // Wire up Revenue by Source controls (business windows — PR-ADS-117)
+  const bySourceRefresh = document.getElementById("revenue-by-source-refresh-btn");
+  const bySourceWindow  = document.getElementById("revenue-by-source-window");
+  if (bySourceRefresh) bySourceRefresh.addEventListener("click", loadRevenueBySource);
+  if (bySourceWindow) {
+    bySourceWindow.value = getRoasBusinessWindow();
+    bySourceWindow.addEventListener("change", handleBusinessWindowSelectChange);
+  }
+
   // Wire up Unit Economics controls
   const ueRefresh = document.getElementById("unit-economics-refresh-btn");
   const ueWindow  = document.getElementById("unit-economics-window");
@@ -8103,6 +8326,7 @@ function handleBusinessWindowSelectChange(e) {
     case "roas-countries":  loadRoasCountries(); break;
     case "deals":           loadDeals();         break;
     case "revenue-health":  loadRevenueHealth(); break;
+    case "revenue-by-source": loadRevenueBySource(); break;
     default:                loadRoasCampaigns();
   }
 }
@@ -8138,7 +8362,7 @@ let roasCountryWindow = null;
 // Per-page request sequence tokens guard against stale-response races: only the
 // newest in-flight request for a page may render. Switching CQ→YTD→Last Quarter
 // quickly must never paint an older response over the newest selection.
-const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0 };
+const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0 };
 
 // PR-ADS-116: show the exact resolved date range beside each window selector.
 function formatWindowRange(win) {

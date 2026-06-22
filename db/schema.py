@@ -524,6 +524,53 @@ CREATE TABLE IF NOT EXISTS lead_truth_exclusions (
 
 CREATE INDEX IF NOT EXISTS idx_lead_truth_exclusions_reason
   ON lead_truth_exclusions(reason);
+
+-- PR-ADS-117: durable acquisition-source classification of HubSpot contacts.
+-- Raw HubSpot source values are persisted alongside the derived group, rule
+-- version, and timestamp so every classification is auditable. Raw HubSpot data
+-- is NEVER overwritten or deleted.
+CREATE TABLE IF NOT EXISTS contact_source_classification (
+  id                        SERIAL PRIMARY KEY,
+  contact_key               TEXT NOT NULL UNIQUE,   -- contact_id, or 'id:'||leads.id
+  contact_id                TEXT,
+  source_primary_raw        TEXT,
+  source_detail_raw         TEXT,
+  acquisition_group         TEXT NOT NULL,          -- google_ads|other_paid|organic|offline|unclassified
+  classification_rule_version TEXT NOT NULL,
+  contact_created_at        TIMESTAMPTZ,
+  status_category           TEXT,
+  classified_at             TIMESTAMPTZ DEFAULT NOW(),
+  updated_at                TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_contact_source_group
+  ON contact_source_classification(acquisition_group);
+CREATE INDEX IF NOT EXISTS idx_contact_source_created
+  ON contact_source_classification(contact_created_at);
+
+-- PR-ADS-117: durable per-deal source attribution. Revenue is NEVER split across
+-- sources — each closed-won deal maps to exactly one group (or the ambiguous /
+-- unclassified bucket).
+CREATE TABLE IF NOT EXISTS deal_source_attribution (
+  id                     SERIAL PRIMARY KEY,
+  deal_id                TEXT NOT NULL UNIQUE,
+  associated_contact_id  TEXT,
+  acquisition_group      TEXT NOT NULL,             -- group | 'ambiguous' | 'unclassified'
+  source_primary_raw     TEXT,
+  source_detail_raw      TEXT,
+  attribution_status     TEXT NOT NULL,             -- attributed|ambiguous|unclassified
+  attribution_reason     TEXT,
+  deal_close_date        TIMESTAMPTZ,
+  deal_amount_usd        NUMERIC(12,2),
+  classification_rule_version TEXT,
+  classified_at          TIMESTAMPTZ DEFAULT NOW(),
+  updated_at             TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_deal_source_group
+  ON deal_source_attribution(acquisition_group);
+CREATE INDEX IF NOT EXISTS idx_deal_source_close
+  ON deal_source_attribution(deal_close_date);
 """
 
 
