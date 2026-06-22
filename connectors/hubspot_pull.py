@@ -25,6 +25,11 @@ HUBSPOT_API_BASE_URL = "https://api.hubapi.com"
 MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 2
 
+
+class HubSpotRetryableError(Exception):
+    """A transient/HTTP HubSpot failure that must be retried, never silently
+    treated as an empty/Unclassified result (PR-ADS-117)."""
+
 # Fields confirmed live from Logistaas HubSpot account
 CONTACT_PROPERTIES = [
     "firstname",
@@ -515,6 +520,166 @@ def pull_contacts_by_ids(contact_ids: list) -> dict:
             d = obj.to_dict()
             out[str(d.get("id"))] = (d.get("properties", {}) or {}).get("createdate")
     return out
+
+
+def pull_all_contacts_in_range(date_from: str, date_to: str) -> list:
+    """Pull ALL HubSpot contacts created within a date range — every source.
+
+    PR-ADS-117 source backfill: unlike pull_paid_search_contacts_in_range this is
+    NOT filtered to PAID_SEARCH, so Organic / Offline / Other Paid contacts are
+    classified too. Returns raw contact dicts (with Original Source + drill-down
+    properties). Read-only — NEVER writes to HubSpot.
+    """
+    client = get_client()
+    from datetime import timezone, time as _time
+    from datetime import date as _date
+
+    def _to_ms(d, start):
+        parsed = _date.fromisoformat(d)
+        edge = _time.min if start else _time.max
+        return int(datetime.combine(parsed, edge, tzinfo=timezone.utc).timestamp() * 1000)
+
+    from_ms, to_ms = _to_ms(str(date_from), True), _to_ms(str(date_to), False)
+    contacts, after = [], None
+    while True:
+        try:
+            response = client.crm.contacts.search_api.do_search(
+                public_object_search_request={
+                    "filterGroups": [{"filters": [
+                        {"propertyName": "createdate", "operator": "GTE", "value": str(from_ms)},
+                        {"propertyName": "createdate", "operator": "LTE", "value": str(to_ms)},
+                    ]}],
+                    "properties": CONTACT_PROPERTIES,
+                    "limit": 100,
+                    "after": after,
+                }
+            )
+            contacts.extend([c.to_dict() for c in response.results])
+            if response.paging and response.paging.next:
+                after = response.paging.next.after
+            else:
+                break
+        except ApiException as exc:
+            if exc.status == 429:
+                time.sleep(INITIAL_BACKOFF_SECONDS * 2)
+                continue
+            logger.error("HubSpot API error pulling all contacts: %s", exc)
+            break
+    logger.info("Pulled %d contacts (all sources, %s → %s)", len(contacts), date_from, date_to)
+    return contacts
+
+
+def pull_closed_won_deals_with_sources_in_range(date_from: str, date_to: str) -> list:
+    """Pull closed-won deals by closedate with ALL associated contacts' sources.
+
+    PR-ADS-117 source attribution: returns, per deal, every associated contact's
+    Original Source + drill-down so the caller can detect ambiguous (conflicting)
+    attribution without splitting revenue. Read-only — NEVER writes to HubSpot.
+
+    A deal whose association/source lookup fails (after bounded retries) is
+    returned with ``lookup_failed: True`` and NO contacts, so the caller can keep
+    that deal's chunk incomplete (retryable) rather than fabricating an
+    Unclassified row. A deal with a *successful* empty association is genuinely
+    Unclassified (contacts == [], lookup_failed False).
+
+    Returns [{deal_id, deal_close_date, deal_amount_usd, lookup_failed,
+              contacts:[{contact_id, source_primary, source_detail}]}].
+    """
+    raw = pull_closed_won_deals_in_range(date_from, date_to)
+    out = []
+    for d in raw:
+        deal_id = d.get("deal_id")
+        entry = {
+            "deal_id": deal_id,
+            "deal_close_date": d.get("deal_close_date"),
+            "deal_amount_usd": d.get("deal_amount_usd"),
+            "lookup_failed": False,
+            "contacts": [],
+        }
+        try:
+            contact_ids = _fetch_associated_contact_ids(deal_id)
+            for cid in contact_ids:
+                props = _fetch_contact_source_props(cid)
+                entry["contacts"].append({
+                    "contact_id": cid,
+                    "source_primary": props.get("hs_analytics_source"),
+                    "source_detail": props.get("hs_analytics_source_data_1"),
+                })
+        except HubSpotRetryableError as exc:
+            # Transient/HTTP failure — do NOT classify as Unclassified; leave the
+            # deal's chunk incomplete so it is retried on resume.
+            logger.warning("Source lookup failed for deal %s (retryable): %s", deal_id, exc)
+            entry["lookup_failed"] = True
+            entry["contacts"] = []
+        out.append(entry)
+    return out
+
+
+def _fetch_associated_contact_ids(deal_id) -> list:
+    """All associated contact IDs for a deal (v4 associations). Read-only.
+
+    Retries on rate-limit / transient request errors; raises HubSpotRetryableError
+    on persistent failure so the caller never mistakes an API failure for a deal
+    that genuinely has no associated contacts. An empty list means a SUCCESSFUL
+    lookup with no associations.
+    """
+    if not deal_id:
+        return []
+    url = f"{HUBSPOT_API_BASE_URL}/crm/v4/objects/deals/{deal_id}/associations/contacts"
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(
+                url, headers={"Authorization": f"Bearer {HUBSPOT_API_KEY}"}, timeout=30)
+            if resp.status_code == 429 and attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+            resp.raise_for_status()
+            ids = []
+            for r in resp.json().get("results", []):
+                cid = r.get("toObjectId") or r.get("id")
+                if cid:
+                    ids.append(str(cid))
+            return ids
+        except (requests.exceptions.RequestException, ApiException) as exc:
+            if attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+            raise HubSpotRetryableError(
+                f"association lookup failed for deal {deal_id}: {exc}") from exc
+    raise HubSpotRetryableError(f"association lookup exhausted retries for deal {deal_id}")
+
+
+def _fetch_contact_source_props(contact_id) -> dict:
+    """Read a contact's Original Source + drill-down properties. Read-only.
+
+    Retries on rate-limit / transient errors; raises HubSpotRetryableError on
+    persistent failure (never silently returns {} for an API failure).
+    """
+    if not contact_id:
+        return {}
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            contact = get_client().crm.contacts.basic_api.get_by_id(
+                contact_id=str(contact_id),
+                properties=["hs_analytics_source", "hs_analytics_source_data_1"],
+            )
+            return contact.to_dict().get("properties", {}) or {}
+        except ApiException as exc:
+            if getattr(exc, "status", None) == 429 and attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+            if attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+            raise HubSpotRetryableError(
+                f"contact source lookup failed for {contact_id}: {exc}") from exc
+        except requests.exceptions.RequestException as exc:
+            if attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+            raise HubSpotRetryableError(
+                f"contact source lookup failed for {contact_id}: {exc}") from exc
+    raise HubSpotRetryableError(f"contact source lookup exhausted retries for {contact_id}")
 
 
 def get_lead_quality_summary(contacts: list) -> dict:

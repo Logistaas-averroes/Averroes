@@ -59,6 +59,10 @@ Protected endpoints (require authenticated session):
   GET  /api/revenue-recovery/status — Latest Revenue Recovery progress/result (admin-only; PR-ADS-114).
   POST /api/lead-reconciliation/run — Admin-only Lead Event-Date Reconciliation (local DB writes only; reads HubSpot read-only; PR-ADS-115).
   GET  /api/lead-reconciliation/status — Latest Lead Reconciliation progress/result (admin-only; PR-ADS-115).
+  GET  /api/revenue-by-source      — Read-only Revenue by Acquisition Source by business window (PR-ADS-117).
+  GET  /api/source-attribution-health — Durable source classification/attribution counts (PR-ADS-117).
+  POST /api/source-attribution-backfill/run — Admin-only durable source-classification backfill (local DB only; PR-ADS-117).
+  GET  /api/source-attribution-backfill/status — Latest source backfill progress/result (admin-only; PR-ADS-117).
 """
 
 import base64
@@ -256,6 +260,24 @@ class LeadReconciliationRequest(BaseModel):
 
 _reconciliation_lock: threading.Lock = threading.Lock()
 _reconciliation_progress: dict[str, Any] = {"running": False, "latest": None}
+
+
+# ---------------------------------------------------------------------------
+# Source Attribution Backfill (PR-ADS-117) — admin-only, durable background job.
+# Reads HubSpot read-only; writes only local classification tables. Reuses the
+# durable job table via job_type="source_attribution_backfill".
+# ---------------------------------------------------------------------------
+
+class SourceBackfillRequest(BaseModel):
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    chunk_months: int = 1
+    dry_run: bool = True
+    resume: bool = False
+
+
+_source_backfill_lock: threading.Lock = threading.Lock()
+_source_backfill_progress: dict[str, Any] = {"running": False, "latest": None}
 
 
 # ---------------------------------------------------------------------------
@@ -6260,6 +6282,147 @@ def api_lead_reconciliation_status(request: Request, job_id: Optional[str] = Non
         "dry_run": job.get("dry_run"),
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
+        "job": job,
+    }
+
+
+@app.get("/api/revenue-by-source")
+async def get_revenue_by_source(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Revenue by Acquisition Source (PR-ADS-117).
+
+    Read-only. Pipeline + closed-won revenue across Google Ads, Other Paid,
+    Organic, Offline, and Unclassified. Only Google Ads carries spend/ROAS; every
+    other group is revenue-only. Leads/SQLs use contact_created_at; Won Revenue
+    uses deal_close_date; both use the selected business window.
+    """
+    from services.source_attribution_service import build_revenue_by_source  # noqa: PLC0415
+    try:
+        return build_revenue_by_source(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Revenue by source failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Revenue by source computation failed") from exc
+
+
+@app.get("/api/source-attribution-health")
+async def get_source_attribution_health(_user=Depends(require_auth)):
+    """Durable source classification / attribution counts (read-only; PR-ADS-117)."""
+    from services.source_attribution_service import build_source_attribution_health  # noqa: PLC0415
+    try:
+        return build_source_attribution_health()
+    except Exception as exc:  # noqa: BLE001
+        log.error("Source attribution health failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Source attribution health failed") from exc
+
+
+def _run_source_backfill_worker(job_id: str, body: "SourceBackfillRequest") -> None:
+    """Background worker for the source-attribution backfill (PR-ADS-117).
+
+    Durable DB checkpoints; resume reads completed chunks from the DB. Local DB
+    writes only; never writes to HubSpot or Google Ads.
+    """
+    import db.writers as db_writers  # noqa: PLC0415
+    from services.source_attribution_service import run_source_attribution_backfill  # noqa: PLC0415
+
+    def _load_completed():
+        job = db_writers.get_recovery_job(job_id) or {}
+        return job.get("completed_chunks", []) or []
+
+    def _checkpoint(jid, snap):
+        fields = {"status": snap.get("status"), "phase": snap.get("phase"),
+                  "current_chunk": snap.get("current_chunk"),
+                  "completed_chunks": snap.get("completed_chunks", []),
+                  "summary": snap.get("summary"), "chunks": snap.get("chunks"),
+                  "errors": snap.get("errors", [])}
+        if "finished_at" in snap:
+            fields["finished_at"] = snap["finished_at"]
+        db_writers.update_recovery_job(jid, **fields)
+
+    try:
+        db_writers.update_recovery_job(job_id, status="running", phase="starting")
+        result = run_source_attribution_backfill(
+            date_from=body.date_from, date_to=body.date_to, dry_run=body.dry_run,
+            chunk_months=body.chunk_months, resume=body.resume, job_id=job_id,
+            load_completed=_load_completed, checkpoint=_checkpoint,
+            progress=_source_backfill_progress,
+        )
+        db_writers.update_recovery_job(
+            job_id, status=result.get("status", "success"), phase="done",
+            summary=result.get("summary"), chunks=result.get("chunks"),
+            errors=result.get("errors", []), finished_at=result.get("finished_at"))
+    except Exception as exc:  # noqa: BLE001
+        log.error("[source-backfill worker] job %s failed: %s", job_id, exc, exc_info=True)
+        db_writers.update_recovery_job(
+            job_id, status="failed", phase="done",
+            errors=[f"{type(exc).__name__}: source backfill worker failed"],
+            finished_at=datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    finally:
+        with _source_backfill_lock:
+            _source_backfill_progress["running"] = False
+
+
+@app.post("/api/source-attribution-backfill/run", status_code=202)
+def api_source_backfill_run(body: SourceBackfillRequest, request: Request) -> dict[str, Any]:
+    """Start the Source Attribution Backfill in the background (PR-ADS-117).
+
+    Admin-only. Returns 202 with a job_id; runs in a background worker with
+    durable checkpoints. Reads HubSpot read-only and writes ONLY local
+    classification tables. Returns 409 if a backfill is already running.
+    """
+    check_admin_or_token(request)
+    if body.chunk_months < 1:
+        raise HTTPException(status_code=422, detail="chunk_months must be >= 1")
+    for label, value in (("date_from", body.date_from), ("date_to", body.date_to)):
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f"{label} '{value}' is not a valid ISO date") from exc
+
+    import db.writers as db_writers  # noqa: PLC0415
+    latest = db_writers.get_latest_recovery_job(job_type="source_attribution_backfill")
+    if latest and latest.get("status") in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="source attribution backfill already running")
+
+    with _source_backfill_lock:
+        if _source_backfill_progress["running"]:
+            raise HTTPException(status_code=409, detail="source attribution backfill already running")
+        _source_backfill_progress["running"] = True
+
+    job_id = uuid.uuid4().hex
+    created = db_writers.create_recovery_job(
+        job_id, dry_run=body.dry_run, date_from=body.date_from, date_to=body.date_to,
+        chunk_months=body.chunk_months, job_type="source_attribution_backfill")
+    if not created:
+        with _source_backfill_lock:
+            _source_backfill_progress["running"] = False
+        raise HTTPException(status_code=503, detail="source backfill job store unavailable")
+
+    threading.Thread(target=_run_source_backfill_worker, args=(job_id, body), daemon=True).start()
+    return {"job_id": job_id, "status": "queued", "dry_run": body.dry_run}
+
+
+@app.get("/api/source-attribution-backfill/status")
+def api_source_backfill_status(request: Request, job_id: Optional[str] = None) -> dict[str, Any]:
+    """Return durable Source Attribution Backfill job state (admin-only)."""
+    check_admin_or_token(request)
+    import db.writers as db_writers  # noqa: PLC0415
+    job = (db_writers.get_recovery_job(job_id) if job_id
+           else db_writers.get_latest_recovery_job(job_type="source_attribution_backfill"))
+    if not job:
+        return {"running": False, "job": None}
+    return {
+        "running": job.get("status") in ("queued", "running"),
+        "job_id": job.get("job_id"), "status": job.get("status"),
+        "phase": job.get("phase"), "current_chunk": job.get("current_chunk"),
+        "completed_chunks": job.get("completed_chunks", []),
+        "summary": job.get("summary"), "chunks": job.get("chunks"),
+        "errors": job.get("errors", []), "dry_run": job.get("dry_run"),
+        "started_at": job.get("started_at"), "finished_at": job.get("finished_at"),
         "job": job,
     }
 

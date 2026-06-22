@@ -117,6 +117,7 @@ class TestSummaryShape:
             "hubspot/contacts",
             "hubspot/deals",
             "gclid/matches",
+            "hubspot/source_classification",
         }
         assert set(result["datasets"].keys()) == expected
 
@@ -267,6 +268,7 @@ class TestDatasetFailureIsolation:
             contacts_pull=failing_pull,
             deals_contacts_pull=failing_pull,
             closed_won_pull=failing_pull,
+            source_pull=failing_pull,
         )
 
         from scheduler.incremental_sync import run_daily_incremental_sync
@@ -620,6 +622,7 @@ def _patch_all_datasets_success(
     deals_contacts_pull=None,
     deals_write=None,
     closed_won_pull=None,
+    source_pull=None,
 ) -> None:
     """Patch all connector and writer calls with safe fake implementations.
 
@@ -671,6 +674,17 @@ def _patch_all_datasets_success(
         "connectors.hubspot_pull.pull_closed_won_deals_in_range",
         closed_won_pull or (lambda *a, **kw: []),
     )
+    # PR-ADS-117: daily source-classification step.
+    monkeypatch.setattr(
+        "connectors.hubspot_pull.pull_all_contacts_in_range",
+        source_pull or (lambda *a, **kw: []),
+    )
+    monkeypatch.setattr(
+        "connectors.hubspot_pull.pull_closed_won_deals_with_sources_in_range",
+        source_pull or (lambda *a, **kw: []),
+    )
+    monkeypatch.setattr("db.writers.upsert_contact_source_classification", lambda *a, **kw: 0)
+    monkeypatch.setattr("db.writers.upsert_deal_source_attribution", lambda *a, **kw: 0)
 
     # DB writers
     monkeypatch.setattr("db.writers.write_campaigns", campaign_write or _default_write)

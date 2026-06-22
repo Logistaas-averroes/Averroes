@@ -40,7 +40,7 @@ def _section(page_id):
 def test_revenue_pages_constant_includes_both_roas_pages():
     # PR-ADS-113 added the Deals (Closed-Won ledger) and Revenue Health pages to
     # the revenue-page set so the global ad-window bar is suppressed there too.
-    assert 'REVENUE_PAGES = ["roas-campaigns", "roas-countries", "deals", "revenue-health"]' in JS
+    assert 'REVENUE_PAGES = ["roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source"]' in JS
     assert "function isRevenuePage" in JS
 
 
@@ -204,4 +204,4 @@ def test_revenue_pages_list():
     m = re.search(r'REVENUE_PAGES = \[([^\]]*)\]', JS)
     assert m
     names = [n.strip().strip('"').strip("'") for n in m.group(1).split(",") if n.strip()]
-    assert names == ["roas-campaigns", "roas-countries", "deals", "revenue-health"]
+    assert names == ["roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source"]
