@@ -488,6 +488,35 @@ def _fetch_primary_contact_for_deal(deal_id) -> dict | None:
         return None
 
 
+def pull_contacts_by_ids(contact_ids: list) -> dict:
+    """Batch-read HubSpot contacts by ID; return {contact_id: createdate | None}.
+
+    PR-ADS-115 lead event-date reconciliation. Read-only — reads ONLY createdate.
+    Not-found contacts are simply absent from the result (the caller treats them
+    as excluded_legacy). Raises on API error so the caller can mark the affected
+    rows ``unresolved`` (retryable) rather than excluding them.
+
+    NEVER writes to HubSpot.
+    """
+    if not contact_ids:
+        return {}
+    client = get_client()
+    out: dict = {}
+    ids = [str(c) for c in contact_ids if c]
+    for i in range(0, len(ids), 100):  # HubSpot batch read: max 100 ids/call
+        batch = ids[i:i + 100]
+        resp = client.crm.contacts.batch_api.read(
+            batch_read_input_simple_public_object_id={
+                "properties": ["createdate"],
+                "inputs": [{"id": cid} for cid in batch],
+            }
+        )
+        for obj in resp.results:
+            d = obj.to_dict()
+            out[str(d.get("id"))] = (d.get("properties", {}) or {}).get("createdate")
+    return out
+
+
 def get_lead_quality_summary(contacts: list) -> dict:
     """
     Aggregate MQL status breakdown from contacts.

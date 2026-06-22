@@ -111,7 +111,10 @@ def test_blocked_state_helpers_exist():
     assert "function isRevenueDecisionReady" in JS
     assert "function renderRevenueBlockedState" in JS
     assert "Revenue ROAS is not ready yet" in JS
-    assert "Run HubSpot lead re-sync" in JS
+    # PR-ADS-115: the misleading "Run HubSpot lead re-sync" copy was replaced by a
+    # real action — Lead Event-Date Reconciliation in Revenue Health.
+    assert "Run HubSpot lead re-sync" not in JS
+    assert "Lead Event-Date Reconciliation" in JS
     assert "Not connected" in JS
     assert "Rebuilding" in JS
 
@@ -120,7 +123,11 @@ def test_blocked_decision_logic():
     fn = _fn("function isRevenueDecisionReady", span=400)
     assert 'lead_date_grain_status === "event_date"' in fn
     assert 'lead_metrics_status !== "withheld"' in fn
-    assert 'revenue_attribution_status !== "not_wired_or_no_closed_won"' in fn
+    # PR-ADS-115: readiness now keys off the revenue INTEGRATION fact (connected),
+    # so a connected-but-empty window is a safe empty state, not a block.
+    assert "isRevenueIntegrationConnected(sh)" in fn
+    helper = _fn("function isRevenueIntegrationConnected", span=400)
+    assert 'revenue_integration_status === "connected"' in helper
 
 
 def test_blocked_state_returns_before_table_campaign():

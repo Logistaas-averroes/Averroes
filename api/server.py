@@ -57,6 +57,8 @@ Protected endpoints (require authenticated session):
   GET  /api/revenue-deals          — Read-only Closed-Won Revenue Ledger by business window (deal_close_date truth; requires auth; PR-ADS-113).
   POST /api/revenue-recovery/run   — Admin-only Revenue Truth Recovery (local DB writes only; reads HubSpot read-only; PR-ADS-114).
   GET  /api/revenue-recovery/status — Latest Revenue Recovery progress/result (admin-only; PR-ADS-114).
+  POST /api/lead-reconciliation/run — Admin-only Lead Event-Date Reconciliation (local DB writes only; reads HubSpot read-only; PR-ADS-115).
+  GET  /api/lead-reconciliation/status — Latest Lead Reconciliation progress/result (admin-only; PR-ADS-115).
 """
 
 import base64
@@ -238,6 +240,22 @@ class RevenueRecoveryRequest(BaseModel):
 
 _recovery_lock: threading.Lock = threading.Lock()
 _recovery_progress: dict[str, Any] = {"running": False, "latest": None}
+
+
+# ---------------------------------------------------------------------------
+# Lead Event-Date Reconciliation (PR-ADS-115) — admin-only, local DB writes
+# only. Reads HubSpot read-only; NEVER writes to HubSpot or Google Ads, and
+# NEVER fabricates a date. Reuses the durable background-job table (job_type).
+# ---------------------------------------------------------------------------
+
+class LeadReconciliationRequest(BaseModel):
+    dry_run: bool = True
+    batch_size: int = 100
+    resume: bool = False
+
+
+_reconciliation_lock: threading.Lock = threading.Lock()
+_reconciliation_progress: dict[str, Any] = {"running": False, "latest": None}
 
 
 # ---------------------------------------------------------------------------
@@ -6054,8 +6072,8 @@ def api_revenue_recovery_run(body: RevenueRecoveryRequest, request: Request) -> 
 
     import db.writers as db_writers  # noqa: PLC0415
 
-    # Durable single-run guard: a job already queued/running blocks a new one.
-    latest = db_writers.get_latest_recovery_job()
+    # Durable single-run guard: a recovery job already queued/running blocks a new one.
+    latest = db_writers.get_latest_recovery_job(job_type="revenue_recovery")
     if latest and latest.get("status") in ("queued", "running"):
         raise HTTPException(status_code=409, detail="revenue recovery already running")
 
@@ -6111,6 +6129,135 @@ def api_revenue_recovery_status(request: Request, job_id: Optional[str] = None) 
         "dry_run": job.get("dry_run"),
         "date_from": job.get("date_from"),
         "date_to": job.get("date_to"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "job": job,
+    }
+
+
+def _run_reconciliation_worker(job_id: str, body: "LeadReconciliationRequest") -> None:
+    """Background worker for lead event-date reconciliation (PR-ADS-115).
+
+    Persists durable checkpoints to the DB so progress survives a restart and
+    resume is idempotent. Local DB writes only; never writes to any external
+    platform and never fabricates a date.
+    """
+    import db.writers as db_writers  # noqa: PLC0415
+    from services.lead_reconciliation_service import run_lead_reconciliation  # noqa: PLC0415
+
+    def _load_completed():
+        job = db_writers.get_recovery_job(job_id) or {}
+        return job.get("completed_chunks", []) or []
+
+    def _checkpoint(jid, snap):
+        fields = {
+            "status": snap.get("status"), "phase": snap.get("phase"),
+            "current_chunk": snap.get("current_chunk"),
+            "completed_chunks": snap.get("completed_chunks", []),
+            "summary": snap.get("summary"), "chunks": snap.get("chunks"),
+            "errors": snap.get("errors", []),
+        }
+        if "finished_at" in snap:
+            fields["finished_at"] = snap["finished_at"]
+        db_writers.update_recovery_job(jid, **fields)
+
+    try:
+        db_writers.update_recovery_job(job_id, status="running", phase="loading")
+        result = run_lead_reconciliation(
+            dry_run=body.dry_run,
+            batch_size=body.batch_size,
+            resume=body.resume,
+            job_id=job_id,
+            load_completed=_load_completed,
+            checkpoint=_checkpoint,
+            progress=_reconciliation_progress,
+        )
+        db_writers.update_recovery_job(
+            job_id, status=result.get("status", "success"), phase="done",
+            summary=result.get("summary"), chunks=result.get("chunks"),
+            errors=result.get("errors", []), finished_at=result.get("finished_at"),
+        )
+        # Revenue readiness may have changed — nothing to write here; the next
+        # source-health read reflects the new exclusion/backfill state.
+    except Exception as exc:  # noqa: BLE001
+        log.error("[lead-reconciliation worker] job %s failed: %s", job_id, exc, exc_info=True)
+        db_writers.update_recovery_job(
+            job_id, status="failed", phase="done",
+            errors=[f"{type(exc).__name__}: reconciliation worker failed"],
+            finished_at=datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    finally:
+        with _reconciliation_lock:
+            _reconciliation_progress["running"] = False
+
+
+@app.post("/api/lead-reconciliation/run", status_code=202)
+def api_lead_reconciliation_run(body: LeadReconciliationRequest, request: Request) -> dict[str, Any]:
+    """Start Lead Event-Date Reconciliation in the background (PR-ADS-115).
+
+    Admin-only. Returns 202 immediately with a job_id; the job runs in a
+    background worker and persists durable checkpoints to local PostgreSQL.
+    Reads HubSpot read-only and writes ONLY to the local DB (backfills from real
+    createdate, or durable exclusions). NEVER writes to HubSpot/Google Ads and
+    NEVER fabricates a date. Returns 409 if a reconciliation is already running.
+    """
+    check_admin_or_token(request)
+    if body.batch_size < 1:
+        raise HTTPException(status_code=422, detail="batch_size must be >= 1")
+
+    import db.writers as db_writers  # noqa: PLC0415
+
+    latest = db_writers.get_latest_recovery_job(job_type="lead_reconciliation")
+    if latest and latest.get("status") in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="lead reconciliation already running")
+
+    with _reconciliation_lock:
+        if _reconciliation_progress["running"]:
+            raise HTTPException(status_code=409, detail="lead reconciliation already running")
+        _reconciliation_progress["running"] = True
+
+    job_id = uuid.uuid4().hex
+    created = db_writers.create_recovery_job(
+        job_id, dry_run=body.dry_run, date_from=None, date_to=None,
+        chunk_months=1, job_type="lead_reconciliation",
+    )
+    if not created:
+        with _reconciliation_lock:
+            _reconciliation_progress["running"] = False
+        raise HTTPException(status_code=503, detail="reconciliation job store unavailable")
+
+    threading.Thread(
+        target=_run_reconciliation_worker, args=(job_id, body), daemon=True,
+    ).start()
+
+    return {"job_id": job_id, "status": "queued", "dry_run": body.dry_run}
+
+
+@app.get("/api/lead-reconciliation/status")
+def api_lead_reconciliation_status(request: Request, job_id: Optional[str] = None) -> dict[str, Any]:
+    """Return durable Lead Reconciliation job state (admin-only).
+
+    Reads from local PostgreSQL: the specific job_id, else the most recent
+    lead_reconciliation job. The UI polls this every few seconds while running.
+    """
+    check_admin_or_token(request)
+    import db.writers as db_writers  # noqa: PLC0415
+
+    job = (db_writers.get_recovery_job(job_id) if job_id
+           else db_writers.get_latest_recovery_job(job_type="lead_reconciliation"))
+    if not job:
+        return {"running": False, "job": None}
+    return {
+        "running": job.get("status") in ("queued", "running"),
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "phase": job.get("phase"),
+        "current_chunk": job.get("current_chunk"),
+        "completed_chunks": job.get("completed_chunks", []),
+        "summary": job.get("summary"),
+        "chunks": job.get("chunks"),
+        "errors": job.get("errors", []),
+        "dry_run": job.get("dry_run"),
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
         "job": job,
