@@ -1174,8 +1174,10 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
     return {
         "window": {
             "key": resolved["key"],
+            "label": resolved.get("label"),
             "start_date": resolved["start_date"],
             "end_date": resolved["end_date"],
+            "is_closed_window": resolved.get("is_closed_window", False),
         },
         "date_grain_health": date_grain_health,
         "counts_by_source_type": grain.get("counts_by_source_type", {}),
