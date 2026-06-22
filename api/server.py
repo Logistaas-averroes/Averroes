@@ -281,6 +281,23 @@ _source_backfill_progress: dict[str, Any] = {"running": False, "latest": None}
 
 
 # ---------------------------------------------------------------------------
+# Google Ads Spend Truth backfill (PR-ADS-118) — admin-only durable job.
+# Reads Google Ads read-only; writes only local canonical tables.
+# ---------------------------------------------------------------------------
+
+class SpendBackfillRequest(BaseModel):
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    chunk_months: int = 1
+    dry_run: bool = True
+    resume: bool = False
+
+
+_spend_backfill_lock: threading.Lock = threading.Lock()
+_spend_backfill_progress: dict[str, Any] = {"running": False, "latest": None}
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -6413,6 +6430,135 @@ def api_source_backfill_status(request: Request, job_id: Optional[str] = None) -
     import db.writers as db_writers  # noqa: PLC0415
     job = (db_writers.get_recovery_job(job_id) if job_id
            else db_writers.get_latest_recovery_job(job_type="source_attribution_backfill"))
+    if not job:
+        return {"running": False, "job": None}
+    return {
+        "running": job.get("status") in ("queued", "running"),
+        "job_id": job.get("job_id"), "status": job.get("status"),
+        "phase": job.get("phase"), "current_chunk": job.get("current_chunk"),
+        "completed_chunks": job.get("completed_chunks", []),
+        "summary": job.get("summary"), "chunks": job.get("chunks"),
+        "errors": job.get("errors", []), "dry_run": job.get("dry_run"),
+        "started_at": job.get("started_at"), "finished_at": job.get("finished_at"),
+        "job": job,
+    }
+
+
+@app.get("/api/google-ads-spend-audit")
+async def get_google_ads_spend_audit(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Google Ads Spend Truth audit (PR-ADS-118).
+
+    Read-only forensic comparison of canonical API total, canonical local-table
+    total, and legacy geo total for a business window, with coverage and state
+    (VERIFIED / PARTIAL / GEO_MISMATCH / UNAVAILABLE). A missing chunk is never
+    treated as zero spend.
+    """
+    from services.google_ads_spend_service import build_google_ads_spend_audit  # noqa: PLC0415
+    try:
+        return build_google_ads_spend_audit(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("Google Ads spend audit failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Google Ads spend audit failed") from exc
+
+
+def _run_spend_backfill_worker(job_id: str, body: "SpendBackfillRequest") -> None:
+    """Background worker for the Google Ads spend backfill (PR-ADS-118).
+
+    Durable DB checkpoints; resume reads completed chunks from the DB. Reads
+    Google Ads read-only; writes only local canonical tables.
+    """
+    import db.writers as db_writers  # noqa: PLC0415
+    from services.google_ads_spend_service import run_google_ads_spend_backfill  # noqa: PLC0415
+
+    def _load_completed():
+        job = db_writers.get_recovery_job(job_id) or {}
+        return job.get("completed_chunks", []) or []
+
+    def _checkpoint(jid, snap):
+        fields = {"status": snap.get("status"), "phase": snap.get("phase"),
+                  "current_chunk": snap.get("current_chunk"),
+                  "completed_chunks": snap.get("completed_chunks", []),
+                  "summary": snap.get("summary"), "chunks": snap.get("chunks"),
+                  "errors": snap.get("errors", [])}
+        if "finished_at" in snap:
+            fields["finished_at"] = snap["finished_at"]
+        db_writers.update_recovery_job(jid, **fields)
+
+    try:
+        db_writers.update_recovery_job(job_id, status="running", phase="starting")
+        result = run_google_ads_spend_backfill(
+            date_from=body.date_from, date_to=body.date_to, dry_run=body.dry_run,
+            chunk_months=body.chunk_months, resume=body.resume, job_id=job_id,
+            load_completed=_load_completed, checkpoint=_checkpoint,
+            progress=_spend_backfill_progress)
+        db_writers.update_recovery_job(
+            job_id, status=result.get("status", "success"), phase="done",
+            summary=result.get("summary"), chunks=result.get("chunks"),
+            errors=result.get("errors", []), finished_at=result.get("finished_at"))
+    except Exception as exc:  # noqa: BLE001
+        log.error("[spend-backfill worker] job %s failed: %s", job_id, exc, exc_info=True)
+        db_writers.update_recovery_job(
+            job_id, status="failed", phase="done",
+            errors=[f"{type(exc).__name__}: spend backfill worker failed"],
+            finished_at=datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    finally:
+        with _spend_backfill_lock:
+            _spend_backfill_progress["running"] = False
+
+
+@app.post("/api/google-ads-spend-backfill/run", status_code=202)
+def api_spend_backfill_run(body: SpendBackfillRequest, request: Request) -> dict[str, Any]:
+    """Start the Google Ads spend backfill in the background (PR-ADS-118).
+
+    Admin-only. Returns 202 with a job_id; durable checkpoints. Reads Google Ads
+    read-only and writes ONLY local canonical tables. Returns 409 if already
+    running. NEVER writes to Google Ads.
+    """
+    check_admin_or_token(request)
+    if body.chunk_months < 1:
+        raise HTTPException(status_code=422, detail="chunk_months must be >= 1")
+    for label, value in (("date_from", body.date_from), ("date_to", body.date_to)):
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f"{label} '{value}' is not a valid ISO date") from exc
+
+    import db.writers as db_writers  # noqa: PLC0415
+    latest = db_writers.get_latest_recovery_job(job_type="google_ads_spend_backfill")
+    if latest and latest.get("status") in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="google ads spend backfill already running")
+
+    with _spend_backfill_lock:
+        if _spend_backfill_progress["running"]:
+            raise HTTPException(status_code=409, detail="google ads spend backfill already running")
+        _spend_backfill_progress["running"] = True
+
+    job_id = uuid.uuid4().hex
+    created = db_writers.create_recovery_job(
+        job_id, dry_run=body.dry_run, date_from=body.date_from, date_to=body.date_to,
+        chunk_months=body.chunk_months, job_type="google_ads_spend_backfill")
+    if not created:
+        with _spend_backfill_lock:
+            _spend_backfill_progress["running"] = False
+        raise HTTPException(status_code=503, detail="spend backfill job store unavailable")
+
+    threading.Thread(target=_run_spend_backfill_worker, args=(job_id, body), daemon=True).start()
+    return {"job_id": job_id, "status": "queued", "dry_run": body.dry_run}
+
+
+@app.get("/api/google-ads-spend-backfill/status")
+def api_spend_backfill_status(request: Request, job_id: Optional[str] = None) -> dict[str, Any]:
+    """Return durable Google Ads spend backfill job state (admin-only)."""
+    check_admin_or_token(request)
+    import db.writers as db_writers  # noqa: PLC0415
+    job = (db_writers.get_recovery_job(job_id) if job_id
+           else db_writers.get_latest_recovery_job(job_type="google_ads_spend_backfill"))
     if not job:
         return {"running": False, "job": None}
     return {

@@ -62,9 +62,33 @@ def _revenue_rows():
     ]
 
 
+def _canonical_from_spend(spend_rows):
+    """Build a canonical campaign-spend payload mirroring geo spend per campaign.
+
+    PR-ADS-118: Campaign ROAS is sourced from canonical Google Ads spend (never
+    geo). Mirroring the geo totals into canonical — with a wide verified coverage
+    chunk — lets these DB-path tests exercise ROAS under the new spend-truth
+    contract (complete canonical coverage required).
+    """
+    by_camp = {}
+    for r in spend_rows:
+        name = r.get("campaign_name")
+        by_camp[name] = by_camp.get(name, 0.0) + float(r.get("spend") or 0)
+    rows = [{"campaign_id": str(i + 1), "campaign_name": name,
+             "cost_micros": int(round(amt * 1_000_000)), "spend": amt}
+            for i, (name, amt) in enumerate(by_camp.items())]
+    total_micros = sum(r["cost_micros"] for r in rows)
+    return {"available": True, "rows": rows, "total_cost_micros": total_micros,
+            "total_spend": total_micros / 1_000_000, "campaign_count": len(rows),
+            "customer_id": "C1", "currency_code": "USD",
+            "coverage_start": "2000-01-01", "coverage_end": "2100-01-01"}
+
+
 def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
-              spend_cov=("2026-04-01", "2026-06-20"), revenue_cov=("2026-05-01", "2026-05-10")):
-    spend_obj = {"available": True, "rows": spend if spend is not None else _spend_rows(),
+              spend_cov=("2026-04-01", "2026-06-20"), revenue_cov=("2026-05-01", "2026-05-10"),
+              canonical=None, coverage=None):
+    spend_rows = spend if spend is not None else _spend_rows()
+    spend_obj = {"available": True, "rows": spend_rows,
                  "coverage_start": spend_cov[0], "coverage_end": spend_cov[1], "table": "geo"}
     leads_obj = {"available": True, "rows": leads if leads is not None else _lead_rows(),
                  "coverage_start": None, "coverage_end": None, "table": "leads",
@@ -73,9 +97,18 @@ def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
                  "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0}
     revenue_obj = {"available": True, "rows": revenue if revenue is not None else _revenue_rows(),
                    "coverage_start": revenue_cov[0], "coverage_end": revenue_cov[1], "table": "gclid_attribution"}
+    # Canonical spend mirrors geo so ROAS is verified from canonical, with a wide
+    # verified coverage chunk (so any window is complete) unless overridden.
+    canonical_obj = canonical if canonical is not None else _canonical_from_spend(spend_rows)
+    coverage_obj = coverage if coverage is not None else {
+        "available": True,
+        "chunks": [{"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified"}],
+    }
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend_obj), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=leads_obj), \
          patch("db.revenue_repository.fetch_won_revenue", return_value=revenue_obj), \
+         patch("db.revenue_repository.fetch_canonical_campaign_spend", return_value=canonical_obj), \
+         patch("db.revenue_repository.fetch_spend_coverage", return_value=coverage_obj), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         return build_revenue_attribution(window, now=NOW)
 

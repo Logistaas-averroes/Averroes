@@ -29,12 +29,36 @@ def _leads(rows=None, safe=True):
             "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0}
 
 
+def _canonical(spend_rows):
+    """Canonical campaign spend mirroring geo (PR-ADS-118 spend-truth contract).
+
+    Campaign ROAS comes from canonical spend with COMPLETE coverage — never geo.
+    Mirroring geo into canonical (with a wide verified chunk) keeps these
+    truth-safety tests exercising real ROAS math under the new contract.
+    """
+    by_camp = {}
+    for r in spend_rows:
+        by_camp[r.get("campaign_name")] = by_camp.get(r.get("campaign_name"), 0.0) + float(r.get("spend") or 0)
+    rows = [{"campaign_id": str(i + 1), "campaign_name": n,
+             "cost_micros": int(round(a * 1_000_000)), "spend": a}
+            for i, (n, a) in enumerate(by_camp.items())]
+    tot = sum(r["cost_micros"] for r in rows)
+    return {"available": True, "rows": rows, "total_cost_micros": tot,
+            "total_spend": tot / 1_000_000, "campaign_count": len(rows),
+            "customer_id": "C1", "currency_code": "USD",
+            "coverage_start": "2000-01-01", "coverage_end": "2100-01-01"}
+
+
 def _build(spend_rows, revenue_rows, lead_rows=None, safe=True):
     spend = {"available": True, "rows": spend_rows, "coverage_start": None, "coverage_end": None, "table": "geo"}
     rev = {"available": True, "rows": revenue_rows, "coverage_start": None, "coverage_end": None, "table": "gclid_attribution"}
+    coverage = {"available": True,
+                "chunks": [{"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified"}]}
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=_leads(lead_rows, safe)), \
          patch("db.revenue_repository.fetch_won_revenue", return_value=rev), \
+         patch("db.revenue_repository.fetch_canonical_campaign_spend", return_value=_canonical(spend_rows)), \
+         patch("db.revenue_repository.fetch_spend_coverage", return_value=coverage), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         return build_revenue_attribution("current_quarter", now=NOW)
 

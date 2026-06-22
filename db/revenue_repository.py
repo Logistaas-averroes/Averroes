@@ -601,3 +601,129 @@ def fetch_source_revenue(start: date | None, end: date) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_source_revenue failed: %s", exc)
         return {"available": False, "rows": []}
+
+
+# ── Canonical Google Ads spend truth (PR-ADS-118) ────────────────────────────
+
+
+def fetch_canonical_campaign_spend(start: date | None, end: date) -> dict:
+    """Per-campaign canonical Google Ads spend from google_ads_campaign_daily_spend.
+
+    Spend truth read DIRECTLY from the canonical table (never the geo table).
+    Aggregates raw cost_micros (no early rounding). Read-only.
+
+    Returns {available, rows:[{campaign_id, campaign_name, cost_micros, spend}],
+             total_cost_micros, total_spend, campaign_count, customer_id,
+             currency_code, coverage_start, coverage_end}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT campaign_id, MAX(campaign_name) AS campaign_name,
+                           SUM(cost_micros)::bigint AS cost_micros
+                    FROM google_ads_campaign_daily_spend
+                    WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    GROUP BY campaign_id
+                    """,
+                    (start, start, end),
+                )
+                rows = []
+                total = 0
+                for r in _rows_as_dicts(cur):
+                    micros = int(r.get("cost_micros") or 0)
+                    total += micros
+                    rows.append({
+                        "campaign_id": r.get("campaign_id"),
+                        "campaign_name": r.get("campaign_name"),
+                        "cost_micros": micros,
+                        "spend": micros / 1_000_000,
+                    })
+                cur.execute(
+                    """
+                    SELECT MIN(spend_date) AS cstart, MAX(spend_date) AS cend,
+                           MIN(customer_id) AS customer_id, MIN(currency_code) AS currency
+                    FROM google_ads_campaign_daily_spend
+                    WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    """,
+                    (start, start, end),
+                )
+                meta = cur.fetchone() or (None, None, None, None)
+            return {
+                "available": True,
+                "rows": rows,
+                "total_cost_micros": total,
+                "total_spend": total / 1_000_000,
+                "campaign_count": len(rows),
+                "customer_id": meta[2],
+                "currency_code": meta[3],
+                "coverage_start": _as_date(meta[0]),
+                "coverage_end": _as_date(meta[1]),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_canonical_campaign_spend failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
+def fetch_spend_coverage(start: date | None, end: date) -> dict:
+    """Verified/failed Google Ads spend chunks intersecting the window. Read-only.
+
+    Returns {available, chunks:[{chunk_start, chunk_end, status, rows_written,
+             cost_micros_total}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "chunks": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT chunk_start, chunk_end, status, rows_written, cost_micros_total
+                    FROM google_ads_spend_coverage
+                    WHERE chunk_end >= COALESCE(%s::date, chunk_end) AND chunk_start <= %s
+                    ORDER BY chunk_start
+                    """,
+                    (start, end),
+                )
+                chunks = []
+                for r in _rows_as_dicts(cur):
+                    chunks.append({
+                        "chunk_start": _as_date(r.get("chunk_start")),
+                        "chunk_end": _as_date(r.get("chunk_end")),
+                        "status": r.get("status"),
+                        "rows_written": r.get("rows_written"),
+                        "cost_micros_total": int(r.get("cost_micros_total") or 0),
+                    })
+            return {"available": True, "chunks": chunks}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_spend_coverage failed: %s", exc)
+        return {"available": False, "chunks": []}
+
+
+def fetch_geo_spend_total(start: date | None, end: date) -> dict:
+    """Total legacy geo-table spend for the window (for reconciliation). Read-only."""
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "total_spend": 0.0}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(spend_usd), 0)::float FROM (
+                        SELECT DISTINCT ON (campaign_name, country, run_date)
+                               run_date, spend_usd
+                        FROM geo
+                        WHERE (%s::date IS NULL OR run_date >= %s) AND run_date <= %s
+                        ORDER BY campaign_name, country, run_date, run_id DESC
+                    ) d
+                    """,
+                    (start, start, end),
+                )
+                total = float(cur.fetchone()[0] or 0.0)
+            return {"available": True, "total_spend": total}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_geo_spend_total failed: %s", exc)
+        return {"available": False, "total_spend": 0.0}

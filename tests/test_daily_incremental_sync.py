@@ -118,6 +118,7 @@ class TestSummaryShape:
             "hubspot/deals",
             "gclid/matches",
             "hubspot/source_classification",
+            "google_ads/canonical_spend",
         }
         assert set(result["datasets"].keys()) == expected
 
@@ -685,6 +686,16 @@ def _patch_all_datasets_success(
     )
     monkeypatch.setattr("db.writers.upsert_contact_source_classification", lambda *a, **kw: 0)
     monkeypatch.setattr("db.writers.upsert_deal_source_attribution", lambda *a, **kw: 0)
+    # PR-ADS-118: daily canonical Google Ads spend step (patched at the service
+    # seam so tests never import the google-ads SDK).
+    monkeypatch.setattr(
+        "services.google_ads_spend_service.fetch_daily_spend",
+        source_pull and (lambda *a, **kw: source_pull()) or (lambda *a, **kw: {
+            "customer_id": "123", "currency_code": "USD",
+            "source_query_version": "campaign_daily_v1", "rows": []}),
+    )
+    monkeypatch.setattr("db.writers.upsert_campaign_daily_spend", lambda *a, **kw: 0)
+    monkeypatch.setattr("db.writers.upsert_spend_coverage", lambda *a, **kw: True)
 
     # DB writers
     monkeypatch.setattr("db.writers.write_campaigns", campaign_write or _default_write)

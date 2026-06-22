@@ -571,6 +571,52 @@ CREATE INDEX IF NOT EXISTS idx_deal_source_group
   ON deal_source_attribution(acquisition_group);
 CREATE INDEX IF NOT EXISTS idx_deal_source_close
   ON deal_source_attribution(deal_close_date);
+
+-- PR-ADS-118: canonical Google Ads campaign-daily spend — the spend-truth fact
+-- read DIRECTLY from the Google Ads API (not derived from the geo table). Raw
+-- cost_micros is preserved; the normalised amount is stored for convenience but
+-- aggregation always sums micros first. Unique per (customer, campaign, day).
+CREATE TABLE IF NOT EXISTS google_ads_campaign_daily_spend (
+  id                      SERIAL PRIMARY KEY,
+  customer_id             TEXT NOT NULL,
+  currency_code           TEXT,
+  campaign_id             TEXT NOT NULL,
+  campaign_name           TEXT,
+  spend_date              DATE NOT NULL,
+  cost_micros             BIGINT NOT NULL DEFAULT 0,
+  spend_account_currency  NUMERIC(18,6) NOT NULL DEFAULT 0,
+  sync_run_id             TEXT,
+  source_query_version    TEXT,
+  fetched_at              TIMESTAMPTZ DEFAULT NOW(),
+  updated_at              TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (customer_id, campaign_id, spend_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ga_daily_spend_date
+  ON google_ads_campaign_daily_spend(spend_date);
+CREATE INDEX IF NOT EXISTS idx_ga_daily_spend_campaign
+  ON google_ads_campaign_daily_spend(campaign_id);
+
+-- PR-ADS-118: per-chunk fetch ledger so the audit can distinguish a genuinely
+-- zero-spend day INSIDE a successfully fetched chunk from a date range that was
+-- never fetched. A missing chunk is NEVER treated as zero spend.
+CREATE TABLE IF NOT EXISTS google_ads_spend_coverage (
+  id                    SERIAL PRIMARY KEY,
+  customer_id           TEXT NOT NULL,
+  chunk_start           DATE NOT NULL,
+  chunk_end             DATE NOT NULL,
+  status                TEXT NOT NULL,          -- verified | failed
+  rows_written          INTEGER NOT NULL DEFAULT 0,
+  cost_micros_total     BIGINT NOT NULL DEFAULT 0,
+  source_query_version  TEXT,
+  sync_run_id           TEXT,
+  fetched_at            TIMESTAMPTZ DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (customer_id, chunk_start, chunk_end)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ga_spend_coverage_range
+  ON google_ads_spend_coverage(chunk_start, chunk_end);
 """
 
 
