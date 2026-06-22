@@ -344,19 +344,22 @@ def test_health_uses_audit_endpoint_read_only():
 
 def test_health_safe_alone_is_not_revenue_ready():
     region = _health_region()
-    # Revenue Ready requires BOTH a SAFE verdict and wired revenue.
+    # Revenue Ready requires a SAFE verdict AND the integration connected (PR-115
+    # split contract): SAFE alone is not enough.
     assert 'audit.verdict === "SAFE"' in region
-    assert "revenueWired" in region
+    assert "integrationConnected" in region
     assert "A SAFE audit verdict alone does not mean Revenue Ready." in region
 
 
-def test_health_shows_four_checks_and_rails():
+def test_health_shows_checks_and_rails():
     region = _health_region()
-    for check in ("Lead date grain", "Revenue attribution", "Campaign pollution", "Window integrity"):
+    # PR-ADS-115: "Revenue attribution / Wired" split into integration + window.
+    for check in ("Lead date grain", "Revenue integration", "Selected window",
+                  "Campaign pollution", "Window integrity"):
         assert check in region, f"missing health check: {check}"
     for rail in ("geo.run_date", "leads.contact_created_at", "gclid_attribution.deal_close_date"):
         assert rail in region, f"missing source-date rail: {rail}"
-    for count in ("Missing contact dates", "Excluded non-paid rows", "Excluded pseudo campaigns"):
+    for count in ("missing dates", "Excluded non-paid rows", "Excluded pseudo campaigns"):
         assert count in region
 
 

@@ -1159,6 +1159,18 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
 
     verdict = "SAFE" if not blockers else "UNSAFE"
 
+    # PR-ADS-115 split contract: integration connected = ANY durable attributed
+    # closed-won deal exists (regardless of window); window status reflects only
+    # the selected business window. A connected integration with no deals in the
+    # selected window is a SAFE EMPTY state, not "not wired".
+    revenue_integration_connected = repo.revenue_integration_connected()
+    window_has_revenue = bool(revenue.get("rows"))
+    try:
+        import db.writers as _db_writers  # noqa: PLC0415
+        legacy_excluded_count = _db_writers.count_lead_exclusions()
+    except Exception:  # noqa: BLE001
+        legacy_excluded_count = 0
+
     return {
         "window": {
             "key": resolved["key"],
@@ -1170,10 +1182,14 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
         "excluded_non_paid_count": grain.get("excluded_non_paid_count", 0),
         "excluded_pseudo_campaign_count": grain.get("excluded_pseudo_campaign_count", 0),
         "missing_contact_created_at_count": grain.get("missing_contact_created_at_count", 0),
+        "legacy_excluded_count": legacy_excluded_count,
         "pseudo_campaign_rows": pollution.get("pseudo_campaign_rows", []),
         "email_campaign_rows": pollution.get("email_campaign_rows", []),
         "zero_spend_campaigns_with_leads": pollution.get("zero_spend_campaigns_with_leads", []),
-        "revenue_attribution_wired": bool(revenue.get("rows")),
+        # Retained for backward compatibility (window-only fact).
+        "revenue_attribution_wired": window_has_revenue,
+        "revenue_integration_status": "connected" if revenue_integration_connected else "not_connected",
+        "revenue_window_status": "has_revenue" if window_has_revenue else "no_closed_won",
         "window_comparison": window_comparison,
         "window_ranges": window_ranges,
         "verdict": verdict,

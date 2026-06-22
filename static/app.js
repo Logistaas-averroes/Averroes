@@ -2896,7 +2896,13 @@ function renderRevenueHealth(audit) {
   const cmpKeys = ["current_quarter", "ytd", "all_time"];
 
   const leadGrainOk = !!dg.lead_window_safe;
-  const revenueWired = audit.revenue_attribution_wired === true;
+  // PR-ADS-115 split contract: integration connected vs selected-window status.
+  const integrationConnected = (audit.revenue_integration_status
+    ? audit.revenue_integration_status === "connected"
+    : audit.revenue_attribution_wired === true);
+  const windowHasRevenue = (audit.revenue_window_status
+    ? audit.revenue_window_status === "has_revenue"
+    : audit.revenue_attribution_wired === true);
   const pollutionOk = pollutionCount === 0;
 
   // Window integrity is a property of the resolved DATE BOUNDARIES, never the
@@ -2909,19 +2915,23 @@ function renderRevenueHealth(audit) {
   });
   const windowIntegrityOk = !audit.window_ranges || new Set(rangeSignatures).size > 1;
 
-  // SAFE alone is NOT Revenue Ready — both conditions are required.
-  const revenueReady = audit.verdict === "SAFE" && revenueWired;
+  // Revenue truth is ready when the audit is SAFE, lead dates are safe, and the
+  // integration is connected. A connected integration whose selected window has
+  // no closed-won deals is a SAFE EMPTY state — never "not wired".
+  const revenueReady = audit.verdict === "SAFE" && leadGrainOk && integrationConnected;
 
   const blockers = (audit.blockers || []).slice();
-  if (!revenueWired) {
-    blockers.push("Revenue attribution is not wired: no closed-won deals attributed for this window.");
+  if (!integrationConnected) {
+    blockers.push("Revenue integration is not connected: no attributed closed-won deals exist yet.");
   }
 
-  let nextAction = "Revenue attribution is ready — no action needed.";
-  if (!revenueWired) {
-    nextAction = "Connect revenue attribution: ensure HubSpot closed-won deals sync with deal_close_date into gclid_attribution, then re-check this page.";
-  } else if (!leadGrainOk) {
-    nextAction = "Run a HubSpot lead re-sync to backfill contact_created_at, then re-check this page.";
+  // The next action points at a REAL admin workflow — never a nonexistent
+  // generic lead re-import action.
+  let nextAction = "Revenue truth is ready — no action needed.";
+  if (!leadGrainOk) {
+    nextAction = "Run Lead Event-Date Reconciliation (below) to resolve included paid leads still missing an event date.";
+  } else if (!integrationConnected) {
+    nextAction = "Run Revenue Truth Recovery (below) to connect closed-won attribution, then re-check this page.";
   } else if (!pollutionOk) {
     nextAction = "Clean pseudo/email campaign rows from the leads table, then re-check this page.";
   }
@@ -2930,12 +2940,12 @@ function renderRevenueHealth(audit) {
     ? `<div class="revenue-blocked-card revenue-empty-card">
          <div class="revenue-blocked-card__eyebrow">Revenue readiness</div>
          <h3>Revenue Ready</h3>
-         <p>The audit verdict is SAFE and revenue attribution is wired for this window.</p>
+         <p>The audit is SAFE, lead event dates are safe, and the revenue integration is connected.${!windowHasRevenue ? " The selected window has no closed-won deals yet — a safe empty state." : ""}</p>
        </div>`
     : `<div class="revenue-blocked-card">
          <div class="revenue-blocked-card__eyebrow">Revenue readiness</div>
-         <h3>Revenue is not ready for this window</h3>
-         <p>A SAFE audit verdict alone does not mean Revenue Ready — revenue is ready only when the audit is SAFE and revenue attribution is wired.</p>
+         <h3>Revenue is not ready</h3>
+         <p>Revenue truth is ready only when the audit is SAFE, lead event dates are safe, and the revenue integration is connected. (A connected integration with no closed-won deals in the selected window is safe-empty, not a blocker.)</p>
          <ul class="revenue-health-blockers">${blockers.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}</ul>
          <div class="revenue-next-step"><strong>Next step:</strong> ${escapeHtml(nextAction)}</div>
        </div>`;
@@ -2962,7 +2972,8 @@ function renderRevenueHealth(audit) {
 
     <div class="revenue-status-grid revenue-health-checks">
       ${revenueHealthCheckChip("Lead date grain", leadGrainOk, "Event-date safe", "Unsafe (sync date)")}
-      ${revenueHealthCheckChip("Revenue attribution", revenueWired, "Wired", "Not wired")}
+      ${revenueHealthCheckChip("Revenue integration", integrationConnected, "Connected", "Not connected")}
+      ${revenueHealthCheckChip("Selected window", true, windowHasRevenue ? "Revenue rows" : "No closed-won revenue (safe)", "")}
       ${revenueHealthCheckChip("Campaign pollution", pollutionOk, "Clean", `${pollutionCount} polluted row(s)`)}
       ${revenueHealthCheckChip("Window integrity", windowIntegrityOk, "Windows differ", "Windows identical")}
     </div>
@@ -2978,8 +2989,9 @@ function renderRevenueHealth(audit) {
       </ul>
     </div>
 
-    <div class="revenue-summary-strip revenue-summary-strip--three">
-      <div><span>Missing contact dates</span><strong>${fmtCount(audit.missing_contact_created_at_count)}</strong></div>
+    <div class="revenue-summary-strip revenue-summary-strip--four">
+      <div><span>Included paid leads missing dates</span><strong>${fmtCount(audit.missing_contact_created_at_count)}</strong></div>
+      <div><span>Legacy paid rows excluded from revenue truth</span><strong>${fmtCount(audit.legacy_excluded_count)}</strong></div>
       <div><span>Excluded non-paid rows</span><strong>${fmtCount(audit.excluded_non_paid_count)}</strong></div>
       <div><span>Excluded pseudo campaigns</span><strong>${fmtCount(audit.excluded_pseudo_campaign_count)}</strong></div>
     </div>
@@ -8141,7 +8153,7 @@ function renderRevenueBlockedState(sourceHealth) {
        <span>${label}</span><strong>${ok ? okText : warnText}</strong>
      </div>`;
   // The next action points at the real Revenue Health reconciliation workflow —
-  // there is no generic "HubSpot lead re-sync" admin action.
+  // there is no generic lead re-import admin action.
   const nextStep = !leadsReady
     ? `<strong>Next step:</strong> Open <strong>System Status → Revenue Health</strong> and run <strong>Lead Event-Date Reconciliation</strong>${(missing || missing === 0) ? ` (${fmtCount(missing)} included paid leads still missing an event date)` : ""}.`
     : `<strong>Next step:</strong> Connect revenue attribution by running <strong>Revenue Truth Recovery</strong> in <strong>System Status → Revenue Health</strong>.`;

@@ -268,3 +268,65 @@ def test_reconciliation_panel_present():
     assert "Preview reconciliation" in JS
     assert "Run reconciliation" in JS
     assert "Included paid leads missing an event date" in JS
+
+
+# ── split-contract audit: connected integration + safe-empty window ──────────
+
+
+def _patched_audit(monkeypatch):
+    """Patch repo so the audit builds: integration connected, but the selected
+    window has zero closed-won deals (71 attributed all-time, none this quarter)."""
+    pytest.importorskip("psycopg2")
+    grain = {"available": True, "lead_window_safe": True,
+             "lead_event_date_field_available": True,
+             "missing_contact_created_at_count": 0, "excluded_non_paid_count": 0,
+             "excluded_pseudo_campaign_count": 0, "counts_by_source_type": {}}
+    pollution = {"available": True, "pseudo_campaign_rows": [],
+                 "email_campaign_rows": [], "zero_spend_campaigns_with_leads": []}
+    empty = {"available": True, "rows": [], "coverage_start": None, "coverage_end": None}
+    leads = {"available": True, "rows": [], "event_date_safe": True,
+             "lead_event_date_field_available": True,
+             "missing_contact_created_at_count": 0, "excluded_non_paid_count": 0,
+             "excluded_pseudo_campaign_count": 0, "coverage_start": None, "coverage_end": None}
+    try:
+        monkeypatch.setattr("db.revenue_repository.fetch_lead_date_grain_health", lambda *a, **k: grain)
+        monkeypatch.setattr("db.revenue_repository.fetch_campaign_pollution_report", lambda *a, **k: pollution)
+        monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", lambda *a, **k: empty)
+        monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", lambda *a, **k: empty)
+        monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda *a, **k: leads)
+        monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda *a, **k: {"available": True, "datasets": {}})
+        # 71 attributed deals exist all-time → integration connected.
+        monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
+        monkeypatch.setattr("db.writers.count_lead_exclusions", lambda: 3276)
+    except (ImportError, AttributeError) as exc:
+        pytest.skip(f"runtime deps unavailable: {exc}")
+
+
+def test_audit_connected_integration_empty_window(monkeypatch):
+    try:
+        from services.revenue_attribution_service import build_revenue_attribution_audit
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"service import unavailable: {exc}")
+    _patched_audit(monkeypatch)
+    audit = build_revenue_attribution_audit("current_quarter")
+    assert audit["revenue_integration_status"] == "connected"
+    assert audit["revenue_window_status"] == "no_closed_won"
+    # Excluded legacy rows are surfaced for Revenue Health.
+    assert audit["legacy_excluded_count"] == 3276
+
+
+def test_health_renders_connected_safe_empty_no_resync():
+    region = _fn("function renderRevenueHealth", span=4800)
+    # Uses the split contract, not the old wired-only fact.
+    assert "revenue_integration_status" in region
+    assert "revenue_window_status" in region
+    assert "integrationConnected" in region
+    # Health shows Connected + the safe-empty window state (not "Not wired").
+    assert "Revenue integration" in JS and 'integrationConnected, "Connected", "Not connected"' in JS
+    assert "No closed-won revenue (safe)" in JS
+    # The legacy exclusion count is shown alongside missing included dates.
+    assert "Legacy paid rows excluded from revenue truth" in JS
+    assert "Included paid leads missing dates" in JS
+    # The misleading generic re-sync action is gone everywhere.
+    assert "HubSpot lead re-sync" not in JS
+    assert "lead re-sync" not in region
