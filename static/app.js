@@ -2845,6 +2845,8 @@ function renderRevenueDealsPage() {
 
 async function loadDeals() {
   const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.deals;
+  setWindowRangeLoading("revenue-deals-range");
   const kpiGrid = document.getElementById("revenue-deals-kpis");
   const tableBody = document.getElementById("revenue-deals-table-body");
   if (kpiGrid) kpiGrid.innerHTML = "";
@@ -2852,21 +2854,26 @@ async function loadDeals() {
 
   try {
     const res = await fetch(`/api/revenue-deals?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
-    if (!res.ok) {
-      revenueDealsLedgerStatus = "database_unavailable";
-      revenueDealsData = [];
-      revenueDealsSummary = null;
-      renderRevenueDealsPage();
+    const data = res.ok ? await res.json() : null;
+    if (token !== _revReqSeq.deals) return;  // stale response superseded
+    if (!res.ok || !_revResponseIsCurrent("deals", token, data)) {
+      if (!res.ok) {
+        revenueDealsLedgerStatus = "database_unavailable";
+        revenueDealsData = [];
+        revenueDealsSummary = null;
+        renderRevenueDealsPage();
+      }
       return;
     }
-    const data = await res.json();
     const sh = data.source_health || {};
     revenueDealsLedgerStatus = sh.ledger_status || "available";
     revenueDealsSummary = data.summary || null;
     revenueDealsData = data.deals || [];
+    renderWindowRange("revenue-deals-range", data.window || null);
     renderRevenueDealsPage();
   } catch (err) {
     console.error("[loadDeals]", err);
+    if (token !== _revReqSeq.deals) return;
     revenueDealsLedgerStatus = "database_unavailable";
     revenueDealsData = [];
     revenueDealsSummary = null;
@@ -3023,18 +3030,25 @@ async function loadRevenueHealth() {
   if (!body) return;
   body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue attribution health…</p>';
   const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.health;
+  setWindowRangeLoading("revenue-health-range");
   try {
     const res = await fetch(`/api/revenue-attribution/audit?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
-    if (!res.ok) {
-      body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Revenue attribution health is unavailable right now.</p>';
+    const audit = res.ok ? await res.json() : null;
+    if (token !== _revReqSeq.health) return;  // stale response superseded
+    if (!res.ok || !_revResponseIsCurrent("health", token, audit)) {
+      if (!res.ok) {
+        body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Revenue attribution health is unavailable right now.</p>';
+      }
       return;
     }
-    const audit = await res.json();
+    renderWindowRange("revenue-health-range", audit.window || null);
     body.innerHTML = renderRevenueHealth(audit);
     // Surface the included missing-event-date count on the reconciliation panel.
     loadLeadReconciliationStatus(audit.missing_contact_created_at_count);
   } catch (err) {
     console.error("[loadRevenueHealth]", err);
+    if (token !== _revReqSeq.health) return;
     body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue attribution health.</p>';
   }
 }
@@ -8114,10 +8128,53 @@ function getBusinessVerdictBadge(verdict) {
 
 const BUSINESS_VERDICT_ORDER = { winner: 0, watch: 1, waste: 2, learning: 3 };
 
-// Shared revenue-attribution payload state for both ROAS pages.
-let roasRevenueWindow = null;
-let roasRevenueSummary = null;
-let roasRevenueSourceHealth = null;
+// PR-ADS-116: every revenue page keeps its OWN window/summary/source-health so a
+// Current-Quarter payload can never bleed into another page or another window.
+let roasCampaignWindow = null;
+let roasCampaignSummary = null;
+let roasCampaignSourceHealth = null;
+let roasCountryWindow = null;
+
+// Per-page request sequence tokens guard against stale-response races: only the
+// newest in-flight request for a page may render. Switching CQ→YTD→Last Quarter
+// quickly must never paint an older response over the newest selection.
+const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0 };
+
+// PR-ADS-116: show the exact resolved date range beside each window selector.
+function formatWindowRange(win) {
+  if (!win) return "";
+  const start = win.start_date || "Earliest";
+  const end = win.end_date || "—";
+  return `${start} → ${end}`;
+}
+
+function renderWindowRange(elId, win) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!win) { el.textContent = ""; el.removeAttribute("title"); return; }
+  const label = win.label ? `${win.label}: ` : "";
+  el.textContent = `${label}${formatWindowRange(win)}`;
+  el.title = win.is_closed_window ? "Completed period" : "Period in progress";
+}
+
+// True when this response is still the newest for its page AND its resolved
+// window still equals the user's current selection. Fails CLOSED: every revenue
+// response must carry a resolved window key — an absent key is never valid.
+function _revResponseIsCurrent(page, token, data) {
+  if (token !== _revReqSeq[page]) return false;
+  const respKey = data && data.window && data.window.key;
+  return Boolean(respKey) && respKey === getRoasBusinessWindow();
+}
+
+// Show "Loading…" in a range chip so a stale range never sits beside a freshly
+// changed selector while the new request is in flight.
+function setWindowRangeLoading(elId) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.textContent = "Loading…";
+  el.removeAttribute("title");
+}
+
 
 // PR-ADS-110: ROAS by Campaign / Country are business decision pages, not
 // diagnostics pages. Decisions are shown only when the truth layer is safe;
@@ -8275,6 +8332,8 @@ function renderRoasCampaignSafeEmptyState() {
 
 async function loadRoasCampaigns() {
   const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.campaigns;
+  setWindowRangeLoading("roas-campaigns-range");
 
   roasCampaignsStatus = "loading";
   const body = document.getElementById("roas-campaigns-table-body");
@@ -8282,20 +8341,26 @@ async function loadRoasCampaigns() {
 
   try {
     const res = await fetch(`/api/revenue-attribution?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
-    if (!res.ok) {
-      roasCampaignsStatus = "error";
-      if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue attribution data.</p>';
+    const data = res.ok ? await res.json() : null;
+    // Drop stale responses: a newer selection (or page reload) supersedes this.
+    if (token !== _revReqSeq.campaigns) return;
+    if (!res.ok || !_revResponseIsCurrent("campaigns", token, data)) {
+      if (!res.ok) {
+        roasCampaignsStatus = "error";
+        if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue attribution data.</p>';
+      }
       return;
     }
-    const data = await res.json();
-    roasRevenueWindow = data.window || null;
-    roasRevenueSummary = data.summary || null;
-    roasRevenueSourceHealth = data.source_health || null;
+    roasCampaignWindow = data.window || null;
+    roasCampaignSummary = data.summary || null;
+    roasCampaignSourceHealth = data.source_health || null;
     roasCampaignsData = data.campaigns || [];
     roasCampaignsStatus = roasCampaignsData.length ? "ok" : "empty";
+    renderWindowRange("roas-campaigns-range", roasCampaignWindow);
     renderRoasCampaignsPage();
   } catch (err) {
     console.error("[loadRoasCampaigns]", err);
+    if (token !== _revReqSeq.campaigns) return;
     roasCampaignsStatus = "error";
     if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue attribution data.</p>';
   }
@@ -8308,8 +8373,8 @@ function renderRoasCampaignsPage() {
   if (!tableBody) return;
 
   // Blocked: truth layer is not safe for business decisions.
-  if (!isRevenueDecisionReady(roasRevenueSourceHealth)) {
-    tableBody.innerHTML = renderRevenueBlockedState(roasRevenueSourceHealth);
+  if (!isRevenueDecisionReady(roasCampaignSourceHealth)) {
+    tableBody.innerHTML = renderRevenueBlockedState(roasCampaignSourceHealth);
     return;
   }
 
@@ -8323,7 +8388,7 @@ function renderRoasCampaignsPage() {
   const filtered = filterRoasCampaignRows(sorted, roasCampaignFilter);
 
   tableBody.innerHTML = `
-    ${renderRoasCampaignSummary(roasRevenueSummary)}
+    ${renderRoasCampaignSummary(roasCampaignSummary)}
     ${renderRoasCampaignFilters()}
     ${renderRoasCampaignTable(filtered)}
     <p class="revenue-footnote">Google Ads provides spend. HubSpot closed-won deals provide revenue.</p>
@@ -8531,6 +8596,8 @@ function renderRoasCountrySafeEmptyState() {
 
 async function loadRoasCountries() {
   const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.countries;
+  setWindowRangeLoading("roas-countries-range");
 
   roasCountriesStatus = "loading";
   const body = document.getElementById("roas-countries-table-body");
@@ -8538,15 +8605,16 @@ async function loadRoasCountries() {
 
   try {
     const res = await fetch(`/api/revenue-attribution?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
-    if (!res.ok) {
-      roasCountriesStatus = "error";
-      if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue attribution data.</p>';
+    const data = res.ok ? await res.json() : null;
+    if (token !== _revReqSeq.countries) return;
+    if (!res.ok || !_revResponseIsCurrent("countries", token, data)) {
+      if (!res.ok) {
+        roasCountriesStatus = "error";
+        if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue attribution data.</p>';
+      }
       return;
     }
-    const data = await res.json();
-    roasRevenueWindow = data.window || null;
-    roasRevenueSummary = data.summary || null;
-    roasRevenueSourceHealth = data.source_health || null;
+    roasCountryWindow = data.window || null;
     // Country readiness layers geo-spend availability on top of shared safety.
     roasCountrySourceHealth = {
       ...(data.source_health || {}),
@@ -8555,9 +8623,11 @@ async function loadRoasCountries() {
     };
     roasCountriesData = data.countries || [];
     roasCountriesStatus = roasCountriesData.length ? "ok" : "empty";
+    renderWindowRange("roas-countries-range", roasCountryWindow);
     renderRoasCountriesPage();
   } catch (err) {
     console.error("[loadRoasCountries]", err);
+    if (token !== _revReqSeq.countries) return;
     roasCountriesStatus = "error";
     if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue attribution data.</p>';
   }

@@ -215,7 +215,9 @@ def test_single_readiness_contract_shared():
     # All three surfaces gate on isRevenueDecisionReady (campaign + country) which
     # uses the same integration-connected helper; the source-health contract is
     # produced once by the revenue-attribution service.
-    assert "isRevenueDecisionReady(roasRevenueSourceHealth)" in JS
+    # PR-ADS-116: each page keeps its own source-health state, but both still
+    # gate on the one shared readiness contract.
+    assert "isRevenueDecisionReady(roasCampaignSourceHealth)" in JS
     assert "isCountryRevenueDecisionReady(roasCountrySourceHealth)" in JS
     country = _fn("function isCountryRevenueDecisionReady", span=400)
     assert "isRevenueDecisionReady(sh)" in country

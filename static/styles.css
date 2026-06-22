@@ -4029,6 +4029,18 @@ a {
   background: var(--color-surface, #fff);
 }
 
+/* PR-ADS-116: the exact resolved date range shown beside the window selector. */
+.roas-window-range {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #475569;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  white-space: nowrap;
+}
+
 /* ── ROAS Estimate Warning ──────────────────────────────────────────────── */
 
 .roas-estimate-warning {
