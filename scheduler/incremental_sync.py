@@ -635,10 +635,12 @@ def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:
     tables.
     """
     from services.google_ads_spend_service import (  # noqa: PLC0415
-        fetch_daily_spend, DAILY_SPEND_LOOKBACK_DAYS,
+        fetch_daily_spend, configured_customer_id, SpendPersistenceError,
+        DAILY_SPEND_LOOKBACK_DAYS,
     )
     from datetime import timedelta as _td
 
+    run_id_str = str(run_id) if run_id else None
     start = date_to - _td(days=DAILY_SPEND_LOOKBACK_DAYS - 1)
     batch_id = db_writers.start_sync_batch(
         source="google_ads", dataset="canonical_spend", sync_type="daily",
@@ -648,13 +650,20 @@ def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:
         payload = fetch_daily_spend(str(start), str(date_to))
         rows = payload.get("rows", [])
         micros = sum(int(r.get("cost_micros") or 0) for r in rows)
-        written = db_writers.upsert_campaign_daily_spend(rows, sync_run_id=str(run_id) if run_id else None)
-        db_writers.upsert_spend_coverage(
-            payload.get("customer_id"), str(start), str(date_to), "verified",
+        customer_id = payload.get("customer_id") or configured_customer_id()
+        # Fail closed: a successful read must be durably persisted before the
+        # chunk is marked verified and the dataset reported successful.
+        written = db_writers.upsert_campaign_daily_spend(rows, sync_run_id=run_id_str)
+        if rows and written != len(rows):
+            raise SpendPersistenceError(f"spend upsert wrote {written}/{len(rows)} rows")
+        ok = db_writers.upsert_spend_coverage(
+            customer_id, str(start), str(date_to), "verified",
             rows_written=written, cost_micros_total=micros,
             source_query_version=payload.get("source_query_version"),
-            sync_run_id=str(run_id) if run_id else None,
+            sync_run_id=run_id_str,
         )
+        if not ok:
+            raise SpendPersistenceError("coverage-ledger upsert failed")
         if batch_id:
             db_writers.finish_sync_batch(
                 batch_id=batch_id, status="success", row_count=written, last_source_date=date_to)
@@ -663,6 +672,14 @@ def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:
         err = f"google_ads/canonical_spend: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
+        # Record a `failed` coverage chunk against the real configured customer
+        # ID (never overwrites a prior verified chunk — writer guard).
+        try:
+            db_writers.upsert_spend_coverage(
+                configured_customer_id(), str(start), str(date_to), "failed",
+                sync_run_id=run_id_str)
+        except Exception:  # noqa: BLE001
+            pass
         if batch_id:
             db_writers.finish_sync_batch(batch_id=batch_id, status="failed", error_message=str(exc)[:1000])
         return {"status": "failed", "error": str(exc)[:500]}

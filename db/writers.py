@@ -1822,6 +1822,10 @@ def upsert_spend_coverage(
 
     The coverage ledger lets the audit treat a zero-spend day inside a verified
     chunk as real, while a never-fetched range is reported missing — never zero.
+
+    A ``failed`` write never overwrites an existing ``verified`` chunk (the
+    ON CONFLICT WHERE guard), so a transient failure cannot silently demote
+    coverage that was already proven good.
     """
     if not customer_id or not chunk_start or not chunk_end:
         return False
@@ -1844,6 +1848,8 @@ def upsert_spend_coverage(
                         sync_run_id          = EXCLUDED.sync_run_id,
                         fetched_at           = NOW(),
                         updated_at           = NOW()
+                    WHERE google_ads_spend_coverage.status <> 'verified'
+                       OR EXCLUDED.status = 'verified'
                     """,
                     (customer_id, chunk_start, chunk_end, status,
                      int(rows_written), int(cost_micros_total), source_query_version, sync_run_id),

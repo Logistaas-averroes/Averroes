@@ -259,6 +259,192 @@ def test_revenue_unchanged_by_spend_source(monkeypatch):
     assert out["summary"]["customers"] == 1
 
 
+# ════════════ correction 1: geo is never a ROAS denominator ════════════
+
+
+def test_geo_fallback_never_produces_campaign_or_country_roas(monkeypatch):
+    # Canonical table UNREACHABLE → geo is diagnostic only. ROAS unavailable for
+    # both Campaign and Country; geo spend (99) is never a denominator.
+    build = _load_revattr()
+    canonical = {"available": False, "rows": []}
+    coverage = []
+    geo_rows = [{"campaign_name": "alpha", "country": "US", "spend": 99.0}]
+    revenue_rows = [{"campaign_name": "alpha", "country": "US", "deal_id": "d1",
+                     "deal_amount_usd": 10000.0, "match_status": "matched"}]
+    _patch_revattr(monkeypatch, canonical=canonical, geo_rows=geo_rows,
+                   coverage=coverage, revenue_rows=revenue_rows)
+    out = build("current_quarter", now=_at("2026-06-22"))
+    sh = out["source_health"]
+    assert sh["spend_source"] == "geo_fallback"
+    assert sh["spend_coverage_status"] == "geo_fallback"
+    assert sh["campaign_roas_available"] is False
+    assert sh["country_roas_available"] is False
+    assert out["summary"]["roas"] is None
+    for c in out["campaigns"]:
+        assert c["roas"] is None, "geo fallback must never back a Campaign ROAS"
+
+
+def test_incomplete_canonical_coverage_blocks_roas(monkeypatch):
+    # Canonical REACHABLE with spend rows, but coverage is missing a chunk →
+    # incomplete → Campaign ROAS unavailable (never from a partial denominator).
+    build = _load_revattr()
+    canonical = {"available": True, "rows": [{"campaign_id": "1", "campaign_name": "alpha",
+                 "cost_micros": 5_000_000, "spend": 5.0}],
+                 "total_cost_micros": 5_000_000, "total_spend": 5.0, "campaign_count": 1,
+                 "customer_id": "C1", "currency_code": "USD",
+                 "coverage_start": "2026-05-01", "coverage_end": "2026-06-22"}
+    # Coverage only covers part of Q2 (window starts 2026-04-01) → incomplete.
+    coverage = [{"chunk_start": "2026-05-01", "chunk_end": "2026-06-22", "status": "verified"}]
+    geo_rows = [{"campaign_name": "alpha", "country": "US", "spend": 5.0}]
+    revenue_rows = [{"campaign_name": "alpha", "country": "US", "deal_id": "d1",
+                     "deal_amount_usd": 10000.0, "match_status": "matched"}]
+    _patch_revattr(monkeypatch, canonical=canonical, geo_rows=geo_rows,
+                   coverage=coverage, revenue_rows=revenue_rows)
+    out = build("current_quarter", now=_at("2026-06-22"))
+    sh = out["source_health"]
+    assert sh["spend_coverage_status"] == "incomplete"
+    assert sh["campaign_roas_available"] is False
+    assert out["summary"]["roas"] is None
+    camp = next(c for c in out["campaigns"] if c["campaign_name"] == "alpha")
+    assert camp["roas"] is None
+
+
+def test_complete_coverage_zero_rows_is_verified_zero_spend(monkeypatch):
+    # Complete coverage + zero canonical rows = verified zero spend (NOT incomplete).
+    build = _load_revattr()
+    canonical = {"available": True, "rows": [], "total_cost_micros": 0, "total_spend": 0.0,
+                 "campaign_count": 0, "customer_id": "C1", "currency_code": "USD",
+                 "coverage_start": None, "coverage_end": None}
+    coverage = [{"chunk_start": "2026-04-01", "chunk_end": "2026-06-22", "status": "verified"}]
+    geo_rows = []
+    revenue_rows = [{"campaign_name": "alpha", "country": "US", "deal_id": "d1",
+                     "deal_amount_usd": 10000.0, "match_status": "matched"}]
+    _patch_revattr(monkeypatch, canonical=canonical, geo_rows=geo_rows,
+                   coverage=coverage, revenue_rows=revenue_rows)
+    out = build("current_quarter", now=_at("2026-06-22"))
+    sh = out["source_health"]
+    assert sh["spend_coverage_status"] == "complete"
+    assert sh["campaign_roas_available"] is True
+
+
+# ════════════ correction 4: explicit campaign mapping status ════════════
+
+
+def test_unmatched_campaign_shows_spend_mapping_unavailable(monkeypatch):
+    # Complete canonical window: spend campaign is "alpha", but revenue is on a
+    # DIFFERENT campaign "beta" with no canonical spend → beta's spend + ROAS are
+    # Unavailable (never a fake $0), flagged spend_mapping="unavailable".
+    build = _load_revattr()
+    canonical = {"available": True, "rows": [{"campaign_id": "1", "campaign_name": "alpha",
+                 "cost_micros": 5_000_000, "spend": 5.0}],
+                 "total_cost_micros": 5_000_000, "total_spend": 5.0, "campaign_count": 1,
+                 "customer_id": "C1", "currency_code": "USD",
+                 "coverage_start": "2026-04-01", "coverage_end": "2026-06-22"}
+    coverage = [{"chunk_start": "2026-04-01", "chunk_end": "2026-06-22", "status": "verified"}]
+    geo_rows = []
+    revenue_rows = [{"campaign_name": "beta", "country": "US", "deal_id": "d1",
+                     "deal_amount_usd": 10000.0, "match_status": "matched"}]
+    _patch_revattr(monkeypatch, canonical=canonical, geo_rows=geo_rows,
+                   coverage=coverage, revenue_rows=revenue_rows)
+    out = build("current_quarter", now=_at("2026-06-22"))
+    beta = next(c for c in out["campaigns"] if c["campaign_name"] == "beta")
+    assert beta["spend"] is None, "unmatched campaign spend must be Unavailable, never $0"
+    assert beta["roas"] is None
+    assert beta["spend_mapping"] == "unavailable"
+
+
+def test_campaign_table_renders_spend_mapping_unavailable():
+    # The campaign table renders Spend + ROAS as Unavailable for unmatched rows.
+    assert 'r.spend_mapping === "unavailable"' in JS
+    assert "Spend mapping unavailable" in JS
+
+
+# ════════════ correction 2: fail closed on canonical persistence ════════════
+
+
+def test_backfill_fails_chunk_when_upsert_count_mismatches(monkeypatch):
+    # API returns 2 rows but the canonical upsert persists only 1 → chunk fails,
+    # is NOT marked verified/completed, and a `failed` coverage row is written.
+    svc = _load_spend()
+    rows = [{"customer_id": "C1", "currency_code": "USD", "campaign_id": str(i),
+             "campaign_name": "a", "spend_date": "2026-01-01", "cost_micros": 1_000_000}
+            for i in (1, 2)]
+    monkeypatch.setattr(svc, "fetch_daily_spend",
+                        lambda a, b: {"customer_id": "C1", "rows": rows, "source_query_version": "v1"})
+    monkeypatch.setattr(svc, "configured_customer_id", lambda: "C1")
+    monkeypatch.setattr("db.writers.upsert_campaign_daily_spend", lambda *a, **k: 1)  # short write
+    cov_calls = []
+    monkeypatch.setattr("db.writers.upsert_spend_coverage",
+                        lambda cid, s, e, status, **k: cov_calls.append((cid, status)) or True)
+    out = svc.run_google_ads_spend_backfill(
+        date_from="2026-01-01", date_to="2026-01-31", dry_run=False, chunk_months=1)
+    assert out["summary"]["chunks_verified"] == 0
+    assert out["summary"]["chunks_failed"] == 1
+    assert ("C1", "failed") in cov_calls
+    assert not any(s == "verified" for _, s in cov_calls)
+
+
+def test_backfill_fails_chunk_when_coverage_write_fails(monkeypatch):
+    # Spend upsert succeeds but the coverage-ledger write fails → chunk fails.
+    svc = _load_spend()
+    rows = [{"customer_id": "C1", "currency_code": "USD", "campaign_id": "1",
+             "campaign_name": "a", "spend_date": "2026-01-01", "cost_micros": 1_000_000}]
+    monkeypatch.setattr(svc, "fetch_daily_spend",
+                        lambda a, b: {"customer_id": "C1", "rows": rows, "source_query_version": "v1"})
+    monkeypatch.setattr(svc, "configured_customer_id", lambda: "C1")
+    monkeypatch.setattr("db.writers.upsert_campaign_daily_spend", lambda *a, **k: 1)
+    seen = []
+    # Verified write fails (False); the later failed write succeeds.
+    monkeypatch.setattr(
+        "db.writers.upsert_spend_coverage",
+        lambda cid, s, e, status, **k: (seen.append(status), status != "verified")[1])
+    out = svc.run_google_ads_spend_backfill(
+        date_from="2026-01-01", date_to="2026-01-31", dry_run=False, chunk_months=1)
+    assert out["summary"]["chunks_failed"] == 1
+    assert out["summary"]["chunks_verified"] == 0
+    assert "verified" in seen and "failed" in seen
+
+
+def test_daily_sync_fails_closed_on_persistence(monkeypatch):
+    # The daily canonical-spend step must NOT report success when a non-empty
+    # fetch cannot be fully persisted; it records a `failed` coverage chunk.
+    try:
+        import scheduler.incremental_sync as inc
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"incremental sync import unavailable: {exc}")
+    from datetime import date as _date
+    monkeypatch.setattr(
+        "services.google_ads_spend_service.fetch_daily_spend",
+        lambda a, b: {"customer_id": "C1", "source_query_version": "v1", "rows": [
+            {"customer_id": "C1", "currency_code": "USD", "campaign_id": "1",
+             "campaign_name": "a", "spend_date": a, "cost_micros": 1_000_000}]})
+    monkeypatch.setattr("services.google_ads_spend_service.configured_customer_id", lambda: "C1")
+    monkeypatch.setattr(inc.db_writers, "start_sync_batch", lambda **k: 1)
+    monkeypatch.setattr(inc.db_writers, "finish_sync_batch", lambda **k: True)
+    monkeypatch.setattr(inc.db_writers, "upsert_campaign_daily_spend", lambda *a, **k: 0)  # short write
+    cov = []
+    monkeypatch.setattr(inc.db_writers, "upsert_spend_coverage",
+                        lambda cid, s, e, status, **k: cov.append((cid, status)) or True)
+    errors = []
+    out = inc._sync_canonical_spend(run_id=42, date_to=_date(2026, 6, 22), errors=errors)
+    assert out["status"] == "failed"
+    assert ("C1", "failed") in cov
+    assert not any(s == "verified" for _, s in cov)
+
+
+def test_failed_coverage_uses_configured_customer_id_and_guards_verified():
+    # Failed coverage is written with the configured customer id (not None), and
+    # a failed write never overwrites a prior verified chunk (writer guard).
+    assert "def configured_customer_id" in SPEND_SRC
+    assert "GOOGLE_ADS_CUSTOMER_ID" in SPEND_SRC
+    # Backfill + daily sync both write failed coverage via configured id.
+    assert SPEND_SRC.count("configured_customer_id()") >= 2
+    INCR = open(os.path.join(ROOT, "scheduler", "incremental_sync.py"), encoding="utf-8").read()
+    assert "configured_customer_id()" in INCR
+    # Writer guard: a failed status cannot demote a verified chunk.
+    assert "status <> 'verified'" in WRITERS
+
+
 # ════════════ 10. no Google Ads write methods ════════════
 
 

@@ -343,14 +343,27 @@ def _finalize_row(
     extra_notes: list | None = None,
     revenue_available: bool = True,
     lead_metrics_withheld: bool = False,
+    spend_trusted: bool = True,
+    spend_mapping_unavailable: bool = False,
 ) -> dict:
-    spend = round(bucket["spend"], 2)
+    # PR-ADS-118: spend is a usable ROAS denominator only when it comes from a
+    # complete canonical source AND this row maps to a verified spend campaign.
+    #   - spend_trusted=False  → canonical coverage incomplete / geo-fallback:
+    #     spend is diagnostic only, ROAS is unavailable (never from a partial
+    #     or geo denominator).
+    #   - spend_mapping_unavailable=True → a revenue/lead campaign with no
+    #     canonical spend match: spend itself is Unavailable (never a fake $0).
     won_revenue = round(bucket["won_revenue"], 2)
     customers = bucket["customers"]
-    # ROAS is null (not 0) when the revenue source is not wired — a 0 would
-    # falsely imply "spent and earned nothing" when we simply have no truth.
-    roas = compute_roas(won_revenue, spend) if revenue_available else None
-    cac = compute_cac(spend, customers)
+    if spend_mapping_unavailable:
+        spend = None
+        roas = None
+    else:
+        spend = round(bucket["spend"], 2)
+        # ROAS is null (not 0) when the revenue source is not wired — a 0 would
+        # falsely imply "spent and earned nothing" when we simply have no truth.
+        roas = compute_roas(won_revenue, spend) if (revenue_available and spend_trusted) else None
+    cac = compute_cac(spend or 0, customers)
 
     raw_confidence = confidence_from_tiers(bucket["tiers"])
     downgraded = legacy_gclid and raw_confidence == "high"
@@ -376,6 +389,17 @@ def _finalize_row(
         notes.append(
             "Revenue attribution not wired for this window — ROAS is unavailable, not zero."
         )
+    if spend_mapping_unavailable:
+        notes.append(
+            "Spend mapping unavailable — this campaign has no matching canonical "
+            "Google Ads spend campaign, so spend and ROAS are unavailable (never $0)."
+        )
+    elif not spend_trusted:
+        notes.append(
+            "Spend coverage incomplete — canonical Google Ads spend is not fully "
+            "verified for this window, so ROAS is unavailable (not from a partial "
+            "or geo denominator)."
+        )
     if downgraded:
         notes.append(
             "GCLID attribution index is legacy (data/campaign_performance.json); "
@@ -394,6 +418,7 @@ def _finalize_row(
         "cac": cac,
         "confidence": confidence,
         "verdict": verdict,
+        "spend_mapping": "unavailable" if spend_mapping_unavailable else "matched",
         "attribution_notes": notes,
     }
 
@@ -567,11 +592,20 @@ def _match_status_to_tier(match_status) -> str:
 
 
 def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, group_field: str,
-                   revenue_available: bool = True, lead_metrics_withheld: bool = False):
+                   revenue_available: bool = True, lead_metrics_withheld: bool = False,
+                   spend_trusted: bool = True, spend_mapping_keys: set | None = None):
     """Aggregate durable DB rows into finished campaign or country rows.
 
     group_field is "campaign_name" or "country". Buckets with an empty/unknown
     key are dropped — the ROAS truth table never shows an "unknown" row.
+
+    PR-ADS-118 spend-truth gating:
+      - spend_trusted=False → spend is diagnostic only, ROAS unavailable.
+      - spend_mapping_keys (campaign grouping only): the set of normalized
+        campaign keys that have a canonical spend match. A revenue/lead campaign
+        whose key is NOT in this set has its spend + ROAS marked unavailable
+        (never a fake $0). Passed only for a complete canonical window with
+        spend rows; None disables per-row mapping checks.
     """
     buckets: dict[str, dict] = {}
 
@@ -605,10 +639,13 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
     for key, bucket in buckets.items():
         if not key:
             continue  # drop unknown / blank campaign or country
+        mapping_unavailable = bool(spend_mapping_keys is not None and key not in spend_mapping_keys)
         finalized = _finalize_row(
             bucket, legacy_gclid=False,
             revenue_available=revenue_available,
             lead_metrics_withheld=lead_metrics_withheld,
+            spend_trusted=spend_trusted,
+            spend_mapping_unavailable=mapping_unavailable,
         )
         if group_field == "campaign_name":
             finalized["campaign_id"] = key
@@ -620,7 +657,9 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
             finalized["top_campaign"] = _db_top_campaign(key, revenue_rows, spend_rows)
         rows.append(finalized)
 
-    rows.sort(key=lambda r: (r["spend"], r["won_revenue"]), reverse=True)
+    # Spend may be None (unavailable mapping); sort those as 0 so ordering is
+    # stable and revenue still breaks ties.
+    rows.sort(key=lambda r: (r["spend"] or 0.0, r["won_revenue"]), reverse=True)
     return rows
 
 
@@ -648,7 +687,8 @@ def _db_top_campaign(country_key: str, revenue_rows: list, spend_rows: list) -> 
 
 
 def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
-                      revenue_available: bool = True, lead_metrics_withheld: bool = False) -> dict:
+                      revenue_available: bool = True, lead_metrics_withheld: bool = False,
+                      spend_trusted: bool = True) -> dict:
     spend = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
     leads = None if lead_metrics_withheld else len(lead_rows)
     sqls = None if lead_metrics_withheld else sum(
@@ -657,13 +697,15 @@ def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
     customers = len(revenue_rows)
     won_revenue = round(sum(_safe_float(r.get("deal_amount_usd")) for r in revenue_rows), 2)
     tiers = [_match_status_to_tier(r.get("match_status")) for r in revenue_rows]
+    # PR-ADS-118: the summary ROAS is only trustworthy from a complete canonical
+    # denominator; otherwise it is unavailable (never from a partial/geo total).
     return {
         "spend": spend,
         "leads": leads,
         "sqls": sqls,
         "customers": customers,
         "won_revenue": won_revenue,
-        "roas": compute_roas(won_revenue, spend) if revenue_available else None,
+        "roas": compute_roas(won_revenue, spend) if (revenue_available and spend_trusted) else None,
         "cac": compute_cac(spend, customers),
         "confidence": confidence_from_tiers(tiers),
     }
@@ -694,32 +736,36 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     spend_rows = spend["rows"]
     revenue_rows = revenue["rows"]
 
-    # PR-ADS-118: Campaign ROAS spend truth comes from the canonical Google Ads
-    # campaign-daily table, NOT the geo table. When canonical spend exists for the
-    # window it is preferred; otherwise we fall back to the geo-derived campaign
-    # spend (clearly labelled) so behaviour is unchanged until the backfill runs.
+    # PR-ADS-118: Campaign ROAS spend truth comes ONLY from the canonical Google
+    # Ads campaign-daily table, NEVER the geo table. When the canonical table is
+    # reachable we always evaluate its coverage — even with zero rows, because a
+    # COMPLETE coverage window with zero rows is verified zero spend, whereas a
+    # window with missing/failed chunks is "incomplete" (never read as $0).
+    #
+    # Spend is a usable ROAS denominator only when canonical coverage is COMPLETE.
+    # When the canonical table is unreachable we fall to geo, but geo is
+    # DIAGNOSTIC ONLY and must never back a Campaign or Country ROAS.
     canonical = repo.fetch_canonical_campaign_spend(start_date, end_date)
-    canonical_available = bool(canonical.get("available") and canonical.get("rows"))
-    if canonical_available:
-        campaign_spend_rows = [
-            {"campaign_name": r.get("campaign_name"), "country": None, "spend": r.get("spend")}
-            for r in canonical["rows"]
-        ]
-        spend_source = "canonical_google_ads_api"
-    else:
-        campaign_spend_rows = spend_rows  # geo fallback (pre-backfill)
-        spend_source = "geo_fallback"
-
-    # Spend coverage: ROAS may only be trusted when the canonical window coverage
-    # is complete; a missing chunk must never be read as zero spend.
-    if canonical_available:
+    canonical_access = bool(canonical.get("available"))
+    if canonical_access:
         from services.google_ads_spend_service import (  # noqa: PLC0415
             analyze_coverage as _analyze_cov, SPEND_VARIANCE_TOLERANCE,
         )
         coverage = repo.fetch_spend_coverage(start_date, end_date)
         _cov = _analyze_cov(start_date, end_date, coverage.get("chunks", []))
-        spend_coverage_status = "complete" if _cov.get("complete") else "incomplete"
+        coverage_complete = bool(_cov.get("complete"))
+        spend_coverage_status = "complete" if coverage_complete else "incomplete"
+        spend_source = "canonical_google_ads_api"
+        canonical_rows = canonical.get("rows") or []
+        campaign_spend_rows = [
+            {"campaign_name": r.get("campaign_name"), "country": None, "spend": r.get("spend")}
+            for r in canonical_rows
+        ]
         canonical_total = round(float(canonical.get("total_spend") or 0), 2)
+        canonical_customer_id = canonical.get("customer_id")
+        canonical_currency = canonical.get("currency_code")
+        # Geo reconciliation for Country ROAS: geo total must match canonical for
+        # the same window within tolerance.
         geo_total_for_recon = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
         if canonical_total > 0:
             country_spend_reconciled = (
@@ -729,9 +775,27 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         else:
             country_spend_reconciled = (geo_total_for_recon == 0)
     else:
+        # Canonical table unreachable → geo is diagnostic only, NEVER a ROAS
+        # denominator. ROAS is unavailable for both Campaign and Country.
+        spend_source = "geo_fallback"
         spend_coverage_status = "geo_fallback"
+        coverage_complete = False
+        campaign_spend_rows = spend_rows  # diagnostic display only
         canonical_total = None
+        canonical_customer_id = None
+        canonical_currency = None
         country_spend_reconciled = None
+
+    # Campaign spend is a trusted ROAS denominator only when canonical coverage
+    # is complete. Country spend additionally requires geo↔canonical reconciliation.
+    campaign_spend_trusted = canonical_access and coverage_complete
+    country_spend_trusted = campaign_spend_trusted and (country_spend_reconciled is True)
+    # Per-campaign mapping check: only when we have a complete canonical window
+    # WITH spend rows. A revenue campaign absent from canonical spend is marked
+    # "spend mapping unavailable" (never a fake $0).
+    spend_mapping_keys = None
+    if campaign_spend_trusted and campaign_spend_rows:
+        spend_mapping_keys = {_norm(r.get("campaign_name")) for r in campaign_spend_rows}
 
     # PR-ADS-109: lead metrics are trusted only when the business event date
     # (HubSpot contact_created_at) is available. Otherwise withhold them — never
@@ -750,14 +814,17 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     campaigns = _build_db_rows(
         campaign_spend_rows, lead_rows, revenue_rows, group_field="campaign_name",
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
+        spend_trusted=campaign_spend_trusted, spend_mapping_keys=spend_mapping_keys,
     )
     countries = _build_db_rows(
         spend_rows, lead_rows, revenue_rows, group_field="country",
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
+        spend_trusted=country_spend_trusted,
     )
     summary = _build_db_summary(
         campaign_spend_rows, lead_rows, revenue_rows,
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
+        spend_trusted=campaign_spend_trusted,
     )
 
     campaign_spend_status = "db" if spend_rows else "db_empty"
@@ -831,12 +898,16 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "revenue_integration_status": revenue_integration_status,
         "revenue_window_status": revenue_window_status,
         # PR-ADS-118 spend-truth contract for Campaign / Country ROAS gating.
+        # ROAS is produced ONLY from a complete canonical denominator; geo is
+        # never a Campaign/Country ROAS denominator.
         "spend_source": spend_source,
         "spend_coverage_status": spend_coverage_status,
+        "campaign_roas_available": campaign_spend_trusted,
+        "country_roas_available": country_spend_trusted,
         "campaign_spend_total": canonical_total,
         "country_spend_reconciled": country_spend_reconciled,
-        "canonical_customer_id": canonical.get("customer_id") if canonical_available else None,
-        "canonical_currency": canonical.get("currency_code") if canonical_available else None,
+        "canonical_customer_id": canonical_customer_id,
+        "canonical_currency": canonical_currency,
         "data_is_partial": data_is_partial,
         "coverage_start": spend.get("coverage_start") or revenue.get("coverage_start"),
         "coverage_end": spend.get("coverage_end") or revenue.get("coverage_end"),

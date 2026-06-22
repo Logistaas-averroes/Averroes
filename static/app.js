@@ -8741,9 +8741,15 @@ async function loadRoasCampaigns() {
   }
 }
 
-// PR-ADS-118 spend-coverage helpers.
+// PR-ADS-118 spend-coverage helpers. Campaign ROAS is available ONLY when the
+// backend confirms a complete canonical denominator; geo-fallback and any
+// incomplete coverage block ROAS (it is never derived from a partial/geo total).
 function spendCoverageIncomplete(sh) {
-  return (sh || {}).spend_coverage_status === "incomplete";
+  const h = sh || {};
+  if (h.campaign_roas_available === true) return false;
+  if (h.campaign_roas_available === false) return true;
+  // Backward-compatible fallback when the explicit flag is absent.
+  return h.spend_coverage_status !== "complete";
 }
 
 function renderSpendCoverageNotice() {
@@ -8811,18 +8817,29 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
     </tr>
   `;
 
-  const bodyRows = rows.map((r) => `
+  const bodyRows = rows.map((r) => {
+    // A revenue campaign with no canonical spend match: spend + ROAS are
+    // Unavailable (never a fake $0). Incomplete coverage gates ROAS too.
+    const mappingUnavailable = r.spend_mapping === "unavailable";
+    const spendCell = mappingUnavailable
+      ? '<span class="spend-unavailable" title="Spend mapping unavailable">Unavailable</span>'
+      : fmtMoney(r.spend);
+    const roasCell = (spendIncomplete || mappingUnavailable)
+      ? "Unavailable"
+      : fmtRoasMultiple(r.roas);
+    return `
     <tr>
       <td>${escapeHtml(r.campaign_name || "")}</td>
-      <td>${fmtMoney(r.spend)}</td>
+      <td>${spendCell}</td>
       <td>${fmtCount(r.leads)}</td>
       <td>${fmtCount(r.sqls)}</td>
       <td>${fmtCount(r.customers)}</td>
       <td>${fmtMoney(r.won_revenue)}</td>
-      <td>${spendIncomplete ? "Unavailable" : fmtRoasMultiple(r.roas)}</td>
+      <td>${roasCell}</td>
       <td>${getBusinessVerdictBadge(r.verdict)}</td>
     </tr>
-  `).join("");
+  `;
+  }).join("");
 
   return `
     <div class="table-scroll">
@@ -9027,6 +9044,15 @@ async function loadRoasCountries() {
   }
 }
 
+// Country ROAS requires a complete canonical denominator AND geo reconciliation.
+function countryRoasUnavailable(sh) {
+  const h = sh || {};
+  if (h.country_roas_available === true) return false;
+  if (h.country_roas_available === false) return true;
+  // Backward-compatible fallback when the explicit flag is absent.
+  return h.country_spend_reconciled === false || h.spend_coverage_status !== "complete";
+}
+
 function renderRoasCountriesPage() {
   const kpiGrid = document.getElementById("roas-countries-kpis");
   const tableBody = document.getElementById("roas-countries-table-body");
@@ -9039,10 +9065,10 @@ function renderRoasCountriesPage() {
     return;
   }
 
-  // PR-ADS-118: Country ROAS uses the geo denominator only when geo reconciles
-  // to canonical campaign spend for the window. An unreconciled denominator is
-  // never used for ROAS.
-  if (roasCountrySourceHealth && roasCountrySourceHealth.country_spend_reconciled === false) {
+  // PR-ADS-118: Country ROAS is available ONLY when canonical coverage is
+  // complete AND geo reconciles to canonical campaign spend for the window.
+  // A partial, geo-fallback, or unreconciled denominator is never used for ROAS.
+  if (countryRoasUnavailable(roasCountrySourceHealth)) {
     tableBody.innerHTML = renderCountrySpendUnreconciledState();
     return;
   }

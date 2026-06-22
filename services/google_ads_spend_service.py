@@ -19,12 +19,33 @@ No Google Ads writes; no budget/bid/campaign/conversion changes.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date, datetime, timezone, timedelta
 
 from analysis.business_windows import resolve_window
 from db import revenue_repository as repo
 
 log = logging.getLogger(__name__)
+
+
+class SpendPersistenceError(Exception):
+    """Raised when a fetched spend chunk cannot be durably persisted.
+
+    Used to fail a chunk closed: a successful API read followed by an
+    incomplete canonical upsert or a failed coverage-ledger write must NOT be
+    recorded as verified/complete, and must not let a sync report success.
+    """
+
+
+def configured_customer_id() -> str | None:
+    """Return the configured Google Ads customer ID, independent of any API call.
+
+    Read directly from the environment so a failed/empty API fetch can still be
+    recorded against the real account (no google-ads SDK import). Seam: tests
+    patch this directly.
+    """
+    cid = (os.getenv("GOOGLE_ADS_CUSTOMER_ID") or "").strip()
+    return cid or None
 
 # Geo↔canonical reconciliation tolerance (fraction). Small by design — a country
 # ROAS denominator may only be trusted when geo reconciles to canonical spend.
@@ -291,15 +312,23 @@ def run_google_ads_spend_backfill(
             micros = sum(int(r.get("cost_micros") or 0) for r in rows)
             chunk["rows"] = len(rows)
             chunk["cost_micros"] = micros
-            summary["api_total_micros"] += micros
-            customer_id = payload.get("customer_id")
+            # Persist with a real customer ID even when the payload omits it.
+            customer_id = payload.get("customer_id") or configured_customer_id()
             if not dry_run:
+                # Fail closed: a successful read must be durably persisted before
+                # the chunk can be marked verified/complete.
                 written = db_writers.upsert_campaign_daily_spend(rows, sync_run_id=job_id)
-                summary["rows_written"] += written
-                db_writers.upsert_spend_coverage(
+                if rows and written != len(rows):
+                    raise SpendPersistenceError(
+                        f"spend upsert wrote {written}/{len(rows)} rows")
+                ok = db_writers.upsert_spend_coverage(
                     customer_id, cursor.isoformat(), chunk_to.isoformat(), "verified",
                     rows_written=written, cost_micros_total=micros,
                     source_query_version=payload.get("source_query_version"), sync_run_id=job_id)
+                if not ok:
+                    raise SpendPersistenceError("coverage-ledger upsert failed")
+                summary["rows_written"] += written
+            summary["api_total_micros"] += micros
             summary["chunks_verified"] += 1
             completed.add(chunk_key)
         except Exception as exc:  # noqa: BLE001
@@ -307,10 +336,13 @@ def run_google_ads_spend_backfill(
             summary["chunks_failed"] += 1
             errors.append(f"{chunk_key}: {exc}")
             if not dry_run:
+                # Record a `failed` chunk against the real configured customer ID
+                # (the API result may be unavailable). Never overwrites a prior
+                # verified chunk (writer guard). Stays incomplete → retried.
                 try:
                     db_writers.upsert_spend_coverage(
-                        None, cursor.isoformat(), chunk_to.isoformat(), "failed",
-                        sync_run_id=job_id)
+                        configured_customer_id(), cursor.isoformat(), chunk_to.isoformat(),
+                        "failed", sync_run_id=job_id)
                 except Exception:  # noqa: BLE001
                     pass
             # Failed chunk is NOT added to completed → retried on resume.
