@@ -188,6 +188,14 @@
           </a>
         </li>
         <li>
+          <a class="nav-item" data-page="revenue-by-source" href="#" role="button" tabindex="0" aria-label="Revenue by Source">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+            </span>
+            <span class="nav-item__label">Revenue by Source</span>
+          </a>
+        </li>
+        <li>
           <a class="nav-item" data-page="gclid-attribution" href="#" role="button" tabindex="0" aria-label="GCLID Attribution">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3.51-7.09"/><path d="M22 4L12 14.01l-3-3"/></svg>
@@ -220,6 +228,14 @@
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
             </span>
             <span class="nav-item__label">System Status</span>
+          </a>
+        </li>
+        <li id="nav-revenue-health-item">
+          <a class="nav-item nav-item--admin" data-page="revenue-health" href="#" role="button" tabindex="0" aria-label="Revenue Attribution Health — read-only data health for revenue decisions" title="Read-only data health for revenue decisions">
+            <span class="nav-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            </span>
+            <span class="nav-item__label">Revenue Health</span>
           </a>
         </li>
         <li id="nav-backfill-item">
@@ -858,23 +874,78 @@
         </p>
       </section>
 
-      <!-- Deals -->
+      <!-- Closed-Won Deals — revenue ledger (PR-ADS-113) -->
       <section id="page-deals" class="page" hidden>
         <header class="page-header">
-          <h1 class="page-title">Deals</h1>
-          <p class="page-subtitle">GCLID-matched deal pipeline</p>
+          <h1 class="page-title">Closed-Won Deals</h1>
+          <p class="page-subtitle">HubSpot closed-won revenue attributed to Google Ads, by deal close date.</p>
         </header>
-        <div id="page-explanation-deals" hidden></div>
-        <p id="run-meta-deals" class="run-meta" data-section="deals"></p>
-        <div class="panel">
-          <div class="panel__header">Pipeline Stages</div>
-          <div class="panel__body" id="deals-funnel-body"><p class="empty-state">Loading deals…</p></div>
+        <div class="roas-window-controls">
+          <label class="roas-window-label">Window:</label>
+          <select id="revenue-deals-window" class="waste-filter-select" data-business-window-select aria-label="Revenue window">
+            <option value="current_quarter" selected>Current Quarter</option>
+            <option value="last_quarter">Last Quarter</option>
+            <option value="last_6_months">Last 6 Months</option>
+            <option value="ytd">YTD</option>
+            <option value="all_time">All Time</option>
+          </select>
+          <button id="revenue-deals-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+          <span class="roas-window-range" id="revenue-deals-range" aria-live="polite"></span>
         </div>
+        <div id="revenue-deals-kpis" class="kpi-grid"></div>
         <div class="panel">
-          <div class="panel__header">Deals Table</div>
-          <div class="panel__body panel__body--flush" id="deals-table-body">
-            <p class="empty-state" style="padding: var(--space-5);">Loading deals…</p>
+          <div class="panel__body panel__body--flush" id="revenue-deals-table-body">
+            <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
           </div>
+        </div>
+      </section>
+
+      <!-- Revenue Attribution Health — admin diagnostics (PR-ADS-113) -->
+      <section id="page-revenue-health" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Revenue Attribution Health</h1>
+          <p class="page-subtitle">Read-only data health for revenue decisions.</p>
+        </header>
+        <div class="roas-window-controls">
+          <label class="roas-window-label">Window:</label>
+          <select id="revenue-health-window" class="waste-filter-select" data-business-window-select aria-label="Revenue window">
+            <option value="current_quarter" selected>Current Quarter</option>
+            <option value="last_quarter">Last Quarter</option>
+            <option value="last_6_months">Last 6 Months</option>
+            <option value="ytd">YTD</option>
+            <option value="all_time">All Time</option>
+          </select>
+          <button id="revenue-health-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+          <span class="roas-window-range" id="revenue-health-range" aria-live="polite"></span>
+        </div>
+        <div id="lead-reconciliation-panel"></div>
+        <div id="revenue-recovery-panel"></div>
+        <div id="revenue-health-body">
+          <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
+        </div>
+      </section>
+
+      <!-- Revenue by Acquisition Source (PR-ADS-117) -->
+      <section id="page-revenue-by-source" class="page" hidden>
+        <header class="page-header">
+          <h1 class="page-title">Revenue by Source</h1>
+          <p class="page-subtitle">Pipeline and closed-won revenue across Google Ads, Other Paid, Organic, Offline, and Unclassified sources. Only Google Ads has connected spend, so only Google Ads shows ROAS.</p>
+        </header>
+        <div class="roas-window-controls">
+          <label class="roas-window-label">Window:</label>
+          <select id="revenue-by-source-window" class="waste-filter-select" data-business-window-select aria-label="Revenue window">
+            <option value="current_quarter" selected>Current Quarter</option>
+            <option value="last_quarter">Last Quarter</option>
+            <option value="last_6_months">Last 6 Months</option>
+            <option value="ytd">YTD</option>
+            <option value="all_time">All Time</option>
+          </select>
+          <button id="revenue-by-source-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+          <span class="roas-window-range" id="revenue-by-source-range" aria-live="polite"></span>
+        </div>
+        <div id="source-backfill-panel"></div>
+        <div id="revenue-by-source-body">
+          <p class="empty-state" style="padding: var(--space-5);">Loading…</p>
         </div>
       </section>
 
@@ -1239,6 +1310,7 @@
             <option value="all_time">All Time</option>
           </select>
           <button id="roas-campaigns-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+          <span class="roas-window-range" id="roas-campaigns-range" aria-live="polite"></span>
         </div>
         <div id="roas-campaigns-kpis" class="kpi-grid"></div>
         <div class="panel">
@@ -1264,6 +1336,7 @@
             <option value="all_time">All Time</option>
           </select>
           <button id="roas-countries-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+          <span class="roas-window-range" id="roas-countries-range" aria-live="polite"></span>
         </div>
         <div id="roas-countries-kpis" class="kpi-grid"></div>
         <div class="panel">

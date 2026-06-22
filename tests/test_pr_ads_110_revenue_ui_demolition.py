@@ -24,7 +24,8 @@ def _fn(name, span=2600):
 
 
 def _navigate():
-    return _fn("function navigate(page, options)", span=2600)
+    # Span widened in PR-ADS-113 (added revenue-health admin role enforcement).
+    return _fn("function navigate(page, options)", span=3200)
 
 
 def _section(page_id):
@@ -37,7 +38,9 @@ def _section(page_id):
 
 
 def test_revenue_pages_constant_includes_both_roas_pages():
-    assert 'REVENUE_PAGES = ["roas-campaigns", "roas-countries"]' in JS
+    # PR-ADS-113 added the Deals (Closed-Won ledger) and Revenue Health pages to
+    # the revenue-page set so the global ad-window bar is suppressed there too.
+    assert 'REVENUE_PAGES = ["roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source"]' in JS
     assert "function isRevenuePage" in JS
 
 
@@ -65,8 +68,13 @@ def test_audit_button_removed_from_business_pages():
     assert "View attribution audit" not in JS
     assert 'id="roas-audit-btn"' not in JS
     assert "function loadRevenueAttributionAudit" not in JS
-    # The business pages must not call the audit endpoint.
-    assert "/api/revenue-attribution/audit" not in JS
+    # The ROAS business decision pages must not call the audit endpoint. (The
+    # admin-only Revenue Health diagnostics page added in PR-ADS-113 legitimately
+    # uses it via loadRevenueHealth — assert the ROAS renderers stay clean.)
+    for fn_name in ("function renderRoasCampaignsPage", "function renderRoasCountriesPage",
+                    "function loadRoasCampaigns", "function loadRoasCountries"):
+        body = _fn(fn_name, span=2600)
+        assert "/api/revenue-attribution/audit" not in body
 
 
 # ── 3. Help / explanation blocks removed ─────────────────────────────────────
@@ -103,7 +111,10 @@ def test_blocked_state_helpers_exist():
     assert "function isRevenueDecisionReady" in JS
     assert "function renderRevenueBlockedState" in JS
     assert "Revenue ROAS is not ready yet" in JS
-    assert "Run HubSpot lead re-sync" in JS
+    # PR-ADS-115: the misleading "Run HubSpot lead re-sync" copy was replaced by a
+    # real action — Lead Event-Date Reconciliation in Revenue Health.
+    assert "Run HubSpot lead re-sync" not in JS
+    assert "Lead Event-Date Reconciliation" in JS
     assert "Not connected" in JS
     assert "Rebuilding" in JS
 
@@ -112,7 +123,11 @@ def test_blocked_decision_logic():
     fn = _fn("function isRevenueDecisionReady", span=400)
     assert 'lead_date_grain_status === "event_date"' in fn
     assert 'lead_metrics_status !== "withheld"' in fn
-    assert 'revenue_attribution_status !== "not_wired_or_no_closed_won"' in fn
+    # PR-ADS-115: readiness now keys off the revenue INTEGRATION fact (connected),
+    # so a connected-but-empty window is a safe empty state, not a block.
+    assert "isRevenueIntegrationConnected(sh)" in fn
+    helper = _fn("function isRevenueIntegrationConnected", span=400)
+    assert 'revenue_integration_status === "connected"' in helper
 
 
 def test_blocked_state_returns_before_table_campaign():
@@ -125,7 +140,8 @@ def test_blocked_state_returns_before_table_campaign():
 
 def test_blocked_state_returns_before_table_country():
     body = _fn("function renderRoasCountriesPage", span=2600)
-    i_block = body.find("renderRevenueBlockedState")
+    # PR-ADS-112 rebuilt this page with a country-specific blocked renderer.
+    i_block = body.find("renderCountryRevenueBlockedState")
     i_table = body.find(">Country<")
     assert i_block != -1 and i_table != -1
     assert i_block < i_table
@@ -143,14 +159,16 @@ def test_safe_empty_state_distinct_from_blocked():
 
 
 def test_render_flow_blocked_then_empty_then_table():
-    # ROAS by Campaign was rebuilt in PR-ADS-111 and uses a campaign-specific
-    # safe empty renderer; ROAS by Country still uses the shared one.
-    for fn_name, empty_fn, col in (
-        ("function renderRoasCampaignsPage", "renderRoasCampaignSafeEmptyState", ">Campaign<"),
-        ("function renderRoasCountriesPage", "renderRevenueEmptyState", ">Country<"),
+    # ROAS by Campaign (PR-ADS-111) and ROAS by Country (PR-ADS-112) were each
+    # rebuilt with page-specific blocked + safe-empty renderers.
+    for fn_name, block_fn, empty_fn, col in (
+        ("function renderRoasCampaignsPage", "renderRevenueBlockedState",
+         "renderRoasCampaignSafeEmptyState", ">Campaign<"),
+        ("function renderRoasCountriesPage", "renderCountryRevenueBlockedState",
+         "renderRoasCountrySafeEmptyState", ">Country<"),
     ):
         body = _fn(fn_name, span=2600)
-        i_block = body.find("renderRevenueBlockedState")
+        i_block = body.find(block_fn)
         i_empty = body.find(empty_fn)
         i_table = body.find(col)
         assert i_block < i_empty < i_table, f"{fn_name}: flow must be blocked -> empty -> table"
@@ -181,8 +199,9 @@ def test_other_pages_not_treated_as_revenue_pages():
     assert "loadLeads" in JS
 
 
-def test_revenue_pages_list_is_exactly_two():
+def test_revenue_pages_list():
+    # PR-ADS-113 extended the revenue-page set with Deals + Revenue Health.
     m = re.search(r'REVENUE_PAGES = \[([^\]]*)\]', JS)
     assert m
     names = [n.strip().strip('"').strip("'") for n in m.group(1).split(",") if n.strip()]
-    assert names == ["roas-campaigns", "roas-countries"]
+    assert names == ["roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source"]

@@ -1386,3 +1386,369 @@ def write_gclid_coverage_snapshot(
     except Exception as exc:  # noqa: BLE001
         log.error("write_gclid_coverage_snapshot failed (run_id=%s): %s", run_id, exc)
         return 0
+
+
+# ---------------------------------------------------------------------------
+# Revenue Truth Recovery jobs (PR-ADS-114) — durable background-job state.
+# Local DB only. Never writes to any external platform.
+# ---------------------------------------------------------------------------
+
+def _recovery_job_row_to_dict(cols, row) -> dict:
+    d = dict(zip(cols, row))
+    for k in ("date_from", "date_to", "started_at", "finished_at",
+              "created_at", "updated_at"):
+        if d.get(k) is not None:
+            d[k] = str(d[k])
+    return d
+
+
+def create_recovery_job(
+    job_id: str,
+    *,
+    dry_run: bool,
+    date_from,
+    date_to,
+    chunk_months: int,
+    job_type: str = "revenue_recovery",
+) -> bool:
+    """Insert a queued background job (revenue_recovery or lead_reconciliation).
+
+    Returns True on success. Never raises.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO revenue_recovery_jobs (
+                        job_id, job_type, status, dry_run, date_from, date_to,
+                        chunk_months, completed_chunks, errors, started_at
+                    ) VALUES (%s, %s, 'queued', %s, %s, %s, %s, '[]'::jsonb, '[]'::jsonb, NOW())
+                    """,
+                    (job_id, job_type, bool(dry_run), date_from, date_to, int(chunk_months)),
+                )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("create_recovery_job failed (job_id=%s): %s", job_id, exc)
+        return False
+
+
+def update_recovery_job(job_id: str, **fields) -> None:
+    """Update mutable fields of a recovery job. JSON fields are serialised.
+
+    Supported fields: status, phase, current_chunk, completed_chunks (list),
+    summary (dict), chunks (list), errors (list), finished_at (str/dt).
+    Never raises.
+    """
+    if not fields:
+        return
+    json_fields = {"completed_chunks", "summary", "chunks", "errors"}
+    sets, values = [], []
+    for key, value in fields.items():
+        if key not in {"status", "phase", "current_chunk", "completed_chunks",
+                       "summary", "chunks", "errors", "finished_at"}:
+            continue
+        if key in json_fields:
+            sets.append(f"{key} = %s::jsonb")
+            values.append(json.dumps(value))
+        else:
+            sets.append(f"{key} = %s")
+            values.append(value)
+    if not sets:
+        return
+    sets.append("updated_at = NOW()")
+    values.append(job_id)
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE revenue_recovery_jobs SET {', '.join(sets)} WHERE job_id = %s",
+                    tuple(values),
+                )
+    except Exception as exc:  # noqa: BLE001
+        log.error("update_recovery_job failed (job_id=%s): %s", job_id, exc)
+
+
+def get_recovery_job(job_id: str) -> Optional[dict]:
+    """Return the durable state of a recovery job, or None. Never raises."""
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM revenue_recovery_jobs WHERE job_id = %s", (job_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                return _recovery_job_row_to_dict(cols, row)
+    except Exception as exc:  # noqa: BLE001
+        log.error("get_recovery_job failed (job_id=%s): %s", job_id, exc)
+        return None
+
+
+def get_latest_recovery_job(job_type: Optional[str] = None) -> Optional[dict]:
+    """Return the most recent job (optionally filtered by job_type), or None.
+
+    Never raises.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                if job_type:
+                    cur.execute(
+                        "SELECT * FROM revenue_recovery_jobs WHERE job_type = %s "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (job_type,),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT * FROM revenue_recovery_jobs ORDER BY created_at DESC LIMIT 1",
+                    )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                return _recovery_job_row_to_dict(cols, row)
+    except Exception as exc:  # noqa: BLE001
+        log.error("get_latest_recovery_job failed: %s", exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Lead-truth exclusions (PR-ADS-115) — auditable revenue-truth decisions.
+# Local DB only. Never overwrites or deletes historical `leads` rows.
+# ---------------------------------------------------------------------------
+
+def write_lead_exclusion(
+    lead_id: str,
+    reason: str,
+    *,
+    details: Optional[str] = None,
+    reconciliation_job_id: Optional[str] = None,
+) -> bool:
+    """Upsert a durable lead-truth exclusion (keyed by lead_id). Never raises.
+
+    A re-run refreshes the reason/details/job but preserves the original
+    excluded_at timestamp for the audit trail.
+    """
+    if not lead_id:
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO lead_truth_exclusions (
+                        lead_id, reason, details, reconciliation_job_id
+                    ) VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (lead_id) DO UPDATE SET
+                        reason                = EXCLUDED.reason,
+                        details               = EXCLUDED.details,
+                        reconciliation_job_id = EXCLUDED.reconciliation_job_id,
+                        updated_at            = NOW()
+                    """,
+                    (lead_id, reason, details, reconciliation_job_id),
+                )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_lead_exclusion failed (lead_id=%s): %s", lead_id, exc)
+        return False
+
+
+def count_lead_exclusions() -> int:
+    """Return the number of durable lead-truth exclusions. Never raises."""
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM lead_truth_exclusions")
+                return int(cur.fetchone()[0])
+    except Exception as exc:  # noqa: BLE001
+        log.error("count_lead_exclusions failed: %s", exc)
+        return 0
+
+
+def backfill_event_date_for_contact(contact_id, created_at) -> int:
+    """Backfill contact_created_at for ALL local lead snapshots of a contact_id
+    that currently lack it (PR-ADS-115 reconciliation).
+
+    Uses ONLY the supplied HubSpot createdate — never a run/sync/current date,
+    and only when a real created date exists. Returns the number of rows updated.
+    Never raises.
+    """
+    if not contact_id or not created_at:
+        return 0
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE leads
+                    SET contact_created_at = %s::timestamptz
+                    WHERE contact_id = %s AND contact_created_at IS NULL
+                    """,
+                    (created_at, contact_id),
+                )
+                return cur.rowcount or 0
+    except Exception as exc:  # noqa: BLE001
+        log.error("backfill_event_date_for_contact failed (contact_id=%s): %s", contact_id, exc)
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# Acquisition-source classification (PR-ADS-117) — durable, auditable. Local DB
+# only; never writes to or deletes raw HubSpot data.
+# ---------------------------------------------------------------------------
+
+def upsert_contact_source_classification(rows: list) -> int:
+    """Upsert contact source classifications (keyed by contact_key). Never raises.
+
+    Each row: {contact_key, contact_id, source_primary_raw, source_detail_raw,
+    acquisition_group, classification_rule_version, contact_created_at,
+    status_category}. Returns count attempted.
+    """
+    if not rows:
+        return 0
+    prepared = []
+    for r in rows:
+        key = (r.get("contact_key") or "").strip()
+        if not key:
+            continue
+        prepared.append((
+            key, r.get("contact_id"), r.get("source_primary_raw"),
+            r.get("source_detail_raw"), r.get("acquisition_group"),
+            r.get("classification_rule_version"),
+            _parse_ts_or_none(r.get("contact_created_at")),
+            r.get("status_category"),
+        ))
+    if not prepared:
+        return 0
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO contact_source_classification (
+                        contact_key, contact_id, source_primary_raw, source_detail_raw,
+                        acquisition_group, classification_rule_version,
+                        contact_created_at, status_category
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (contact_key) DO UPDATE SET
+                        contact_id                  = EXCLUDED.contact_id,
+                        source_primary_raw          = EXCLUDED.source_primary_raw,
+                        source_detail_raw           = EXCLUDED.source_detail_raw,
+                        acquisition_group           = EXCLUDED.acquisition_group,
+                        classification_rule_version = EXCLUDED.classification_rule_version,
+                        contact_created_at          = EXCLUDED.contact_created_at,
+                        status_category             = EXCLUDED.status_category,
+                        updated_at                  = NOW()
+                    """,
+                    prepared,
+                )
+        return len(prepared)
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_contact_source_classification failed: %s", exc)
+        return 0
+
+
+def upsert_deal_source_attribution(rows: list) -> int:
+    """Upsert per-deal source attribution (keyed by deal_id). Never raises.
+
+    Each row: {deal_id, associated_contact_id, acquisition_group,
+    source_primary_raw, source_detail_raw, attribution_status,
+    attribution_reason, deal_close_date, deal_amount_usd,
+    classification_rule_version}. Returns count attempted.
+    """
+    if not rows:
+        return 0
+    prepared = []
+    for r in rows:
+        deal_id = (r.get("deal_id") or "").strip()
+        if not deal_id:
+            continue
+        prepared.append((
+            deal_id, r.get("associated_contact_id"), r.get("acquisition_group"),
+            r.get("source_primary_raw"), r.get("source_detail_raw"),
+            r.get("attribution_status"), r.get("attribution_reason"),
+            _parse_ts_or_none(r.get("deal_close_date")),
+            _float_or_none(r.get("deal_amount_usd")),
+            r.get("classification_rule_version"),
+        ))
+    if not prepared:
+        return 0
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO deal_source_attribution (
+                        deal_id, associated_contact_id, acquisition_group,
+                        source_primary_raw, source_detail_raw,
+                        attribution_status, attribution_reason,
+                        deal_close_date, deal_amount_usd, classification_rule_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (deal_id) DO UPDATE SET
+                        associated_contact_id       = EXCLUDED.associated_contact_id,
+                        acquisition_group           = EXCLUDED.acquisition_group,
+                        source_primary_raw          = EXCLUDED.source_primary_raw,
+                        source_detail_raw           = EXCLUDED.source_detail_raw,
+                        attribution_status          = EXCLUDED.attribution_status,
+                        attribution_reason          = EXCLUDED.attribution_reason,
+                        deal_close_date             = EXCLUDED.deal_close_date,
+                        deal_amount_usd             = EXCLUDED.deal_amount_usd,
+                        classification_rule_version = EXCLUDED.classification_rule_version,
+                        updated_at                  = NOW()
+                    """,
+                    prepared,
+                )
+        return len(prepared)
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_deal_source_attribution failed: %s", exc)
+        return 0
+
+
+def source_attribution_health_counts() -> dict:
+    """Return {contacts_classified, deals_attributed, ambiguous_deals,
+    unclassified_deals} from the durable source tables. Never raises."""
+    out = {"contacts_classified": 0, "deals_attributed": 0,
+           "ambiguous_deals": 0, "unclassified_deals": 0}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return out
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM contact_source_classification")
+                out["contacts_classified"] = int(cur.fetchone()[0])
+                cur.execute(
+                    "SELECT attribution_status, COUNT(*) FROM deal_source_attribution "
+                    "GROUP BY attribution_status"
+                )
+                for status, n in cur.fetchall():
+                    if status == "attributed":
+                        out["deals_attributed"] += int(n)
+                    elif status == "ambiguous":
+                        out["ambiguous_deals"] += int(n)
+                    elif status == "unclassified":
+                        out["unclassified_deals"] += int(n)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.error("source_attribution_health_counts failed: %s", exc)
+        return out

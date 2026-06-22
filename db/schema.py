@@ -475,6 +475,102 @@ BEGIN
         TRUNCATE TABLE campaigns;
     END IF;
 END $$;
+
+-- PR-ADS-114: durable Revenue Truth Recovery jobs. Background recovery runs
+-- persist their metadata, chunk checkpoints, counts, status, and errors here so
+-- progress survives a process restart and resume reads completed chunks from DB.
+CREATE TABLE IF NOT EXISTS revenue_recovery_jobs (
+  id                SERIAL PRIMARY KEY,
+  job_id            TEXT NOT NULL UNIQUE,
+  job_type          TEXT NOT NULL DEFAULT 'revenue_recovery',  -- revenue_recovery|lead_reconciliation
+  status            TEXT NOT NULL DEFAULT 'queued',  -- queued|running|success|partial|failed
+  dry_run           BOOLEAN NOT NULL DEFAULT TRUE,
+  date_from         DATE,
+  date_to           DATE,
+  chunk_months      INTEGER NOT NULL DEFAULT 1,
+  phase             TEXT,
+  current_chunk     TEXT,
+  completed_chunks  JSONB NOT NULL DEFAULT '[]'::jsonb,
+  summary           JSONB,
+  chunks            JSONB,
+  errors            JSONB NOT NULL DEFAULT '[]'::jsonb,
+  started_at        TIMESTAMPTZ,
+  finished_at       TIMESTAMPTZ,
+  created_at        TIMESTAMPTZ DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Existing installs: add job_type so the durable-job table is reused for the
+-- PR-ADS-115 lead-reconciliation job (idempotent).
+ALTER TABLE revenue_recovery_jobs
+  ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'revenue_recovery';
+
+CREATE INDEX IF NOT EXISTS idx_revenue_recovery_jobs_created
+  ON revenue_recovery_jobs(created_at DESC);
+
+-- PR-ADS-115: durable lead-truth exclusions. A missing-event-date paid lead with
+-- no verifiable HubSpot identity / created date is excluded from revenue-truth
+-- metrics with an explicit, auditable reason. Historical `leads` rows are NEVER
+-- overwritten or deleted; exclusion is a separate, reversible truth decision.
+CREATE TABLE IF NOT EXISTS lead_truth_exclusions (
+  id                     SERIAL PRIMARY KEY,
+  lead_id                TEXT NOT NULL UNIQUE,  -- COALESCE(contact_id, 'id:'||leads.id)
+  reason                 TEXT NOT NULL,         -- no_contact_identity|hubspot_contact_not_found|hubspot_contact_no_createdate
+  details                TEXT,
+  reconciliation_job_id  TEXT,
+  excluded_at            TIMESTAMPTZ DEFAULT NOW(),
+  updated_at             TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_lead_truth_exclusions_reason
+  ON lead_truth_exclusions(reason);
+
+-- PR-ADS-117: durable acquisition-source classification of HubSpot contacts.
+-- Raw HubSpot source values are persisted alongside the derived group, rule
+-- version, and timestamp so every classification is auditable. Raw HubSpot data
+-- is NEVER overwritten or deleted.
+CREATE TABLE IF NOT EXISTS contact_source_classification (
+  id                        SERIAL PRIMARY KEY,
+  contact_key               TEXT NOT NULL UNIQUE,   -- contact_id, or 'id:'||leads.id
+  contact_id                TEXT,
+  source_primary_raw        TEXT,
+  source_detail_raw         TEXT,
+  acquisition_group         TEXT NOT NULL,          -- google_ads|other_paid|organic|offline|unclassified
+  classification_rule_version TEXT NOT NULL,
+  contact_created_at        TIMESTAMPTZ,
+  status_category           TEXT,
+  classified_at             TIMESTAMPTZ DEFAULT NOW(),
+  updated_at                TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_contact_source_group
+  ON contact_source_classification(acquisition_group);
+CREATE INDEX IF NOT EXISTS idx_contact_source_created
+  ON contact_source_classification(contact_created_at);
+
+-- PR-ADS-117: durable per-deal source attribution. Revenue is NEVER split across
+-- sources — each closed-won deal maps to exactly one group (or the ambiguous /
+-- unclassified bucket).
+CREATE TABLE IF NOT EXISTS deal_source_attribution (
+  id                     SERIAL PRIMARY KEY,
+  deal_id                TEXT NOT NULL UNIQUE,
+  associated_contact_id  TEXT,
+  acquisition_group      TEXT NOT NULL,             -- group | 'ambiguous' | 'unclassified'
+  source_primary_raw     TEXT,
+  source_detail_raw      TEXT,
+  attribution_status     TEXT NOT NULL,             -- attributed|ambiguous|unclassified
+  attribution_reason     TEXT,
+  deal_close_date        TIMESTAMPTZ,
+  deal_amount_usd        NUMERIC(12,2),
+  classification_rule_version TEXT,
+  classified_at          TIMESTAMPTZ DEFAULT NOW(),
+  updated_at             TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_deal_source_group
+  ON deal_source_attribution(acquisition_group);
+CREATE INDEX IF NOT EXISTS idx_deal_source_close
+  ON deal_source_attribution(deal_close_date);
 """
 
 

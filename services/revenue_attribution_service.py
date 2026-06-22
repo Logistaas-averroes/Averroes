@@ -732,6 +732,13 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     revenue_attribution_status = (
         "gclid_attribution_db" if revenue_available else "not_wired_or_no_closed_won"
     )
+    # PR-ADS-115: split revenue truth into two independent facts. A connected
+    # integration whose selected window simply has no closed-won deals is a SAFE
+    # EMPTY state — not "not wired". Readiness keys off the integration fact;
+    # window emptiness is handled downstream as a safe empty table.
+    revenue_integration_connected = repo.revenue_integration_connected()
+    revenue_integration_status = "connected" if revenue_integration_connected else "not_connected"
+    revenue_window_status = "has_revenue" if revenue_available else "no_closed_won"
     # Top-level attribution_source_status retained for backward compatibility.
     if revenue_available:
         attribution_status = "gclid_attribution_db"
@@ -782,6 +789,8 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "lead_date_grain_status": lead_date_grain_status,
         "lead_metrics_status": lead_metrics_status,
         "revenue_attribution_status": revenue_attribution_status,
+        "revenue_integration_status": revenue_integration_status,
+        "revenue_window_status": revenue_window_status,
         "data_is_partial": data_is_partial,
         "coverage_start": spend.get("coverage_start") or revenue.get("coverage_start"),
         "coverage_end": spend.get("coverage_end") or revenue.get("coverage_end"),
@@ -808,6 +817,8 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "lead_date_grain_status": lead_date_grain_status,
         "lead_metrics_status": lead_metrics_status,
         "revenue_attribution_status": revenue_attribution_status,
+        "revenue_integration_status": revenue_integration_status,
+        "revenue_window_status": revenue_window_status,
         "country_spend_available": country_spend_available,
         "geo_country_mapping_status": "available" if country_spend_available else (
             "no_geo_data" if not spend_rows else "partial"
@@ -902,6 +913,9 @@ def _build_from_json(resolved, start_dt, end_dt) -> dict:
     # The JSON fallback filters contacts by HubSpot createdate, so leads are
     # event-date based; revenue is wired only when attributed deals exist.
     revenue_attribution_status = "local_json_fallback" if deals_w else "not_wired_or_no_closed_won"
+    # PR-ADS-115 split contract: integration connected if ANY won deal exists.
+    revenue_integration_status = "connected" if deals else "not_connected"
+    revenue_window_status = "has_revenue" if deals_w else "no_closed_won"
 
     source_health = {
         "mode": "local_json_fallback" if has_any_local else "source_unavailable",
@@ -912,6 +926,8 @@ def _build_from_json(resolved, start_dt, end_dt) -> dict:
         "lead_date_grain_status": "event_date",
         "lead_metrics_status": "local_json_fallback" if contacts else "source_unavailable",
         "revenue_attribution_status": revenue_attribution_status,
+        "revenue_integration_status": revenue_integration_status,
+        "revenue_window_status": revenue_window_status,
         "data_is_partial": True,
         "coverage_start": None,
         "coverage_end": None,
@@ -935,6 +951,8 @@ def _build_from_json(resolved, start_dt, end_dt) -> dict:
         "lead_date_grain_status": "event_date",
         "lead_metrics_status": "local_json_fallback" if contacts else "source_unavailable",
         "revenue_attribution_status": revenue_attribution_status,
+        "revenue_integration_status": revenue_integration_status,
+        "revenue_window_status": revenue_window_status,
         "country_spend_available": country_spend_available,
         "geo_country_mapping_status": geo_country_mapping_status,
         "data_is_partial": True,
@@ -980,6 +998,103 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     return _build_from_json(resolved, start_dt, end_dt)
 
 
+def build_revenue_deals(window: str, now: datetime | None = None) -> dict:
+    """Build the Closed-Won Revenue Ledger contract for a business window.
+
+    PR-ADS-113. Read-only deal-level revenue truth from the durable
+    gclid_attribution table, windowed by deal_close_date (NEVER the scheduler
+    run_date). Only closed-won deals count as revenue. One latest row per
+    deal_id (deduped in the repository).
+
+    Distinct states:
+      - ledger_status="database_unavailable" when the durable ledger cannot be
+        read. This is NOT the same as a safe-empty window.
+      - safe-empty: ledger available but no closed-won deals in the window
+        (deals == [], summary totals zeroed).
+
+    Returns a contract with window, summary, deals, source_health, generated_at.
+
+    Raises:
+        ValueError: If ``window`` is not a supported business window.
+    """
+    resolved, start_date, end_date = _window_date_bounds(window, now)
+
+    ledger = repo.fetch_revenue_deals(start_date, end_date)
+    generated_at = datetime.now(timezone.utc).isoformat()
+
+    if not ledger.get("available"):
+        # The durable ledger/database cannot be read — distinct from safe-empty.
+        return {
+            "window": resolved,
+            "summary": {
+                "deal_count": 0,
+                "won_revenue": None,
+                "average_deal_value": None,
+                "exact_gclid_count": 0,
+            },
+            "deals": [],
+            "source_health": {
+                "ledger_status": "database_unavailable",
+                "revenue_attribution_status": "database_unavailable",
+            },
+            "generated_at": generated_at,
+        }
+
+    rows = ledger.get("rows", [])
+
+    deals = []
+    won_revenue = 0.0
+    exact_gclid_count = 0
+    for row in rows:
+        amount = _safe_float(row.get("deal_amount_usd"))
+        won_revenue += amount
+        match_source = (row.get("match_source") or "").strip().lower()
+        if match_source == "gclid":
+            exact_gclid_count += 1
+        deals.append({
+            "deal_id": row.get("deal_id"),
+            "company": row.get("company"),
+            "country": row.get("country"),
+            "campaign_name": row.get("campaign_name"),
+            "deal_close_date": row.get("deal_close_date"),
+            "deal_amount_usd": round(amount, 2),
+            "deal_stage_label": row.get("deal_stage_label"),
+            "match_status": row.get("match_status"),
+            "match_source": row.get("match_source"),
+        })
+
+    # Sort: most recent close first, then largest revenue.
+    deals.sort(
+        key=lambda d: (d.get("deal_close_date") or "", d.get("deal_amount_usd") or 0.0),
+        reverse=True,
+    )
+
+    deal_count = len(deals)
+    revenue_wired = deal_count > 0
+    summary = {
+        "deal_count": deal_count,
+        # No closed-won deals -> revenue is unavailable (None), never a fake $0.
+        "won_revenue": round(won_revenue, 2) if revenue_wired else None,
+        "average_deal_value": (
+            round(won_revenue / deal_count, 2) if revenue_wired else None
+        ),
+        "exact_gclid_count": exact_gclid_count,
+    }
+
+    return {
+        "window": resolved,
+        "summary": summary,
+        "deals": deals,
+        "source_health": {
+            "ledger_status": "available",
+            "revenue_attribution_status": (
+                "gclid_attribution_db" if revenue_wired else "not_wired_or_no_closed_won"
+            ),
+        },
+        "generated_at": generated_at,
+    }
+
+
 def build_revenue_attribution_audit(window: str, now: datetime | None = None) -> dict:
     """Truth audit for /api/revenue-attribution (PR-ADS-109).
 
@@ -1011,14 +1126,26 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
         "revenue_window_safe": revenue_window_safe,
     }
 
-    # Window comparison — proves Current Quarter / YTD / All Time differ (or
-    # explains why they don't) using the same safe build logic.
+    # Window comparison — Current Quarter / YTD / All Time totals via the same
+    # safe build logic. Identical totals are NOT a problem: they are correct when
+    # all available data falls inside the current quarter. Window integrity is a
+    # property of the resolved DATE BOUNDARIES (window_ranges), not the aggregates.
     window_comparison = {}
+    window_ranges = {}
     for wk in ("current_quarter", "ytd", "all_time"):
         try:
             window_comparison[wk] = build_revenue_attribution(wk, now=now)["summary"]
         except Exception:  # noqa: BLE001
             window_comparison[wk] = {}
+        try:
+            wr = resolve_window(wk, now=now)
+            window_ranges[wk] = {
+                "key": wr["key"],
+                "start_date": wr["start_date"],
+                "end_date": wr["end_date"],
+            }
+        except Exception:  # noqa: BLE001
+            window_ranges[wk] = {}
 
     blockers: list[str] = []
     if not grain.get("available"):
@@ -1032,22 +1159,41 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
 
     verdict = "SAFE" if not blockers else "UNSAFE"
 
+    # PR-ADS-115 split contract: integration connected = ANY durable attributed
+    # closed-won deal exists (regardless of window); window status reflects only
+    # the selected business window. A connected integration with no deals in the
+    # selected window is a SAFE EMPTY state, not "not wired".
+    revenue_integration_connected = repo.revenue_integration_connected()
+    window_has_revenue = bool(revenue.get("rows"))
+    try:
+        import db.writers as _db_writers  # noqa: PLC0415
+        legacy_excluded_count = _db_writers.count_lead_exclusions()
+    except Exception:  # noqa: BLE001
+        legacy_excluded_count = 0
+
     return {
         "window": {
             "key": resolved["key"],
+            "label": resolved.get("label"),
             "start_date": resolved["start_date"],
             "end_date": resolved["end_date"],
+            "is_closed_window": resolved.get("is_closed_window", False),
         },
         "date_grain_health": date_grain_health,
         "counts_by_source_type": grain.get("counts_by_source_type", {}),
         "excluded_non_paid_count": grain.get("excluded_non_paid_count", 0),
         "excluded_pseudo_campaign_count": grain.get("excluded_pseudo_campaign_count", 0),
         "missing_contact_created_at_count": grain.get("missing_contact_created_at_count", 0),
+        "legacy_excluded_count": legacy_excluded_count,
         "pseudo_campaign_rows": pollution.get("pseudo_campaign_rows", []),
         "email_campaign_rows": pollution.get("email_campaign_rows", []),
         "zero_spend_campaigns_with_leads": pollution.get("zero_spend_campaigns_with_leads", []),
-        "revenue_attribution_wired": bool(revenue.get("rows")),
+        # Retained for backward compatibility (window-only fact).
+        "revenue_attribution_wired": window_has_revenue,
+        "revenue_integration_status": "connected" if revenue_integration_connected else "not_connected",
+        "revenue_window_status": "has_revenue" if window_has_revenue else "no_closed_won",
         "window_comparison": window_comparison,
+        "window_ranges": window_ranges,
         "verdict": verdict,
         "blockers": blockers,
         "generated_at": datetime.now(timezone.utc).isoformat(),

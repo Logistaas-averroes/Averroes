@@ -117,6 +117,7 @@ class TestSummaryShape:
             "hubspot/contacts",
             "hubspot/deals",
             "gclid/matches",
+            "hubspot/source_classification",
         }
         assert set(result["datasets"].keys()) == expected
 
@@ -266,6 +267,8 @@ class TestDatasetFailureIsolation:
             geo_pull=failing_pull,
             contacts_pull=failing_pull,
             deals_contacts_pull=failing_pull,
+            closed_won_pull=failing_pull,
+            source_pull=failing_pull,
         )
 
         from scheduler.incremental_sync import run_daily_incremental_sync
@@ -386,16 +389,18 @@ class TestUnsupportedDatasets:
         assert "note" in ds
         assert "unsupported_by_current_connector" in ds["note"]
 
-    def test_gclid_matches_skipped(self, monkeypatch):
+    def test_gclid_matches_persisted_not_skipped(self, monkeypatch):
+        # PR-ADS-114: gclid/matches now has a real persistence path (closed-won
+        # deals by closedate → gclid_attribution). With no closed-won deals it
+        # is a legitimate zero-row success, never "skipped".
         _patch_all_datasets_success(monkeypatch)
 
         from scheduler.incremental_sync import run_daily_incremental_sync
         result = run_daily_incremental_sync()
 
         ds = result["datasets"]["gclid/matches"]
-        assert ds["status"] == "skipped"
-        assert "note" in ds
-        assert "unsupported_by_current_connector" in ds["note"]
+        assert ds["status"] == "success"
+        assert "closed_won_deals_found" in ds
 
     def test_skipped_datasets_not_counted_in_failure(self, monkeypatch):
         """Skipped datasets must not contribute to 'failed' overall status."""
@@ -616,6 +621,8 @@ def _patch_all_datasets_success(
     contacts_write=None,
     deals_contacts_pull=None,
     deals_write=None,
+    closed_won_pull=None,
+    source_pull=None,
 ) -> None:
     """Patch all connector and writer calls with safe fake implementations.
 
@@ -662,6 +669,22 @@ def _patch_all_datasets_success(
         "connectors.hubspot_pull.pull_deals_with_gclid",
         _default_deals_pull,
     )
+    # PR-ADS-114: gclid/matches now pulls closed-won deals by closedate.
+    monkeypatch.setattr(
+        "connectors.hubspot_pull.pull_closed_won_deals_in_range",
+        closed_won_pull or (lambda *a, **kw: []),
+    )
+    # PR-ADS-117: daily source-classification step.
+    monkeypatch.setattr(
+        "connectors.hubspot_pull.pull_all_contacts_in_range",
+        source_pull or (lambda *a, **kw: []),
+    )
+    monkeypatch.setattr(
+        "connectors.hubspot_pull.pull_closed_won_deals_with_sources_in_range",
+        source_pull or (lambda *a, **kw: []),
+    )
+    monkeypatch.setattr("db.writers.upsert_contact_source_classification", lambda *a, **kw: 0)
+    monkeypatch.setattr("db.writers.upsert_deal_source_attribution", lambda *a, **kw: 0)
 
     # DB writers
     monkeypatch.setattr("db.writers.write_campaigns", campaign_write or _default_write)
@@ -669,6 +692,11 @@ def _patch_all_datasets_success(
     monkeypatch.setattr("db.writers.write_geo", geo_write or _default_write)
     monkeypatch.setattr("db.writers.write_leads", contacts_write or _default_write)
     monkeypatch.setattr("db.writers.write_deals", deals_write or _default_write)
+    monkeypatch.setattr("db.writers.write_gclid_attribution", lambda *a, **kw: 0)
+
+    # PR-ADS-114: real local run record (returns a non-None run_id).
+    monkeypatch.setattr("db.writers.write_run", lambda *a, **kw: 1)
+    monkeypatch.setattr("db.writers.update_run", lambda *a, **kw: None)
 
     # Sync batch tracking — stub out to return a valid batch_id
     monkeypatch.setattr("db.writers.start_sync_batch", lambda *a, **kw: 1)

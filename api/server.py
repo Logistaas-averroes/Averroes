@@ -54,6 +54,15 @@ Protected endpoints (require authenticated session):
   GET  /api/diagnostics/window-semantics — Read-only window-counts and diagnostic verdict per dataset (admin only; PR-ADS-095).
   GET  /api/revenue-attribution   — Shared revenue-attribution contract by business window for ROAS campaign/country pages (requires auth; PR-ADS-107A).
   GET  /api/revenue-attribution/audit — Read-only truth audit of revenue-attribution date grain / source pollution per window (requires auth; PR-ADS-109).
+  GET  /api/revenue-deals          — Read-only Closed-Won Revenue Ledger by business window (deal_close_date truth; requires auth; PR-ADS-113).
+  POST /api/revenue-recovery/run   — Admin-only Revenue Truth Recovery (local DB writes only; reads HubSpot read-only; PR-ADS-114).
+  GET  /api/revenue-recovery/status — Latest Revenue Recovery progress/result (admin-only; PR-ADS-114).
+  POST /api/lead-reconciliation/run — Admin-only Lead Event-Date Reconciliation (local DB writes only; reads HubSpot read-only; PR-ADS-115).
+  GET  /api/lead-reconciliation/status — Latest Lead Reconciliation progress/result (admin-only; PR-ADS-115).
+  GET  /api/revenue-by-source      — Read-only Revenue by Acquisition Source by business window (PR-ADS-117).
+  GET  /api/source-attribution-health — Durable source classification/attribution counts (PR-ADS-117).
+  POST /api/source-attribution-backfill/run — Admin-only durable source-classification backfill (local DB only; PR-ADS-117).
+  GET  /api/source-attribution-backfill/status — Latest source backfill progress/result (admin-only; PR-ADS-117).
 """
 
 import base64
@@ -64,6 +73,7 @@ import logging
 import os
 import re
 import threading
+import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -215,6 +225,59 @@ class BackfillRunRequest(BaseModel):
 
 _backfill_lock: threading.Lock = threading.Lock()
 _backfill_state: dict[str, Any] = {"running": False, "latest": None}
+
+
+# ---------------------------------------------------------------------------
+# Revenue Truth Recovery (PR-ADS-114) — admin-only, local DB writes only.
+# Reads HubSpot read-only; NEVER writes to HubSpot, Google Ads, bids, budgets,
+# or conversions. _recovery_progress carries live phase/chunk state for the
+# status endpoint and the admin Revenue Recovery panel.
+# ---------------------------------------------------------------------------
+
+class RevenueRecoveryRequest(BaseModel):
+    date_from: Optional[str] = None  # None → All Time (default recovery range)
+    date_to: Optional[str] = None
+    chunk_months: int = 1
+    dry_run: bool = True
+    resume: bool = False
+
+
+_recovery_lock: threading.Lock = threading.Lock()
+_recovery_progress: dict[str, Any] = {"running": False, "latest": None}
+
+
+# ---------------------------------------------------------------------------
+# Lead Event-Date Reconciliation (PR-ADS-115) — admin-only, local DB writes
+# only. Reads HubSpot read-only; NEVER writes to HubSpot or Google Ads, and
+# NEVER fabricates a date. Reuses the durable background-job table (job_type).
+# ---------------------------------------------------------------------------
+
+class LeadReconciliationRequest(BaseModel):
+    dry_run: bool = True
+    batch_size: int = 100
+    resume: bool = False
+
+
+_reconciliation_lock: threading.Lock = threading.Lock()
+_reconciliation_progress: dict[str, Any] = {"running": False, "latest": None}
+
+
+# ---------------------------------------------------------------------------
+# Source Attribution Backfill (PR-ADS-117) — admin-only, durable background job.
+# Reads HubSpot read-only; writes only local classification tables. Reuses the
+# durable job table via job_type="source_attribution_backfill".
+# ---------------------------------------------------------------------------
+
+class SourceBackfillRequest(BaseModel):
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    chunk_months: int = 1
+    dry_run: bool = True
+    resume: bool = False
+
+
+_source_backfill_lock: threading.Lock = threading.Lock()
+_source_backfill_progress: dict[str, Any] = {"running": False, "latest": None}
 
 
 # ---------------------------------------------------------------------------
@@ -5907,6 +5970,461 @@ async def get_revenue_attribution_audit(
         raise HTTPException(
             status_code=500, detail="Revenue attribution audit failed"
         ) from exc
+
+
+@app.get("/api/revenue-deals")
+async def get_revenue_deals(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Closed-Won Revenue Ledger (PR-ADS-113).
+
+    Read-only deal-level revenue truth for the rebuilt Deals page. Sourced from
+    the durable gclid_attribution table, windowed by the real deal_close_date
+    (NEVER the scheduler run_date). Only closed-won deals count as revenue.
+    Business-revenue windows only: current_quarter, last_quarter, last_6_months,
+    ytd, all_time.
+
+    No Google Ads conversion value. No scheduler-date revenue windows. When the
+    durable ledger cannot be read, source_health.ledger_status is
+    "database_unavailable" (distinct from a safe-empty window).
+
+    Read-only — no writes to Google Ads, HubSpot, or any external system.
+    """
+    from services.revenue_attribution_service import build_revenue_deals
+
+    try:
+        return build_revenue_deals(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Revenue deals computation failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Revenue deals computation failed"
+        ) from exc
+
+
+def _run_recovery_worker(job_id: str, body: "RevenueRecoveryRequest") -> None:
+    """Background worker: run recovery and persist durable checkpoints to the DB.
+
+    Resume reads completed chunks from the DB (durable), so progress survives a
+    process restart. Local DB writes only; never writes to any external platform.
+    """
+    import db.writers as db_writers  # noqa: PLC0415
+    from services.revenue_recovery_service import run_revenue_recovery  # noqa: PLC0415
+
+    def _load_completed():
+        job = db_writers.get_recovery_job(job_id) or {}
+        return job.get("completed_chunks", []) or []
+
+    def _checkpoint(jid, snap):
+        fields = {
+            "status": snap.get("status"),
+            "phase": snap.get("phase"),
+            "current_chunk": snap.get("current_chunk"),
+            "completed_chunks": snap.get("completed_chunks", []),
+            "summary": snap.get("summary"),
+            "chunks": snap.get("chunks"),
+            "errors": snap.get("errors", []),
+        }
+        if "finished_at" in snap:
+            fields["finished_at"] = snap["finished_at"]
+        db_writers.update_recovery_job(jid, **fields)
+
+    try:
+        db_writers.update_recovery_job(job_id, status="running", phase="starting")
+        result = run_revenue_recovery(
+            date_from=body.date_from,
+            date_to=body.date_to,
+            dry_run=body.dry_run,
+            chunk_months=body.chunk_months,
+            resume=body.resume,
+            job_id=job_id,
+            load_completed=_load_completed,
+            checkpoint=_checkpoint,
+            progress=_recovery_progress,
+        )
+        # Final state is also written by the service's closing checkpoint.
+        db_writers.update_recovery_job(
+            job_id,
+            status=result.get("status", "success"),
+            phase="done",
+            summary=result.get("summary"),
+            chunks=result.get("chunks"),
+            errors=result.get("errors", []),
+            finished_at=result.get("finished_at"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error("[revenue-recovery worker] job %s failed: %s", job_id, exc, exc_info=True)
+        db_writers.update_recovery_job(
+            job_id, status="failed", phase="done",
+            errors=[f"{type(exc).__name__}: recovery worker failed"],
+            finished_at=datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    finally:
+        with _recovery_lock:
+            _recovery_progress["running"] = False
+
+
+@app.post("/api/revenue-recovery/run", status_code=202)
+def api_revenue_recovery_run(body: RevenueRecoveryRequest, request: Request) -> dict[str, Any]:
+    """Start the Revenue Truth Recovery job in the background (PR-ADS-114).
+
+    Admin-only. Returns 202 immediately with a job_id; the recovery runs in a
+    background worker and persists durable checkpoints to local PostgreSQL, so
+    the All-Time run never blocks the request and resume survives a restart.
+
+    Reads HubSpot read-only and writes ONLY to the local DB (only when
+    dry_run is False). NEVER writes to HubSpot, Google Ads, bids, budgets, or
+    conversions. Default range is All Time. Returns 409 if a job is already
+    running, 422 on invalid parameters.
+    """
+    check_admin_or_token(request)
+
+    if body.chunk_months < 1:
+        raise HTTPException(status_code=422, detail="chunk_months must be >= 1")
+    for label, value in (("date_from", body.date_from), ("date_to", body.date_to)):
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"{label} '{value}' is not a valid ISO date",
+                ) from exc
+
+    import db.writers as db_writers  # noqa: PLC0415
+
+    # Durable single-run guard: a recovery job already queued/running blocks a new one.
+    latest = db_writers.get_latest_recovery_job(job_type="revenue_recovery")
+    if latest and latest.get("status") in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="revenue recovery already running")
+
+    with _recovery_lock:
+        if _recovery_progress["running"]:
+            raise HTTPException(status_code=409, detail="revenue recovery already running")
+        _recovery_progress["running"] = True
+
+    job_id = uuid.uuid4().hex
+    created = db_writers.create_recovery_job(
+        job_id,
+        dry_run=body.dry_run,
+        date_from=body.date_from,
+        date_to=body.date_to,
+        chunk_months=body.chunk_months,
+    )
+    if not created:
+        with _recovery_lock:
+            _recovery_progress["running"] = False
+        raise HTTPException(status_code=503, detail="recovery job store unavailable")
+
+    threading.Thread(
+        target=_run_recovery_worker, args=(job_id, body), daemon=True,
+    ).start()
+
+    return {"job_id": job_id, "status": "queued", "dry_run": body.dry_run}
+
+
+@app.get("/api/revenue-recovery/status")
+def api_revenue_recovery_status(request: Request, job_id: Optional[str] = None) -> dict[str, Any]:
+    """Return durable Revenue Recovery job state (admin-only).
+
+    Reads from local PostgreSQL: the specific job_id when provided, otherwise the
+    most recent job. The UI polls this every few seconds while a job is running.
+    """
+    check_admin_or_token(request)
+    import db.writers as db_writers  # noqa: PLC0415
+
+    job = db_writers.get_recovery_job(job_id) if job_id else db_writers.get_latest_recovery_job()
+    if not job:
+        return {"running": False, "job": None}
+
+    return {
+        "running": job.get("status") in ("queued", "running"),
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "phase": job.get("phase"),
+        "current_chunk": job.get("current_chunk"),
+        "completed_chunks": job.get("completed_chunks", []),
+        "summary": job.get("summary"),
+        "chunks": job.get("chunks"),
+        "errors": job.get("errors", []),
+        "dry_run": job.get("dry_run"),
+        "date_from": job.get("date_from"),
+        "date_to": job.get("date_to"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "job": job,
+    }
+
+
+def _run_reconciliation_worker(job_id: str, body: "LeadReconciliationRequest") -> None:
+    """Background worker for lead event-date reconciliation (PR-ADS-115).
+
+    Persists durable checkpoints to the DB so progress survives a restart and
+    resume is idempotent. Local DB writes only; never writes to any external
+    platform and never fabricates a date.
+    """
+    import db.writers as db_writers  # noqa: PLC0415
+    from services.lead_reconciliation_service import run_lead_reconciliation  # noqa: PLC0415
+
+    def _load_completed():
+        job = db_writers.get_recovery_job(job_id) or {}
+        return job.get("completed_chunks", []) or []
+
+    def _checkpoint(jid, snap):
+        fields = {
+            "status": snap.get("status"), "phase": snap.get("phase"),
+            "current_chunk": snap.get("current_chunk"),
+            "completed_chunks": snap.get("completed_chunks", []),
+            "summary": snap.get("summary"), "chunks": snap.get("chunks"),
+            "errors": snap.get("errors", []),
+        }
+        if "finished_at" in snap:
+            fields["finished_at"] = snap["finished_at"]
+        db_writers.update_recovery_job(jid, **fields)
+
+    try:
+        db_writers.update_recovery_job(job_id, status="running", phase="loading")
+        result = run_lead_reconciliation(
+            dry_run=body.dry_run,
+            batch_size=body.batch_size,
+            resume=body.resume,
+            job_id=job_id,
+            load_completed=_load_completed,
+            checkpoint=_checkpoint,
+            progress=_reconciliation_progress,
+        )
+        db_writers.update_recovery_job(
+            job_id, status=result.get("status", "success"), phase="done",
+            summary=result.get("summary"), chunks=result.get("chunks"),
+            errors=result.get("errors", []), finished_at=result.get("finished_at"),
+        )
+        # Revenue readiness may have changed — nothing to write here; the next
+        # source-health read reflects the new exclusion/backfill state.
+    except Exception as exc:  # noqa: BLE001
+        log.error("[lead-reconciliation worker] job %s failed: %s", job_id, exc, exc_info=True)
+        db_writers.update_recovery_job(
+            job_id, status="failed", phase="done",
+            errors=[f"{type(exc).__name__}: reconciliation worker failed"],
+            finished_at=datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    finally:
+        with _reconciliation_lock:
+            _reconciliation_progress["running"] = False
+
+
+@app.post("/api/lead-reconciliation/run", status_code=202)
+def api_lead_reconciliation_run(body: LeadReconciliationRequest, request: Request) -> dict[str, Any]:
+    """Start Lead Event-Date Reconciliation in the background (PR-ADS-115).
+
+    Admin-only. Returns 202 immediately with a job_id; the job runs in a
+    background worker and persists durable checkpoints to local PostgreSQL.
+    Reads HubSpot read-only and writes ONLY to the local DB (backfills from real
+    createdate, or durable exclusions). NEVER writes to HubSpot/Google Ads and
+    NEVER fabricates a date. Returns 409 if a reconciliation is already running.
+    """
+    check_admin_or_token(request)
+    if body.batch_size < 1:
+        raise HTTPException(status_code=422, detail="batch_size must be >= 1")
+
+    import db.writers as db_writers  # noqa: PLC0415
+
+    latest = db_writers.get_latest_recovery_job(job_type="lead_reconciliation")
+    if latest and latest.get("status") in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="lead reconciliation already running")
+
+    with _reconciliation_lock:
+        if _reconciliation_progress["running"]:
+            raise HTTPException(status_code=409, detail="lead reconciliation already running")
+        _reconciliation_progress["running"] = True
+
+    job_id = uuid.uuid4().hex
+    created = db_writers.create_recovery_job(
+        job_id, dry_run=body.dry_run, date_from=None, date_to=None,
+        chunk_months=1, job_type="lead_reconciliation",
+    )
+    if not created:
+        with _reconciliation_lock:
+            _reconciliation_progress["running"] = False
+        raise HTTPException(status_code=503, detail="reconciliation job store unavailable")
+
+    threading.Thread(
+        target=_run_reconciliation_worker, args=(job_id, body), daemon=True,
+    ).start()
+
+    return {"job_id": job_id, "status": "queued", "dry_run": body.dry_run}
+
+
+@app.get("/api/lead-reconciliation/status")
+def api_lead_reconciliation_status(request: Request, job_id: Optional[str] = None) -> dict[str, Any]:
+    """Return durable Lead Reconciliation job state (admin-only).
+
+    Reads from local PostgreSQL: the specific job_id, else the most recent
+    lead_reconciliation job. The UI polls this every few seconds while running.
+    """
+    check_admin_or_token(request)
+    import db.writers as db_writers  # noqa: PLC0415
+
+    job = (db_writers.get_recovery_job(job_id) if job_id
+           else db_writers.get_latest_recovery_job(job_type="lead_reconciliation"))
+    if not job:
+        return {"running": False, "job": None}
+    return {
+        "running": job.get("status") in ("queued", "running"),
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "phase": job.get("phase"),
+        "current_chunk": job.get("current_chunk"),
+        "completed_chunks": job.get("completed_chunks", []),
+        "summary": job.get("summary"),
+        "chunks": job.get("chunks"),
+        "errors": job.get("errors", []),
+        "dry_run": job.get("dry_run"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "job": job,
+    }
+
+
+@app.get("/api/revenue-by-source")
+async def get_revenue_by_source(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Revenue by Acquisition Source (PR-ADS-117).
+
+    Read-only. Pipeline + closed-won revenue across Google Ads, Other Paid,
+    Organic, Offline, and Unclassified. Only Google Ads carries spend/ROAS; every
+    other group is revenue-only. Leads/SQLs use contact_created_at; Won Revenue
+    uses deal_close_date; both use the selected business window.
+    """
+    from services.source_attribution_service import build_revenue_by_source  # noqa: PLC0415
+    try:
+        return build_revenue_by_source(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Revenue by source failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Revenue by source computation failed") from exc
+
+
+@app.get("/api/source-attribution-health")
+async def get_source_attribution_health(_user=Depends(require_auth)):
+    """Durable source classification / attribution counts (read-only; PR-ADS-117)."""
+    from services.source_attribution_service import build_source_attribution_health  # noqa: PLC0415
+    try:
+        return build_source_attribution_health()
+    except Exception as exc:  # noqa: BLE001
+        log.error("Source attribution health failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Source attribution health failed") from exc
+
+
+def _run_source_backfill_worker(job_id: str, body: "SourceBackfillRequest") -> None:
+    """Background worker for the source-attribution backfill (PR-ADS-117).
+
+    Durable DB checkpoints; resume reads completed chunks from the DB. Local DB
+    writes only; never writes to HubSpot or Google Ads.
+    """
+    import db.writers as db_writers  # noqa: PLC0415
+    from services.source_attribution_service import run_source_attribution_backfill  # noqa: PLC0415
+
+    def _load_completed():
+        job = db_writers.get_recovery_job(job_id) or {}
+        return job.get("completed_chunks", []) or []
+
+    def _checkpoint(jid, snap):
+        fields = {"status": snap.get("status"), "phase": snap.get("phase"),
+                  "current_chunk": snap.get("current_chunk"),
+                  "completed_chunks": snap.get("completed_chunks", []),
+                  "summary": snap.get("summary"), "chunks": snap.get("chunks"),
+                  "errors": snap.get("errors", [])}
+        if "finished_at" in snap:
+            fields["finished_at"] = snap["finished_at"]
+        db_writers.update_recovery_job(jid, **fields)
+
+    try:
+        db_writers.update_recovery_job(job_id, status="running", phase="starting")
+        result = run_source_attribution_backfill(
+            date_from=body.date_from, date_to=body.date_to, dry_run=body.dry_run,
+            chunk_months=body.chunk_months, resume=body.resume, job_id=job_id,
+            load_completed=_load_completed, checkpoint=_checkpoint,
+            progress=_source_backfill_progress,
+        )
+        db_writers.update_recovery_job(
+            job_id, status=result.get("status", "success"), phase="done",
+            summary=result.get("summary"), chunks=result.get("chunks"),
+            errors=result.get("errors", []), finished_at=result.get("finished_at"))
+    except Exception as exc:  # noqa: BLE001
+        log.error("[source-backfill worker] job %s failed: %s", job_id, exc, exc_info=True)
+        db_writers.update_recovery_job(
+            job_id, status="failed", phase="done",
+            errors=[f"{type(exc).__name__}: source backfill worker failed"],
+            finished_at=datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    finally:
+        with _source_backfill_lock:
+            _source_backfill_progress["running"] = False
+
+
+@app.post("/api/source-attribution-backfill/run", status_code=202)
+def api_source_backfill_run(body: SourceBackfillRequest, request: Request) -> dict[str, Any]:
+    """Start the Source Attribution Backfill in the background (PR-ADS-117).
+
+    Admin-only. Returns 202 with a job_id; runs in a background worker with
+    durable checkpoints. Reads HubSpot read-only and writes ONLY local
+    classification tables. Returns 409 if a backfill is already running.
+    """
+    check_admin_or_token(request)
+    if body.chunk_months < 1:
+        raise HTTPException(status_code=422, detail="chunk_months must be >= 1")
+    for label, value in (("date_from", body.date_from), ("date_to", body.date_to)):
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f"{label} '{value}' is not a valid ISO date") from exc
+
+    import db.writers as db_writers  # noqa: PLC0415
+    latest = db_writers.get_latest_recovery_job(job_type="source_attribution_backfill")
+    if latest and latest.get("status") in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="source attribution backfill already running")
+
+    with _source_backfill_lock:
+        if _source_backfill_progress["running"]:
+            raise HTTPException(status_code=409, detail="source attribution backfill already running")
+        _source_backfill_progress["running"] = True
+
+    job_id = uuid.uuid4().hex
+    created = db_writers.create_recovery_job(
+        job_id, dry_run=body.dry_run, date_from=body.date_from, date_to=body.date_to,
+        chunk_months=body.chunk_months, job_type="source_attribution_backfill")
+    if not created:
+        with _source_backfill_lock:
+            _source_backfill_progress["running"] = False
+        raise HTTPException(status_code=503, detail="source backfill job store unavailable")
+
+    threading.Thread(target=_run_source_backfill_worker, args=(job_id, body), daemon=True).start()
+    return {"job_id": job_id, "status": "queued", "dry_run": body.dry_run}
+
+
+@app.get("/api/source-attribution-backfill/status")
+def api_source_backfill_status(request: Request, job_id: Optional[str] = None) -> dict[str, Any]:
+    """Return durable Source Attribution Backfill job state (admin-only)."""
+    check_admin_or_token(request)
+    import db.writers as db_writers  # noqa: PLC0415
+    job = (db_writers.get_recovery_job(job_id) if job_id
+           else db_writers.get_latest_recovery_job(job_type="source_attribution_backfill"))
+    if not job:
+        return {"running": False, "job": None}
+    return {
+        "running": job.get("status") in ("queued", "running"),
+        "job_id": job.get("job_id"), "status": job.get("status"),
+        "phase": job.get("phase"), "current_chunk": job.get("current_chunk"),
+        "completed_chunks": job.get("completed_chunks", []),
+        "summary": job.get("summary"), "chunks": job.get("chunks"),
+        "errors": job.get("errors", []), "dry_run": job.get("dry_run"),
+        "started_at": job.get("started_at"), "finished_at": job.get("finished_at"),
+        "job": job,
+    }
 
 
 @app.get("/api/reports/roas/campaigns")

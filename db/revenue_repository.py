@@ -157,6 +157,7 @@ def fetch_lead_quality(start: date | None, end: date) -> dict:
                           AND campaign_name IS NOT NULL
                           AND lower(campaign_name) NOT IN %s
                           AND campaign_name !~* 'email_campaign'
+                          AND {_CONTACT_KEY} NOT IN (SELECT lead_id FROM lead_truth_exclusions)
                         ORDER BY {_CONTACT_KEY}, run_date DESC, id DESC
                     )
                     SELECT campaign_name, country, status_category, has_gclid
@@ -166,7 +167,9 @@ def fetch_lead_quality(start: date | None, end: date) -> dict:
                 )
                 rows = _rows_as_dicts(cur)
 
-                # Paid contacts that have NO business event date in ANY row.
+                # INCLUDED paid contacts that have NO business event date in ANY
+                # row (PR-ADS-115): audited legacy/orphan exclusions are NOT
+                # counted as blockers — only included missing-date leads block.
                 cur.execute(
                     f"""
                     SELECT COUNT(*) FROM (
@@ -174,7 +177,9 @@ def fetch_lead_quality(start: date | None, end: date) -> dict:
                         FROM leads
                         WHERE source_type = 'paid_search'
                         GROUP BY 1
-                    ) t WHERE t.mc IS NULL
+                    ) t
+                    WHERE t.mc IS NULL
+                      AND t.k NOT IN (SELECT lead_id FROM lead_truth_exclusions)
                     """
                 )
                 missing_event = cur.fetchone()[0]
@@ -291,6 +296,58 @@ def fetch_won_revenue(start: date | None, end: date) -> dict:
             }
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_won_revenue failed: %s", exc)
+        return _unavailable("gclid_attribution")
+
+
+def fetch_revenue_deals(start: date | None, end: date) -> dict:
+    """Closed-won deal ledger rows from the durable `gclid_attribution` table.
+
+    PR-ADS-113: powers the Closed-Won Revenue Ledger (/api/revenue-deals).
+    Windowed by the real deal_close_date (NEVER the scheduler run_date) and
+    deduped to the latest row per deal_id. Only closed-won deals count as
+    revenue. Read-only.
+
+    Returns rows [{deal_id, company, country, campaign_name, deal_close_date,
+    deal_amount_usd, deal_stage_label, match_status, match_source}].
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable("gclid_attribution")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT deal_id, company, country, campaign_name,
+                           deal_close_date,
+                           deal_amount_usd::float AS deal_amount_usd,
+                           deal_stage_label, match_status, match_source
+                    FROM (
+                        SELECT DISTINCT ON (deal_id)
+                            deal_id, company, country, campaign_name,
+                            deal_close_date, deal_amount_usd, deal_stage_label,
+                            match_status, match_source, created_at
+                        FROM gclid_attribution
+                        WHERE deal_id IS NOT NULL
+                          AND deal_close_date IS NOT NULL
+                          AND (deal_stage = %s OR deal_stage_label ILIKE %s)
+                          AND (%s::date IS NULL OR deal_close_date >= %s)
+                          AND deal_close_date < (%s::date + INTERVAL '1 day')
+                        ORDER BY deal_id, created_at DESC
+                    ) d
+                    ORDER BY deal_close_date DESC, deal_amount_usd DESC NULLS LAST
+                    """,
+                    (WON_DEAL_STAGE_ID, _WON_LABEL_LIKE, start, start, end),
+                )
+                rows = _rows_as_dicts(cur)
+                for row in rows:
+                    row["deal_close_date"] = _as_date(row.get("deal_close_date"))
+            return {
+                "available": True,
+                "rows": rows,
+                "table": "gclid_attribution",
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_revenue_deals failed: %s", exc)
         return _unavailable("gclid_attribution")
 
 
@@ -421,3 +478,126 @@ def fetch_sync_state() -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_sync_state failed: %s", exc)
         return {"available": False, "datasets": {}}
+
+
+# ── Lead event-date reconciliation (PR-ADS-115) ──────────────────────────────
+
+
+def fetch_missing_event_date_leads() -> dict:
+    """Paid leads missing an event date and not already excluded.
+
+    Returns {available, rows:[{lead_key, contact_id}]} where lead_key is the
+    stable contact identity (contact_id, or 'id:<rowid>' when no contact_id) —
+    the same key the truth-gate counts. Read-only.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {_CONTACT_KEY} AS lead_key,
+                           MAX(NULLIF(contact_id, '')) AS contact_id
+                    FROM leads
+                    WHERE source_type = 'paid_search'
+                    GROUP BY {_CONTACT_KEY}
+                    HAVING MAX(contact_created_at) IS NULL
+                    """
+                )
+                rows = _rows_as_dicts(cur)
+                cur.execute("SELECT lead_id FROM lead_truth_exclusions")
+                excluded = {r[0] for r in cur.fetchall()}
+            rows = [r for r in rows if r.get("lead_key") not in excluded]
+            return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_missing_event_date_leads failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
+def revenue_integration_connected() -> bool:
+    """True when ANY closed-won attributed deal exists (integration is wired),
+    regardless of the selected business window.
+
+    Lets the contract distinguish a connected integration whose current window is
+    safely empty from an integration that was never wired. Read-only.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM gclid_attribution
+                        WHERE deal_id IS NOT NULL
+                          AND deal_close_date IS NOT NULL
+                          AND (deal_stage = %s OR deal_stage_label ILIKE %s)
+                    )
+                    """,
+                    (WON_DEAL_STAGE_ID, _WON_LABEL_LIKE),
+                )
+                return bool(cur.fetchone()[0])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("revenue_integration_connected failed: %s", exc)
+        return False
+
+
+# ── Revenue by acquisition source (PR-ADS-117) ───────────────────────────────
+
+
+def fetch_source_leads(start: date | None, end: date) -> dict:
+    """Classified contacts in the window, by acquisition group. Read-only.
+
+    Windowed by contact_created_at (the business event date). Returns
+    {available, rows:[{acquisition_group, status_category}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT acquisition_group, status_category
+                    FROM contact_source_classification
+                    WHERE contact_created_at IS NOT NULL
+                      AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
+                      AND contact_created_at < (%s::date + INTERVAL '1 day')
+                    """,
+                    (start, end),
+                )
+                return {"available": True, "rows": _rows_as_dicts(cur)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_source_leads failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
+def fetch_source_revenue(start: date | None, end: date) -> dict:
+    """Closed-won deals in the window, by acquisition group. Read-only.
+
+    Windowed by deal_close_date. Each deal appears once (deal_id is unique in
+    deal_source_attribution). Returns {available, rows:[{acquisition_group,
+    attribution_status, deal_amount_usd}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT acquisition_group, attribution_status,
+                           deal_amount_usd::float AS deal_amount_usd
+                    FROM deal_source_attribution
+                    WHERE deal_close_date IS NOT NULL
+                      AND deal_close_date >= COALESCE(%s::timestamptz, deal_close_date)
+                      AND deal_close_date < (%s::date + INTERVAL '1 day')
+                    """,
+                    (start, end),
+                )
+                return {"available": True, "rows": _rows_as_dicts(cur)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_source_revenue failed: %s", exc)
+        return {"available": False, "rows": []}
