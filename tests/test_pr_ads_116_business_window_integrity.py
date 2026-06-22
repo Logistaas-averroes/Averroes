@@ -11,6 +11,8 @@ Deterministic boundary fixtures cover 31 Dec / 1 Jan, 31 Mar / 1 Apr,
 """
 
 import os
+import shutil as _shutil
+import subprocess as _subprocess
 import sys
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -217,6 +219,49 @@ def test_stale_response_guard_present():
         assert "++_revReqSeq" in body, f"{loader} must take a request token"
         assert "_revResponseIsCurrent" in body or "_revReqSeq" in body
         assert "return" in body
+
+
+def test_guard_fails_closed_on_missing_window_key():
+    # An absent window key must NEVER render as valid — every revenue response is
+    # required to carry a resolved window.
+    guard = _fn("function _revResponseIsCurrent", span=300)
+    assert "Boolean(respKey) && respKey === getRoasBusinessWindow()" in guard
+    # Behavioural check via node, if available.
+    node = _shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    import re as _re
+    m = _re.search(r"function _revResponseIsCurrent\(page, token, data\) \{.*?\n\}", JS, _re.DOTALL)
+    assert m
+    script = (
+        "const _revReqSeq = { p: 5 };\n"
+        "function getRoasBusinessWindow(){ return 'ytd'; }\n"
+        + m.group(0).replace("_revReqSeq[page]", "_revReqSeq[page]") + "\n"
+        # token current, but response has NO window key → must be rejected.
+        "console.log(JSON.stringify(_revResponseIsCurrent('p', 5, { window: {} })));\n"
+        "console.log(JSON.stringify(_revResponseIsCurrent('p', 5, { window: { key: 'ytd' } })));\n"
+        "console.log(JSON.stringify(_revResponseIsCurrent('p', 5, { window: { key: 'current_quarter' } })));\n"
+    )
+    out = _subprocess.check_output([node, "-e", script]).decode().split()
+    assert out == ["false", "true", "false"]
+
+
+def test_selector_change_clears_previous_range_immediately():
+    # Each loader sets its range chip to "Loading…" before awaiting, so a stale
+    # range never sits beside a freshly changed selector.
+    assert "function setWindowRangeLoading" in JS
+    assert '"Loading…"' in _fn("function setWindowRangeLoading", span=200)
+    for loader, el in (
+        ("function loadRoasCampaigns", "roas-campaigns-range"),
+        ("function loadRoasCountries", "roas-countries-range"),
+        ("function loadDeals", "revenue-deals-range"),
+        ("function loadRevenueHealth", "revenue-health-range"),
+    ):
+        body = _fn(loader, span=1600)
+        i_loading = body.find(f'setWindowRangeLoading("{el}")')
+        i_await = body.find("await fetch")
+        assert i_loading != -1, f"{loader} must clear its range chip"
+        assert i_loading < i_await, f"{loader} must clear the range BEFORE awaiting"
 
 
 # ════════════════ frontend: per-page state (no cross-window bleed) ════════════

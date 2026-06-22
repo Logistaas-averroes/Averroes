@@ -2846,6 +2846,7 @@ function renderRevenueDealsPage() {
 async function loadDeals() {
   const window_ = getRoasBusinessWindow();
   const token = ++_revReqSeq.deals;
+  setWindowRangeLoading("revenue-deals-range");
   const kpiGrid = document.getElementById("revenue-deals-kpis");
   const tableBody = document.getElementById("revenue-deals-table-body");
   if (kpiGrid) kpiGrid.innerHTML = "";
@@ -3030,6 +3031,7 @@ async function loadRevenueHealth() {
   body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue attribution health…</p>';
   const window_ = getRoasBusinessWindow();
   const token = ++_revReqSeq.health;
+  setWindowRangeLoading("revenue-health-range");
   try {
     const res = await fetch(`/api/revenue-attribution/audit?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
     const audit = res.ok ? await res.json() : null;
@@ -8156,11 +8158,21 @@ function renderWindowRange(elId, win) {
 }
 
 // True when this response is still the newest for its page AND its resolved
-// window still equals the user's current selection.
+// window still equals the user's current selection. Fails CLOSED: every revenue
+// response must carry a resolved window key — an absent key is never valid.
 function _revResponseIsCurrent(page, token, data) {
   if (token !== _revReqSeq[page]) return false;
   const respKey = data && data.window && data.window.key;
-  return !respKey || respKey === getRoasBusinessWindow();
+  return Boolean(respKey) && respKey === getRoasBusinessWindow();
+}
+
+// Show "Loading…" in a range chip so a stale range never sits beside a freshly
+// changed selector while the new request is in flight.
+function setWindowRangeLoading(elId) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.textContent = "Loading…";
+  el.removeAttribute("title");
 }
 
 
@@ -8321,6 +8333,7 @@ function renderRoasCampaignSafeEmptyState() {
 async function loadRoasCampaigns() {
   const window_ = getRoasBusinessWindow();
   const token = ++_revReqSeq.campaigns;
+  setWindowRangeLoading("roas-campaigns-range");
 
   roasCampaignsStatus = "loading";
   const body = document.getElementById("roas-campaigns-table-body");
@@ -8584,6 +8597,7 @@ function renderRoasCountrySafeEmptyState() {
 async function loadRoasCountries() {
   const window_ = getRoasBusinessWindow();
   const token = ++_revReqSeq.countries;
+  setWindowRangeLoading("roas-countries-range");
 
   roasCountriesStatus = "loading";
   const body = document.getElementById("roas-countries-table-body");
