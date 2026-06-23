@@ -415,6 +415,9 @@ def _patch_incremental(monkeypatch, *, contacts_write=None, contacts_pull=None):
         )
         monkeypatch.setattr("db.writers.upsert_campaign_daily_spend", lambda rows, **k: len(rows))
         monkeypatch.setattr("db.writers.upsert_spend_coverage", lambda *a, **k: True)
+        monkeypatch.setattr("services.google_ads_spend_service.fetch_account_daily_spend",
+                            lambda *a, **k: {"rows": []})
+        monkeypatch.setattr("db.writers.upsert_account_daily_spend", lambda *a, **k: 0)
         monkeypatch.setattr("db.writers.write_run", lambda *a, **k: 4242)
         monkeypatch.setattr("db.writers.update_run", lambda *a, **k: None)
         monkeypatch.setattr("db.writers.start_sync_batch", lambda *a, **k: 1)

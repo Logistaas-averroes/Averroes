@@ -67,8 +67,50 @@ def fetch_daily_spend(start_date: str, end_date: str) -> dict:
     return fetch_campaign_daily_spend(start_date, end_date)
 
 
-def _window_bounds(window: str, now):
-    resolved = resolve_window(window, now=now)
+def fetch_account_daily_spend(start_date: str, end_date: str) -> dict:
+    """Thin seam over the account-level Google Ads spend connector (late import).
+
+    Read-only. Patched directly by tests so the SDK is never imported.
+    """
+    from connectors.google_ads_direct import fetch_account_daily_spend as _f  # noqa: PLC0415
+    return _f(start_date, end_date)
+
+
+def account_today(account_time_zone: str | None, now: datetime | None = None) -> date:
+    """The current date in the Google Ads ACCOUNT time zone (PR-ADS-120).
+
+    Spend windows must use the account's local day, not server time / UTC, so a
+    late-night-UTC query does not silently include or drop a boundary day.
+    """
+    base = now or datetime.now(tz=timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    if account_time_zone:
+        try:
+            from zoneinfo import ZoneInfo  # noqa: PLC0415
+            return base.astimezone(ZoneInfo(account_time_zone)).date()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[spend] unknown account time zone %r: %s", account_time_zone, exc)
+    return base.astimezone(timezone.utc).date()
+
+
+def resolve_spend_window(window: str, account_time_zone: str | None = None,
+                         now: datetime | None = None) -> dict:
+    """Resolve a business window using the ACCOUNT time zone for 'now'.
+
+    The window's date boundaries are computed from the account's local day so the
+    spend date range matches what the Google Ads UI shows.
+    """
+    acct_today = account_today(account_time_zone, now)
+    acct_now = datetime(acct_today.year, acct_today.month, acct_today.day, 12, 0, 0, tzinfo=timezone.utc)
+    return resolve_window(window, now=acct_now)
+
+
+def _window_bounds(window: str, now, account_time_zone: str | None = None):
+    if account_time_zone is not None:
+        resolved = resolve_spend_window(window, account_time_zone, now)
+    else:
+        resolved = resolve_window(window, now=now)
     start = date.fromisoformat(resolved["start_date"]) if resolved["start_date"] else None
     end = date.fromisoformat(resolved["end_date"])
     return resolved, start, end
@@ -139,12 +181,17 @@ def build_google_ads_spend_audit(window: str, now: datetime | None = None,
 
     ``api_total_micros`` may be injected (tests / a pre-fetched live total). When
     None, a best-effort live API total is attempted and ignored on failure.
+
+    PR-ADS-120: the window is resolved in the Google Ads ACCOUNT time zone, and
+    the campaign-daily sum is reconciled against the direct account-daily total.
     """
-    resolved, start, end = _window_bounds(window, now)
+    account_time_zone = repo.fetch_account_time_zone()
+    resolved, start, end = _window_bounds(window, now, account_time_zone)
 
     canonical = repo.fetch_canonical_campaign_spend(start, end)
     coverage = repo.fetch_spend_coverage(start, end)
     geo = repo.fetch_geo_spend_total(start, end)
+    account = repo.fetch_account_daily_spend_total(start, end)
 
     if not canonical.get("available"):
         return {
@@ -193,6 +240,26 @@ def build_google_ads_spend_audit(window: str, now: datetime | None = None,
     # PR-ADS-119: native-currency truth + USD reporting via daily FX.
     native_currency = canonical.get("currency_code") or "GBP"
     usd_total = canonical.get("total_spend_usd")
+
+    # PR-ADS-120: reconcile the campaign-daily sum against the DIRECT account-daily
+    # total. Only "verified" when both totals agree within tolerance AND the
+    # customer, currency, and account time zone all match. Expose any delta.
+    account_available = bool(account.get("available"))
+    account_total = account.get("total_spend") if account_available else None
+    account_currency = account.get("currency_code") if account_available else None
+    account_tz_seen = account.get("account_time_zone") if account_available else None
+    acct_recon = _reconcile(account_total, local_spend, SPEND_VARIANCE_TOLERANCE) if account_total is not None else None
+    identity_match = bool(
+        account_available
+        and (not account_currency or account_currency == native_currency)
+        and (not account_tz_seen or account_tz_seen == (account_time_zone or account_tz_seen))
+    )
+    if not account_available:
+        account_recon_status = "unavailable"
+    elif acct_recon and acct_recon["within_tolerance"] and identity_match:
+        account_recon_status = "verified"
+    else:
+        account_recon_status = "mismatch"
     try:
         from services.fx_service import build_fx_coverage  # noqa: PLC0415
         fx = build_fx_coverage(start, end, native_currency)
@@ -208,8 +275,15 @@ def build_google_ads_spend_audit(window: str, now: datetime | None = None,
         # Native GBP spend truth (reconciles to the Google Ads UI within £0.01).
         "native_currency": native_currency,
         "native_total": round(local_spend, 6),
+        "account_time_zone": account_time_zone,
         "canonical_api_total": api_spend,
         "canonical_local_total": round(local_spend, 6),
+        # PR-ADS-120: direct account-daily total vs campaign-daily sum.
+        "account_daily_total": round(account_total, 6) if account_total is not None else None,
+        "campaign_daily_total": round(local_spend, 6),
+        "account_variance_amount": acct_recon["variance_amount"] if acct_recon else None,
+        "account_variance_pct": acct_recon["variance_pct"] if acct_recon else None,
+        "account_reconciliation_status": account_recon_status,
         # USD reporting spend (daily-FX converted) + FX coverage.
         "reporting_currency": canonical.get("reporting_currency") or "USD",
         "usd_total": usd_total,
@@ -346,6 +420,13 @@ def run_google_ads_spend_backfill(
                     source_query_version=payload.get("source_query_version"), sync_run_id=job_id)
                 if not ok:
                     raise SpendPersistenceError("coverage-ledger upsert failed")
+                # PR-ADS-120: persist the direct account-daily total for the same
+                # chunk so the campaign sum can be reconciled against it.
+                try:
+                    acct = fetch_account_daily_spend(cursor.isoformat(), chunk_to.isoformat())
+                    db_writers.upsert_account_daily_spend(acct.get("rows", []), sync_run_id=job_id)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[spend_backfill] account-daily fetch failed for %s: %s", chunk_key, exc)
                 summary["rows_written"] += written
             summary["api_total_micros"] += micros
             summary["chunks_verified"] += 1

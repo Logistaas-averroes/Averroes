@@ -775,6 +775,70 @@ def fetch_geo_spend_total(start: date | None, end: date) -> dict:
         return {"available": False, "total_spend": 0.0}
 
 
+def fetch_account_daily_spend_total(start: date | None, end: date) -> dict:
+    """Direct account-level Google Ads spend total for the window (PR-ADS-120).
+
+    Independent of the campaign breakdown so the campaign sum can be reconciled
+    against it. Read-only. Returns {available, total_cost_micros, total_spend,
+    currency_code, account_time_zone, spend_days, coverage_start, coverage_end}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "total_cost_micros": 0}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(cost_micros), 0)::bigint AS micros,
+                           COUNT(DISTINCT spend_date) AS spend_days,
+                           MIN(spend_date) AS cstart, MAX(spend_date) AS cend,
+                           MIN(currency_code) AS currency,
+                           MIN(account_time_zone) AS tz
+                    FROM google_ads_account_daily_spend
+                    WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    """,
+                    (start, start, end),
+                )
+                row = cur.fetchone() or (0, 0, None, None, None, None)
+            micros = int(row[0] or 0)
+            return {
+                "available": True,
+                "total_cost_micros": micros,
+                "total_spend": micros / 1_000_000,
+                "spend_days": int(row[1] or 0),
+                "coverage_start": _as_date(row[2]),
+                "coverage_end": _as_date(row[3]),
+                "currency_code": row[4],
+                "account_time_zone": row[5],
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_account_daily_spend_total failed: %s", exc)
+        return {"available": False, "total_cost_micros": 0}
+
+
+def fetch_account_time_zone() -> str | None:
+    """Most recent Google Ads account time zone on record (PR-ADS-120). Read-only."""
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT account_time_zone
+                    FROM google_ads_account_daily_spend
+                    WHERE account_time_zone IS NOT NULL
+                    ORDER BY spend_date DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+            return row[0] if row else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_account_time_zone failed: %s", exc)
+        return None
+
+
 def fetch_fx_coverage(start: date | None, end: date,
                       base_currency: str, quote_currency: str = FX_REPORTING_CURRENCY) -> dict:
     """FX coverage over the canonical spend dates in the window (PR-ADS-119).

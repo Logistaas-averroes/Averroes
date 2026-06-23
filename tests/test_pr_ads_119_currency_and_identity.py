@@ -450,7 +450,7 @@ def test_revattr_loads_approved_identity_mappings():
     # The pipeline (not just the review panel) consumes approved mappings.
     src = open(os.path.join(ROOT, "services", "revenue_attribution_service.py"), encoding="utf-8").read()
     bd = src[src.find("def _build_from_db"):]
-    assert "_load_approved_identity_map" in bd
+    assert "_build_resolution_map" in bd  # PR-ADS-120 renamed resolver
     assert "fetch_campaign_identity" in src
     assert "applied_campaign_mappings" in bd
 

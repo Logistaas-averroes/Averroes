@@ -3643,7 +3643,7 @@ function renderSpendTruth(audit, backfill) {
         <div><span>Chunks verified</span><strong>${fmtCount(bs.chunks_verified)}</strong></div>
         <div><span>Chunks failed</span><strong>${fmtCount(bs.chunks_failed)}</strong></div>
         <div><span>Rows written</span><strong>${fmtCount(bs.rows_written)}</strong></div>
-        <div><span>API spend total</span><strong>${fmtMoney(bs.api_total_spend)}</strong></div>
+        <div><span>API spend total (native)</span><strong>${bs.api_total_spend === null || bs.api_total_spend === undefined ? "—" : fmtCurrency(bs.api_total_spend, a.native_currency || "GBP")}</strong></div>
       </div>` : ""}
   ` : "";
 
@@ -3666,6 +3666,16 @@ function renderSpendTruth(audit, backfill) {
           <div><span>FX coverage</span><strong class="spend-state spend-state--${a.fx_coverage_complete ? "verified" : "partial"}">${a.fx_coverage_complete ? "Verified" : (a.fx_coverage_state === "UNAVAILABLE" ? "Unavailable" : "Incomplete")}</strong></div>
           <div><span>Legacy geo total (native)</span><strong>${a.legacy_geo_total === null || a.legacy_geo_total === undefined ? "Unavailable" : fmtCurrency(a.legacy_geo_total, a.native_currency || "GBP")}</strong></div>
         </div>
+        <div class="recovery-statuses">
+          <div>Account time zone: <strong>${escapeHtml(a.account_time_zone || "—")}</strong></div>
+        </div>
+        <div class="revenue-summary-strip revenue-summary-strip--four">
+          <div><span>Direct account daily total</span><strong>${a.account_daily_total === null || a.account_daily_total === undefined ? "Unavailable" : fmtCurrency(a.account_daily_total, a.native_currency || "GBP")}</strong></div>
+          <div><span>Campaign daily total</span><strong>${a.campaign_daily_total === null || a.campaign_daily_total === undefined ? "Unavailable" : fmtCurrency(a.campaign_daily_total, a.native_currency || "GBP")}</strong></div>
+          <div><span>Variance</span><strong>${a.account_variance_amount === null || a.account_variance_amount === undefined ? "—" : fmtCurrency(a.account_variance_amount, a.native_currency || "GBP")}${a.account_variance_pct != null ? ` (${(a.account_variance_pct * 100).toFixed(2)}%)` : ""}</strong></div>
+          <div><span>Account reconciliation</span><strong class="spend-state spend-state--${a.account_reconciliation_status === "verified" ? "verified" : "partial"}">${escapeHtml((a.account_reconciliation_status || "—").replace(/^\w/, (c) => c.toUpperCase()))}</strong></div>
+        </div>
+        ${(a.account_reconciliation_status === "mismatch") ? `<p class="revenue-footnote">Campaign-daily sum does not yet reconcile to the direct account-daily total for this window — the delta above is shown instead of claiming success.</p>` : ""}
         ${(a.missing_chunks && a.missing_chunks.length) ? `<p class="revenue-footnote">Missing / unverified chunks: ${a.missing_chunks.map((c) => escapeHtml(`${c.start}→${c.end}`)).join(", ")}. Missing rows are never treated as £0 spend.</p>` : ""}
         ${(a.fx_missing_dates && a.fx_missing_dates.length) ? `<p class="revenue-footnote">FX coverage incomplete — missing rates for ${a.fx_missing_dates.length} date(s). USD ROAS is unavailable until FX coverage is complete.</p>` : ""}
         ${adminPanel}
@@ -8616,6 +8626,8 @@ function getBusinessVerdictBadge(verdict) {
     case "watch":    return '<span class="roas-verdict-badge roas-verdict-badge--hold" title="SQLs exist but weak customers/revenue">Watch</span>';
     case "waste":    return '<span class="roas-verdict-badge roas-verdict-badge--cut" title="Spend exists but no SQLs/customers/revenue">Waste</span>';
     case "learning": return '<span class="roas-verdict-badge roas-verdict-badge--insufficient" title="Low spend or insufficient data">Learning</span>';
+    // PR-ADS-120: an unmapped campaign cannot be judged on incomplete spend.
+    case "mapping_required": return '<span class="roas-verdict-badge roas-verdict-badge--mapping" title="Spend mapping required before this campaign can be judged">Mapping required</span>';
     default:         return '<span class="roas-verdict-badge">' + escapeHtml(verdict || "—") + '</span>';
   }
 }
@@ -8893,6 +8905,16 @@ function spendCoverageIncomplete(sh) {
   return h.spend_coverage_status !== "complete";
 }
 
+// PR-ADS-120: compact secondary spend-status label under the spend amount.
+function spendStatusLabel(state) {
+  switch (state) {
+    case "mapped_exact":       return '<div class="spend-status spend-status--matched">Matched exactly</div>';
+    case "mapped_manual":      return '<div class="spend-status spend-status--matched">Matched (manual)</div>';
+    case "verified_zero_spend":return '<div class="spend-status spend-status--zero">Verified zero spend</div>';
+    default:                   return "";
+  }
+}
+
 function renderSpendCoverageNotice(sh) {
   const h = sh || {};
   // PR-ADS-119: when spend coverage is complete but FX coverage is not, the
@@ -8970,16 +8992,30 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
     </tr>
   `;
 
+  // PR-ADS-120: the spend cell shows actual spend (USD when FX complete, else
+  // native GBP — never $ for native), with a compact spend-status label. An
+  // unmapped campaign is "Unavailable" (never $0) with Decision "Mapping required".
+  const sh = roasCampaignSourceHealth || {};
+  const usdReady = sh.campaign_roas_available === true;
+  const nativeCur = sh.spend_native_currency || "GBP";
+
   const bodyRows = rows.map((r) => {
-    // A revenue campaign with no canonical spend match: spend + ROAS are
-    // Unavailable (never a fake $0). Incomplete coverage gates ROAS too.
-    const mappingUnavailable = r.spend_mapping === "unavailable";
-    const spendCell = mappingUnavailable
-      ? '<span class="spend-unavailable" title="Spend mapping unavailable">Unavailable</span>'
-      : fmtMoney(r.spend);
-    const roasCell = (spendIncomplete || mappingUnavailable)
-      ? "Unavailable"
-      : fmtRoasMultiple(r.roas);
+    const state = r.spend_state;
+    const unmapped = state === "unmapped" || r.spend_mapping === "unavailable";
+    let spendCell;
+    let roasCell;
+    let decisionCell;
+    if (unmapped) {
+      spendCell = '<span class="spend-unavailable" title="Spend mapping required">Unavailable</span>'
+                + '<div class="spend-status spend-status--unmapped">Spend mapping required</div>';
+      roasCell = "Unavailable";
+      decisionCell = getBusinessVerdictBadge("mapping_required");
+    } else {
+      const amt = usdReady ? fmtMoney(r.spend) : fmtCurrency(r.spend, nativeCur);
+      spendCell = `${amt}${spendStatusLabel(state)}`;
+      roasCell = spendIncomplete ? "Unavailable" : fmtRoasMultiple(r.roas);
+      decisionCell = getBusinessVerdictBadge(r.verdict);
+    }
     return `
     <tr>
       <td>${escapeHtml(r.campaign_name || "")}</td>
@@ -8989,7 +9025,7 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
       <td>${fmtCount(r.customers)}</td>
       <td>${fmtMoney(r.won_revenue)}</td>
       <td>${roasCell}</td>
-      <td>${getBusinessVerdictBadge(r.verdict)}</td>
+      <td>${decisionCell}</td>
     </tr>
   `;
   }).join("");

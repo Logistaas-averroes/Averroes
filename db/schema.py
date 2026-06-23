@@ -618,6 +618,27 @@ CREATE TABLE IF NOT EXISTS google_ads_spend_coverage (
 CREATE INDEX IF NOT EXISTS idx_ga_spend_coverage_range
   ON google_ads_spend_coverage(chunk_start, chunk_end);
 
+-- PR-ADS-120: account-level daily spend, persisted separately from campaign rows
+-- so the campaign-daily sum can be reconciled against the direct account total.
+-- account_time_zone is the Google Ads account local zone — spend windows use the
+-- account's local day, not server time / UTC.
+CREATE TABLE IF NOT EXISTS google_ads_account_daily_spend (
+  id                 SERIAL PRIMARY KEY,
+  customer_id        TEXT NOT NULL,
+  spend_date         DATE NOT NULL,
+  cost_micros        BIGINT NOT NULL DEFAULT 0,
+  currency_code      TEXT,
+  account_time_zone  TEXT,
+  sync_run_id        TEXT,
+  source_query_version TEXT,
+  fetched_at         TIMESTAMPTZ DEFAULT NOW(),
+  updated_at         TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (customer_id, spend_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ga_account_daily_spend_date
+  ON google_ads_account_daily_spend(spend_date);
+
 -- PR-ADS-119: durable daily FX rates. Google Ads native spend (GBP) is converted
 -- to USD reporting spend using the rate for each spend row's OWN spend_date — never
 -- a single current spot rate for a whole quarter. A missing rate_date makes FX
