@@ -757,15 +757,39 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         spend_coverage_status = "complete" if coverage_complete else "incomplete"
         spend_source = "canonical_google_ads_api"
         canonical_rows = canonical.get("rows") or []
-        campaign_spend_rows = [
-            {"campaign_name": r.get("campaign_name"), "country": None, "spend": r.get("spend")}
-            for r in canonical_rows
-        ]
         canonical_total = round(float(canonical.get("total_spend") or 0), 2)
         canonical_customer_id = canonical.get("customer_id")
-        canonical_currency = canonical.get("currency_code")
+        canonical_currency = canonical.get("currency_code") or "GBP"
+        # PR-ADS-119: HubSpot revenue is USD, so the ROAS denominator must be USD.
+        # Convert via daily FX (already done in the repo). fx_complete is None when
+        # the FX layer was not evaluated (legacy/patched canonical) — treat as
+        # not-blocking and fall back to native spend for backward compatibility.
+        fx_complete_raw = canonical.get("fx_complete")
+        fx_evaluated = fx_complete_raw is not None
+        fx_complete = bool(fx_complete_raw) if fx_evaluated else True
+        fx_coverage_status = (
+            ("complete" if fx_complete else "incomplete") if fx_evaluated else "not_evaluated"
+        )
+        usd_total = canonical.get("total_spend_usd")
+        spend_native_total = canonical_total
+        spend_usd_total = round(float(usd_total), 2) if usd_total is not None else None
+        use_usd = fx_evaluated and fx_complete
+        reporting_currency = canonical.get("reporting_currency") or "USD"
+        # Effective realized rate (native→USD) from the per-day conversions; used
+        # only to express the reconciled country (geo) split in USD.
+        fx_effective_rate = (
+            (spend_usd_total / spend_native_total)
+            if (use_usd and spend_usd_total is not None and spend_native_total) else None
+        )
+        # Campaign spend rows in the ROAS currency (USD when FX complete; native
+        # diagnostic otherwise).
+        campaign_spend_rows = [
+            {"campaign_name": r.get("campaign_name"), "country": None,
+             "spend": (r.get("spend_usd") if use_usd else r.get("spend"))}
+            for r in canonical_rows
+        ]
         # Geo reconciliation for Country ROAS: geo total must match canonical for
-        # the same window within tolerance.
+        # the same window within tolerance (compared in native currency).
         geo_total_for_recon = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
         if canonical_total > 0:
             country_spend_reconciled = (
@@ -780,16 +804,32 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         spend_source = "geo_fallback"
         spend_coverage_status = "geo_fallback"
         coverage_complete = False
+        fx_complete = False
+        fx_coverage_status = "unavailable"
+        use_usd = False
+        reporting_currency = "USD"
+        fx_effective_rate = None
+        spend_native_total = None
+        spend_usd_total = None
         campaign_spend_rows = spend_rows  # diagnostic display only
         canonical_total = None
         canonical_customer_id = None
         canonical_currency = None
         country_spend_reconciled = None
 
-    # Campaign spend is a trusted ROAS denominator only when canonical coverage
-    # is complete. Country spend additionally requires geo↔canonical reconciliation.
-    campaign_spend_trusted = canonical_access and coverage_complete
+    # Campaign spend is a trusted ROAS denominator only when canonical coverage is
+    # complete AND FX coverage is complete (USD reporting). Country spend
+    # additionally requires geo↔canonical reconciliation.
+    campaign_spend_trusted = canonical_access and coverage_complete and fx_complete
     country_spend_trusted = campaign_spend_trusted and (country_spend_reconciled is True)
+    # Country spend split (geo, native) expressed in USD via the realized rate so
+    # Country ROAS is also USD — never native-vs-USD mixed.
+    if country_spend_trusted and fx_effective_rate is not None:
+        country_spend_rows = [
+            {**r, "spend": _safe_float(r.get("spend")) * fx_effective_rate} for r in spend_rows
+        ]
+    else:
+        country_spend_rows = spend_rows
     # Per-campaign mapping check: only when we have a complete canonical window
     # WITH spend rows. A revenue campaign absent from canonical spend is marked
     # "spend mapping unavailable" (never a fake $0).
@@ -817,7 +857,7 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         spend_trusted=campaign_spend_trusted, spend_mapping_keys=spend_mapping_keys,
     )
     countries = _build_db_rows(
-        spend_rows, lead_rows, revenue_rows, group_field="country",
+        country_spend_rows, lead_rows, revenue_rows, group_field="country",
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
         spend_trusted=country_spend_trusted,
     )
@@ -908,6 +948,14 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "country_spend_reconciled": country_spend_reconciled,
         "canonical_customer_id": canonical_customer_id,
         "canonical_currency": canonical_currency,
+        # PR-ADS-119 currency contract: native GBP truth + USD reporting via daily
+        # FX. ROAS renders only when canonical coverage complete AND FX complete.
+        "spend_native_total": spend_native_total,
+        "spend_native_currency": canonical_currency,
+        "spend_usd_total": spend_usd_total,
+        "reporting_currency": reporting_currency,
+        "fx_coverage_status": fx_coverage_status,
+        "revenue_currency": "USD",
         "data_is_partial": data_is_partial,
         "coverage_start": spend.get("coverage_start") or revenue.get("coverage_start"),
         "coverage_end": spend.get("coverage_end") or revenue.get("coverage_end"),

@@ -210,6 +210,13 @@ def run_daily_incremental_sync(
         run_id=run_id, date_to=today, errors=errors,
     )
 
+    # ── fx/daily_rates — keep daily GBP→USD FX rates current (PR-ADS-119) so
+    # native spend can be converted to USD reporting spend per spend_date. Reads
+    # published reference rates read-only; writes only the local fx_rates table.
+    datasets["fx/daily_rates"] = _sync_fx_rates(
+        run_id=run_id, date_to=today, errors=errors,
+    )
+
     finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     overall_status = _overall_status(datasets)
@@ -680,6 +687,42 @@ def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:
                 sync_run_id=run_id_str)
         except Exception:  # noqa: BLE001
             pass
+        if batch_id:
+            db_writers.finish_sync_batch(batch_id=batch_id, status="failed", error_message=str(exc)[:1000])
+        return {"status": "failed", "error": str(exc)[:500]}
+
+
+def _sync_fx_rates(*, run_id, date_to, errors: list) -> dict:
+    """Refresh daily GBP→USD FX rates for a small lookback window (PR-ADS-119).
+
+    Idempotent (only missing dates are fetched). Reads published reference rates
+    read-only; writes ONLY the local fx_rates table. A fetch failure marks the
+    dataset failed (FX coverage then stays incomplete, which safely blocks ROAS).
+    """
+    from services.fx_service import ensure_fx_rates, NATIVE_CURRENCY, REPORTING_CURRENCY  # noqa: PLC0415
+    from datetime import timedelta as _td
+
+    lookback_days = 7
+    start = date_to - _td(days=lookback_days - 1)
+    batch_id = db_writers.start_sync_batch(
+        source="fx", dataset="daily_rates", sync_type="daily",
+        date_from=start, date_to=date_to, run_id=run_id,
+    )
+    try:
+        result = ensure_fx_rates(start, date_to, base_currency=NATIVE_CURRENCY,
+                                 quote_currency=REPORTING_CURRENCY, only_missing=True)
+        failed = result.get("failed") or []
+        if failed:
+            raise RuntimeError(f"{len(failed)} FX date(s) failed to fetch")
+        if batch_id:
+            db_writers.finish_sync_batch(
+                batch_id=batch_id, status="success",
+                row_count=result.get("rows_written", 0), last_source_date=date_to)
+        return {"status": "success", "rows_written": result.get("rows_written", 0)}
+    except Exception as exc:  # noqa: BLE001
+        err = f"fx/daily_rates: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
         if batch_id:
             db_writers.finish_sync_batch(batch_id=batch_id, status="failed", error_message=str(exc)[:1000])
         return {"status": "failed", "error": str(exc)[:500]}

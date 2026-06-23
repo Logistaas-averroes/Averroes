@@ -1858,3 +1858,101 @@ def upsert_spend_coverage(
     except Exception as exc:  # noqa: BLE001
         log.error("upsert_spend_coverage failed: %s", exc)
         return False
+
+
+def upsert_fx_rates(rows: list) -> int:
+    """Upsert daily FX rates (PR-ADS-119). Idempotent. Never raises.
+
+    Each row: {rate_date, base_currency, quote_currency, rate, provider,
+    source_version}. Keyed by (rate_date, base_currency, quote_currency) so a
+    re-fetch never double-writes. Returns the number of rows upserted.
+    """
+    if not rows:
+        return 0
+    prepared = []
+    for r in rows:
+        rd = r.get("rate_date")
+        base = (r.get("base_currency") or "").strip().upper()
+        quote = (r.get("quote_currency") or "").strip().upper()
+        rate = r.get("rate")
+        if not rd or not base or not quote or rate is None:
+            continue
+        prepared.append((rd, base, quote, float(rate),
+                         r.get("provider"), r.get("source_version")))
+    if not prepared:
+        return 0
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO fx_rates (
+                        rate_date, base_currency, quote_currency, rate,
+                        provider, source_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (rate_date, base_currency, quote_currency) DO UPDATE SET
+                        rate           = EXCLUDED.rate,
+                        provider       = EXCLUDED.provider,
+                        source_version = EXCLUDED.source_version,
+                        fetched_at     = NOW(),
+                        updated_at     = NOW()
+                    """,
+                    prepared,
+                )
+        return len(prepared)
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_fx_rates failed: %s", exc)
+        return 0
+
+
+def upsert_campaign_identity(
+    customer_id: str, external_campaign_label: str, *,
+    campaign_id: Optional[str] = None,
+    canonical_campaign_name: Optional[str] = None,
+    historical_campaign_name: Optional[str] = None,
+    match_method: str = "manual",
+    approved_by: Optional[str] = None,
+) -> bool:
+    """Record a campaign-identity mapping (PR-ADS-119). Idempotent. Never raises.
+
+    Maps an external HubSpot/UTM label to a canonical Google Ads campaign. Manual
+    mappings carry approved_at/approved_by for audit. This NEVER overwrites the
+    raw canonical spend-table identity — the historical campaign name is stored
+    here as a copy, not by rewriting source rows.
+    """
+    label = (external_campaign_label or "").strip()
+    if not customer_id or not label:
+        return False
+    approved = match_method in ("manual", "exact_normalized")
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO google_ads_campaign_identity (
+                        customer_id, campaign_id, canonical_campaign_name,
+                        historical_campaign_name, external_campaign_label,
+                        match_method, approved_at, approved_by
+                    ) VALUES (%s, %s, %s, %s, %s, %s,
+                              CASE WHEN %s THEN NOW() ELSE NULL END, %s)
+                    ON CONFLICT (customer_id, external_campaign_label) DO UPDATE SET
+                        campaign_id              = EXCLUDED.campaign_id,
+                        canonical_campaign_name  = EXCLUDED.canonical_campaign_name,
+                        historical_campaign_name = EXCLUDED.historical_campaign_name,
+                        match_method             = EXCLUDED.match_method,
+                        approved_at              = EXCLUDED.approved_at,
+                        approved_by              = EXCLUDED.approved_by,
+                        updated_at               = NOW()
+                    """,
+                    (customer_id, campaign_id, canonical_campaign_name,
+                     historical_campaign_name, label, match_method,
+                     approved, approved_by),
+                )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_campaign_identity failed: %s", exc)
+        return False

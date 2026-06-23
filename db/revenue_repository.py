@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 WON_DEAL_STAGE_ID = "326093516"
 _WON_LABEL_LIKE = "%won%"
 
+# PR-ADS-119: HubSpot closed-won revenue is reported in USD, so Google Ads native
+# spend is converted to USD for ROAS using daily FX rates.
+FX_REPORTING_CURRENCY = "USD"
+
 # HubSpot traffic-source pseudo-names that must never appear as ROAS campaigns.
 _PSEUDO_CAMPAIGNS = (
     "(direct)", "(organic)", "(referral)", "(not set)",
@@ -612,9 +616,16 @@ def fetch_canonical_campaign_spend(start: date | None, end: date) -> dict:
     Spend truth read DIRECTLY from the canonical table (never the geo table).
     Aggregates raw cost_micros (no early rounding). Read-only.
 
-    Returns {available, rows:[{campaign_id, campaign_name, cost_micros, spend}],
-             total_cost_micros, total_spend, campaign_count, customer_id,
-             currency_code, coverage_start, coverage_end}.
+    PR-ADS-119: each daily spend row is converted to USD using the FX rate for
+    its OWN spend_date (LEFT JOIN fx_rates) — never one spot rate for the whole
+    window. ``fx_complete`` is False when any spend_date lacks an FX rate, which
+    must block ROAS (USD spend is only trustworthy when FX coverage is complete).
+
+    Returns {available, rows:[{campaign_id, campaign_name, cost_micros, spend,
+             spend_usd, fx_complete}], total_cost_micros, total_spend (native),
+             total_spend_usd, campaign_count, customer_id, currency_code (native),
+             reporting_currency, fx_missing_days, fx_complete, coverage_start,
+             coverage_end}.
     """
     try:
         with get_conn() as conn:
@@ -623,24 +634,38 @@ def fetch_canonical_campaign_spend(start: date | None, end: date) -> dict:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT campaign_id, MAX(campaign_name) AS campaign_name,
-                           SUM(cost_micros)::bigint AS cost_micros
-                    FROM google_ads_campaign_daily_spend
-                    WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
-                    GROUP BY campaign_id
+                    SELECT s.campaign_id, MAX(s.campaign_name) AS campaign_name,
+                           SUM(s.cost_micros)::bigint AS cost_micros,
+                           SUM((s.cost_micros / 1000000.0) * fx.rate) AS spend_usd,
+                           COUNT(DISTINCT CASE WHEN fx.rate IS NULL THEN s.spend_date END)
+                               AS fx_missing_days
+                    FROM google_ads_campaign_daily_spend s
+                    LEFT JOIN fx_rates fx
+                      ON fx.rate_date = s.spend_date
+                     AND fx.base_currency = s.currency_code
+                     AND fx.quote_currency = %s
+                    WHERE (%s::date IS NULL OR s.spend_date >= %s) AND s.spend_date <= %s
+                    GROUP BY s.campaign_id
                     """,
-                    (start, start, end),
+                    (FX_REPORTING_CURRENCY, start, start, end),
                 )
                 rows = []
                 total = 0
+                total_usd = 0.0
                 for r in _rows_as_dicts(cur):
                     micros = int(r.get("cost_micros") or 0)
                     total += micros
+                    row_missing = int(r.get("fx_missing_days") or 0)
+                    usd = None if row_missing else float(r.get("spend_usd") or 0.0)
+                    if usd is not None:
+                        total_usd += usd
                     rows.append({
                         "campaign_id": r.get("campaign_id"),
                         "campaign_name": r.get("campaign_name"),
                         "cost_micros": micros,
                         "spend": micros / 1_000_000,
+                        "spend_usd": usd,
+                        "fx_complete": row_missing == 0,
                     })
                 cur.execute(
                     """
@@ -652,14 +677,35 @@ def fetch_canonical_campaign_spend(start: date | None, end: date) -> dict:
                     (start, start, end),
                 )
                 meta = cur.fetchone() or (None, None, None, None)
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM (
+                        SELECT DISTINCT s.spend_date
+                        FROM google_ads_campaign_daily_spend s
+                        LEFT JOIN fx_rates fx
+                          ON fx.rate_date = s.spend_date
+                         AND fx.base_currency = s.currency_code
+                         AND fx.quote_currency = %s
+                        WHERE (%s::date IS NULL OR s.spend_date >= %s) AND s.spend_date <= %s
+                          AND fx.rate IS NULL
+                    ) m
+                    """,
+                    (FX_REPORTING_CURRENCY, start, start, end),
+                )
+                fx_missing_days = int((cur.fetchone() or (0,))[0] or 0)
+            fx_complete = fx_missing_days == 0
             return {
                 "available": True,
                 "rows": rows,
                 "total_cost_micros": total,
                 "total_spend": total / 1_000_000,
+                "total_spend_usd": round(total_usd, 6) if fx_complete else None,
                 "campaign_count": len(rows),
                 "customer_id": meta[2],
                 "currency_code": meta[3],
+                "reporting_currency": FX_REPORTING_CURRENCY,
+                "fx_missing_days": fx_missing_days,
+                "fx_complete": fx_complete,
                 "coverage_start": _as_date(meta[0]),
                 "coverage_end": _as_date(meta[1]),
             }
@@ -727,3 +773,128 @@ def fetch_geo_spend_total(start: date | None, end: date) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_geo_spend_total failed: %s", exc)
         return {"available": False, "total_spend": 0.0}
+
+
+def fetch_fx_coverage(start: date | None, end: date,
+                      base_currency: str, quote_currency: str = FX_REPORTING_CURRENCY) -> dict:
+    """FX coverage over the canonical spend dates in the window (PR-ADS-119).
+
+    Returns {available, complete, spend_days, covered_days, missing_dates}. A
+    spend_date with no fx_rates row is reported missing — never converted at a
+    wrong rate. With no spend dates, coverage is trivially complete (nothing to
+    convert). Read-only.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "complete": False, "missing_dates": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.spend_date,
+                           MAX(CASE WHEN fx.rate IS NOT NULL THEN 1 ELSE 0 END) AS has_rate
+                    FROM (
+                        SELECT DISTINCT spend_date, currency_code
+                        FROM google_ads_campaign_daily_spend
+                        WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    ) s
+                    LEFT JOIN fx_rates fx
+                      ON fx.rate_date = s.spend_date
+                     AND fx.base_currency = COALESCE(s.currency_code, %s)
+                     AND fx.quote_currency = %s
+                    GROUP BY s.spend_date
+                    ORDER BY s.spend_date
+                    """,
+                    (start, start, end, base_currency, quote_currency),
+                )
+                spend_days = 0
+                covered = 0
+                missing = []
+                for r in _rows_as_dicts(cur):
+                    spend_days += 1
+                    if int(r.get("has_rate") or 0) == 1:
+                        covered += 1
+                    else:
+                        missing.append(_as_date(r.get("spend_date")))
+            return {
+                "available": True,
+                "complete": not missing,
+                "spend_days": spend_days,
+                "covered_days": covered,
+                "missing_dates": missing,
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_fx_coverage failed: %s", exc)
+        return {"available": False, "complete": False, "missing_dates": []}
+
+
+def fetch_fx_rates(start: date | None, end: date,
+                   base_currency: str, quote_currency: str = FX_REPORTING_CURRENCY) -> dict:
+    """Daily FX rates for the window keyed by ISO date string (PR-ADS-119). Read-only."""
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rates": {}}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT rate_date, rate, provider, source_version
+                    FROM fx_rates
+                    WHERE base_currency = %s AND quote_currency = %s
+                      AND (%s::date IS NULL OR rate_date >= %s) AND rate_date <= %s
+                    ORDER BY rate_date
+                    """,
+                    (base_currency, quote_currency, start, start, end),
+                )
+                rates = {}
+                provider = None
+                for r in _rows_as_dicts(cur):
+                    d = _as_date(r.get("rate_date"))
+                    if d:
+                        rates[d] = float(r.get("rate"))
+                    provider = r.get("provider") or provider
+            return {"available": True, "rates": rates, "provider": provider}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_fx_rates failed: %s", exc)
+        return {"available": False, "rates": {}}
+
+
+def fetch_campaign_identity(customer_id: str | None = None) -> dict:
+    """Approved campaign-identity mappings keyed by normalized external label.
+
+    PR-ADS-119: external HubSpot/UTM label -> canonical Google Ads campaign. Only
+    rows with approved_at set are returned (manual + auto-approved exact matches).
+    Read-only — the raw spend-table identity is never modified here.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "mappings": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT customer_id, campaign_id, canonical_campaign_name,
+                           historical_campaign_name, external_campaign_label,
+                           match_method, approved_at, approved_by
+                    FROM google_ads_campaign_identity
+                    WHERE approved_at IS NOT NULL
+                      AND (%s::text IS NULL OR customer_id = %s)
+                    """,
+                    (customer_id, customer_id),
+                )
+                mappings = []
+                for r in _rows_as_dicts(cur):
+                    mappings.append({
+                        "customer_id": r.get("customer_id"),
+                        "campaign_id": r.get("campaign_id"),
+                        "canonical_campaign_name": r.get("canonical_campaign_name"),
+                        "historical_campaign_name": r.get("historical_campaign_name"),
+                        "external_campaign_label": r.get("external_campaign_label"),
+                        "match_method": r.get("match_method"),
+                        "approved_at": str(r.get("approved_at")) if r.get("approved_at") else None,
+                        "approved_by": r.get("approved_by"),
+                    })
+            return {"available": True, "mappings": mappings}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_campaign_identity failed: %s", exc)
+        return {"available": False, "mappings": []}

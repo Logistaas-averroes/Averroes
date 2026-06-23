@@ -297,6 +297,27 @@ _spend_backfill_lock: threading.Lock = threading.Lock()
 _spend_backfill_progress: dict[str, Any] = {"running": False, "latest": None}
 
 
+# PR-ADS-119 — daily FX backfill + campaign identity mapping.
+class FxBackfillRequest(BaseModel):
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    base_currency: str = "GBP"
+    quote_currency: str = "USD"
+    only_missing: bool = True
+
+
+class CampaignMappingRequest(BaseModel):
+    customer_id: str
+    external_campaign_label: str
+    campaign_id: str
+    canonical_campaign_name: str
+    historical_campaign_name: Optional[str] = None
+
+
+_fx_backfill_lock: threading.Lock = threading.Lock()
+_fx_backfill_progress: dict[str, Any] = {"running": False, "latest": None}
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -6571,6 +6592,127 @@ def api_spend_backfill_status(request: Request, job_id: Optional[str] = None) ->
         "started_at": job.get("started_at"), "finished_at": job.get("finished_at"),
         "job": job,
     }
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-119 — currency normalization (FX) + campaign identity reconciliation.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/fx-coverage")
+async def get_fx_coverage(
+    window: str = Query(default="current_quarter"),
+    base_currency: str = Query(default="GBP"),
+    _user=Depends(require_auth),
+):
+    """FX coverage for the canonical spend dates in a window (PR-ADS-119).
+
+    Read-only. A spend_date with no FX rate is reported missing — USD ROAS is
+    blocked until FX coverage is complete (never converted at a wrong rate).
+    """
+    from services.fx_service import build_fx_coverage, _window_bounds_safe  # noqa: PLC0415
+    try:
+        start, end = _window_bounds_safe(window)
+        return build_fx_coverage(start, end, base_currency)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("FX coverage failed: %s", exc)
+        raise HTTPException(status_code=500, detail="FX coverage failed") from exc
+
+
+def _run_fx_backfill_worker(body: "FxBackfillRequest") -> None:
+    """Background worker: fetch + upsert daily FX rates (read-only external read)."""
+    from services.fx_service import ensure_fx_rates  # noqa: PLC0415
+    try:
+        end = date.fromisoformat(body.date_to) if body.date_to else datetime.now(tz=timezone.utc).date()
+        start = date.fromisoformat(body.date_from) if body.date_from else date(2024, 1, 1)
+        result = ensure_fx_rates(start, end, base_currency=body.base_currency,
+                                 quote_currency=body.quote_currency, only_missing=body.only_missing)
+        with _fx_backfill_lock:
+            _fx_backfill_progress["latest"] = result
+    except Exception as exc:  # noqa: BLE001
+        log.error("[fx-backfill worker] failed: %s", exc, exc_info=True)
+        with _fx_backfill_lock:
+            _fx_backfill_progress["latest"] = {"error": f"{type(exc).__name__}: fx backfill failed"}
+    finally:
+        with _fx_backfill_lock:
+            _fx_backfill_progress["running"] = False
+
+
+@app.post("/api/fx-backfill/run", status_code=202)
+def api_fx_backfill_run(body: FxBackfillRequest, request: Request) -> dict[str, Any]:
+    """Backfill daily FX rates in the background (PR-ADS-119, admin-only).
+
+    Reads published reference rates read-only; writes ONLY the local fx_rates
+    table. Idempotent (only_missing skips dates already stored). Returns 409 if
+    already running.
+    """
+    check_admin_or_token(request)
+    for label, value in (("date_from", body.date_from), ("date_to", body.date_to)):
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f"{label} '{value}' is not a valid ISO date") from exc
+    with _fx_backfill_lock:
+        if _fx_backfill_progress["running"]:
+            raise HTTPException(status_code=409, detail="fx backfill already running")
+        _fx_backfill_progress["running"] = True
+    threading.Thread(target=_run_fx_backfill_worker, args=(body,), daemon=True).start()
+    return {"status": "queued", "date_from": body.date_from, "date_to": body.date_to}
+
+
+@app.get("/api/fx-backfill/status")
+def api_fx_backfill_status(request: Request) -> dict[str, Any]:
+    """Return the latest FX backfill state (admin-only)."""
+    check_admin_or_token(request)
+    with _fx_backfill_lock:
+        return {"running": _fx_backfill_progress["running"], "latest": _fx_backfill_progress["latest"]}
+
+
+@app.get("/api/campaign-mapping-review")
+async def get_campaign_mapping_review(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Admin campaign-identity mapping review (PR-ADS-119, read-only).
+
+    For each external HubSpot campaign label: Google Ads candidate, native spend,
+    USD spend, revenue, and match status. Unmatched labels are never assigned a
+    fabricated $0 spend.
+    """
+    from services.campaign_identity_service import build_mapping_review  # noqa: PLC0415
+    try:
+        return build_mapping_review(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("campaign mapping review failed: %s", exc)
+        raise HTTPException(status_code=500, detail="campaign mapping review failed") from exc
+
+
+@app.post("/api/campaign-mapping")
+def api_campaign_mapping(body: CampaignMappingRequest, request: Request) -> dict[str, Any]:
+    """Record an explicit, auditable manual campaign-identity mapping (admin-only).
+
+    Never overwrites the raw Google Ads campaign identity; stores an approved
+    mapping with approved_at/approved_by for audit.
+    """
+    user = check_admin_or_token(request)
+    from services.campaign_identity_service import record_manual_mapping  # noqa: PLC0415
+    approved_by = None
+    try:
+        approved_by = (user or {}).get("email") if isinstance(user, dict) else None
+    except Exception:  # noqa: BLE001
+        approved_by = None
+    ok = record_manual_mapping(
+        body.customer_id, body.external_campaign_label, body.campaign_id,
+        body.canonical_campaign_name, historical_campaign_name=body.historical_campaign_name,
+        approved_by=approved_by)
+    if not ok:
+        raise HTTPException(status_code=503, detail="campaign identity store unavailable")
+    return {"status": "ok", "external_campaign_label": body.external_campaign_label,
+            "match_method": "manual"}
 
 
 @app.get("/api/reports/roas/campaigns")

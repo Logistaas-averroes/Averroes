@@ -617,6 +617,50 @@ CREATE TABLE IF NOT EXISTS google_ads_spend_coverage (
 
 CREATE INDEX IF NOT EXISTS idx_ga_spend_coverage_range
   ON google_ads_spend_coverage(chunk_start, chunk_end);
+
+-- PR-ADS-119: durable daily FX rates. Google Ads native spend (GBP) is converted
+-- to USD reporting spend using the rate for each spend row's OWN spend_date — never
+-- a single current spot rate for a whole quarter. A missing rate_date makes FX
+-- coverage incomplete and blocks ROAS (never silently converts at a wrong rate).
+CREATE TABLE IF NOT EXISTS fx_rates (
+  id              SERIAL PRIMARY KEY,
+  rate_date       DATE NOT NULL,
+  base_currency   TEXT NOT NULL,
+  quote_currency  TEXT NOT NULL,
+  rate            NUMERIC(18,8) NOT NULL,
+  provider        TEXT,
+  fetched_at      TIMESTAMPTZ DEFAULT NOW(),
+  source_version  TEXT,
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (rate_date, base_currency, quote_currency)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fx_rates_lookup
+  ON fx_rates(base_currency, quote_currency, rate_date);
+
+-- PR-ADS-119: durable campaign identity mapping. The raw Google Ads campaign
+-- identity (campaign_id + historical_campaign_name) is immutable truth; this
+-- table records how an external HubSpot/UTM label maps to a canonical campaign.
+-- Manual mappings are explicit and auditable (approved_at) and NEVER overwrite
+-- the raw campaign identity. Exact normalized matches may be auto-linked; fuzzy
+-- matches (e.g. "mexico,chile" -> "Emerging Markets") are NEVER auto-applied.
+CREATE TABLE IF NOT EXISTS google_ads_campaign_identity (
+  id                       SERIAL PRIMARY KEY,
+  customer_id              TEXT NOT NULL,
+  campaign_id              TEXT,
+  canonical_campaign_name  TEXT,
+  historical_campaign_name TEXT,
+  external_campaign_label  TEXT NOT NULL,
+  match_method             TEXT NOT NULL,         -- exact_normalized | manual | unmatched
+  approved_at              TIMESTAMPTZ,
+  approved_by              TEXT,
+  created_at               TIMESTAMPTZ DEFAULT NOW(),
+  updated_at               TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (customer_id, external_campaign_label)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ga_campaign_identity_label
+  ON google_ads_campaign_identity(external_campaign_label);
 """
 
 
