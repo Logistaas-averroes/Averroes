@@ -1860,6 +1860,55 @@ def upsert_spend_coverage(
         return False
 
 
+def upsert_account_daily_spend(rows: list, sync_run_id: Optional[str] = None) -> int:
+    """Upsert account-level daily spend rows (PR-ADS-120). Idempotent. Never raises.
+
+    Each row: {customer_id, spend_date, cost_micros, currency_code,
+    account_time_zone, source_query_version}. Keyed by (customer_id, spend_date)
+    so a re-fetch never double-counts. Returns the number of rows upserted.
+    """
+    if not rows:
+        return 0
+    prepared = []
+    for r in rows:
+        cust = (r.get("customer_id") or "").strip()
+        spend_date = r.get("spend_date")
+        if not cust or not spend_date:
+            continue
+        prepared.append((
+            cust, spend_date, int(r.get("cost_micros") or 0),
+            r.get("currency_code"), r.get("account_time_zone"),
+            sync_run_id, r.get("source_query_version"),
+        ))
+    if not prepared:
+        return 0
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO google_ads_account_daily_spend (
+                        customer_id, spend_date, cost_micros, currency_code,
+                        account_time_zone, sync_run_id, source_query_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (customer_id, spend_date) DO UPDATE SET
+                        cost_micros          = EXCLUDED.cost_micros,
+                        currency_code        = EXCLUDED.currency_code,
+                        account_time_zone    = EXCLUDED.account_time_zone,
+                        sync_run_id          = EXCLUDED.sync_run_id,
+                        source_query_version = EXCLUDED.source_query_version,
+                        updated_at           = NOW()
+                    """,
+                    prepared,
+                )
+        return len(prepared)
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_account_daily_spend failed: %s", exc)
+        return 0
+
+
 def upsert_fx_rates(rows: list) -> int:
     """Upsert daily FX rates (PR-ADS-119). Idempotent. Never raises.
 

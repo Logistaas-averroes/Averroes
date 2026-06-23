@@ -499,8 +499,11 @@ def test_failed_spend_chunk_not_completed_and_resumes(monkeypatch):
             "source_query_version": "v1"}
 
     monkeypatch.setattr(svc, "fetch_daily_spend", fetch)
+    # PR-ADS-120: account-daily reconciliation fetch runs on the success path.
+    monkeypatch.setattr(svc, "fetch_account_daily_spend", lambda a, b: {"rows": []})
     monkeypatch.setattr("db.writers.upsert_campaign_daily_spend", lambda *a, **k: 1)
     monkeypatch.setattr("db.writers.upsert_spend_coverage", lambda *a, **k: True)
+    monkeypatch.setattr("db.writers.upsert_account_daily_spend", lambda *a, **k: 0)
     store = {"completed": []}
     cp = lambda jid, snap: store.__setitem__("completed", list(snap.get("completed_chunks", [])))
     lc = lambda: list(store["completed"])

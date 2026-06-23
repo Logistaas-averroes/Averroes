@@ -448,3 +448,61 @@ def fetch_campaign_daily_spend(start_date: str, end_date: str) -> dict:
         "source_query_version": SPEND_QUERY_VERSION,
         "rows": out,
     }
+
+
+# PR-ADS-120 — account-level daily spend, queried independently of campaigns so
+# the campaign sum can be reconciled against the account total.
+ACCOUNT_SPEND_QUERY_VERSION = "account_daily_v1"
+
+
+def fetch_account_daily_spend(start_date: str, end_date: str) -> dict:
+    """Read account-level Google Ads daily spend directly from the API.
+
+    PR-ADS-120 reconciliation source: the account total per day, independent of
+    the campaign breakdown, so the campaign sum can be checked against it. Also
+    surfaces the account time zone so spend windows use the account's local day.
+    Raw micros are preserved (never rounded before aggregation). Read-only — a
+    pure SELECT that never writes to Google Ads.
+
+    Returns {customer_id, currency_code, account_time_zone, source_query_version,
+             rows:[{customer_id, currency_code, account_time_zone, spend_date,
+                    cost_micros}]}.
+    """
+    client = build_google_ads_client()
+    customer_id = get_customer_id()
+
+    query = f"""
+        SELECT
+          customer.id,
+          customer.currency_code,
+          customer.time_zone,
+          segments.date,
+          metrics.cost_micros
+        FROM customer
+        WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
+        ORDER BY segments.date
+    """
+
+    rows = _run_search_stream(client, customer_id, query)
+    currency_code = None
+    account_time_zone = None
+    out = []
+    for row in rows:
+        currency_code = row.customer.currency_code or currency_code
+        account_time_zone = row.customer.time_zone or account_time_zone
+        out.append({
+            "customer_id": str(customer_id),
+            "currency_code": row.customer.currency_code,
+            "account_time_zone": row.customer.time_zone,
+            "spend_date": row.segments.date,
+            "cost_micros": int(row.metrics.cost_micros),
+        })
+    logger.info(
+        "fetch_account_daily_spend: %d rows (%s → %s)", len(out), start_date, end_date)
+    return {
+        "customer_id": str(customer_id),
+        "currency_code": currency_code,
+        "account_time_zone": account_time_zone,
+        "source_query_version": ACCOUNT_SPEND_QUERY_VERSION,
+        "rows": out,
+    }

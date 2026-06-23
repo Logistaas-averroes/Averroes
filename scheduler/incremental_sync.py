@@ -671,6 +671,14 @@ def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:
         )
         if not ok:
             raise SpendPersistenceError("coverage-ledger upsert failed")
+        # PR-ADS-120: also refresh the direct account-daily total for the same
+        # window (best-effort) so campaign↔account reconciliation stays current.
+        try:
+            from services.google_ads_spend_service import fetch_account_daily_spend  # noqa: PLC0415
+            acct = fetch_account_daily_spend(str(start), str(date_to))
+            db_writers.upsert_account_daily_spend(acct.get("rows", []), sync_run_id=run_id_str)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[incremental_sync] account-daily spend refresh failed: %s", exc)
         if batch_id:
             db_writers.finish_sync_batch(
                 batch_id=batch_id, status="success", row_count=written, last_source_date=date_to)

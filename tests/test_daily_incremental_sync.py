@@ -697,6 +697,10 @@ def _patch_all_datasets_success(
     )
     monkeypatch.setattr("db.writers.upsert_campaign_daily_spend", lambda *a, **kw: 0)
     monkeypatch.setattr("db.writers.upsert_spend_coverage", lambda *a, **kw: True)
+    # PR-ADS-120: account-daily reconciliation fetch (best-effort on success).
+    monkeypatch.setattr("services.google_ads_spend_service.fetch_account_daily_spend",
+                        lambda *a, **kw: {"rows": []})
+    monkeypatch.setattr("db.writers.upsert_account_daily_spend", lambda *a, **kw: 0)
     # PR-ADS-119: daily FX rates step. Patch ensure_fx_rates so the FX connector
     # (network) is never hit. Mirror the spend failure mode (source_pull) so the
     # all-datasets-fail test still drives this dataset to failure.

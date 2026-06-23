@@ -345,6 +345,7 @@ def _finalize_row(
     lead_metrics_withheld: bool = False,
     spend_trusted: bool = True,
     spend_mapping_unavailable: bool = False,
+    spend_state: str | None = None,
 ) -> dict:
     # PR-ADS-118: spend is a usable ROAS denominator only when it comes from a
     # complete canonical source AND this row maps to a verified spend campaign.
@@ -378,6 +379,10 @@ def _finalize_row(
     if lead_metrics_withheld and not has_revenue:
         # Without trusted lead/SQL signal we cannot call a spend-only row "waste".
         verdict = "learning"
+    # PR-ADS-120: an unmapped campaign has incomplete spend truth — it is never
+    # classed winner/waste/watch; the decision is "mapping_required".
+    if spend_mapping_unavailable or spend_state == "unmapped":
+        verdict = "mapping_required"
 
     notes = _row_notes(bucket, confidence)
     if lead_metrics_withheld:
@@ -400,6 +405,12 @@ def _finalize_row(
             "verified for this window, so ROAS is unavailable (not from a partial "
             "or geo denominator)."
         )
+    if spend_state == "verified_zero_spend":
+        notes.append(
+            "Verified zero spend — this campaign is matched to canonical Google Ads "
+            "spend and genuinely spent $0 in this window (a verified zero, not a "
+            "missing mapping)."
+        )
     if downgraded:
         notes.append(
             "GCLID attribution index is legacy (data/campaign_performance.json); "
@@ -419,6 +430,8 @@ def _finalize_row(
         "confidence": confidence,
         "verdict": verdict,
         "spend_mapping": "unavailable" if spend_mapping_unavailable else "matched",
+        # PR-ADS-120: mapped_exact | mapped_manual | unmapped | verified_zero_spend.
+        "spend_state": spend_state,
         "attribution_notes": notes,
     }
 
@@ -593,7 +606,8 @@ def _match_status_to_tier(match_status) -> str:
 
 def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, group_field: str,
                    revenue_available: bool = True, lead_metrics_withheld: bool = False,
-                   spend_trusted: bool = True, spend_mapping_keys: set | None = None):
+                   spend_trusted: bool = True, spend_mapping_keys: set | None = None,
+                   manual_target_keys: set | None = None, compute_spend_state: bool = False):
     """Aggregate durable DB rows into finished campaign or country rows.
 
     group_field is "campaign_name" or "country". Buckets with an empty/unknown
@@ -604,8 +618,13 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
       - spend_mapping_keys (campaign grouping only): the set of normalized
         campaign keys that have a canonical spend match. A revenue/lead campaign
         whose key is NOT in this set has its spend + ROAS marked unavailable
-        (never a fake $0). Passed only for a complete canonical window with
-        spend rows; None disables per-row mapping checks.
+        (never a fake $0). Passed only for a resolved canonical window with spend
+        rows; None disables per-row mapping checks.
+
+    PR-ADS-120 spend semantics (campaign grouping, compute_spend_state=True):
+      each row gets a ``spend_state`` of mapped_exact | mapped_manual | unmapped |
+      verified_zero_spend. An unmapped row shows Unavailable (never $0) and is
+      never classed winner/waste/watch (verdict = mapping_required).
     """
     buckets: dict[str, dict] = {}
 
@@ -640,12 +659,24 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
         if not key:
             continue  # drop unknown / blank campaign or country
         mapping_unavailable = bool(spend_mapping_keys is not None and key not in spend_mapping_keys)
+        # PR-ADS-120 spend state (campaign grouping only).
+        spend_state = None
+        if compute_spend_state and group_field == "campaign_name" and spend_mapping_keys is not None:
+            if key not in spend_mapping_keys:
+                spend_state = "unmapped"
+            elif _safe_float(bucket["spend"]) > 0:
+                spend_state = ("mapped_manual"
+                               if (manual_target_keys and key in manual_target_keys)
+                               else "mapped_exact")
+            else:
+                spend_state = "verified_zero_spend"
         finalized = _finalize_row(
             bucket, legacy_gclid=False,
             revenue_available=revenue_available,
             lead_metrics_withheld=lead_metrics_withheld,
             spend_trusted=spend_trusted,
             spend_mapping_unavailable=mapping_unavailable,
+            spend_state=spend_state,
         )
         if group_field == "campaign_name":
             finalized["campaign_id"] = key
@@ -719,23 +750,36 @@ def _window_date_bounds(window: str, now: datetime | None):
     return resolved, start_date, end_date
 
 
-def _load_approved_identity_map(customer_id) -> dict:
-    """Approved campaign-identity mappings: {normalized external label -> canonical name}.
+def _ident_norm(name) -> str:
+    """Identity normalization (case / spaces / commas / hyphens) for matching."""
+    from services.campaign_identity_service import normalize_campaign_name  # noqa: PLC0415
+    return normalize_campaign_name(name)
 
-    PR-ADS-119: only APPROVED mappings (manual or auto-approved exact-normalized)
-    are returned by the repository (approved_at IS NOT NULL); unapproved labels
-    are never applied to the ROAS pipeline.
+
+def _build_resolution_map(canonical_rows: list, approved_mappings: list) -> dict:
+    """Identity-normalized external label -> canonical Google Ads campaign name.
+
+    PR-ADS-120: combines two sources, both applied to the ACTUAL ROAS aggregation:
+      - exact-normalized auto-links from the canonical campaign set (case /
+        spaces / commas / hyphens), and
+      - APPROVED manual mappings (admin), which override exact auto-links.
+    Only approved manual mappings (approved_at IS NOT NULL) are honoured; an
+    unapproved label is never resolved (it stays "Spend mapping unavailable").
     """
-    identity = repo.fetch_campaign_identity(customer_id)
-    out: dict[str, str] = {}
-    for m in identity.get("mappings", []):
+    res: dict[str, str] = {}
+    for c in canonical_rows or []:
+        name = c.get("campaign_name")
+        nz = _ident_norm(name)
+        if nz and name:
+            res[nz] = name  # exact-normalized auto-link target
+    for m in approved_mappings or []:
         if not m.get("approved_at"):
             continue
-        norm = _norm(m.get("external_campaign_label"))
+        nz = _ident_norm(m.get("external_campaign_label"))
         canon = m.get("canonical_campaign_name")
-        if norm and canon:
-            out[norm] = canon
-    return out
+        if nz and canon:
+            res[nz] = canon  # explicit approved manual mapping overrides
+    return res
 
 
 def _dedupe_mappings(applied_log: list) -> list:
@@ -761,7 +805,7 @@ def _apply_identity_map(rows: list, mapping: dict, applied_log: list) -> list:
     out = []
     for r in rows:
         label = r.get("campaign_name")
-        canon = mapping.get(_norm(label))
+        canon = mapping.get(_ident_norm(label))
         if canon and _norm(canon) != _norm(label):
             nr = dict(r)
             nr["campaign_name"] = canon
@@ -877,9 +921,12 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     # unapproved labels stay unmapped ("Spend mapping unavailable"). The original
     # external label is preserved in audit metadata.
     applied_identity_mappings: list = []
-    approved_identity_map = _load_approved_identity_map(canonical_customer_id) if canonical_access else {}
-    if approved_identity_map:
-        revenue_rows = _apply_identity_map(revenue_rows, approved_identity_map, applied_identity_mappings)
+    approved_mappings = (repo.fetch_campaign_identity(canonical_customer_id).get("mappings", [])
+                         if canonical_access else [])
+    resolution_map = (_build_resolution_map(canonical.get("rows") or [], approved_mappings)
+                      if canonical_access else {})
+    if resolution_map:
+        revenue_rows = _apply_identity_map(revenue_rows, resolution_map, applied_identity_mappings)
 
     # Campaign spend is a trusted ROAS denominator only when canonical coverage is
     # complete AND FX coverage is complete (USD reporting). Country spend
@@ -894,12 +941,22 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         ]
     else:
         country_spend_rows = spend_rows
-    # Per-campaign mapping check: only when we have a complete canonical window
-    # WITH spend rows. A revenue campaign absent from canonical spend is marked
-    # "spend mapping unavailable" (never a fake $0).
+    # PR-ADS-120: campaign-identity resolution is determined by canonical COVERAGE
+    # completeness (we know the full campaign set), independent of FX. A revenue
+    # campaign absent from the canonical spend set is "unmapped" → spend + ROAS
+    # Unavailable (never a fake $0). FX only gates whether USD spend / ROAS show.
+    spend_identity_resolved = canonical_access and coverage_complete
     spend_mapping_keys = None
-    if campaign_spend_trusted and campaign_spend_rows:
+    manual_target_keys: set = set()
+    if spend_identity_resolved and campaign_spend_rows:
         spend_mapping_keys = {_norm(r.get("campaign_name")) for r in campaign_spend_rows}
+        # Canonical campaigns reachable via an approved MANUAL mapping → labelled
+        # mapped_manual; exact-normalized matches are mapped_exact.
+        manual_target_keys = {
+            _norm(m.get("canonical_campaign_name"))
+            for m in approved_mappings
+            if m.get("approved_at") and m.get("canonical_campaign_name")
+        }
 
     # PR-ADS-109: lead metrics are trusted only when the business event date
     # (HubSpot contact_created_at) is available. Otherwise withhold them — never
@@ -907,8 +964,8 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     lead_event_date_safe = bool(leads.get("event_date_safe"))
     lead_metrics_withheld = not lead_event_date_safe
     lead_rows = [] if lead_metrics_withheld else leads["rows"]
-    if approved_identity_map and lead_rows:
-        lead_rows = _apply_identity_map(lead_rows, approved_identity_map, applied_identity_mappings)
+    if resolution_map and lead_rows:
+        lead_rows = _apply_identity_map(lead_rows, resolution_map, applied_identity_mappings)
 
     # Revenue is "wired" only when there are closed-won attributed rows; without
     # them ROAS is null (not zero) and the status says so.
@@ -921,6 +978,7 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         campaign_spend_rows, lead_rows, revenue_rows, group_field="campaign_name",
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
         spend_trusted=campaign_spend_trusted, spend_mapping_keys=spend_mapping_keys,
+        manual_target_keys=manual_target_keys, compute_spend_state=spend_identity_resolved,
     )
     countries = _build_db_rows(
         country_spend_rows, lead_rows, revenue_rows, group_field="country",
