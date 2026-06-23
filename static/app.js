@@ -3026,6 +3026,8 @@ function renderRevenueHealth(audit) {
 async function loadRevenueHealth() {
   // Google Ads Spend Truth panel (PR-ADS-118) sits at the top of diagnostics.
   loadSpendTruth();
+  // Campaign identity mapping review (PR-ADS-119).
+  loadCampaignMapping();
   // Admin-only Revenue Recovery panel (PR-ADS-114) sits above the diagnostics.
   loadRevenueRecoveryStatus();
 
@@ -3611,6 +3613,7 @@ document.addEventListener("click", (e) => {
 let spendBackfillJobId = null;
 let spendBackfillPollTimer = null;
 let spendTruthNotice = "";
+let fxBackfillNotice = "";  // PR-ADS-119
 
 const SPEND_STATE_LABEL = {
   VERIFIED: "Verified", PARTIAL: "Partial coverage",
@@ -3631,7 +3634,9 @@ function renderSpendTruth(audit, backfill) {
     <div class="recovery-actions">
       <button type="button" class="btn btn--secondary" data-spend-backfill-action="preview" ${running ? "disabled" : ""}>Preview Google Ads spend backfill</button>
       <button type="button" class="btn btn--primary" data-spend-backfill-action="run" ${running ? "disabled" : ""}>Run Google Ads spend backfill</button>
+      <button type="button" class="btn btn--secondary" data-fx-backfill-action="run">Backfill FX rates (GBP→USD)</button>
     </div>
+    ${fxBackfillNotice ? `<p class="revenue-footnote">${escapeHtml(fxBackfillNotice)}</p>` : ""}
     ${running ? `<div class="recovery-progress">Running… ${escapeHtml((backfill && backfill.phase) || "starting")}${backfill && backfill.current_chunk ? ` · ${escapeHtml(backfill.current_chunk)}` : ""}</div>` : ""}
     ${spendTruthNotice ? `<p class="revenue-footnote">${escapeHtml(spendTruthNotice)}</p>` : ""}
     ${bs ? `<div class="revenue-summary-strip revenue-summary-strip--four">
@@ -3651,17 +3656,18 @@ function renderSpendTruth(audit, backfill) {
           <div>State: <strong class="spend-state spend-state--${escapeHtml((a.state || "").toLowerCase())}">${escapeHtml(stateLabel)}</strong></div>
         </div>
         <div class="recovery-statuses">
-          <div>Customer: <strong>${escapeHtml(a.customer_id || "—")}</strong> (${escapeHtml(a.currency_code || "—")})</div>
+          <div>Customer: <strong>${escapeHtml(a.customer_id || "—")}</strong> (${escapeHtml(a.native_currency || a.currency_code || "—")})</div>
           <div>Canonical campaigns: <strong>${fmtCount(a.canonical_campaign_count)}</strong></div>
           <div>Geo reconciliation: <strong>${escapeHtml(a.geo_reconciliation_status || "—")}</strong></div>
         </div>
         <div class="revenue-summary-strip revenue-summary-strip--four">
-          <div><span>Canonical API total</span><strong>${a.canonical_api_total === null || a.canonical_api_total === undefined ? "Unavailable" : fmtMoney(a.canonical_api_total)}</strong></div>
-          <div><span>Canonical local total</span><strong>${a.canonical_local_total === null || a.canonical_local_total === undefined ? "Unavailable" : fmtMoney(a.canonical_local_total)}</strong></div>
-          <div><span>Legacy geo total</span><strong>${a.legacy_geo_total === null || a.legacy_geo_total === undefined ? "Unavailable" : fmtMoney(a.legacy_geo_total)}</strong></div>
-          <div><span>Variance</span><strong>${a.variance_amount === null || a.variance_amount === undefined ? "—" : fmtMoney(a.variance_amount)}${a.variance_pct != null ? ` (${(a.variance_pct * 100).toFixed(1)}%)` : ""}</strong></div>
+          <div><span>Google Ads native spend</span><strong>${a.native_total === null || a.native_total === undefined ? "Unavailable" : fmtCurrency(a.native_total, a.native_currency || "GBP")}</strong></div>
+          <div><span>USD reporting spend</span><strong>${a.usd_total === null || a.usd_total === undefined ? "FX incomplete" : fmtUSD(a.usd_total)}</strong></div>
+          <div><span>FX coverage</span><strong class="spend-state spend-state--${a.fx_coverage_complete ? "verified" : "partial"}">${a.fx_coverage_complete ? "Verified" : (a.fx_coverage_state === "UNAVAILABLE" ? "Unavailable" : "Incomplete")}</strong></div>
+          <div><span>Legacy geo total (native)</span><strong>${a.legacy_geo_total === null || a.legacy_geo_total === undefined ? "Unavailable" : fmtCurrency(a.legacy_geo_total, a.native_currency || "GBP")}</strong></div>
         </div>
-        ${(a.missing_chunks && a.missing_chunks.length) ? `<p class="revenue-footnote">Missing / unverified chunks: ${a.missing_chunks.map((c) => escapeHtml(`${c.start}→${c.end}`)).join(", ")}. Missing rows are never treated as $0 spend.</p>` : ""}
+        ${(a.missing_chunks && a.missing_chunks.length) ? `<p class="revenue-footnote">Missing / unverified chunks: ${a.missing_chunks.map((c) => escapeHtml(`${c.start}→${c.end}`)).join(", ")}. Missing rows are never treated as £0 spend.</p>` : ""}
+        ${(a.fx_missing_dates && a.fx_missing_dates.length) ? `<p class="revenue-footnote">FX coverage incomplete — missing rates for ${a.fx_missing_dates.length} date(s). USD ROAS is unavailable until FX coverage is complete.</p>` : ""}
         ${adminPanel}
       </div>
     </div>
@@ -3751,6 +3757,95 @@ document.addEventListener("click", (e) => {
   if (!btn) return;
   runSpendBackfillJob(btn.dataset.spendBackfillAction === "preview");
 });
+
+// ── PR-ADS-119: FX rate backfill + campaign identity mapping review ──────────
+
+async function runFxBackfill() {
+  fxBackfillNotice = "Starting FX backfill…";
+  loadSpendTruthRenderOnly(null);
+  try {
+    const res = await fetch("/api/fx-backfill/run", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (res.status === 409) { fxBackfillNotice = "An FX backfill is already running."; }
+    else if (!res.ok) { fxBackfillNotice = "FX backfill could not be started."; }
+    else { fxBackfillNotice = "FX backfill started — daily GBP→USD rates are being fetched."; }
+  } catch (err) {
+    console.error("[runFxBackfill]", err);
+    fxBackfillNotice = "FX backfill request failed.";
+  }
+  loadSpendTruth();
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-fx-backfill-action]");
+  if (!btn) return;
+  runFxBackfill();
+});
+
+async function loadCampaignMapping() {
+  const panel = document.getElementById("campaign-mapping-panel");
+  if (!panel) return;
+  const window_ = getRoasBusinessWindow();
+  let review = null;
+  try {
+    const res = await fetch(`/api/campaign-mapping-review?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
+    if (res.ok) review = await res.json();
+  } catch (err) { console.error("[loadCampaignMapping]", err); }
+  renderCampaignMapping(review);
+}
+
+function renderCampaignMapping(review) {
+  const panel = document.getElementById("campaign-mapping-panel");
+  if (!panel) return;
+  const isAdmin = _currentUser && _currentUser.role === "admin";
+  if (!isAdmin) { panel.innerHTML = ""; return; }
+  const r = review || {};
+  const rows = r.rows || [];
+  const nativeCur = r.native_currency || "GBP";
+  const statusLabel = {
+    matched: "Matched", exact_normalized: "Auto (exact)", manual: "Manual", unmatched: "Unmatched",
+  };
+  const body = rows.length ? rows.map((row) => `
+    <tr class="${row.match_status === "unmatched" ? "mapping-unmatched" : ""}">
+      <td>${escapeHtml(row.hubspot_campaign_label || "")}</td>
+      <td>${row.google_ads_candidate ? escapeHtml(row.google_ads_candidate) : '<span class="spend-unavailable">Spend mapping unavailable</span>'}</td>
+      <td>${row.native_spend === null || row.native_spend === undefined ? "Unavailable" : fmtCurrency(row.native_spend, nativeCur)}</td>
+      <td>${row.usd_spend === null || row.usd_spend === undefined ? "Unavailable" : fmtUSD(row.usd_spend)}</td>
+      <td>${fmtUSD(row.revenue)}</td>
+      <td><span class="mapping-status mapping-status--${escapeHtml(row.match_status || "")}">${escapeHtml(statusLabel[row.match_status] || row.match_status || "—")}</span></td>
+    </tr>
+  `).join("") : `<tr><td colspan="6" class="empty-state">No HubSpot campaign labels in this window.</td></tr>`;
+
+  panel.innerHTML = `
+    <div class="panel recovery-panel">
+      <div class="panel__header">Campaign Identity Mapping Review</div>
+      <div class="panel__body">
+        <div class="recovery-statuses">
+          <div>Customer: <strong>${escapeHtml(r.customer_id || "—")}</strong></div>
+          <div>Unmatched labels: <strong>${fmtCount(r.unmatched_count)}</strong></div>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <tr>
+              <th>HubSpot campaign label</th>
+              <th>Google Ads candidate</th>
+              <th>Native spend</th>
+              <th>USD spend</th>
+              <th>Revenue</th>
+              <th>Match status</th>
+            </tr>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+        <p class="revenue-footnote">Exact normalized matches are auto-linked. Unmatched labels show "Spend mapping unavailable" (never $0). Manual mappings are explicit and auditable and never overwrite the raw Google Ads campaign identity.</p>
+      </div>
+    </div>
+  `;
+}
 
 function junkRateBadge(junkPct) {
   if (junkPct === null || junkPct === undefined) {
@@ -8421,6 +8516,31 @@ function fmtMoney(v) {
   return "$" + v.toFixed(0);
 }
 
+// PR-ADS-119 — currency-correct formatting. Native Google Ads spend is GBP and
+// must NEVER be rendered with a "$"; USD reporting spend uses "$". A full
+// amount (2dp) with an explicit currency suffix is shown for spend-truth values
+// that must reconcile to the Google Ads UI / HubSpot.
+const _CURRENCY_SYMBOL = { GBP: "£", USD: "$", EUR: "€" };
+
+function currencySymbol(code) {
+  return _CURRENCY_SYMBOL[(code || "").toUpperCase()] || "";
+}
+
+function fmtCurrency(v, code) {
+  if (v === null || v === undefined) return "—";
+  const sym = currencySymbol(code);
+  const amt = Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${sym}${amt} ${(code || "").toUpperCase()}`.trim();
+}
+
+function fmtNativeGBP(v) {
+  return fmtCurrency(v, "GBP");
+}
+
+function fmtUSD(v) {
+  return fmtCurrency(v, "USD");
+}
+
 function fmtNum(v, decimals) {
   if (v === null || v === undefined) return "—";
   return Number(v).toFixed(decimals !== undefined ? decimals : 1);
@@ -8662,10 +8782,31 @@ function sortRoasCampaignRows(rows) {
 
 function renderRoasCampaignSummary(summary, spendIncomplete) {
   const s = summary || {};
+  const sh = roasCampaignSourceHealth || {};
   const roasCell = spendIncomplete ? "Unavailable" : fmtRoasMultiple(s.roas);
+  // PR-ADS-119: Google Ads native spend is GBP; USD ROAS uses daily-FX reporting
+  // spend. Never render native GBP with "$".
+  const native = sh.spend_native_total;
+  const usd = sh.spend_usd_total;
+  const nativeCur = sh.spend_native_currency || "GBP";
+  const fxComplete = sh.fx_coverage_status === "complete";
+  const hasNative = native !== null && native !== undefined;
+  const spendBlock = hasNative ? `
+    <div class="revenue-spend-currency">
+      <div class="revenue-spend-currency__label">Google Ads Spend</div>
+      <div class="revenue-spend-currency__native">${fmtCurrency(native, nativeCur)} native</div>
+      <div class="revenue-spend-currency__usd">${usd === null || usd === undefined ? "USD reporting: FX coverage incomplete" : fmtUSD(usd) + " USD reporting"}</div>
+      <div class="revenue-spend-currency__fx">FX coverage: <strong>${fxComplete ? "Verified" : "Incomplete — ROAS unavailable"}</strong></div>
+      <div class="revenue-spend-currency__note">ROAS: ${spendIncomplete ? "unavailable" : "calculated from USD reporting spend"}</div>
+    </div>` : "";
+  // Strip Spend cell: USD reporting when FX complete; otherwise native diagnostic.
+  const spendCell = (usd !== null && usd !== undefined)
+    ? fmtUSD(usd)
+    : (hasNative ? fmtCurrency(native, nativeCur) : fmtMoney(s.spend));
   return `
+    ${spendBlock}
     <div class="revenue-summary-strip">
-      <div><span>Spend</span><strong>${fmtMoney(s.spend)}</strong></div>
+      <div><span>Spend</span><strong>${spendCell}</strong></div>
       <div><span>Leads</span><strong>${fmtCount(s.leads)}</strong></div>
       <div><span>SQLs</span><strong>${fmtCount(s.sqls)}</strong></div>
       <div><span>Customers</span><strong>${fmtCount(s.customers)}</strong></div>
@@ -8752,7 +8893,19 @@ function spendCoverageIncomplete(sh) {
   return h.spend_coverage_status !== "complete";
 }
 
-function renderSpendCoverageNotice() {
+function renderSpendCoverageNotice(sh) {
+  const h = sh || {};
+  // PR-ADS-119: when spend coverage is complete but FX coverage is not, the
+  // blocker is currency conversion — be explicit so it isn't mistaken for a
+  // missing-spend problem.
+  if (h.spend_coverage_status === "complete" && h.fx_coverage_status === "incomplete") {
+    return `
+    <div class="revenue-blocked-card revenue-empty-card">
+      <div class="revenue-blocked-card__eyebrow">Currency normalization</div>
+      <h3>FX coverage incomplete — ROAS unavailable</h3>
+      <p>Google Ads native spend is GBP and HubSpot revenue is USD. One or more spend dates have no daily FX rate, so USD reporting spend cannot be computed for the whole window. Run the FX backfill in System Status → Revenue Health. Native spend is shown for diagnostics only.</p>
+    </div>`;
+  }
   return `
     <div class="revenue-blocked-card revenue-empty-card">
       <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
@@ -8787,7 +8940,7 @@ function renderRoasCampaignsPage() {
   const spendIncomplete = spendCoverageIncomplete(roasCampaignSourceHealth);
 
   tableBody.innerHTML = `
-    ${spendIncomplete ? renderSpendCoverageNotice() : ""}
+    ${spendIncomplete ? renderSpendCoverageNotice(roasCampaignSourceHealth) : ""}
     ${renderRoasCampaignSummary(roasCampaignSummary, spendIncomplete)}
     ${renderRoasCampaignFilters()}
     ${renderRoasCampaignTable(filtered, spendIncomplete)}

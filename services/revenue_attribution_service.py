@@ -719,6 +719,60 @@ def _window_date_bounds(window: str, now: datetime | None):
     return resolved, start_date, end_date
 
 
+def _load_approved_identity_map(customer_id) -> dict:
+    """Approved campaign-identity mappings: {normalized external label -> canonical name}.
+
+    PR-ADS-119: only APPROVED mappings (manual or auto-approved exact-normalized)
+    are returned by the repository (approved_at IS NOT NULL); unapproved labels
+    are never applied to the ROAS pipeline.
+    """
+    identity = repo.fetch_campaign_identity(customer_id)
+    out: dict[str, str] = {}
+    for m in identity.get("mappings", []):
+        if not m.get("approved_at"):
+            continue
+        norm = _norm(m.get("external_campaign_label"))
+        canon = m.get("canonical_campaign_name")
+        if norm and canon:
+            out[norm] = canon
+    return out
+
+
+def _dedupe_mappings(applied_log: list) -> list:
+    """Unique applied-mapping records (external label -> canonical) for audit."""
+    seen = set()
+    out = []
+    for m in applied_log:
+        key = (m.get("external_campaign_label"), m.get("canonical_campaign_name"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    return out
+
+
+def _apply_identity_map(rows: list, mapping: dict, applied_log: list) -> list:
+    """Rewrite external HubSpot/UTM campaign labels to their canonical Google Ads
+    campaign name so they aggregate onto canonical spend. Preserves the original
+    label in ``external_campaign_label`` and records each applied mapping for audit.
+    """
+    if not mapping:
+        return rows
+    out = []
+    for r in rows:
+        label = r.get("campaign_name")
+        canon = mapping.get(_norm(label))
+        if canon and _norm(canon) != _norm(label):
+            nr = dict(r)
+            nr["campaign_name"] = canon
+            nr["external_campaign_label"] = label  # preserve original truth
+            out.append(nr)
+            applied_log.append({"external_campaign_label": label, "canonical_campaign_name": canon})
+        else:
+            out.append(r)
+    return out
+
+
 def _build_from_db(resolved, start_date, end_date) -> dict | None:
     """Build the contract from durable DB sources.
 
@@ -757,15 +811,39 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         spend_coverage_status = "complete" if coverage_complete else "incomplete"
         spend_source = "canonical_google_ads_api"
         canonical_rows = canonical.get("rows") or []
-        campaign_spend_rows = [
-            {"campaign_name": r.get("campaign_name"), "country": None, "spend": r.get("spend")}
-            for r in canonical_rows
-        ]
         canonical_total = round(float(canonical.get("total_spend") or 0), 2)
         canonical_customer_id = canonical.get("customer_id")
-        canonical_currency = canonical.get("currency_code")
+        canonical_currency = canonical.get("currency_code") or "GBP"
+        # PR-ADS-119: HubSpot revenue is USD, so the ROAS denominator must be USD.
+        # Convert via daily FX (already done in the repo). fx_complete is None when
+        # the FX layer was not evaluated (legacy/patched canonical) — treat as
+        # not-blocking and fall back to native spend for backward compatibility.
+        fx_complete_raw = canonical.get("fx_complete")
+        fx_evaluated = fx_complete_raw is not None
+        fx_complete = bool(fx_complete_raw) if fx_evaluated else True
+        fx_coverage_status = (
+            ("complete" if fx_complete else "incomplete") if fx_evaluated else "not_evaluated"
+        )
+        usd_total = canonical.get("total_spend_usd")
+        spend_native_total = canonical_total
+        spend_usd_total = round(float(usd_total), 2) if usd_total is not None else None
+        use_usd = fx_evaluated and fx_complete
+        reporting_currency = canonical.get("reporting_currency") or "USD"
+        # Effective realized rate (native→USD) from the per-day conversions; used
+        # only to express the reconciled country (geo) split in USD.
+        fx_effective_rate = (
+            (spend_usd_total / spend_native_total)
+            if (use_usd and spend_usd_total is not None and spend_native_total) else None
+        )
+        # Campaign spend rows in the ROAS currency (USD when FX complete; native
+        # diagnostic otherwise).
+        campaign_spend_rows = [
+            {"campaign_name": r.get("campaign_name"), "country": None,
+             "spend": (r.get("spend_usd") if use_usd else r.get("spend"))}
+            for r in canonical_rows
+        ]
         # Geo reconciliation for Country ROAS: geo total must match canonical for
-        # the same window within tolerance.
+        # the same window within tolerance (compared in native currency).
         geo_total_for_recon = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
         if canonical_total > 0:
             country_spend_reconciled = (
@@ -780,16 +858,42 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         spend_source = "geo_fallback"
         spend_coverage_status = "geo_fallback"
         coverage_complete = False
+        fx_complete = False
+        fx_coverage_status = "unavailable"
+        use_usd = False
+        reporting_currency = "USD"
+        fx_effective_rate = None
+        spend_native_total = None
+        spend_usd_total = None
         campaign_spend_rows = spend_rows  # diagnostic display only
         canonical_total = None
         canonical_customer_id = None
         canonical_currency = None
         country_spend_reconciled = None
 
-    # Campaign spend is a trusted ROAS denominator only when canonical coverage
-    # is complete. Country spend additionally requires geo↔canonical reconciliation.
-    campaign_spend_trusted = canonical_access and coverage_complete
+    # PR-ADS-119: apply APPROVED campaign-identity mappings so external
+    # HubSpot/UTM labels aggregate onto their canonical Google Ads campaign BEFORE
+    # campaign rows and ROAS are computed. Only approved mappings are applied;
+    # unapproved labels stay unmapped ("Spend mapping unavailable"). The original
+    # external label is preserved in audit metadata.
+    applied_identity_mappings: list = []
+    approved_identity_map = _load_approved_identity_map(canonical_customer_id) if canonical_access else {}
+    if approved_identity_map:
+        revenue_rows = _apply_identity_map(revenue_rows, approved_identity_map, applied_identity_mappings)
+
+    # Campaign spend is a trusted ROAS denominator only when canonical coverage is
+    # complete AND FX coverage is complete (USD reporting). Country spend
+    # additionally requires geo↔canonical reconciliation.
+    campaign_spend_trusted = canonical_access and coverage_complete and fx_complete
     country_spend_trusted = campaign_spend_trusted and (country_spend_reconciled is True)
+    # Country spend split (geo, native) expressed in USD via the realized rate so
+    # Country ROAS is also USD — never native-vs-USD mixed.
+    if country_spend_trusted and fx_effective_rate is not None:
+        country_spend_rows = [
+            {**r, "spend": _safe_float(r.get("spend")) * fx_effective_rate} for r in spend_rows
+        ]
+    else:
+        country_spend_rows = spend_rows
     # Per-campaign mapping check: only when we have a complete canonical window
     # WITH spend rows. A revenue campaign absent from canonical spend is marked
     # "spend mapping unavailable" (never a fake $0).
@@ -803,6 +907,8 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     lead_event_date_safe = bool(leads.get("event_date_safe"))
     lead_metrics_withheld = not lead_event_date_safe
     lead_rows = [] if lead_metrics_withheld else leads["rows"]
+    if approved_identity_map and lead_rows:
+        lead_rows = _apply_identity_map(lead_rows, approved_identity_map, applied_identity_mappings)
 
     # Revenue is "wired" only when there are closed-won attributed rows; without
     # them ROAS is null (not zero) and the status says so.
@@ -817,7 +923,7 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         spend_trusted=campaign_spend_trusted, spend_mapping_keys=spend_mapping_keys,
     )
     countries = _build_db_rows(
-        spend_rows, lead_rows, revenue_rows, group_field="country",
+        country_spend_rows, lead_rows, revenue_rows, group_field="country",
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
         spend_trusted=country_spend_trusted,
     )
@@ -908,6 +1014,17 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "country_spend_reconciled": country_spend_reconciled,
         "canonical_customer_id": canonical_customer_id,
         "canonical_currency": canonical_currency,
+        # PR-ADS-119 currency contract: native GBP truth + USD reporting via daily
+        # FX. ROAS renders only when canonical coverage complete AND FX complete.
+        "spend_native_total": spend_native_total,
+        "spend_native_currency": canonical_currency,
+        "spend_usd_total": spend_usd_total,
+        "reporting_currency": reporting_currency,
+        "fx_coverage_status": fx_coverage_status,
+        "revenue_currency": "USD",
+        # Approved campaign-identity mappings applied to the ROAS pipeline; the
+        # original external labels are preserved here for audit.
+        "applied_campaign_mappings": _dedupe_mappings(applied_identity_mappings),
         "data_is_partial": data_is_partial,
         "coverage_start": spend.get("coverage_start") or revenue.get("coverage_start"),
         "coverage_end": spend.get("coverage_end") or revenue.get("coverage_end"),

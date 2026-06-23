@@ -57,7 +57,8 @@ def test_scope_campaign_only_no_country_rebuild():
 
 def test_campaign_summary_strip_exists():
     assert "function renderRoasCampaignSummary" in JS
-    fn = _fn("function renderRoasCampaignSummary", span=900)
+    # span widened in PR-ADS-119: a native/USD currency block now precedes the strip.
+    fn = _fn("function renderRoasCampaignSummary", span=2400)
     for label in ("Spend", "Leads", "SQLs", "Customers", "Won Revenue", "ROAS"):
         assert f">{label}<" in fn, f"summary strip missing {label}"
     assert "revenue-summary-strip" in fn

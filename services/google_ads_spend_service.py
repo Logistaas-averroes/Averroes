@@ -190,13 +190,32 @@ def build_google_ads_spend_audit(window: str, now: datetime | None = None,
     geo_status = ("reconciled" if (geo_recon and geo_recon["within_tolerance"])
                   else ("mismatch" if geo_recon else "unavailable"))
 
+    # PR-ADS-119: native-currency truth + USD reporting via daily FX.
+    native_currency = canonical.get("currency_code") or "GBP"
+    usd_total = canonical.get("total_spend_usd")
+    try:
+        from services.fx_service import build_fx_coverage  # noqa: PLC0415
+        fx = build_fx_coverage(start, end, native_currency)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[spend_audit] fx coverage unavailable: %s", exc)
+        fx = {"state": "UNAVAILABLE", "complete": False, "missing_dates": []}
+
     return {
         "window": resolved,
         "state": state,
         "customer_id": canonical.get("customer_id"),
-        "currency_code": canonical.get("currency_code"),
+        "currency_code": native_currency,
+        # Native GBP spend truth (reconciles to the Google Ads UI within £0.01).
+        "native_currency": native_currency,
+        "native_total": round(local_spend, 6),
         "canonical_api_total": api_spend,
         "canonical_local_total": round(local_spend, 6),
+        # USD reporting spend (daily-FX converted) + FX coverage.
+        "reporting_currency": canonical.get("reporting_currency") or "USD",
+        "usd_total": usd_total,
+        "fx_coverage_state": fx.get("state"),
+        "fx_coverage_complete": bool(fx.get("complete")),
+        "fx_missing_dates": fx.get("missing_dates", []),
         "legacy_geo_total": geo_total,
         "variance_amount": geo_recon["variance_amount"] if geo_recon else None,
         "variance_pct": geo_recon["variance_pct"] if geo_recon else None,

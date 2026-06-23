@@ -119,6 +119,7 @@ class TestSummaryShape:
             "gclid/matches",
             "hubspot/source_classification",
             "google_ads/canonical_spend",
+            "fx/daily_rates",
         }
         assert set(result["datasets"].keys()) == expected
 
@@ -696,6 +697,14 @@ def _patch_all_datasets_success(
     )
     monkeypatch.setattr("db.writers.upsert_campaign_daily_spend", lambda *a, **kw: 0)
     monkeypatch.setattr("db.writers.upsert_spend_coverage", lambda *a, **kw: True)
+    # PR-ADS-119: daily FX rates step. Patch ensure_fx_rates so the FX connector
+    # (network) is never hit. Mirror the spend failure mode (source_pull) so the
+    # all-datasets-fail test still drives this dataset to failure.
+    def _fx_stub(*a, **kw):
+        if source_pull:
+            source_pull()  # raises in the all-fail scenario
+        return {"rows_written": 0, "fetched": 0, "failed": []}
+    monkeypatch.setattr("services.fx_service.ensure_fx_rates", _fx_stub)
 
     # DB writers
     monkeypatch.setattr("db.writers.write_campaigns", campaign_write or _default_write)
