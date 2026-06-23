@@ -719,6 +719,60 @@ def _window_date_bounds(window: str, now: datetime | None):
     return resolved, start_date, end_date
 
 
+def _load_approved_identity_map(customer_id) -> dict:
+    """Approved campaign-identity mappings: {normalized external label -> canonical name}.
+
+    PR-ADS-119: only APPROVED mappings (manual or auto-approved exact-normalized)
+    are returned by the repository (approved_at IS NOT NULL); unapproved labels
+    are never applied to the ROAS pipeline.
+    """
+    identity = repo.fetch_campaign_identity(customer_id)
+    out: dict[str, str] = {}
+    for m in identity.get("mappings", []):
+        if not m.get("approved_at"):
+            continue
+        norm = _norm(m.get("external_campaign_label"))
+        canon = m.get("canonical_campaign_name")
+        if norm and canon:
+            out[norm] = canon
+    return out
+
+
+def _dedupe_mappings(applied_log: list) -> list:
+    """Unique applied-mapping records (external label -> canonical) for audit."""
+    seen = set()
+    out = []
+    for m in applied_log:
+        key = (m.get("external_campaign_label"), m.get("canonical_campaign_name"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    return out
+
+
+def _apply_identity_map(rows: list, mapping: dict, applied_log: list) -> list:
+    """Rewrite external HubSpot/UTM campaign labels to their canonical Google Ads
+    campaign name so they aggregate onto canonical spend. Preserves the original
+    label in ``external_campaign_label`` and records each applied mapping for audit.
+    """
+    if not mapping:
+        return rows
+    out = []
+    for r in rows:
+        label = r.get("campaign_name")
+        canon = mapping.get(_norm(label))
+        if canon and _norm(canon) != _norm(label):
+            nr = dict(r)
+            nr["campaign_name"] = canon
+            nr["external_campaign_label"] = label  # preserve original truth
+            out.append(nr)
+            applied_log.append({"external_campaign_label": label, "canonical_campaign_name": canon})
+        else:
+            out.append(r)
+    return out
+
+
 def _build_from_db(resolved, start_date, end_date) -> dict | None:
     """Build the contract from durable DB sources.
 
@@ -817,6 +871,16 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         canonical_currency = None
         country_spend_reconciled = None
 
+    # PR-ADS-119: apply APPROVED campaign-identity mappings so external
+    # HubSpot/UTM labels aggregate onto their canonical Google Ads campaign BEFORE
+    # campaign rows and ROAS are computed. Only approved mappings are applied;
+    # unapproved labels stay unmapped ("Spend mapping unavailable"). The original
+    # external label is preserved in audit metadata.
+    applied_identity_mappings: list = []
+    approved_identity_map = _load_approved_identity_map(canonical_customer_id) if canonical_access else {}
+    if approved_identity_map:
+        revenue_rows = _apply_identity_map(revenue_rows, approved_identity_map, applied_identity_mappings)
+
     # Campaign spend is a trusted ROAS denominator only when canonical coverage is
     # complete AND FX coverage is complete (USD reporting). Country spend
     # additionally requires geo↔canonical reconciliation.
@@ -843,6 +907,8 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     lead_event_date_safe = bool(leads.get("event_date_safe"))
     lead_metrics_withheld = not lead_event_date_safe
     lead_rows = [] if lead_metrics_withheld else leads["rows"]
+    if approved_identity_map and lead_rows:
+        lead_rows = _apply_identity_map(lead_rows, approved_identity_map, applied_identity_mappings)
 
     # Revenue is "wired" only when there are closed-won attributed rows; without
     # them ROAS is null (not zero) and the status says so.
@@ -956,6 +1022,9 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "reporting_currency": reporting_currency,
         "fx_coverage_status": fx_coverage_status,
         "revenue_currency": "USD",
+        # Approved campaign-identity mappings applied to the ROAS pipeline; the
+        # original external labels are preserved here for audit.
+        "applied_campaign_mappings": _dedupe_mappings(applied_identity_mappings),
         "data_is_partial": data_is_partial,
         "coverage_start": spend.get("coverage_start") or revenue.get("coverage_start"),
         "coverage_end": spend.get("coverage_end") or revenue.get("coverage_end"),

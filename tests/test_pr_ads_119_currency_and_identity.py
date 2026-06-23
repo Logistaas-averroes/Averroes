@@ -382,6 +382,79 @@ def test_revenue_unchanged_across_fx_states(monkeypatch):
     assert complete["summary"]["customers"] == incomplete["summary"]["customers"] == 1
 
 
+# ════════════ approved mappings applied in the ROAS pipeline ════════════
+
+
+def test_approved_mapping_applied_in_roas_pipeline(monkeypatch):
+    build = _load_revattr()
+    # canonical spend: "Emerging Markets"; revenue label "mexico,chile";
+    # approved manual mapping mexico,chile -> Emerging Markets.
+    rows = [{"campaign_id": "9", "campaign_name": "Emerging Markets", "cost_micros": 5_000_000,
+             "spend": 5.0, "spend_usd": 6.5, "fx_complete": True}]
+    canonical = _canonical(rows, fx_complete=True, total_spend=5.0, total_spend_usd=6.5)
+    coverage = [{"chunk_start": "2026-04-01", "chunk_end": "2026-06-22", "status": "verified"}]
+    revenue_rows = [{"campaign_name": "mexico,chile", "country": "MX", "deal_id": "d1",
+                     "deal_amount_usd": 1300.0, "match_status": "matched"}]
+    _patch_revattr(monkeypatch, canonical=canonical, coverage=coverage, revenue_rows=revenue_rows)
+    monkeypatch.setattr(
+        "db.revenue_repository.fetch_campaign_identity",
+        lambda cid=None: {"available": True, "mappings": [{
+            "customer_id": "123-456", "campaign_id": "9",
+            "canonical_campaign_name": "Emerging Markets",
+            "historical_campaign_name": "Emerging Markets",
+            "external_campaign_label": "mexico,chile",
+            "match_method": "manual", "approved_at": "2026-06-01T00:00:00Z",
+            "approved_by": "ops@x.com"}]})
+    out = build("current_quarter", now=_at("2026-06-22"))
+    # Exactly one Emerging Markets row with canonical spend, revenue, and USD ROAS.
+    em = [c for c in out["campaigns"] if c["campaign_name"] == "Emerging Markets"]
+    assert len(em) == 1
+    row = em[0]
+    assert row["spend"] == 6.5            # canonical USD reporting spend
+    assert row["won_revenue"] == 1300.0   # mapped revenue
+    assert row["spend_mapping"] == "matched"
+    assert row["roas"] == round(1300.0 / 6.5, 2)
+    # No leftover unmapped "mexico,chile" row.
+    assert not any(c["campaign_name"] == "mexico,chile" for c in out["campaigns"])
+    # Original external label preserved in audit metadata.
+    applied = out["source_health"]["applied_campaign_mappings"]
+    assert {"external_campaign_label": "mexico,chile",
+            "canonical_campaign_name": "Emerging Markets"} in applied
+
+
+def test_unapproved_mapping_not_applied(monkeypatch):
+    build = _load_revattr()
+    rows = [{"campaign_id": "9", "campaign_name": "Emerging Markets", "cost_micros": 5_000_000,
+             "spend": 5.0, "spend_usd": 6.5, "fx_complete": True}]
+    canonical = _canonical(rows, fx_complete=True, total_spend=5.0, total_spend_usd=6.5)
+    coverage = [{"chunk_start": "2026-04-01", "chunk_end": "2026-06-22", "status": "verified"}]
+    revenue_rows = [{"campaign_name": "mexico,chile", "country": "MX", "deal_id": "d1",
+                     "deal_amount_usd": 1300.0, "match_status": "matched"}]
+    _patch_revattr(monkeypatch, canonical=canonical, coverage=coverage, revenue_rows=revenue_rows)
+    # Mapping exists but is NOT approved (approved_at is None) → must NOT be applied.
+    monkeypatch.setattr(
+        "db.revenue_repository.fetch_campaign_identity",
+        lambda cid=None: {"available": True, "mappings": [{
+            "customer_id": "123-456", "campaign_id": "9",
+            "canonical_campaign_name": "Emerging Markets",
+            "external_campaign_label": "mexico,chile",
+            "match_method": "manual", "approved_at": None}]})
+    out = build("current_quarter", now=_at("2026-06-22"))
+    mc = next(c for c in out["campaigns"] if c["campaign_name"] == "mexico,chile")
+    assert mc["spend"] is None and mc["roas"] is None
+    assert mc["spend_mapping"] == "unavailable"
+    assert out["source_health"]["applied_campaign_mappings"] == []
+
+
+def test_revattr_loads_approved_identity_mappings():
+    # The pipeline (not just the review panel) consumes approved mappings.
+    src = open(os.path.join(ROOT, "services", "revenue_attribution_service.py"), encoding="utf-8").read()
+    bd = src[src.find("def _build_from_db"):]
+    assert "_load_approved_identity_map" in bd
+    assert "fetch_campaign_identity" in src
+    assert "applied_campaign_mappings" in bd
+
+
 # ════════════ schema + endpoints + daily sync wiring ════════════
 
 
