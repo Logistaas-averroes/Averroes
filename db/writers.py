@@ -1974,7 +1974,9 @@ def upsert_campaign_identity(
     label = (external_campaign_label or "").strip()
     if not customer_id or not label:
         return False
-    approved = match_method in ("manual", "exact_normalized")
+    # An explicit admin action carries an audit timestamp: manual mappings,
+    # auto-approved exact matches, and "not Google Ads" exclusions (PR-ADS-120b).
+    approved = match_method in ("manual", "exact_normalized", "not_google_ads")
     try:
         with get_conn() as conn:
             if conn is None:

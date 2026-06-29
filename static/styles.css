@@ -4970,3 +4970,139 @@ a {
 .snapshot-warnings li {
   margin-bottom: var(--space-1, 0.25rem);
 }
+
+/* ── PR-ADS-120b: Campaign Mapping Workbench ─────────────────────────────── */
+.mapping-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+  margin: var(--space-3, 12px) 0;
+}
+.mapping-card {
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-md, 10px);
+  padding: var(--space-4, 16px);
+  background: var(--color-surface, #fff);
+}
+.mapping-card--unmatched {
+  border-left: 3px solid var(--red-500, #ef4444);
+}
+.mapping-card--matched,
+.mapping-card--manual {
+  border-left: 3px solid var(--green-500, #22c55e);
+}
+.mapping-card--excluded {
+  border-left: 3px solid var(--color-text-muted, #94a3b8);
+  opacity: 0.92;
+}
+.mapping-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3, 12px);
+  margin-bottom: var(--space-2, 8px);
+}
+.mapping-card__label {
+  font-weight: 600;
+  font-size: 1.02rem;
+  color: var(--color-text, #1e293b);
+  word-break: break-word;
+}
+.mapping-status {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--color-surface-alt, #f1f5f9);
+  color: var(--color-text-muted, #64748b);
+  border: 1px solid var(--color-border, #e2e8f0);
+}
+.mapping-status--unmatched { background: color-mix(in srgb, var(--red-500, #ef4444) 12%, #fff); color: var(--red-600, #dc2626); border-color: color-mix(in srgb, var(--red-500, #ef4444) 30%, #fff); }
+.mapping-status--matched,
+.mapping-status--manual { background: color-mix(in srgb, var(--green-500, #22c55e) 12%, #fff); color: var(--green-600, #16a34a); border-color: color-mix(in srgb, var(--green-500, #22c55e) 30%, #fff); }
+.mapping-status--not_google_ads { background: var(--color-surface-alt, #f1f5f9); color: var(--color-text-muted, #64748b); }
+.mapping-card__metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4, 16px);
+  font-size: 0.85rem;
+  color: var(--color-text-muted, #64748b);
+  margin-bottom: var(--space-3, 12px);
+}
+.mapping-card__metrics strong { color: var(--color-text, #1e293b); }
+.mapping-resolved-note,
+.mapping-excluded-note {
+  font-size: 0.85rem;
+  color: var(--color-text-muted, #64748b);
+  margin-bottom: var(--space-3, 12px);
+}
+.mapping-excluded-note { font-weight: 600; }
+.mapping-card__suggest {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  margin-bottom: var(--space-3, 12px);
+}
+.mapping-card__suggest-label {
+  font-size: 0.82rem;
+  color: var(--color-text-muted, #64748b);
+}
+.mapping-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  background: var(--color-surface-alt, #f8fafc);
+  color: var(--color-text, #1e293b);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.mapping-chip:hover { border-color: var(--green-500, #22c55e); }
+.mapping-chip--none { cursor: default; color: var(--color-text-muted, #94a3b8); background: transparent; border-style: dashed; }
+.mapping-chip__meta { font-size: 0.72rem; color: var(--color-text-muted, #64748b); }
+.mapping-card__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3, 12px);
+}
+.mapping-picker { display: flex; flex-direction: column; gap: 6px; min-width: 260px; flex: 1 1 260px; }
+.mapping-search,
+.mapping-select {
+  width: 100%;
+  padding: 7px var(--space-3, 12px);
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--color-border, #e2e8f0);
+  background: var(--color-surface, #fff);
+  color: var(--color-text, #1e293b);
+  font-family: var(--font-sans, sans-serif);
+  font-size: 0.88rem;
+}
+.mapping-card__spend,
+.mapping-card__confidence {
+  font-size: 0.82rem;
+  color: var(--color-text-muted, #64748b);
+}
+.mapping-card__spend strong,
+.mapping-card__confidence strong { color: var(--color-text, #1e293b); }
+.mapping-card__actions { display: flex; flex-wrap: wrap; gap: var(--space-2, 8px); }
+.mapping-notice {
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  border-radius: var(--radius-sm, 6px);
+  font-size: 0.85rem;
+  margin-bottom: var(--space-3, 12px);
+  border: 1px solid var(--color-border, #e2e8f0);
+}
+.mapping-notice--ok { background: color-mix(in srgb, var(--green-500, #22c55e) 10%, #fff); color: var(--green-600, #16a34a); border-color: color-mix(in srgb, var(--green-500, #22c55e) 30%, #fff); }
+.mapping-notice--error { background: color-mix(in srgb, var(--red-500, #ef4444) 10%, #fff); color: var(--red-600, #dc2626); border-color: color-mix(in srgb, var(--red-500, #ef4444) 30%, #fff); }
+.mapping-notice--info { background: var(--color-surface-alt, #f1f5f9); color: var(--color-text-muted, #64748b); }
+.campaign-aliases {
+  font-size: 0.75rem;
+  color: var(--color-text-muted, #64748b);
+  margin-top: 3px;
+}

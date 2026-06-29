@@ -672,7 +672,7 @@ CREATE TABLE IF NOT EXISTS google_ads_campaign_identity (
   canonical_campaign_name  TEXT,
   historical_campaign_name TEXT,
   external_campaign_label  TEXT NOT NULL,
-  match_method             TEXT NOT NULL,         -- exact_normalized | manual | unmatched
+  match_method             TEXT NOT NULL,         -- exact_normalized | manual | not_google_ads | unmatched
   approved_at              TIMESTAMPTZ,
   approved_by              TEXT,
   created_at               TIMESTAMPTZ DEFAULT NOW(),

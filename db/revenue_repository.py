@@ -962,3 +962,85 @@ def fetch_campaign_identity(customer_id: str | None = None) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_campaign_identity failed: %s", exc)
         return {"available": False, "mappings": []}
+
+
+def fetch_all_known_campaigns(customer_id: str | None = None) -> dict:
+    """All known Google Ads campaign identities (the candidate pool). Read-only.
+
+    PR-ADS-120b: powers the Campaign Mapping Workbench dropdown. Returns every
+    distinct campaign that has ever appeared in the canonical daily-spend table —
+    the full controlled list an admin may map a HubSpot label onto:
+
+      - active/spending campaigns (have spend in any window),
+      - campaigns with zero spend but a known identity (cost-0 rows synced), and
+      - archived/removed campaigns that had historical spend (no recent rows).
+
+    Scoped to a single Google Ads ``customer_id`` when provided, so the workbench
+    for one account never exposes another customer's campaigns. The display name
+    is the LATEST campaign_name for each campaign_id (by most recent spend_date) —
+    never MAX(name) — so a renamed campaign shows its current name while the
+    immutable campaign_id stays the real identity.
+
+    Window-specific native/USD spend is layered on by the caller from
+    ``fetch_canonical_campaign_spend``; this is the all-time identity universe so
+    a campaign with no spend in the SELECTED window is still selectable.
+
+    Returns {available, customer_id, currency_code, campaigns:[{campaign_id,
+             campaign_name, lifetime_cost_micros, lifetime_spend, last_spend_date,
+             had_historical_spend}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "campaigns": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT campaign_id, campaign_name, cost_micros, spend_date,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY campaign_id
+                                   ORDER BY spend_date DESC, updated_at DESC NULLS LAST
+                               ) AS rn
+                        FROM google_ads_campaign_daily_spend
+                        WHERE campaign_id IS NOT NULL
+                          AND (%s::text IS NULL OR customer_id = %s)
+                    )
+                    SELECT campaign_id,
+                           MAX(campaign_name) FILTER (WHERE rn = 1) AS campaign_name,
+                           SUM(cost_micros)::bigint AS lifetime_cost_micros,
+                           MAX(spend_date) AS last_spend_date
+                    FROM ranked
+                    GROUP BY campaign_id
+                    """,
+                    (customer_id, customer_id),
+                )
+                campaigns = []
+                for r in _rows_as_dicts(cur):
+                    micros = int(r.get("lifetime_cost_micros") or 0)
+                    campaigns.append({
+                        "campaign_id": r.get("campaign_id"),
+                        "campaign_name": r.get("campaign_name"),
+                        "lifetime_cost_micros": micros,
+                        "lifetime_spend": micros / 1_000_000,
+                        "last_spend_date": _as_date(r.get("last_spend_date")),
+                        "had_historical_spend": micros > 0,
+                    })
+                cur.execute(
+                    """
+                    SELECT MIN(customer_id) AS customer_id, MIN(currency_code) AS currency
+                    FROM google_ads_campaign_daily_spend
+                    WHERE (%s::text IS NULL OR customer_id = %s)
+                    """,
+                    (customer_id, customer_id),
+                )
+                meta = cur.fetchone() or (None, None)
+            return {
+                "available": True,
+                "customer_id": meta[0],
+                "currency_code": meta[1],
+                "campaigns": campaigns,
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_all_known_campaigns failed: %s", exc)
+        return {"available": False, "campaigns": []}
