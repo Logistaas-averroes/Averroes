@@ -66,7 +66,7 @@ def _patch_review(monkeypatch, *, canonical, revenue, identity=None, known=None,
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity",
                         lambda cid=None: identity or {"available": True, "mappings": []})
     monkeypatch.setattr("db.revenue_repository.fetch_all_known_campaigns",
-                        lambda: known or {"available": True, "campaigns": []})
+                        lambda cid=None: known or {"available": True, "campaigns": []})
     monkeypatch.setattr("db.revenue_repository.fetch_lead_quality",
                         lambda s, e: leads or {"available": True, "rows": []})
 
@@ -169,6 +169,83 @@ def test_exact_auto_match_still_works(monkeypatch):
     assert row["match_status"] == "exact_normalized"
     assert row["status"] == "matched"
     assert row["native_spend"] == 5.0 and row["usd_spend"] == 6.5
+
+
+def test_candidate_pool_scoped_to_customer(monkeypatch):
+    idsvc = _load_identity()
+    seen = {}
+    canonical = {"available": True, "customer_id": "3059734490", "currency_code": "GBP",
+                 "reporting_currency": "USD", "rows": []}
+    revenue = {"available": True, "rows": [
+        {"campaign_name": "mexico,chile", "deal_id": "d1", "deal_amount_usd": 7050.0}]}
+
+    def _known(cid=None):
+        seen["cid"] = cid
+        return {"available": True, "campaigns": []}
+
+    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
+    monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", lambda s, e: revenue)
+    monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
+    monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda s, e: {"available": True, "rows": []})
+    monkeypatch.setattr("db.revenue_repository.fetch_all_known_campaigns", _known)
+    idsvc.build_mapping_review("current_quarter", now=_at("2026-06-29T12:00:00"))
+    # The candidate pool is fetched scoped to THIS customer, never globally.
+    assert seen["cid"] == "3059734490"
+
+
+def test_known_campaigns_query_scoped_and_latest_name():
+    fn = REPO_SRC[REPO_SRC.find("def fetch_all_known_campaigns"):]
+    # Scoped to the selected Google Ads customer_id.
+    assert "customer_id = %s" in fn
+    assert "def fetch_all_known_campaigns(customer_id" in fn
+    # Latest name by spend_date (ROW_NUMBER), never MAX(campaign_name).
+    assert "ROW_NUMBER() OVER" in fn
+    assert "ORDER BY spend_date DESC" in fn
+    assert "MAX(campaign_name) AS campaign_name" not in fn
+
+
+def test_manual_mapping_spend_only_from_mapped_campaign(monkeypatch):
+    idsvc = _load_identity()
+    # 'Gulf Region' is manually mapped to campaign 99 (NO window spend), but the
+    # label ALSO exact-normalizes to in-window campaign 1 (spend 5.0/6.5). The
+    # manual row must show the mapped campaign's spend (none), never campaign 1's.
+    canonical = {"available": True, "customer_id": "123", "currency_code": "GBP",
+                 "reporting_currency": "USD",
+                 "rows": [{"campaign_id": "1", "campaign_name": "Gulf Region",
+                           "spend": 5.0, "spend_usd": 6.5}]}
+    revenue = {"available": True, "rows": [
+        {"campaign_name": "Gulf Region", "deal_id": "d1", "deal_amount_usd": 1000.0}]}
+    identity = {"available": True, "mappings": [{
+        "customer_id": "123", "campaign_id": "99",
+        "canonical_campaign_name": "Mexico, Chile, Colombia",
+        "external_campaign_label": "Gulf Region", "match_method": "manual",
+        "approved_at": "2026-06-01T00:00:00Z", "approved_by": "ops@x.com"}]}
+    _patch_review(monkeypatch, canonical=canonical, revenue=revenue, identity=identity)
+    review = idsvc.build_mapping_review("current_quarter", now=_at("2026-06-29T12:00:00"))
+    row = {r["external_campaign_label"]: r for r in review["rows"]}["Gulf Region"]
+    assert row["status"] == "manual"
+    assert row["campaign_id"] == "99"
+    assert row["canonical_campaign_name"] == "Mexico, Chile, Colombia"
+    # The other campaign's spend (5.0/6.5) must NOT leak onto this manual mapping.
+    assert row["native_spend"] is None and row["usd_spend"] is None
+
+
+def test_leads_zero_when_available_but_no_lead_rows(monkeypatch):
+    idsvc = _load_identity()
+    canonical = {"available": True, "customer_id": "123", "currency_code": "GBP",
+                 "reporting_currency": "USD", "rows": []}
+    revenue = {"available": True, "rows": [
+        {"campaign_name": "with_leads", "deal_id": "d1", "deal_amount_usd": 100.0},
+        {"campaign_name": "no_leads", "deal_id": "d2", "deal_amount_usd": 200.0}]}
+    leads = {"available": True, "rows": [
+        {"campaign_name": "with_leads", "status_category": "qualified"}]}
+    _patch_review(monkeypatch, canonical=canonical, revenue=revenue, leads=leads)
+    review = idsvc.build_mapping_review("current_quarter", now=_at("2026-06-29T12:00:00"))
+    by_label = {r["external_campaign_label"]: r for r in review["rows"]}
+    # Lead truth IS available, so a label with no leads is genuinely 0 — not None.
+    assert by_label["no_leads"]["leads"] == 0
+    assert by_label["no_leads"]["sqls"] == 0
+    assert by_label["with_leads"]["leads"] == 1
 
 
 def test_leads_sqls_customers_surfaced(monkeypatch):
@@ -453,6 +530,18 @@ def test_admin_token_can_save_mapping_and_exclude(client, monkeypatch):
     assert res2.status_code == 200, res2.text
     assert res2.json()["match_method"] == "not_google_ads"
     assert "map" in saved and "excl" in saved
+    # approved_by audit must be the session identity (username when no email), not
+    # the always-NULL "email" key — proves the audit trail is preserved.
+    assert saved["map"][1].get("approved_by") == "api-token"
+    assert saved["excl"][1].get("approved_by") == "api-token"
+
+
+def test_approver_identity_prefers_email_then_username():
+    import api.server as srv
+    assert srv._approver_identity({"username": "u", "role": "admin"}) == "u"
+    assert srv._approver_identity({"email": "a@x.com", "username": "u"}) == "a@x.com"
+    assert srv._approver_identity(None) is None
+    assert srv._approver_identity({"role": "admin"}) is None
 
 
 def test_exclude_endpoint_registered_and_admin_gated():

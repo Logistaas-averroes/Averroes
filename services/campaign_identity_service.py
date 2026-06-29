@@ -288,9 +288,9 @@ def _safe_lead_quality(start, end) -> dict:
         return {"rows": []}
 
 
-def _safe_known_campaigns() -> dict:
+def _safe_known_campaigns(customer_id) -> dict:
     try:
-        out = repo.fetch_all_known_campaigns()
+        out = repo.fetch_all_known_campaigns(customer_id)
         return out if isinstance(out, dict) else {"campaigns": []}
     except Exception as exc:  # noqa: BLE001
         log.warning("mapping review known-campaign fetch failed: %s", exc)
@@ -312,9 +312,12 @@ def build_mapping_review(window: str, now: datetime | None = None) -> dict:
 
     canonical = repo.fetch_canonical_campaign_spend(start, end)
     revenue = repo.fetch_won_revenue(start, end)
-    identity = repo.fetch_campaign_identity(canonical.get("customer_id"))
+    customer_id = canonical.get("customer_id")
+    identity = repo.fetch_campaign_identity(customer_id)
     leads = _safe_lead_quality(start, end)
-    known = _safe_known_campaigns()
+    # Scope the candidate pool to THIS Google Ads account — never expose another
+    # customer's campaigns in the workbench.
+    known = _safe_known_campaigns(customer_id)
 
     ga_campaigns = canonical.get("rows") or []
     ga_by_norm = {normalize_campaign_name(c.get("campaign_name")): c for c in ga_campaigns}
@@ -370,8 +373,10 @@ def build_mapping_review(window: str, now: datetime | None = None) -> dict:
         ld = lead_by_label.get(label) or {}
         revenue_usd = round(float(rev.get("revenue", 0.0)), 2)
         customers = len(rev.get("deals", set()))
-        leads_n = ld.get("leads") if leads_available else None
-        sqls_n = ld.get("sqls") if leads_available else None
+        # When lead truth is available, a label with no lead rows genuinely has 0
+        # leads/SQLs (not "unknown"); only withhold (None) when no lead data exists.
+        leads_n = ld.get("leads", 0) if leads_available else None
+        sqls_n = ld.get("sqls", 0) if leads_available else None
 
         candidates: list = []
         if approved and approved.get("match_method") == "not_google_ads":
@@ -381,7 +386,10 @@ def build_mapping_review(window: str, now: datetime | None = None) -> dict:
             status, match_status = "manual", "manual"
             cand_name = approved.get("canonical_campaign_name")
             cid = approved.get("campaign_id")
-            ga_row = next((c for c in ga_campaigns if str(c.get("campaign_id")) == str(cid)), candidate)
+            # Spend must come ONLY from the manually-mapped campaign (cid); never
+            # fall back to the label's coincidental exact match (a different
+            # campaign). A mapped campaign with no window spend shows no spend.
+            ga_row = next((c for c in ga_campaigns if str(c.get("campaign_id")) == str(cid)), None)
             candidates = build_candidates(label, pool)
         elif candidate is not None:
             status, match_status = "matched", "exact_normalized"

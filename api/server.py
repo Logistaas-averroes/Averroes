@@ -320,6 +320,17 @@ class CampaignExcludeRequest(BaseModel):
     reason: Optional[str] = None
 
 
+def _approver_identity(user: Any) -> Optional[str]:
+    """Best available auditable identity for an admin action (email, else username).
+
+    The session user carries ``username``/``role`` (no email today); prefer email
+    if a future identity provider supplies one so approved_by is never NULL.
+    """
+    if not isinstance(user, dict):
+        return None
+    return user.get("email") or user.get("username") or None
+
+
 _fx_backfill_lock: threading.Lock = threading.Lock()
 _fx_backfill_progress: dict[str, Any] = {"running": False, "latest": None}
 
@@ -6706,11 +6717,7 @@ def api_campaign_mapping(body: CampaignMappingRequest, request: Request) -> dict
     """
     user = check_admin_or_token(request)
     from services.campaign_identity_service import record_manual_mapping  # noqa: PLC0415
-    approved_by = None
-    try:
-        approved_by = (user or {}).get("email") if isinstance(user, dict) else None
-    except Exception:  # noqa: BLE001
-        approved_by = None
+    approved_by = _approver_identity(user)
     ok = record_manual_mapping(
         body.customer_id, body.external_campaign_label, body.campaign_id,
         body.canonical_campaign_name, historical_campaign_name=body.historical_campaign_name,
@@ -6732,10 +6739,7 @@ def api_campaign_mapping_exclude(body: CampaignExcludeRequest, request: Request)
     """
     user = check_admin_or_token(request)
     from services.campaign_identity_service import record_exclusion  # noqa: PLC0415
-    try:
-        approved_by = (user or {}).get("email") if isinstance(user, dict) else None
-    except Exception:  # noqa: BLE001
-        approved_by = None
+    approved_by = _approver_identity(user)
     ok = record_exclusion(
         body.customer_id, body.external_campaign_label,
         approved_by=approved_by, reason=body.reason)
