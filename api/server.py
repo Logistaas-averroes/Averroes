@@ -314,6 +314,12 @@ class CampaignMappingRequest(BaseModel):
     historical_campaign_name: Optional[str] = None
 
 
+class CampaignExcludeRequest(BaseModel):
+    customer_id: str
+    external_campaign_label: str
+    reason: Optional[str] = None
+
+
 _fx_backfill_lock: threading.Lock = threading.Lock()
 _fx_backfill_progress: dict[str, Any] = {"running": False, "latest": None}
 
@@ -6713,6 +6719,30 @@ def api_campaign_mapping(body: CampaignMappingRequest, request: Request) -> dict
         raise HTTPException(status_code=503, detail="campaign identity store unavailable")
     return {"status": "ok", "external_campaign_label": body.external_campaign_label,
             "match_method": "manual"}
+
+
+@app.post("/api/campaign-mapping/exclude")
+def api_campaign_mapping_exclude(body: CampaignExcludeRequest, request: Request) -> dict[str, Any]:
+    """Mark an external label as "Not Google Ads" (PR-ADS-120b, admin-only).
+
+    For labels sourced from HubSpot/attribution that are not real Google Ads
+    campaigns (offline/import/bad-UTM/CRM). The label is excluded from Google Ads
+    ROAS — it never shows as an unmapped row or a fabricated $0. Auditable
+    (approved_by/approved_at); never overwrites the raw Google Ads identity.
+    """
+    user = check_admin_or_token(request)
+    from services.campaign_identity_service import record_exclusion  # noqa: PLC0415
+    try:
+        approved_by = (user or {}).get("email") if isinstance(user, dict) else None
+    except Exception:  # noqa: BLE001
+        approved_by = None
+    ok = record_exclusion(
+        body.customer_id, body.external_campaign_label,
+        approved_by=approved_by, reason=body.reason)
+    if not ok:
+        raise HTTPException(status_code=503, detail="campaign identity store unavailable")
+    return {"status": "ok", "external_campaign_label": body.external_campaign_label,
+            "match_method": "not_google_ads"}
 
 
 @app.get("/api/reports/roas/campaigns")

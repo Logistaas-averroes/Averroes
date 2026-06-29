@@ -923,6 +923,26 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     applied_identity_mappings: list = []
     approved_mappings = (repo.fetch_campaign_identity(canonical_customer_id).get("mappings", [])
                          if canonical_access else [])
+    # PR-ADS-120b: "Not Google Ads" exclusions — labels an admin marked as not a
+    # real Google Ads campaign (offline / import / bad UTM / sales / old CRM
+    # label). Drop them from the Google Ads ROAS aggregation entirely so they
+    # never surface as an unmapped row or a fabricated $0; they are reported
+    # separately (excluded_campaign_labels) for audit.
+    excluded_label_keys = {
+        _ident_norm(m.get("external_campaign_label"))
+        for m in approved_mappings
+        if m.get("match_method") == "not_google_ads" and m.get("approved_at")
+        and m.get("external_campaign_label")
+    }
+    excluded_campaign_labels = sorted({
+        m.get("external_campaign_label")
+        for m in approved_mappings
+        if m.get("match_method") == "not_google_ads" and m.get("approved_at")
+        and m.get("external_campaign_label")
+    })
+    if excluded_label_keys:
+        revenue_rows = [r for r in revenue_rows
+                        if _ident_norm(r.get("campaign_name")) not in excluded_label_keys]
     resolution_map = (_build_resolution_map(canonical.get("rows") or [], approved_mappings)
                       if canonical_access else {})
     if resolution_map:
@@ -964,6 +984,9 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     lead_event_date_safe = bool(leads.get("event_date_safe"))
     lead_metrics_withheld = not lead_event_date_safe
     lead_rows = [] if lead_metrics_withheld else leads["rows"]
+    if excluded_label_keys and lead_rows:
+        lead_rows = [r for r in lead_rows
+                     if _ident_norm(r.get("campaign_name")) not in excluded_label_keys]
     if resolution_map and lead_rows:
         lead_rows = _apply_identity_map(lead_rows, resolution_map, applied_identity_mappings)
 
@@ -980,6 +1003,20 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         spend_trusted=campaign_spend_trusted, spend_mapping_keys=spend_mapping_keys,
         manual_target_keys=manual_target_keys, compute_spend_state=spend_identity_resolved,
     )
+    # PR-ADS-120b: multiple external labels can resolve to ONE canonical campaign.
+    # Spend is aggregated once (never duplicated); the other external labels are
+    # surfaced as aliases under the canonical campaign so the table shows the
+    # canonical row a single time. A label identical to the canonical name was
+    # never rewritten and is therefore not an alias.
+    alias_by_canon: dict[str, list] = {}
+    for m in _dedupe_mappings(applied_identity_mappings):
+        canon_key = _norm(m.get("canonical_campaign_name"))
+        bucket = alias_by_canon.setdefault(canon_key, [])
+        lbl = m.get("external_campaign_label")
+        if lbl and lbl not in bucket:
+            bucket.append(lbl)
+    for c in campaigns:
+        c["aliases"] = alias_by_canon.get(_norm(c.get("campaign_name")), [])
     countries = _build_db_rows(
         country_spend_rows, lead_rows, revenue_rows, group_field="country",
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
@@ -1083,6 +1120,9 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         # Approved campaign-identity mappings applied to the ROAS pipeline; the
         # original external labels are preserved here for audit.
         "applied_campaign_mappings": _dedupe_mappings(applied_identity_mappings),
+        # PR-ADS-120b: labels marked "Not Google Ads" and excluded from Google Ads
+        # ROAS (offline / import / bad UTM / CRM). Never shown as $0 or unmapped.
+        "excluded_campaign_labels": excluded_campaign_labels,
         "data_is_partial": data_is_partial,
         "coverage_start": spend.get("coverage_start") or revenue.get("coverage_start"),
         "coverage_end": spend.get("coverage_end") or revenue.get("coverage_end"),

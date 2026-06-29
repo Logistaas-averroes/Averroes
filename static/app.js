@@ -3796,6 +3796,9 @@ document.addEventListener("click", (e) => {
   runFxBackfill();
 });
 
+let _lastCampaignMappingReview = null;
+let campaignMappingNotice = null; // { type: "ok"|"error"|"info", msg }
+
 async function loadCampaignMapping() {
   const panel = document.getElementById("campaign-mapping-panel");
   if (!panel) return;
@@ -3805,7 +3808,138 @@ async function loadCampaignMapping() {
     const res = await fetch(`/api/campaign-mapping-review?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
     if (res.ok) review = await res.json();
   } catch (err) { console.error("[loadCampaignMapping]", err); }
+  _lastCampaignMappingReview = review;
   renderCampaignMapping(review);
+}
+
+const _MAPPING_STATUS_TEXT = {
+  matched: "Auto (exact)", exact_normalized: "Auto (exact)", manual: "Manual mapping",
+  not_google_ads: "Not Google Ads", unmatched: "Unmatched",
+};
+
+function mappingReasonLabel(reason) {
+  switch (reason) {
+    case "exact_normalized": return "Exact match";
+    case "fuzzy_name":       return "Fuzzy name match";
+    case "active_spend":     return "Active spend";
+    case "historical_spend": return "Historical spend";
+    case "zero_spend_known_identity": return "Known identity";
+    case "manual":           return "Manual";
+    case "not_google_ads":   return "Excluded";
+    default:                 return reason || "—";
+  }
+}
+
+// Native + USD spend preview line for a selected/candidate Google Ads campaign.
+function mappingSpendPreview(native, usd, nativeCur) {
+  const nat = (native === null || native === undefined || native === "")
+    ? "—" : fmtCurrency(Number(native), nativeCur);
+  const u = (usd === null || usd === undefined || usd === "")
+    ? "Unavailable" : fmtUSD(Number(usd));
+  return `Native spend: <strong>${nat}</strong> · USD spend: <strong>${u}</strong>`;
+}
+
+function mappingOptionHtml(c, nativeCur) {
+  if (!c || !c.campaign_id) return "";
+  const name = c.canonical_campaign_name || "(unnamed campaign)";
+  const native = (c.native_spend === null || c.native_spend === undefined) ? "" : c.native_spend;
+  const usd = (c.usd_spend === null || c.usd_spend === undefined) ? "" : c.usd_spend;
+  return `<option value="${escapeHtml(String(c.campaign_id))}" data-name="${escapeHtml(name)}" data-native="${native}" data-usd="${usd}">${escapeHtml(name)}</option>`;
+}
+
+function renderCampaignMappingCard(row, nativeCur, customerId, options) {
+  const status = row.status || row.match_status || "unmatched";
+  const isExcluded = status === "not_google_ads";
+  const isResolved = status === "matched" || status === "manual";
+  // Dropdown source: per-row scored candidates (suggestions first) when present,
+  // otherwise the full controlled campaign list (e.g. for an excluded row).
+  const candidates = (row.candidates && row.candidates.length) ? row.candidates : options;
+  const optionHtml = (candidates || []).map((c) => mappingOptionHtml(c, nativeCur)).join("");
+
+  // Suggested candidates: exact + strong fuzzy matches only.
+  const suggestions = (row.candidates || []).filter(
+    (c) => c.match_reason === "exact_normalized" || c.match_reason === "fuzzy_name"
+  ).slice(0, 3);
+  const suggestHtml = suggestions.length ? suggestions.map((c) => `
+    <button type="button" class="mapping-chip" data-mapping-action="suggest"
+            data-campaign-id="${escapeHtml(String(c.campaign_id || ""))}">
+      ${escapeHtml(c.canonical_campaign_name || "")}
+      <span class="mapping-chip__meta">${mappingReasonLabel(c.match_reason)} · ${Math.round((c.match_score || 0) * 100)}%</span>
+    </button>`).join("")
+    : `<span class="mapping-chip mapping-chip--none">No strong suggestions — pick from the full list.</span>`;
+
+  // Initial native/USD spend preview: the currently mapped campaign (resolved
+  // rows) or the top suggested candidate (unmatched rows). Never a fake $0.
+  let previewNative = row.native_spend, previewUsd = row.usd_spend;
+  if (!isResolved && row.candidates && row.candidates.length) {
+    previewNative = row.candidates[0].native_spend;
+    previewUsd = row.candidates[0].usd_spend;
+  }
+
+  const leadsTxt = (row.leads === null || row.leads === undefined) ? "—" : fmtCount(row.leads);
+  const sqlsTxt = (row.sqls === null || row.sqls === undefined) ? "—" : fmtCount(row.sqls);
+
+  const metrics = `
+    <div class="mapping-card__metrics">
+      <span>Revenue <strong>${fmtUSD(row.revenue_usd)}</strong></span>
+      <span>Leads <strong>${leadsTxt}</strong></span>
+      <span>SQLs <strong>${sqlsTxt}</strong></span>
+      <span>Customers <strong>${fmtCount(row.customers)}</strong></span>
+    </div>`;
+
+  const head = `
+    <div class="mapping-card__head">
+      <div class="mapping-card__label">${escapeHtml(row.external_campaign_label || "")}</div>
+      <span class="mapping-status mapping-status--${escapeHtml(status)}">${escapeHtml(_MAPPING_STATUS_TEXT[status] || status)}</span>
+    </div>`;
+
+  if (isExcluded) {
+    return `
+      <div class="mapping-card mapping-card--excluded" data-label="${escapeHtml(row.external_campaign_label || "")}">
+        ${head}
+        ${metrics}
+        <div class="mapping-excluded-note">Not Google Ads — Excluded from Google Ads ROAS.</div>
+        <div class="mapping-card__controls">
+          <div class="mapping-picker">
+            <input type="text" class="mapping-search" data-mapping-search placeholder="Search campaigns…" aria-label="Search Google Ads campaigns" />
+            <select class="mapping-select" data-mapping-select aria-label="Google Ads campaign">
+              <option value="">Re-map to a Google Ads campaign…</option>
+              ${optionHtml}
+            </select>
+          </div>
+          <button type="button" class="btn btn--secondary" data-mapping-action="approve">Save mapping</button>
+        </div>
+      </div>`;
+  }
+
+  const resolvedNote = isResolved ? `
+    <div class="mapping-resolved-note">Mapped to <strong>${escapeHtml(row.canonical_campaign_name || "—")}</strong>${status === "matched" ? " (auto exact match)" : ""}.</div>` : "";
+
+  return `
+    <div class="mapping-card mapping-card--${escapeHtml(status)}" data-label="${escapeHtml(row.external_campaign_label || "")}">
+      ${head}
+      ${metrics}
+      ${resolvedNote}
+      <div class="mapping-card__suggest">
+        <span class="mapping-card__suggest-label">Suggested Google Ads campaigns:</span>
+        ${suggestHtml}
+      </div>
+      <div class="mapping-card__controls">
+        <div class="mapping-picker">
+          <input type="text" class="mapping-search" data-mapping-search placeholder="Search campaigns…" aria-label="Search Google Ads campaigns" />
+          <select class="mapping-select" data-mapping-select aria-label="Google Ads campaign">
+            <option value="">${isResolved ? "Change mapping…" : "Select Google Ads campaign…"}</option>
+            ${optionHtml}
+          </select>
+        </div>
+        <div class="mapping-card__spend" data-mapping-spend>${mappingSpendPreview(previewNative, previewUsd, nativeCur)}</div>
+        <div class="mapping-card__confidence">Confidence: <strong>${escapeHtml(row.confidence || "—")}</strong> · ${escapeHtml(mappingReasonLabel(row.match_reason))}</div>
+        <div class="mapping-card__actions">
+          <button type="button" class="btn btn--primary" data-mapping-action="approve">Approve mapping</button>
+          <button type="button" class="btn btn--secondary" data-mapping-action="exclude">Mark as Not Google Ads</button>
+        </div>
+      </div>
+    </div>`;
 }
 
 function renderCampaignMapping(review) {
@@ -3816,46 +3950,165 @@ function renderCampaignMapping(review) {
   const r = review || {};
   const rows = r.rows || [];
   const nativeCur = r.native_currency || "GBP";
-  const statusLabel = {
-    matched: "Matched", exact_normalized: "Auto (exact)", manual: "Manual", unmatched: "Unmatched",
-  };
-  const body = rows.length ? rows.map((row) => `
-    <tr class="${row.match_status === "unmatched" ? "mapping-unmatched" : ""}">
-      <td>${escapeHtml(row.hubspot_campaign_label || "")}</td>
-      <td>${row.google_ads_candidate ? escapeHtml(row.google_ads_candidate) : '<span class="spend-unavailable">Spend mapping unavailable</span>'}</td>
-      <td>${row.native_spend === null || row.native_spend === undefined ? "Unavailable" : fmtCurrency(row.native_spend, nativeCur)}</td>
-      <td>${row.usd_spend === null || row.usd_spend === undefined ? "Unavailable" : fmtUSD(row.usd_spend)}</td>
-      <td>${fmtUSD(row.revenue)}</td>
-      <td><span class="mapping-status mapping-status--${escapeHtml(row.match_status || "")}">${escapeHtml(statusLabel[row.match_status] || row.match_status || "—")}</span></td>
-    </tr>
-  `).join("") : `<tr><td colspan="6" class="empty-state">No HubSpot campaign labels in this window.</td></tr>`;
+  const customerId = r.customer_id || "";
+  const options = r.campaign_options || [];
+
+  const unmatched = rows.filter((row) => (row.status || row.match_status) === "unmatched");
+  const resolved = rows.filter((row) => {
+    const s = row.status || row.match_status;
+    return s === "matched" || s === "manual" || s === "not_google_ads";
+  });
+
+  const noticeHtml = campaignMappingNotice ? `
+    <div class="mapping-notice mapping-notice--${escapeHtml(campaignMappingNotice.type)}">${escapeHtml(campaignMappingNotice.msg)}</div>` : "";
+
+  const cardsHtml = rows.length
+    ? (unmatched.concat(resolved)).map((row) => renderCampaignMappingCard(row, nativeCur, customerId, options)).join("")
+    : `<p class="empty-state">No HubSpot campaign labels in this window.</p>`;
 
   panel.innerHTML = `
-    <div class="panel recovery-panel">
+    <div class="panel recovery-panel" data-campaign-mapping data-customer-id="${escapeHtml(customerId)}">
       <div class="panel__header">Campaign Identity Mapping Review</div>
       <div class="panel__body">
         <div class="recovery-statuses">
-          <div>Customer: <strong>${escapeHtml(r.customer_id || "—")}</strong></div>
+          <div>Customer: <strong>${escapeHtml(customerId || "—")}</strong></div>
           <div>Unmatched labels: <strong>${fmtCount(r.unmatched_count)}</strong></div>
         </div>
-        <div class="table-scroll">
-          <table class="data-table">
-            <tr>
-              <th>HubSpot campaign label</th>
-              <th>Google Ads candidate</th>
-              <th>Native spend</th>
-              <th>USD spend</th>
-              <th>Revenue</th>
-              <th>Match status</th>
-            </tr>
-            <tbody>${body}</tbody>
-          </table>
-        </div>
-        <p class="revenue-footnote">Exact normalized matches are auto-linked. Unmatched labels show "Spend mapping unavailable" (never $0). Manual mappings are explicit and auditable and never overwrite the raw Google Ads campaign identity.</p>
+        ${noticeHtml}
+        <div class="mapping-cards">${cardsHtml}</div>
+        <p class="revenue-footnote">Map identity only: HubSpot label → Google Ads campaign ID. Spend is sourced only from canonical Google Ads spend — no manual spend entry. Exact normalized matches auto-link; unmatched labels show "Spend mapping unavailable" (never $0). "Mark as Not Google Ads" excludes a label from Google Ads ROAS. Mappings are auditable (approved_by / approved_at) and never overwrite the raw Google Ads campaign identity.</p>
       </div>
     </div>
   `;
 }
+
+function setCampaignMappingNotice(type, msg) {
+  campaignMappingNotice = { type, msg };
+  if (_lastCampaignMappingReview) renderCampaignMapping(_lastCampaignMappingReview);
+}
+
+async function saveCampaignMapping(label, campaignId, campaignName, customerId) {
+  campaignMappingNotice = { type: "info", msg: `Saving mapping for "${label}"…` };
+  if (_lastCampaignMappingReview) renderCampaignMapping(_lastCampaignMappingReview);
+  try {
+    const res = await fetch("/api/campaign-mapping", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        customer_id: customerId,
+        external_campaign_label: label,
+        campaign_id: campaignId,
+        canonical_campaign_name: campaignName,
+        historical_campaign_name: label,
+      }),
+    });
+    if (res.status === 401 || res.status === 403) {
+      setCampaignMappingNotice("error", "You must be an admin to save mappings.");
+      return;
+    }
+    if (!res.ok) {
+      setCampaignMappingNotice("error", "Mapping could not be saved.");
+      return;
+    }
+    campaignMappingNotice = { type: "ok", msg: `Mapped "${label}" → ${campaignName}. Refresh ROAS by Campaign to see it applied.` };
+  } catch (err) {
+    console.error("[saveCampaignMapping]", err);
+    setCampaignMappingNotice("error", "Mapping request failed.");
+    return;
+  }
+  loadCampaignMapping();
+}
+
+async function excludeCampaignLabel(label, customerId) {
+  campaignMappingNotice = { type: "info", msg: `Marking "${label}" as Not Google Ads…` };
+  if (_lastCampaignMappingReview) renderCampaignMapping(_lastCampaignMappingReview);
+  try {
+    const res = await fetch("/api/campaign-mapping/exclude", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ customer_id: customerId, external_campaign_label: label }),
+    });
+    if (res.status === 401 || res.status === 403) {
+      setCampaignMappingNotice("error", "You must be an admin to change mappings.");
+      return;
+    }
+    if (!res.ok) {
+      setCampaignMappingNotice("error", "Label could not be excluded.");
+      return;
+    }
+    campaignMappingNotice = { type: "ok", msg: `"${label}" excluded from Google Ads ROAS.` };
+  } catch (err) {
+    console.error("[excludeCampaignLabel]", err);
+    setCampaignMappingNotice("error", "Exclude request failed.");
+    return;
+  }
+  loadCampaignMapping();
+}
+
+// Campaign mapping workbench — click (approve / exclude / suggestion chip).
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-mapping-action]");
+  if (!btn) return;
+  const action = btn.dataset.mappingAction;
+  const card = btn.closest(".mapping-card");
+  const panel = btn.closest("[data-campaign-mapping]");
+  if (!card || !panel) return;
+  const label = card.dataset.label;
+  const customerId = panel.dataset.customerId || "";
+  if (action === "suggest") {
+    const sel = card.querySelector("[data-mapping-select]");
+    if (sel) {
+      sel.value = btn.dataset.campaignId || "";
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    return;
+  }
+  if (action === "approve") {
+    const sel = card.querySelector("[data-mapping-select]");
+    const opt = sel && sel.selectedOptions[0];
+    if (!sel || !sel.value) {
+      setCampaignMappingNotice("error", `Choose a Google Ads campaign for "${label}" first.`);
+      return;
+    }
+    saveCampaignMapping(label, sel.value, opt ? (opt.dataset.name || opt.textContent.trim()) : "", customerId);
+    return;
+  }
+  if (action === "exclude") {
+    excludeCampaignLabel(label, customerId);
+  }
+});
+
+// Searchable dropdown — filter options as the admin types.
+document.addEventListener("input", (e) => {
+  const inp = e.target.closest("[data-mapping-search]");
+  if (!inp) return;
+  const card = inp.closest(".mapping-card");
+  const sel = card && card.querySelector("[data-mapping-select]");
+  if (!sel) return;
+  const q = inp.value.trim().toLowerCase();
+  Array.from(sel.options).forEach((o) => {
+    if (!o.value) return; // keep the placeholder visible
+    o.hidden = !!q && !o.textContent.toLowerCase().includes(q);
+  });
+});
+
+// Update the native/USD spend preview when a different campaign is selected.
+document.addEventListener("change", (e) => {
+  const sel = e.target.closest("[data-mapping-select]");
+  if (!sel) return;
+  const card = sel.closest(".mapping-card");
+  const preview = card && card.querySelector("[data-mapping-spend]");
+  if (!preview) return;
+  const opt = sel.selectedOptions[0];
+  const nativeCur = (_lastCampaignMappingReview && _lastCampaignMappingReview.native_currency) || "GBP";
+  if (!opt || !sel.value) {
+    preview.innerHTML = mappingSpendPreview(null, null, nativeCur);
+    return;
+  }
+  preview.innerHTML = mappingSpendPreview(opt.dataset.native, opt.dataset.usd, nativeCur);
+});
 
 function junkRateBadge(junkPct) {
   if (junkPct === null || junkPct === undefined) {
@@ -8915,6 +9168,14 @@ function spendStatusLabel(state) {
   }
 }
 
+// PR-ADS-120b: when multiple HubSpot labels map to one Google Ads campaign, the
+// canonical campaign is shown once (spend never duplicated) with its aliases
+// listed underneath.
+function campaignAliasHtml(aliases) {
+  if (!aliases || !aliases.length) return "";
+  return `<div class="campaign-aliases">Aliases: ${escapeHtml(aliases.join("; "))}</div>`;
+}
+
 function renderSpendCoverageNotice(sh) {
   const h = sh || {};
   // PR-ADS-119: when spend coverage is complete but FX coverage is not, the
@@ -9018,7 +9279,7 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
     }
     return `
     <tr>
-      <td>${escapeHtml(r.campaign_name || "")}</td>
+      <td>${escapeHtml(r.campaign_name || "")}${campaignAliasHtml(r.aliases)}</td>
       <td>${spendCell}</td>
       <td>${fmtCount(r.leads)}</td>
       <td>${fmtCount(r.sqls)}</td>
