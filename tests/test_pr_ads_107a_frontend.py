@@ -85,11 +85,14 @@ def test_default_selected_window_is_current_quarter():
 
 
 def test_roas_loaders_use_revenue_attribution_endpoint():
-    for fn in ("loadRoasCampaigns", "loadRoasCountries"):
+    # PR-ADS-126: the ROAS loaders read the canonical mart as PRIMARY truth via
+    # fetchRevenuePerformance(view, window) — never the legacy page endpoints.
+    for fn, view in (("loadRoasCampaigns", "campaign"), ("loadRoasCountries", "country")):
         idx = JS.find(f"function {fn}")
         assert idx != -1, f"{fn} not found"
         body = JS[idx:idx + 900]
-        assert "/api/revenue-attribution" in body, f"{fn} must call /api/revenue-attribution"
+        assert f'fetchRevenuePerformance("{view}"' in body, f"{fn} must read the mart"
+        assert "/api/revenue-attribution?" not in body
         assert "/api/reports/roas/campaigns" not in body
         assert "/api/reports/roas/countries" not in body
 
@@ -150,7 +153,8 @@ def test_campaign_render_has_simple_columns():
 
 
 def test_country_render_has_simple_columns():
-    idx = JS.find("function renderRoasCountriesPage")
+    # PR-ADS-126: the column headers live in the dedicated table renderer.
+    idx = JS.find("function renderRoasCountryTable")
     assert idx != -1
     body = JS[idx:idx + 2500]
     for col in ("Country", "Spend", "Leads", "SQLs", "Customers", "Won Revenue", "ROAS", "Decision"):

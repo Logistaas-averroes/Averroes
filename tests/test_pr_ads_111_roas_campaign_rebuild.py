@@ -101,11 +101,13 @@ def test_sorting_is_business_value_first():
 
 
 def test_blocked_state_returns_before_summary_and_table():
-    body = _fn("function renderRoasCampaignsPage", span=1600)
-    i_ready = body.find("isRevenueDecisionReady")
+    # PR-ADS-126: readiness is the MART's verdict (data.readiness.revenue_decision_ready),
+    # and the blocked guard still returns before any summary strip or table render.
+    body = _fn("function renderRoasCampaignsPage", span=2400)
+    i_ready = body.find("revenue_decision_ready")
     i_block = body.find("renderRevenueBlockedState")
     i_return = body.find("return", i_block)
-    i_summary = body.find("renderRoasCampaignSummary")
+    i_summary = body.find("renderMartSummaryStrip")
     i_table = body.find("renderRoasCampaignTable")
     assert i_ready != -1 and i_block != -1 and i_return != -1
     assert i_ready < i_block < i_return, "must check readiness, render blocked, then return"

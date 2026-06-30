@@ -178,9 +178,13 @@ def test_render_flow_blocked_then_empty_then_table():
 
 
 def test_both_pages_simple_decision_table():
+    # PR-ADS-126: the Decision column lives in the dedicated table renderers; the
+    # page render functions compose the mart strips + table and stay clutter-free.
+    for tbl_name in ("function renderRoasCampaignTable", "function renderRoasCountryTable"):
+        body = _fn(tbl_name, span=2600)
+        assert ">Decision<" in body
     for fn_name in ("function renderRoasCampaignsPage", "function renderRoasCountriesPage"):
         body = _fn(fn_name, span=2600)
-        assert ">Decision<" in body
         for clutter in (">CAC<", ">Confidence<", ">Notes<"):
             assert clutter not in body
 

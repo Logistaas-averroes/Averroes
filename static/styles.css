@@ -4458,6 +4458,75 @@ body.is-revenue-page #monitoring-banner {
   }
 }
 
+/* ── Canonical Revenue Decision Mart UI (PR-ADS-126) ─────────────────────── */
+
+/* Compact diagnostics stack — the mart's own explanation of why spend/ROAS are
+   (un)available. Deliberately quiet (no warning wall). */
+.revenue-diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 16px;
+}
+
+.revenue-diagnostic {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.revenue-diagnostic strong {
+  flex: 0 0 auto;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: #475569;
+}
+
+.revenue-diagnostic span {
+  color: #334155;
+}
+
+/* Revenue Page Parity panel — does every revenue page agree with the mart? */
+.revenue-page-parity {
+  margin-bottom: 20px;
+}
+
+.revenue-parity-table th,
+.revenue-parity-table td {
+  white-space: nowrap;
+}
+
+.parity-status {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.parity-status--ok {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.parity-status--warning {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.parity-status--neutral {
+  background: #e2e8f0;
+  color: #475569;
+}
+
 /* ── Revenue Attribution Health — admin diagnostics (PR-ADS-113) ─────────── */
 
 .revenue-health-note {

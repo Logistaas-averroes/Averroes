@@ -260,10 +260,14 @@ def test_deals_uses_business_windows_not_day_windows():
     assert '"deals"' in JS[JS.find("REVENUE_PAGES"):JS.find("REVENUE_PAGES") + 120]
 
 
-def test_deals_loader_uses_revenue_deals_endpoint():
+def test_deals_loader_uses_mart_deal_view():
+    # PR-ADS-126: the Deals page reads the canonical mart deal view as PRIMARY
+    # truth (fetchRevenuePerformance("deal", ...)) — never /api/deals?days=, and
+    # no silent fallback to the legacy /api/revenue-deals page endpoint.
     region = _deals_region()
-    assert "/api/revenue-deals?window=" in region
+    assert 'fetchRevenuePerformance("deal"' in region
     assert "/api/deals?days=" not in region
+    assert "/api/revenue-deals?window=" not in region
 
 
 def test_old_funnel_removed():
