@@ -271,11 +271,14 @@ def test_pages_use_own_window_state():
     # The shared roasRevenue* globals are gone — each page keeps its own.
     assert "roasRevenueSourceHealth" not in JS
     assert "roasRevenueSummary" not in JS
-    campaign = _fn("function renderRoasCampaignsPage", span=1400)
+    # PR-ADS-126: each page keeps its OWN per-page mart payload + source health, so
+    # one window's response can never bleed into another page.
+    campaign = _fn("function renderRoasCampaignsPage", span=1600)
     assert "roasCampaignSourceHealth" in campaign
-    assert "roasCampaignSummary" in campaign
+    assert "roasCampaignMart" in campaign
     country = _fn("function renderRoasCountriesPage", span=1600)
     assert "roasCountrySourceHealth" in country
+    assert "roasCountryMart" in country
     # Each loader fetches its own window and stores a page-specific window object.
     assert "roasCampaignWindow" in JS
     assert "roasCountryWindow" in JS

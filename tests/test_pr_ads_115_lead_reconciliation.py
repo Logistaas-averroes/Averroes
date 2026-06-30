@@ -212,15 +212,16 @@ def test_reconciliation_does_not_touch_attribution_rows():
 
 
 def test_single_readiness_contract_shared():
-    # All three surfaces gate on isRevenueDecisionReady (campaign + country) which
-    # uses the same integration-connected helper; the source-health contract is
-    # produced once by the revenue-attribution service.
-    # PR-ADS-116: each page keeps its own source-health state, but both still
-    # gate on the one shared readiness contract.
-    assert "isRevenueDecisionReady(roasCampaignSourceHealth)" in JS
-    assert "isCountryRevenueDecisionReady(roasCountrySourceHealth)" in JS
-    country = _fn("function isCountryRevenueDecisionReady", span=400)
-    assert "isRevenueDecisionReady(sh)" in country
+    # PR-ADS-126: the readiness contract is computed ONCE in the backend mart
+    # (_readiness_block) and shared by every view. Both ROAS pages gate on the
+    # mart's revenue_decision_ready verdict instead of each re-deriving readiness.
+    camp = _fn("function renderRoasCampaignsPage", span=1600)
+    country = _fn("function renderRoasCountriesPage", span=1600)
+    assert "readiness.revenue_decision_ready" in camp
+    assert "readiness.revenue_decision_ready" in country
+    mart = open(os.path.join(ROOT, "services", "revenue_decision_mart.py"), encoding="utf-8").read()
+    assert "def _readiness_block" in mart
+    assert "revenue_decision_ready" in mart
 
 
 # ── 9. ROAS copy → Lead Event-Date Reconciliation, not a re-sync ─────────────

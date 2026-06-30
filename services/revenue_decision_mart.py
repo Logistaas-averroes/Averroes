@@ -225,6 +225,59 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
     return diags
 
 
+def _readiness_block(core: dict, spend_truth: dict) -> dict:
+    """Canonical decision-readiness, computed ONCE so the UI renders, never decides.
+
+    PR-ADS-126: the mart owns every readiness verdict a revenue page used to
+    derive on its own (lead-grain safety, revenue-integration connection, spend
+    coverage, country reconciliation). The frontend reads these booleans and the
+    accompanying statuses to render blocked/ready states — it does not re-derive
+    them from raw source_health. The booleans mirror the existing doctrine; no new
+    business math is introduced.
+    """
+    health = core.get("source_health") or {}
+
+    lead_metrics_ready = (
+        health.get("lead_date_grain_status") == "event_date"
+        and health.get("lead_metrics_status") != "withheld"
+    )
+    if health.get("revenue_integration_status"):
+        revenue_integration_connected = (
+            health.get("revenue_integration_status") == "connected"
+        )
+    else:  # backward-compatible fallback for older payloads
+        revenue_integration_connected = (
+            health.get("revenue_attribution_status") != "not_wired_or_no_closed_won"
+        )
+
+    revenue_decision_ready = bool(lead_metrics_ready and revenue_integration_connected)
+    spend_decision_ready = spend_truth["campaign_spend_status"] == "verified" and \
+        spend_truth["fx_status"] == "verified"
+    country_decision_ready = bool(
+        spend_decision_ready and spend_truth["country_spend_status"] == "verified"
+    )
+
+    return {
+        "revenue_decision_ready": revenue_decision_ready,
+        "spend_decision_ready": bool(spend_decision_ready),
+        "country_decision_ready": country_decision_ready,
+        "roas_ready": (core.get("summary") or {}).get("roas") is not None,
+        "lead_metrics_ready": bool(lead_metrics_ready),
+        "revenue_integration_connected": bool(revenue_integration_connected),
+        # Statuses the blocked-state renderer needs (presentation only).
+        "lead_date_grain_status": health.get("lead_date_grain_status"),
+        "lead_metrics_status": health.get("lead_metrics_status"),
+        "revenue_integration_status": health.get("revenue_integration_status"),
+        "revenue_attribution_status": health.get("revenue_attribution_status"),
+        "missing_contact_created_at_count": health.get(
+            "missing_contact_created_at_count", 0
+        ),
+        "country_spend_available": bool(core.get("country_spend_available")),
+        "geo_country_mapping_status": core.get("geo_country_mapping_status"),
+        "geo_country_source": health.get("geo_country_source"),
+    }
+
+
 def _canonical_core(window: str, now: datetime | None):
     """The single durable revenue-attribution contract for ``window``."""
     return build_revenue_attribution(window, now=now)
@@ -275,6 +328,7 @@ def build_revenue_decision_mart(
 
     spend_truth = _spend_truth_block(core)
     summary = _summary_block(core, spend_truth)
+    readiness = _readiness_block(core, spend_truth)
     rows = _rows_for_view(view, window, core, now)
     diagnostics = _diagnostics(core, view, spend_truth)
 
@@ -283,6 +337,7 @@ def build_revenue_decision_mart(
         "window": _window_block(core),
         "spend_truth": spend_truth,
         "summary": summary,
+        "readiness": readiness,
         "rows": rows,
         "diagnostics": diagnostics,
         "source_truth": "revenue_decision_mart",

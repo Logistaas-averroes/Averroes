@@ -2871,6 +2871,12 @@ function renderRevenueDealsPage() {
   if (kpiGrid) kpiGrid.innerHTML = "";
   if (!tableBody) return;
 
+  // Mart endpoint failed — NO silent fallback to /api/revenue-deals.
+  if (revenueDealsLedgerStatus === "mart_unavailable") {
+    tableBody.innerHTML = renderMartUnavailable();
+    return;
+  }
+
   // Unavailable: the durable ledger/database cannot be read.
   if (revenueDealsLedgerStatus === "database_unavailable") {
     tableBody.innerHTML = renderRevenueDealsUnavailable();
@@ -2885,9 +2891,11 @@ function renderRevenueDealsPage() {
 
   const sorted = sortRevenueDealRows(revenueDealsData);
   tableBody.innerHTML = `
-    ${renderRevenueDealsSummary(revenueDealsSummary)}
+    ${renderMartSpendTruth(revenueDealsMart)}
+    ${renderRevenueDealsSummary(martDealLedgerSummary(revenueDealsMart))}
+    ${renderMartDiagnostics(revenueDealsMart)}
     ${renderRevenueDealsTable(sorted)}
-    <p class="revenue-footnote">HubSpot closed-won deals provide revenue, attributed to Google Ads by deal close date.</p>
+    <p class="revenue-footnote">Canonical Revenue Decision Mart — HubSpot closed-won deals provide revenue, attributed to Google Ads by deal close date.</p>
   `;
 }
 
@@ -2901,32 +2909,51 @@ async function loadDeals() {
   if (tableBody) tableBody.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading closed-won deals…</p>';
 
   try {
-    const res = await fetch(`/api/revenue-deals?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
-    const data = res.ok ? await res.json() : null;
+    // PR-ADS-126: PRIMARY truth is the canonical mart deal view.
+    const data = await fetchRevenuePerformance("deal", window_);
     if (token !== _revReqSeq.deals) return;  // stale response superseded
-    if (!res.ok || !_revResponseIsCurrent("deals", token, data)) {
-      if (!res.ok) {
-        revenueDealsLedgerStatus = "database_unavailable";
-        revenueDealsData = [];
-        revenueDealsSummary = null;
-        renderRevenueDealsPage();
-      }
+    if (!data) {
+      // Mart endpoint failed — NO silent fallback to /api/revenue-deals.
+      revenueDealsMart = null;
+      revenueDealsLedgerStatus = "mart_unavailable";
+      revenueDealsData = [];
+      revenueDealsSummary = null;
+      renderRevenueDealsPage();
       return;
     }
-    const sh = data.source_health || {};
-    revenueDealsLedgerStatus = sh.ledger_status || "available";
+    if (!_revResponseIsCurrent("deals", token, data)) return;
+    revenueDealsMart = data;
+    revenueDealsLedgerStatus = "available";
     revenueDealsSummary = data.summary || null;
-    revenueDealsData = data.deals || [];
+    revenueDealsData = data.rows || [];
     renderWindowRange("revenue-deals-range", data.window || null);
     renderRevenueDealsPage();
   } catch (err) {
     console.error("[loadDeals]", err);
     if (token !== _revReqSeq.deals) return;
-    revenueDealsLedgerStatus = "database_unavailable";
+    revenueDealsMart = null;
+    revenueDealsLedgerStatus = "mart_unavailable";
     revenueDealsData = [];
     revenueDealsSummary = null;
     renderRevenueDealsPage();
   }
+}
+
+// Deal-ledger summary for the existing summary strip. The revenue TOTAL is the
+// mart's canonical figure (summary.won_revenue_usd) — never recomputed in the
+// UI; deal count / average / exact-GCLID count are presentation aggregates over
+// the mart-provided deal rows.
+function martDealLedgerSummary(data) {
+  const rows = (data && data.rows) || [];
+  const s = (data && data.summary) || {};
+  const dealCount = rows.length;
+  const wonRevenue = s.won_revenue_usd;
+  return {
+    deal_count: dealCount,
+    won_revenue: wonRevenue,
+    average_deal_value: (dealCount && wonRevenue != null) ? wonRevenue / dealCount : null,
+    exact_gclid_count: rows.filter((r) => (r.match_source || "").toLowerCase() === "gclid").length,
+  };
 }
 
 // ── Revenue Attribution Health — admin diagnostics (PR-ADS-113) ─────────────
@@ -3070,6 +3097,46 @@ function renderRevenueHealth(audit) {
   `;
 }
 
+// PR-ADS-126: compact, canonical "Revenue Page Parity" panel. Answers the
+// acceptance-criteria question — do all Revenue & Attribution pages agree with
+// the mart on spend / revenue, and if not, exactly why? Driven solely by
+// GET /api/revenue-performance/audit; the frontend computes no parity itself.
+function renderRevenuePageParity(audit) {
+  if (!audit || !Array.isArray(audit.pages)) return "";
+  const fmtVal = (v) => (v === null || v === undefined ? "Unavailable" : fmtMoney(v));
+  const fmtDiff = (v) => (v === null || v === undefined ? "—" : fmtMoney(v));
+  const statusBadge = (s) => {
+    const cls = s === "pass" ? "ok" : (s === "fail" ? "warning" : "neutral");
+    return `<span class="parity-status parity-status--${cls}">${escapeHtml(s || "—")}</span>`;
+  };
+  const rows = audit.pages.map((p) => `
+    <tr>
+      <td>${escapeHtml(p.page || p.page_key || "—")}</td>
+      <td>${escapeHtml(p.metric || "—")}</td>
+      <td>${fmtVal(p.current_value)}</td>
+      <td>${fmtVal(p.mart_value)}</td>
+      <td>${fmtDiff(p.difference)}</td>
+      <td>${statusBadge(p.status)}</td>
+      <td>${escapeHtml((p.reasons || []).join(", ") || (p.status === "pass" ? "—" : ""))}</td>
+    </tr>
+  `).join("");
+  const allAgree = audit.all_pages_agree === true;
+  return `
+    <div class="panel revenue-page-parity">
+      <div class="panel__header">Revenue Page Parity</div>
+      <div class="panel__body panel__body--flush">
+        <p class="revenue-footnote" style="padding:var(--space-3) var(--space-4) 0">Do all Revenue &amp; Attribution pages agree with the canonical mart? ${allAgree ? "Yes — every page matches the mart." : "No — see the differing rows and their reasons below."}</p>
+        <div class="table-scroll">
+          <table class="data-table roas-table revenue-decision-table revenue-parity-table">
+            <tr><th>Page</th><th>Metric</th><th>Current</th><th>Mart</th><th>Difference</th><th>Status</th><th>Reason</th></tr>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 async function loadRevenueHealth() {
   // Google Ads Spend Truth panel (PR-ADS-118) sits at the top of diagnostics.
   loadSpendTruth();
@@ -3097,7 +3164,21 @@ async function loadRevenueHealth() {
       return;
     }
     renderWindowRange("revenue-health-range", audit.window || null);
-    body.innerHTML = renderRevenueHealth(audit);
+    // PR-ADS-126: prepend the canonical Revenue Page Parity panel (best-effort —
+    // the diagnostics body still renders if the mart audit is briefly down).
+    let parityHtml = "";
+    try {
+      const martAuditRes = await fetch(
+        `/api/revenue-performance/audit?window=${encodeURIComponent(window_)}`,
+        { credentials: "same-origin" }
+      );
+      if (martAuditRes.ok) {
+        const martAudit = await martAuditRes.json();
+        if (token === _revReqSeq.health) parityHtml = renderRevenuePageParity(martAudit);
+      }
+    } catch (e) { /* parity panel is best-effort diagnostics */ }
+    if (token !== _revReqSeq.health) return;
+    body.innerHTML = parityHtml + renderRevenueHealth(audit);
     // Surface the included missing-event-date count on the reconciliation panel.
     loadLeadReconciliationStatus(audit.missing_contact_created_at_count);
   } catch (err) {
@@ -3681,11 +3762,15 @@ function renderRevenueBySourceHealth(summary) {
 function renderRevenueBySourcePage(data) {
   const body = document.getElementById("revenue-by-source-body");
   if (!body) return;
-  const groups = (data && data.groups) || [];
+  // PR-ADS-126: rows ARE the per-source groups from the canonical mart. Only the
+  // Google Ads group carries spend/ROAS (the mart sets has_spend / roas), so the
+  // frontend never decides which source has spend.
+  const groups = (data && data.rows) || [];
   body.innerHTML = `
-    ${renderRevenueBySourceHealth((data && data.summary) || {})}
+    ${renderMartSpendTruth(data)}
+    ${renderMartDiagnostics(data)}
     ${groups.map(renderSourceSectionTable).join("")}
-    <p class="revenue-footnote">Google Ads provides spend; ROAS is shown only for Google Ads. Other groups are revenue-only — no connected spend source, so ROAS is never fabricated.</p>
+    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads provides spend; ROAS is shown only for Google Ads. Other groups are revenue-only, so ROAS is never fabricated.</p>
   `;
 }
 
@@ -3697,19 +3782,20 @@ async function loadRevenueBySource() {
   const body = document.getElementById("revenue-by-source-body");
   if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue by source…</p>';
   try {
-    const res = await fetch(`/api/revenue-by-source?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
-    const data = res.ok ? await res.json() : null;
+    // PR-ADS-126: PRIMARY truth is the canonical mart source view.
+    const data = await fetchRevenuePerformance("source", window_);
     if (token !== _revReqSeq.bySource) return;  // stale response superseded
-    if (!res.ok || !_revResponseIsCurrent("bySource", token, data)) {
-      if (!res.ok && body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue by source.</p>';
+    if (!data) {
+      if (body) body.innerHTML = renderMartUnavailable();
       return;
     }
+    if (!_revResponseIsCurrent("bySource", token, data)) return;
     renderWindowRange("revenue-by-source-range", data.window || null);
     renderRevenueBySourcePage(data);
   } catch (err) {
     console.error("[loadRevenueBySource]", err);
     if (token !== _revReqSeq.bySource) return;
-    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue by source.</p>';
+    if (body) body.innerHTML = renderMartUnavailable();
   }
 }
 
@@ -9248,6 +9334,171 @@ function renderRevenueEmptyState(scope) {
     </div>`;
 }
 
+// ── Canonical Revenue Decision Mart client (PR-ADS-126) ─────────────────────
+// Every Revenue & Attribution BUSINESS page reads from ONE backend contract:
+//   GET /api/revenue-performance?view=campaign|country|source|deal&window=...
+// The mart owns the truth — which spend source is trusted, whether FX is
+// complete, whether ROAS is safe, whether country geo reconciles, whether a
+// campaign is mapped, and whether a source has spend. These pages are renderers
+// only: they read summary / spend_truth / readiness / rows / diagnostics and
+// never re-derive any of those verdicts. There is NO silent fallback to the old
+// page endpoints — a mart failure says so plainly, so page drift cannot return.
+
+// Holds the latest mart response per business page so filter-chip re-renders and
+// blocked/ready gating read the SAME canonical payload the loader fetched.
+let roasCampaignMart = null;
+let roasCountryMart = null;
+let revenueDealsMart = null;
+
+async function fetchRevenuePerformance(view, windowKey) {
+  const res = await fetch(
+    `/api/revenue-performance?view=${encodeURIComponent(view)}&window=${encodeURIComponent(windowKey)}`,
+    { credentials: "same-origin" }
+  );
+  if (!res.ok) return null;
+  return res.json();
+}
+
+// "verified"/"complete" → Verified, "incomplete" → Incomplete, etc. Never blank.
+function labelizeStatus(status) {
+  switch ((status || "").toLowerCase()) {
+    case "verified":
+    case "complete":   return "Verified";
+    case "incomplete": return "Incomplete";
+    case "mismatch":   return "Mismatch";
+    case "unavailable":
+    case "":           return "Unavailable";
+    default:           return status.charAt(0).toUpperCase() + status.slice(1);
+  }
+}
+
+// Native (non-USD) spend — reuses the existing currency helper so a GBP amount
+// is NEVER rendered with a "$". Unavailable (never $0) when missing.
+function fmtNativeMoney(v, currencyCode) {
+  if (v === null || v === undefined) return "Unavailable";
+  return fmtCurrency(v, currencyCode || "GBP");
+}
+
+// Mart-owned readiness. Prefer the backend booleans; the spend_truth shim only
+// covers callers without a readiness block.
+function martSpendReady(data) {
+  if (data && data.readiness) return data.readiness.spend_decision_ready === true;
+  const st = (data && data.spend_truth) || {};
+  return st.campaign_spend_status === "verified" && st.fx_status === "verified";
+}
+function martCountryReady(data) {
+  if (data && data.readiness) return data.readiness.country_decision_ready === true;
+  const st = (data && data.spend_truth) || {};
+  return (
+    st.campaign_spend_status === "verified" &&
+    st.country_spend_status === "verified" &&
+    st.fx_status === "verified"
+  );
+}
+function martRoasReady(data, view) {
+  if (view === "country") return martCountryReady(data);
+  return martSpendReady(data);
+}
+
+// Canonical spend-truth strip: native spend, USD reporting spend (Unavailable
+// when FX is incomplete — NEVER native GBP relabelled as USD), FX status, and
+// the canonical ROAS (Unavailable when the denominator is unsafe; never $0).
+function renderMartSpendTruth(data) {
+  const st = (data && data.spend_truth) || {};
+  const roas = data && data.summary ? data.summary.roas : null;
+  return `
+    <div class="revenue-spend-summary">
+      <div class="revenue-spend-summary__title">Canonical Spend Truth</div>
+      <div class="revenue-spend-summary__grid">
+        <div><span>Native Spend</span><strong title="${escapeHtml(st.native_currency || "GBP")}">${fmtNativeMoney(st.native_spend, st.native_currency)}</strong></div>
+        <div><span>USD Reporting</span><strong>${st.usd_spend == null ? "Unavailable" : fmtMoney(st.usd_spend)}</strong></div>
+        <div><span>FX</span><strong>${labelizeStatus(st.fx_status)}</strong></div>
+        <div><span>ROAS</span><strong>${roas == null ? "Unavailable" : fmtRoasMultiple(roas)}</strong></div>
+      </div>
+    </div>
+  `;
+}
+
+// Business KPI strip from the canonical summary (identical across every view).
+function renderMartSummaryStrip(data) {
+  const s = (data && data.summary) || {};
+  return `
+    <div class="revenue-summary-strip">
+      <div><span>Spend (USD)</span><strong>${s.spend_usd == null ? "Unavailable" : fmtMoney(s.spend_usd)}</strong></div>
+      <div><span>Leads</span><strong>${fmtCount(s.leads)}</strong></div>
+      <div><span>SQLs</span><strong>${fmtCount(s.sqls)}</strong></div>
+      <div><span>Customers</span><strong>${fmtCount(s.customers)}</strong></div>
+      <div><span>Won Revenue</span><strong>${s.won_revenue_usd == null ? "Unavailable" : fmtMoney(s.won_revenue_usd)}</strong></div>
+      <div><span>ROAS</span><strong>${s.roas == null ? "Unavailable" : fmtRoasMultiple(s.roas)}</strong></div>
+    </div>
+  `;
+}
+
+// Compact diagnostics — the mart's own explanation of why spend/ROAS are
+// (un)available. One tidy stack, never a warning wall.
+function renderMartDiagnostics(data) {
+  const diagnostics = (data && data.diagnostics) || [];
+  if (!diagnostics.length) return "";
+  return `
+    <div class="revenue-diagnostics">
+      ${diagnostics.map((d) => `
+        <div class="revenue-diagnostic">
+          <strong>${escapeHtml((d && d.code) || "diagnostic")}</strong>
+          <span>${escapeHtml((d && d.message) || "")}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+// A mart fetch failure must NOT silently fall back to the old page endpoints —
+// that is exactly the page drift PR-ADS-125/126 removed.
+function renderMartUnavailable() {
+  return `
+    <div class="revenue-blocked-card">
+      <div class="revenue-blocked-card__eyebrow">Revenue Decision Mart</div>
+      <h3>Canonical revenue mart unavailable.</h3>
+      <p>The canonical Revenue Decision Mart could not be reached, so this page is not rendering any page-specific truth that could disagree with the mart. Retry shortly; if it persists, check System Status → Revenue Health.</p>
+    </div>`;
+}
+
+// Feed the existing campaign table/blocked-state renderers from the mart. The
+// mart already DECIDED these verdicts; this only maps them to the labels those
+// renderers read. The campaign table reads campaign_roas_available (USD vs native
+// spend cell) and spend_native_currency off this object.
+function martCampaignSourceHealth(data) {
+  const st = (data && data.spend_truth) || {};
+  const r = (data && data.readiness) || {};
+  return {
+    campaign_roas_available: martSpendReady(data),
+    spend_coverage_status: st.spend_coverage_status,
+    fx_coverage_status: st.fx_status === "verified" ? "complete"
+      : (st.fx_status === "incomplete" ? "incomplete" : "not_evaluated"),
+    spend_native_currency: st.native_currency,
+    spend_native_total: st.native_spend,
+    spend_usd_total: st.usd_spend,
+    lead_date_grain_status: r.lead_date_grain_status,
+    lead_metrics_status: r.lead_metrics_status,
+    revenue_integration_status: r.revenue_integration_status,
+    revenue_attribution_status: r.revenue_attribution_status,
+    missing_contact_created_at_count: r.missing_contact_created_at_count,
+  };
+}
+
+// Feed the existing country blocked-state card from the mart readiness block.
+function martCountrySourceHealth(data) {
+  const r = (data && data.readiness) || {};
+  return {
+    lead_date_grain_status: r.lead_date_grain_status,
+    lead_metrics_status: r.lead_metrics_status,
+    revenue_integration_status: r.revenue_integration_status,
+    revenue_attribution_status: r.revenue_attribution_status,
+    missing_contact_created_at_count: r.missing_contact_created_at_count,
+    country_spend_available: r.country_spend_available === true,
+    geo_country_mapping_status: r.geo_country_mapping_status || "no_geo_data",
+  };
+}
+
 // ── ROAS by Campaign (PR-ADS-111) ─────────────────────────────────────────
 // Executive decision page: "Which Google Ads campaigns are producing qualified
 // pipeline, customers, and closed-won revenue?" — not a diagnostics page.
@@ -9376,29 +9627,32 @@ async function loadRoasCampaigns() {
   if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue attribution by campaign…</p>';
 
   try {
-    const res = await fetch(`/api/revenue-attribution?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
-    const data = res.ok ? await res.json() : null;
+    // PR-ADS-126: PRIMARY truth is the canonical mart, not /api/revenue-attribution.
+    const data = await fetchRevenuePerformance("campaign", window_);
     // Drop stale responses: a newer selection (or page reload) supersedes this.
     if (token !== _revReqSeq.campaigns) return;
-    if (!res.ok || !_revResponseIsCurrent("campaigns", token, data)) {
-      if (!res.ok) {
-        roasCampaignsStatus = "error";
-        if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue attribution data.</p>';
-      }
+    if (!data) {
+      // Mart endpoint failed — NO silent fallback to old endpoints (page drift).
+      roasCampaignMart = null;
+      roasCampaignsStatus = "error";
+      if (body) body.innerHTML = renderMartUnavailable();
       return;
     }
+    if (!_revResponseIsCurrent("campaigns", token, data)) return;
+    roasCampaignMart = data;
     roasCampaignWindow = data.window || null;
     roasCampaignSummary = data.summary || null;
-    roasCampaignSourceHealth = data.source_health || null;
-    roasCampaignsData = data.campaigns || [];
+    roasCampaignSourceHealth = martCampaignSourceHealth(data);
+    roasCampaignsData = data.rows || [];
     roasCampaignsStatus = roasCampaignsData.length ? "ok" : "empty";
     renderWindowRange("roas-campaigns-range", roasCampaignWindow);
     renderRoasCampaignsPage();
   } catch (err) {
     console.error("[loadRoasCampaigns]", err);
     if (token !== _revReqSeq.campaigns) return;
+    roasCampaignMart = null;
     roasCampaignsStatus = "error";
-    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue attribution data.</p>';
+    if (body) body.innerHTML = renderMartUnavailable();
   }
 }
 
@@ -9458,8 +9712,14 @@ function renderRoasCampaignsPage() {
   if (kpiGrid) kpiGrid.innerHTML = "";
   if (!tableBody) return;
 
-  // Blocked: truth layer is not safe for business decisions.
-  if (!isRevenueDecisionReady(roasCampaignSourceHealth)) {
+  // PR-ADS-126: the mart is the only truth. No mart payload → say so, never fall
+  // back to a page-specific interpretation.
+  const data = roasCampaignMart;
+  if (!data) { tableBody.innerHTML = renderMartUnavailable(); return; }
+
+  // Blocked: the MART says revenue truth is not decision-ready (lead grain unsafe
+  // or revenue integration not connected). The frontend does not decide this.
+  if (!data.readiness || data.readiness.revenue_decision_ready !== true) {
     tableBody.innerHTML = renderRevenueBlockedState(roasCampaignSourceHealth);
     return;
   }
@@ -9472,17 +9732,18 @@ function renderRoasCampaignsPage() {
 
   const sorted = sortRoasCampaignRows(roasCampaignsData);
   const filtered = filterRoasCampaignRows(sorted, roasCampaignFilter);
-  // PR-ADS-118: when canonical Google Ads spend coverage is incomplete for this
-  // window, ROAS must NOT be shown from a partial denominator. Show the observed
-  // spend as diagnostic detail but render ROAS as unavailable.
-  const spendIncomplete = spendCoverageIncomplete(roasCampaignSourceHealth);
+  // Spend safety is the mart's verdict: when the canonical denominator is unsafe
+  // (incomplete coverage / incomplete FX), per-row ROAS is already null and the
+  // table renders "Unavailable" — never a partial/geo denominator.
+  const spendIncomplete = !martSpendReady(data);
 
   tableBody.innerHTML = `
-    ${spendIncomplete ? renderSpendCoverageNotice(roasCampaignSourceHealth) : ""}
-    ${renderRoasCampaignSummary(roasCampaignSummary, spendIncomplete)}
+    ${renderMartSpendTruth(data)}
+    ${renderMartSummaryStrip(data)}
+    ${renderMartDiagnostics(data)}
     ${renderRoasCampaignFilters()}
     ${renderRoasCampaignTable(filtered, spendIncomplete)}
-    <p class="revenue-footnote">Google Ads canonical spend powers ROAS. HubSpot closed-won deals provide revenue.</p>
+    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads canonical spend powers ROAS; HubSpot closed-won deals provide revenue.</p>
   `;
 }
 
@@ -9975,32 +10236,29 @@ async function loadRoasCountries() {
   if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading revenue attribution by country…</p>';
 
   try {
-    const res = await fetch(`/api/revenue-attribution?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
-    const data = res.ok ? await res.json() : null;
+    // PR-ADS-126: PRIMARY truth is the canonical mart country view.
+    const data = await fetchRevenuePerformance("country", window_);
     if (token !== _revReqSeq.countries) return;
-    if (!res.ok || !_revResponseIsCurrent("countries", token, data)) {
-      if (!res.ok) {
-        roasCountriesStatus = "error";
-        if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load revenue attribution data.</p>';
-      }
+    if (!data) {
+      roasCountryMart = null;
+      roasCountriesStatus = "error";
+      if (body) body.innerHTML = renderMartUnavailable();
       return;
     }
+    if (!_revResponseIsCurrent("countries", token, data)) return;
+    roasCountryMart = data;
     roasCountryWindow = data.window || null;
-    // Country readiness layers geo-spend availability on top of shared safety.
-    roasCountrySourceHealth = {
-      ...(data.source_health || {}),
-      country_spend_available: data.country_spend_available === true,
-      geo_country_mapping_status: data.geo_country_mapping_status || "no_geo_data",
-    };
-    roasCountriesData = data.countries || [];
+    roasCountrySourceHealth = martCountrySourceHealth(data);
+    roasCountriesData = data.rows || [];
     roasCountriesStatus = roasCountriesData.length ? "ok" : "empty";
     renderWindowRange("roas-countries-range", roasCountryWindow);
     renderRoasCountriesPage();
   } catch (err) {
     console.error("[loadRoasCountries]", err);
     if (token !== _revReqSeq.countries) return;
+    roasCountryMart = null;
     roasCountriesStatus = "error";
-    if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Error loading revenue attribution data.</p>';
+    if (body) body.innerHTML = renderMartUnavailable();
   }
 }
 
@@ -10019,16 +10277,22 @@ function renderRoasCountriesPage() {
   if (kpiGrid) kpiGrid.innerHTML = "";
   if (!tableBody) return;
 
-  // Blocked: shared truth layer unsafe, or country geo spend not available.
-  if (!isCountryRevenueDecisionReady(roasCountrySourceHealth)) {
+  const data = roasCountryMart;
+  if (!data) { tableBody.innerHTML = renderMartUnavailable(); return; }
+
+  // Blocked: the MART says revenue truth is not decision-ready (lead grain /
+  // revenue integration). The frontend does not decide this.
+  if (!data.readiness || data.readiness.revenue_decision_ready !== true) {
     tableBody.innerHTML = renderCountryRevenueBlockedState(roasCountrySourceHealth);
     return;
   }
 
-  // PR-ADS-118: Country ROAS is available ONLY when canonical coverage is
-  // complete AND geo reconciles to canonical campaign spend for the window.
-  // A partial, geo-fallback, or unreconciled denominator is never used for ROAS.
-  if (countryRoasUnavailable(roasCountrySourceHealth)) {
+  // Country ROAS readiness is the MART's verdict: spend_truth.country_spend_status.
+  // Anything other than "verified" (mismatch / unavailable) blocks the trusted
+  // table — the frontend never independently decides country ROAS readiness, and
+  // never renders a partial/geo/unreconciled denominator as ROAS.
+  const st = data.spend_truth || {};
+  if (st.country_spend_status !== "verified") {
     tableBody.innerHTML = renderCountrySpendUnreconciledState();
     return;
   }
@@ -10041,13 +10305,14 @@ function renderRoasCountriesPage() {
 
   const sorted = sortRoasCountryRows(roasCountriesData);
   const filtered = filterRoasCountryRows(sorted, roasCountryFilter);
-  const summary = summarizeRoasCountryRows(roasCountriesData);
 
   tableBody.innerHTML = `
-    ${renderRoasCountrySummary(summary)}
+    ${renderMartSpendTruth(data)}
+    ${renderMartSummaryStrip(data)}
+    ${renderMartDiagnostics(data)}
     ${renderRoasCountryFilters()}
     ${renderRoasCountryTable(filtered)}
-    <p class="revenue-footnote">Google Ads geo data provides country spend. HubSpot closed-won deals provide revenue.</p>
+    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads canonical geo spend provides country spend; HubSpot closed-won deals provide revenue.</p>
   `;
 }
 

@@ -78,21 +78,27 @@ def test_country_readiness_requires_geo_spend():
 
 
 def test_load_retains_country_specific_source_health():
+    # PR-ADS-126: country-specific source health is now derived by the MART and
+    # mapped through martCountrySourceHealth(data) — the loader no longer reads
+    # page-specific top-level fields off a page endpoint.
     fn = _fn("async function loadRoasCountries", span=2000)
-    assert "roasCountrySourceHealth = {" in fn
-    assert "country_spend_available: data.country_spend_available === true" in fn
-    assert 'geo_country_mapping_status: data.geo_country_mapping_status || "no_geo_data"' in fn
+    assert "roasCountrySourceHealth = martCountrySourceHealth(data)" in fn
+    helper = _fn("function martCountrySourceHealth", span=900)
+    assert "country_spend_available: r.country_spend_available === true" in helper
+    assert 'geo_country_mapping_status: r.geo_country_mapping_status || "no_geo_data"' in helper
 
 
 # ── 4. Blocked state renders before summary/table ────────────────────────────
 
 
 def test_blocked_state_returns_before_summary_and_table():
-    body = _fn("function renderRoasCountriesPage", span=1800)
-    i_ready = body.find("isCountryRevenueDecisionReady")
+    # PR-ADS-126: readiness is the MART's verdict (data.readiness.revenue_decision_ready),
+    # and the blocked guard still returns before any summary strip or table render.
+    body = _fn("function renderRoasCountriesPage", span=2600)
+    i_ready = body.find("revenue_decision_ready")
     i_block = body.find("renderCountryRevenueBlockedState")
     i_return = body.find("return", i_block)
-    i_summary = body.find("renderRoasCountrySummary")
+    i_summary = body.find("renderMartSummaryStrip")
     i_table = body.find("renderRoasCountryTable")
     assert i_ready != -1 and i_block != -1 and i_return != -1
     assert i_ready < i_block < i_return
@@ -111,19 +117,16 @@ def test_country_blocked_copy():
     assert "HubSpot lead re-sync" not in fn
 
 
-# ── 5. Summary derived from country rows, not the global summary ──────────────
+# ── 5. Summary is the canonical mart summary (one shared truth) ───────────────
 
 
-def test_summary_derived_from_country_rows():
-    assert "function summarizeRoasCountryRows" in JS
-    body = _fn("function renderRoasCountriesPage", span=1800)
-    # The page summarizes the loaded country rows.
-    assert "summarizeRoasCountryRows(roasCountriesData)" in body
-    # And must NOT reuse the global account summary.
+def test_summary_is_canonical_mart_summary():
+    # PR-ADS-126: the country summary is the canonical mart summary (the SAME
+    # truth every revenue page shares), not a page-local recomputation or a stale
+    # global account summary.
+    body = _fn("function renderRoasCountriesPage", span=2600)
+    assert "renderMartSummaryStrip(data)" in body
     assert "roasRevenueSummary" not in body
-    fn = _fn("function summarizeRoasCountryRows", span=900)
-    assert "reduce(" in fn
-    assert "totals.spend > 0 ? totals.won_revenue / totals.spend : null" in fn
 
 
 # ── 6. Summary and table use the multiple ROAS formatter ─────────────────────
