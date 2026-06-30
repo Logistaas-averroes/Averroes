@@ -51,11 +51,36 @@ CANONICAL = {
     ],
 }
 
-# Geo (campaign-country) spend, native GBP — reconciles with canonical (10,000).
+# Legacy run-scoped geo (campaign-country) spend, native GBP. Used by Revenue by
+# Source; reconciles with canonical (10,000).
 GEO_ROWS = [
     {"campaign_name": "Brand - UK", "country": "United Kingdom", "spend": 6000.0},
     {"campaign_name": "Search - Global", "country": "Germany", "spend": 4000.0},
 ]
+
+# PR-ADS-124 canonical Google Ads geo (google_ads_geo_daily_spend) — the SAME
+# source as the reconciliation total AND the country-row source. Native GBP total
+# 10,000 reconciles with canonical campaign spend; per-country USD (8,000 + 5,000)
+# matches the canonical USD denominator (13,000).
+GEO_CANONICAL_TOTAL = {
+    "available": True, "has_rows": True,
+    "total_cost_micros": 10000_000_000, "total_spend": 10000.0,
+    "rows_counted": 2, "country_count": 2,
+    "currency_code": "GBP", "customer_id": "111",
+}
+GEO_BY_COUNTRY = {
+    "available": True, "has_rows": True,
+    "total_spend": 10000.0, "total_spend_usd": 13000.0, "fx_complete": True,
+    "currency_code": "GBP", "customer_id": "111", "reporting_currency": "USD",
+    "rows": [
+        {"country_criterion_id": "2826", "country_code": "GB",
+         "country_name": "United Kingdom", "cost_micros": 6000_000_000,
+         "spend": 6000.0, "spend_usd": 8000.0, "fx_complete": True},
+        {"country_criterion_id": "2276", "country_code": "DE",
+         "country_name": "Germany", "cost_micros": 4000_000_000,
+         "spend": 4000.0, "spend_usd": 5000.0, "fx_complete": True},
+    ],
+}
 
 # Verified coverage chunk spanning the whole window -> coverage complete.
 COVERAGE_COMPLETE = [
@@ -126,13 +151,16 @@ CANONICAL_FX_INCOMPLETE = {
 }
 
 
-def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None):
+def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
+                   geo_total=None, geo_by_country=None):
     """Patch the durable repository so every revenue service reads one dataset."""
     import db.revenue_repository as repo
 
     won = won_rows if won_rows is not None else [WON_ROW_MAPPED]
     chunks = coverage if coverage is not None else COVERAGE_COMPLETE
     canon = canonical if canonical is not None else CANONICAL
+    geo_tot = geo_total if geo_total is not None else GEO_CANONICAL_TOTAL
+    geo_country = geo_by_country if geo_by_country is not None else GEO_BY_COUNTRY
 
     monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "Europe/London")
     monkeypatch.setattr(
@@ -156,6 +184,13 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None)
     monkeypatch.setattr(
         repo, "fetch_canonical_campaign_spend",
         lambda s, e: dict(canon),
+    )
+    # PR-ADS-124 canonical Google Ads geo source (reconciliation + country rows).
+    monkeypatch.setattr(
+        repo, "fetch_geo_daily_spend_total", lambda s, e: dict(geo_tot),
+    )
+    monkeypatch.setattr(
+        repo, "fetch_geo_daily_spend_by_country", lambda s, e: dict(geo_country),
     )
     monkeypatch.setattr(
         repo, "fetch_spend_coverage",
@@ -261,6 +296,28 @@ def test_country_cannot_invent_spend_beyond_mart(monkeypatch):
     # Country rows come from the same source; the page cannot exceed the mart.
     assert mart_country_spend == page_country_spend
     assert mart_country_spend <= mart["summary"]["spend_usd"] + 0.01
+
+
+# ── 3b. Country view is backed by the canonical geo source (PR-ADS-124) ─────
+
+def test_country_view_uses_canonical_geo_source(monkeypatch):
+    # After rebasing onto PR-ADS-124, the mart's country rows must come from the
+    # canonical google_ads_geo_daily_spend source (USD), NOT the legacy geo table.
+    _patch_durable(monkeypatch)
+    from services.revenue_attribution_service import build_revenue_attribution
+    from services.revenue_decision_mart import build_revenue_decision_mart
+
+    core = build_revenue_attribution(WINDOW, now=NOW)
+    assert core["source_health"]["geo_country_source"] == "canonical_google_ads_api"
+
+    mart = build_revenue_decision_mart(view="country", window=WINDOW, now=NOW)
+    # Country rows are expressed in the canonical USD denominator and reconcile
+    # exactly with the canonical spend truth — never the legacy native total.
+    country_spend = round(sum(r["spend"] for r in mart["rows"]), 2)
+    assert country_spend == mart["summary"]["spend_usd"] == 13000.0
+    assert mart["spend_truth"]["country_spend_status"] == "verified"
+    countries = {r["country"] for r in mart["rows"]}
+    assert {"United Kingdom", "Germany"} <= countries
 
 
 # ── 4. Revenue by Source Google Ads spend equals mart Google Ads spend ──────
@@ -416,16 +473,13 @@ def test_audit_compares_every_page_against_the_mart(monkeypatch):
 
 
 def test_audit_flags_geo_reconciliation_difference(monkeypatch):
-    # Break geo<->canonical reconciliation: geo total no longer matches canonical.
-    import db.revenue_repository as repo
-    _patch_durable(monkeypatch)
-    monkeypatch.setattr(
-        repo, "fetch_campaign_country_spend",
-        lambda s, e: {"available": True,
-                      "rows": [{"campaign_name": "Brand - UK",
-                                "country": "United Kingdom", "spend": 1000.0}],
-                      "coverage_start": "2026-01-01", "coverage_end": "2026-06-22"},
-    )
+    # Break geo<->canonical reconciliation by making the canonical Google Ads geo
+    # total (PR-ADS-124 source) no longer match the canonical campaign total.
+    broken_total = {"available": True, "has_rows": True,
+                    "total_cost_micros": 1000_000_000, "total_spend": 1000.0,
+                    "rows_counted": 1, "country_count": 1,
+                    "currency_code": "GBP", "customer_id": "111"}
+    _patch_durable(monkeypatch, geo_total=broken_total)
     from services.revenue_decision_mart import build_revenue_decision_mart, \
         build_revenue_performance_audit
 
