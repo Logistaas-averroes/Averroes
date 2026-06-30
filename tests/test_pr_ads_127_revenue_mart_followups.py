@@ -115,22 +115,22 @@ def test_country_unavailable_uses_no_geo_wording(monkeypatch):
 
 
 def test_country_card_copy_branches_on_status():
-    fn = _slice("function renderCountrySpendUnreconciledState", span=1300)
-    # The card takes the cause and renders cause-specific copy.
-    assert "function renderCountrySpendUnreconciledState(status)" in JS
+    # PR-ADS-128: the card takes the whole spend_truth and renders cause-specific
+    # copy (mismatch vs unavailable) plus status chips.
+    fn = _slice("function renderCountrySpendUnreconciledState", span=1800)
+    assert "function renderCountrySpendUnreconciledState(spendTruth)" in JS
     assert 'status === "mismatch"' in fn
     # Mismatch wording (geo exists but doesn't reconcile).
     assert "does not reconcile" in fn
     # No-geo wording (nothing to reconcile yet — run the geo sync).
     assert "no canonical Google Ads geo" in fn
-    assert "Country geo spend unavailable" in fn
     # Both still surface the recovery CTA.
     assert "roasCountryCtaButtons()" in fn
 
 
 def test_country_call_site_passes_status():
     page = _slice("function renderRoasCountriesPage", span=2600)
-    assert "renderCountrySpendUnreconciledState(st.country_spend_status)" in page
+    assert "renderCountrySpendUnreconciledState(st)" in page
 
 
 # ── Read-only doctrine preserved ────────────────────────────────────────────

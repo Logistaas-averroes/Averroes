@@ -552,4 +552,6 @@ def test_spend_truth_panel_and_gates_present():
     assert "Spend coverage incomplete — ROAS unavailable" in JS
     # Country page reconciliation gate.
     assert "country_spend_reconciled === false" in JS
-    assert "Country spend coverage incomplete — ROAS unavailable" in JS
+    # PR-ADS-128 reworded the country blocked card with cause-specific copy; the
+    # reconciliation gate still blocks the trusted ROAS table.
+    assert "Country ROAS is blocked" in JS

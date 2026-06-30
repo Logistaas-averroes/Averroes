@@ -67,7 +67,10 @@ def test_decision_table_has_min_width_in_scroll():
 def test_decision_column_nowrap_and_min_width():
     block = _css_block(".revenue-decision-table th:last-child,\n.revenue-decision-table td:last-child")
     assert "white-space: nowrap" in block
-    assert re.search(r"min-width:\s*120px", block)
+    # PR-ADS-128: Decision column widened (150px) + explicit right padding so the
+    # badge is never clipped against the table edge.
+    assert re.search(r"min-width:\s*150px", block)
+    assert re.search(r"padding-right:\s*24px", block)
 
 
 def test_campaign_name_column_wraps_normally():

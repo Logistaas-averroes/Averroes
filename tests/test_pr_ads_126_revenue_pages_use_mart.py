@@ -144,11 +144,13 @@ def test_country_mismatch_blocks_trusted_table_in_ui():
     body = _slice("function renderRoasCountriesPage", span=2600)
     # Country readiness is the mart's verdict; mismatch/unavailable blocks the table.
     assert 'country_spend_status !== "verified"' in body
-    # PR-ADS-127: the card is now given the cause so its copy matches it.
-    assert "renderCountrySpendUnreconciledState(st.country_spend_status)" in body
-    card = _slice("function renderCountrySpendUnreconciledState", span=1100)
-    assert "Country spend coverage incomplete" in card  # mismatch wording
-    assert "Country geo spend unavailable" in card       # no-geo wording (distinct)
+    # PR-ADS-128: the card is given the whole spend_truth so its copy + status
+    # chips match the cause.
+    assert "renderCountrySpendUnreconciledState(st)" in body
+    card = _slice("function renderCountrySpendUnreconciledState", span=1800)
+    assert "Country ROAS is blocked" in card
+    assert "does not reconcile" in card                 # mismatch wording
+    assert "no canonical Google Ads geo spend" in card  # no-geo wording (distinct)
     # The mismatch guard returns before any trusted table render.
     i_guard = body.find('country_spend_status !== "verified"')
     i_table = body.find("renderRoasCountryTable")
@@ -176,7 +178,7 @@ def test_revenue_health_renders_parity_panel():
     health = _slice("async function loadRevenueHealth", span=2400)
     assert "/api/revenue-performance/audit?window=" in health
     assert "renderRevenuePageParity" in health
-    panel = _slice("function renderRevenuePageParity", span=1800)
+    panel = _slice("function renderRevenuePageParity", span=2800)
     assert "Revenue Page Parity" in panel
     for col in (">Page<", ">Metric<", ">Current<", ">Mart<", ">Difference<", ">Status<", ">Reason<"):
         assert col in panel, f"parity panel missing column {col}"

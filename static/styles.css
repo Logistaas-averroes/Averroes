@@ -4117,33 +4117,88 @@ body.is-revenue-page #monitoring-banner {
   overflow: hidden;
 }
 
-.revenue-table-scroll {
+.revenue-table-scroll,
+.revenue-page-parity .table-scroll {
   width: 100%;
   max-width: 100%;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }
 
-/* Scoped to the scroll wrapper so other .revenue-decision-table consumers
-   (e.g. the deals ledger table) are unaffected by the min-width. */
-.revenue-table-scroll .revenue-decision-table {
+/* PR-ADS-128: every revenue decision table scrolls horizontally rather than
+   clipping the right-side Decision column. Scoped to revenue scroll wrappers so
+   other .revenue-decision-table consumers are unaffected by the min-width. */
+.revenue-table-scroll .revenue-decision-table,
+.revenue-page-parity .revenue-decision-table {
   min-width: 1120px;
   width: 100%;
+  table-layout: auto;
 }
 
-/* Keep the Decision column compact and never clipped. */
-.revenue-decision-table th:last-child,
-.revenue-decision-table td:last-child {
-  min-width: 120px;
+.revenue-decision-table th,
+.revenue-decision-table td {
   white-space: nowrap;
 }
 
-/* Campaign / country name + aliases wrap normally instead of forcing the table
-   ever wider (the global .roas-table td nowrap would otherwise clip them). */
+/* Keep the Decision column (last) fully visible: an explicit width plus right
+   padding so the badge never touches the table edge or gets clipped. */
+.revenue-decision-table th:last-child,
+.revenue-decision-table td:last-child {
+  min-width: 150px;
+  padding-right: 24px;
+  white-space: nowrap;
+}
+
+/* Campaign / country name + aliases (first column) wrap normally instead of
+   forcing the table ever wider (the global .roas-table td nowrap would clip). */
+.revenue-decision-table th:first-child,
 .revenue-decision-table td:first-child {
   white-space: normal;
-  min-width: 200px;
+  min-width: 260px;
   max-width: 340px;
+}
+
+/* PR-ADS-128: scannable Revenue Page Parity summary above the table. */
+.revenue-parity-summary {
+  margin: 12px 16px 4px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  background: var(--color-surface, #fff);
+}
+.revenue-parity-summary--ok {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+.revenue-parity-summary--warning {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+.revenue-parity-summary__verdict {
+  font-size: 14px;
+}
+.revenue-parity-drift {
+  margin-top: 6px;
+  font-size: 13px;
+  color: #991b1b;
+}
+.revenue-parity-drift ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+/* Failed parity rows: obvious but not huge. */
+.revenue-parity-table td .parity-status--warning {
+  font-weight: 700;
+}
+
+/* PR-ADS-128: "Current status" label inside the country blocked card. */
+.revenue-status-label {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: #64748b;
 }
 
 /* ── PR-ADS-123: Google Ads Spend summary strip ─────────────────────────────
