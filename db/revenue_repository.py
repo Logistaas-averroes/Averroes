@@ -839,6 +839,124 @@ def fetch_account_time_zone() -> str | None:
         return None
 
 
+def fetch_campaign_daily_spend_local(
+    campaign_id: str, start: date | None, end: date, customer_id: str | None = None
+) -> dict:
+    """Local canonical daily spend for ONE campaign over the window (PR-ADS-122).
+
+    The per-campaign drilldown source: one aggregated row per spend_date so the
+    daily breakdown can prove the campaign's local total date by date. Aggregates
+    raw cost_micros (no early rounding). ``rows_counted`` is the count of distinct
+    spend_date rows summed (which equals the underlying row count because the
+    table is UNIQUE per customer_id+campaign_id+spend_date — a property the
+    duplicate check verifies). Read-only.
+
+    Returns {available, customer_id, currency_code, campaign_id, campaign_name,
+             rows:[{spend_date, cost_micros, spend}], total_cost_micros,
+             total_spend, rows_counted, coverage_start, coverage_end}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.spend_date,
+                           SUM(s.cost_micros)::bigint AS cost_micros,
+                           COUNT(*) AS row_count
+                    FROM google_ads_campaign_daily_spend s
+                    WHERE s.campaign_id = %s
+                      AND (%s::text IS NULL OR s.customer_id = %s)
+                      AND (%s::date IS NULL OR s.spend_date >= %s) AND s.spend_date <= %s
+                    GROUP BY s.spend_date
+                    ORDER BY s.spend_date
+                    """,
+                    (str(campaign_id), customer_id, customer_id, start, start, end),
+                )
+                rows = []
+                total = 0
+                rows_counted = 0
+                for r in _rows_as_dicts(cur):
+                    micros = int(r.get("cost_micros") or 0)
+                    total += micros
+                    rows_counted += int(r.get("row_count") or 0)
+                    rows.append({
+                        "spend_date": _as_date(r.get("spend_date")),
+                        "cost_micros": micros,
+                        "spend": micros / 1_000_000,
+                    })
+                cur.execute(
+                    """
+                    SELECT MIN(spend_date) AS cstart, MAX(spend_date) AS cend,
+                           MIN(customer_id) AS customer_id, MIN(currency_code) AS currency,
+                           MAX(campaign_name) AS campaign_name
+                    FROM google_ads_campaign_daily_spend
+                    WHERE campaign_id = %s
+                      AND (%s::text IS NULL OR customer_id = %s)
+                      AND (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    """,
+                    (str(campaign_id), customer_id, customer_id, start, start, end),
+                )
+                meta = cur.fetchone() or (None, None, None, None, None)
+            return {
+                "available": True,
+                "rows": rows,
+                "total_cost_micros": total,
+                "total_spend": total / 1_000_000,
+                "rows_counted": rows_counted,
+                "customer_id": meta[2],
+                "currency_code": meta[3],
+                "campaign_id": str(campaign_id),
+                "campaign_name": meta[4],
+                "coverage_start": _as_date(meta[0]),
+                "coverage_end": _as_date(meta[1]),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_campaign_daily_spend_local failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
+def fetch_campaign_spend_duplicate_dates(
+    campaign_id: str, start: date | None, end: date, customer_id: str | None = None
+) -> dict:
+    """Detect duplicate local canonical rows per customer+campaign+spend_date.
+
+    PR-ADS-122 integrity proof: the canonical table is UNIQUE on
+    (customer_id, campaign_id, spend_date), so a duplicate would corrupt the
+    local total. This returns any (customer_id, spend_date) carrying more than
+    one row for the campaign — expected to be empty. Read-only.
+
+    Returns {available, duplicates:[{customer_id, spend_date, row_count}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "duplicates": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT customer_id, spend_date, COUNT(*) AS row_count
+                    FROM google_ads_campaign_daily_spend
+                    WHERE campaign_id = %s
+                      AND (%s::text IS NULL OR customer_id = %s)
+                      AND (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    GROUP BY customer_id, spend_date
+                    HAVING COUNT(*) > 1
+                    """,
+                    (str(campaign_id), customer_id, customer_id, start, start, end),
+                )
+                duplicates = [{
+                    "customer_id": r.get("customer_id"),
+                    "spend_date": _as_date(r.get("spend_date")),
+                    "row_count": int(r.get("row_count") or 0),
+                } for r in _rows_as_dicts(cur)]
+            return {"available": True, "duplicates": duplicates}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_campaign_spend_duplicate_dates failed: %s", exc)
+        return {"available": False, "duplicates": []}
+
+
 def fetch_fx_coverage(start: date | None, end: date,
                       base_currency: str, quote_currency: str = FX_REPORTING_CURRENCY) -> dict:
     """FX coverage over the canonical spend dates in the window (PR-ADS-119).

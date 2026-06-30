@@ -9279,7 +9279,7 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
     }
     return `
     <tr>
-      <td>${escapeHtml(r.campaign_name || "")}${campaignAliasHtml(r.aliases)}</td>
+      <td>${escapeHtml(r.campaign_name || "")}${campaignAliasHtml(r.aliases)}${unmapped ? "" : spendProofButton(r.campaign_id, r.campaign_name)}</td>
       <td>${spendCell}</td>
       <td>${fmtCount(r.leads)}</td>
       <td>${fmtCount(r.sqls)}</td>
@@ -9309,6 +9309,237 @@ document.addEventListener("click", (e) => {
   if (!btn) return;
   roasCampaignFilter = btn.dataset.roasCampaignFilter || "all";
   renderRoasCampaignsPage();
+});
+
+// ── PR-ADS-122: Campaign spend reconciliation drilldown ("View spend proof") ──
+// A compact modal that proves a ROAS campaign row's spend: local canonical DB
+// total vs a fresh Google Ads campaign-level API total, with a daily breakdown
+// and an ad-group status breakdown. The UI never hides a mismatch.
+
+let _spendProofOpen = false;
+let _spendProofReqId = 0;
+
+// Only a row with a real, immutable Google Ads campaign_id can be proven. The
+// normalized fallback key ("unknown" / a slug) is not a queryable campaign_id.
+function spendProofButton(campaignId, campaignName) {
+  const id = campaignId == null ? "" : String(campaignId).trim();
+  if (!id || id === "unknown") return "";
+  if (!/^\d+$/.test(id)) return "";  // real Google Ads campaign ids are numeric
+  return `<button type="button" class="spend-proof-link"
+    data-spend-proof-campaign="${escapeHtml(id)}"
+    data-spend-proof-name="${escapeHtml(campaignName || "")}">View spend proof</button>`;
+}
+
+function spendProofStatusBadge(status) {
+  const map = {
+    match: ["spend-proof-badge--ok", "Reconciled"],
+    mismatch: ["spend-proof-badge--mismatch", "Mismatch"],
+    unavailable: ["spend-proof-badge--unknown", "API total unavailable"],
+  };
+  const [cls, label] = map[status] || map.unavailable;
+  return `<span class="spend-proof-badge ${cls}">${label}</span>`;
+}
+
+function spendProofVariance(value, cur) {
+  if (value === null || value === undefined) return "—";
+  const sign = value > 0 ? "+" : "";
+  return sign + fmtCurrency(value, cur);
+}
+
+function renderSpendProofDaily(daily, cur) {
+  if (!daily || !daily.length) {
+    return '<p class="spend-proof-empty">No daily spend rows for this campaign in the window.</p>';
+  }
+  const body = daily.map((d) => `
+    <tr class="${d.variance && Math.abs(d.variance) > 0.005 ? "spend-proof-row--diff" : ""}">
+      <td>${escapeHtml(d.date || "—")}</td>
+      <td>${fmtCurrency(d.local_cost, cur)}</td>
+      <td>${d.api_cost === null || d.api_cost === undefined ? "—" : fmtCurrency(d.api_cost, cur)}</td>
+      <td>${spendProofVariance(d.variance, cur)}</td>
+      <td><span class="spend-proof-cov spend-proof-cov--${escapeHtml(d.coverage_state || "unverified")}">${escapeHtml(d.coverage_state || "unverified")}</span></td>
+    </tr>`).join("");
+  return `
+    <table class="spend-proof-daily">
+      <thead><tr><th>Date</th><th>Local cost</th><th>API cost</th><th>Variance</th><th>Coverage</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
+function renderSpendProofAdGroups(ag, cur) {
+  if (!ag || !ag.available) {
+    return '<p class="spend-proof-empty">Ad-group-level spend was not available — a paused/removed ad-group filter could not be confirmed or ruled out.</p>';
+  }
+  const rows = (ag.statuses || []).map((s) => `
+    <tr>
+      <td>${escapeHtml(s.status || "—")}</td>
+      <td>${fmtCurrency(s.spend, cur)}</td>
+      <td>${fmtCount(s.ad_group_count)}</td>
+    </tr>`).join("");
+  return `
+    <table class="spend-proof-adgroups">
+      <thead><tr><th>Ad group status</th><th>Spend</th><th>Ad groups</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="spend-proof-adgroup-totals">
+      <span>Enabled only: <strong>${fmtCurrency(ag.enabled_only, cur)}</strong></span>
+      <span>Paused/removed: <strong>${fmtCurrency(ag.paused_removed, cur)}</strong></span>
+    </div>`;
+}
+
+function renderSpendProof(data) {
+  const cur = data.currency_code || "GBP";
+  const aliases = (data.mapped_aliases && data.mapped_aliases.length)
+    ? escapeHtml(data.mapped_aliases.join("; ")) : "—";
+  const causes = (data.possible_causes || []).map((c) => `<li>${escapeHtml(c)}</li>`).join("");
+  const money = (v) => (v === null || v === undefined ? "Unavailable" : fmtCurrency(v, cur));
+  const rows = [
+    ["Campaign ID", escapeHtml(data.campaign_id || "—")],
+    ["Canonical campaign name", escapeHtml(data.campaign_name || "—")],
+    ["Mapped aliases", aliases],
+    ["Window", `${escapeHtml(data.date_from || "—")} → ${escapeHtml(data.date_to || "—")}`],
+    ["Account timezone", escapeHtml(data.account_time_zone || "—")],
+    ["Native currency", escapeHtml(cur)],
+    ["Coverage status", escapeHtml(data.coverage_status || "—")],
+    ["Rows counted", fmtCount(data.rows_counted)],
+    ["Date chunks verified", fmtCount(data.date_chunks_verified)],
+  ];
+  // PR-ADS-122: the totals are kept strictly separate so the campaign-level
+  // reconciliation is never conflated with the Google Ads UI enabled-only view.
+  const primaryRows = [
+    ["Local canonical campaign total", money(data.local_canonical_campaign_total)],
+    ["Fresh campaign API total (all statuses)", money(data.fresh_campaign_api_total_all_statuses)],
+    ["Variance — local vs campaign API", `${spendProofVariance(data.variance_local_vs_fresh_campaign_api, cur)}${data.variance_local_vs_fresh_campaign_api_pct === null || data.variance_local_vs_fresh_campaign_api_pct === undefined ? "" : ` (${data.variance_local_vs_fresh_campaign_api_pct}%)`}`],
+  ];
+  const uiRows = [
+    ["Ad-group total (all statuses)", money(data.fresh_ad_group_total_all_statuses)],
+    ["Ad-group enabled-only", money(data.fresh_ad_group_total_enabled_only)],
+    ["Ad-group paused/removed", money(data.fresh_ad_group_total_paused_removed)],
+    ["Google Ads UI filter estimate", money(data.google_ui_filter_estimate)],
+    ["Variance — UI estimate vs enabled-only", spendProofVariance(data.variance_google_ui_filter_estimate_vs_enabled_only, cur)],
+    ["Variance — local vs ad-group all statuses", spendProofVariance(data.variance_local_vs_ad_group_all_statuses, cur)],
+  ];
+  const dupCount = (data.duplicate_local_rows || []).length;
+  const dupNote = dupCount
+    ? `<div class="spend-proof-warn">⚠ ${dupCount} duplicate local row date(s) detected for this campaign.</div>`
+    : "";
+  return `
+    <div class="spend-proof-overlay">
+      <div class="spend-proof-modal" role="dialog" aria-modal="true" aria-label="Campaign spend proof">
+        <header class="spend-proof-header">
+          <div>
+            <div class="spend-proof-eyebrow">Spend reconciliation</div>
+            <h3>${escapeHtml(data.campaign_name || "Campaign")} ${spendProofStatusBadge(data.status)}</h3>
+          </div>
+          <button type="button" class="spend-proof-close" data-spend-proof-x aria-label="Close">×</button>
+        </header>
+        <div class="spend-proof-body">
+          ${dupNote}
+          <dl class="spend-proof-grid">
+            ${rows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${v}</dd></div>`).join("")}
+          </dl>
+          <h4 class="spend-proof-subhead">Primary reconciliation — local canonical vs fresh campaign API</h4>
+          <p class="spend-proof-note">These are expected to match. A mismatch points to stale local spend, a date-boundary issue, or a campaign identity/mapping issue — not the ad-group filter.</p>
+          <dl class="spend-proof-grid">
+            ${primaryRows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${v}</dd></div>`).join("")}
+          </dl>
+          <h4 class="spend-proof-subhead">Google Ads UI estimate — enabled-only ad-group view</h4>
+          <p class="spend-proof-note">Only the enabled-only ad-group total explains the Google Ads UI screenshot (Ad group status: Enabled). It is not assumed equal to the campaign-level API total.</p>
+          <dl class="spend-proof-grid">
+            ${uiRows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${v}</dd></div>`).join("")}
+          </dl>
+          <h4 class="spend-proof-subhead">Ad-group status breakdown</h4>
+          ${renderSpendProofAdGroups(data.ad_group_breakdown, cur)}
+          <h4 class="spend-proof-subhead">Daily breakdown</h4>
+          ${renderSpendProofDaily(data.daily, cur)}
+          <h4 class="spend-proof-subhead">Possible causes</h4>
+          <ul class="spend-proof-causes">${causes || "<li>—</li>"}</ul>
+        </div>
+      </div>
+    </div>`;
+}
+
+function spendProofContainer() {
+  let el = document.getElementById("spend-proof-root");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "spend-proof-root";
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+function closeSpendProof() {
+  _spendProofOpen = false;
+  const el = document.getElementById("spend-proof-root");
+  if (el) el.innerHTML = "";
+}
+
+async function openSpendProof(campaignId, campaignName) {
+  const id = (campaignId || "").trim();
+  if (!id) return;
+  _spendProofOpen = true;
+  const reqId = ++_spendProofReqId;
+  const window_ = getRoasBusinessWindow();
+  const root = spendProofContainer();
+  root.innerHTML = `
+    <div class="spend-proof-overlay">
+      <div class="spend-proof-modal" role="dialog" aria-modal="true">
+        <header class="spend-proof-header">
+          <div><div class="spend-proof-eyebrow">Spend reconciliation</div>
+          <h3>${escapeHtml(campaignName || "Campaign")}</h3></div>
+          <button type="button" class="spend-proof-close" data-spend-proof-x aria-label="Close">×</button>
+        </header>
+        <div class="spend-proof-body"><p class="spend-proof-empty">Loading spend proof…</p></div>
+      </div>
+    </div>`;
+  try {
+    const res = await fetch(
+      `/api/google-ads-spend-reconcile/campaign?window=${encodeURIComponent(window_)}&campaign_id=${encodeURIComponent(id)}`,
+      { credentials: "same-origin" });
+    if (reqId !== _spendProofReqId || !_spendProofOpen) return;
+    if (!res.ok) {
+      root.innerHTML = `
+        <div class="spend-proof-overlay">
+          <div class="spend-proof-modal" role="dialog" aria-modal="true">
+            <header class="spend-proof-header"><h3>Spend proof unavailable</h3>
+            <button type="button" class="spend-proof-close" data-spend-proof-x aria-label="Close">×</button></header>
+            <div class="spend-proof-body"><p class="spend-proof-empty">Could not load reconciliation for this campaign.</p></div>
+          </div>
+        </div>`;
+      return;
+    }
+    const data = await res.json();
+    if (reqId !== _spendProofReqId || !_spendProofOpen) return;
+    root.innerHTML = renderSpendProof(data);
+  } catch (err) {
+    console.error("[openSpendProof]", err);
+    if (reqId !== _spendProofReqId || !_spendProofOpen) return;
+    root.innerHTML = `
+      <div class="spend-proof-overlay">
+        <div class="spend-proof-modal" role="dialog" aria-modal="true">
+          <header class="spend-proof-header"><h3>Spend proof error</h3>
+          <button type="button" class="spend-proof-close" data-spend-proof-x aria-label="Close">×</button></header>
+          <div class="spend-proof-body"><p class="spend-proof-empty">Error loading spend reconciliation.</p></div>
+        </div>
+      </div>`;
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const open = e.target.closest("[data-spend-proof-campaign]");
+  if (open) {
+    openSpendProof(open.dataset.spendProofCampaign, open.dataset.spendProofName);
+    return;
+  }
+  if (e.target.closest("[data-spend-proof-x]")) { closeSpendProof(); return; }
+  // Backdrop click (only when the overlay itself is the target) closes the modal.
+  if (e.target.classList && e.target.classList.contains("spend-proof-overlay")) {
+    closeSpendProof();
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && _spendProofOpen) closeSpendProof();
 });
 
 // ── ROAS by Country ───────────────────────────────────────────────────────

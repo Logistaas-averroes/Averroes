@@ -5106,3 +5106,145 @@ a {
   color: var(--color-text-muted, #64748b);
   margin-top: 3px;
 }
+
+/* PR-ADS-122 — campaign spend reconciliation drilldown ("View spend proof"). */
+.spend-proof-link {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-accent, #2563eb);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.spend-proof-link:hover { color: var(--color-accent-strong, #1d4ed8); }
+
+.spend-proof-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 5vh 16px;
+  overflow-y: auto;
+}
+.spend-proof-modal {
+  background: var(--color-surface, #fff);
+  color: var(--color-text, #0f172a);
+  border-radius: 12px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+  width: min(720px, 100%);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.spend-proof-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
+}
+.spend-proof-header h3 { margin: 2px 0 0; font-size: 1.05rem; }
+.spend-proof-eyebrow {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted, #64748b);
+}
+.spend-proof-close {
+  border: none;
+  background: none;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--color-text-muted, #64748b);
+}
+.spend-proof-body { padding: 18px 22px; overflow-y: auto; }
+.spend-proof-subhead { margin: 20px 0 8px; font-size: 0.85rem; }
+.spend-proof-note {
+  margin: 0 0 10px;
+  font-size: 0.78rem;
+  color: var(--color-text-muted, #64748b);
+}
+.spend-proof-empty { color: var(--color-text-muted, #64748b); font-size: 0.85rem; }
+
+.spend-proof-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  vertical-align: middle;
+}
+.spend-proof-badge--ok { background: #dcfce7; color: #166534; }
+.spend-proof-badge--mismatch { background: #fee2e2; color: #991b1b; }
+.spend-proof-badge--unknown { background: #e2e8f0; color: #475569; }
+
+.spend-proof-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 18px;
+  margin: 0;
+}
+.spend-proof-grid dt {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted, #64748b);
+}
+.spend-proof-grid dd { margin: 1px 0 0; font-size: 0.9rem; font-weight: 600; }
+
+.spend-proof-warn {
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 0.8rem;
+  margin-bottom: 14px;
+}
+
+.spend-proof-daily,
+.spend-proof-adgroups {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.spend-proof-daily th,
+.spend-proof-daily td,
+.spend-proof-adgroups th,
+.spend-proof-adgroups td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
+}
+.spend-proof-row--diff { background: #fff7ed; }
+.spend-proof-cov {
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.spend-proof-cov--verified { background: #dcfce7; color: #166534; }
+.spend-proof-cov--unverified { background: #fee2e2; color: #991b1b; }
+
+.spend-proof-adgroup-totals {
+  display: flex;
+  gap: 18px;
+  margin-top: 8px;
+  font-size: 0.8rem;
+  color: var(--color-text-muted, #64748b);
+}
+.spend-proof-causes {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 0.82rem;
+}
+.spend-proof-causes li { margin-bottom: 4px; }
