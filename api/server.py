@@ -6504,6 +6504,41 @@ async def get_google_ads_spend_audit(
         raise HTTPException(status_code=500, detail="Google Ads spend audit failed") from exc
 
 
+@app.get("/api/google-ads-spend-reconcile/campaign")
+async def get_google_ads_spend_reconcile_campaign(
+    window: str = Query(default="ytd"),
+    campaign_id: str = Query(...),
+    include_ad_groups: bool = Query(default=True),
+    _user=Depends(require_auth),
+):
+    """Campaign-level Google Ads spend reconciliation drilldown (PR-ADS-122).
+
+    Proves a single ROAS campaign row's spend by comparing, for the same
+    campaign and window: the LOCAL canonical DB total, a FRESH campaign-level
+    Google Ads API total, and an optional ad-group-level status breakdown
+    (enabled / paused / removed). Returns a daily breakdown plus the explicit
+    variance, coverage status, rows counted, and verified date chunks.
+
+    Read-only — never writes to Google Ads and never changes the ROAS spend
+    source. Canonical spend stays the Google Ads campaign-level total unless this
+    reconciliation proves it wrong.
+    """
+    from services.spend_reconciliation_service import (  # noqa: PLC0415
+        build_campaign_spend_reconciliation,
+    )
+    if not (campaign_id or "").strip():
+        raise HTTPException(status_code=400, detail="campaign_id is required")
+    try:
+        return build_campaign_spend_reconciliation(
+            window, campaign_id, include_ad_groups=include_ad_groups)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("Campaign spend reconciliation failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Campaign spend reconciliation failed") from exc
+
+
 def _run_spend_backfill_worker(job_id: str, body: "SpendBackfillRequest") -> None:
     """Background worker for the Google Ads spend backfill (PR-ADS-118).
 

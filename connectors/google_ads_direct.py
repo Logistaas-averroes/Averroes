@@ -506,3 +506,133 @@ def fetch_account_daily_spend(start_date: str, end_date: str) -> dict:
         "source_query_version": ACCOUNT_SPEND_QUERY_VERSION,
         "rows": out,
     }
+
+
+# PR-ADS-122 — single-campaign reconciliation. A FRESH campaign-level total for
+# one campaign/date range, queried independently of the canonical backfill so a
+# ROAS campaign row can prove its spend against the live Google Ads API.
+CAMPAIGN_RECONCILE_QUERY_VERSION = "campaign_daily_by_id_v1"
+
+
+def fetch_campaign_daily_spend_for_campaign(
+    start_date: str, end_date: str, campaign_id: str
+) -> dict:
+    """Fresh Google Ads campaign-level daily spend for ONE campaign. Read-only.
+
+    The reconciliation truth source for PR-ADS-122: a live campaign-level query
+    filtered to a single campaign_id, fetched fresh (never the canonical table)
+    so the local canonical total can be checked against the API right now. Raw
+    micros are preserved (never rounded before aggregation). A pure SELECT that
+    never writes to Google Ads.
+
+    Returns {customer_id, currency_code, account_time_zone, campaign_id,
+             campaign_name, source_query_version,
+             rows:[{spend_date, cost_micros}]}.
+    """
+    client = build_google_ads_client()
+    customer_id = get_customer_id()
+    safe_campaign_id = str(campaign_id).strip()
+
+    query = f"""
+        SELECT
+          campaign.id,
+          campaign.name,
+          customer.currency_code,
+          customer.time_zone,
+          segments.date,
+          metrics.cost_micros
+        FROM campaign
+        WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
+          AND campaign.id = {safe_campaign_id}
+        ORDER BY segments.date
+    """
+
+    rows = _run_search_stream(client, customer_id, query)
+    currency_code = None
+    account_time_zone = None
+    campaign_name = None
+    out = []
+    for row in rows:
+        currency_code = row.customer.currency_code or currency_code
+        account_time_zone = row.customer.time_zone or account_time_zone
+        campaign_name = row.campaign.name or campaign_name
+        out.append({
+            "spend_date": row.segments.date,
+            "cost_micros": int(row.metrics.cost_micros),
+        })
+    logger.info(
+        "fetch_campaign_daily_spend_for_campaign: %d rows (campaign=%s, %s → %s)",
+        len(out), safe_campaign_id, start_date, end_date)
+    return {
+        "customer_id": str(customer_id),
+        "currency_code": currency_code,
+        "account_time_zone": account_time_zone,
+        "campaign_id": safe_campaign_id,
+        "campaign_name": campaign_name,
+        "source_query_version": CAMPAIGN_RECONCILE_QUERY_VERSION,
+        "rows": out,
+    }
+
+
+# PR-ADS-122 — ad-group-level spend WITH status, so the reconciliation can prove
+# whether a Google Ads UI "Ad group status: Enabled" filter explains a lower UI
+# total than the campaign-level (all-status) canonical spend.
+ADGROUP_RECONCILE_QUERY_VERSION = "adgroup_daily_v1"
+
+
+def fetch_ad_group_daily_spend(
+    start_date: str, end_date: str, campaign_id: str
+) -> dict:
+    """Ad-group-level daily spend with status for ONE campaign. Read-only.
+
+    PR-ADS-122 reconciliation evidence: the same campaign spend broken out by
+    ad group AND ad-group status (ENABLED / PAUSED / REMOVED). This proves
+    whether the Google Ads UI screenshot is lower because it filters to enabled
+    ad groups while the campaign-level total includes paused/removed ad-group
+    spend. Raw micros preserved. A pure SELECT — never writes to Google Ads.
+
+    Returns {customer_id, currency_code, campaign_id, source_query_version,
+             rows:[{ad_group_id, ad_group_name, ad_group_status, spend_date,
+                    cost_micros}]}.
+    """
+    client = build_google_ads_client()
+    customer_id = get_customer_id()
+    safe_campaign_id = str(campaign_id).strip()
+
+    query = f"""
+        SELECT
+          campaign.id,
+          ad_group.id,
+          ad_group.name,
+          ad_group.status,
+          customer.currency_code,
+          segments.date,
+          metrics.cost_micros
+        FROM ad_group
+        WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
+          AND campaign.id = {safe_campaign_id}
+        ORDER BY segments.date
+    """
+
+    rows = _run_search_stream(client, customer_id, query, raise_on_error=False)
+    currency_code = None
+    out = []
+    for row in rows:
+        currency_code = row.customer.currency_code or currency_code
+        out.append({
+            "ad_group_id": str(row.ad_group.id),
+            "ad_group_name": row.ad_group.name,
+            "ad_group_status": row.ad_group.status.name,
+            "spend_date": row.segments.date,
+            "cost_micros": int(row.metrics.cost_micros),
+        })
+    logger.info(
+        "fetch_ad_group_daily_spend: %d rows (campaign=%s, %s → %s)",
+        len(out), safe_campaign_id, start_date, end_date)
+    return {
+        "customer_id": str(customer_id),
+        "currency_code": currency_code,
+        "campaign_id": safe_campaign_id,
+        "source_query_version": ADGROUP_RECONCILE_QUERY_VERSION,
+        "rows": out,
+    }
