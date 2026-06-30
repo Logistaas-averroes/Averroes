@@ -107,12 +107,32 @@ SOURCE_REV_ROWS = [
 ]
 
 
-def _patch_durable(monkeypatch, *, coverage=None, won_rows=None):
+# Canonical spend with INCOMPLETE FX: USD cannot be computed safely, so the repo
+# returns total_spend_usd=None and fx_complete=False (never a guessed USD total).
+CANONICAL_FX_INCOMPLETE = {
+    "available": True,
+    "customer_id": "111",
+    "currency_code": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": False,
+    "fx_missing_days": 40,
+    "campaign_count": 2,
+    "total_spend": 10000.0,
+    "total_spend_usd": None,
+    "rows": [
+        {"campaign_name": "Brand - UK", "spend": 6000.0, "spend_usd": None},
+        {"campaign_name": "Search - Global", "spend": 4000.0, "spend_usd": None},
+    ],
+}
+
+
+def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None):
     """Patch the durable repository so every revenue service reads one dataset."""
     import db.revenue_repository as repo
 
     won = won_rows if won_rows is not None else [WON_ROW_MAPPED]
     chunks = coverage if coverage is not None else COVERAGE_COMPLETE
+    canon = canonical if canonical is not None else CANONICAL
 
     monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "Europe/London")
     monkeypatch.setattr(
@@ -135,7 +155,7 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None):
                         lambda: {"available": True, "datasets": {}})
     monkeypatch.setattr(
         repo, "fetch_canonical_campaign_spend",
-        lambda s, e: dict(CANONICAL),
+        lambda s, e: dict(canon),
     )
     monkeypatch.setattr(
         repo, "fetch_spend_coverage",
@@ -324,6 +344,45 @@ def test_roas_unavailable_when_spend_coverage_unsafe(monkeypatch):
     # Diagnostics explain why ROAS is withheld (never a silent empty).
     codes = {d["code"] for d in mart["diagnostics"]}
     assert "campaign_spend_coverage" in codes
+
+
+# ── 10b. FX incomplete: never label native GBP as USD ───────────────────────
+
+def test_fx_incomplete_never_labels_native_gbp_as_usd(monkeypatch):
+    # FX coverage is incomplete -> USD spend is unknowable. The mart must NOT
+    # fall back to the native GBP figure and call it USD.
+    _patch_durable(monkeypatch, canonical=CANONICAL_FX_INCOMPLETE)
+    from services.revenue_decision_mart import build_revenue_decision_mart
+
+    mart = build_revenue_decision_mart(view="campaign", window=WINDOW, now=NOW)
+
+    # FX incomplete => no trustworthy USD spend anywhere in spend_truth/summary.
+    assert mart["spend_truth"]["fx_status"] == "incomplete"
+    assert mart["spend_truth"]["usd_spend"] is None
+    assert mart["summary"]["spend_usd"] is None
+    assert mart["summary"]["roas"] is None
+
+    # Native spend is preserved ONLY in spend_truth.native_spend (as GBP), and is
+    # never surfaced as a USD figure in the summary.
+    assert mart["spend_truth"]["native_currency"] == "GBP"
+    assert mart["spend_truth"]["native_spend"] == 10000.0
+    assert mart["summary"]["spend_usd"] != 10000.0
+
+    # The same truth holds for every view (shared spend_truth).
+    for view in ("country", "source", "deal"):
+        other = build_revenue_decision_mart(view=view, window=WINDOW, now=NOW)
+        assert other["spend_truth"]["usd_spend"] is None
+        assert other["summary"]["spend_usd"] is None
+        assert other["summary"]["roas"] is None
+
+
+def test_fx_incomplete_emits_fx_diagnostic(monkeypatch):
+    _patch_durable(monkeypatch, canonical=CANONICAL_FX_INCOMPLETE)
+    from services.revenue_decision_mart import build_revenue_decision_mart
+
+    mart = build_revenue_decision_mart(view="campaign", window=WINDOW, now=NOW)
+    codes = {d["code"] for d in mart["diagnostics"]}
+    assert "fx_coverage" in codes
 
 
 # ── 11. Existing revenue endpoints can be compared against the mart ─────────

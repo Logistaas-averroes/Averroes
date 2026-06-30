@@ -157,14 +157,15 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
     re-derives ROAS from an unsafe denominator.
     """
     summary = core.get("summary") or {}
-    # Prefer the canonical USD spend; the revenue-attribution summary["spend"] is
-    # already this USD figure when FX is complete, and the native diagnostic
-    # otherwise. Keep them in lockstep.
-    spend_usd = spend_truth.get("usd_spend")
-    if spend_usd is None:
-        spend_usd = _round2(summary.get("spend"))
+    # spend_usd is STRICTLY the canonical USD spend. We never fall back to the
+    # revenue-attribution summary["spend"], which is the native diagnostic figure
+    # (GBP) whenever FX is incomplete — labelling native GBP as USD would be a
+    # silent currency lie. When FX coverage is not verified, spend_truth.usd_spend
+    # is None, so summary.spend_usd is None and ROAS (already gated upstream by
+    # spend_trusted) stays None too. Native spend lives only in
+    # spend_truth.native_spend.
     return {
-        "spend_usd": spend_usd,
+        "spend_usd": spend_truth.get("usd_spend"),
         "leads": summary.get("leads"),
         "sqls": summary.get("sqls"),
         "customers": summary.get("customers"),
