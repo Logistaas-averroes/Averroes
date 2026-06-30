@@ -839,6 +839,59 @@ def fetch_account_time_zone() -> str | None:
         return None
 
 
+def fetch_geo_daily_spend_total(start: date | None, end: date) -> dict:
+    """Canonical Google Ads geo (country) daily spend total for the window.
+
+    PR-ADS-124 geo-reconciliation source: the country-segmented spend total read
+    DIRECTLY from the canonical google_ads_geo_daily_spend table (Google Ads API
+    geographic_view), independent of the legacy run-scoped `geo` table. Used to
+    reconcile geo spend against the canonical campaign-level total before Country
+    ROAS is trusted. Aggregates raw cost_micros. Read-only.
+
+    Returns {available, has_rows, total_cost_micros, total_spend (native),
+    rows_counted, country_count, currency_code, customer_id, last_synced_at,
+    coverage_start, coverage_end}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "has_rows": False}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(cost_micros), 0)::bigint AS micros,
+                           COUNT(*) AS rows_counted,
+                           COUNT(DISTINCT country_criterion_id) AS country_count,
+                           MIN(spend_date) AS cstart, MAX(spend_date) AS cend,
+                           MIN(currency_code) AS currency,
+                           MIN(customer_id) AS customer_id,
+                           MAX(updated_at) AS last_synced_at
+                    FROM google_ads_geo_daily_spend
+                    WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    """,
+                    (start, start, end),
+                )
+                row = cur.fetchone() or (0, 0, 0, None, None, None, None, None)
+            micros = int(row[0] or 0)
+            rows_counted = int(row[1] or 0)
+            return {
+                "available": True,
+                "has_rows": rows_counted > 0,
+                "total_cost_micros": micros,
+                "total_spend": micros / 1_000_000,
+                "rows_counted": rows_counted,
+                "country_count": int(row[2] or 0),
+                "coverage_start": _as_date(row[3]),
+                "coverage_end": _as_date(row[4]),
+                "currency_code": row[5],
+                "customer_id": row[6],
+                "last_synced_at": str(row[7]) if row[7] else None,
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_geo_daily_spend_total failed: %s", exc)
+        return {"available": False, "has_rows": False}
+
+
 def fetch_campaign_daily_spend_local(
     campaign_id: str, start: date | None, end: date, customer_id: str | None = None
 ) -> dict:

@@ -1558,6 +1558,24 @@ a {
   border-bottom: 1px solid transparent;
 }
 
+/* PR-ADS-124: CSS failsafe — even if a JS lifecycle hook is missed, the global
+   ad-window bar, the page help button, and the monitoring warning banner are
+   never shown on a revenue & attribution page. applyPageChrome() toggles the
+   body.is-revenue-page class. */
+body.is-revenue-page #time-range-bar,
+body.is-revenue-page #page-help-btn,
+body.is-revenue-page #monitoring-banner {
+  display: none !important;
+}
+
+/* PR-ADS-124: recovery CTA buttons on the blocked ROAS by Country card. */
+.revenue-cta-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2, 8px);
+  margin-top: var(--space-4, 16px);
+}
+
 .monitoring-banner--yellow {
   background: var(--c-warning-bg);
   color: var(--c-warning);

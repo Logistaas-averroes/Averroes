@@ -640,3 +640,63 @@ def fetch_ad_group_daily_spend(
         "source_query_version": ADGROUP_RECONCILE_QUERY_VERSION,
         "rows": out,
     }
+
+
+# PR-ADS-124 — canonical Google Ads geo (country) daily spend. Bump when the
+# query shape changes.
+GEO_DAILY_SPEND_QUERY_VERSION = "geo_daily_v1"
+
+
+def fetch_geo_daily_spend(start_date: str, end_date: str) -> dict:
+    """Read canonical Google Ads geo (country) daily spend directly from the API.
+
+    PR-ADS-124 geo spend-truth source: a direct geographic_view query, segmented
+    by country criterion and campaign and date, independent of the legacy
+    run-scoped `geo` table or any Windsor data. Raw micros are preserved (never
+    rounded before aggregation). Read-only — a pure SELECT that never writes to
+    Google Ads. geographic_view may be unavailable for some account access
+    levels, in which case this returns zero rows (a missing range is NEVER
+    treated as zero spend by the caller's coverage ledger).
+
+    Returns {customer_id, currency_code, source_query_version,
+             rows:[{customer_id, currency_code, country_criterion_id,
+                    campaign_id, spend_date, cost_micros}]}.
+    """
+    client = build_google_ads_client()
+    customer_id = get_customer_id()
+
+    query = f"""
+        SELECT
+          campaign.id,
+          geographic_view.country_criterion_id,
+          customer.currency_code,
+          segments.date,
+          metrics.cost_micros
+        FROM geographic_view
+        WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
+        ORDER BY segments.date
+    """
+
+    # geographic_view may be unavailable for some account types; treat API errors
+    # as an intentional fallback and return an empty list (read-only).
+    rows = _run_search_stream(client, customer_id, query, raise_on_error=False)
+    currency_code = None
+    out = []
+    for row in rows:
+        currency_code = row.customer.currency_code or currency_code
+        out.append({
+            "customer_id": str(customer_id),
+            "currency_code": row.customer.currency_code,
+            "country_criterion_id": str(row.geographic_view.country_criterion_id),
+            "campaign_id": str(row.campaign.id),
+            "spend_date": row.segments.date,
+            "cost_micros": int(row.metrics.cost_micros),
+        })
+    logger.info(
+        "fetch_geo_daily_spend: %d rows (%s → %s)", len(out), start_date, end_date)
+    return {
+        "customer_id": str(customer_id),
+        "currency_code": currency_code,
+        "source_query_version": GEO_DAILY_SPEND_QUERY_VERSION,
+        "rows": out,
+    }

@@ -888,7 +888,16 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         ]
         # Geo reconciliation for Country ROAS: geo total must match canonical for
         # the same window within tolerance (compared in native currency).
-        geo_total_for_recon = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
+        # PR-ADS-124: prefer the canonical Google Ads API geo total (the durable
+        # google_ads_geo_daily_spend table, populated by the geo sync) when it has
+        # rows; otherwise fall back to the legacy geo-table sum. This moves country
+        # ROAS reconciliation onto canonical Google Ads API geo rows without ever
+        # loosening the rule (no geo rows → fall back, never a fabricated match).
+        geo_canonical = repo.fetch_geo_daily_spend_total(start_date, end_date)
+        if geo_canonical.get("available") and geo_canonical.get("has_rows"):
+            geo_total_for_recon = round(float(geo_canonical.get("total_spend") or 0.0), 2)
+        else:
+            geo_total_for_recon = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
         if canonical_total > 0:
             country_spend_reconciled = (
                 abs(geo_total_for_recon - canonical_total) / canonical_total

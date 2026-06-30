@@ -31,6 +31,28 @@ function isRevenuePage(pageId) {
   return REVENUE_PAGES.includes(pageId);
 }
 
+// PR-ADS-124: one shared chrome guard for the global ad-window bar, the page
+// help button, and the monitoring warning banner. Revenue & Attribution pages
+// are clean business-decision pages — none of that ad UI clutter belongs there.
+// Called from every route lifecycle point (showApp, navigate start + after
+// _currentPage is set, hashchange, and after the freshness/monitoring loaders)
+// so an in-flight async paint can never leak chrome back onto a revenue page.
+// A body.is-revenue-page class provides a CSS failsafe even if JS misses a spot.
+function applyPageChrome(page) {
+  const revenuePage = isRevenuePage(page);
+
+  const timeRangeBar = document.getElementById("time-range-bar");
+  if (timeRangeBar) timeRangeBar.hidden = revenuePage;
+
+  const helpBtn = document.getElementById("page-help-btn");
+  if (helpBtn && revenuePage) helpBtn.hidden = true;
+
+  const monitoringBanner = document.getElementById("monitoring-banner");
+  if (monitoringBanner && revenuePage) monitoringBanner.hidden = true;
+
+  if (document.body) document.body.classList.toggle("is-revenue-page", revenuePage);
+}
+
 // ── UI threshold state ─────────────────────────────────────────────────────
 
 // Default values matching config/thresholds.yaml doctrine — used as fallback
@@ -1025,6 +1047,9 @@ function showApp(user) {
   // Show/hide Revenue Health nav item (admin-only — PR-ADS-113)
   const revenueHealthNav = document.getElementById("nav-revenue-health-item");
   if (revenueHealthNav) revenueHealthNav.hidden = user.role !== "admin";
+  // PR-ADS-124: apply chrome immediately from the URL so revenue pages never
+  // flash the ad-window bar / monitoring banner before the first navigate().
+  applyPageChrome(hashToPage(window.location.hash));
   // Start with sidebar health check and data freshness
   loadSidebarHealth();
   loadDataFreshness();
@@ -1033,6 +1058,9 @@ function showApp(user) {
   // user navigates to any data page.  loadDatasetFreshness() guards against
   // missing DOM elements so it is safe to call outside the Health page.
   loadDatasetFreshness();
+  // Re-assert chrome after the async loaders are kicked off (belt-and-suspenders
+  // for the monitoring race): the current URL decides, not the fetch timing.
+  applyPageChrome(hashToPage(window.location.hash));
 }
 
 function applySidebarUser(user) {
@@ -1197,6 +1225,8 @@ function navigate(page, options) {
     return;
   }
 
+  applyPageChrome(page);  // PR-ADS-124: chrome guard at navigation start
+
   // Close help drawer on page change
   closeHelpDrawer();
 
@@ -1214,6 +1244,8 @@ function navigate(page, options) {
   // Suppress the global ad-window bar, the monitoring warning, the help button,
   // and the page-explanation block on these pages. Diagnostics live elsewhere
   // (System Status / Data Runs / Scheduler).
+  // PR-ADS-110/124: revenue pages suppress the ad-window bar + monitoring banner
+  // (also centralized in applyPageChrome; kept here too, idempotent).
   const revenuePage = isRevenuePage(page);
 
   const timeRangeBar = document.getElementById("time-range-bar");
@@ -1246,6 +1278,10 @@ function navigate(page, options) {
   });
 
   _currentPage = page;
+
+  // PR-ADS-124: re-assert chrome after _currentPage is set so any loader that
+  // keys off _currentPage (e.g. loadMonitoringStatus) lands on the right state.
+  applyPageChrome(page);
 
   // Update URL hash
   if (updateHash) {
@@ -1359,6 +1395,10 @@ async function loadDataFreshness() {
     } catch (_) { /* ignore — both sources unavailable */ }
   }
 
+  // PR-ADS-124: the freshness bar lives in the same chrome row — re-assert the
+  // guard after this async loader resolves so it never reappears on a revenue page.
+  applyPageChrome(_currentPage);
+
   // Both sources unavailable — show explicit DB-offline error.
   if (dbUnavailable && !latestRun) {
     statusEl.textContent = "Run history unavailable · database offline";
@@ -1410,8 +1450,10 @@ async function loadMonitoringStatus() {
   bannerEl.hidden = true;
   bannerEl.className = "monitoring-banner";
 
-  // PR-ADS-110: the monitoring warning never belongs on a revenue decision page.
+  // PR-ADS-110/124: never on a revenue page (re-checked after the await too).
+  const pageAtRequestStart = _currentPage;
   if (isRevenuePage(_currentPage)) return;
+  if (isRevenuePage(pageAtRequestStart)) return;
 
   let data = null;
   try {
@@ -1420,6 +1462,11 @@ async function loadMonitoringStatus() {
     // Monitoring endpoint unavailable — fail silently; do not block the UI.
     return;
   }
+
+  // PR-ADS-124: re-check the CURRENT page after the await — if we navigated onto
+  // a revenue page mid-flight, never paint the banner (the race the spec calls out).
+  if (isRevenuePage(_currentPage)) return;
+  if (_currentPage !== pageAtRequestStart && isRevenuePage(_currentPage)) return;
 
   if (!data || data.severity === "green" || !data.warnings || data.warnings.length === 0) {
     return;
@@ -3026,6 +3073,8 @@ function renderRevenueHealth(audit) {
 async function loadRevenueHealth() {
   // Google Ads Spend Truth panel (PR-ADS-118) sits at the top of diagnostics.
   loadSpendTruth();
+  // Google Ads Geo Sync + country reconciliation (PR-ADS-124).
+  loadGeoSync();
   // Campaign identity mapping review (PR-ADS-119).
   loadCampaignMapping();
   // Admin-only Revenue Recovery panel (PR-ADS-114) sits above the diagnostics.
@@ -3227,6 +3276,188 @@ document.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-recovery-action]");
   if (!btn) return;
   runRevenueRecoveryJob(btn.dataset.recoveryAction === "dry-run");
+});
+
+// ── Google Ads Geo Sync panel (PR-ADS-124, admin-only) ──────────────────────
+// Country ROAS needs geo (per-country) spend to reconcile with the canonical
+// campaign-level Google Ads spend. This panel shows the reconciliation status
+// and lets an admin Preview / Run the geo sync. Reads Google Ads read-only and
+// writes ONLY the local canonical geo table — never Google Ads, never HubSpot.
+
+let geoSyncJobId = null;
+let geoSyncPollTimer = null;
+let geoSyncNotice = "";
+let geoSyncReconcile = null;
+const GEO_SYNC_POLL_MS = 2500;
+
+function geoSyncStatusBadge(status) {
+  const map = {
+    reconciled: ["revenue-status-chip--ok", "Reconciled"],
+    mismatch: ["revenue-status-chip--warning", "Mismatch"],
+    no_geo_data: ["revenue-status-chip--warning", "No geo data yet"],
+    unavailable: ["revenue-status-chip--warning", "Unavailable"],
+  };
+  const [cls, label] = map[status] || map.unavailable;
+  return `<div class="revenue-status-chip ${cls}"><span>Geo reconciliation status</span><strong>${label}</strong></div>`;
+}
+
+function renderGeoSyncPanel(reconcile, status) {
+  const panel = document.getElementById("geo-sync-panel");
+  if (!panel) return;
+  const r = reconcile || {};
+  const st = status || {};
+  const cur = r.currency_code || "GBP";
+  const running = st.running === true;
+  const isAdmin = _currentUser && _currentUser.role === "admin";
+  const money = (v) => (v === null || v === undefined ? "—" : fmtCurrency(v, cur));
+  const variance = (r.variance === null || r.variance === undefined)
+    ? "—"
+    : `${r.variance > 0 ? "+" : ""}${fmtCurrency(r.variance, cur)}${r.variance_pct === null || r.variance_pct === undefined ? "" : ` (${r.variance_pct}%)`}`;
+  const sm = st.summary || {};
+  const rowsWritten = (sm.rows_written === null || sm.rows_written === undefined)
+    ? (r.geo_rows_counted || 0) : sm.rows_written;
+
+  const progressHtml = running
+    ? `<div class="recovery-progress">Running… phase: <strong>${escapeHtml(st.phase || "starting")}</strong>${st.current_chunk ? ` · chunk ${escapeHtml(st.current_chunk)}` : ""}</div>`
+    : "";
+  const noticeHtml = geoSyncNotice ? `<p class="revenue-footnote">${escapeHtml(geoSyncNotice)}</p>` : "";
+
+  const actions = isAdmin
+    ? `<div class="recovery-actions">
+         <button type="button" class="btn btn--secondary" data-geo-sync-action="dry-run" ${running ? "disabled" : ""}>Preview Google Ads geo sync</button>
+         <button type="button" class="btn btn--primary" data-geo-sync-action="run" ${running ? "disabled" : ""}>Run Google Ads geo sync</button>
+       </div>`
+    : `<p class="revenue-footnote">Ask an admin to run Google Ads Geo Sync from Revenue Health.</p>`;
+
+  panel.innerHTML = `
+    <div class="panel recovery-panel">
+      <div class="panel__header">Google Ads Geo Sync</div>
+      <div class="panel__body">
+        <p class="revenue-footnote">Country ROAS needs geo-table spend to reconcile with canonical campaign spend. Runs in the background. Reads Google Ads read-only (geographic_view) and writes only the local database; never writes to Google Ads or HubSpot.</p>
+        <div class="revenue-status-grid">
+          ${geoSyncStatusBadge(r.status)}
+        </div>
+        <div class="revenue-summary-strip revenue-summary-strip--four">
+          <div><span>Canonical campaign spend</span><strong>${money(r.canonical_campaign_total)}</strong></div>
+          <div><span>Geo spend</span><strong>${money(r.geo_total)}</strong></div>
+          <div><span>Variance</span><strong>${variance}</strong></div>
+          <div><span>Latest geo sync</span><strong>${escapeHtml(r.last_geo_sync_at || "Never")}</strong></div>
+        </div>
+        <div class="revenue-summary-strip revenue-summary-strip--three">
+          <div><span>Rows written</span><strong>${fmtCount(rowsWritten)}</strong></div>
+          <div><span>Countries</span><strong>${fmtCount(r.geo_country_count)}</strong></div>
+          <div><span>Coverage / FX</span><strong>${escapeHtml(r.coverage_status || "—")} / ${escapeHtml(r.fx_coverage_status || "—")}</strong></div>
+        </div>
+        ${actions}
+        ${progressHtml}
+        ${noticeHtml}
+      </div>
+    </div>
+  `;
+}
+
+function stopGeoSyncPolling() {
+  if (geoSyncPollTimer) { clearTimeout(geoSyncPollTimer); geoSyncPollTimer = null; }
+}
+
+async function fetchGeoReconcile() {
+  const window_ = getRoasBusinessWindow();
+  try {
+    const res = await fetch(`/api/google-ads-geo-reconcile?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
+    if (!res.ok) return null;
+    return res.json();
+  } catch (_) { return null; }
+}
+
+async function fetchGeoSyncStatus() {
+  const url = geoSyncJobId
+    ? `/api/google-ads-geo-sync/status?job_id=${encodeURIComponent(geoSyncJobId)}`
+    : "/api/google-ads-geo-sync/status";
+  try {
+    const res = await fetch(url, { credentials: "same-origin" });
+    if (!res.ok) return null;
+    return res.json();
+  } catch (_) { return null; }
+}
+
+async function pollGeoSyncOnce() {
+  if (_currentPage !== "revenue-health") { stopGeoSyncPolling(); return; }
+  try {
+    const status = await fetchGeoSyncStatus();
+    if (status) {
+      if (status.job_id) geoSyncJobId = status.job_id;
+      if (!status.running) geoSyncReconcile = await fetchGeoReconcile();
+      renderGeoSyncPanel(geoSyncReconcile, status);
+      if (status.running) {
+        geoSyncPollTimer = setTimeout(pollGeoSyncOnce, GEO_SYNC_POLL_MS);
+        return;
+      }
+    }
+  } catch (err) {
+    console.error("[pollGeoSync]", err);
+  }
+  stopGeoSyncPolling();
+}
+
+async function loadGeoSync() {
+  const panel = document.getElementById("geo-sync-panel");
+  if (!panel) return;
+  stopGeoSyncPolling();
+  geoSyncNotice = "";
+  try {
+    const [reconcile, status] = await Promise.all([fetchGeoReconcile(), fetchGeoSyncStatus()]);
+    geoSyncReconcile = reconcile;
+    if (status && status.job_id) geoSyncJobId = status.job_id;
+    renderGeoSyncPanel(reconcile, status);
+    if (status && status.running) {
+      geoSyncPollTimer = setTimeout(pollGeoSyncOnce, GEO_SYNC_POLL_MS);
+    }
+  } catch (err) {
+    console.error("[loadGeoSync]", err);
+    renderGeoSyncPanel(null, null);
+  }
+}
+
+async function runGeoSyncJob(dryRun) {
+  geoSyncNotice = "";
+  renderGeoSyncPanel(geoSyncReconcile, { running: true, phase: dryRun ? "dry-run" : "starting" });
+  try {
+    const res = await fetch("/api/google-ads-geo-sync/run", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ window: getRoasBusinessWindow(), dry_run: dryRun }),
+    });
+    if (res.status === 409) {
+      geoSyncNotice = "A geo sync job is already running.";
+      loadGeoSync();
+      return;
+    }
+    if (res.status === 403) {
+      geoSyncNotice = "Admin access is required to run the Google Ads geo sync.";
+      loadGeoSync();
+      return;
+    }
+    if (!res.ok) {
+      geoSyncNotice = "Google Ads geo sync could not be started.";
+      loadGeoSync();
+      return;
+    }
+    const accepted = await res.json();
+    geoSyncJobId = accepted.job_id || null;
+    stopGeoSyncPolling();
+    pollGeoSyncOnce();
+  } catch (err) {
+    console.error("[runGeoSyncJob]", err);
+    geoSyncNotice = "Google Ads geo sync request failed.";
+    loadGeoSync();
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-geo-sync-action]");
+  if (!btn) return;
+  runGeoSyncJob(btn.dataset.geoSyncAction === "dry-run");
 });
 
 // ── Lead Event-Date Reconciliation panel (PR-ADS-115, admin-only) ───────────
@@ -8298,6 +8529,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Hash routing: listen for back/forward navigation
   window.addEventListener("hashchange", () => {
     const page = hashToPage(window.location.hash);
+    // PR-ADS-124: assert chrome from the hash before navigate runs its loaders.
+    applyPageChrome(page);
     navigate(page, { updateHash: false });
   });
 
@@ -9700,6 +9933,7 @@ function renderCountryRevenueBlockedState(sourceHealth) {
       <div class="revenue-next-step">
         ${nextStep}
       </div>
+      ${roasCountryCtaButtons()}
     </div>`;
 }
 
@@ -9709,6 +9943,25 @@ function renderRoasCountrySafeEmptyState() {
       <div class="revenue-blocked-card__eyebrow">Revenue attribution</div>
       <h3>No country revenue found for this window</h3>
       <p>Country spend and revenue sources are ready, but no HubSpot closed-won deals are attributed to countries in this business window.</p>
+    </div>`;
+}
+
+// PR-ADS-124: a real recovery CTA from the blocked country card. "Open Revenue
+// Health" navigates; the Run actions are admin-only and kick the corresponding
+// background job after navigating to Revenue Health. A non-admin sees guidance
+// to ask an admin — never a dead-end "run geo sync" with no button. Defined here
+// (function declarations hoist) so it never widens the renderRoasCountriesPage →
+// table region that other tests scan.
+function roasCountryCtaButtons() {
+  const isAdmin = _currentUser && _currentUser.role === "admin";
+  const runButtons = isAdmin
+    ? `<button type="button" class="btn btn--primary" data-country-cta="run-geo-sync">Run Google Ads Geo Sync</button>
+       <button type="button" class="btn btn--secondary" data-country-cta="run-spend-backfill">Run Google Ads Spend Backfill</button>`
+    : `<p class="revenue-footnote">Ask an admin to run Google Ads Geo Sync from Revenue Health.</p>`;
+  return `
+    <div class="revenue-cta-actions">
+      <button type="button" class="btn btn--secondary" data-country-cta="open-health">Open Revenue Health</button>
+      ${runButtons}
     </div>`;
 }
 
@@ -9803,7 +10056,8 @@ function renderCountrySpendUnreconciledState() {
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
       <h3>Country spend coverage incomplete — ROAS unavailable</h3>
-      <p>Geo-table spend does not reconcile with canonical Google Ads campaign spend for this window, so a country ROAS denominator cannot be trusted. Run the Google Ads geo sync and the spend backfill, then re-check this page.</p>
+      <p>Geo spend does not reconcile with canonical Google Ads campaign spend for this window, so a country ROAS denominator cannot be trusted. The exact mismatch totals are in Revenue Health → Google Ads Geo Sync.</p>
+      ${roasCountryCtaButtons()}
     </div>`;
 }
 
@@ -9863,6 +10117,22 @@ document.addEventListener("click", (e) => {
   if (!btn) return;
   roasCountryFilter = btn.dataset.roasCountryFilter || "all";
   renderRoasCountriesPage();
+});
+
+// PR-ADS-124: blocked ROAS by Country card CTAs. "Open Revenue Health" navigates;
+// the admin-only run actions navigate to Revenue Health and kick the job there so
+// progress + reconciliation totals are visible. Country ROAS stays blocked until
+// geo spend reconciles — these buttons fix the recovery path, not the safety rule.
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-country-cta]");
+  if (!btn) return;
+  const action = btn.dataset.countryCta;
+  navigate("revenue-health");
+  if (action === "run-geo-sync") {
+    setTimeout(() => { if (typeof runGeoSyncJob === "function") runGeoSyncJob(false); }, 0);
+  } else if (action === "run-spend-backfill") {
+    setTimeout(() => { if (typeof runSpendBackfillJob === "function") runSpendBackfillJob(false); }, 0);
+  }
 });
 
 // ── Unit Economics ─────────────────────────────────────────────────────────
