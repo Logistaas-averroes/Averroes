@@ -2923,8 +2923,16 @@ async function loadDeals() {
     }
     if (!_revResponseIsCurrent("deals", token, data)) return;
     revenueDealsMart = data;
-    revenueDealsLedgerStatus = "available";
-    revenueDealsSummary = data.summary || null;
+    // PR-ADS-127: a durable deal-ledger OUTAGE must never read as an empty
+    // window. The mart surfaces the ledger's own availability in data_health; a
+    // "database_unavailable" status renders the honest "ledger cannot be read"
+    // card, not "No closed-won deals found".
+    const dealLedgerStatus = (data.data_health && data.data_health.deal_ledger_status) || "available";
+    revenueDealsLedgerStatus = dealLedgerStatus === "database_unavailable"
+      ? "database_unavailable" : "available";
+    // PR-ADS-127: the Deals summary comes from the ledger's OWN summary so its
+    // count / Won Revenue / average all reconcile with the displayed deal rows.
+    revenueDealsSummary = data.ledger_summary || null;
     revenueDealsData = data.rows || [];
     renderWindowRange("revenue-deals-range", data.window || null);
     renderRevenueDealsPage();
@@ -2939,19 +2947,22 @@ async function loadDeals() {
   }
 }
 
-// Deal-ledger summary for the existing summary strip. The revenue TOTAL is the
-// mart's canonical figure (summary.won_revenue_usd) — never recomputed in the
-// UI; deal count / average / exact-GCLID count are presentation aggregates over
-// the mart-provided deal rows.
+// Deal-ledger summary for the summary strip. PR-ADS-127: the count, Won Revenue,
+// average and exact-GCLID count ALL come from the mart's deal-ledger summary —
+// the SAME source as the displayed deal rows — so the strip always reconciles
+// with the table. (Earlier this mixed the canonical attribution total with the
+// raw ledger count, which diverged whenever a "not Google Ads" exclusion or an
+// identity remap was applied.) Falls back to aggregating the rows only when the
+// backend omits the ledger summary (older payloads).
 function martDealLedgerSummary(data) {
+  if (data && data.ledger_summary) return data.ledger_summary;
   const rows = (data && data.rows) || [];
-  const s = (data && data.summary) || {};
   const dealCount = rows.length;
-  const wonRevenue = s.won_revenue_usd;
+  const wonRevenue = rows.reduce((acc, r) => acc + (Number(r.deal_amount_usd) || 0), 0);
   return {
     deal_count: dealCount,
-    won_revenue: wonRevenue,
-    average_deal_value: (dealCount && wonRevenue != null) ? wonRevenue / dealCount : null,
+    won_revenue: dealCount ? Math.round(wonRevenue * 100) / 100 : null,
+    average_deal_value: dealCount ? Math.round((wonRevenue / dealCount) * 100) / 100 : null,
     exact_gclid_count: rows.filter((r) => (r.match_source || "").toLowerCase() === "gclid").length,
   };
 }
@@ -10293,7 +10304,7 @@ function renderRoasCountriesPage() {
   // never renders a partial/geo/unreconciled denominator as ROAS.
   const st = data.spend_truth || {};
   if (st.country_spend_status !== "verified") {
-    tableBody.innerHTML = renderCountrySpendUnreconciledState();
+    tableBody.innerHTML = renderCountrySpendUnreconciledState(st.country_spend_status);
     return;
   }
 
@@ -10316,12 +10327,28 @@ function renderRoasCountriesPage() {
   `;
 }
 
-function renderCountrySpendUnreconciledState() {
+// PR-ADS-127: the country spend denominator can be untrusted for two distinct
+// reasons, and the copy must match the cause (both still withhold ROAS — never a
+// fabricated denominator):
+//   - "mismatch"     → geo spend exists but does NOT reconcile with canonical
+//                      campaign spend (point at the Geo Sync mismatch totals).
+//   - "unavailable"  → there is NO canonical geo (country) spend for this window
+//                      yet (run the Geo Sync to populate it). Saying it "does not
+//                      reconcile" here would be wrong — there is nothing to
+//                      reconcile.
+function renderCountrySpendUnreconciledState(status) {
+  const isMismatch = status === "mismatch";
+  const heading = isMismatch
+    ? "Country spend coverage incomplete — ROAS unavailable"
+    : "Country geo spend unavailable — ROAS unavailable";
+  const body = isMismatch
+    ? "Geo spend does not reconcile with canonical Google Ads campaign spend for this window, so a country ROAS denominator cannot be trusted. The exact mismatch totals are in Revenue Health → Google Ads Geo Sync."
+    : "There is no canonical Google Ads geo (country) spend for this window yet, so a country ROAS denominator cannot be computed. Run the Google Ads Geo Sync in Revenue Health to populate country spend, then re-check this page.";
   return `
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
-      <h3>Country spend coverage incomplete — ROAS unavailable</h3>
-      <p>Geo spend does not reconcile with canonical Google Ads campaign spend for this window, so a country ROAS denominator cannot be trusted. The exact mismatch totals are in Revenue Health → Google Ads Geo Sync.</p>
+      <h3>${heading}</h3>
+      <p>${body}</p>
       ${roasCountryCtaButtons()}
     </div>`;
 }

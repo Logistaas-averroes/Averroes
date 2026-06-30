@@ -76,14 +76,17 @@ def test_source_page_uses_mart():
 # ── 4. Deals uses the mart ──────────────────────────────────────────────────
 
 def test_deals_page_uses_mart():
-    loader = _slice("async function loadDeals")
+    loader = _slice("async function loadDeals", span=2000)
     assert 'fetchRevenuePerformance("deal"' in loader
     assert "revenueDealsData = data.rows" in loader
     assert "/api/revenue-deals?" not in loader
-    # Revenue total is the mart's canonical figure, not recomputed in the UI.
-    summary = _slice("function martDealLedgerSummary", span=700)
-    assert "won_revenue: wonRevenue" in summary
-    assert "s.won_revenue_usd" in summary
+    # PR-ADS-127: the deal summary (count / Won Revenue / average / GCLID) all come
+    # from the mart's deal-LEDGER summary — the same source as the deal rows — so it
+    # reconciles with the table and never mixes the canonical attribution total.
+    assert "revenueDealsSummary = data.ledger_summary" in loader
+    summary = _slice("function martDealLedgerSummary", span=900)
+    assert "data.ledger_summary" in summary
+    assert "won_revenue_usd" not in summary
 
 
 # ── 5. Shared spend-truth / summary / diagnostics across every view ─────────
@@ -141,9 +144,11 @@ def test_country_mismatch_blocks_trusted_table_in_ui():
     body = _slice("function renderRoasCountriesPage", span=2600)
     # Country readiness is the mart's verdict; mismatch/unavailable blocks the table.
     assert 'country_spend_status !== "verified"' in body
-    assert "renderCountrySpendUnreconciledState()" in body
-    card = _slice("function renderCountrySpendUnreconciledState", span=700)
-    assert "Country spend coverage incomplete" in card
+    # PR-ADS-127: the card is now given the cause so its copy matches it.
+    assert "renderCountrySpendUnreconciledState(st.country_spend_status)" in body
+    card = _slice("function renderCountrySpendUnreconciledState", span=1100)
+    assert "Country spend coverage incomplete" in card  # mismatch wording
+    assert "Country geo spend unavailable" in card       # no-geo wording (distinct)
     # The mismatch guard returns before any trusted table render.
     i_guard = body.find('country_spend_status !== "verified"')
     i_table = body.find("renderRoasCountryTable")
