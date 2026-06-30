@@ -8796,6 +8796,22 @@ function fmtCurrency(v, code) {
   return `${sym}${amt} ${(code || "").toUpperCase()}`.trim();
 }
 
+// PR-ADS-123 — compact, currency-correct money for KPI cards / summary strips.
+// Native GBP must NEVER render with "$". KPI cards show a compact magnitude
+// (e.g. "£69.7k GBP" / "$93.9k USD"); exact full-precision amounts stay in the
+// spend proof modal and spend-truth panels via fmtCurrency.
+function fmtCompactCurrency(v, code) {
+  if (v === null || v === undefined) return "—";
+  const sym = currencySymbol(code);
+  const cc = (code || "").toUpperCase();
+  const abs = Math.abs(v);
+  let body;
+  if (abs >= 1000000) body = (v / 1000000).toFixed(1) + "M";
+  else if (abs >= 1000) body = (v / 1000).toFixed(1) + "k";
+  else body = Number(v).toFixed(0);
+  return `${sym}${body}${cc ? " " + cc : ""}`;
+}
+
 function fmtNativeGBP(v) {
   return fmtCurrency(v, "GBP");
 }
@@ -9056,18 +9072,24 @@ function renderRoasCampaignSummary(summary, spendIncomplete) {
   const nativeCur = sh.spend_native_currency || "GBP";
   const fxComplete = sh.fx_coverage_status === "complete";
   const hasNative = native !== null && native !== undefined;
+  // PR-ADS-123: a compact, contained summary strip. Exact full-precision values
+  // live in the spend proof modal; this card shows magnitudes so it fits cleanly
+  // and never wraps a "$93,875.53" onto a stray "USD" line.
   const spendBlock = hasNative ? `
-    <div class="revenue-spend-currency">
-      <div class="revenue-spend-currency__label">Google Ads Spend</div>
-      <div class="revenue-spend-currency__native">${fmtCurrency(native, nativeCur)} native</div>
-      <div class="revenue-spend-currency__usd">${usd === null || usd === undefined ? "USD reporting: FX coverage incomplete" : fmtUSD(usd) + " USD reporting"}</div>
-      <div class="revenue-spend-currency__fx">FX coverage: <strong>${fxComplete ? "Verified" : "Incomplete — ROAS unavailable"}</strong></div>
-      <div class="revenue-spend-currency__note">ROAS: ${spendIncomplete ? "unavailable" : "calculated from USD reporting spend"}</div>
+    <div class="revenue-spend-summary">
+      <div class="revenue-spend-summary__title">Google Ads Spend</div>
+      <div class="revenue-spend-summary__grid">
+        <div><span>Native</span><strong title="${fmtCurrency(native, nativeCur)}">${fmtCompactCurrency(native, nativeCur)}</strong></div>
+        <div><span>Reporting</span><strong title="${usd === null || usd === undefined ? "" : fmtUSD(usd)}">${usd === null || usd === undefined ? "FX incomplete" : fmtCompactCurrency(usd, "USD")}</strong></div>
+        <div><span>FX</span><strong>${fxComplete ? "Verified" : "Incomplete"}</strong></div>
+        <div><span>ROAS</span><strong>${spendIncomplete ? "Unavailable" : "USD reporting spend"}</strong></div>
+      </div>
     </div>` : "";
-  // Strip Spend cell: USD reporting when FX complete; otherwise native diagnostic.
+  // KPI strip Spend cell: compact USD reporting when FX complete; otherwise a
+  // compact native diagnostic (never "$" on native GBP).
   const spendCell = (usd !== null && usd !== undefined)
-    ? fmtUSD(usd)
-    : (hasNative ? fmtCurrency(native, nativeCur) : fmtMoney(s.spend));
+    ? fmtMoney(usd)
+    : (hasNative ? fmtCompactCurrency(native, nativeCur) : fmtMoney(s.spend));
   return `
     ${spendBlock}
     <div class="revenue-summary-strip">
@@ -9291,12 +9313,16 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
   `;
   }).join("");
 
+  // PR-ADS-123: a real horizontal-scroll shell so the Decision column is never
+  // clipped on desktop; the table keeps a min-width and scrolls only if needed.
   return `
-    <div class="table-scroll">
-      <table class="data-table roas-table revenue-decision-table">
-        ${headerRow}
-        <tbody>${bodyRows}</tbody>
-      </table>
+    <div class="revenue-table-shell">
+      <div class="revenue-table-scroll">
+        <table class="data-table roas-table revenue-decision-table">
+          ${headerRow}
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </div>
     </div>
   `;
 }
@@ -9816,12 +9842,16 @@ function renderRoasCountryTable(rows) {
     </tr>
   `).join("");
 
+  // PR-ADS-123: same contained horizontal-scroll shell as ROAS by Campaign so
+  // the Decision column stays fully visible on desktop.
   return `
-    <div class="table-scroll">
-      <table class="data-table roas-table revenue-decision-table">
-        ${headerRow}
-        <tbody>${bodyRows}</tbody>
-      </table>
+    <div class="revenue-table-shell">
+      <div class="revenue-table-scroll">
+        <table class="data-table roas-table revenue-decision-table">
+          ${headerRow}
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </div>
     </div>
   `;
 }

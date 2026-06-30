@@ -4088,6 +4088,89 @@ a {
   margin: 0.1rem;
 }
 
+/* ── PR-ADS-123: Revenue ROAS table containment ─────────────────────────────
+   The ROAS by Campaign / Country decision tables were overflowing the page on
+   desktop (the .table-scroll wrapper they used had no overflow rule), clipping
+   the Decision column on the right. A real horizontal-scroll shell keeps the
+   table contained: it shows fully when it fits and scrolls only when it can't. */
+.revenue-table-shell {
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.revenue-table-scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Scoped to the scroll wrapper so other .revenue-decision-table consumers
+   (e.g. the deals ledger table) are unaffected by the min-width. */
+.revenue-table-scroll .revenue-decision-table {
+  min-width: 1120px;
+  width: 100%;
+}
+
+/* Keep the Decision column compact and never clipped. */
+.revenue-decision-table th:last-child,
+.revenue-decision-table td:last-child {
+  min-width: 120px;
+  white-space: nowrap;
+}
+
+/* Campaign / country name + aliases wrap normally instead of forcing the table
+   ever wider (the global .roas-table td nowrap would otherwise clip them). */
+.revenue-decision-table td:first-child {
+  white-space: normal;
+  min-width: 200px;
+  max-width: 340px;
+}
+
+/* ── PR-ADS-123: Google Ads Spend summary strip ─────────────────────────────
+   Replaces the unstyled raw text block (which had no CSS at all) with a compact,
+   contained card. Exact full-precision spend lives in the spend proof modal. */
+.revenue-spend-summary {
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  background: var(--color-surface, #fff);
+}
+
+.revenue-spend-summary__title {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted, #64748b);
+  margin-bottom: 8px;
+}
+
+.revenue-spend-summary__grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+}
+
+.revenue-spend-summary__grid > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 90px;
+}
+
+.revenue-spend-summary__grid span {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted, #64748b);
+}
+
+.revenue-spend-summary__grid strong {
+  font-size: 0.95rem;
+  white-space: nowrap;
+}
+
 /* ── ROAS Verdict Badges ────────────────────────────────────────────────── */
 
 .roas-verdict-badge {
