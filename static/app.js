@@ -9381,8 +9381,8 @@ function renderSpendProofAdGroups(ag, cur) {
       <tbody>${rows}</tbody>
     </table>
     <div class="spend-proof-adgroup-totals">
-      <span>Enabled only: <strong>${fmtCurrency(ag.enabled_total_native, cur)}</strong></span>
-      <span>Paused/removed: <strong>${fmtCurrency(ag.non_enabled_total_native, cur)}</strong></span>
+      <span>Enabled only: <strong>${fmtCurrency(ag.enabled_only, cur)}</strong></span>
+      <span>Paused/removed: <strong>${fmtCurrency(ag.paused_removed, cur)}</strong></span>
     </div>`;
 }
 
@@ -9391,6 +9391,7 @@ function renderSpendProof(data) {
   const aliases = (data.mapped_aliases && data.mapped_aliases.length)
     ? escapeHtml(data.mapped_aliases.join("; ")) : "—";
   const causes = (data.possible_causes || []).map((c) => `<li>${escapeHtml(c)}</li>`).join("");
+  const money = (v) => (v === null || v === undefined ? "Unavailable" : fmtCurrency(v, cur));
   const rows = [
     ["Campaign ID", escapeHtml(data.campaign_id || "—")],
     ["Canonical campaign name", escapeHtml(data.campaign_name || "—")],
@@ -9398,12 +9399,24 @@ function renderSpendProof(data) {
     ["Window", `${escapeHtml(data.date_from || "—")} → ${escapeHtml(data.date_to || "—")}`],
     ["Account timezone", escapeHtml(data.account_time_zone || "—")],
     ["Native currency", escapeHtml(cur)],
-    ["Local canonical spend", fmtCurrency(data.local_total_native, cur)],
-    ["Google Ads API campaign spend", data.api_total_native === null || data.api_total_native === undefined ? "Unavailable" : fmtCurrency(data.api_total_native, cur)],
-    ["Variance", `${spendProofVariance(data.variance_native, cur)}${data.variance_pct === null || data.variance_pct === undefined ? "" : ` (${data.variance_pct}%)`}`],
     ["Coverage status", escapeHtml(data.coverage_status || "—")],
     ["Rows counted", fmtCount(data.rows_counted)],
     ["Date chunks verified", fmtCount(data.date_chunks_verified)],
+  ];
+  // PR-ADS-122: the totals are kept strictly separate so the campaign-level
+  // reconciliation is never conflated with the Google Ads UI enabled-only view.
+  const primaryRows = [
+    ["Local canonical campaign total", money(data.local_canonical_campaign_total)],
+    ["Fresh campaign API total (all statuses)", money(data.fresh_campaign_api_total_all_statuses)],
+    ["Variance — local vs campaign API", `${spendProofVariance(data.variance_local_vs_fresh_campaign_api, cur)}${data.variance_local_vs_fresh_campaign_api_pct === null || data.variance_local_vs_fresh_campaign_api_pct === undefined ? "" : ` (${data.variance_local_vs_fresh_campaign_api_pct}%)`}`],
+  ];
+  const uiRows = [
+    ["Ad-group total (all statuses)", money(data.fresh_ad_group_total_all_statuses)],
+    ["Ad-group enabled-only", money(data.fresh_ad_group_total_enabled_only)],
+    ["Ad-group paused/removed", money(data.fresh_ad_group_total_paused_removed)],
+    ["Google Ads UI filter estimate", money(data.google_ui_filter_estimate)],
+    ["Variance — UI estimate vs enabled-only", spendProofVariance(data.variance_google_ui_filter_estimate_vs_enabled_only, cur)],
+    ["Variance — local vs ad-group all statuses", spendProofVariance(data.variance_local_vs_ad_group_all_statuses, cur)],
   ];
   const dupCount = (data.duplicate_local_rows || []).length;
   const dupNote = dupCount
@@ -9423,6 +9436,16 @@ function renderSpendProof(data) {
           ${dupNote}
           <dl class="spend-proof-grid">
             ${rows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${v}</dd></div>`).join("")}
+          </dl>
+          <h4 class="spend-proof-subhead">Primary reconciliation — local canonical vs fresh campaign API</h4>
+          <p class="spend-proof-note">These are expected to match. A mismatch points to stale local spend, a date-boundary issue, or a campaign identity/mapping issue — not the ad-group filter.</p>
+          <dl class="spend-proof-grid">
+            ${primaryRows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${v}</dd></div>`).join("")}
+          </dl>
+          <h4 class="spend-proof-subhead">Google Ads UI estimate — enabled-only ad-group view</h4>
+          <p class="spend-proof-note">Only the enabled-only ad-group total explains the Google Ads UI screenshot (Ad group status: Enabled). It is not assumed equal to the campaign-level API total.</p>
+          <dl class="spend-proof-grid">
+            ${uiRows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${v}</dd></div>`).join("")}
           </dl>
           <h4 class="spend-proof-subhead">Ad-group status breakdown</h4>
           ${renderSpendProofAdGroups(data.ad_group_breakdown, cur)}

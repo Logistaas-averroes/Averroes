@@ -529,9 +529,11 @@ def fetch_campaign_daily_spend_for_campaign(
              campaign_name, source_query_version,
              rows:[{spend_date, cost_micros}]}.
     """
+    safe_campaign_id = str(campaign_id).strip()
+    if not safe_campaign_id.isdigit():
+        raise ValueError("campaign_id must be numeric")
     client = build_google_ads_client()
     customer_id = get_customer_id()
-    safe_campaign_id = str(campaign_id).strip()
 
     query = f"""
         SELECT
@@ -595,9 +597,11 @@ def fetch_ad_group_daily_spend(
              rows:[{ad_group_id, ad_group_name, ad_group_status, spend_date,
                     cost_micros}]}.
     """
+    safe_campaign_id = str(campaign_id).strip()
+    if not safe_campaign_id.isdigit():
+        raise ValueError("campaign_id must be numeric")
     client = build_google_ads_client()
     customer_id = get_customer_id()
-    safe_campaign_id = str(campaign_id).strip()
 
     query = f"""
         SELECT
