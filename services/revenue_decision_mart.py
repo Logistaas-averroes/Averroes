@@ -283,17 +283,34 @@ def _canonical_core(window: str, now: datetime | None):
     return build_revenue_attribution(window, now=now)
 
 
-def _rows_for_view(view: str, window: str, core: dict, now: datetime | None) -> list:
-    """Pick the rows for the requested view at its controlled grain."""
+def _view_payload(view: str, window: str, core: dict, now: datetime | None) -> dict:
+    """Rows for the requested grain plus any view-specific health/summary.
+
+    Returns {rows, ledger_summary, data_health}:
+      - rows: the controlled-grain rows for this view.
+      - ledger_summary: the deal view's OWN ledger summary (deal_count /
+        won_revenue / average_deal_value / exact_gclid_count) so the Deals page
+        derives every KPI from the SAME source as its rows — never mixing the
+        canonical attribution total with the raw deal-ledger count.
+      - data_health: view-specific availability the canonical spend_truth cannot
+        carry. For the deal view this surfaces deal_ledger_status so a durable
+        ledger OUTAGE is never silently rendered as a truthful empty window.
+    """
+    payload = {"rows": [], "ledger_summary": None, "data_health": {}}
     if view == "campaign":
-        return core.get("campaigns") or []
-    if view == "country":
-        return core.get("countries") or []
-    if view == "source":
-        return build_revenue_by_source(window, now=now).get("groups") or []
-    if view == "deal":
-        return build_revenue_deals(window, now=now).get("deals") or []
-    return []
+        payload["rows"] = core.get("campaigns") or []
+    elif view == "country":
+        payload["rows"] = core.get("countries") or []
+    elif view == "source":
+        payload["rows"] = build_revenue_by_source(window, now=now).get("groups") or []
+    elif view == "deal":
+        deals = build_revenue_deals(window, now=now)
+        payload["rows"] = deals.get("deals") or []
+        payload["ledger_summary"] = deals.get("summary")
+        payload["data_health"] = {
+            "deal_ledger_status": (deals.get("source_health") or {}).get("ledger_status"),
+        }
+    return payload
 
 
 def build_revenue_decision_mart(
@@ -329,7 +346,7 @@ def build_revenue_decision_mart(
     spend_truth = _spend_truth_block(core)
     summary = _summary_block(core, spend_truth)
     readiness = _readiness_block(core, spend_truth)
-    rows = _rows_for_view(view, window, core, now)
+    payload = _view_payload(view, window, core, now)
     diagnostics = _diagnostics(core, view, spend_truth)
 
     return {
@@ -338,7 +355,11 @@ def build_revenue_decision_mart(
         "spend_truth": spend_truth,
         "summary": summary,
         "readiness": readiness,
-        "rows": rows,
+        "rows": payload["rows"],
+        # Deal view: the ledger's own summary (consistent with its rows) and the
+        # ledger availability signal. None / empty for the other views.
+        "ledger_summary": payload["ledger_summary"],
+        "data_health": payload["data_health"],
         "diagnostics": diagnostics,
         "source_truth": "revenue_decision_mart",
         "google_ads_conversion_value_used": False,
