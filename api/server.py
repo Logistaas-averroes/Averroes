@@ -6059,6 +6059,69 @@ async def get_revenue_deals(
         ) from exc
 
 
+# ---------------------------------------------------------------------------
+# Canonical Revenue Decision Mart (PR-ADS-125)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/revenue-performance")
+async def get_revenue_performance(
+    view: str = Query(default="campaign"),
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Canonical Revenue Decision Mart (PR-ADS-125).
+
+    ONE backend contract that every Revenue & Attribution page reads from.
+    ``view`` selects the grain — campaign | country | source | deal — while the
+    business ``window``, ``spend_truth`` and ``summary`` blocks are the SAME
+    canonical truth regardless of view. This ends per-page spend/FX/mapping
+    disagreement: Campaign, Country, Source and Deals obey one brain.
+
+    Doctrine is never loosened: canonical Google Ads campaign-daily spend is the
+    only ROAS denominator, HubSpot closed-won is revenue truth, no fake $0, no
+    ROAS on an unsafe denominator. Read-only — no Google Ads or HubSpot writes.
+    """
+    from services.revenue_decision_mart import build_revenue_decision_mart  # noqa: PLC0415
+
+    try:
+        return build_revenue_decision_mart(view=view, window=window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Revenue decision mart failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Revenue decision mart computation failed"
+        ) from exc
+
+
+@app.get("/api/revenue-performance/audit")
+async def get_revenue_performance_audit(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Revenue Decision Mart audit (PR-ADS-125).
+
+    Read-only. Compares every current revenue page (ROAS by Campaign, ROAS by
+    Country, Revenue by Source, Deals) against the canonical mart and reports,
+    per page, the current value, the mart value, the difference, a pass/fail
+    status, and — when they differ — exactly why (different source table, date
+    grain, campaign mapping, geo reconciliation, FX coverage, or source
+    classification). No writes to Google Ads or HubSpot.
+    """
+    from services.revenue_decision_mart import build_revenue_performance_audit  # noqa: PLC0415
+
+    try:
+        return build_revenue_performance_audit(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Revenue performance audit failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Revenue performance audit failed"
+        ) from exc
+
+
 def _run_recovery_worker(job_id: str, body: "RevenueRecoveryRequest") -> None:
     """Background worker: run recovery and persist durable checkpoints to the DB.
 
