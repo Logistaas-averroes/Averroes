@@ -1909,6 +1909,64 @@ def upsert_account_daily_spend(rows: list, sync_run_id: Optional[str] = None) ->
         return 0
 
 
+def upsert_geo_daily_spend(rows: list, sync_run_id: Optional[str] = None) -> int:
+    """Upsert canonical Google Ads geo (country) daily spend (PR-ADS-124).
+
+    Idempotent. Never raises. Each row: {customer_id, currency_code,
+    country_criterion_id, campaign_id, spend_date, cost_micros,
+    source_query_version}. Keyed by (customer_id, country_criterion_id,
+    campaign_id, spend_date) so a re-sync never double-counts. Writes ONLY this
+    local table — never Google Ads. Returns the number of rows upserted.
+    """
+    if not rows:
+        return 0
+    prepared = []
+    for r in rows:
+        cust = (r.get("customer_id") or "").strip()
+        spend_date = r.get("spend_date")
+        if not cust or not spend_date:
+            continue
+        prepared.append((
+            cust, r.get("currency_code"),
+            (r.get("country_criterion_id") or "").strip(),
+            r.get("country_code"), r.get("country_name"),
+            (r.get("campaign_id") or "").strip(),
+            spend_date, int(r.get("cost_micros") or 0),
+            sync_run_id, r.get("source_query_version"),
+        ))
+    if not prepared:
+        return 0
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO google_ads_geo_daily_spend (
+                        customer_id, currency_code, country_criterion_id,
+                        country_code, country_name,
+                        campaign_id, spend_date, cost_micros,
+                        sync_run_id, source_query_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (customer_id, country_criterion_id, campaign_id, spend_date)
+                    DO UPDATE SET
+                        currency_code        = EXCLUDED.currency_code,
+                        country_code         = EXCLUDED.country_code,
+                        country_name         = EXCLUDED.country_name,
+                        cost_micros          = EXCLUDED.cost_micros,
+                        sync_run_id          = EXCLUDED.sync_run_id,
+                        source_query_version = EXCLUDED.source_query_version,
+                        updated_at           = NOW()
+                    """,
+                    prepared,
+                )
+        return len(prepared)
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_geo_daily_spend failed: %s", exc)
+        return 0
+
+
 def upsert_fx_rates(rows: list) -> int:
     """Upsert daily FX rates (PR-ADS-119). Idempotent. Never raises.
 

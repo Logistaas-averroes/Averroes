@@ -297,6 +297,23 @@ _spend_backfill_lock: threading.Lock = threading.Lock()
 _spend_backfill_progress: dict[str, Any] = {"running": False, "latest": None}
 
 
+class GeoSyncRequest(BaseModel):
+    """PR-ADS-124 — Google Ads geo (country) spend sync request.
+
+    Resolved either from a business ``window`` (account-time-zone bounded) or an
+    explicit date range. ``dry_run`` previews without writing local rows.
+    """
+    window: Optional[str] = "ytd"
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    chunk_months: int = 1
+    dry_run: bool = True
+
+
+_geo_sync_lock: threading.Lock = threading.Lock()
+_geo_sync_progress: dict[str, Any] = {"running": False, "latest": None}
+
+
 # PR-ADS-119 — daily FX backfill + campaign identity mapping.
 class FxBackfillRequest(BaseModel):
     date_from: Optional[str] = None
@@ -6707,6 +6724,137 @@ def api_spend_backfill_status(request: Request, job_id: Optional[str] = None) ->
         "started_at": job.get("started_at"), "finished_at": job.get("finished_at"),
         "job": job,
     }
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-124 — Google Ads Geo (country) Spend Sync + reconciliation.
+# Reads Google Ads read-only (geographic_view); writes ONLY the local canonical
+# geo table. NEVER writes to Google Ads and NEVER writes to HubSpot. Country ROAS
+# stays blocked until geo spend reconciles with canonical campaign spend.
+# ---------------------------------------------------------------------------
+
+
+def _run_geo_sync_worker(job_id: str, body: "GeoSyncRequest") -> None:
+    """Background worker for the Google Ads geo sync (PR-ADS-124).
+
+    Reads Google Ads read-only; writes ONLY the local canonical geo table. Never
+    writes to Google Ads or HubSpot.
+    """
+    import db.writers as db_writers  # noqa: PLC0415
+    from services.google_ads_geo_sync_service import run_google_ads_geo_sync  # noqa: PLC0415
+
+    def _checkpoint(jid, snap):
+        fields = {"status": snap.get("status"), "phase": snap.get("phase"),
+                  "current_chunk": snap.get("current_chunk"),
+                  "summary": snap.get("summary"), "chunks": snap.get("chunks"),
+                  "errors": snap.get("errors", [])}
+        if "finished_at" in snap:
+            fields["finished_at"] = snap["finished_at"]
+        db_writers.update_recovery_job(jid, **fields)
+
+    try:
+        db_writers.update_recovery_job(job_id, status="running", phase="starting")
+        result = run_google_ads_geo_sync(
+            window=body.window, date_from=body.date_from, date_to=body.date_to,
+            dry_run=body.dry_run, chunk_months=body.chunk_months, job_id=job_id,
+            checkpoint=_checkpoint, progress=_geo_sync_progress)
+        db_writers.update_recovery_job(
+            job_id, status=result.get("status", "success"), phase="done",
+            summary=result.get("summary"), chunks=result.get("chunks"),
+            errors=result.get("errors", []), finished_at=result.get("finished_at"))
+    except Exception as exc:  # noqa: BLE001
+        log.error("[geo-sync worker] job %s failed: %s", job_id, exc, exc_info=True)
+        db_writers.update_recovery_job(
+            job_id, status="failed", phase="done",
+            errors=[f"{type(exc).__name__}: geo sync worker failed"],
+            finished_at=datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    finally:
+        with _geo_sync_lock:
+            _geo_sync_progress["running"] = False
+
+
+@app.post("/api/google-ads-geo-sync/run", status_code=202)
+def api_geo_sync_run(body: GeoSyncRequest, request: Request) -> dict[str, Any]:
+    """Start the Google Ads geo (country) spend sync in the background (PR-ADS-124).
+
+    Admin-only. Returns 202 with a job_id. Reads Google Ads read-only and writes
+    ONLY the local canonical geo table. Returns 409 if already running. NEVER
+    writes to Google Ads or HubSpot.
+    """
+    check_admin_or_token(request)
+    if body.chunk_months < 1:
+        raise HTTPException(status_code=422, detail="chunk_months must be >= 1")
+    for label, value in (("date_from", body.date_from), ("date_to", body.date_to)):
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f"{label} '{value}' is not a valid ISO date") from exc
+
+    import db.writers as db_writers  # noqa: PLC0415
+    latest = db_writers.get_latest_recovery_job(job_type="google_ads_geo_sync")
+    if latest and latest.get("status") in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="google ads geo sync already running")
+
+    with _geo_sync_lock:
+        if _geo_sync_progress["running"]:
+            raise HTTPException(status_code=409, detail="google ads geo sync already running")
+        _geo_sync_progress["running"] = True
+
+    job_id = uuid.uuid4().hex
+    created = db_writers.create_recovery_job(
+        job_id, dry_run=body.dry_run, date_from=body.date_from, date_to=body.date_to,
+        chunk_months=body.chunk_months, job_type="google_ads_geo_sync")
+    if not created:
+        with _geo_sync_lock:
+            _geo_sync_progress["running"] = False
+        raise HTTPException(status_code=503, detail="geo sync job store unavailable")
+
+    threading.Thread(target=_run_geo_sync_worker, args=(job_id, body), daemon=True).start()
+    return {"job_id": job_id, "status": "queued", "dry_run": body.dry_run, "window": body.window}
+
+
+@app.get("/api/google-ads-geo-sync/status")
+def api_geo_sync_status(request: Request, job_id: Optional[str] = None) -> dict[str, Any]:
+    """Return durable Google Ads geo sync job state (admin-only)."""
+    check_admin_or_token(request)
+    import db.writers as db_writers  # noqa: PLC0415
+    job = (db_writers.get_recovery_job(job_id) if job_id
+           else db_writers.get_latest_recovery_job(job_type="google_ads_geo_sync"))
+    if not job:
+        return {"running": False, "job": None}
+    return {
+        "running": job.get("status") in ("queued", "running"),
+        "job_id": job.get("job_id"), "status": job.get("status"),
+        "phase": job.get("phase"), "current_chunk": job.get("current_chunk"),
+        "summary": job.get("summary"), "chunks": job.get("chunks"),
+        "errors": job.get("errors", []), "dry_run": job.get("dry_run"),
+        "started_at": job.get("started_at"), "finished_at": job.get("finished_at"),
+        "job": job,
+    }
+
+
+@app.get("/api/google-ads-geo-reconcile")
+async def get_google_ads_geo_reconcile(
+    window: str = Query(default="ytd"),
+    _user=Depends(require_auth),
+):
+    """Geo↔canonical reconciliation diagnostics for a window (PR-ADS-124).
+
+    Read-only. Compares canonical campaign-level spend vs canonical geo (country)
+    spend, with the explicit variance, coverage + FX status, and whether Country
+    ROAS is unblockable. Powers the Revenue Health Geo Sync panel and the ROAS by
+    Country blocked card. Never fabricates a reconciliation when geo data is
+    absent (reported as no_geo_data, never £0).
+    """
+    from services.google_ads_geo_sync_service import build_geo_reconciliation  # noqa: PLC0415
+    try:
+        return build_geo_reconciliation(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("Geo reconciliation failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Geo reconciliation failed") from exc
 
 
 # ---------------------------------------------------------------------------
