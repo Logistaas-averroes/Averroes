@@ -3131,17 +3131,32 @@ function renderRevenuePageParity(audit) {
       <td>${escapeHtml((p.reasons || []).join(", ") || (p.status === "pass" ? "—" : ""))}</td>
     </tr>
   `).join("");
+  // PR-ADS-128: a compact, scannable summary above the table. Rendered purely
+  // from the audit response (no frontend parity computation): the headline agree
+  // verdict plus an explicit list of any drifting pages and their reasons.
   const allAgree = audit.all_pages_agree === true;
+  const drift = audit.pages.filter((p) => p.status !== "pass");
+  const driftHtml = (!allAgree && drift.length)
+    ? `<div class="revenue-parity-drift">
+         <span>Pages with drift</span>
+         <ul>${drift.map((p) => `<li>${escapeHtml(p.page || p.page_key || "—")} — ${escapeHtml((p.reasons || []).join(", ") || p.status || "drift")}</li>`).join("")}</ul>
+       </div>`
+    : "";
   return `
     <div class="panel revenue-page-parity">
       <div class="panel__header">Revenue Page Parity</div>
       <div class="panel__body panel__body--flush">
-        <p class="revenue-footnote" style="padding:var(--space-3) var(--space-4) 0">Do all Revenue &amp; Attribution pages agree with the canonical mart? ${allAgree ? "Yes — every page matches the mart." : "No — see the differing rows and their reasons below."}</p>
-        <div class="table-scroll">
-          <table class="data-table roas-table revenue-decision-table revenue-parity-table">
-            <tr><th>Page</th><th>Metric</th><th>Current</th><th>Mart</th><th>Difference</th><th>Status</th><th>Reason</th></tr>
-            <tbody>${rows}</tbody>
-          </table>
+        <div class="revenue-parity-summary revenue-parity-summary--${allAgree ? "ok" : "warning"}">
+          <div class="revenue-parity-summary__verdict">All revenue pages agree with mart: <strong>${allAgree ? "Yes" : "No"}</strong></div>
+          ${driftHtml}
+        </div>
+        <div class="revenue-table-shell">
+          <div class="revenue-table-scroll table-scroll">
+            <table class="data-table roas-table revenue-decision-table revenue-parity-table">
+              <tr><th>Page</th><th>Metric</th><th>Current</th><th>Mart</th><th>Difference</th><th>Status</th><th>Reason</th></tr>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -9411,22 +9426,25 @@ function martRoasReady(data, view) {
   return martSpendReady(data);
 }
 
-// Canonical spend-truth strip: native spend, USD reporting spend (Unavailable
-// when FX is incomplete — NEVER native GBP relabelled as USD), FX status, and
-// the canonical ROAS (Unavailable when the denominator is unsafe; never $0).
+// Canonical Spend Truth card (PR-ADS-128): one shared, clean component across
+// Campaign / Country / Source / Deals. Renders ONLY mart fields — never computes
+// or fabricates anything. Native spend uses the native-currency formatter (never
+// "$" on GBP); USD reporting and the ROAS basis show "Unavailable" (never $0)
+// when the mart withholds them. The ROAS magnitude lives in the summary strip;
+// this card states the ROAS *basis* so the denominator is never ambiguous.
 function renderMartSpendTruth(data) {
   const st = (data && data.spend_truth) || {};
-  const roas = data && data.summary ? data.summary.roas : null;
+  const s = (data && data.summary) || {};
   return `
-    <div class="revenue-spend-summary">
-      <div class="revenue-spend-summary__title">Canonical Spend Truth</div>
-      <div class="revenue-spend-summary__grid">
-        <div><span>Native Spend</span><strong title="${escapeHtml(st.native_currency || "GBP")}">${fmtNativeMoney(st.native_spend, st.native_currency)}</strong></div>
+    <section class="revenue-spend-card revenue-spend-summary">
+      <div class="revenue-spend-card__title revenue-spend-summary__title">Canonical Spend Truth</div>
+      <div class="revenue-spend-card__grid revenue-spend-summary__grid">
+        <div><span>Native Spend</span><strong>${fmtNativeMoney(st.native_spend, st.native_currency)}</strong></div>
         <div><span>USD Reporting</span><strong>${st.usd_spend == null ? "Unavailable" : fmtMoney(st.usd_spend)}</strong></div>
-        <div><span>FX</span><strong>${labelizeStatus(st.fx_status)}</strong></div>
-        <div><span>ROAS</span><strong>${roas == null ? "Unavailable" : fmtRoasMultiple(roas)}</strong></div>
+        <div><span>FX Coverage</span><strong>${labelizeStatus(st.fx_status)}</strong></div>
+        <div><span>ROAS Basis</span><strong>${s.roas == null ? "Unavailable" : "USD reporting spend"}</strong></div>
       </div>
-    </div>
+    </section>
   `;
 }
 
@@ -9468,8 +9486,9 @@ function renderMartUnavailable() {
   return `
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Revenue Decision Mart</div>
-      <h3>Canonical revenue mart unavailable.</h3>
-      <p>The canonical Revenue Decision Mart could not be reached, so this page is not rendering any page-specific truth that could disagree with the mart. Retry shortly; if it persists, check System Status → Revenue Health.</p>
+      <h3>Canonical revenue mart unavailable</h3>
+      <p>This page will not render old page-specific numbers because they may disagree with the mart.</p>
+      <div class="revenue-next-step"><strong>Next step:</strong> Check Revenue Health and System Status.</div>
     </div>`;
 }
 
@@ -10304,7 +10323,7 @@ function renderRoasCountriesPage() {
   // never renders a partial/geo/unreconciled denominator as ROAS.
   const st = data.spend_truth || {};
   if (st.country_spend_status !== "verified") {
-    tableBody.innerHTML = renderCountrySpendUnreconciledState(st.country_spend_status);
+    tableBody.innerHTML = renderCountrySpendUnreconciledState(st);
     return;
   }
 
@@ -10336,19 +10355,40 @@ function renderRoasCountriesPage() {
 //                      yet (run the Geo Sync to populate it). Saying it "does not
 //                      reconcile" here would be wrong — there is nothing to
 //                      reconcile.
-function renderCountrySpendUnreconciledState(status) {
+// PR-ADS-128: cause-specific Country ROAS blocked card. Takes the mart's whole
+// spend_truth so it can show exactly which spend gate failed (campaign spend, FX,
+// or country geo) and a next step matched to the cause. Country geo can be
+// untrusted for two distinct reasons — both withhold the trusted ROAS table, and
+// neither fabricates a denominator:
+//   - "mismatch"    → geo spend exists but does NOT reconcile with canonical
+//                     campaign spend (review the Geo Sync mismatch totals).
+//   - "unavailable" → there is no canonical geo spend yet (run the Geo Sync).
+function renderCountrySpendUnreconciledState(spendTruth) {
+  const st = spendTruth || {};
+  const status = st.country_spend_status;
   const isMismatch = status === "mismatch";
-  const heading = isMismatch
-    ? "Country spend coverage incomplete — ROAS unavailable"
-    : "Country geo spend unavailable — ROAS unavailable";
-  const body = isMismatch
-    ? "Geo spend does not reconcile with canonical Google Ads campaign spend for this window, so a country ROAS denominator cannot be trusted. The exact mismatch totals are in Revenue Health → Google Ads Geo Sync."
-    : "There is no canonical Google Ads geo (country) spend for this window yet, so a country ROAS denominator cannot be computed. Run the Google Ads Geo Sync in Revenue Health to populate country spend, then re-check this page.";
+  const cause = isMismatch
+    ? "Country geo spend exists, but it does not reconcile with canonical Google Ads campaign spend for this window."
+    : "There is no canonical Google Ads geo spend for this window yet, so country ROAS cannot be computed safely.";
+  const nextStep = isMismatch
+    ? "Open Revenue Health and review the Google Ads Geo Sync totals."
+    : "Run Google Ads Geo Sync in Revenue Health to populate country spend, then re-check this page.";
+  const chip = (label, value, ok) =>
+    `<div class="revenue-status-chip revenue-status-chip--${ok ? "ok" : "warning"}">
+       <span>${label}</span><strong>${escapeHtml(value)}</strong>
+     </div>`;
   return `
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
-      <h3>${heading}</h3>
-      <p>${body}</p>
+      <h3>Country ROAS is blocked</h3>
+      <p>${cause}</p>
+      <div class="revenue-status-label">Current status</div>
+      <div class="revenue-status-grid">
+        ${chip("Campaign spend", labelizeStatus(st.campaign_spend_status), st.campaign_spend_status === "verified")}
+        ${chip("FX coverage", labelizeStatus(st.fx_status), st.fx_status === "verified")}
+        ${chip("Country geo spend", labelizeStatus(status), false)}
+      </div>
+      <div class="revenue-next-step"><strong>Next step:</strong> ${nextStep}</div>
       ${roasCountryCtaButtons()}
     </div>`;
 }
