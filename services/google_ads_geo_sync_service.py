@@ -43,6 +43,39 @@ def fetch_geo_daily(start_date: str, end_date: str) -> dict:
     return _f(start_date, end_date)
 
 
+def fetch_geo_country_codes(criterion_ids) -> dict:
+    """Seam over the geo_target_constant resolver (late import). Read-only.
+
+    Maps Google Ads country criterion ids -> {country_code, name}. Patched by
+    tests so the SDK is never imported. Best-effort: an empty result simply
+    leaves rows with an unresolved country (still stored, just not country-named).
+    """
+    from connectors.google_ads_direct import fetch_geo_target_country_codes as _f  # noqa: PLC0415
+    return _f(criterion_ids)
+
+
+def _resolve_country_metadata(rows: list) -> None:
+    """Attach country_code + country_name to canonical geo rows in place.
+
+    Resolves the distinct criterion ids via geo_target_constant so the canonical
+    geo table itself carries the country identity that feeds named ROAS by
+    Country rows. Resolution failure is non-fatal: rows keep an unresolved
+    country (never blocks the spend write).
+    """
+    ids = {r.get("country_criterion_id") for r in rows if r.get("country_criterion_id")}
+    if not ids:
+        return
+    try:
+        resolved = fetch_geo_country_codes(sorted(ids)) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[geo_sync] country-code resolution failed: %s", exc)
+        resolved = {}
+    for r in rows:
+        meta = resolved.get(str(r.get("country_criterion_id"))) or {}
+        r["country_code"] = meta.get("country_code")
+        r["country_name"] = meta.get("name")
+
+
 def _micros_to_native(micros) -> float:
     return round(int(micros or 0) / 1_000_000, 6)
 
@@ -225,6 +258,9 @@ def run_google_ads_geo_sync(
             micros = sum(int(r.get("cost_micros") or 0) for r in rows)
             for r in rows:
                 seen_countries.add(r.get("country_criterion_id"))
+            # Resolve criterion ids -> country code/name so the canonical geo table
+            # itself carries the country identity that feeds named country rows.
+            _resolve_country_metadata(rows)
             chunk["rows"] = len(rows)
             chunk["cost_micros"] = micros
             if not dry_run:

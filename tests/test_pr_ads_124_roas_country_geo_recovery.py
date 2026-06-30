@@ -225,6 +225,46 @@ def test_geo_sync_service_writes_only_local_geo_table():
     assert "def upsert_geo_daily_spend" in WRITERS
 
 
+def test_geo_connector_raises_on_error_not_verified_empty():
+    # The geo connector must RAISE on API error so the sync can mark the chunk
+    # failed — a valid empty result and an API failure must not look identical.
+    i = CONN_SRC.find("def fetch_geo_daily_spend")
+    body = CONN_SRC[i:CONN_SRC.find("\ndef ", i + 1)]
+    assert "raise_on_error=True" in body
+
+
+def test_geo_sync_marks_chunk_failed_on_api_error(monkeypatch):
+    svc = _load_geo()
+    monkeypatch.setattr("db.revenue_repository.fetch_account_time_zone", lambda: "Europe/London")
+
+    def _boom(a, b):
+        raise RuntimeError("geographic_view unavailable / unsupported")
+    monkeypatch.setattr(svc, "fetch_geo_daily", _boom)
+    res = svc.run_google_ads_geo_sync(window="ytd", dry_run=True, now=_at("2026-06-30"))
+    # API failure → failed chunks, never confidently "verified empty".
+    assert res["status"] == "failed"
+    assert res["summary"]["chunks_verified"] == 0
+    assert res["summary"]["chunks_failed"] >= 1
+    assert res["errors"]
+
+
+def test_geo_sync_resolves_country_codes_onto_rows(monkeypatch):
+    svc = _load_geo()
+    monkeypatch.setattr("db.revenue_repository.fetch_account_time_zone", lambda: "Europe/London")
+    captured = {}
+    monkeypatch.setattr("db.writers.upsert_geo_daily_spend",
+                        lambda rows, sync_run_id=None: captured.setdefault("rows", rows) or len(rows))
+    monkeypatch.setattr(svc, "fetch_geo_daily", lambda a, b: {"rows": [
+        {"customer_id": "1", "country_criterion_id": "2826", "campaign_id": "9",
+         "spend_date": a, "cost_micros": 5_000_000}]})
+    monkeypatch.setattr(svc, "fetch_geo_country_codes",
+                        lambda ids: {"2826": {"country_code": "GB", "name": "United Kingdom"}})
+    svc.run_google_ads_geo_sync(window="ytd", dry_run=False, now=_at("2026-06-30"))
+    row = captured["rows"][0]
+    assert row["country_code"] == "GB"
+    assert row["country_name"] == "United Kingdom"
+
+
 def test_geo_sync_run_is_dry_by_default_and_skips_writes(monkeypatch):
     svc = _load_geo()
     monkeypatch.setattr("db.revenue_repository.fetch_account_time_zone", lambda: "Europe/London")
@@ -250,14 +290,27 @@ def test_geo_sync_run_is_dry_by_default_and_skips_writes(monkeypatch):
 # 11. ROAS by Country shows the table only when geo reconciliation is verified.
 
 
+def _geo_by_country(rows):
+    """Canonical geo by-country payload (the country SOURCE) or absent."""
+    if rows is None:
+        return {"available": True, "has_rows": False, "rows": []}
+    total = sum(int(round(float(r.get("spend") or 0) * 1_000_000)) for r in rows)
+    return {"available": True, "has_rows": bool(rows), "rows": rows,
+            "total_cost_micros": total, "total_spend": total / 1_000_000,
+            "total_spend_usd": None, "fx_complete": True, "currency_code": "GBP",
+            "customer_id": "3059734490", "reporting_currency": "USD"}
+
+
 def _patch_revattr(monkeypatch, *, canonical, geo_daily, country_rows, revenue_rows,
-                   coverage=None):
+                   coverage=None, geo_country=None, legacy_spend=None):
     leads = {"available": True, "rows": [], "event_date_safe": True,
              "lead_event_date_field_available": True, "missing_contact_created_at_count": 0,
              "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0,
              "coverage_start": None, "coverage_end": None}
-    spend = {"available": True, "rows": country_rows, "coverage_start": "2026-01-01",
-             "coverage_end": "2026-06-30"}
+    # Legacy geo table rows (fetch_campaign_country_spend) — distinct from the
+    # canonical geo source so a test can prove the legacy table is NOT used.
+    spend = {"available": True, "rows": legacy_spend if legacy_spend is not None else country_rows,
+             "coverage_start": "2026-01-01", "coverage_end": "2026-06-30"}
     revenue = {"available": True, "rows": revenue_rows, "coverage_start": None, "coverage_end": None}
     cov = coverage or [{"chunk_start": "2026-01-01", "chunk_end": "2026-06-30", "status": "verified"}]
     try:
@@ -271,8 +324,11 @@ def _patch_revattr(monkeypatch, *, canonical, geo_daily, country_rows, revenue_r
                             lambda s, e: {"available": True, "chunks": cov})
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity",
                             lambda cid=None: {"available": True, "mappings": []})
-        # PR-ADS-124: canonical geo total drives country reconciliation.
+        # PR-ADS-124: canonical geo total drives reconciliation; canonical geo
+        # by-country is the country ROW source.
         monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_total", lambda s, e: geo_daily)
+        monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_by_country",
+                            lambda s, e: _geo_by_country(geo_country))
     except (ImportError, AttributeError) as exc:
         pytest.skip(f"runtime deps unavailable: {exc}")
 
@@ -289,9 +345,18 @@ def _canonical(total, *, fx_complete=True):
         "coverage_start": "2026-01-01", "coverage_end": "2026-06-30"}
 
 
-_COUNTRY_ROWS = [{"campaign_name": "alpha", "country": "GB", "spend": 9000.0}]
-_REVENUE_ROWS = [{"campaign_name": "alpha", "country": "GB", "deal_id": "d1",
+_COUNTRY_ROWS = [{"campaign_name": "alpha", "country": "United Kingdom", "spend": 9000.0}]
+_REVENUE_ROWS = [{"campaign_name": "alpha", "country": "United Kingdom", "deal_id": "d1",
                   "deal_amount_usd": 5000.0, "match_status": "matched"}]
+# Canonical geo by-country rows (the country SOURCE), native + per-day-FX USD.
+_GEO_COUNTRY = [
+    {"country_criterion_id": "2826", "country_code": "GB", "country_name": "United Kingdom",
+     "cost_micros": 7_000_000_000, "spend": 7000.0, "spend_usd": 8890.0, "fx_complete": True},
+    {"country_criterion_id": "2250", "country_code": "FR", "country_name": "France",
+     "cost_micros": 3_000_000_000, "spend": 3000.0, "spend_usd": 3810.0, "fx_complete": True},
+]
+_GEO_TOTAL_10K = {"available": True, "has_rows": True, "total_spend": 10000.0,
+                  "rows_counted": 130, "country_count": 2, "last_synced_at": "2026-06-30 10:00:00"}
 
 
 def test_country_roas_blocked_when_geo_mismatches(monkeypatch):
@@ -300,7 +365,7 @@ def test_country_roas_blocked_when_geo_mismatches(monkeypatch):
     geo_daily = {"available": True, "has_rows": True, "total_spend": 7000.0,
                  "rows_counted": 120, "country_count": 14}
     _patch_revattr(monkeypatch, canonical=_canonical(10000.0), geo_daily=geo_daily,
-                   country_rows=_COUNTRY_ROWS, revenue_rows=_REVENUE_ROWS)
+                   country_rows=_COUNTRY_ROWS, revenue_rows=_REVENUE_ROWS, geo_country=_GEO_COUNTRY)
     out = build("ytd", now=_at("2026-06-30"))
     sh = out["source_health"]
     assert sh["country_spend_reconciled"] is False
@@ -309,18 +374,74 @@ def test_country_roas_blocked_when_geo_mismatches(monkeypatch):
 
 def test_country_roas_available_when_geo_reconciles(monkeypatch):
     build = _load_revattr()
-    # Canonical campaign spend £10,000; canonical geo total £10,000 → reconciled.
-    geo_daily = {"available": True, "has_rows": True, "total_spend": 10000.0,
-                 "rows_counted": 130, "country_count": 16}
     _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
-                   geo_daily=geo_daily, country_rows=_COUNTRY_ROWS, revenue_rows=_REVENUE_ROWS)
+                   geo_daily=_GEO_TOTAL_10K, country_rows=_COUNTRY_ROWS,
+                   revenue_rows=_REVENUE_ROWS, geo_country=_GEO_COUNTRY)
     out = build("ytd", now=_at("2026-06-30"))
     sh = out["source_health"]
     assert sh["country_spend_reconciled"] is True
     assert sh["country_roas_available"] is True
     assert out["country_spend_available"] is True
-    # The country table actually has rows now (table appears).
+    assert out["geo_country_mapping_status"] == "available"
     assert len(out["countries"]) >= 1
+
+
+# Reviewer-required: the canonical geo table feeds the ROAS by Country rows.
+
+
+def test_canonical_geo_table_feeds_country_rows(monkeypatch):
+    build = _load_revattr()
+    _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
+                   geo_daily=_GEO_TOTAL_10K, country_rows=_COUNTRY_ROWS,
+                   revenue_rows=_REVENUE_ROWS, geo_country=_GEO_COUNTRY)
+    out = build("ytd", now=_at("2026-06-30"))
+    names = {c.get("country") for c in out["countries"]}
+    # France is ONLY in the canonical geo source (no revenue, not in legacy rows
+    # used elsewhere) — its presence proves the rows come from canonical geo.
+    assert "France" in names
+    assert "United Kingdom" in names
+    assert out["source_health"]["geo_country_source"] == "canonical_google_ads_api"
+
+
+def test_legacy_geo_table_not_used_when_canonical_geo_exists(monkeypatch):
+    build = _load_revattr()
+    # Legacy geo table carries a bogus country that must NEVER appear once the
+    # canonical geo table has rows.
+    legacy = [{"campaign_name": "x", "country": "Atlantis", "spend": 99999.0}]
+    _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
+                   geo_daily=_GEO_TOTAL_10K, country_rows=_COUNTRY_ROWS,
+                   revenue_rows=_REVENUE_ROWS, geo_country=_GEO_COUNTRY, legacy_spend=legacy)
+    out = build("ytd", now=_at("2026-06-30"))
+    names = {c.get("country") for c in out["countries"]}
+    assert "Atlantis" not in names  # legacy table is not the source
+    assert "France" in names and "United Kingdom" in names
+
+
+def test_country_rows_sum_to_reconciled_geo_total(monkeypatch):
+    build = _load_revattr()
+    _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
+                   geo_daily=_GEO_TOTAL_10K, country_rows=_COUNTRY_ROWS,
+                   revenue_rows=_REVENUE_ROWS, geo_country=_GEO_COUNTRY)
+    out = build("ytd", now=_at("2026-06-30"))
+    # Country spend is USD reporting (FX complete); the visible rows sum to the
+    # canonical geo total expressed in USD (8890 + 3810 = 12700) — same source.
+    total = round(sum(float(c.get("spend") or 0) for c in out["countries"]), 2)
+    assert total == 12700.0
+
+
+def test_no_geo_data_remains_blocked_never_zero(monkeypatch):
+    build = _load_revattr()
+    # Canonical campaign spend exists, but the canonical geo table has NO rows.
+    geo_daily = {"available": True, "has_rows": False}
+    _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
+                   geo_daily=geo_daily, country_rows=[], revenue_rows=_REVENUE_ROWS,
+                   geo_country=None, legacy_spend=[])
+    out = build("ytd", now=_at("2026-06-30"))
+    sh = out["source_health"]
+    assert sh["country_roas_available"] is False     # blocked
+    assert out["geo_country_mapping_status"] == "no_geo_data"
+    # Never a fabricated £0 country denominator.
+    assert out["source_health"].get("geo_country_source") == "legacy_geo_table"
 
 
 def test_country_roas_blocked_when_fx_incomplete_even_if_geo_reconciles(monkeypatch):

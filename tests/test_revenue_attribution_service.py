@@ -104,13 +104,48 @@ def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
         "available": True,
         "chunks": [{"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified"}],
     }
+    # PR-ADS-124: the canonical Google Ads geo table is the country spend SOURCE.
+    # Mirror the geo spend into it (total + per-country) so the country table and
+    # the reconciliation total come from the same canonical source.
+    geo_total_obj, geo_country_obj = _geo_from_spend(spend_rows)
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend_obj), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=leads_obj), \
          patch("db.revenue_repository.fetch_won_revenue", return_value=revenue_obj), \
          patch("db.revenue_repository.fetch_canonical_campaign_spend", return_value=canonical_obj), \
          patch("db.revenue_repository.fetch_spend_coverage", return_value=coverage_obj), \
+         patch("db.revenue_repository.fetch_geo_daily_spend_total", return_value=geo_total_obj), \
+         patch("db.revenue_repository.fetch_geo_daily_spend_by_country", return_value=geo_country_obj), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         return build_revenue_attribution(window, now=NOW)
+
+
+def _geo_from_spend(spend_rows):
+    """Mirror geo spend into the canonical geo table payloads (total + by-country).
+
+    PR-ADS-124: ROAS by Country is sourced from the canonical Google Ads geo
+    table. These payloads make canonical geo the active country source in the
+    DB-path tests, with country names that join the legacy spend/deal countries.
+    """
+    by_country = {}
+    for r in spend_rows:
+        c = r.get("country")
+        if not c:
+            continue
+        by_country[c] = by_country.get(c, 0.0) + float(r.get("spend") or 0)
+    rows = [{"country_criterion_id": str(i + 1), "country_code": None,
+             "country_name": country, "cost_micros": int(round(amt * 1_000_000)),
+             "spend": amt, "spend_usd": None, "fx_complete": True}
+            for i, (country, amt) in enumerate(by_country.items())]
+    total_micros = sum(r["cost_micros"] for r in rows)
+    total_obj = {"available": True, "has_rows": bool(rows),
+                 "total_cost_micros": total_micros, "total_spend": total_micros / 1_000_000,
+                 "rows_counted": len(rows), "country_count": len(rows),
+                 "last_synced_at": "2026-06-30 10:00:00"}
+    by_country_obj = {"available": True, "has_rows": bool(rows), "rows": rows,
+                      "total_cost_micros": total_micros, "total_spend": total_micros / 1_000_000,
+                      "total_spend_usd": None, "fx_complete": True,
+                      "currency_code": "USD", "customer_id": "C1", "reporting_currency": "USD"}
+    return total_obj, by_country_obj
 
 
 def _db_unavailable():

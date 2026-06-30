@@ -644,11 +644,16 @@ CREATE INDEX IF NOT EXISTS idx_ga_account_daily_spend_date
 -- Windsor). This is the geo spend-truth used to reconcile country-level spend
 -- against the canonical campaign-level total so Country ROAS can be trusted.
 -- Raw cost_micros is preserved; unique per (customer, country, campaign, day).
+-- country_code / country_name resolve the criterion id via geo_target_constant so
+-- the canonical geo table itself feeds named ROAS by Country rows (the same source
+-- as the reconciliation total) — never a different spend source.
 CREATE TABLE IF NOT EXISTS google_ads_geo_daily_spend (
   id                    SERIAL PRIMARY KEY,
   customer_id           TEXT NOT NULL,
   currency_code         TEXT,
   country_criterion_id  TEXT NOT NULL DEFAULT '',
+  country_code          TEXT,
+  country_name          TEXT,
   campaign_id           TEXT NOT NULL DEFAULT '',
   spend_date            DATE NOT NULL,
   cost_micros           BIGINT NOT NULL DEFAULT 0,
@@ -663,6 +668,10 @@ CREATE INDEX IF NOT EXISTS idx_ga_geo_daily_spend_date
   ON google_ads_geo_daily_spend(spend_date);
 CREATE INDEX IF NOT EXISTS idx_ga_geo_daily_spend_country
   ON google_ads_geo_daily_spend(country_criterion_id);
+
+-- Existing DBs: add the country resolution columns if the table predates them.
+ALTER TABLE google_ads_geo_daily_spend ADD COLUMN IF NOT EXISTS country_code TEXT;
+ALTER TABLE google_ads_geo_daily_spend ADD COLUMN IF NOT EXISTS country_name TEXT;
 
 -- PR-ADS-119: durable daily FX rates. Google Ads native spend (GBP) is converted
 -- to USD reporting spend using the rate for each spend row's OWN spend_date — never

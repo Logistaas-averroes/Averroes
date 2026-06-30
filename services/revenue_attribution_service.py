@@ -59,7 +59,7 @@ from analysis.attribution_matcher import attribute_deals
 from analysis.business_windows import get_window_bounds, resolve_window
 from analysis.core import QUALIFIED
 from db import revenue_repository as repo
-from services.country_codes import get_country_code
+from services.country_codes import country_name_for_code, get_country_code
 
 logger = logging.getLogger(__name__)
 
@@ -957,19 +957,57 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     if resolution_map:
         revenue_rows = _apply_identity_map(revenue_rows, resolution_map, applied_identity_mappings)
 
+    # PR-ADS-124: the COUNTRY spend SOURCE. When the canonical Google Ads geo
+    # table has rows, the ROAS by Country table is built from the SAME canonical
+    # source as the reconciliation total — never the legacy `geo` table. Each row
+    # carries the country resolved from its criterion id (country_name / code) and
+    # per-day-FX USD. A criterion that did not resolve to a country is dropped from
+    # named rows (honest partial coverage), never bucketed as unknown spend.
+    geo_by_country = repo.fetch_geo_daily_spend_by_country(start_date, end_date)
+    canonical_geo_country = bool(
+        canonical_access and geo_by_country.get("available") and geo_by_country.get("has_rows"))
+    if canonical_geo_country:
+        geo_country_source = "canonical_google_ads_api"
+        country_source_rows = []
+        for r in geo_by_country.get("rows", []):
+            name = (r.get("country_name")
+                    or country_name_for_code(r.get("country_code"))
+                    or r.get("country_code"))
+            if not name:
+                continue  # unresolved criterion id → not country-named
+            country_source_rows.append({
+                "campaign_name": None, "country": name,
+                "spend": r.get("spend"), "spend_usd": r.get("spend_usd"),
+                "fx_complete": r.get("fx_complete"),
+            })
+    else:
+        geo_country_source = "legacy_geo_table"
+        country_source_rows = spend_rows
+
     # Campaign spend is a trusted ROAS denominator only when canonical coverage is
     # complete AND FX coverage is complete (USD reporting). Country spend
-    # additionally requires geo↔canonical reconciliation.
+    # additionally requires geo↔canonical reconciliation AND that the visible
+    # country rows are sourced from the SAME canonical geo table (PR-ADS-124) —
+    # never unblock from the legacy table or a bare reconciled total.
     campaign_spend_trusted = canonical_access and coverage_complete and fx_complete
-    country_spend_trusted = campaign_spend_trusted and (country_spend_reconciled is True)
-    # Country spend split (geo, native) expressed in USD via the realized rate so
-    # Country ROAS is also USD — never native-vs-USD mixed.
-    if country_spend_trusted and fx_effective_rate is not None:
+    country_spend_trusted = (
+        campaign_spend_trusted and (country_spend_reconciled is True) and canonical_geo_country)
+    # Country spend expressed in the ROAS currency: when trusted + FX complete, use
+    # the per-day-FX USD carried on the canonical geo rows; otherwise native
+    # diagnostic. Never native-vs-USD mixed.
+    if country_spend_trusted and canonical_geo_country and use_usd:
         country_spend_rows = [
-            {**r, "spend": _safe_float(r.get("spend")) * fx_effective_rate} for r in spend_rows
+            {"campaign_name": r.get("campaign_name"), "country": r.get("country"),
+             "spend": r.get("spend_usd")}
+            for r in country_source_rows
+        ]
+    elif country_spend_trusted and fx_effective_rate is not None:
+        country_spend_rows = [
+            {**r, "spend": _safe_float(r.get("spend")) * fx_effective_rate}
+            for r in country_source_rows
         ]
     else:
-        country_spend_rows = spend_rows
+        country_spend_rows = country_source_rows
     # PR-ADS-120: campaign-identity resolution is determined by canonical COVERAGE
     # completeness (we know the full campaign set), independent of FX. A revenue
     # campaign absent from the canonical spend set is "unmapped" → spend + ROAS
@@ -1003,7 +1041,10 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     # them ROAS is null (not zero) and the status says so.
     revenue_available = bool(revenue_rows)
 
-    named_spend = [r for r in spend_rows if r.get("country")]
+    # PR-ADS-124: country availability keys off the COUNTRY SOURCE rows (canonical
+    # geo when present, else legacy) so it reflects the same source that feeds the
+    # table and the reconciliation total.
+    named_spend = [r for r in country_source_rows if r.get("country")]
     country_spend_available = bool(named_spend)
 
     campaigns = _build_db_rows(
@@ -1114,6 +1155,9 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "spend_coverage_status": spend_coverage_status,
         "campaign_roas_available": campaign_spend_trusted,
         "country_roas_available": country_spend_trusted,
+        # PR-ADS-124: which spend source backed the country rows (canonical geo
+        # table vs legacy geo table) — country ROAS is trusted only from canonical.
+        "geo_country_source": geo_country_source,
         "campaign_spend_total": canonical_total,
         "country_spend_reconciled": country_spend_reconciled,
         "canonical_customer_id": canonical_customer_id,
@@ -1161,9 +1205,13 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "revenue_integration_status": revenue_integration_status,
         "revenue_window_status": revenue_window_status,
         "country_spend_available": country_spend_available,
-        "geo_country_mapping_status": "available" if country_spend_available else (
-            "no_geo_data" if not spend_rows else "partial"
+        # PR-ADS-124: "available" only when canonical geo named rows feed the table;
+        # legacy-only or unresolved criteria are "partial"; no geo at all is honest.
+        "geo_country_mapping_status": (
+            "available" if (canonical_geo_country and country_spend_available)
+            else ("no_geo_data" if not country_source_rows else "partial")
         ),
+        "geo_country_source": geo_country_source,
         "data_is_partial": data_is_partial,
         "source_health": source_health,
         "files_used": {},

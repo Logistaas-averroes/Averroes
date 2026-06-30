@@ -123,22 +123,29 @@ def test_exact_values_preserved_on_hover_and_in_modal():
 
 
 def test_only_frontend_and_test_files_changed():
-    # PR-ADS-123 is presentation-only: the diff vs origin/main must touch nothing
-    # outside static/* and this test file.
+    # PR-ADS-123 is presentation-only. Scope this guard to the PR-ADS-123 commits
+    # that are NOT yet merged into origin/main — once PR-123 is merged (and a later
+    # branch builds on top), there are no such commits here and the check is moot
+    # (a later PR legitimately changes backend files). This keeps the guard honest
+    # on the PR-123 branch without flagging unrelated later work.
+    import pytest
     try:
-        base = subprocess.run(
-            ["git", "merge-base", "HEAD", "origin/main"],
-            cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
-        out = subprocess.run(
-            ["git", "diff", "--name-only", base, "HEAD"],
+        log = subprocess.run(
+            ["git", "log", "--format=%H%x09%s", "origin/main..HEAD"],
             cwd=ROOT, capture_output=True, text=True, check=True).stdout
     except subprocess.CalledProcessError:
-        import pytest
-        pytest.skip("git diff unavailable in this environment")
-    changed = [f for f in out.splitlines() if f.strip()]
-    if not changed:
-        import pytest
-        pytest.skip("no committed diff yet (working tree only)")
+        pytest.skip("git log unavailable in this environment")
+    pr123_commits = [line.split("\t", 1)[0] for line in log.splitlines()
+                     if "\t" in line and "PR-ADS-123" in line.split("\t", 1)[1]]
+    if not pr123_commits:
+        pytest.skip("PR-ADS-123 already merged (or not on this branch) — guard not applicable")
+    try:
+        out = subprocess.run(
+            ["git", "show", "--name-only", "--format=", *pr123_commits],
+            cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    except subprocess.CalledProcessError:
+        pytest.skip("git show unavailable in this environment")
+    changed = {f for f in out.splitlines() if f.strip()}
     allowed_prefixes = ("static/",)
     allowed_exact = {"tests/test_pr_ads_123_revenue_ui_containment.py"}
     forbidden = [

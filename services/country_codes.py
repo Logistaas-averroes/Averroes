@@ -156,3 +156,44 @@ def get_country_code(name: str | None) -> str | None:
     if len(key) == 2 and key.isalpha():
         return key.upper()
     return None
+
+
+# PR-ADS-124: reverse map (ISO alpha-2 -> canonical display name) so the
+# canonical Google Ads geo table (which resolves a criterion id to a country
+# code) can present a human-readable country name that also joins HubSpot deal
+# country names. The first display name listed for each code wins.
+_CODE_TO_NAME = {
+    "SA": "Saudi Arabia", "AE": "United Arab Emirates", "QA": "Qatar",
+    "KW": "Kuwait", "BH": "Bahrain", "OM": "Oman", "JO": "Jordan",
+    "LB": "Lebanon", "EG": "Egypt", "IQ": "Iraq", "YE": "Yemen", "SY": "Syria",
+    "PS": "Palestine", "IL": "Israel", "TR": "Turkey", "IR": "Iran",
+    "MA": "Morocco", "DZ": "Algeria", "TN": "Tunisia", "LY": "Libya", "SD": "Sudan",
+    "GB": "United Kingdom", "IE": "Ireland", "FR": "France", "DE": "Germany",
+    "ES": "Spain", "PT": "Portugal", "IT": "Italy", "NL": "Netherlands",
+    "BE": "Belgium", "LU": "Luxembourg", "CH": "Switzerland", "AT": "Austria",
+    "PL": "Poland", "CZ": "Czech Republic", "SK": "Slovakia", "HU": "Hungary",
+    "RO": "Romania", "BG": "Bulgaria", "GR": "Greece", "CY": "Cyprus",
+    "MT": "Malta", "SE": "Sweden", "NO": "Norway", "DK": "Denmark",
+    "FI": "Finland", "IS": "Iceland", "EE": "Estonia", "LV": "Latvia",
+    "LT": "Lithuania", "UA": "Ukraine", "RU": "Russia", "HR": "Croatia",
+    "SI": "Slovenia", "RS": "Serbia", "US": "United States", "CA": "Canada",
+    "MX": "Mexico", "BR": "Brazil", "AR": "Argentina", "CL": "Chile",
+    "CO": "Colombia", "PE": "Peru", "EC": "Ecuador", "VE": "Venezuela",
+    "UY": "Uruguay", "PY": "Paraguay", "BO": "Bolivia", "PA": "Panama",
+    "CR": "Costa Rica", "GT": "Guatemala", "DO": "Dominican Republic",
+    "CN": "China", "HK": "Hong Kong", "TW": "Taiwan", "JP": "Japan",
+    "KR": "South Korea", "IN": "India", "PK": "Pakistan", "BD": "Bangladesh",
+    "KE": "Kenya", "GH": "Ghana", "ET": "Ethiopia", "TZ": "Tanzania", "UG": "Uganda",
+}
+
+
+def country_name_for_code(code: str | None) -> str | None:
+    """Return a canonical display country name for an ISO alpha-2 code, or None.
+
+    Used by the canonical Google Ads geo path: a criterion id resolves to a code,
+    and this maps the code to a human-readable name for the ROAS by Country row.
+    Unknown codes return None so the caller can fall back to the raw code.
+    """
+    if not code:
+        return None
+    return _CODE_TO_NAME.get(str(code).strip().upper())

@@ -1929,6 +1929,7 @@ def upsert_geo_daily_spend(rows: list, sync_run_id: Optional[str] = None) -> int
         prepared.append((
             cust, r.get("currency_code"),
             (r.get("country_criterion_id") or "").strip(),
+            r.get("country_code"), r.get("country_name"),
             (r.get("campaign_id") or "").strip(),
             spend_date, int(r.get("cost_micros") or 0),
             sync_run_id, r.get("source_query_version"),
@@ -1944,12 +1945,15 @@ def upsert_geo_daily_spend(rows: list, sync_run_id: Optional[str] = None) -> int
                     """
                     INSERT INTO google_ads_geo_daily_spend (
                         customer_id, currency_code, country_criterion_id,
+                        country_code, country_name,
                         campaign_id, spend_date, cost_micros,
                         sync_run_id, source_query_version
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (customer_id, country_criterion_id, campaign_id, spend_date)
                     DO UPDATE SET
                         currency_code        = EXCLUDED.currency_code,
+                        country_code         = EXCLUDED.country_code,
+                        country_name         = EXCLUDED.country_name,
                         cost_micros          = EXCLUDED.cost_micros,
                         sync_run_id          = EXCLUDED.sync_run_id,
                         source_query_version = EXCLUDED.source_query_version,
