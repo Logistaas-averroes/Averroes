@@ -3422,7 +3422,10 @@ function geoReconcileCauseText(reason) {
   switch (reason) {
     case "reconciled": return "Geo and campaign spend reconcile within tolerance.";
     case "missing_geo_dates": return "Some dates have campaign spend but no geo rows — the geo sync did not cover those dates.";
-    case "unattributed_location_spend": return "Geo rows exist for every campaign-spend day, but the geo total is below the campaign total. The residual is Google Ads spend with no identifiable location (not attributable to any country).";
+    case "campaign_spend_without_geo": return "One or more campaigns spent but have NO geo rows at all — the geo report is missing those campaigns.";
+    case "unattributed_location_spend":
+    case "geo_report_does_not_reconcile_by_design":
+      return "Geo rows exist for every campaign-spend day and campaign, but the geo total is still below the campaign total. The residual is Google Ads spend with no identifiable location — the geographic_view report omits it, so this denominator cannot reconcile to campaign spend under the current query.";
     case "geo_total_below_campaign_total": return "Geo total is below the campaign total.";
     default: return "Geo and campaign totals do not reconcile.";
   }
@@ -3431,7 +3434,7 @@ function geoReconcileNextActionText(nextAction) {
   switch (nextAction) {
     case "none": return "No action needed.";
     case "run_geo_sync_for_missing_dates": return "Run Google Ads Geo Sync for the missing dates.";
-    case "inspect_geo_query_parity": return "Inspect geo/campaign query parity. Geo rows exist, but totals do not reconcile.";
+    case "inspect_geo_query_parity": return "Inspect geo/campaign query parity — running Geo Sync again will not close this gap. Country ROAS stays blocked until the geo source can reconcile.";
     default: return "Inspect the geo/campaign reconciliation gap.";
   }
 }
@@ -3441,17 +3444,25 @@ function renderGeoReconcileDetail(r, cur) {
   }
   const money = (v) => (v === null || v === undefined ? "—" : fmtCurrency(v, cur));
   const missingCount = (r.missing_geo_dates || []).length;
+  const campGaps = (r.largest_campaign_gaps || []).slice(0, 5);
+  const dayGaps = (r.largest_daily_gaps || []).slice(0, 5);
+  const gapList = (items, label) => (items.length
+    ? `<div class="revenue-status-label">${label}</div>
+       <ul class="revenue-geo-gap-list">${items.map((g) => `<li>${escapeHtml(g.campaign_name || g.campaign_id || g.date || "—")}: ${money(g.variance_native)}</li>`).join("")}</ul>`
+    : "");
   return `
     <div class="revenue-geo-diagnostics">
-      <div class="revenue-status-label">Likely cause</div>
+      <div class="revenue-status-label">Geo Reconciliation Root Cause</div>
       <p class="revenue-geo-cause">${escapeHtml(geoReconcileCauseText(r.reason))}</p>
-      <div class="revenue-status-label">Next action</div>
-      <p class="revenue-geo-next">${escapeHtml(geoReconcileNextActionText(r.next_action))}</p>
       <div class="revenue-summary-strip revenue-summary-strip--three">
         <div><span>Tolerance</span><strong>${fmtTolerancePct(r.tolerance)}</strong></div>
         <div><span>Missing geo dates</span><strong>${fmtCount(missingCount)}</strong></div>
-        <div><span>Unmapped location spend</span><strong>${money(r.unmapped_location_spend_native)}</strong></div>
+        <div><span>Unknown / unattributed spend</span><strong>${money(r.unknown_location_spend_native)}</strong></div>
       </div>
+      ${gapList(campGaps, "Largest campaign gaps")}
+      ${gapList(dayGaps, "Largest daily gaps")}
+      <div class="revenue-status-label">Next action</div>
+      <p class="revenue-geo-next">${escapeHtml(geoReconcileNextActionText(r.next_action))}</p>
     </div>`;
 }
 
@@ -9423,6 +9434,8 @@ function renderRevenueEmptyState(scope) {
 let roasCampaignMart = null;
 let roasCountryMart = null;
 let revenueDealsMart = null;
+// PR-ADS-130: geo reconciliation root-cause for the blocked ROAS by Country card.
+let roasCountryGeoReconcile = null;
 
 async function fetchRevenuePerformance(view, windowKey) {
   const res = await fetch(
@@ -9902,7 +9915,7 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
   const usdReady = sh.campaign_roas_available === true;
   const nativeCur = sh.spend_native_currency || "GBP";
 
-  const bodyRows = rows.map((r) => {
+  const bodyRows = rows.map((r, i) => {
     const state = r.spend_state;
     const unmapped = state === "unmapped" || r.spend_mapping === "unavailable";
     let spendCell;
@@ -9919,9 +9932,12 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
       roasCell = spendIncomplete ? "Unavailable" : fmtRoasMultiple(r.roas);
       decisionCell = getBusinessVerdictBadge(r.verdict);
     }
+    // PR-ADS-130: an expand control opens a per-campaign drawer of the closed-won
+    // clients/deals behind the revenue (lazy-loaded on first open).
+    const expandBtn = `<button type="button" class="campaign-expand-btn" data-campaign-expand-idx="${i}" data-campaign-name="${encodeURIComponent(r.campaign_name || "")}" aria-expanded="false" title="Show clients / deals behind this campaign">▸</button>`;
     return `
     <tr>
-      <td>${escapeHtml(r.campaign_name || "")}${campaignAliasHtml(r.aliases)}${unmapped ? "" : spendProofButton(r.campaign_id, r.campaign_name)}</td>
+      <td>${expandBtn}${escapeHtml(r.campaign_name || "")}${campaignAliasHtml(r.aliases)}${unmapped ? "" : spendProofButton(r.campaign_id, r.campaign_name)}</td>
       <td>${spendCell}</td>
       <td>${fmtCount(r.leads)}</td>
       <td>${fmtCount(r.sqls)}</td>
@@ -9929,6 +9945,9 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
       <td>${fmtMoney(r.won_revenue)}</td>
       <td>${roasCell}</td>
       <td>${decisionCell}</td>
+    </tr>
+    <tr class="campaign-drilldown-row" data-drilldown-idx="${i}" hidden>
+      <td colspan="8"><div class="campaign-drilldown"></div></td>
     </tr>
   `;
   }).join("");
@@ -9955,6 +9974,100 @@ document.addEventListener("click", (e) => {
   if (!btn) return;
   roasCampaignFilter = btn.dataset.roasCampaignFilter || "all";
   renderRoasCampaignsPage();
+});
+
+// ── PR-ADS-130: ROAS by Campaign row drilldown (clients / deals behind revenue) ──
+// Expand control toggles a per-campaign drawer that lazily fetches the closed-won
+// client/deal detail from the read-only campaign-detail endpoint. Details are
+// rendered exactly as the backend provides them — missing company/contact ids
+// show "unavailable", never a fabricated value, and the deal is never hidden.
+
+// Format a possibly-missing value: real value or an explicit "unavailable" chip.
+function drilldownValue(v) {
+  if (v === null || v === undefined || v === "") {
+    return '<span class="detail-unavailable">unavailable</span>';
+  }
+  return escapeHtml(String(v));
+}
+
+function renderCampaignDrilldown(data) {
+  const status = (data && data.source_health && data.source_health.status) || "available";
+  if (status === "database_unavailable") {
+    return `<p class="revenue-footnote">Client/deal detail is temporarily unavailable (durable ledger unreachable).</p>`;
+  }
+  const details = (data && data.details) || [];
+  if (!details.length) {
+    return `<p class="revenue-footnote">No attributed closed-won client detail found for this campaign.</p>`;
+  }
+  const header = `
+    <tr>
+      <th>Company</th><th>Company ID</th><th>Main Contact</th><th>Contact ID</th>
+      <th>Deal</th><th>Deal ID</th><th>Amount</th><th>Close Date</th><th>Attribution</th>
+    </tr>`;
+  const body = details.map((d) => `
+    <tr>
+      <td>${drilldownValue(d.company_name)}</td>
+      <td>${drilldownValue(d.company_record_id)}</td>
+      <td>${drilldownValue(d.main_contact_name)}</td>
+      <td>${drilldownValue(d.main_contact_record_id)}</td>
+      <td>${drilldownValue(d.deal_name)}</td>
+      <td>${drilldownValue(d.deal_record_id)}</td>
+      <td>${d.deal_amount_usd == null ? drilldownValue(null) : fmtMoney(d.deal_amount_usd)}</td>
+      <td>${drilldownValue(d.deal_close_date)}</td>
+      <td>${drilldownValue(d.match_method)}</td>
+    </tr>`).join("");
+  return `
+    <div class="campaign-drilldown__title">Clients / Deals Behind This Campaign</div>
+    <div class="table-scroll campaign-drilldown__scroll">
+      <table class="data-table revenue-decision-table campaign-drilldown-table">
+        ${header}
+        <tbody>${body}</tbody>
+      </table>
+    </div>`;
+}
+
+async function loadCampaignDrilldown(campaignName, drawerRow) {
+  const container = drawerRow.querySelector(".campaign-drilldown");
+  if (!container) return;
+  container.innerHTML = '<p class="revenue-footnote">Loading clients / deals…</p>';
+  try {
+    const window_ = getRoasBusinessWindow();
+    const res = await fetch(
+      `/api/revenue-performance/campaign-detail?window=${encodeURIComponent(window_)}&campaign=${encodeURIComponent(campaignName)}`,
+      { credentials: "same-origin" }
+    );
+    if (!res.ok) {
+      container.innerHTML = `<p class="revenue-footnote">Could not load client/deal detail for this campaign.</p>`;
+      return;
+    }
+    container.innerHTML = renderCampaignDrilldown(await res.json());
+  } catch (err) {
+    console.error("[loadCampaignDrilldown]", err);
+    container.innerHTML = `<p class="revenue-footnote">Error loading client/deal detail.</p>`;
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-campaign-expand-idx]");
+  if (!btn) return;
+  const idx = btn.getAttribute("data-campaign-expand-idx");
+  const name = decodeURIComponent(btn.getAttribute("data-campaign-name") || "");
+  const drawer = document.querySelector(`.campaign-drilldown-row[data-drilldown-idx="${idx}"]`);
+  if (!drawer) return;
+  if (drawer.hasAttribute("hidden")) {
+    drawer.removeAttribute("hidden");
+    btn.setAttribute("aria-expanded", "true");
+    btn.textContent = "▾";
+    // Lazy-load once; a loaded drawer keeps its content when re-opened.
+    if (!drawer.dataset.loaded) {
+      drawer.dataset.loaded = "1";
+      loadCampaignDrilldown(name, drawer);
+    }
+  } else {
+    drawer.setAttribute("hidden", "");
+    btn.setAttribute("aria-expanded", "false");
+    btn.textContent = "▸";
+  }
 });
 
 // ── PR-ADS-122: Campaign spend reconciliation drilldown ("View spend proof") ──
@@ -10378,6 +10491,18 @@ async function loadRoasCountries() {
     roasCountriesData = data.rows || [];
     roasCountriesStatus = roasCountriesData.length ? "ok" : "empty";
     renderWindowRange("roas-countries-range", roasCountryWindow);
+    // PR-ADS-130: when country ROAS is blocked, fetch the geo reconciliation
+    // root-cause so the blocked card can name the likely cause + largest gap
+    // (never another blind "run geo sync"). Best-effort; the card renders either way.
+    roasCountryGeoReconcile = null;
+    const st = data.spend_truth || {};
+    if (st.country_spend_status !== "verified") {
+      try {
+        const gr = await fetch(`/api/google-ads-geo-reconcile?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
+        if (gr.ok && token === _revReqSeq.countries) roasCountryGeoReconcile = await gr.json();
+      } catch (e) { /* best-effort root-cause */ }
+      if (token !== _revReqSeq.countries) return;
+    }
     renderRoasCountriesPage();
   } catch (err) {
     console.error("[loadRoasCountries]", err);
@@ -10487,6 +10612,23 @@ function renderCountrySpendUnreconciledState(spendTruth) {
          <div><span>Tolerance</span><strong>${escapeHtml(tol || "—")}</strong></div>
        </div>`
     : "";
+  // PR-ADS-130: root-cause (from the geo reconciliation audit) so the blocked card
+  // names the LIKELY CAUSE + LARGEST GAP instead of another blind "run geo sync".
+  const gr = (isMismatch && roasCountryGeoReconcile) ? roasCountryGeoReconcile : null;
+  let rootCauseHtml = "";
+  let effectiveNextStep = nextStep;
+  if (gr) {
+    const cgap = (gr.largest_campaign_gaps && gr.largest_campaign_gaps[0]) || null;
+    const dgap = (gr.largest_daily_gaps && gr.largest_daily_gaps[0]) || null;
+    const largest = cgap
+      ? `${escapeHtml(cgap.campaign_name || cgap.campaign_id || "campaign")}: ${fmtNativeMoney(cgap.variance_native, cur)}`
+      : (dgap ? `${escapeHtml(dgap.date || "")}: ${fmtNativeMoney(dgap.variance_native, cur)}` : null);
+    effectiveNextStep = geoReconcileNextActionText(gr.next_action);
+    rootCauseHtml = `
+      <div class="revenue-status-label">Likely cause</div>
+      <p class="revenue-geo-cause">${escapeHtml(geoReconcileCauseText(gr.reason))}</p>
+      ${largest ? `<div class="revenue-status-label">Largest gap</div><p class="revenue-geo-next">${largest}</p>` : ""}`;
+  }
   return `
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
@@ -10499,7 +10641,8 @@ function renderCountrySpendUnreconciledState(spendTruth) {
         ${chip("FX coverage", labelizeStatus(st.fx_status), st.fx_status === "verified")}
         ${chip("Country geo spend", labelizeStatus(status), false)}
       </div>
-      <div class="revenue-next-step"><strong>Next step:</strong> ${nextStep}</div>
+      ${rootCauseHtml}
+      <div class="revenue-next-step"><strong>Next step:</strong> ${escapeHtml(effectiveNextStep)}</div>
       ${roasCountryCtaButtons()}
     </div>`;
 }

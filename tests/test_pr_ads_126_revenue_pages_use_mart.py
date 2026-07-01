@@ -147,7 +147,7 @@ def test_country_mismatch_blocks_trusted_table_in_ui():
     # PR-ADS-128: the card is given the whole spend_truth so its copy + status
     # chips match the cause.
     assert "renderCountrySpendUnreconciledState(st)" in body
-    card = _slice("function renderCountrySpendUnreconciledState", span=2800)
+    card = _slice("function renderCountrySpendUnreconciledState", span=3800)
     assert "Country ROAS is blocked" in card
     assert "does not reconcile" in card                 # mismatch wording
     assert "no canonical Google Ads geo spend" in card  # no-geo wording (distinct)
