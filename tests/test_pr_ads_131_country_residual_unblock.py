@@ -126,6 +126,8 @@ def test_residual_row_is_added(monkeypatch):
     # Not a real country: no leads/revenue, decision "unattributed".
     assert row["leads"] == 0 and row["customers"] == 0 and row["won_revenue"] == 0
     assert row["decision"] == "unattributed"
+    # No revenue basis -> ROAS is null, never a fake computed 0.0.
+    assert row["roas"] is None
 
 
 # ── Test 3 — residual amount equals the gap ─────────────────────────────────

@@ -9953,7 +9953,8 @@ function renderRoasCampaignTable(rows, spendIncomplete) {
     }
     // PR-ADS-130: an expand control opens a per-campaign drawer of the closed-won
     // clients/deals behind the revenue (lazy-loaded on first open).
-    const expandBtn = `<button type="button" class="campaign-expand-btn" data-campaign-expand-idx="${i}" data-campaign-name="${encodeURIComponent(r.campaign_name || "")}" aria-expanded="false" title="Show clients / deals behind this campaign">▸</button>`;
+    const expandLabel = `Show clients / deals behind ${r.campaign_name || "this campaign"}`;
+    const expandBtn = `<button type="button" class="campaign-expand-btn" data-campaign-expand-idx="${i}" data-campaign-name="${encodeURIComponent(r.campaign_name || "")}" aria-expanded="false" aria-label="${escapeHtml(expandLabel)}" title="${escapeHtml(expandLabel)}">▸</button>`;
     return `
     <tr>
       <td>${expandBtn}${escapeHtml(r.campaign_name || "")}${campaignAliasHtml(r.aliases)}${unmapped ? "" : spendProofButton(r.campaign_id, r.campaign_name)}</td>
@@ -10510,12 +10511,14 @@ async function loadRoasCountries() {
     roasCountriesData = data.rows || [];
     roasCountriesStatus = roasCountriesData.length ? "ok" : "empty";
     renderWindowRange("roas-countries-range", roasCountryWindow);
-    // PR-ADS-130: when country ROAS is blocked, fetch the geo reconciliation
-    // root-cause so the blocked card can name the likely cause + largest gap
-    // (never another blind "run geo sync"). Best-effort; the card renders either way.
+    // PR-ADS-130: on a geo MISMATCH, fetch the geo reconciliation root-cause so the
+    // blocked card can name the likely cause + largest gap (never another blind "run
+    // geo sync"). Only "mismatch" consumes roasCountryGeoReconcile — "unavailable"
+    // does not use it and "reconciled_with_residual" renders the table — so we skip
+    // the request for those states. Best-effort; the card renders either way.
     roasCountryGeoReconcile = null;
     const st = data.spend_truth || {};
-    if (st.country_spend_status !== "verified") {
+    if (st.country_spend_status === "mismatch") {
       try {
         const gr = await fetch(`/api/google-ads-geo-reconcile?window=${encodeURIComponent(window_)}`, { credentials: "same-origin" });
         if (gr.ok && token === _revReqSeq.countries) roasCountryGeoReconcile = await gr.json();

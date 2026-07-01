@@ -471,7 +471,10 @@ def _residual_country_row(residual_native, residual_usd, use_usd) -> dict:
         "sqls": 0,
         "customers": 0,
         "won_revenue": 0.0,
-        "roas": 0,
+        # No revenue basis for unattributed spend — ROAS is null (never a fake 0.0 an
+        # API consumer could read as a real computed ROAS), matching the mart's
+        # "no revenue → ROAS unavailable" doctrine. The UI renders it as an em-dash.
+        "roas": None,
         "cac": None,
         "confidence": "n/a",
         "verdict": "unattributed",
