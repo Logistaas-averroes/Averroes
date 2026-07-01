@@ -87,7 +87,7 @@ def test_shared_clean_spend_truth_card():
     # All four business page renderers use the SAME component.
     for page in ("function renderRoasCampaignsPage", "function renderRoasCountriesPage",
                  "function renderRevenueBySourcePage", "function renderRevenueDealsPage"):
-        body = _slice(page, span=1800)
+        body = _slice(page, span=3000)
         assert "renderMartSpendTruth(" in body, f"{page} must use the shared spend card"
 
 
@@ -143,7 +143,7 @@ def test_country_blocked_state_branches_by_status():
     # Status chips show the campaign-spend and FX gates too.
     assert "Campaign spend" in fn and "FX coverage" in fn
     # Never a country ROAS table from a blocked state — the guard returns first.
-    page = _slice("function renderRoasCountriesPage", span=2600)
+    page = _slice("function renderRoasCountriesPage", span=3400)
     i_guard = page.find('country_spend_status !== "verified"')
     i_table = page.find("renderRoasCountryTable")
     assert i_guard != -1 and i_table != -1 and i_guard < i_table

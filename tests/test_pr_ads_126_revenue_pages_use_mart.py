@@ -101,7 +101,7 @@ def test_all_revenue_pages_share_mart_renderers():
         "function renderRevenueBySourcePage",
         "function renderRevenueDealsPage",
     ):
-        body = _slice(page, span=1800)
+        body = _slice(page, span=3000)
         assert "renderMartSpendTruth(" in body, f"{page} must render the shared spend truth strip"
         assert "renderMartDiagnostics(" in body, f"{page} must render shared diagnostics"
     # The shared strip reads spend_truth + summary; the summary strip reads summary.
@@ -141,7 +141,7 @@ def test_fx_incomplete_backend_nulls_usd_and_roas(monkeypatch):
 # ── 7. Country mismatch blocks the trusted ROAS table ───────────────────────
 
 def test_country_mismatch_blocks_trusted_table_in_ui():
-    body = _slice("function renderRoasCountriesPage", span=2600)
+    body = _slice("function renderRoasCountriesPage", span=3400)
     # Country readiness is the mart's verdict; mismatch/unavailable blocks the table.
     assert 'country_spend_status !== "verified"' in body
     # PR-ADS-128: the card is given the whole spend_truth so its copy + status

@@ -145,7 +145,7 @@ def test_campaign_detail_db_unavailable_is_reported(monkeypatch):
 
 # Test 4 — frontend has an expandable campaign row control
 def test_frontend_has_expandable_campaign_row():
-    table = _slice("function renderRoasCampaignTable", span=2600)
+    table = _slice("function renderRoasCampaignTable", span=3000)
     assert "data-campaign-expand-idx" in table
     assert "campaign-drilldown-row" in table
     # A click handler toggles the drawer and lazy-loads the detail.
@@ -297,7 +297,7 @@ def test_frontend_country_card_shows_root_cause():
 
 
 def test_frontend_health_root_cause_section():
-    fn = _slice("function renderGeoReconcileDetail", span=1800)
+    fn = _slice("function renderGeoReconcileDetail", span=3200)
     assert "Geo Reconciliation Root Cause" in fn
     assert "Largest campaign gaps" in fn
     assert "Largest daily gaps" in fn

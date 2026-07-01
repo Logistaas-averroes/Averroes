@@ -139,7 +139,7 @@ def test_blocked_state_returns_before_table_campaign():
 
 
 def test_blocked_state_returns_before_table_country():
-    body = _fn("function renderRoasCountriesPage", span=2600)
+    body = _fn("function renderRoasCountriesPage", span=3400)
     # PR-ADS-112 rebuilt this page with a country-specific blocked renderer; the
     # table is rendered via renderRoasCountryTable (its own function).
     i_block = body.find("renderCountryRevenueBlockedState")
@@ -168,7 +168,7 @@ def test_render_flow_blocked_then_empty_then_table():
         ("function renderRoasCountriesPage", "renderCountryRevenueBlockedState",
          "renderRoasCountrySafeEmptyState", "renderRoasCountryTable"),
     ):
-        body = _fn(fn_name, span=2600)
+        body = _fn(fn_name, span=3400)
         i_block = body.find(block_fn)
         i_empty = body.find(empty_fn)
         i_table = body.find(table_fn)

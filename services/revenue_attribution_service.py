@@ -450,6 +450,45 @@ def _finalize_row(
     }
 
 
+def _residual_country_row(residual_native, residual_usd, use_usd) -> dict:
+    """PR-ADS-131: the explicit 'Unattributed / No Country' residual bucket row.
+
+    This is NOT a real country: no country_code/flag, no leads or revenue, decision
+    'unattributed'. Its spend is the campaign↔geo shortfall Google Ads could not
+    assign to a country (geographic_view omits location-less spend by design). It is
+    surfaced so ``Sum(country spend) + residual = canonical campaign spend`` — never
+    spread across real countries. USD is shown only when FX is complete; otherwise
+    USD stays None (never native GBP relabelled as USD)."""
+    spend = residual_usd if use_usd else residual_native
+    return {
+        "country": "Unattributed / No Country",
+        "country_code": None,
+        "is_residual": True,
+        "spend": spend,
+        "spend_native": residual_native,
+        "spend_usd": residual_usd,
+        "leads": 0,
+        "sqls": 0,
+        "customers": 0,
+        "won_revenue": 0.0,
+        # No revenue basis for unattributed spend — ROAS is null (never a fake 0.0 an
+        # API consumer could read as a real computed ROAS), matching the mart's
+        # "no revenue → ROAS unavailable" doctrine. The UI renders it as an em-dash.
+        "roas": None,
+        "cac": None,
+        "confidence": "n/a",
+        "verdict": "unattributed",
+        "decision": "unattributed",
+        "spend_mapping": "matched",
+        "spend_state": None,
+        "top_campaign": None,
+        "attribution_notes": [
+            "Unattributed residual — Google Ads geographic view does not assign this "
+            "spend to a country. Shown separately; never spread across real countries."
+        ],
+    }
+
+
 def _build_campaign_rows(deals: list, spend_rows: list, contacts: list, *, legacy_gclid: bool) -> list:
     buckets: dict[str, dict] = {}
 
@@ -1039,8 +1078,28 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     # country rows are sourced from the SAME canonical geo table (PR-ADS-124) —
     # never unblock from the legacy table or a bare reconciled total.
     campaign_spend_trusted = canonical_access and coverage_complete and fx_complete
+    # PR-ADS-131: a by-design unattributed residual (geo assigns most spend to
+    # countries; the shortfall is location-less spend the geographic_view omits) is
+    # a SAFE unblock. Real country rows keep their geo-attributed spend and an
+    # explicit "Unattributed / No Country" residual bucket is added — never spread
+    # across countries, never a real country, never loosening tolerance. Missing geo
+    # dates / campaigns missing geo / incomplete FX/coverage stay BLOCKED.
+    country_residual = {"eligible": False, "residual_native": None,
+                        "residual_pct": None, "reason": None}
+    if canonical_geo_country and country_spend_reconciled is False:
+        from services.google_ads_geo_sync_service import (  # noqa: PLC0415
+            _geo_reconciliation_detail, evaluate_country_residual,
+        )
+        _geo_detail = _geo_reconciliation_detail(
+            start_date, end_date, canonical_total, geo_total_for_recon, "mismatch")
+        country_residual = evaluate_country_residual(
+            canonical_total, geo_total_for_recon, _geo_detail,
+            coverage_complete=coverage_complete, fx_complete=fx_complete,
+            geo_has_rows=canonical_geo_country, reconciled=False)
+    country_residual_eligible = bool(country_residual["eligible"])
     country_spend_trusted = (
-        campaign_spend_trusted and (country_spend_reconciled is True) and canonical_geo_country)
+        campaign_spend_trusted and canonical_geo_country
+        and (country_spend_reconciled is True or country_residual_eligible))
     # Country spend expressed in the ROAS currency: when trusted + FX complete, use
     # the per-day-FX USD carried on the canonical geo rows; otherwise native
     # diagnostic. Never native-vs-USD mixed.
@@ -1121,6 +1180,16 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
         spend_trusted=country_spend_trusted,
     )
+    # PR-ADS-131: append the explicit residual bucket AFTER the real country rows so
+    # Sum(country spend) + residual == canonical campaign spend. USD is converted
+    # with the mart's effective FX rate only when FX is complete (else USD is None,
+    # never native GBP relabelled as USD).
+    country_residual_usd = None
+    if country_residual_eligible:
+        _res_native = country_residual["residual_native"]
+        country_residual_usd = (round(_res_native * fx_effective_rate, 2)
+                                if (use_usd and fx_effective_rate is not None) else None)
+        countries.append(_residual_country_row(_res_native, country_residual_usd, use_usd))
     summary = _build_db_summary(
         campaign_spend_rows, lead_rows, revenue_rows,
         revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
@@ -1252,6 +1321,12 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "country_spend_variance": country_spend_variance_native,
         "country_spend_variance_pct": country_spend_variance_pct,
         "country_spend_tolerance": country_spend_tolerance,
+        # PR-ADS-131: safe unblock via an explicit unattributed residual bucket.
+        "country_residual_eligible": country_residual_eligible,
+        "country_residual_native": country_residual["residual_native"],
+        "country_residual_usd": country_residual_usd,
+        "country_residual_pct": country_residual["residual_pct"],
+        "country_residual_reason_code": country_residual["reason"],
         "canonical_customer_id": canonical_customer_id,
         "canonical_currency": canonical_currency,
         # PR-ADS-119 currency contract: native GBP truth + USD reporting via daily
