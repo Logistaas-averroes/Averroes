@@ -311,10 +311,32 @@ def test_all_time_passes_none_start_to_db():
     assert captured["start"] is None
 
 
-def test_partial_data_flagged_when_coverage_starts_after_window():
-    result = _build_db(window="ytd", spend_cov=("2026-04-01", "2026-06-20"))  # ytd starts Jan 1
+def test_partial_data_flagged_when_canonical_coverage_incomplete():
+    # PR-ADS-129: "partial" is driven by the canonical coverage LEDGER (missing
+    # chunks), NOT the geo table's first-row date. Coverage chunks starting Apr 1
+    # leave Jan–Mar of a YTD window uncovered → incomplete → partial.
+    coverage = {"available": True, "chunks": [
+        {"chunk_start": "2026-04-01", "chunk_end": "2100-01-01", "status": "verified"},
+    ]}
+    canonical = _canonical_from_spend(_spend_rows())
+    canonical["coverage_start"] = "2026-04-04"
+    result = _build_db(window="ytd", canonical=canonical, coverage=coverage)
     assert result["data_is_partial"] is True
-    assert any("Partial data" in w for w in result["warnings"])
+    assert any("coverage incomplete" in w.lower() for w in result["warnings"])
+    assert result["source_health"]["campaign_spend_coverage_status"] == "incomplete"
+
+
+def test_verified_zero_before_first_spend_is_not_partial():
+    # PR-ADS-129: first spend row starts Apr 4 but the whole YTD window is covered
+    # by a VERIFIED coverage chunk (Jan–Apr fetched, verified zero) → coverage is
+    # complete, NOT partial, and no spend-coverage warning is emitted.
+    canonical = _canonical_from_spend(_spend_rows())
+    canonical["coverage_start"] = "2026-04-04"
+    result = _build_db(window="ytd", canonical=canonical)  # default wide verified chunk
+    sh = result["source_health"]
+    assert sh["campaign_spend_coverage_status"] == "complete"
+    assert sh["campaign_spend_coverage_reason"] == "verified_zero_before_first_spend"
+    assert not any("coverage incomplete" in w.lower() for w in result["warnings"])
 
 
 def test_invalid_window_raises():

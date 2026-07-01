@@ -505,7 +505,7 @@ def test_blocked_country_card_has_recovery_cta():
     assert '_currentUser.role === "admin"' in fn
     assert "Ask an admin to run Google Ads Geo Sync from Revenue Health." in fn
     # The unreconciled blocked card actually renders the CTA.
-    blocked = _fn("function renderCountrySpendUnreconciledState", span=1900)
+    blocked = _fn("function renderCountrySpendUnreconciledState", span=2800)
     assert "roasCountryCtaButtons()" in blocked
 
 

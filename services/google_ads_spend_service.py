@@ -168,6 +168,149 @@ def analyze_coverage(start: date | None, end: date, chunks: list) -> dict:
     }
 
 
+def _coerce_iso(value) -> str | None:
+    """Best-effort ISO date string from a date/datetime/str, else None."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return value.isoformat()
+    except Exception:  # noqa: BLE001
+        return str(value)
+
+
+def classify_coverage(start: date | None, end: date, chunks: list,
+                      first_spend_date: str | None) -> dict:
+    """Classify campaign spend-coverage completeness AND the reason (PR-ADS-129).
+
+    ``analyze_coverage`` already decides completeness from the durable coverage
+    LEDGER (google_ads_spend_coverage) — a VERIFIED chunk covers its dates even
+    with zero spend, and a MISSING/ FAILED chunk does not. This adds the *reason*
+    so ROAS availability is auditable, never inferred:
+
+      - verified_zero_before_first_spend: coverage is complete and the first spend
+        row starts after the window start — i.e. the earlier period was fetched
+        and verified as zero spend (ROAS may be available). NOT inferred zero:
+        it requires actual verified ledger chunks spanning that period.
+      - missing_chunks: the ledger does not cover the whole window (some dates
+        were never fetched) — coverage incomplete, ROAS withheld.
+      - not_backfilled: there are no ledger chunks at all — coverage incomplete.
+      - failed_chunks: at least one ledger chunk failed — coverage incomplete.
+      - fully_covered: coverage complete and spend spans the whole window.
+
+    Returns {complete, status, reason, missing_chunks, failed_chunks,
+    verified_zero_chunks} — never writes anything, never fabricates spend.
+    """
+    cov = analyze_coverage(start, end, chunks)
+    complete = bool(cov.get("complete"))
+
+    missing_chunks = [
+        {"date_from": r.get("start"), "date_to": r.get("end")}
+        for r in (cov.get("missing_ranges") or [])
+    ]
+    failed_chunks = [
+        {"date_from": _coerce_iso(c.get("chunk_start")), "date_to": _coerce_iso(c.get("chunk_end"))}
+        for c in chunks if c.get("status") != "verified"
+    ]
+    verified_zero_chunks = [
+        {
+            "date_from": _coerce_iso(c.get("chunk_start")),
+            "date_to": _coerce_iso(c.get("chunk_end")),
+            "source": "google_ads_api",
+            "rows_returned": int(c.get("rows_written") or 0),
+            "status": "verified_zero",
+        }
+        for c in chunks
+        if c.get("status") == "verified" and int(c.get("cost_micros_total") or 0) == 0
+    ]
+
+    req_start = start.isoformat() if start else None
+    has_any_chunk = bool(chunks)
+
+    if failed_chunks:
+        status, reason = "incomplete", "failed_chunks"
+    elif missing_chunks:
+        status = "incomplete"
+        reason = "missing_chunks" if has_any_chunk else "not_backfilled"
+    elif complete and first_spend_date and req_start and first_spend_date > req_start:
+        # Complete coverage but spend only starts later → the earlier period was
+        # fetched and verified as zero spend (proven, not inferred).
+        status, reason = "complete", "verified_zero_before_first_spend"
+    elif complete:
+        status, reason = "complete", "fully_covered"
+    elif not has_any_chunk:
+        # No ledger chunks at all (e.g. all_time with an empty coverage ledger):
+        # deterministically "not backfilled" — incomplete, never an ambiguous
+        # "unknown" that a consumer might read as recoverable.
+        status, reason = "incomplete", "not_backfilled"
+    else:
+        # Chunks exist but none cover the window and none failed (e.g. a verified
+        # chunk missing its chunk_start) — genuinely ambiguous.
+        status, reason = "unknown", "unknown"
+
+    return {
+        "complete": complete,
+        "status": status,
+        "reason": reason,
+        "missing_chunks": missing_chunks,
+        "failed_chunks": failed_chunks,
+        "verified_zero_chunks": verified_zero_chunks,
+    }
+
+
+def build_campaign_spend_coverage_audit(window: str, now: datetime | None = None) -> dict:
+    """Auditable campaign spend-coverage report for a business window (PR-ADS-129).
+
+    Proves WHY campaign ROAS is (un)available: it distinguishes a window whose
+    earlier dates were fetched-and-verified-zero (coverage complete) from one whose
+    earlier dates were never fetched or failed (coverage incomplete). Read-only.
+    """
+    account_time_zone = repo.fetch_account_time_zone()
+    resolved, start, end = _window_bounds(window, now, account_time_zone)
+    requested_start = resolved.get("start_date")
+    requested_end = resolved.get("end_date")
+
+    canonical = repo.fetch_canonical_campaign_spend(start, end)
+    if not canonical.get("available"):
+        return {
+            "window": window,
+            "requested_start": requested_start,
+            "requested_end": requested_end,
+            "first_spend_date": None,
+            "last_spend_date": None,
+            # Align with source_health: an unreachable canonical backend is
+            # "unavailable", not an ambiguous "unknown" a consumer might retry.
+            "coverage_status": "unavailable",
+            "coverage_reason": "canonical_unavailable",
+            "missing_chunks": [],
+            "failed_chunks": [],
+            "verified_zero_chunks": [],
+            "account_time_zone": account_time_zone,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    first_spend_date = _coerce_iso(canonical.get("coverage_start"))
+    last_spend_date = _coerce_iso(canonical.get("coverage_end"))
+    chunks = repo.fetch_spend_coverage(start, end).get("chunks", [])
+    classification = classify_coverage(start, end, chunks, first_spend_date)
+
+    return {
+        "window": window,
+        "requested_start": requested_start,
+        "requested_end": requested_end,
+        "first_spend_date": first_spend_date,
+        "last_spend_date": last_spend_date,
+        "coverage_status": classification["status"],
+        "coverage_reason": classification["reason"],
+        "missing_chunks": classification["missing_chunks"],
+        "failed_chunks": classification["failed_chunks"],
+        "verified_zero_chunks": classification["verified_zero_chunks"],
+        "account_time_zone": account_time_zone,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def _reconcile(canonical_spend: float, other_spend: float, tolerance: float) -> dict:
     amount = round(canonical_spend - other_spend, 6)
     pct = (abs(amount) / canonical_spend) if canonical_spend > 0 else None

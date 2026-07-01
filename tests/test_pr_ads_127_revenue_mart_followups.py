@@ -117,7 +117,7 @@ def test_country_unavailable_uses_no_geo_wording(monkeypatch):
 def test_country_card_copy_branches_on_status():
     # PR-ADS-128: the card takes the whole spend_truth and renders cause-specific
     # copy (mismatch vs unavailable) plus status chips.
-    fn = _slice("function renderCountrySpendUnreconciledState", span=1800)
+    fn = _slice("function renderCountrySpendUnreconciledState", span=2800)
     assert "function renderCountrySpendUnreconciledState(spendTruth)" in JS
     assert 'status === "mismatch"' in fn
     # Mismatch wording (geo exists but doesn't reconcile).

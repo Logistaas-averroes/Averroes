@@ -980,6 +980,118 @@ def fetch_geo_daily_spend_by_country(start: date | None, end: date) -> dict:
         return {"available": False, "has_rows": False, "rows": []}
 
 
+def fetch_geo_reconciliation_breakdown(start: date | None, end: date) -> dict:
+    """Per-day + per-campaign geo vs canonical-campaign spend (PR-ADS-129).
+
+    Explains WHY the geo total differs from the canonical campaign total: it
+    returns aligned per-day and per-campaign native totals from BOTH the canonical
+    campaign-daily table and the canonical geo table, plus the geo spend that could
+    not be mapped to a country. Read-only; no fabrication.
+
+    Returns {available, daily:[{spend_date, campaign_spend, geo_spend}],
+    by_campaign:[{campaign_id, campaign_name, campaign_spend, geo_spend}],
+    unmapped_geo_native, campaign_rows_counted}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False}
+            with conn.cursor() as cur:
+                # Per-day native totals from both tables, full-outer-joined on date.
+                cur.execute(
+                    """
+                    WITH camp AS (
+                        SELECT spend_date, SUM(cost_micros)::bigint AS micros
+                        FROM google_ads_campaign_daily_spend
+                        WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                        GROUP BY spend_date
+                    ),
+                    geo AS (
+                        SELECT spend_date, SUM(cost_micros)::bigint AS micros
+                        FROM google_ads_geo_daily_spend
+                        WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                        GROUP BY spend_date
+                    )
+                    SELECT COALESCE(camp.spend_date, geo.spend_date) AS spend_date,
+                           COALESCE(camp.micros, 0) AS camp_micros,
+                           COALESCE(geo.micros, 0) AS geo_micros
+                    FROM camp FULL OUTER JOIN geo ON camp.spend_date = geo.spend_date
+                    ORDER BY spend_date
+                    """,
+                    (start, start, end, start, start, end),
+                )
+                daily = [
+                    {
+                        "spend_date": _as_date(r[0]),
+                        "campaign_spend": round(int(r[1] or 0) / 1_000_000, 6),
+                        "geo_spend": round(int(r[2] or 0) / 1_000_000, 6),
+                    }
+                    for r in cur.fetchall()
+                ]
+                # Per-campaign native totals from both tables.
+                cur.execute(
+                    """
+                    WITH camp AS (
+                        SELECT campaign_id, MAX(campaign_name) AS campaign_name,
+                               SUM(cost_micros)::bigint AS micros
+                        FROM google_ads_campaign_daily_spend
+                        WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                        GROUP BY campaign_id
+                    ),
+                    geo AS (
+                        SELECT campaign_id, SUM(cost_micros)::bigint AS micros
+                        FROM google_ads_geo_daily_spend
+                        WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                        GROUP BY campaign_id
+                    )
+                    SELECT COALESCE(camp.campaign_id, geo.campaign_id) AS campaign_id,
+                           camp.campaign_name,
+                           COALESCE(camp.micros, 0) AS camp_micros,
+                           COALESCE(geo.micros, 0) AS geo_micros
+                    FROM camp FULL OUTER JOIN geo ON camp.campaign_id = geo.campaign_id
+                    """,
+                    (start, start, end, start, start, end),
+                )
+                by_campaign = [
+                    {
+                        "campaign_id": r[0],
+                        "campaign_name": r[1],
+                        "campaign_spend": round(int(r[2] or 0) / 1_000_000, 6),
+                        "geo_spend": round(int(r[3] or 0) / 1_000_000, 6),
+                    }
+                    for r in cur.fetchall()
+                ]
+                # Geo spend that resolved to no country (unmapped location).
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(cost_micros), 0)::bigint
+                    FROM google_ads_geo_daily_spend
+                    WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                      AND (country_code IS NULL OR country_criterion_id = '')
+                    """,
+                    (start, start, end),
+                )
+                unmapped = int((cur.fetchone() or [0])[0] or 0)
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM google_ads_campaign_daily_spend
+                    WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                    """,
+                    (start, start, end),
+                )
+                camp_rows = int((cur.fetchone() or [0])[0] or 0)
+            return {
+                "available": True,
+                "daily": daily,
+                "by_campaign": by_campaign,
+                "unmapped_geo_native": round(unmapped / 1_000_000, 6),
+                "campaign_rows_counted": camp_rows,
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_geo_reconciliation_breakdown failed: %s", exc)
+        return {"available": False}
+
+
 def fetch_campaign_daily_spend_local(
     campaign_id: str, start: date | None, end: date, customer_id: str | None = None
 ) -> dict:

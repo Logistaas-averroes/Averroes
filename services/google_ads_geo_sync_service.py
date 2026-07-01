@@ -160,6 +160,10 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
         canonical_available and coverage_complete and fx_complete and status == "reconciled"
     )
 
+    # PR-ADS-129: explain WHY the totals differ, from per-day + per-campaign data.
+    breakdown = _geo_reconciliation_detail(
+        start, end, canonical_total, geo_total, status)
+
     return {
         "window": window,
         "date_from": date_from,
@@ -178,9 +182,115 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
         "country_roas_unblockable": country_roas_unblockable,
         "geo_rows_counted": int(geo.get("rows_counted") or 0) if geo_available else 0,
         "geo_country_count": int(geo.get("country_count") or 0) if geo_available else 0,
+        "campaign_rows_counted": breakdown.get("campaign_rows_counted"),
         "last_geo_sync_at": geo.get("last_synced_at") if geo_available else None,
         "tolerance": SPEND_VARIANCE_TOLERANCE,
+        # PR-ADS-129 diagnostics: exactly where the gap is + the concrete next action.
+        "reason": breakdown.get("reason"),
+        "next_action": breakdown.get("next_action"),
+        "missing_geo_dates": breakdown.get("missing_geo_dates", []),
+        "failed_geo_dates": [],  # geo sync has no per-date failure ledger
+        "unmapped_location_spend_native": breakdown.get("unmapped_geo_native"),
+        "unknown_location_spend_native": None,  # not tracked as a distinct bucket
+        "excluded_geo_spend_native": None,
+        "network_or_segment_gap_native": breakdown.get("network_or_segment_gap_native"),
+        "largest_daily_variances": breakdown.get("largest_daily_variances", []),
+        "campaign_geo_gaps": breakdown.get("campaign_geo_gaps", []),
+        "campaign_ids_in_geo": breakdown.get("campaign_ids_in_geo"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _geo_reconciliation_detail(start, end, canonical_total, geo_total, status: str) -> dict:
+    """Per-day + per-campaign explanation of the geo↔campaign variance (PR-ADS-129).
+
+    Best-effort and read-only: computes the largest daily and per-campaign gaps,
+    the geo spend with no resolvable country (unmapped), the overall gap, and a
+    concrete next action. Never blocks or fabricates — on any error it returns the
+    top-line reason only.
+    """
+    net_gap = (round(canonical_total - geo_total, 6)
+               if (canonical_total is not None and geo_total is not None) else None)
+
+    detail = repo.fetch_geo_reconciliation_breakdown(start, end)
+    if not detail.get("available"):
+        reason = ("geo_total_below_campaign_total"
+                  if (net_gap is not None and net_gap > 0) else "totals_differ")
+        return {
+            "reason": reason,
+            "next_action": "inspect_geo_gap",
+            "network_or_segment_gap_native": net_gap,
+            "missing_geo_dates": [],
+            "largest_daily_variances": [],
+            "campaign_geo_gaps": [],
+            "campaign_ids_in_geo": None,
+            "campaign_rows_counted": None,
+            "unmapped_geo_native": None,
+        }
+
+    daily = detail.get("daily", [])
+    # Dates where campaign spent but geo has NO spend at all → a genuine geo gap
+    # (the geo sync did not cover that day), distinct from an unattributed residual.
+    missing_geo_dates = [
+        d["spend_date"] for d in daily
+        if (d.get("campaign_spend") or 0) > 0 and (d.get("geo_spend") or 0) == 0
+    ]
+    largest_daily = sorted(
+        (
+            {
+                "date": d.get("spend_date"),
+                "campaign_spend_native": d.get("campaign_spend"),
+                "geo_spend_native": d.get("geo_spend"),
+                "variance_native": round((d.get("geo_spend") or 0) - (d.get("campaign_spend") or 0), 6),
+            }
+            for d in daily
+        ),
+        key=lambda x: abs(x["variance_native"]),
+        reverse=True,
+    )[:10]
+
+    by_campaign = detail.get("by_campaign", [])
+    campaign_ids_in_geo = any((c.get("geo_spend") or 0) > 0 for c in by_campaign)
+    campaign_gaps = sorted(
+        (
+            {
+                "campaign_id": c.get("campaign_id"),
+                "campaign_name": c.get("campaign_name"),
+                "campaign_spend_native": c.get("campaign_spend"),
+                "geo_spend_native": c.get("geo_spend"),
+                "variance_native": round((c.get("geo_spend") or 0) - (c.get("campaign_spend") or 0), 6),
+            }
+            for c in by_campaign
+        ),
+        key=lambda x: abs(x["variance_native"]),
+        reverse=True,
+    )[:10]
+
+    if status == "reconciled":
+        reason = "reconciled"
+        next_action = "none"
+    elif missing_geo_dates:
+        reason = "missing_geo_dates"
+        next_action = "run_geo_sync_for_missing_dates"
+    elif net_gap is not None and net_gap > 0:
+        # Geo rows exist for every campaign-spend day, but totals still differ —
+        # the residual is spend Google Ads did not attribute to any country.
+        reason = "unattributed_location_spend"
+        next_action = "inspect_geo_query_parity"
+    else:
+        reason = "totals_differ"
+        next_action = "inspect_geo_gap"
+
+    return {
+        "reason": reason,
+        "next_action": next_action,
+        "network_or_segment_gap_native": net_gap,
+        "unmapped_geo_native": detail.get("unmapped_geo_native"),
+        "missing_geo_dates": missing_geo_dates,
+        "largest_daily_variances": largest_daily,
+        "campaign_geo_gaps": campaign_gaps if campaign_ids_in_geo else [],
+        "campaign_ids_in_geo": campaign_ids_in_geo,
+        "campaign_rows_counted": detail.get("campaign_rows_counted"),
     }
 
 

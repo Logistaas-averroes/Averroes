@@ -145,6 +145,19 @@ def _spend_truth_block(core: dict) -> dict:
         "reporting_currency": health.get("reporting_currency") or "USD",
         "spend_source": health.get("spend_source"),
         "spend_coverage_status": health.get("spend_coverage_status"),
+        # PR-ADS-129: auditable coverage classification — distinguishes a window
+        # whose earlier dates were verified-zero (coverage complete) from one whose
+        # earlier dates were never fetched / failed (coverage incomplete).
+        "campaign_spend_coverage_status": health.get("campaign_spend_coverage_status"),
+        "campaign_spend_coverage_reason": health.get("campaign_spend_coverage_reason"),
+        "spend_coverage_detail": health.get("spend_coverage_detail") or {},
+        # PR-ADS-129: exact geo↔canonical variance so the Country blocked card shows
+        # real totals (campaign vs geo, variance, tolerance) — never fabricated.
+        "campaign_spend_total": native_spend,
+        "country_geo_total": _round2(health.get("country_geo_total")),
+        "country_spend_variance": _round2(health.get("country_spend_variance")),
+        "country_spend_variance_pct": health.get("country_spend_variance_pct"),
+        "country_spend_tolerance": health.get("country_spend_tolerance"),
     }
 
 
@@ -197,12 +210,33 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
             ),
         })
     if spend_truth["campaign_spend_status"] != "verified":
+        detail = spend_truth.get("spend_coverage_detail") or {}
+        reason = spend_truth.get("campaign_spend_coverage_reason")
+        missing = detail.get("missing_chunks") or []
+        failed = detail.get("failed_chunks") or []
+        req_start = detail.get("requested_start")
+        first_spend = detail.get("first_spend_date")
+        # PR-ADS-129: name the exact missing/unverified period so the reason is
+        # actionable — never a bare "incomplete".
+        if failed:
+            extra = (" One or more Google Ads spend backfill chunks FAILED — "
+                     "re-run the spend backfill for the affected dates.")
+        elif missing:
+            gap = missing[0]
+            extra = (f" Durable spend is unverified for {gap.get('date_from')} → "
+                     f"{gap.get('date_to')} (reason: {reason}). Run the Google Ads "
+                     "spend backfill for that period, or verify it was zero spend.")
+        elif req_start and first_spend and first_spend > req_start:
+            extra = (f" Durable spend rows start {first_spend}; verify "
+                     f"{req_start} → {first_spend} was zero spend to unblock ROAS.")
+        else:
+            extra = ""
         diags.append({
             "code": "campaign_spend_coverage",
             "message": (
                 "Canonical campaign spend coverage is "
                 f"'{spend_truth['campaign_spend_status']}' — ROAS is unavailable "
-                "(never a fake $0) until coverage is complete."
+                f"(never a fake $0) until coverage is complete.{extra}"
             ),
         })
     if spend_truth["country_spend_status"] == "mismatch":

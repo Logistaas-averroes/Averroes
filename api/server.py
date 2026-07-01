@@ -6857,6 +6857,28 @@ async def get_google_ads_geo_reconcile(
         raise HTTPException(status_code=500, detail="Geo reconciliation failed") from exc
 
 
+@app.get("/api/google-ads-spend-coverage-audit")
+async def get_google_ads_spend_coverage_audit(
+    window: str = Query(default="ytd"),
+    _user=Depends(require_auth),
+):
+    """Campaign spend-coverage audit for a window (PR-ADS-129).
+
+    Read-only. Proves WHY campaign ROAS is (un)available by classifying the
+    durable coverage ledger: verified_zero_before_first_spend (complete),
+    missing_chunks / not_backfilled / failed_chunks (incomplete). Powers the
+    Revenue Health spend-truth coverage note and the ROAS by Campaign diagnostic.
+    """
+    from services.google_ads_spend_service import build_campaign_spend_coverage_audit  # noqa: PLC0415
+    try:
+        return build_campaign_spend_coverage_audit(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("Spend coverage audit failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Spend coverage audit failed") from exc
+
+
 # ---------------------------------------------------------------------------
 # PR-ADS-119 — currency normalization (FX) + campaign identity reconciliation.
 # ---------------------------------------------------------------------------
