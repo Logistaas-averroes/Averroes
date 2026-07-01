@@ -941,7 +941,11 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         country_geo_total_native = None
         country_spend_variance_native = None
         country_spend_variance_pct = None
-        country_spend_tolerance = 0.02
+        # Reuse the shared constant so the tolerance can never silently drift.
+        from services.google_ads_spend_service import (  # noqa: PLC0415
+            SPEND_VARIANCE_TOLERANCE as _SVT,
+        )
+        country_spend_tolerance = _SVT
         fx_complete = False
         fx_coverage_status = "unavailable"
         use_usd = False

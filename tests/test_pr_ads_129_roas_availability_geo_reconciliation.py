@@ -76,20 +76,35 @@ def test_no_chunks_is_not_backfilled():
     assert out["reason"] == "not_backfilled"
 
 
-def test_all_time_empty_ledger_is_unknown_and_warned(monkeypatch):
-    # all_time (start=None) with an empty coverage ledger cannot establish
-    # completeness → "unknown"; ROAS stays withheld AND a warning is emitted.
+def test_all_time_empty_ledger_is_not_backfilled_and_warned(monkeypatch):
+    # all_time (start=None) with an empty coverage ledger is deterministically
+    # "not backfilled" — incomplete (never an ambiguous "unknown"). ROAS stays
+    # withheld AND a warning is emitted.
     out = classify_coverage(None, date(2026, 7, 1), [], first_spend_date=None)
-    assert out["status"] == "unknown"
+    assert out["status"] == "incomplete"
+    assert out["reason"] == "not_backfilled"
 
     import test_pr_ads_125_revenue_decision_mart as t125
     t125._patch_durable(monkeypatch, coverage=[])  # empty coverage ledger
     from services.revenue_attribution_service import build_revenue_attribution
     res = build_revenue_attribution("all_time", now=t125.NOW)
     sh = res["source_health"]
-    assert sh["campaign_spend_coverage_status"] == "unknown"
+    assert sh["campaign_spend_coverage_status"] == "incomplete"
+    assert sh["campaign_spend_coverage_reason"] == "not_backfilled"
     assert res["data_is_partial"] is True
-    assert any("could not be verified" in w.lower() for w in res["warnings"])
+    assert any("coverage incomplete" in w.lower() for w in res["warnings"])
+
+
+def test_coverage_audit_unavailable_when_canonical_unavailable(monkeypatch):
+    # Copilot review: an unreachable canonical backend is "unavailable", not
+    # an ambiguous "unknown".
+    import db.revenue_repository as repo
+    monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "Europe/London")
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: {"available": False})
+    from services.google_ads_spend_service import build_campaign_spend_coverage_audit
+    out = build_campaign_spend_coverage_audit("ytd")
+    assert out["coverage_status"] == "unavailable"
+    assert out["coverage_reason"] == "canonical_unavailable"
 
 
 # Test 3 — failed chunks block ROAS

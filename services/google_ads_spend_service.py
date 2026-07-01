@@ -239,7 +239,14 @@ def classify_coverage(start: date | None, end: date, chunks: list,
         status, reason = "complete", "verified_zero_before_first_spend"
     elif complete:
         status, reason = "complete", "fully_covered"
+    elif not has_any_chunk:
+        # No ledger chunks at all (e.g. all_time with an empty coverage ledger):
+        # deterministically "not backfilled" — incomplete, never an ambiguous
+        # "unknown" that a consumer might read as recoverable.
+        status, reason = "incomplete", "not_backfilled"
     else:
+        # Chunks exist but none cover the window and none failed (e.g. a verified
+        # chunk missing its chunk_start) — genuinely ambiguous.
         status, reason = "unknown", "unknown"
 
     return {
@@ -272,7 +279,9 @@ def build_campaign_spend_coverage_audit(window: str, now: datetime | None = None
             "requested_end": requested_end,
             "first_spend_date": None,
             "last_spend_date": None,
-            "coverage_status": "unknown",
+            # Align with source_health: an unreachable canonical backend is
+            # "unavailable", not an ambiguous "unknown" a consumer might retry.
+            "coverage_status": "unavailable",
             "coverage_reason": "canonical_unavailable",
             "missing_chunks": [],
             "failed_chunks": [],
