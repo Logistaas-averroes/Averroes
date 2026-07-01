@@ -3408,6 +3408,53 @@ function geoSyncStatusBadge(status) {
   return `<div class="revenue-status-chip ${cls}"><span>Geo reconciliation status</span><strong>${label}</strong></div>`;
 }
 
+// PR-ADS-129: the reconciliation tolerance is a FRACTION (0.02) — render it as a
+// true percentage ("2%") so it reads consistently with variance_pct (already ×100)
+// and is never mistaken for 0.02%.
+function fmtTolerancePct(fraction) {
+  if (fraction === null || fraction === undefined) return "—";
+  return `${Math.round(fraction * 10000) / 100}%`;
+}
+
+// PR-ADS-129: map the backend geo-reconciliation reason/next_action codes to
+// human copy. The frontend renders the backend's verdict — it never recomputes it.
+function geoReconcileCauseText(reason) {
+  switch (reason) {
+    case "reconciled": return "Geo and campaign spend reconcile within tolerance.";
+    case "missing_geo_dates": return "Some dates have campaign spend but no geo rows — the geo sync did not cover those dates.";
+    case "unattributed_location_spend": return "Geo rows exist for every campaign-spend day, but the geo total is below the campaign total. The residual is Google Ads spend with no identifiable location (not attributable to any country).";
+    case "geo_total_below_campaign_total": return "Geo total is below the campaign total.";
+    default: return "Geo and campaign totals do not reconcile.";
+  }
+}
+function geoReconcileNextActionText(nextAction) {
+  switch (nextAction) {
+    case "none": return "No action needed.";
+    case "run_geo_sync_for_missing_dates": return "Run Google Ads Geo Sync for the missing dates.";
+    case "inspect_geo_query_parity": return "Inspect geo/campaign query parity. Geo rows exist, but totals do not reconcile.";
+    default: return "Inspect the geo/campaign reconciliation gap.";
+  }
+}
+function renderGeoReconcileDetail(r, cur) {
+  if (!r || !r.status || r.status === "reconciled" || r.status === "no_geo_data" || r.status === "unavailable") {
+    return "";
+  }
+  const money = (v) => (v === null || v === undefined ? "—" : fmtCurrency(v, cur));
+  const missingCount = (r.missing_geo_dates || []).length;
+  return `
+    <div class="revenue-geo-diagnostics">
+      <div class="revenue-status-label">Likely cause</div>
+      <p class="revenue-geo-cause">${escapeHtml(geoReconcileCauseText(r.reason))}</p>
+      <div class="revenue-status-label">Next action</div>
+      <p class="revenue-geo-next">${escapeHtml(geoReconcileNextActionText(r.next_action))}</p>
+      <div class="revenue-summary-strip revenue-summary-strip--three">
+        <div><span>Tolerance</span><strong>${fmtTolerancePct(r.tolerance)}</strong></div>
+        <div><span>Missing geo dates</span><strong>${fmtCount(missingCount)}</strong></div>
+        <div><span>Unmapped location spend</span><strong>${money(r.unmapped_location_spend_native)}</strong></div>
+      </div>
+    </div>`;
+}
+
 function renderGeoSyncPanel(reconcile, status) {
   const panel = document.getElementById("geo-sync-panel");
   if (!panel) return;
@@ -3455,6 +3502,7 @@ function renderGeoSyncPanel(reconcile, status) {
           <div><span>Countries</span><strong>${fmtCount(r.geo_country_count)}</strong></div>
           <div><span>Coverage / FX</span><strong>${escapeHtml(r.coverage_status || "—")} / ${escapeHtml(r.fx_coverage_status || "—")}</strong></div>
         </div>
+        ${renderGeoReconcileDetail(r, cur)}
         ${actions}
         ${progressHtml}
         ${noticeHtml}
@@ -9769,12 +9817,60 @@ function renderRoasCampaignsPage() {
 
   tableBody.innerHTML = `
     ${renderMartSpendTruth(data)}
+    ${renderMartCampaignCoverage(data)}
     ${renderMartSummaryStrip(data)}
     ${renderMartDiagnostics(data)}
     ${renderRoasCampaignFilters()}
     ${renderRoasCampaignTable(filtered, spendIncomplete)}
     <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads canonical spend powers ROAS; HubSpot closed-won deals provide revenue.</p>
   `;
+}
+
+// PR-ADS-129: campaign spend-coverage diagnostic. Reads ONLY the mart's coverage
+// audit (spend_truth.spend_coverage_detail + status/reason) — never recomputed.
+// Explains exactly which period is missing/unverified, or confirms a verified-zero
+// earlier period so an available ROAS is understood. Returns "" when coverage is
+// verified and spend spans the full window.
+function renderMartCampaignCoverage(data) {
+  const st = (data && data.spend_truth) || {};
+  const detail = st.spend_coverage_detail || {};
+  const status = st.campaign_spend_coverage_status;
+  const reason = st.campaign_spend_coverage_reason;
+  const missing = detail.missing_chunks || [];
+  const failed = detail.failed_chunks || [];
+  const rng = (c) => `${escapeHtml(c.date_from || "—")} → ${escapeHtml(c.date_to || "—")}`;
+
+  // Verified-zero earlier period → coverage complete, ROAS uses verified spend.
+  if (status === "complete" && reason === "verified_zero_before_first_spend") {
+    return `
+      <div class="revenue-blocked-card revenue-empty-card">
+        <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
+        <h3>Coverage complete</h3>
+        <p>${escapeHtml(detail.requested_start || "—")} → ${escapeHtml(detail.first_spend_date || "—")} was verified as zero spend. ROAS uses verified spend for this window.</p>
+      </div>`;
+  }
+
+  // Incomplete / unknown coverage → name the exact missing / unverified period.
+  if (status === "incomplete" || status === "unknown") {
+    const period = failed.length ? rng(failed[0])
+      : (missing.length ? rng(missing[0])
+        : `${escapeHtml(detail.requested_start || "—")} → ${escapeHtml(detail.first_spend_date || "—")}`);
+    const nextStep = failed.length
+      ? "Re-run the Google Ads spend backfill for the failed chunks."
+      : "Run Google Ads spend backfill for the missing period, or verify this period had zero spend.";
+    return `
+      <div class="revenue-blocked-card">
+        <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
+        <h3>Campaign spend coverage incomplete</h3>
+        <div class="revenue-summary-strip revenue-summary-strip--three revenue-coverage-grid">
+          <div><span>Requested window</span><strong>${escapeHtml(detail.requested_start || "—")} → ${escapeHtml(detail.requested_end || "—")}</strong></div>
+          <div><span>Durable spend coverage</span><strong>${escapeHtml(detail.first_spend_date || "—")} → ${escapeHtml(detail.last_spend_date || "—")}</strong></div>
+          <div><span>Missing / unverified period</span><strong>${period}</strong></div>
+        </div>
+        <div class="revenue-next-step"><strong>Next step:</strong> ${nextStep}</div>
+      </div>`;
+  }
+  return "";
 }
 
 function renderRoasCampaignTable(rows, spendIncomplete) {
@@ -10377,11 +10473,26 @@ function renderCountrySpendUnreconciledState(spendTruth) {
     `<div class="revenue-status-chip revenue-status-chip--${ok ? "ok" : "warning"}">
        <span>${label}</span><strong>${escapeHtml(value)}</strong>
      </div>`;
+  // PR-ADS-129: show the exact totals + variance for a mismatch (native currency,
+  // never fabricated). Only shown when the mart provides real geo numbers.
+  const cur = st.native_currency || "GBP";
+  const hasTotals = isMismatch && st.campaign_spend_total != null && st.country_geo_total != null;
+  const pct = (st.country_spend_variance_pct == null) ? "" : ` (${st.country_spend_variance_pct}%)`;
+  const tol = fmtTolerancePct(st.country_spend_tolerance);
+  const totalsHtml = hasTotals
+    ? `<div class="revenue-summary-strip revenue-summary-strip--four revenue-geo-variance">
+         <div><span>Campaign spend</span><strong>${fmtNativeMoney(st.campaign_spend_total, cur)}</strong></div>
+         <div><span>Geo spend</span><strong>${fmtNativeMoney(st.country_geo_total, cur)}</strong></div>
+         <div><span>Variance</span><strong>${st.country_spend_variance == null ? "—" : fmtNativeMoney(st.country_spend_variance, cur)}${pct}</strong></div>
+         <div><span>Tolerance</span><strong>${escapeHtml(tol || "—")}</strong></div>
+       </div>`
+    : "";
   return `
     <div class="revenue-blocked-card">
       <div class="revenue-blocked-card__eyebrow">Google Ads spend truth</div>
       <h3>Country ROAS is blocked</h3>
       <p>${cause}</p>
+      ${totalsHtml}
       <div class="revenue-status-label">Current status</div>
       <div class="revenue-status-grid">
         ${chip("Campaign spend", labelizeStatus(st.campaign_spend_status), st.campaign_spend_status === "verified")}

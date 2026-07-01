@@ -853,6 +853,19 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         _cov = _analyze_cov(start_date, end_date, coverage.get("chunks", []))
         coverage_complete = bool(_cov.get("complete"))
         spend_coverage_status = "complete" if coverage_complete else "incomplete"
+        # PR-ADS-129: classify the coverage REASON from the durable ledger so ROAS
+        # availability is auditable — a window whose first spend row starts after
+        # the window start is coverage-COMPLETE when the earlier period was fetched
+        # and verified as zero spend (never inferred zero).
+        from services.google_ads_spend_service import classify_coverage as _classify_cov  # noqa: PLC0415
+        _cs = canonical.get("coverage_start")
+        _first_spend = _cs if (isinstance(_cs, str) or _cs is None) else _cs.isoformat()
+        _ce = canonical.get("coverage_end")
+        _last_spend = _ce if (isinstance(_ce, str) or _ce is None) else _ce.isoformat()
+        coverage_detail = _classify_cov(
+            start_date, end_date, coverage.get("chunks", []), _first_spend)
+        campaign_spend_coverage_status = coverage_detail["status"]
+        campaign_spend_coverage_reason = coverage_detail["reason"]
         spend_source = "canonical_google_ads_api"
         canonical_rows = canonical.get("rows") or []
         canonical_total = round(float(canonical.get("total_spend") or 0), 2)
@@ -905,12 +918,30 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
             )
         else:
             country_spend_reconciled = (geo_total_for_recon == 0)
+        # PR-ADS-129: surface the exact geo↔canonical variance so the ROAS by
+        # Country blocked card can show real totals (never fabricated).
+        country_geo_total_native = geo_total_for_recon
+        country_spend_variance_native = round(geo_total_for_recon - canonical_total, 2)
+        country_spend_variance_pct = (
+            round(abs(country_spend_variance_native) / canonical_total * 100, 4)
+            if canonical_total > 0 else None
+        )
+        country_spend_tolerance = SPEND_VARIANCE_TOLERANCE
     else:
         # Canonical table unreachable → geo is diagnostic only, NEVER a ROAS
         # denominator. ROAS is unavailable for both Campaign and Country.
         spend_source = "geo_fallback"
         spend_coverage_status = "geo_fallback"
         coverage_complete = False
+        campaign_spend_coverage_status = "unavailable"
+        campaign_spend_coverage_reason = "canonical_unavailable"
+        coverage_detail = {"missing_chunks": [], "failed_chunks": [], "verified_zero_chunks": []}
+        _first_spend = None
+        _last_spend = None
+        country_geo_total_native = None
+        country_spend_variance_native = None
+        country_spend_variance_pct = None
+        country_spend_tolerance = 0.02
         fx_complete = False
         fx_coverage_status = "unavailable"
         use_usd = False
@@ -1104,11 +1135,13 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     else:
         attribution_status = "none"
 
-    # Partial when spend coverage does not reach back to the window start, or
-    # when lead metrics are withheld, or revenue is not wired.
+    # Partial when campaign spend coverage is genuinely incomplete (per the durable
+    # coverage LEDGER — PR-ADS-129), or when lead metrics are withheld, or revenue
+    # is not wired. NOTE: we no longer treat "first geo row starts after the window
+    # start" as partial — that geo-first-row heuristic falsely flagged windows whose
+    # earlier period was fetched and verified as zero spend.
     data_is_partial = lead_metrics_withheld or not revenue_available
-    cov_start = spend.get("coverage_start")
-    if start_date is not None and (cov_start is None or cov_start > resolved["start_date"]):
+    if canonical_access and not coverage_complete:
         data_is_partial = True
 
     warnings: list[str] = []
@@ -1125,11 +1158,25 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         )
     if campaign_spend_status == "db_empty":
         warnings.append("No Google Ads spend rows in durable table 'geo' for this window.")
-    if data_is_partial and cov_start and start_date is not None and cov_start > resolved["start_date"]:
-        warnings.append(
-            f"Partial data: durable spend coverage starts {cov_start}, after the "
-            f"requested window start {resolved['start_date']}."
-        )
+    # PR-ADS-129: the spend-coverage warning is driven by the CANONICAL coverage
+    # ledger classification (missing / failed chunks), never the geo table's first
+    # row. Coverage that is complete — including verified-zero before the first
+    # spend row — is NOT flagged as partial.
+    if canonical_access and campaign_spend_coverage_status == "incomplete":
+        if campaign_spend_coverage_reason == "failed_chunks":
+            warnings.append(
+                "Campaign spend coverage incomplete: one or more Google Ads spend "
+                "backfill chunks FAILED for this window — ROAS is unavailable until "
+                "they are re-run."
+            )
+        else:
+            warnings.append(
+                "Campaign spend coverage incomplete: durable Google Ads spend for "
+                f"{resolved['start_date']} → {resolved['end_date']} has "
+                f"unverified dates ({campaign_spend_coverage_reason}) — ROAS is "
+                "unavailable until the missing period is backfilled or verified as "
+                "zero spend."
+            )
 
     db_tables_used = [t for t, present in (
         ("geo", bool(spend_rows)),
@@ -1153,6 +1200,20 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         # never a Campaign/Country ROAS denominator.
         "spend_source": spend_source,
         "spend_coverage_status": spend_coverage_status,
+        # PR-ADS-129: auditable coverage classification. campaign_spend_coverage_status
+        # is "complete" even when the first spend row starts after the window start,
+        # provided the earlier period was fetched and VERIFIED as zero spend.
+        "campaign_spend_coverage_status": campaign_spend_coverage_status,
+        "campaign_spend_coverage_reason": campaign_spend_coverage_reason,
+        "spend_coverage_detail": {
+            "requested_start": resolved["start_date"],
+            "requested_end": resolved["end_date"],
+            "first_spend_date": _first_spend,
+            "last_spend_date": _last_spend,
+            "missing_chunks": coverage_detail.get("missing_chunks", []),
+            "failed_chunks": coverage_detail.get("failed_chunks", []),
+            "verified_zero_chunks": coverage_detail.get("verified_zero_chunks", []),
+        },
         "campaign_roas_available": campaign_spend_trusted,
         "country_roas_available": country_spend_trusted,
         # PR-ADS-124: which spend source backed the country rows (canonical geo
@@ -1160,6 +1221,11 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "geo_country_source": geo_country_source,
         "campaign_spend_total": canonical_total,
         "country_spend_reconciled": country_spend_reconciled,
+        # PR-ADS-129: exact geo↔canonical variance for the Country blocked card.
+        "country_geo_total": country_geo_total_native,
+        "country_spend_variance": country_spend_variance_native,
+        "country_spend_variance_pct": country_spend_variance_pct,
+        "country_spend_tolerance": country_spend_tolerance,
         "canonical_customer_id": canonical_customer_id,
         "canonical_currency": canonical_currency,
         # PR-ADS-119 currency contract: native GBP truth + USD reporting via daily

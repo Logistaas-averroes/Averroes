@@ -4201,6 +4201,25 @@ body.is-revenue-page #monitoring-banner {
   color: #64748b;
 }
 
+/* PR-ADS-129: geo↔campaign variance strip + coverage grid + geo diagnostics. */
+.revenue-geo-variance {
+  margin: 10px 0 4px;
+}
+.revenue-coverage-grid {
+  margin: 10px 0 4px;
+}
+.revenue-geo-diagnostics {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border, #e2e8f0);
+}
+.revenue-geo-cause,
+.revenue-geo-next {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #334155;
+}
+
 /* ── PR-ADS-123: Google Ads Spend summary strip ─────────────────────────────
    Replaces the unstyled raw text block (which had no CSS at all) with a compact,
    contained card. Exact full-precision spend lives in the spend proof modal. */

@@ -142,8 +142,11 @@ def test_clean_subtitles_on_roas_pages():
 
 
 def test_campaign_render_has_simple_columns():
-    """PR-ADS-110: simplified table — no CAC/Confidence/Notes clutter."""
-    idx = JS.find("function renderRoasCampaignsPage")
+    """PR-ADS-110: simplified table — no CAC/Confidence/Notes clutter.
+
+    PR-ADS-128/129: the column headers live in the dedicated table renderer.
+    """
+    idx = JS.find("function renderRoasCampaignTable")
     assert idx != -1
     body = JS[idx:idx + 2500]
     for col in ("Campaign", "Spend", "Leads", "SQLs", "Customers", "Won Revenue", "ROAS", "Decision"):

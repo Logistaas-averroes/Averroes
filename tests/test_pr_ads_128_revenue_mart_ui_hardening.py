@@ -132,7 +132,7 @@ def _css_block(selector_fragment):
 # ── Test 7 — Country blocked state branches by status ───────────────────────
 
 def test_country_blocked_state_branches_by_status():
-    fn = _slice("function renderCountrySpendUnreconciledState", span=1900)
+    fn = _slice("function renderCountrySpendUnreconciledState", span=2800)
     assert "function renderCountrySpendUnreconciledState(spendTruth)" in JS
     assert 'status === "mismatch"' in fn
     assert "Country ROAS is blocked" in fn

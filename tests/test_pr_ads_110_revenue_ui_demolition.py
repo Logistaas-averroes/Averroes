@@ -133,7 +133,7 @@ def test_blocked_decision_logic():
 def test_blocked_state_returns_before_table_campaign():
     body = _fn("function renderRoasCampaignsPage", span=2600)
     i_block = body.find("renderRevenueBlockedState")
-    i_table = body.find(">Campaign<")
+    i_table = body.find("renderRoasCampaignTable")
     assert i_block != -1 and i_table != -1
     assert i_block < i_table, "blocked card must render before (and instead of) the table"
 
