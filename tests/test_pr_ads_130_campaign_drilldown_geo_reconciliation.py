@@ -115,6 +115,25 @@ def test_missing_company_contact_does_not_drop_deal(monkeypatch):
     assert dealless["deal_amount_usd"] == 7000.0      # never a fabricated $0
 
 
+# Test 3b — a MISSING deal amount stays None, never a fabricated $0.00
+def test_missing_deal_amount_is_null_not_zero(monkeypatch):
+    rows = [
+        {"deal_id": "555333", "contact_id": "222", "gclid": None,
+         "company": "No Amount Co", "country": "Mexico",
+         "campaign_name": "Mexico, Chile, Colombia", "deal_close_date": "2026-02-01",
+         "deal_amount_usd": None, "deal_stage_label": "Closed Won",
+         "match_status": "matched", "match_source": "gclid"},
+    ]
+    _patch_details(monkeypatch, rows)
+    from services.revenue_attribution_service import build_campaign_deal_details
+    out = build_campaign_deal_details("ytd", "Mexico, Chile, Colombia")
+    d = next(x for x in out["details"] if x["deal_record_id"] == "555333")
+    # None (→ "unavailable" in the UI), NOT 0.0 which would read as real revenue.
+    assert d["deal_amount_usd"] is None
+    # The frontend drawer renders a null amount as "unavailable", not $0.00.
+    assert 'd.deal_amount_usd == null ? drilldownValue(null) : fmtMoney(d.deal_amount_usd)' in JS
+
+
 def test_campaign_detail_db_unavailable_is_reported(monkeypatch):
     import db.revenue_repository as repo
     monkeypatch.setattr(repo, "fetch_campaign_deal_details", lambda s, e: {"available": False})

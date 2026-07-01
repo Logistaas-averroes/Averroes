@@ -209,6 +209,20 @@ def _safe_float(value) -> float:
         return 0.0
 
 
+def _nullable_float(value) -> float | None:
+    """Coerce ``value`` to float, or None when it is missing/invalid.
+
+    Unlike ``_safe_float`` this never fabricates a 0.0 — used where a missing
+    value must render as "unavailable" rather than a real-looking $0.00.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _deal_revenue(deal: dict) -> float:
     """Closed-won revenue for a deal — prefer amount, fall back to ACV/ARR."""
     for key in ("amount", "hs_acv", "hs_arr"):
@@ -1487,7 +1501,10 @@ def _deal_detail_row(r: dict) -> dict:
         "main_contact_record_id": r.get("contact_id") or None,
         "deal_name": None,                  # deal title is not stored (only stage label)
         "deal_record_id": r.get("deal_id") or None,
-        "deal_amount_usd": round(_safe_float(r.get("deal_amount_usd")), 2),
+        # Preserve None for a missing amount — never fabricate a $0.00 the UI
+        # would show as real revenue; the drawer renders it as "unavailable".
+        "deal_amount_usd": (lambda a: round(a, 2) if a is not None else None)(
+            _nullable_float(r.get("deal_amount_usd"))),
         "deal_close_date": r.get("deal_close_date"),
         "attributed_campaign_label": r.get("external_campaign_label") or r.get("campaign_name"),
         "canonical_campaign_name": r.get("campaign_name"),
