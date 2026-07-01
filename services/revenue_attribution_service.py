@@ -1162,12 +1162,20 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     # ledger classification (missing / failed chunks), never the geo table's first
     # row. Coverage that is complete — including verified-zero before the first
     # spend row — is NOT flagged as partial.
-    if canonical_access and campaign_spend_coverage_status == "incomplete":
+    if canonical_access and campaign_spend_coverage_status in ("incomplete", "unknown"):
         if campaign_spend_coverage_reason == "failed_chunks":
             warnings.append(
                 "Campaign spend coverage incomplete: one or more Google Ads spend "
                 "backfill chunks FAILED for this window — ROAS is unavailable until "
                 "they are re-run."
+            )
+        elif campaign_spend_coverage_status == "unknown":
+            # e.g. all_time with no durable coverage ledger — completeness cannot be
+            # established, so ROAS stays unavailable (never assumed complete).
+            warnings.append(
+                "Campaign spend coverage could not be verified for this window: "
+                "there is no durable Google Ads spend coverage ledger — ROAS is "
+                "unavailable until the Google Ads spend backfill runs."
             )
         else:
             warnings.append(

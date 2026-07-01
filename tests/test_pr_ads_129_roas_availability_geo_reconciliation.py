@@ -76,6 +76,22 @@ def test_no_chunks_is_not_backfilled():
     assert out["reason"] == "not_backfilled"
 
 
+def test_all_time_empty_ledger_is_unknown_and_warned(monkeypatch):
+    # all_time (start=None) with an empty coverage ledger cannot establish
+    # completeness → "unknown"; ROAS stays withheld AND a warning is emitted.
+    out = classify_coverage(None, date(2026, 7, 1), [], first_spend_date=None)
+    assert out["status"] == "unknown"
+
+    import test_pr_ads_125_revenue_decision_mart as t125
+    t125._patch_durable(monkeypatch, coverage=[])  # empty coverage ledger
+    from services.revenue_attribution_service import build_revenue_attribution
+    res = build_revenue_attribution("all_time", now=t125.NOW)
+    sh = res["source_health"]
+    assert sh["campaign_spend_coverage_status"] == "unknown"
+    assert res["data_is_partial"] is True
+    assert any("could not be verified" in w.lower() for w in res["warnings"])
+
+
 # Test 3 — failed chunks block ROAS
 def test_failed_chunks_incomplete():
     chunks = [
