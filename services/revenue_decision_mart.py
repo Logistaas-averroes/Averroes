@@ -126,13 +126,21 @@ def _spend_truth_block(core: dict) -> dict:
         campaign_spend_status = "unavailable"
 
     # Country spend status -> geo<->canonical reconciliation outcome.
+    # PR-ADS-131: a by-design unattributed residual (geo assigns most spend to
+    # countries; the shortfall is location-less spend geographic_view omits) is a
+    # SAFE unblock — reconciled_with_residual, distinct from a plain verified
+    # reconcile and from a blocking mismatch. The residual is surfaced as an explicit
+    # bucket, never distributed across countries, never loosening tolerance.
     reconciled = health.get("country_spend_reconciled")
     if reconciled is True:
         country_spend_status = "verified"
+    elif health.get("country_residual_eligible"):
+        country_spend_status = "reconciled_with_residual"
     elif reconciled is False:
         country_spend_status = "mismatch"
     else:
         country_spend_status = "unavailable"
+    country_roas_unblockable = country_spend_status in ("verified", "reconciled_with_residual")
 
     return {
         "native_currency": native_currency,
@@ -158,6 +166,18 @@ def _spend_truth_block(core: dict) -> dict:
         "country_spend_variance": _round2(health.get("country_spend_variance")),
         "country_spend_variance_pct": health.get("country_spend_variance_pct"),
         "country_spend_tolerance": health.get("country_spend_tolerance"),
+        # PR-ADS-131: safe unblock via an explicit residual bucket. country ROAS is
+        # unblockable when spend is verified OR reconciled-with-residual.
+        "country_roas_unblockable": country_roas_unblockable,
+        "country_residual_native": _round2(health.get("country_residual_native")),
+        "country_residual_usd": _round2(health.get("country_residual_usd")),
+        "country_residual_pct": health.get("country_residual_pct"),
+        "country_residual_label": (
+            "Unattributed / No Country"
+            if country_spend_status == "reconciled_with_residual" else None),
+        "country_residual_reason": (
+            "Google Ads geographic view does not assign this spend to a country."
+            if country_spend_status == "reconciled_with_residual" else None),
     }
 
 
@@ -247,6 +267,22 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
                 "spend within tolerance — Country ROAS is withheld."
             ),
         })
+    if spend_truth["country_spend_status"] == "reconciled_with_residual":
+        res_native = spend_truth.get("country_residual_native")
+        res_pct = spend_truth.get("country_residual_pct")
+        cur = spend_truth.get("native_currency") or "GBP"
+        diags.append({
+            "code": "country_spend_residual",
+            "message": (
+                "Country ROAS is shown with an explicit "
+                f"'Unattributed / No Country' residual of {res_native} {cur}"
+                f"{'' if res_pct is None else f' ({res_pct}%)'} — Google Ads assigned "
+                "most spend to countries, and this shortfall is spend the geographic "
+                "view does not assign to any country. The residual is surfaced, never "
+                "spread across real countries; real country rows use country-attributed "
+                "spend only."
+            ),
+        })
 
     if view == "source":
         diags.append({
@@ -287,8 +323,11 @@ def _readiness_block(core: dict, spend_truth: dict) -> dict:
     revenue_decision_ready = bool(lead_metrics_ready and revenue_integration_connected)
     spend_decision_ready = spend_truth["campaign_spend_status"] == "verified" and \
         spend_truth["fx_status"] == "verified"
+    # PR-ADS-131: country ROAS is decision-ready when the spend denominator is
+    # verified OR reconciled-with-residual (real country rows + explicit residual).
     country_decision_ready = bool(
-        spend_decision_ready and spend_truth["country_spend_status"] == "verified"
+        spend_decision_ready
+        and spend_truth["country_spend_status"] in ("verified", "reconciled_with_residual")
     )
 
     return {

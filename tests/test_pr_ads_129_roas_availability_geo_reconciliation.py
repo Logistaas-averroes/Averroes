@@ -269,7 +269,7 @@ def test_frontend_country_blocked_copy():
 
 def test_frontend_geo_health_diagnostics():
     assert "function renderGeoReconcileDetail" in JS
-    fn = _slice("function renderGeoReconcileDetail", span=1800)
+    fn = _slice("function renderGeoReconcileDetail", span=3200)
     # PR-ADS-130 renamed the header to a root-cause section.
     assert "Geo Reconciliation Root Cause" in fn
     assert "Next action" in fn

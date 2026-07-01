@@ -94,7 +94,7 @@ def test_load_retains_country_specific_source_health():
 def test_blocked_state_returns_before_summary_and_table():
     # PR-ADS-126: readiness is the MART's verdict (data.readiness.revenue_decision_ready),
     # and the blocked guard still returns before any summary strip or table render.
-    body = _fn("function renderRoasCountriesPage", span=2600)
+    body = _fn("function renderRoasCountriesPage", span=3400)
     i_ready = body.find("revenue_decision_ready")
     i_block = body.find("renderCountryRevenueBlockedState")
     i_return = body.find("return", i_block)
@@ -124,7 +124,7 @@ def test_summary_is_canonical_mart_summary():
     # PR-ADS-126: the country summary is the canonical mart summary (the SAME
     # truth every revenue page shares), not a page-local recomputation or a stale
     # global account summary.
-    body = _fn("function renderRoasCountriesPage", span=2600)
+    body = _fn("function renderRoasCountriesPage", span=3400)
     assert "renderMartSummaryStrip(data)" in body
     assert "roasRevenueSummary" not in body
 

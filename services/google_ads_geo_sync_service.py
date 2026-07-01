@@ -164,6 +164,24 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
     breakdown = _geo_reconciliation_detail(
         start, end, canonical_total, geo_total, status)
 
+    # PR-ADS-131: an unattributed-residual shortfall (geographic_view omits
+    # location-less spend by design) is a SAFE unblock — Country ROAS can show real
+    # country rows plus an explicit residual bucket instead of staying trapped in a
+    # blind "run geo sync" loop. This never loosens tolerance, never distributes the
+    # residual across countries, and keeps missing geo dates / missing campaigns /
+    # incomplete FX BLOCKED. `status` and `country_roas_unblockable` (the strict
+    # "reconciles perfectly" flag) are intentionally unchanged.
+    residual = evaluate_country_residual(
+        canonical_total, geo_total, breakdown,
+        coverage_complete=coverage_complete, fx_complete=fx_complete,
+        geo_has_rows=geo_has_rows, reconciled=(status == "reconciled"))
+    country_spend_status = (
+        "reconciled_with_residual" if residual["eligible"]
+        else "verified" if status == "reconciled"
+        else "unavailable" if status in ("unavailable", "no_geo_data")
+        else "mismatch"
+    )
+
     return {
         "window": window,
         "date_from": date_from,
@@ -180,6 +198,18 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
         "coverage_status": coverage_status,
         "fx_coverage_status": "complete" if fx_complete else "incomplete",
         "country_roas_unblockable": country_roas_unblockable,
+        # PR-ADS-131: safe-unblock verdict + explicit residual bucket for the
+        # Country page and Revenue Health. `country_spend_status` mirrors the mart's
+        # country_spend_status (verified | reconciled_with_residual | mismatch |
+        # unavailable). The residual is the campaign↔geo shortfall Google Ads could
+        # not assign to a country — surfaced, never spread across real countries.
+        "country_spend_status": country_spend_status,
+        "country_residual_native": residual["residual_native"],
+        "country_residual_pct": residual["residual_pct"],
+        "country_residual_label": ("Unattributed / No Country" if residual["eligible"] else None),
+        "country_residual_reason": (
+            "Google Ads geographic view does not assign this spend to a country."
+            if residual["eligible"] else None),
         "geo_rows_counted": int(geo.get("rows_counted") or 0) if geo_available else 0,
         "geo_country_count": int(geo.get("country_count") or 0) if geo_available else 0,
         "campaign_rows_counted": breakdown.get("campaign_rows_counted"),
@@ -327,6 +357,41 @@ def _geo_reconciliation_detail(start, end, canonical_total, geo_total, status: s
         "campaign_ids_in_geo": campaign_ids_in_geo,
         "campaign_rows_counted": detail.get("campaign_rows_counted"),
     }
+
+
+def evaluate_country_residual(canonical_total, geo_total, detail, *,
+                              coverage_complete, fx_complete, geo_has_rows, reconciled):
+    """PR-ADS-131: decide whether a geo↔campaign shortfall is a SAFE unattributed
+    residual rather than a blocking mismatch.
+
+    Returns {eligible, residual_native, residual_pct, reason}. ``detail`` is the
+    ``_geo_reconciliation_detail`` breakdown (reused, not re-fetched).
+
+    Eligible ONLY when — campaign-spend coverage AND FX are complete, geo rows
+    exist, there are NO missing geo dates and NO campaigns missing geo, the
+    shortfall is positive (geo total below campaign total), and the reason is the
+    by-design residual (``geo_report_does_not_reconcile_by_design``). This never
+    loosens tolerance and never distributes the residual across countries. Missing
+    geo dates, campaigns missing geo, or incomplete FX/coverage keep it BLOCKED.
+
+        residual_native = canonical_campaign_total - geo_total   (only when > 0)
+    """
+    out = {"eligible": False, "residual_native": None, "residual_pct": None,
+           "reason": (detail or {}).get("reason")}
+    if reconciled or not (coverage_complete and fx_complete and geo_has_rows):
+        return out
+    if canonical_total is None or geo_total is None or canonical_total <= 0:
+        return out
+    net_gap = round(canonical_total - geo_total, 2)
+    if net_gap <= 0:
+        return out
+    if ((detail or {}).get("reason") == "geo_report_does_not_reconcile_by_design"
+            and not (detail or {}).get("missing_geo_dates")
+            and not (detail or {}).get("campaigns_missing_geo")):
+        out["eligible"] = True
+        out["residual_native"] = net_gap
+        out["residual_pct"] = round(net_gap / canonical_total * 100, 4)
+    return out
 
 
 def run_google_ads_geo_sync(

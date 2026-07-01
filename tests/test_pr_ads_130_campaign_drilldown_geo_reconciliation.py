@@ -297,7 +297,7 @@ def test_frontend_country_card_shows_root_cause():
 
 
 def test_frontend_health_root_cause_section():
-    fn = _slice("function renderGeoReconcileDetail", span=1800)
+    fn = _slice("function renderGeoReconcileDetail", span=3200)
     assert "Geo Reconciliation Root Cause" in fn
     assert "Largest campaign gaps" in fn
     assert "Largest daily gaps" in fn

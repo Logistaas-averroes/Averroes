@@ -3400,6 +3400,8 @@ const GEO_SYNC_POLL_MS = 2500;
 function geoSyncStatusBadge(status) {
   const map = {
     reconciled: ["revenue-status-chip--ok", "Reconciled"],
+    // PR-ADS-131: a safe unblock — reconciled with an explicit unattributed residual.
+    reconciled_with_residual: ["revenue-status-chip--ok", "Reconciled with residual"],
     mismatch: ["revenue-status-chip--warning", "Mismatch"],
     no_geo_data: ["revenue-status-chip--warning", "No geo data yet"],
     unavailable: ["revenue-status-chip--warning", "Unavailable"],
@@ -3439,10 +3441,27 @@ function geoReconcileNextActionText(nextAction) {
   }
 }
 function renderGeoReconcileDetail(r, cur) {
+  const money = (v) => (v === null || v === undefined ? "—" : fmtCurrency(v, cur));
+  // PR-ADS-131: reconciled-with-residual is NOT a blocked root-cause — it is a safe
+  // audit state. Show the split (campaign spend = country-attributed geo spend +
+  // unattributed residual) and make clear country ROAS renders with a residual row.
+  // Running Geo Sync again is NOT presented as the fix.
+  if (r && r.country_spend_status === "reconciled_with_residual") {
+    const pct = (r.country_residual_pct == null) ? "" : ` (${r.country_residual_pct}%)`;
+    return `
+    <div class="revenue-geo-diagnostics">
+      <div class="revenue-status-label">Geo reconciliation status: Reconciled with residual</div>
+      <div class="revenue-summary-strip revenue-summary-strip--three">
+        <div><span>Campaign spend</span><strong>${money(r.canonical_campaign_total)}</strong></div>
+        <div><span>Geo country-attributed spend</span><strong>${money(r.geo_total)}</strong></div>
+        <div><span>Unattributed / No Country residual</span><strong>${money(r.country_residual_native)}${pct}</strong></div>
+      </div>
+      <p class="revenue-geo-cause">Country ROAS is shown with a residual row. Real country rows use country-attributed spend only. Running Geo Sync again will not close this gap — the geographic view does not assign this spend to a country by design.</p>
+    </div>`;
+  }
   if (!r || !r.status || r.status === "reconciled" || r.status === "no_geo_data" || r.status === "unavailable") {
     return "";
   }
-  const money = (v) => (v === null || v === undefined ? "—" : fmtCurrency(v, cur));
   const missingCount = (r.missing_geo_dates || []).length;
   const campGaps = (r.largest_campaign_gaps || []).slice(0, 5);
   const dayGaps = (r.largest_daily_gaps || []).slice(0, 5);
@@ -3500,7 +3519,7 @@ function renderGeoSyncPanel(reconcile, status) {
       <div class="panel__body">
         <p class="revenue-footnote">Country ROAS needs geo-table spend to reconcile with canonical campaign spend. Runs in the background. Reads Google Ads read-only (geographic_view) and writes only the local database; never writes to Google Ads or HubSpot.</p>
         <div class="revenue-status-grid">
-          ${geoSyncStatusBadge(r.status)}
+          ${geoSyncStatusBadge(r.country_spend_status === "reconciled_with_residual" ? "reconciled_with_residual" : r.status)}
         </div>
         <div class="revenue-summary-strip revenue-summary-strip--four">
           <div><span>Canonical campaign spend</span><strong>${money(r.canonical_campaign_total)}</strong></div>
@@ -10542,29 +10561,61 @@ function renderRoasCountriesPage() {
   // Anything other than "verified" (mismatch / unavailable) blocks the trusted
   // table — the frontend never independently decides country ROAS readiness, and
   // never renders a partial/geo/unreconciled denominator as ROAS.
+  // PR-ADS-131: "reconciled_with_residual" is a SAFE render state — the real
+  // country rows use country-attributed geo spend, and an explicit "Unattributed /
+  // No Country" residual bucket carries the shortfall geographic_view could not
+  // assign to a country. Only "verified" and "reconciled_with_residual" render the
+  // table; every other status stays blocked (mismatch / unavailable / FX or spend
+  // incomplete). The frontend never decides this — it obeys the mart's verdict.
   const st = data.spend_truth || {};
-  if (st.country_spend_status !== "verified") {
+  const residualMode = st.country_spend_status === "reconciled_with_residual";
+  if (st.country_spend_status !== "verified" && !residualMode) {
     tableBody.innerHTML = renderCountrySpendUnreconciledState(st);
     return;
   }
 
-  // Safe but no closed-won revenue attributed to countries.
-  if (!roasCountriesData.length) {
+  // The residual bucket is pinned regardless of the decision filter (it is not a
+  // real country and must stay visible); real country rows are sorted + filtered.
+  const residualRows = roasCountriesData.filter((r) => r && r.is_residual);
+  const realRows = roasCountriesData.filter((r) => !(r && r.is_residual));
+
+  // Safe but no closed-won revenue attributed to countries (and no residual row).
+  if (!realRows.length && !residualRows.length) {
     tableBody.innerHTML = renderRoasCountrySafeEmptyState();
     return;
   }
 
-  const sorted = sortRoasCountryRows(roasCountriesData);
-  const filtered = filterRoasCountryRows(sorted, roasCountryFilter);
+  const sorted = sortRoasCountryRows(realRows);
+  const filtered = filterRoasCountryRows(sorted, roasCountryFilter).concat(residualRows);
 
   tableBody.innerHTML = `
     ${renderMartSpendTruth(data)}
+    ${residualMode ? renderCountryResidualWarning(st) : ""}
     ${renderMartSummaryStrip(data)}
     ${renderMartDiagnostics(data)}
     ${renderRoasCountryFilters()}
     ${renderRoasCountryTable(filtered)}
     <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads canonical geo spend provides country spend; HubSpot closed-won deals provide revenue.</p>
   `;
+}
+
+// PR-ADS-131: compact warning shown above the country table when spend is
+// reconciled WITH an unattributed residual. It explains that most spend was
+// assigned to countries and the shortfall is shown as "Unattributed / No Country"
+// instead of being spread across real countries. Never presents "run geo sync" as
+// the fix — the residual is a by-design property of the geographic_view report.
+function renderCountryResidualWarning(spendTruth) {
+  const st = spendTruth || {};
+  const cur = st.native_currency || "GBP";
+  const resNative = (st.country_residual_native == null)
+    ? "—" : fmtNativeMoney(st.country_residual_native, cur);
+  const pct = (st.country_residual_pct == null) ? "" : ` (${st.country_residual_pct}%)`;
+  return `
+    <div class="revenue-residual-warning">
+      <div class="revenue-residual-warning__eyebrow">Country spend includes an unattributed residual</div>
+      <p>Google Ads assigned most spend to countries, but ${resNative}${pct} could not be assigned to a country by the geo report.</p>
+      <p class="revenue-residual-warning__note">The residual is shown as “Unattributed / No Country” instead of being spread across real countries. Real country rows use country-attributed spend only.</p>
+    </div>`;
 }
 
 // PR-ADS-127: the country spend denominator can be untrusted for two distinct
@@ -10669,7 +10720,24 @@ function renderRoasCountryTable(rows) {
     </tr>
   `;
 
-  const bodyRows = rows.map((r) => `
+  // PR-ADS-131: the residual row is NOT a real country — muted styling, a
+  // "Residual" badge, no flag, an "Unattributed" decision, and em-dashes for the
+  // metric columns (never fake zeros/ROAS). Only its spend is shown.
+  const bodyRows = rows.map((r) => {
+    if (r && r.is_residual) {
+      return `
+    <tr class="revenue-residual-row">
+      <td><span class="revenue-residual-name">Unattributed / No Country</span> <span class="revenue-residual-badge">Residual</span></td>
+      <td>${fmtMoney(r.spend)}</td>
+      <td>—</td>
+      <td>—</td>
+      <td>—</td>
+      <td>—</td>
+      <td>—</td>
+      <td><span class="decision-badge decision-badge--unattributed">Unattributed</span></td>
+    </tr>`;
+    }
+    return `
     <tr>
       <td>${escapeHtml(countryDisplayName(r.country))}</td>
       <td>${fmtMoney(r.spend)}</td>
@@ -10679,8 +10747,8 @@ function renderRoasCountryTable(rows) {
       <td>${fmtMoney(r.won_revenue)}</td>
       <td>${fmtRoasMultiple(r.roas)}</td>
       <td>${getBusinessVerdictBadge(r.verdict)}</td>
-    </tr>
-  `).join("");
+    </tr>`;
+  }).join("");
 
   // PR-ADS-123: same contained horizontal-scroll shell as ROAS by Campaign so
   // the Decision column stays fully visible on desktop.
