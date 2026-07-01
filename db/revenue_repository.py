@@ -303,6 +303,56 @@ def fetch_won_revenue(start: date | None, end: date) -> dict:
         return _unavailable("gclid_attribution")
 
 
+def fetch_campaign_deal_details(start: date | None, end: date) -> dict:
+    """Closed-won deal rows with contact / GCLID identity, for the campaign
+    drilldown (PR-ADS-130).
+
+    Same window + closed-won + dedupe rules as fetch_revenue_deals, but also
+    carries contact_id and gclid so the "clients / deals behind this campaign"
+    drawer can show the HubSpot record ids. Read-only. campaign_name is the RAW
+    external label — the caller applies the canonical identity map to group these
+    onto the ROAS-by-Campaign rows.
+
+    Returns rows [{deal_id, contact_id, gclid, company, country, campaign_name,
+    deal_close_date, deal_amount_usd, deal_stage_label, match_status, match_source}].
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable("gclid_attribution")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT deal_id, contact_id, gclid, company, country, campaign_name,
+                           deal_close_date,
+                           deal_amount_usd::float AS deal_amount_usd,
+                           deal_stage_label, match_status, match_source
+                    FROM (
+                        SELECT DISTINCT ON (deal_id)
+                            deal_id, contact_id, gclid, company, country, campaign_name,
+                            deal_close_date, deal_amount_usd, deal_stage_label,
+                            match_status, match_source, created_at
+                        FROM gclid_attribution
+                        WHERE deal_id IS NOT NULL
+                          AND deal_close_date IS NOT NULL
+                          AND (deal_stage = %s OR deal_stage_label ILIKE %s)
+                          AND (%s::date IS NULL OR deal_close_date >= %s)
+                          AND deal_close_date < (%s::date + INTERVAL '1 day')
+                        ORDER BY deal_id, created_at DESC
+                    ) d
+                    ORDER BY deal_close_date DESC, deal_amount_usd DESC NULLS LAST
+                    """,
+                    (WON_DEAL_STAGE_ID, _WON_LABEL_LIKE, start, start, end),
+                )
+                rows = _rows_as_dicts(cur)
+                for row in rows:
+                    row["deal_close_date"] = _as_date(row.get("deal_close_date"))
+            return {"available": True, "rows": rows, "table": "gclid_attribution"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_campaign_deal_details failed: %s", exc)
+        return _unavailable("gclid_attribution")
+
+
 def fetch_revenue_deals(start: date | None, end: date) -> dict:
     """Closed-won deal ledger rows from the durable `gclid_attribution` table.
 
@@ -1072,6 +1122,17 @@ def fetch_geo_reconciliation_breakdown(start: date | None, end: date) -> dict:
                     (start, start, end),
                 )
                 unmapped = int((cur.fetchone() or [0])[0] or 0)
+                # PR-ADS-130: count the geo rows with no resolvable country so the
+                # root-cause audit can say whether unknown-location rows exist.
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM google_ads_geo_daily_spend
+                    WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                      AND (country_code IS NULL OR country_criterion_id = '')
+                    """,
+                    (start, start, end),
+                )
+                null_country_rows = int((cur.fetchone() or [0])[0] or 0)
                 cur.execute(
                     """
                     SELECT COUNT(*) FROM google_ads_campaign_daily_spend
@@ -1085,6 +1146,7 @@ def fetch_geo_reconciliation_breakdown(start: date | None, end: date) -> dict:
                 "daily": daily,
                 "by_campaign": by_campaign,
                 "unmapped_geo_native": round(unmapped / 1_000_000, 6),
+                "geo_rows_with_null_country": null_country_rows,
                 "campaign_rows_counted": camp_rows,
             }
     except Exception as exc:  # noqa: BLE001

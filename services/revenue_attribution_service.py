@@ -209,6 +209,20 @@ def _safe_float(value) -> float:
         return 0.0
 
 
+def _nullable_float(value) -> float | None:
+    """Coerce ``value`` to float, or None when it is missing/invalid.
+
+    Unlike ``_safe_float`` this never fabricates a 0.0 — used where a missing
+    value must render as "unavailable" rather than a real-looking $0.00.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _deal_revenue(deal: dict) -> float:
     """Closed-won revenue for a deal — prefer amount, fall back to ACV/ARR."""
     for key in ("amount", "hs_acv", "hs_arr"):
@@ -1463,6 +1477,91 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     # Database unavailable — diagnostic fallback to local JSON.
     start_dt, end_dt = get_window_bounds(window, now=now)
     return _build_from_json(resolved, start_dt, end_dt)
+
+
+def _mask_gclid(gclid) -> str | None:
+    """Show a masked GCLID prefix (privacy) or None — never a fake value."""
+    if not gclid:
+        return None
+    g = str(gclid)
+    return (g[:6] + "…") if len(g) > 6 else g
+
+
+def _deal_detail_row(r: dict) -> dict:
+    """One 'client / deal behind this campaign' detail row (PR-ADS-130).
+
+    Only fields the durable tables actually store are populated; unavailable
+    identity fields (company record id, contact name, deal name are not stored)
+    are explicit None so the UI shows "unavailable", never a fabricated id.
+    """
+    return {
+        "company_name": r.get("company") or None,
+        "company_record_id": None,          # durable table stores company NAME only
+        "main_contact_name": None,          # contact name is not stored
+        "main_contact_record_id": r.get("contact_id") or None,
+        "deal_name": None,                  # deal title is not stored (only stage label)
+        "deal_record_id": r.get("deal_id") or None,
+        # Preserve None for a missing amount — never fabricate a $0.00 the UI
+        # would show as real revenue; the drawer renders it as "unavailable".
+        "deal_amount_usd": (lambda a: round(a, 2) if a is not None else None)(
+            _nullable_float(r.get("deal_amount_usd"))),
+        "deal_close_date": r.get("deal_close_date"),
+        "attributed_campaign_label": r.get("external_campaign_label") or r.get("campaign_name"),
+        "canonical_campaign_name": r.get("campaign_name"),
+        "match_method": r.get("match_source") or r.get("match_status") or None,
+        "gclid": _mask_gclid(r.get("gclid")),
+        "country": r.get("country") or None,
+        "deal_stage_label": r.get("deal_stage_label") or None,
+    }
+
+
+def build_campaign_deal_details(window: str, campaign: str,
+                                now: datetime | None = None) -> dict:
+    """Closed-won client/deal detail rows behind ONE canonical campaign (PR-ADS-130).
+
+    Read-only drilldown for the ROAS by Campaign drawer. Fetches closed-won deals
+    from the durable gclid_attribution table (windowed by deal_close_date), applies
+    the SAME canonical identity map the ROAS rows use so a deal's raw campaign label
+    groups onto its canonical campaign, then returns the deals for the requested
+    canonical campaign. Never writes anything; never fabricates company/contact ids.
+
+    Raises ValueError for an unsupported window.
+    """
+    resolved, start_date, end_date = _window_date_bounds(window, now)
+    generated_at = datetime.now(timezone.utc).isoformat()
+
+    fetched = repo.fetch_campaign_deal_details(start_date, end_date)
+    if not fetched.get("available"):
+        return {
+            "window": resolved, "campaign": campaign, "details": [],
+            "source_health": {"status": "database_unavailable"},
+            "generated_at": generated_at,
+        }
+
+    rows = fetched.get("rows", [])
+    # Apply the canonical identity map (exact-normalized auto-links + approved
+    # manual mappings) so raw deal labels resolve to the canonical campaign name.
+    canonical = repo.fetch_canonical_campaign_spend(start_date, end_date)
+    canonical_access = bool(canonical.get("available"))
+    approved = (repo.fetch_campaign_identity(canonical.get("customer_id")).get("mappings", [])
+                if canonical_access else [])
+    resolution_map = (_build_resolution_map(canonical.get("rows") or [], approved)
+                      if canonical_access else {})
+    mapped = _apply_identity_map(rows, resolution_map, []) if resolution_map else rows
+
+    target = _norm(campaign)
+    details = [_deal_detail_row(r) for r in mapped if _norm(r.get("campaign_name")) == target]
+    details.sort(
+        key=lambda d: (d.get("deal_close_date") or "", d.get("deal_amount_usd") or 0.0),
+        reverse=True,
+    )
+    return {
+        "window": resolved,
+        "campaign": campaign,
+        "details": details,
+        "source_health": {"status": "available"},
+        "generated_at": generated_at,
+    }
 
 
 def build_revenue_deals(window: str, now: datetime | None = None) -> dict:

@@ -191,12 +191,23 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
         "missing_geo_dates": breakdown.get("missing_geo_dates", []),
         "failed_geo_dates": [],  # geo sync has no per-date failure ledger
         "unmapped_location_spend_native": breakdown.get("unmapped_geo_native"),
-        "unknown_location_spend_native": None,  # not tracked as a distinct bucket
+        "unknown_location_spend_native": breakdown.get("unknown_country_spend_native"),
+        "unknown_country_spend_native": breakdown.get("unknown_country_spend_native"),
+        "geo_rows_with_null_country": breakdown.get("geo_rows_with_null_country"),
         "excluded_geo_spend_native": None,
+        "campaign_spend_without_geo_native": breakdown.get("campaign_spend_without_geo_native"),
+        "campaigns_missing_geo": breakdown.get("campaigns_missing_geo", []),
         "network_or_segment_gap_native": breakdown.get("network_or_segment_gap_native"),
+        # PR-ADS-130: date-level and campaign-level gap breakdowns (largest first).
+        "largest_daily_gaps": breakdown.get("largest_daily_variances", []),
         "largest_daily_variances": breakdown.get("largest_daily_variances", []),
+        "largest_campaign_gaps": breakdown.get("campaign_geo_gaps", []),
         "campaign_geo_gaps": breakdown.get("campaign_geo_gaps", []),
         "campaign_ids_in_geo": breakdown.get("campaign_ids_in_geo"),
+        # PR-ADS-130: document the query dimensions each side uses so a by-design
+        # non-reconciliation is auditable rather than a mystery.
+        "campaign_query_dimensions": ["customer_id", "campaign_id", "spend_date", "cost_micros"],
+        "geo_query_dimensions": ["customer_id", "campaign_id", "country_criterion_id", "spend_date", "cost_micros"],
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -266,16 +277,36 @@ def _geo_reconciliation_detail(start, end, canonical_total, geo_total, status: s
         reverse=True,
     )[:10]
 
+    # PR-ADS-130: campaigns that spent but have NO geo rows at all — a genuine
+    # per-campaign geo gap (distinct from a total-only residual).
+    campaigns_missing_geo = [
+        {
+            "campaign_id": c.get("campaign_id"),
+            "campaign_name": c.get("campaign_name"),
+            "campaign_spend_native": c.get("campaign_spend"),
+        }
+        for c in by_campaign
+        if (c.get("campaign_spend") or 0) > 0 and (c.get("geo_spend") or 0) == 0
+    ]
+    campaign_spend_without_geo = round(
+        sum(c["campaign_spend_native"] or 0 for c in campaigns_missing_geo), 6)
+    unknown_country_spend = detail.get("unmapped_geo_native")
+
     if status == "reconciled":
         reason = "reconciled"
         next_action = "none"
     elif missing_geo_dates:
         reason = "missing_geo_dates"
         next_action = "run_geo_sync_for_missing_dates"
+    elif campaigns_missing_geo:
+        reason = "campaign_spend_without_geo"
+        next_action = "inspect_geo_query_parity"
     elif net_gap is not None and net_gap > 0:
-        # Geo rows exist for every campaign-spend day, but totals still differ —
-        # the residual is spend Google Ads did not attribute to any country.
-        reason = "unattributed_location_spend"
+        # Geo rows exist for every campaign-spend day AND every campaign, but the
+        # totals still differ. The residual is spend Google Ads did not attribute
+        # to any country — the geographic_view report omits it by design, so this
+        # denominator cannot reconcile to campaign spend under the current query.
+        reason = "geo_report_does_not_reconcile_by_design"
         next_action = "inspect_geo_query_parity"
     else:
         reason = "totals_differ"
@@ -285,7 +316,11 @@ def _geo_reconciliation_detail(start, end, canonical_total, geo_total, status: s
         "reason": reason,
         "next_action": next_action,
         "network_or_segment_gap_native": net_gap,
-        "unmapped_geo_native": detail.get("unmapped_geo_native"),
+        "unmapped_geo_native": unknown_country_spend,
+        "unknown_country_spend_native": unknown_country_spend,
+        "geo_rows_with_null_country": detail.get("geo_rows_with_null_country"),
+        "campaign_spend_without_geo_native": campaign_spend_without_geo,
+        "campaigns_missing_geo": campaigns_missing_geo[:10],
         "missing_geo_dates": missing_geo_dates,
         "largest_daily_variances": largest_daily,
         "campaign_geo_gaps": campaign_gaps if campaign_ids_in_geo else [],

@@ -257,7 +257,7 @@ def test_frontend_campaign_coverage_copy():
 
 # Test 9 — country blocked copy with totals
 def test_frontend_country_blocked_copy():
-    fn = _slice("function renderCountrySpendUnreconciledState", span=2800)
+    fn = _slice("function renderCountrySpendUnreconciledState", span=3800)
     assert "Country ROAS is blocked" in fn
     assert "Campaign spend" in fn
     assert "Geo spend" in fn
@@ -269,8 +269,9 @@ def test_frontend_country_blocked_copy():
 
 def test_frontend_geo_health_diagnostics():
     assert "function renderGeoReconcileDetail" in JS
-    fn = _slice("function renderGeoReconcileDetail", span=1200)
-    assert "Likely cause" in fn
+    fn = _slice("function renderGeoReconcileDetail", span=1800)
+    # PR-ADS-130 renamed the header to a root-cause section.
+    assert "Geo Reconciliation Root Cause" in fn
     assert "Next action" in fn
     assert "Tolerance" in fn
     panel = _slice("function renderGeoSyncPanel", span=3600)

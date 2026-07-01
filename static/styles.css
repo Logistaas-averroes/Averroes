@@ -4219,6 +4219,50 @@ body.is-revenue-page #monitoring-banner {
   font-size: 13px;
   color: #334155;
 }
+.revenue-geo-gap-list {
+  margin: 4px 0 10px;
+  padding-left: 18px;
+  font-size: 13px;
+  color: #334155;
+}
+
+/* PR-ADS-130: ROAS by Campaign row drilldown (clients / deals behind revenue). */
+.campaign-expand-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 6px 0 0;
+  color: #475569;
+}
+.campaign-expand-btn:hover { color: #0f172a; }
+.campaign-drilldown-row > td {
+  background: #f8fafc;
+  padding: 0;
+}
+.campaign-drilldown {
+  padding: 12px 16px;
+}
+.campaign-drilldown__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 8px;
+}
+.campaign-drilldown__scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.campaign-drilldown-table th,
+.campaign-drilldown-table td {
+  white-space: nowrap;
+  font-size: 13px;
+}
+.detail-unavailable {
+  color: #94a3b8;
+  font-style: italic;
+}
 
 /* ── PR-ADS-123: Google Ads Spend summary strip ─────────────────────────────
    Replaces the unstyled raw text block (which had no CSS at all) with a compact,

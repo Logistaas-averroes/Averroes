@@ -32,7 +32,7 @@ def _fn(marker, span=1800):
 
 
 def test_campaign_table_uses_revenue_table_scroll():
-    fn = _fn("function renderRoasCampaignTable", span=2600)
+    fn = _fn("function renderRoasCampaignTable", span=3400)
     assert "revenue-table-shell" in fn
     assert "revenue-table-scroll" in fn
     assert "revenue-decision-table" in fn

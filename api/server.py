@@ -6112,6 +6112,32 @@ async def get_revenue_performance(
         ) from exc
 
 
+@app.get("/api/revenue-performance/campaign-detail")
+async def get_revenue_performance_campaign_detail(
+    window: str = Query(default="current_quarter"),
+    campaign: str = Query(..., description="Canonical campaign name"),
+    _user=Depends(require_auth),
+):
+    """Clients / deals behind ONE canonical campaign (PR-ADS-130).
+
+    Read-only lazy drilldown for the ROAS by Campaign row drawer. Returns the
+    closed-won deal detail rows (company / contact / deal record ids, amount,
+    close date, attribution) for the requested canonical campaign, using the same
+    identity map the ROAS rows use. Never writes to Google Ads or HubSpot.
+    """
+    from services.revenue_attribution_service import build_campaign_deal_details  # noqa: PLC0415
+
+    try:
+        return build_campaign_deal_details(window, campaign)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Campaign deal detail failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Campaign deal detail computation failed"
+        ) from exc
+
+
 @app.get("/api/revenue-performance/audit")
 async def get_revenue_performance_audit(
     window: str = Query(default="current_quarter"),
