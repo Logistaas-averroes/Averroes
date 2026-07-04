@@ -3846,9 +3846,14 @@ function sourcePlatformExpandControl(idx, group, channel, platform, label) {
 }
 
 function renderSourcePlatformRow(group, ch, pf, idx) {
-  const isGoogle = group.has_spend === true;
-  const statusCell = isGoogle ? fmtRoasMultiple(pf.roas) : `<span class="source-status">${escapeHtml(pf.status || "")}</span>`;
-  const spendCell = isGoogle ? fmtMoney(pf.spend) : '<span class="detail-unavailable">Unavailable</span>';
+  // ROAS shows ONLY for a spend-connected platform (the canonical Google Ads
+  // bucket). fmtRoasMultiple already renders a null ROAS as "Unavailable", so a
+  // spend-connected-but-zero bucket never shows NaN; every other bucket shows its
+  // honest status string, never a fabricated ROAS. (group.has_spend gates the
+  // group; pf.spend gates the individual bucket — see PR-133 review.)
+  const hasSpend = pf.spend !== null && pf.spend !== undefined;
+  const statusCell = hasSpend ? fmtRoasMultiple(pf.roas) : `<span class="source-status">${escapeHtml(pf.status || "")}</span>`;
+  const spendCell = hasSpend ? fmtMoney(pf.spend) : '<span class="detail-unavailable">Unavailable</span>';
   return `
     <tr class="source-platform-row">
       <td class="source-platform-name">${sourcePlatformExpandControl(idx, group.group, ch.channel, pf.platform, pf.label)}${escapeHtml(pf.label)}</td>
@@ -3867,9 +3872,11 @@ function renderSourcePlatformRow(group, ch, pf, idx) {
 }
 
 function renderSourceChannelRows(group, ch, gi, ci) {
-  const isGoogle = group.has_spend === true;
-  const spendCell = isGoogle ? fmtMoney(ch.spend) : '<span class="detail-unavailable">Unavailable</span>';
-  const statusCell = isGoogle ? fmtRoasMultiple(ch.roas) : "—";
+  // Only the spend-connected (canonical Paid Search) channel carries spend/ROAS;
+  // gate on ch.spend so a non-canonical channel in the Google group never shows it.
+  const hasSpend = ch.spend !== null && ch.spend !== undefined;
+  const spendCell = hasSpend ? fmtMoney(ch.spend) : '<span class="detail-unavailable">Unavailable</span>';
+  const statusCell = hasSpend ? fmtRoasMultiple(ch.roas) : "—";
   const channelHead = `
     <tr class="source-channel-row">
       <td class="source-channel-name">${escapeHtml(ch.label)}</td>

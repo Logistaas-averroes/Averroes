@@ -203,6 +203,34 @@ def test_google_gets_spend_roas_others_never_inherit(monkeypatch):
     assert li["status"] == "Revenue-only — no connected spend source"
 
 
+def test_google_non_canonical_bucket_never_inherits_spend(monkeypatch):
+    # PR-133 review: a row inside the Google Ads group that lacks raw source detail
+    # falls into the group's "unspecified" bucket. It must NOT inherit Google's
+    # spend/ROAS — only the canonical Paid Search → Google Ads bucket does.
+    from services.source_attribution_service import build_revenue_by_source
+    _patch_sources(
+        monkeypatch,
+        revenue_rows=[
+            {"acquisition_group": "google_ads", "attribution_status": "attributed",
+             "deal_amount_usd": 4000.0, "source_primary_raw": "Paid Search",
+             "source_detail_raw": "google"},
+            # google_ads group row with NO raw source → falls into unspecified.
+            {"acquisition_group": "google_ads", "attribution_status": "attributed",
+             "deal_amount_usd": 1000.0, "source_primary_raw": None, "source_detail_raw": None},
+        ],
+        spend_rows=[{"spend": 2000.0}],
+    )
+    out = build_revenue_by_source("current_quarter", now=_at("2026-06-22"))
+    g = _group(out, "google_ads")
+    canonical = _platform(_channel(g, "paid_search"), "google_ads")
+    assert canonical["spend"] == 2000.0 and canonical["roas"] == round(5000.0 / 2000.0, 2)
+    unspecified_ch = _channel(g, "unspecified")
+    assert unspecified_ch["spend"] is None and unspecified_ch["roas"] is None
+    up = _platform(unspecified_ch, "unspecified")
+    assert up["spend"] is None and up["roas"] is None
+    assert up["status"] == "Needs review — source missing or unsafe"
+
+
 def test_offline_platform_status_is_migration(monkeypatch):
     from services.source_attribution_service import build_revenue_by_source
     _patch_sources(
@@ -348,10 +376,12 @@ def test_frontend_no_fake_roas_for_non_google():
     assert "Revenue-only — no connected spend source" in status
     assert "Imported CRM records — no reliable source attribution" in status
     assert "Needs review — source missing or unsafe" in status
-    pf = _slice(JS, "function renderSourcePlatformRow", span=900)
-    # The status cell is only a ROAS multiple when the group is spend-connected;
-    # otherwise it renders the honest status string, never a fabricated ROAS.
-    assert "group.has_spend === true" in pf
+    pf = _slice(JS, "function renderSourcePlatformRow", span=1100)
+    # The status cell is only a ROAS multiple when the PLATFORM bucket is
+    # spend-connected (canonical Google Ads); otherwise it renders the honest
+    # status string, never a fabricated ROAS. Gating on pf.spend (not just the
+    # group) keeps a non-canonical bucket inside the Google group from showing ROAS.
+    assert "pf.spend !== null" in pf
     assert "pf.status" in pf
 
 

@@ -21,6 +21,7 @@ from analysis.source_classification import (
     GROUP_GOOGLE_ADS, GROUP_OTHER_PAID, GROUP_ORGANIC, GROUP_OFFLINE,
     GROUP_UNCLASSIFIED, GROUP_LABELS, GROUPS_WITH_SPEND, RULE_VERSION,
     CHANNEL_LABELS, PLATFORM_LABELS, CH_UNSPECIFIED, PF_UNSPECIFIED,
+    CH_PAID_SEARCH, PF_GOOGLE_ADS,
     classify_source, classify_source_taxonomy, attribute_deal,
 )
 from db import revenue_repository as repo
@@ -40,9 +41,17 @@ STATUS_OFFLINE = "Imported CRM records — no reliable source attribution"
 STATUS_NEEDS_REVIEW = "Needs review — source missing or unsafe"
 
 
-def _platform_status(group: str) -> str:
+def _platform_status(group: str, is_canonical: bool = False) -> str:
+    """Status label for a channel/platform row.
+
+    Only the CANONICAL Google Ads bucket (Paid Search → Google Ads) is
+    spend-connected / ROAS-eligible. A non-canonical bucket inside the Google
+    group (e.g. rows that fell into ``unspecified`` because their raw source was
+    missing) is NOT the spend-connected platform, so it must never claim ROAS —
+    it gets a needs-review status instead.
+    """
     if group in GROUPS_WITH_SPEND:
-        return STATUS_ROAS_AVAILABLE
+        return STATUS_ROAS_AVAILABLE if is_canonical else STATUS_NEEDS_REVIEW
     if group == GROUP_OFFLINE:
         return STATUS_OFFLINE
     if group == GROUP_UNCLASSIFIED:
@@ -112,8 +121,13 @@ def _finalize_channels(group: str, channels: dict, group_spend, group_roas) -> l
     has_spend = group in GROUPS_WITH_SPEND
     out = []
     for ch_key, ch in channels.items():
+        # Spend/ROAS attach ONLY to the canonical Paid Search channel — never to a
+        # non-canonical bucket (e.g. an ``unspecified`` bucket from a raw-source
+        # mismatch) that happens to sit inside the Google Ads group.
+        canonical_channel = has_spend and ch_key == CH_PAID_SEARCH
         platforms = []
         for pf_key, pf in ch["platforms"].items():
+            canonical_platform = canonical_channel and pf_key == PF_GOOGLE_ADS
             platforms.append({
                 "platform": pf_key,
                 "label": pf["label"],
@@ -121,9 +135,9 @@ def _finalize_channels(group: str, channels: dict, group_spend, group_roas) -> l
                 "sqls": pf["sqls"],
                 "customers": pf["customers"],
                 "won_revenue": round(pf["won_revenue"], 2),
-                "spend": group_spend if has_spend else None,
-                "roas": group_roas if has_spend else None,
-                "status": _platform_status(group),
+                "spend": group_spend if canonical_platform else None,
+                "roas": group_roas if canonical_platform else None,
+                "status": _platform_status(group, is_canonical=canonical_platform),
             })
         platforms.sort(key=lambda p: (p["won_revenue"], p["leads"]), reverse=True)
         out.append({
@@ -133,8 +147,8 @@ def _finalize_channels(group: str, channels: dict, group_spend, group_roas) -> l
             "sqls": ch["sqls"],
             "customers": ch["customers"],
             "won_revenue": round(ch["won_revenue"], 2),
-            "spend": group_spend if has_spend else None,
-            "roas": group_roas if has_spend else None,
+            "spend": group_spend if canonical_channel else None,
+            "roas": group_roas if canonical_channel else None,
             "platforms": platforms,
         })
     out.sort(key=lambda c: (c["won_revenue"], c["leads"]), reverse=True)
