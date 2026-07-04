@@ -6138,6 +6138,34 @@ async def get_revenue_performance_campaign_detail(
         ) from exc
 
 
+@app.get("/api/revenue-performance/country-detail")
+async def get_revenue_performance_country_detail(
+    window: str = Query(default="current_quarter"),
+    country: str = Query(..., description="Country display name"),
+    country_code: str | None = Query(default=None, description="ISO alpha-2 code (safer)"),
+    _user=Depends(require_auth),
+):
+    """Clients / deals behind ONE country (PR-ADS-132).
+
+    Read-only lazy drilldown for the ROAS by Country row drawer. Returns the
+    closed-won deal detail rows (company / contact / deal record ids, amount,
+    close date, campaign attribution) for the requested country, matched by ISO
+    country_code when provided (safer) else by exact normalized name. Never
+    writes to Google Ads or HubSpot; never fabricates ids or amounts.
+    """
+    from services.revenue_attribution_service import build_country_deal_details  # noqa: PLC0415
+
+    try:
+        return build_country_deal_details(window, country, country_code)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Country deal detail failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Country deal detail computation failed"
+        ) from exc
+
+
 @app.get("/api/revenue-performance/audit")
 async def get_revenue_performance_audit(
     window: str = Query(default="current_quarter"),

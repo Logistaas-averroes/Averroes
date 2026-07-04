@@ -1639,6 +1639,116 @@ def build_campaign_deal_details(window: str, campaign: str,
     }
 
 
+def _country_deal_detail_row(r: dict) -> dict:
+    """One 'client / deal behind this country' detail row (PR-ADS-132).
+
+    Only fields the durable tables actually store are populated; identity fields
+    that are NOT stored (company record id, contact name, deal name) are explicit
+    None so the UI renders "unavailable", never a fabricated id. A missing amount
+    stays None (the drawer shows "unavailable"), never a fake $0.00.
+    """
+    return {
+        "company_name": r.get("company") or None,
+        "company_record_id": None,          # durable table stores company NAME only
+        "main_contact_name": None,          # contact name is not stored
+        "main_contact_record_id": r.get("contact_id") or None,
+        "deal_name": None,                  # deal title is not stored (only stage label)
+        "deal_record_id": r.get("deal_id") or None,
+        # Preserve None for a missing amount — never fabricate a $0.00 the UI
+        # would read as real revenue; the drawer renders it as "unavailable".
+        "deal_amount_usd": (lambda a: round(a, 2) if a is not None else None)(
+            _nullable_float(r.get("deal_amount_usd"))),
+        "deal_close_date": r.get("deal_close_date"),
+        # campaign_name is the CANONICAL display label (post identity map);
+        # raw_campaign_name preserves the original external/UTM label.
+        "campaign_name": r.get("campaign_name") or None,
+        "raw_campaign_name": (r.get("raw_campaign_name")
+                              or r.get("external_campaign_label")
+                              or r.get("campaign_name")),
+        "match_status": r.get("match_status") or None,
+        "match_source": r.get("match_source") or None,
+        "gclid_masked": _mask_gclid(r.get("gclid")),
+        "country": r.get("country") or None,
+        "deal_stage_label": r.get("deal_stage_label") or None,
+    }
+
+
+def build_country_deal_details(window: str, country: str,
+                               country_code: str | None = None,
+                               now: datetime | None = None) -> dict:
+    """Closed-won client/deal detail rows behind ONE country (PR-ADS-132).
+
+    Read-only validation drilldown for the ROAS by Country drawer. Fetches
+    closed-won deals from the durable gclid_attribution table (windowed by
+    deal_close_date) for EXACTLY the requested country — matched by ISO code when
+    available, else by exact normalized name (never fuzzy / `contains`, so
+    "United Arab Emirates" never leaks into "United Kingdom"). Applies the SAME
+    canonical identity map the ROAS rows use so a deal's raw campaign label groups
+    onto its canonical campaign name for display. Never writes anything; never
+    fabricates company / contact / deal ids or amounts.
+
+    Raises ValueError for an unsupported window.
+    """
+    resolved, start_date, end_date = _window_date_bounds(window, now)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    code = (country_code or "").strip().upper() or None
+
+    fetched = repo.fetch_country_deal_details(start_date, end_date, country, code)
+    if not fetched.get("available"):
+        return {
+            "window": resolved, "country": country, "country_code": code,
+            "details": [],
+            "summary": {"companies": 0, "deals": 0, "won_revenue_usd": None, "customers": 0},
+            "source_health": {"status": "database_unavailable"},
+            "generated_at": generated_at,
+        }
+
+    rows = fetched.get("rows", [])
+    # Preserve the RAW label before the canonical identity map overwrites it, so
+    # the drawer can show both "Campaign / Source" (canonical) and the raw label.
+    for r in rows:
+        r.setdefault("raw_campaign_name", r.get("campaign_name"))
+    # Apply the canonical identity map (exact-normalized auto-links + approved
+    # manual mappings) so raw deal labels resolve to the canonical campaign name.
+    canonical = repo.fetch_canonical_campaign_spend(start_date, end_date)
+    canonical_access = bool(canonical.get("available"))
+    approved = (repo.fetch_campaign_identity(canonical.get("customer_id")).get("mappings", [])
+                if canonical_access else [])
+    resolution_map = (_build_resolution_map(canonical.get("rows") or [], approved)
+                      if canonical_access else {})
+    mapped = _apply_identity_map(rows, resolution_map, []) if resolution_map else rows
+
+    details = [_country_deal_detail_row(r) for r in mapped]
+    # Sorted by amount (largest first, missing amounts last), then most recent close.
+    details.sort(
+        key=lambda d: (
+            d.get("deal_amount_usd") is not None,
+            d.get("deal_amount_usd") or 0.0,
+            d.get("deal_close_date") or "",
+        ),
+        reverse=True,
+    )
+
+    companies = {d["company_name"] for d in details if d.get("company_name")}
+    deal_ids = {d["deal_record_id"] for d in details if d.get("deal_record_id")}
+    amounts = [d["deal_amount_usd"] for d in details if d.get("deal_amount_usd") is not None]
+    won_revenue = round(sum(amounts), 2) if amounts else None
+    return {
+        "window": resolved,
+        "country": country,
+        "country_code": code,
+        "details": details,
+        "summary": {
+            "companies": len(companies),
+            "deals": len(deal_ids),
+            "won_revenue_usd": won_revenue,
+            "customers": len(deal_ids),
+        },
+        "source_health": {"status": "ready"},
+        "generated_at": generated_at,
+    }
+
+
 def build_revenue_deals(window: str, now: datetime | None = None) -> dict:
     """Build the Closed-Won Revenue Ledger contract for a business window.
 
