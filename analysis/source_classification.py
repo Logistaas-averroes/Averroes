@@ -275,9 +275,19 @@ def classify_source_taxonomy(primary, detail_1=None, detail_2=None,
     """Classify a HubSpot source into a group → channel → platform taxonomy.
 
     Pure and deterministic. The GROUP is delegated to ``classify_source`` so this
-    never diverges from the rest of the system. ``detail_2`` / utm_* are accepted
-    for forward-compatibility and richer labelling but are NOT required for the
-    core routing (HubSpot Original Source + Drill-Down are authoritative in v1).
+    never diverges from the rest of the system. Routing uses HubSpot Original
+    Source + Original Source Drill-Down (``hs_analytics_source`` +
+    ``hs_analytics_source_data_1``), which are the only source fields persisted
+    locally today.
+
+    ``detail_2`` (``hs_analytics_source_data_2``) and utm_* are accepted for
+    forward-compatibility and richer platform labelling but are NOT yet used for
+    routing: ``hs_analytics_source_data_2`` is fetched by the HubSpot connector but
+    is NOT persisted in the durable reporting tables, so it is unavailable at read
+    time. Using it for platform detection is deferred to PR-134, after the durable
+    field is inspected/persisted — doing so here would require a schema + writer +
+    backfill change outside this PR's scope. Until then the drawer surfaces
+    ``source_drilldown_2`` as "Unavailable" rather than fabricating a value.
 
     Only Google Ads / Paid Search returns spend_connected=True, roas_available=True.
     Every other source is revenue-only. Missing / unknown primary → Unclassified,

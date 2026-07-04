@@ -95,6 +95,17 @@ def _nullable_float(v):
         return None
 
 
+def _roas(won, spend):
+    """ROAS = won revenue / spend, or None when spend is missing/zero.
+
+    Never returns a fabricated 0.00x — a null spend (no connected source) yields a
+    null ROAS so the UI renders "Unavailable".
+    """
+    if spend is None or spend <= 0:
+        return None
+    return round(_safe_float(won) / spend, 2)
+
+
 def _window_bounds(window: str, now):
     resolved = resolve_window(window, now=now)
     start = date.fromisoformat(resolved["start_date"]) if resolved["start_date"] else None
@@ -110,13 +121,16 @@ def _section_bucket(acquisition_group: str) -> str:
     return GROUP_UNCLASSIFIED
 
 
-def _finalize_channels(group: str, channels: dict, group_spend, group_roas) -> list:
+def _finalize_channels(group: str, channels: dict, group_spend) -> list:
     """Shape the nested channel/platform dicts into sorted list rows (PR-ADS-133).
 
-    Only the Google Ads group carries spend/ROAS; it has exactly one real
-    channel/platform (Paid Search → Google Ads) so the group spend/ROAS attaches
-    to it. Every other platform is revenue-only: spend/ROAS stay None (never a
-    fabricated $0 / 0.00x) and get an honest status label.
+    Only the Google Ads group carries spend/ROAS, and only on its canonical
+    Paid Search → Google Ads channel/platform. That bucket's ROAS is computed
+    from its OWN won revenue / spend (not the group ROAS), so a non-canonical
+    Google bucket never distorts it. Every other bucket — and any non-canonical
+    Google bucket — keeps spend/ROAS None (never a fabricated $0 / 0.00x) and
+    gets an honest status label. When the Google spend source is unavailable
+    (group_spend is None), even the canonical bucket shows spend/ROAS None.
     """
     has_spend = group in GROUPS_WITH_SPEND
     out = []
@@ -125,18 +139,21 @@ def _finalize_channels(group: str, channels: dict, group_spend, group_roas) -> l
         # non-canonical bucket (e.g. an ``unspecified`` bucket from a raw-source
         # mismatch) that happens to sit inside the Google Ads group.
         canonical_channel = has_spend and ch_key == CH_PAID_SEARCH
+        ch_won = round(ch["won_revenue"], 2)
         platforms = []
         for pf_key, pf in ch["platforms"].items():
             canonical_platform = canonical_channel and pf_key == PF_GOOGLE_ADS
+            pf_won = round(pf["won_revenue"], 2)
             platforms.append({
                 "platform": pf_key,
                 "label": pf["label"],
                 "leads": pf["leads"],
                 "sqls": pf["sqls"],
                 "customers": pf["customers"],
-                "won_revenue": round(pf["won_revenue"], 2),
+                "won_revenue": pf_won,
                 "spend": group_spend if canonical_platform else None,
-                "roas": group_roas if canonical_platform else None,
+                # Bucket-level ROAS = this bucket's won revenue / spend.
+                "roas": _roas(pf_won, group_spend) if canonical_platform else None,
                 "status": _platform_status(group, is_canonical=canonical_platform),
             })
         platforms.sort(key=lambda p: (p["won_revenue"], p["leads"]), reverse=True)
@@ -146,9 +163,9 @@ def _finalize_channels(group: str, channels: dict, group_spend, group_roas) -> l
             "leads": ch["leads"],
             "sqls": ch["sqls"],
             "customers": ch["customers"],
-            "won_revenue": round(ch["won_revenue"], 2),
+            "won_revenue": ch_won,
             "spend": group_spend if canonical_channel else None,
-            "roas": group_roas if canonical_channel else None,
+            "roas": _roas(ch_won, group_spend) if canonical_channel else None,
             "platforms": platforms,
         })
     out.sort(key=lambda c: (c["won_revenue"], c["leads"]), reverse=True)
@@ -214,8 +231,13 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         platform["customers"] += 1
         platform["won_revenue"] += amount
 
-    # Only Google Ads has a connected spend source.
-    google_spend = round(sum(_safe_float(r.get("spend")) for r in (spend.get("rows") or [])), 2)
+    # Only Google Ads has a connected spend source. When that source is
+    # unavailable OR returns no rows, spend is None (NOT a fabricated $0) so the UI
+    # renders "Unavailable" and ROAS stays null — never a $0 denominator.
+    spend_rows = spend.get("rows") or []
+    spend_source_available = bool(spend.get("available")) and bool(spend_rows)
+    google_spend = (round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
+                    if spend_source_available else None)
 
     groups = []
     for g in SECTION_ORDER:
@@ -223,8 +245,10 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         has_spend = g in GROUPS_WITH_SPEND
         won = round(b["won_revenue"], 2)
         group_spend = google_spend if has_spend else None
-        # ROAS is available ONLY for Google Ads, and only with real spend.
-        roas = (round(won / group_spend, 2) if has_spend and group_spend and group_spend > 0 else None)
+        # ROAS is available ONLY for Google Ads, and only with real (non-null) spend.
+        roas = _roas(won, group_spend) if has_spend else None
+        # Spend is connected only when there is a real spend source for this group.
+        spend_connected = has_spend and group_spend is not None
         groups.append({
             "group": g,
             "label": GROUP_LABELS[g],
@@ -235,9 +259,11 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
             "customers": b["customers"],
             "won_revenue": won,
             "roas": roas,
-            # Non-Google groups have no connected spend source — ROAS unavailable.
-            "roas_status": "available" if has_spend else "unavailable_no_spend_source",
-            "channels": _finalize_channels(g, nested[g], group_spend, roas),
+            # Non-Google groups have no connected spend source; Google shows it as
+            # unavailable when the spend source itself is missing for the window.
+            "roas_status": ("available" if spend_connected
+                            else "unavailable_no_spend_source"),
+            "channels": _finalize_channels(g, nested[g], group_spend),
         })
 
     summary = source_attribution_health_counts()
@@ -280,44 +306,95 @@ def _source_detail_row(r: dict, group: str, channel_label: str, platform_label: 
     }
 
 
+def _source_contact_row(r: dict, channel_label: str, platform_label: str) -> dict:
+    """One 'lead / SQL behind this source platform' drawer row (PR-ADS-133).
+
+    Proves a classified contact. Only durably-stored fields are populated; contact
+    name, company id and HubSpot lifecycle are NOT persisted, so they are explicit
+    None → the UI renders "Unavailable". ``is_sql`` marks a qualified contact.
+    """
+    status = r.get("status_category") or None
+    return {
+        "company": r.get("company") or None,
+        "company_id": None,                 # company record id is not stored
+        "main_contact": None,               # contact name is not stored
+        "contact_id": r.get("contact_id") or None,
+        "lifecycle_stage": None,            # HubSpot lifecyclestage is not persisted
+        "status_category": status,
+        "is_sql": status == "qualified",
+        "created_date": r.get("contact_created_at"),
+        "source": channel_label,
+        "source_drilldown_1": platform_label,
+        "source_drilldown_2": None,         # hs_analytics_source_data_2 not persisted
+        "campaign_source_label": r.get("source_detail_raw") or None,
+    }
+
+
 def build_source_platform_detail(window: str, source_group: str, source_channel: str,
                                  source_platform: str, now: datetime | None = None) -> dict:
-    """Closed-won client/deal detail rows behind ONE source platform (PR-ADS-133).
+    """Clients/deals + leads/SQLs behind ONE source platform (PR-ADS-133).
 
-    Read-only lazy drilldown for the Revenue by Source drawer. Fetches closed-won
-    deals in the window (deal_source_attribution, windowed by deal_close_date),
-    derives each deal's group/channel/platform with the SAME taxonomy the page
-    rows use, and returns the deals whose (group, channel, platform) match the
-    request. Never writes anything; never fabricates ids, names or amounts.
+    Read-only lazy drilldown for the Revenue by Source drawer, in two sections:
+
+      - ``contacts``: classified contacts proving the Leads / SQLs, windowed by
+        contact_created_at (the lead business-event date).
+      - ``deals``: closed-won deals proving the Won Revenue, windowed by
+        deal_close_date.
+
+    Both derive their group/channel/platform with the SAME taxonomy the page rows
+    use and keep only rows matching the requested (group, channel, platform).
+    Never writes anything; never fabricates ids, names or amounts. ``rows`` is kept
+    as an alias of ``deals`` for backward compatibility.
 
     Raises ValueError for an unsupported window.
     """
     resolved, start, end = _window_bounds(window, now)
     generated_at = datetime.now(timezone.utc).isoformat()
 
-    fetched = repo.fetch_source_deal_details(start, end)
-    if not fetched.get("available"):
-        return {
-            "window": resolved, "source_group": source_group,
-            "source_channel": source_channel, "source_platform": source_platform,
-            "rows": [], "source_health": {"status": "database_unavailable"},
-            "generated_at": generated_at,
-        }
-
-    rows = []
-    for r in (fetched.get("rows") or []):
+    def _matches(r):
         section = _section_bucket(r.get("acquisition_group") or GROUP_UNCLASSIFIED)
         ch, ch_label, pf, pf_label = _taxonomy_for_section(
             section, r.get("source_primary_raw"), r.get("source_detail_raw"))
-        if section == source_group and ch == source_channel and pf == source_platform:
-            rows.append(_source_detail_row(r, section, ch_label, pf_label))
+        hit = section == source_group and ch == source_channel and pf == source_platform
+        return hit, ch_label, pf_label
+
+    deals_fetch = repo.fetch_source_deal_details(start, end)
+    contacts_fetch = repo.fetch_source_contact_details(start, end)
+    if not deals_fetch.get("available") and not contacts_fetch.get("available"):
+        return {
+            "window": resolved, "source_group": source_group,
+            "source_channel": source_channel, "source_platform": source_platform,
+            "contacts": [], "deals": [], "rows": [],
+            "summary": {"contacts": 0, "sqls": 0, "deals": 0},
+            "source_health": {"status": "database_unavailable"},
+            "generated_at": generated_at,
+        }
+
+    deals = []
+    for r in (deals_fetch.get("rows") or []):
+        hit, ch_label, pf_label = _matches(r)
+        if hit:
+            deals.append(_source_detail_row(r, source_group, ch_label, pf_label))
+
+    contacts = []
+    for r in (contacts_fetch.get("rows") or []):
+        hit, ch_label, pf_label = _matches(r)
+        if hit:
+            contacts.append(_source_contact_row(r, ch_label, pf_label))
 
     return {
         "window": resolved,
         "source_group": source_group,
         "source_channel": source_channel,
         "source_platform": source_platform,
-        "rows": rows,
+        "contacts": contacts,
+        "deals": deals,
+        "rows": deals,   # backward-compatible alias
+        "summary": {
+            "contacts": len(contacts),
+            "sqls": sum(1 for c in contacts if c.get("is_sql")),
+            "deals": len(deals),
+        },
         "source_health": {"status": "ready"},
         "generated_at": generated_at,
     }

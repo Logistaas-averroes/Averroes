@@ -222,13 +222,41 @@ def test_google_non_canonical_bucket_never_inherits_spend(monkeypatch):
     )
     out = build_revenue_by_source("current_quarter", now=_at("2026-06-22"))
     g = _group(out, "google_ads")
+    # Group ROAS uses the whole group revenue; the canonical bucket ROAS uses ONLY
+    # its own won revenue / spend (4000 / 2000 = 2.0), not the group's (5000/2000).
+    assert g["roas"] == round(5000.0 / 2000.0, 2)
     canonical = _platform(_channel(g, "paid_search"), "google_ads")
-    assert canonical["spend"] == 2000.0 and canonical["roas"] == round(5000.0 / 2000.0, 2)
+    assert canonical["spend"] == 2000.0 and canonical["roas"] == round(4000.0 / 2000.0, 2)
     unspecified_ch = _channel(g, "unspecified")
     assert unspecified_ch["spend"] is None and unspecified_ch["roas"] is None
     up = _platform(unspecified_ch, "unspecified")
     assert up["spend"] is None and up["roas"] is None
     assert up["status"] == "Needs review — source missing or unsafe"
+
+
+def test_google_spend_null_when_source_unavailable(monkeypatch):
+    # PR-133 follow-up (fix 3): when the Google spend source is unavailable / empty,
+    # spend and ROAS are null (UI renders Unavailable) — never a fabricated $0.
+    import db.revenue_repository as repo
+    from services.source_attribution_service import build_revenue_by_source
+    monkeypatch.setattr(repo, "fetch_source_leads", lambda s, e: {"available": True, "rows": []})
+    monkeypatch.setattr(repo, "fetch_source_revenue", lambda s, e: {"available": True, "rows": [
+        {"acquisition_group": "google_ads", "attribution_status": "attributed",
+         "deal_amount_usd": 5000.0, "source_primary_raw": "Paid Search",
+         "source_detail_raw": "google"}]})
+    # Spend source reports unavailable.
+    monkeypatch.setattr(repo, "fetch_campaign_country_spend",
+                        lambda s, e: {"available": False, "rows": []})
+    import db.writers as w
+    monkeypatch.setattr(w, "source_attribution_health_counts",
+                        lambda: {"contacts_classified": 0, "deals_attributed": 0,
+                                 "ambiguous_deals": 0, "unclassified_deals": 0})
+    out = build_revenue_by_source("current_quarter", now=_at("2026-06-22"))
+    g = _group(out, "google_ads")
+    assert g["spend"] is None and g["roas"] is None   # never $0 / 0.00x
+    assert g["roas_status"] == "unavailable_no_spend_source"
+    gp = _platform(_channel(g, "paid_search"), "google_ads")
+    assert gp["spend"] is None and gp["roas"] is None
 
 
 def test_offline_platform_status_is_migration(monkeypatch):
@@ -269,14 +297,32 @@ DETAIL_ROWS = [
 ]
 
 
-def test_detail_filters_by_group_channel_platform(monkeypatch):
+CONTACT_ROWS = [
+    {"contact_id": "c1", "acquisition_group": "organic", "status_category": "qualified",
+     "source_primary_raw": "Organic Social", "source_detail_raw": "LinkedIn",
+     "contact_created_at": "2026-03-15", "company": "Acme Logistics"},
+    # Same group, DIFFERENT platform (Meta) — excluded from a LinkedIn query.
+    {"contact_id": "c2", "acquisition_group": "organic", "status_category": "unknown",
+     "source_primary_raw": "Organic Social", "source_detail_raw": "Facebook",
+     "contact_created_at": "2026-03-10", "company": None},
+]
+
+
+def _patch_detail_repos(monkeypatch, *, deal_rows=None, contact_rows=None):
     import db.revenue_repository as repo
     monkeypatch.setattr(repo, "fetch_source_deal_details",
-                        lambda s, e: {"available": True, "rows": list(DETAIL_ROWS)})
+                        lambda s, e: {"available": True, "rows": list(deal_rows or [])})
+    monkeypatch.setattr(repo, "fetch_source_contact_details",
+                        lambda s, e: {"available": True, "rows": list(contact_rows or [])})
+
+
+def test_detail_filters_by_group_channel_platform(monkeypatch):
+    _patch_detail_repos(monkeypatch, deal_rows=DETAIL_ROWS)
     from services.source_attribution_service import build_source_platform_detail
     out = build_source_platform_detail("ytd", "organic", "organic_social", "linkedin")
     ids = {r["deal_id"] for r in out["rows"]}
     assert ids == {"789"}, "only the LinkedIn organic-social deal matches"
+    assert out["deals"] == out["rows"]   # backward-compatible alias
     r = out["rows"][0]
     assert r["company"] == "Acme Logistics"
     assert r["contact_id"] == "456"
@@ -287,10 +333,30 @@ def test_detail_filters_by_group_channel_platform(monkeypatch):
     assert r["attribution_status"] == "attributed"
 
 
+def test_detail_contacts_prove_leads_sqls(monkeypatch):
+    # PR-133 follow-up: the drawer includes a contacts section proving Leads/SQLs,
+    # filtered to the requested platform. The Meta contact is excluded from a
+    # LinkedIn query; the LinkedIn contact is a qualified SQL.
+    _patch_detail_repos(monkeypatch, deal_rows=DETAIL_ROWS, contact_rows=CONTACT_ROWS)
+    from services.source_attribution_service import build_source_platform_detail
+    out = build_source_platform_detail("ytd", "organic", "organic_social", "linkedin")
+    assert {c["contact_id"] for c in out["contacts"]} == {"c1"}
+    c = out["contacts"][0]
+    assert c["is_sql"] is True and c["status_category"] == "qualified"
+    assert c["company"] == "Acme Logistics"
+    assert c["source"] == "Organic Social" and c["source_drilldown_1"] == "LinkedIn"
+    assert c["created_date"] == "2026-03-15"
+    # Fields not durably stored stay None → UI shows Unavailable.
+    assert c["main_contact"] is None and c["company_id"] is None and c["lifecycle_stage"] is None
+    assert c["source_drilldown_2"] is None
+    # Summary counts both sections; deals section still present.
+    assert out["summary"]["contacts"] == 1 and out["summary"]["sqls"] == 1
+    assert out["summary"]["deals"] == 1
+    assert {d["deal_id"] for d in out["deals"]} == {"789"}
+
+
 def test_detail_missing_amount_stays_null_and_labels_unavailable(monkeypatch):
-    import db.revenue_repository as repo
-    monkeypatch.setattr(repo, "fetch_source_deal_details",
-                        lambda s, e: {"available": True, "rows": list(DETAIL_ROWS)})
+    _patch_detail_repos(monkeypatch, deal_rows=DETAIL_ROWS)
     from services.source_attribution_service import build_source_platform_detail
     out = build_source_platform_detail("ytd", "organic", "organic_social", "meta")
     r = next(x for x in out["rows"] if x["deal_id"] == "790")
@@ -307,20 +373,27 @@ def test_detail_missing_amount_stays_null_and_labels_unavailable(monkeypatch):
 def test_detail_db_unavailable_reported(monkeypatch):
     import db.revenue_repository as repo
     monkeypatch.setattr(repo, "fetch_source_deal_details", lambda s, e: {"available": False})
+    monkeypatch.setattr(repo, "fetch_source_contact_details", lambda s, e: {"available": False})
     from services.source_attribution_service import build_source_platform_detail
     out = build_source_platform_detail("ytd", "organic", "organic_social", "linkedin")
-    assert out["rows"] == []
+    assert out["rows"] == [] and out["contacts"] == [] and out["deals"] == []
     assert out["source_health"]["status"] == "database_unavailable"
 
 
 def test_detail_query_is_read_only():
-    body = _repo_fn_body("fetch_source_deal_details").lower()
-    for forbidden in ("insert", "update ", "delete", "upsert", "drop", "alter",
-                      "requests.post", "requests.patch", "requests.put"):
-        assert forbidden not in body, f"source detail query must be read-only (found '{forbidden}')"
-    # Windowed by the real close date, never a sync/run date.
-    assert "deal_close_date >=" in body and "deal_close_date <" in body
-    assert "run_date" not in body
+    for name in ("fetch_source_deal_details", "fetch_source_contact_details"):
+        body = _repo_fn_body(name).lower()
+        for forbidden in ("insert", "update ", "delete", "upsert", "drop", "alter",
+                          "requests.post", "requests.patch", "requests.put"):
+            assert forbidden not in body, f"{name} must be read-only (found '{forbidden}')"
+    # Deal proof is windowed by the real close date; never a sync/run date.
+    deal_body = _repo_fn_body("fetch_source_deal_details")
+    assert "deal_close_date >=" in deal_body and "deal_close_date <" in deal_body
+    assert "run_date" not in deal_body
+    # Lead/SQL proof is windowed by the contact event date, never the close date.
+    contact_body = _repo_fn_body("fetch_source_contact_details")
+    assert "contact_created_at >=" in contact_body and "contact_created_at <" in contact_body
+    assert "deal_close_date" not in contact_body
 
 
 def test_detail_endpoint_registered():
@@ -359,12 +432,15 @@ def test_frontend_has_expandable_platform_drawer():
 
 
 def test_drawer_renders_validation_columns():
-    fn = _slice(JS, "function renderSourceDrilldown(data)", span=1600)
+    fn = _slice(JS, "function renderSourceDrilldown(data)", span=3200)
     for col in (">Company<", ">Company ID<", ">Main Contact<", ">Contact ID<",
                 ">Lifecycle<", ">SQL / Customer Status<", ">Deal<", ">Deal ID<",
                 ">Amount<", ">Close Date<", ">Source<", ">Source Drilldown 1<",
                 ">Source Drilldown 2<", ">Campaign / Source<", ">Attribution<"):
         assert col in fn, f"drawer missing column {col}"
+    # Two proof sections: Leads / SQLs and Closed-Won Deals.
+    assert "Leads / SQLs Behind This Source" in fn
+    assert "Closed-Won Deals Behind This Source" in fn
     assert "No attributed closed-won client detail found for this source in this window." in fn
     assert "Loading source client details" in JS
     assert "Source client details could not be loaded." in JS

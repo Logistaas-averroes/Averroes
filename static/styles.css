@@ -4413,8 +4413,9 @@ body.is-revenue-page #monitoring-banner {
   font-size: 13px;
   font-weight: 600;
   color: #334155;
-  margin-bottom: 8px;
+  margin: 14px 0 8px;
 }
+.source-drilldown-panel > .source-drilldown-title:first-child { margin-top: 0; }
 .source-drilldown-scroll {
   max-width: 100%;
   overflow-x: auto;

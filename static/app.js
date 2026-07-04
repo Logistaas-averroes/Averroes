@@ -3971,31 +3971,75 @@ function renderSourceDrilldownRow(d) {
     </tr>`;
 }
 
+// One contact (lead / SQL) proof row. Same safe formatter; unavailable for any
+// field not durably stored (contact name, company id, lifecycle).
+function renderSourceContactRow(c) {
+  return `
+    <tr>
+      <td>${drilldownValue(c.company)}</td>
+      <td>${drilldownValue(c.company_id)}</td>
+      <td>${drilldownValue(c.main_contact)}</td>
+      <td>${drilldownValue(c.contact_id)}</td>
+      <td>${drilldownValue(c.lifecycle_stage)}</td>
+      <td>${drilldownValue(c.status_category)}</td>
+      <td>${c.is_sql ? "Yes" : "No"}</td>
+      <td>${drilldownValue(c.created_date)}</td>
+      <td>${drilldownValue(c.source)}</td>
+      <td>${drilldownValue(c.source_drilldown_1)}</td>
+      <td>${drilldownValue(c.source_drilldown_2)}</td>
+      <td>${drilldownValue(c.campaign_source_label)}</td>
+    </tr>`;
+}
+
 function renderSourceDrilldown(data) {
   const status = (data && data.source_health && data.source_health.status) || "ready";
   if (status === "database_unavailable") {
     return `<p class="source-drilldown-muted">Source client details could not be loaded.</p>`;
   }
-  const rows = (data && data.rows) || [];
-  if (!rows.length) {
+  const contacts = (data && data.contacts) || [];
+  const deals = (data && data.deals) || (data && data.rows) || [];
+  if (!contacts.length && !deals.length) {
     return `<div class="source-drilldown-empty">No attributed closed-won client detail found for this source in this window.</div>`;
   }
-  const header = `
+  // Section 1 — Leads / SQLs proof (windowed by contact_created_at).
+  const contactHeader = `
+    <tr>
+      <th>Company</th><th>Company ID</th><th>Main Contact</th><th>Contact ID</th>
+      <th>Lifecycle</th><th>SQL / Customer Status</th><th>SQL</th><th>Created</th>
+      <th>Source</th><th>Source Drilldown 1</th><th>Source Drilldown 2</th>
+      <th>Campaign / Source</th>
+    </tr>`;
+  const contactsSection = contacts.length
+    ? `
+    <div class="source-drilldown-title">Leads / SQLs Behind This Source</div>
+    <div class="table-scroll source-drilldown-scroll">
+      <table class="data-table revenue-decision-table source-drilldown-table">
+        ${contactHeader}
+        <tbody>${contacts.map(renderSourceContactRow).join("")}</tbody>
+      </table>
+    </div>`
+    : `<div class="source-drilldown-title">Leads / SQLs Behind This Source</div>
+       <div class="source-drilldown-empty">No leads/SQLs found for this source in this window.</div>`;
+  // Section 2 — Closed-Won Deals proof (windowed by deal_close_date).
+  const dealHeader = `
     <tr>
       <th>Company</th><th>Company ID</th><th>Main Contact</th><th>Contact ID</th>
       <th>Lifecycle</th><th>SQL / Customer Status</th><th>Deal</th><th>Deal ID</th>
       <th>Amount</th><th>Close Date</th><th>Source</th><th>Source Drilldown 1</th>
       <th>Source Drilldown 2</th><th>Campaign / Source</th><th>Attribution</th>
     </tr>`;
-  const body = rows.map(renderSourceDrilldownRow).join("");
-  return `
-    <div class="source-drilldown-title">Clients / Deals Behind This Source</div>
+  const dealsSection = deals.length
+    ? `
+    <div class="source-drilldown-title">Closed-Won Deals Behind This Source</div>
     <div class="table-scroll source-drilldown-scroll">
       <table class="data-table revenue-decision-table source-drilldown-table">
-        ${header}
-        <tbody>${body}</tbody>
+        ${dealHeader}
+        <tbody>${deals.map(renderSourceDrilldownRow).join("")}</tbody>
       </table>
-    </div>`;
+    </div>`
+    : `<div class="source-drilldown-title">Closed-Won Deals Behind This Source</div>
+       <div class="source-drilldown-empty">No closed-won deals found for this source in this window.</div>`;
+  return `${contactsSection}${dealsSection}`;
 }
 
 async function loadSourceDrilldown(group, channel, platform, drawerRow) {

@@ -768,6 +768,54 @@ def fetch_source_revenue(start: date | None, end: date) -> dict:
         return {"available": False, "rows": []}
 
 
+def fetch_source_contact_details(start: date | None, end: date) -> dict:
+    """Classified-contact detail rows for the Revenue by Source drawer (PR-ADS-133).
+
+    Read-only. Proves the Leads / SQLs behind a source platform. Windowed by
+    contact_created_at (the business event date for leads/SQLs — NEVER a deal
+    close date). LEFT JOINs `leads` for the company name (the only durable
+    per-contact company). Fields not durably stored (contact name, company id,
+    lifecycle) are absent so the caller returns null → the UI shows "Unavailable".
+    The caller derives the group/channel/platform from the raw source fields and
+    filters to the requested platform.
+
+    Returns rows [{contact_id, acquisition_group, status_category,
+    source_primary_raw, source_detail_raw, contact_created_at, company}].
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable("contact_source_classification")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT c.contact_id, c.acquisition_group, c.status_category,
+                           c.source_primary_raw, c.source_detail_raw,
+                           c.contact_created_at,
+                           l.company AS company
+                    FROM contact_source_classification c
+                    LEFT JOIN (
+                        SELECT DISTINCT ON (contact_id) contact_id, company
+                        FROM leads
+                        WHERE contact_id IS NOT NULL
+                        ORDER BY contact_id, created_at DESC
+                    ) l ON l.contact_id = c.contact_id
+                    WHERE c.contact_created_at IS NOT NULL
+                      AND c.contact_created_at >= COALESCE(%s::timestamptz, c.contact_created_at)
+                      AND c.contact_created_at < (%s::date + INTERVAL '1 day')
+                    ORDER BY c.contact_created_at DESC
+                    """,
+                    (start, end),
+                )
+                rows = _rows_as_dicts(cur)
+                for row in rows:
+                    row["contact_created_at"] = _as_date(row.get("contact_created_at"))
+            return {"available": True, "rows": rows, "table": "contact_source_classification"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_source_contact_details failed: %s", exc)
+        return _unavailable("contact_source_classification")
+
+
 def fetch_source_deal_details(start: date | None, end: date) -> dict:
     """Closed-won deal detail rows for the Revenue by Source drawer (PR-ADS-133).
 
