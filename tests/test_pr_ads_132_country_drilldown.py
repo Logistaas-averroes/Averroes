@@ -188,6 +188,37 @@ def test_country_name_only_match_is_exact(monkeypatch):
     assert {d["deal_record_id"] for d in out["details"]} == {"987654"}
 
 
+def test_name_only_path_is_exact_never_contains(monkeypatch):
+    # A country with NO ISO code (e.g. a region label) matches by EXACT name only —
+    # a near-miss ("Narnian") must never be pulled in by a partial/contains match.
+    rows = [
+        {"deal_id": "n1", "contact_id": "c", "gclid": None, "company": "Co A",
+         "country": "Narnia", "campaign_name": "x", "deal_close_date": "2026-05-01",
+         "deal_amount_usd": 10.0, "deal_stage_label": "Closed Won",
+         "match_status": "matched", "match_source": "gclid"},
+        {"deal_id": "n2", "contact_id": "c", "gclid": None, "company": "Co B",
+         "country": "Narnian Republic", "campaign_name": "x", "deal_close_date": "2026-05-01",
+         "deal_amount_usd": 20.0, "deal_stage_label": "Closed Won",
+         "match_status": "matched", "match_source": "gclid"},
+    ]
+    _patch_db(monkeypatch, rows)
+    _patch_identity(monkeypatch)
+    from services.revenue_attribution_service import build_country_deal_details
+    out = build_country_deal_details("ytd", "Narnia")
+    assert {d["deal_record_id"] for d in out["details"]} == {"n1"}
+
+
+def test_name_only_path_pushes_exact_filter_into_sql():
+    # PR-ADS-132 follow-up (review): the name-only path filters in SQL by an EXACT
+    # normalized name (btrim + lower + collapsed whitespace) — not a LIKE/contains —
+    # so an on-demand drilldown never scans every closed-won row in Python.
+    body = _repo_fn_body("fetch_country_deal_details")
+    assert "regexp_replace(btrim(country)" in body
+    assert "name_only" in body
+    low = body.lower()
+    assert "country like" not in low and "country ilike" not in low
+
+
 # ══════════════ Test 5 — a missing amount stays None, never $0 ══════════════
 
 def test_missing_amount_is_null_not_zero(monkeypatch):

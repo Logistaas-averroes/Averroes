@@ -393,13 +393,29 @@ def fetch_country_deal_details(start: date | None, end: date, country: str,
     if not target_code and not target_name:
         return {"available": True, "rows": [], "table": "gclid_attribution"}
 
+    # When the country cannot be resolved to an ISO code, matching is by EXACT
+    # normalized name only — push that equality into SQL so an on-demand drilldown
+    # never has to pull every closed-won row just to filter it in Python. The
+    # code path keeps its Python-side ISO-code resolution (the durable table has
+    # no code column), so aliases like "UAE" / "United Arab Emirates" still match
+    # safely without ever fuzzy/`contains`-matching. The SQL normalization mirrors
+    # _norm_country_key: btrim + lower + collapse inner whitespace.
+    name_only = not target_code and bool(target_name)
+    country_clause = (
+        "AND lower(regexp_replace(btrim(country), '\\s+', ' ', 'g')) = %s"
+        if name_only else ""
+    )
+    params = [WON_DEAL_STAGE_ID, _WON_LABEL_LIKE, start, start, end]
+    if name_only:
+        params.append(target_name)
+
     try:
         with get_conn() as conn:
             if conn is None:
                 return _unavailable("gclid_attribution")
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT deal_id, contact_id, gclid, company, country, campaign_name,
                            deal_close_date,
                            deal_amount_usd::float AS deal_amount_usd,
@@ -415,11 +431,12 @@ def fetch_country_deal_details(start: date | None, end: date, country: str,
                           AND (deal_stage = %s OR deal_stage_label ILIKE %s)
                           AND (%s::date IS NULL OR deal_close_date >= %s)
                           AND deal_close_date < (%s::date + INTERVAL '1 day')
+                          {country_clause}
                         ORDER BY deal_id, created_at DESC
                     ) d
                     ORDER BY deal_amount_usd DESC NULLS LAST, deal_close_date DESC
                     """,
-                    (WON_DEAL_STAGE_ID, _WON_LABEL_LIKE, start, start, end),
+                    tuple(params),
                 )
                 all_rows = _rows_as_dicts(cur)
     except Exception as exc:  # noqa: BLE001
