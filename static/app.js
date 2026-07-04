@@ -10701,6 +10701,14 @@ function renderCountrySpendUnreconciledState(spendTruth) {
     </div>`;
 }
 
+// PR-ADS-132: expand control for a REAL country row — opens the per-country
+// clients/deals drawer (lazy-loaded). Carries the country name + ISO code so the
+// lazy loader can query the safer code identity. Residual rows never call this.
+function countryExpandControl(r, i) {
+  const label = `Show clients / deals behind ${countryDisplayName(r.country) || "this country"}`;
+  return `<button type="button" class="country-expand-button" data-country-expand data-country-idx="${i}" data-country-name="${encodeURIComponent(r.country || "")}" data-country-code="${encodeURIComponent(r.country_code || "")}" aria-expanded="false" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">▸</button>`;
+}
+
 function renderRoasCountryTable(rows) {
   if (!rows.length) {
     return `
@@ -10725,8 +10733,10 @@ function renderRoasCountryTable(rows) {
 
   // PR-ADS-131: the residual row is NOT a real country — muted styling, a
   // "Residual" badge, no flag, an "Unattributed" decision, and em-dashes for the
-  // metric columns (never fake zeros/ROAS). Only its spend is shown.
-  const bodyRows = rows.map((r) => {
+  // metric columns (never fake zeros/ROAS). Only its spend is shown. PR-ADS-132:
+  // real country rows get an expand control (see countryExpandControl); the
+  // residual row never does.
+  const bodyRows = rows.map((r, i) => {
     if (r && r.is_residual) {
       return `
     <tr class="revenue-residual-row">
@@ -10742,7 +10752,7 @@ function renderRoasCountryTable(rows) {
     }
     return `
     <tr>
-      <td>${escapeHtml(countryDisplayName(r.country))}</td>
+      <td>${countryExpandControl(r, i)}${escapeHtml(countryDisplayName(r.country))}</td>
       <td>${fmtMoney(r.spend)}</td>
       <td>${fmtCount(r.leads)}</td>
       <td>${fmtCount(r.sqls)}</td>
@@ -10750,6 +10760,9 @@ function renderRoasCountryTable(rows) {
       <td>${fmtMoney(r.won_revenue)}</td>
       <td>${fmtRoasMultiple(r.roas)}</td>
       <td>${getBusinessVerdictBadge(r.verdict)}</td>
+    </tr>
+    <tr class="country-drilldown-row" data-country-drilldown-idx="${i}" hidden>
+      <td colspan="8"><div class="country-drilldown-panel"></div></td>
     </tr>`;
   }).join("");
 
@@ -10766,6 +10779,138 @@ function renderRoasCountryTable(rows) {
     </div>
   `;
 }
+
+// ── PR-ADS-132: ROAS by Country row drilldown (clients / deals behind revenue) ──
+// Expand control toggles a per-country drawer that lazily fetches the closed-won
+// client/deal detail from the read-only country-detail endpoint. Details are
+// rendered exactly as the backend provides them — missing company/contact/deal
+// ids and amounts show "unavailable", never a fabricated value, and the deal is
+// never hidden. Residual rows have no expand button (handled in the table render).
+// Reuses drilldownValue() (defined for the campaign drawer) as the safe formatter.
+
+// Lazy-load cache/state keyed per window+country so a drawer is fetched at most
+// once and re-opening never refetches.
+let roasCountryExpandedKey = null;       // eslint-disable-line no-unused-vars
+let roasCountryDrilldownCache = {};
+let roasCountryDrilldownLoading = {};    // eslint-disable-line no-unused-vars
+let roasCountryDrilldownError = {};      // eslint-disable-line no-unused-vars
+
+// Stable key: window + country identity (prefer the safer ISO code).
+function countryDrilldownKey(country, countryCode) {
+  const id = (countryCode || country || "").toString();
+  return `${getRoasBusinessWindow()}:${id}`;
+}
+
+// One detail <tr> inside the drawer table. Every cell routes through
+// drilldownValue() so a missing value renders "unavailable" — never undefined,
+// null, or a fake $0.00 amount.
+function renderCountryDrilldownRow(d) {
+  const amount = d.deal_amount_usd == null
+    ? drilldownValue(null)
+    : fmtMoney(d.deal_amount_usd);
+  const campaign = d.campaign_name || d.raw_campaign_name || null;
+  const attribution = d.match_source || d.match_status || null;
+  return `
+    <tr>
+      <td>${drilldownValue(d.company_name)}</td>
+      <td>${drilldownValue(d.company_record_id)}</td>
+      <td>${drilldownValue(d.main_contact_name)}</td>
+      <td>${drilldownValue(d.main_contact_record_id)}</td>
+      <td>${drilldownValue(d.deal_name)}</td>
+      <td>${drilldownValue(d.deal_record_id)}</td>
+      <td>${amount}</td>
+      <td>${drilldownValue(d.deal_close_date)}</td>
+      <td>${drilldownValue(campaign)}</td>
+      <td>${drilldownValue(attribution)}</td>
+    </tr>`;
+}
+
+function renderCountryDrilldown(data) {
+  const status = (data && data.source_health && data.source_health.status) || "ready";
+  if (status === "database_unavailable") {
+    return `<p class="country-drilldown-muted">Country client details could not be loaded.</p>`;
+  }
+  const details = (data && data.details) || [];
+  if (!details.length) {
+    return `<div class="country-drilldown-empty">No attributed closed-won client detail found for this country in this window.</div>`;
+  }
+  const header = `
+    <tr>
+      <th>Company</th><th>Company ID</th><th>Main Contact</th><th>Contact ID</th>
+      <th>Deal</th><th>Deal ID</th><th>Amount</th><th>Close Date</th>
+      <th>Campaign / Source</th><th>Attribution</th>
+    </tr>`;
+  const body = details.map(renderCountryDrilldownRow).join("");
+  return `
+    <div class="country-drilldown-title">Clients / Deals Behind This Country</div>
+    <div class="table-scroll country-drilldown-scroll">
+      <table class="data-table revenue-decision-table country-drilldown-table">
+        ${header}
+        <tbody>${body}</tbody>
+      </table>
+    </div>`;
+}
+
+async function loadCountryDrilldown(country, countryCode, drawerRow) {
+  const container = drawerRow.querySelector(".country-drilldown-panel");
+  if (!container) return;
+  const key = countryDrilldownKey(country, countryCode);
+  if (roasCountryDrilldownCache[key]) {
+    container.innerHTML = renderCountryDrilldown(roasCountryDrilldownCache[key]);
+    return;
+  }
+  container.innerHTML = `<p class="country-drilldown-muted">Loading country client details…</p>`;
+  roasCountryDrilldownLoading[key] = true;
+  try {
+    const window_ = getRoasBusinessWindow();
+    const codeParam = countryCode
+      ? `&country_code=${encodeURIComponent(countryCode)}`
+      : "";
+    const res = await fetch(
+      `/api/revenue-performance/country-detail?window=${encodeURIComponent(window_)}&country=${encodeURIComponent(country)}${codeParam}`,
+      { credentials: "same-origin" }
+    );
+    if (!res.ok) {
+      roasCountryDrilldownError[key] = true;
+      container.innerHTML = `<p class="country-drilldown-muted">Country client details could not be loaded.</p>`;
+      return;
+    }
+    const data = await res.json();
+    roasCountryDrilldownCache[key] = data;
+    container.innerHTML = renderCountryDrilldown(data);
+  } catch (err) {
+    console.error("[loadCountryDrilldown]", err);
+    roasCountryDrilldownError[key] = true;
+    container.innerHTML = `<p class="country-drilldown-muted">Country client details could not be loaded.</p>`;
+  } finally {
+    roasCountryDrilldownLoading[key] = false;
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-country-expand]");
+  if (!btn) return;
+  const idx = btn.getAttribute("data-country-idx");
+  const country = decodeURIComponent(btn.getAttribute("data-country-name") || "");
+  const code = decodeURIComponent(btn.getAttribute("data-country-code") || "");
+  const drawer = document.querySelector(`.country-drilldown-row[data-country-drilldown-idx="${idx}"]`);
+  if (!drawer) return;
+  if (drawer.hasAttribute("hidden")) {
+    drawer.removeAttribute("hidden");
+    btn.setAttribute("aria-expanded", "true");
+    btn.textContent = "▾";
+    roasCountryExpandedKey = countryDrilldownKey(country, code);
+    // Lazy-load once; a loaded drawer keeps its content when re-opened.
+    if (!drawer.dataset.loaded) {
+      drawer.dataset.loaded = "1";
+      loadCountryDrilldown(country, code, drawer);
+    }
+  } else {
+    drawer.setAttribute("hidden", "");
+    btn.setAttribute("aria-expanded", "false");
+    btn.textContent = "▸";
+  }
+});
 
 // Decision-bucket filter chips (country page only) — event delegation keyed off
 // the country-specific data attribute so the Campaign page is unaffected.

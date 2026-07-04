@@ -353,6 +353,110 @@ def fetch_campaign_deal_details(start: date | None, end: date) -> dict:
         return _unavailable("gclid_attribution")
 
 
+def _norm_country_key(value) -> str:
+    """Exact country grouping key: lowercased, trimmed, inner whitespace collapsed.
+
+    Deliberately conservative — NO fuzzy matching, NO `contains`. Punctuation is
+    left as-is (the existing country logic does not strip it), so this only
+    ever produces an EXACT-name match, never a partial one.
+    """
+    if not value:
+        return ""
+    return " ".join(str(value).strip().lower().split())
+
+
+def fetch_country_deal_details(start: date | None, end: date, country: str,
+                               country_code: str | None = None) -> dict:
+    """Closed-won deal rows for ONE country, for the country drilldown (PR-ADS-132).
+
+    Same window + closed-won + dedupe rules as ``fetch_campaign_deal_details``,
+    but filtered to a single country by EXACT identity — never a fuzzy / `contains`
+    match. Country matching:
+
+      1. When an ISO country_code is known for BOTH the requested country and a
+         durable row's stored country name, match on the CODE (so "UAE" and
+         "United Arab Emirates" both resolve to AE, and AE never matches GB).
+      2. Otherwise fall back to EXACT normalized country-name equality
+         (lowercased, trimmed, inner whitespace collapsed).
+
+    The durable `gclid_attribution` table stores only a country NAME (no code
+    column), so the code match is resolved in Python from the stored name.
+    Residual / unattributed spend is never a country and is never matched here.
+    Read-only — carries contact_id + gclid so the drawer can show HubSpot record
+    ids; campaign_name is the RAW external label (the caller applies the canonical
+    identity map for display).
+    """
+    from services.country_codes import get_country_code  # noqa: PLC0415
+
+    target_code = (country_code or "").strip().upper() or get_country_code(country)
+    target_name = _norm_country_key(country)
+    if not target_code and not target_name:
+        return {"available": True, "rows": [], "table": "gclid_attribution"}
+
+    # When the country cannot be resolved to an ISO code, matching is by EXACT
+    # normalized name only — push that equality into SQL so an on-demand drilldown
+    # never has to pull every closed-won row just to filter it in Python. The
+    # code path keeps its Python-side ISO-code resolution (the durable table has
+    # no code column), so aliases like "UAE" / "United Arab Emirates" still match
+    # safely without ever fuzzy/`contains`-matching. The SQL normalization mirrors
+    # _norm_country_key: btrim + lower + collapse inner whitespace.
+    name_only = not target_code and bool(target_name)
+    country_clause = (
+        "AND lower(regexp_replace(btrim(country), '\\s+', ' ', 'g')) = %s"
+        if name_only else ""
+    )
+    params = [WON_DEAL_STAGE_ID, _WON_LABEL_LIKE, start, start, end]
+    if name_only:
+        params.append(target_name)
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable("gclid_attribution")
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT deal_id, contact_id, gclid, company, country, campaign_name,
+                           deal_close_date,
+                           deal_amount_usd::float AS deal_amount_usd,
+                           deal_stage_label, match_status, match_source
+                    FROM (
+                        SELECT DISTINCT ON (deal_id)
+                            deal_id, contact_id, gclid, company, country, campaign_name,
+                            deal_close_date, deal_amount_usd, deal_stage_label,
+                            match_status, match_source, created_at
+                        FROM gclid_attribution
+                        WHERE deal_id IS NOT NULL
+                          AND deal_close_date IS NOT NULL
+                          AND (deal_stage = %s OR deal_stage_label ILIKE %s)
+                          AND (%s::date IS NULL OR deal_close_date >= %s)
+                          AND deal_close_date < (%s::date + INTERVAL '1 day')
+                          {country_clause}
+                        ORDER BY deal_id, created_at DESC
+                    ) d
+                    ORDER BY deal_amount_usd DESC NULLS LAST, deal_close_date DESC
+                    """,
+                    tuple(params),
+                )
+                all_rows = _rows_as_dicts(cur)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_country_deal_details failed: %s", exc)
+        return _unavailable("gclid_attribution")
+
+    rows = []
+    for row in all_rows:
+        row_country = row.get("country")
+        row_code = get_country_code(row_country)
+        if target_code and row_code:
+            if row_code != target_code:
+                continue
+        elif not target_name or _norm_country_key(row_country) != target_name:
+            continue
+        row["deal_close_date"] = _as_date(row.get("deal_close_date"))
+        rows.append(row)
+    return {"available": True, "rows": rows, "table": "gclid_attribution"}
+
+
 def fetch_revenue_deals(start: date | None, end: date) -> dict:
     """Closed-won deal ledger rows from the durable `gclid_attribution` table.
 

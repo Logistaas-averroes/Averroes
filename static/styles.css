@@ -4313,6 +4313,55 @@ body.is-revenue-page #monitoring-banner {
   font-style: italic;
 }
 
+/* ── PR-ADS-132: ROAS by Country row drilldown drawer ───────────────────────
+   Validation-only drawer opened under a real country row. Mirrors the campaign
+   drilldown drawer so both pages read as one system. Full-width row, compact
+   table, horizontal scroll only if the columns overflow — never breaks the
+   country table width. Residual rows never render this. */
+.country-expand-button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 6px 0 0;
+  color: #475569;
+}
+.country-expand-button:hover { color: #0f172a; }
+.country-drilldown-row > td {
+  background: #f8fafc;
+  padding: 0;
+}
+.country-drilldown-panel {
+  padding: 12px 16px;
+}
+.country-drilldown-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 8px;
+}
+.country-drilldown-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.country-drilldown-table th,
+.country-drilldown-table td {
+  white-space: nowrap;
+  font-size: 13px;
+}
+.country-drilldown-empty {
+  font-size: 13px;
+  color: #64748b;
+  padding: 4px 0;
+}
+.country-drilldown-muted {
+  font-size: 13px;
+  color: #94a3b8;
+  font-style: italic;
+  padding: 4px 0;
+}
+
 /* ── PR-ADS-123: Google Ads Spend summary strip ─────────────────────────────
    Replaces the unstyled raw text block (which had no CSS at all) with a compact,
    contained card. Exact full-precision spend lives in the spend proof modal. */
