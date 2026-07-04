@@ -6166,6 +6166,35 @@ async def get_revenue_performance_country_detail(
         ) from exc
 
 
+@app.get("/api/revenue-performance/source-platform-detail")
+async def get_revenue_performance_source_platform_detail(
+    window: str = Query(default="current_quarter"),
+    source_group: str = Query(..., description="Source group id, e.g. organic"),
+    source_channel: str = Query(..., description="Source channel id, e.g. organic_social"),
+    source_platform: str = Query(..., description="Source platform id, e.g. linkedin"),
+    _user=Depends(require_auth),
+):
+    """Clients / deals behind ONE source platform (PR-ADS-133).
+
+    Read-only lazy drilldown for the Revenue by Source drawer. Returns the
+    closed-won deal detail rows (company / contact / deal record ids, amount,
+    close date, source attribution) for the requested group → channel → platform,
+    using the same taxonomy the page rows use. Never writes to Google Ads or
+    HubSpot; never fabricates ids, names or amounts.
+    """
+    from services.source_attribution_service import build_source_platform_detail  # noqa: PLC0415
+
+    try:
+        return build_source_platform_detail(window, source_group, source_channel, source_platform)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Source platform detail failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Source platform detail computation failed"
+        ) from exc
+
+
 @app.get("/api/revenue-performance/audit")
 async def get_revenue_performance_audit(
     window: str = Query(default="current_quarter"),

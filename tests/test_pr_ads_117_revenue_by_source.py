@@ -264,12 +264,15 @@ def test_page_registered_and_revenue_page():
 
 
 def test_page_sections_and_roas_only_for_google():
-    fn_idx = JS.find("function renderSourceSectionTable")
+    # PR-ADS-133: the page renders a group → channel → platform hierarchy. Each
+    # group section has Spend + ROAS/Status columns; only Google Ads shows ROAS,
+    # every other source is revenue-only (never a fabricated ROAS).
+    fn_idx = JS.find("function renderSourceGroupSection")
     body = JS[fn_idx:fn_idx + 1600]
-    # Google section has Spend + ROAS; others show "ROAS unavailable".
-    assert ">ROAS<" in body and ">Spend<" in body
-    assert "ROAS unavailable — no connected spend source" in body
-    assert ">Attribution Status<" in body
+    assert ">Spend<" in body and ">ROAS / Status<" in body
+    assert ">Channel / Platform<" in body
+    status = JS[JS.find("function sourceStatusLabel"):JS.find("function sourceStatusLabel") + 600]
+    assert "Revenue-only — no connected spend source" in status
     # Health summary surfaces the four counts.
     health = JS[JS.find("function renderRevenueBySourceHealth"):JS.find("function renderRevenueBySourceHealth") + 700]
     for label in ("Contacts classified", "Deals attributed", "Ambiguous deals", "Unclassified deals"):
