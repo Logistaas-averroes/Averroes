@@ -1170,16 +1170,35 @@ function pageToHash(page) {
 }
 
 function hashToPage(hash) {
-  const raw = (hash || "").replace(/^#\/?/, "").trim();
+  // Strip any query suffix (e.g. #/dashboard?tab=revenue) before resolving the
+  // page key — dashboard tab state (PR-ADS-135) travels as a ?tab= param.
+  const raw = (hash || "").replace(/^#\/?/, "").split("?")[0].trim();
   if (!raw) return "dashboard";
   // Resolve aliases
   if (HASH_ROUTE_ALIASES[raw]) return HASH_ROUTE_ALIASES[raw];
   return raw;
 }
 
+// Dashboard inner-tab state (PR-ADS-135). Overview is the default; Revenue is
+// linkable/bookmarkable via #/dashboard?tab=revenue.
+const DASHBOARD_TABS = ["overview", "revenue"];
+
+function hashToDashTab(hash) {
+  const q = (hash || "").split("?")[1] || "";
+  const m = q.split("&").map((p) => p.split("=")).find((kv) => kv[0] === "tab");
+  const tab = m ? decodeURIComponent(m[1] || "") : "";
+  return DASHBOARD_TABS.includes(tab) ? tab : "overview";
+}
+
 function navigateToHash(page, options) {
   options = options || {};
-  const hash = pageToHash(page);
+  let hash = pageToHash(page);
+  // Preserve a bookmarked dashboard tab (#/dashboard?tab=revenue) so navigating
+  // to the dashboard does not strip the tab before the loader reads it.
+  if (page === "dashboard") {
+    const tab = hashToDashTab(window.location.hash);
+    if (tab !== "overview") hash = `${hash}?tab=${tab}`;
+  }
   if (window.location.hash !== hash) {
     if (options.replace) {
       history.replaceState(null, "", hash);
@@ -1301,7 +1320,7 @@ function navigate(page, options) {
 
 function loadPage(page) {
   switch (page) {
-    case "dashboard":     loadDashboardOverview();                  break;
+    case "dashboard":     loadDashboardTab();                       break;
     case "reports":       loadReports(); loadRevenueSnapshotHistory(); break;
     case "campaigns":     loadCampaigns();                          break;
     case "waste":         loadWaste();                              break;
@@ -1909,7 +1928,45 @@ const DASH_DELTA_VALENCE = {
   sqls: "up-good",
   customers: "up-good",
   roas: "up-good",
+  // PR-ADS-135 revenue-tab metric keys.
+  closed_won_revenue_usd: "up-good",
+  average_deal_value_usd: "up-good",
 };
+
+// ── Dashboard inner-tab controller (PR-ADS-135) ───────────────────────────
+// Overview is the default; Revenue is linkable via #/dashboard?tab=revenue.
+// Both roots reuse the same PR-134 design system — no new visual language.
+
+function loadDashboardTab() {
+  const tab = hashToDashTab(window.location.hash);
+  activateDashboardTab(tab, { updateHash: false });
+}
+
+function activateDashboardTab(tab, options) {
+  options = options || {};
+  const target = DASHBOARD_TABS.includes(tab) ? tab : "overview";
+
+  document.querySelectorAll(".dashboard-tab[data-dash-tab]").forEach((btn) => {
+    const active = btn.dataset.dashTab === target;
+    btn.classList.toggle("is-active", active);
+    if (active) btn.setAttribute("aria-current", "page");
+    else btn.removeAttribute("aria-current");
+  });
+
+  const overviewRoot = document.getElementById("dashboard-overview-root");
+  const revenueRoot = document.getElementById("dashboard-revenue-root");
+  if (overviewRoot) overviewRoot.hidden = target !== "overview";
+  if (revenueRoot) revenueRoot.hidden = target !== "revenue";
+
+  if (options.updateHash !== false) {
+    // Overview is the default → keep the URL clean; Revenue is bookmarkable.
+    const hash = target === "overview" ? "#/dashboard" : `#/dashboard?tab=${target}`;
+    if (window.location.hash !== hash) history.replaceState(null, "", hash);
+  }
+
+  if (target === "revenue") loadDashboardRevenue();
+  else loadDashboardOverview();
+}
 
 async function loadDashboardOverview() {
   const window_ = getRoasBusinessWindow();
@@ -2679,6 +2736,580 @@ function renderDashTruthFooter(d) {
         : (dashCanNavigate("health")
           ? '<a class="dash-footer-note" href="#/health">Some sources need attention — open System Status</a>'
           : '<span class="dash-footer-note">Some sources need attention — contact your administrator.</span>')}
+    </footer>`;
+}
+
+// ── Dashboard — Revenue & Customers tab (PR-ADS-135) ───────────────────────
+//
+// Second dashboard tab. Reuses the PR-134 design system end to end (command
+// header, tabs, business-window selector, KPI cards, chart shell, decision
+// cards, truth footer, loading/refetch/unavailable states) — NO new visual
+// language. Only the Revenue content, contract, and analysis are new.
+// Truth doctrine is identical: HubSpot closed-won is revenue truth, Google Ads
+// conversion value is never used, unavailable data renders "Unavailable" (never
+// a fake $0 / 0.00x / 0%), non-Google sources never show ROAS.
+
+let dashRevenue = null;
+let dashRevenueStatus = "loading";
+
+const REV_ATTR_LABEL = {
+  attributed: "Attributed",
+  partial: "Partial",
+  ambiguous: "Ambiguous",
+  unattributed: "Unattributed",
+};
+const REV_ATTR_CLASS = {
+  attributed: "rev-attr--ok",
+  partial: "rev-attr--warn",
+  ambiguous: "rev-attr--warn",
+  unattributed: "rev-attr--muted",
+};
+
+function revAttrBadge(status) {
+  const key = (status || "").toLowerCase();
+  return `<span class="rev-attr ${REV_ATTR_CLASS[key] || "rev-attr--muted"}">${escapeHtml(REV_ATTR_LABEL[key] || "—")}</span>`;
+}
+
+async function loadDashboardRevenue() {
+  const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.dashRevenue;
+  setWindowRangeLoading("dashboard-range");
+
+  const root = document.getElementById("dashboard-revenue-root");
+  const genEl = document.getElementById("dashboard-generated");
+  if (root) {
+    if (dashRevenue && dashRevenueStatus === "ok") {
+      root.classList.add("is-refreshing");
+    } else {
+      root.innerHTML = renderDashSkeleton();
+    }
+  }
+
+  try {
+    const data = await fetchJSON(
+      `/api/dashboard/revenue?window=${encodeURIComponent(window_)}`
+    );
+    if (token !== _revReqSeq.dashRevenue) return;
+    if (!_revResponseIsCurrent("dashRevenue", token, data)) return;
+    dashRevenue = data;
+    dashRevenueStatus = "ok";
+    renderWindowRange("dashboard-range", data.window || null);
+    if (genEl) genEl.textContent = data.generated_at ? `Generated ${fmtDate(data.generated_at)}` : "";
+    renderDashboardRevenue();
+  } catch (err) {
+    console.error("[loadDashboardRevenue]", err);
+    if (token !== _revReqSeq.dashRevenue) return;
+    dashRevenue = null;
+    dashRevenueStatus = "error";
+    if (genEl) genEl.textContent = "";
+    renderWindowRange("dashboard-range", null);
+    renderDashboardRevenue();
+  }
+}
+
+function renderDashboardRevenue() {
+  const root = document.getElementById("dashboard-revenue-root");
+  if (!root) return;
+  root.classList.remove("is-refreshing");
+
+  if (dashRevenueStatus !== "ok" || !dashRevenue) {
+    const nextStep = dashCanNavigate("health")
+      ? 'Next step: check <a href="#/health">System Status</a> or retry with Refresh.'
+      : "Next step: retry with Refresh, or contact your administrator.";
+    root.innerHTML = `
+      <div class="revenue-blocked-card dash-error-card">
+        <h3 class="revenue-blocked-card__title">Revenue &amp; Customers unavailable</h3>
+        <p>The dashboard revenue service could not be reached. Nothing is shown
+        because nothing safe could be computed — metrics are never fabricated.</p>
+        <p class="revenue-blocked-card__next">${nextStep}</p>
+      </div>`;
+    return;
+  }
+
+  const d = dashRevenue;
+  root.innerHTML = `
+    <div class="dash-tab-intro dash-anim">
+      <h2 class="dash-tab-intro__title">Revenue &amp; Customers</h2>
+      <p class="dash-tab-intro__sub">Closed-won revenue, customer movement, and deal proof from HubSpot truth.</p>
+    </div>
+    ${renderRevKpiRow(d)}
+    <div class="dash-main-grid">
+      <section class="dash-panel dash-chart-panel dash-anim" aria-label="Revenue momentum">
+        ${renderRevMomentumPanel(d)}
+      </section>
+      <aside class="dash-panel dash-anim rev-concentration-panel" aria-label="Deal concentration">
+        ${renderRevConcentration(d)}
+      </aside>
+    </div>
+    ${renderRevConversionStrip(d)}
+    ${renderRevBreakdowns(d)}
+    <section class="dash-panel dash-anim rev-deals-panel" aria-label="Top closed-won deals">
+      ${renderRevTopDeals(d)}
+    </section>
+    <section class="dash-decisions dash-anim" aria-label="Revenue decision cards">
+      ${renderDashDecisionCards(d)}
+    </section>
+    ${renderRevTruthFooter(d)}
+  `;
+  wireRevChartHover(root, d);
+  wireRevDealDrawers(root, d);
+}
+
+function renderRevKpiRow(d) {
+  const k = d.kpis || {};
+  const pc = d.period_change || {};
+  const largestDealCompany = (d.top_deals || [])[0] && (d.top_deals || [])[0].company;
+
+  const cards = [
+    {
+      key: "revenue",
+      label: "Closed-Won Revenue",
+      value: dashValue(k.closed_won_revenue_usd, fmtMoney),
+      sub: "USD · HubSpot closed-won",
+      delta: dashDeltaChip("closed_won_revenue_usd", pc),
+      source: "HubSpot Closed-Won",
+      ok: k.closed_won_revenue_usd !== null && k.closed_won_revenue_usd !== undefined,
+    },
+    {
+      key: "customers",
+      label: "Customers",
+      value: dashValue(k.customers, fmtCount),
+      sub: "Closed-won deals",
+      delta: dashDeltaChip("customers", pc),
+      source: "HubSpot Closed-Won",
+      ok: k.customers !== null && k.customers !== undefined,
+    },
+    {
+      key: "avg",
+      label: "Average Deal Value",
+      value: dashValue(k.average_deal_value_usd, fmtMoney),
+      sub: "Revenue ÷ customers",
+      delta: dashDeltaChip("average_deal_value_usd", pc),
+      source: "HubSpot Closed-Won",
+      ok: k.average_deal_value_usd !== null && k.average_deal_value_usd !== undefined,
+    },
+    {
+      key: "largest",
+      label: "Largest Deal",
+      value: dashValue(k.largest_deal_usd, fmtMoney),
+      // When the largest deal is Unavailable (an amount is unknown, so the
+      // biggest deal can't be identified), don't name a company under it.
+      sub: (k.largest_deal_usd !== null && k.largest_deal_usd !== undefined && largestDealCompany)
+        ? escapeHtml(largestDealCompany) : "Single biggest closed-won deal",
+      delta: '<span class="dash-delta dash-delta--none">Single deal</span>',
+      source: "HubSpot Closed-Won",
+      ok: k.largest_deal_usd !== null && k.largest_deal_usd !== undefined,
+    },
+    {
+      key: "rate",
+      label: "SQL → Customer Rate",
+      value: k.sql_to_customer_rate === null || k.sql_to_customer_rate === undefined
+        ? '<span class="dash-unavailable">Unavailable</span>'
+        : `${(k.sql_to_customer_rate * 100).toFixed(1)}%`,
+      sub: k.sqls === null || k.sqls === undefined
+        ? "SQLs unavailable" : `${escapeHtml(fmtCount(k.sqls))} SQLs`,
+      delta: '<span class="dash-delta dash-delta--none">Window rate</span>',
+      source: "HubSpot qualified leads",
+      ok: k.sql_to_customer_rate !== null && k.sql_to_customer_rate !== undefined,
+    },
+  ];
+
+  const compareNote = pc.available
+    ? `<p class="dash-compare-note">Change ${escapeHtml(pc.label || "vs previous period")}${pc.note ? ` — ${escapeHtml(pc.note)}` : ""}</p>`
+    : `<p class="dash-compare-note dash-compare-note--muted">No previous-period comparison${pc.reason ? ` — ${escapeHtml(pc.reason)}` : ""}</p>`;
+
+  return `
+    <div class="dash-kpi-grid">
+      ${cards.map((c) => `
+        <div class="dash-kpi-card dash-anim ${c.ok ? "" : "dash-kpi-card--unavailable"}" data-kpi="${c.key}">
+          <div class="dash-kpi-card__label">${escapeHtml(c.label)}</div>
+          <div class="dash-kpi-card__value">${c.value}</div>
+          <div class="dash-kpi-card__sub">${c.sub}</div>
+          <div class="dash-kpi-card__meta">${c.delta}</div>
+          <div class="dash-kpi-card__source">${escapeHtml(c.source)}</div>
+        </div>`).join("")}
+    </div>
+    ${compareNote}`;
+}
+
+function renderRevMomentumPanel(d) {
+  const trend = d.revenue_trend || {};
+  const k = d.kpis || {};
+  const bucketLabel = trend.bucket === "month" ? "Monthly" : (trend.bucket === "week" ? "Weekly" : "");
+  const note = trend.status !== "ready"
+    ? `<p class="dash-series-note">Revenue series unavailable — ${escapeHtml(trend.reason || "not verified")}</p>` : "";
+
+  return `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Revenue Momentum</h3>
+        <p class="dash-panel__sub">More customers, or one big deal?${bucketLabel ? ` · ${bucketLabel}` : ""}</p>
+      </div>
+      <div class="dash-legend">
+        <span class="dash-legend__item"><span class="dash-legend__swatch" style="background:${DASH_SERIES_COLORS.revenue}"></span>Revenue</span>
+        <span class="dash-legend__item"><span class="rev-legend-badge">N</span>Customers / period</span>
+      </div>
+    </div>
+    ${note}
+    ${revMomentumChartSVG(trend)}
+    <p class="dash-chart-caption">
+      Window total revenue: ${dashValue(k.closed_won_revenue_usd, fmtMoney)} across
+      ${dashValue(k.customers, fmtCount)} customers · Avg ${dashValue(k.average_deal_value_usd, fmtMoney)}
+    </p>`;
+}
+
+// Revenue bars with the customer COUNT as a direct label on each bar cap — NOT
+// a second y-axis (dual-axis is a dataviz anti-pattern). The bar height reads
+// revenue; the small count answers "one big deal or many customers?".
+function revMomentumChartSVG(trend) {
+  const points = (trend && trend.points) || [];
+  if (trend.status !== "ready" || !points.length) {
+    return '<div class="dash-chart-empty">No chartable revenue in this window.</div>';
+  }
+  const W = 760, H = 240, padL = 52, padR = 14, padT = 18, padB = 30;
+  const plotW = W - padL - padR, plotH = H - padT - padB, n = points.length;
+  const slot = plotW / n, barW = Math.min(24, slot * 0.55);
+  const values = points.map((p) => p.revenue_usd || 0);
+  const yMax = dashNiceCeil(Math.max(1, ...values));
+  const xCenter = (i) => padL + slot * i + slot / 2;
+  const yPos = (v) => padT + plotH * (1 - v / yMax);
+  const baseline = padT + plotH;
+
+  const ticks = [0.25, 0.5, 0.75, 1];
+  const grid = ticks.map((t) => {
+    const y = yPos(yMax * t).toFixed(1);
+    return `<line x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}" stroke="#e0e6ef" stroke-width="1"/>
+      <text x="${padL - 8}" y="${Number(y) + 3}" text-anchor="end" class="dash-chart-tick">${dashCompactMoney(yMax * t)}</text>`;
+  }).join("");
+
+  const bars = points.map((p, i) => {
+    const hasCustomers = (p.customers !== null && p.customers !== undefined && p.customers > 0);
+    const v = p.revenue_usd || 0;
+    const h = Math.max(0, baseline - yPos(v));
+    const x = xCenter(i) - barW / 2, y = yPos(v), r = Math.min(4, barW / 2, h || 4);
+    // A bucket with customers but null/zero summed revenue (a permitted null
+    // amount — never faked as $0) still shows its customer count at the
+    // baseline, so real customer activity is never hidden from the chart.
+    if (h === 0) {
+      return hasCustomers
+        ? `<text x="${xCenter(i).toFixed(1)}" y="${(baseline - 6).toFixed(1)}" text-anchor="middle" class="rev-count-label">${escapeHtml(String(p.customers))}</text>` : "";
+    }
+    const countLabel = hasCustomers
+      ? `<text x="${xCenter(i).toFixed(1)}" y="${(y - 6).toFixed(1)}" text-anchor="middle" class="rev-count-label">${escapeHtml(String(p.customers))}</text>` : "";
+    return `<path d="M${x.toFixed(1)},${baseline.toFixed(1)}
+      L${x.toFixed(1)},${(y + r).toFixed(1)}
+      Q${x.toFixed(1)},${y.toFixed(1)} ${(x + r).toFixed(1)},${y.toFixed(1)}
+      L${(x + barW - r).toFixed(1)},${y.toFixed(1)}
+      Q${(x + barW).toFixed(1)},${y.toFixed(1)} ${(x + barW).toFixed(1)},${(y + r).toFixed(1)}
+      L${(x + barW).toFixed(1)},${baseline.toFixed(1)} Z" fill="${DASH_SERIES_COLORS.revenue}" fill-opacity="0.92"/>${countLabel}`;
+  }).join("");
+
+  const labelEvery = Math.max(1, Math.ceil(n / 6));
+  const xLabels = points.map((p, i) => {
+    if (i !== 0 && i !== n - 1) {
+      if (i % labelEvery !== 0) return "";
+      if (n - 1 - i < Math.max(2, Math.ceil(labelEvery * 0.6))) return "";
+    }
+    return `<text x="${xCenter(i).toFixed(1)}" y="${H - 8}" text-anchor="middle" class="dash-chart-tick">${escapeHtml(p.period_label || "")}</text>`;
+  }).join("");
+
+  const hitBands = points.map((p, i) =>
+    `<rect class="dash-chart-hit" data-dash-idx="${i}" x="${(padL + slot * i).toFixed(1)}" y="${padT}"
+      width="${slot.toFixed(1)}" height="${plotH}" fill="transparent"/>`).join("");
+
+  return `
+    <div class="dash-chart-wrap">
+      <svg viewBox="0 0 ${W} ${H}" class="dash-combo-chart" role="img"
+        aria-label="Closed-won revenue bars per ${trend.bucket || "period"} with customer counts">
+        ${grid}
+        <line x1="${padL}" x2="${W - padR}" y1="${baseline}" y2="${baseline}" stroke="#cbd5e1" stroke-width="1"/>
+        ${bars}
+        ${xLabels}
+        ${hitBands}
+      </svg>
+      <div class="dash-chart-tooltip" hidden></div>
+    </div>`;
+}
+
+function wireRevChartHover(root, d) {
+  const wrap = root.querySelector(".dash-chart-wrap");
+  if (!wrap) return;
+  const tooltip = wrap.querySelector(".dash-chart-tooltip");
+  const points = ((d.revenue_trend || {}).points) || [];
+
+  function hide() {
+    if (tooltip) tooltip.hidden = true;
+    wrap.querySelectorAll(".dash-chart-hit.is-hover").forEach((el) => el.classList.remove("is-hover"));
+  }
+  wrap.addEventListener("pointermove", (e) => {
+    const band = e.target.closest(".dash-chart-hit");
+    if (!band || !tooltip) { hide(); return; }
+    const p = points[Number(band.dataset.dashIdx)];
+    if (!p) { hide(); return; }
+    wrap.querySelectorAll(".dash-chart-hit.is-hover").forEach((el) => el.classList.remove("is-hover"));
+    band.classList.add("is-hover");
+    tooltip.textContent = "";
+    const title = document.createElement("div");
+    title.className = "dash-chart-tooltip__title";
+    title.textContent = p.period_label || "";
+    tooltip.appendChild(title);
+    [["Revenue", p.revenue_usd === null || p.revenue_usd === undefined ? "Unavailable" : fmtMoney(p.revenue_usd), DASH_SERIES_COLORS.revenue],
+     ["Customers", p.customers === null || p.customers === undefined ? "Unavailable" : String(p.customers), null],
+     ["Deals", p.deals === null || p.deals === undefined ? "Unavailable" : String(p.deals), null]].forEach(([label, val, color]) => {
+      const row = document.createElement("div");
+      row.className = "dash-chart-tooltip__row";
+      if (color) {
+        const key = document.createElement("span");
+        key.className = "dash-chart-tooltip__key";
+        key.style.background = color;
+        row.appendChild(key);
+      }
+      const strong = document.createElement("strong");
+      strong.textContent = val;
+      const name = document.createElement("span");
+      name.textContent = ` ${label}`;
+      row.appendChild(strong);
+      row.appendChild(name);
+      tooltip.appendChild(row);
+    });
+    const wrapRect = wrap.getBoundingClientRect();
+    const bandRect = band.getBoundingClientRect();
+    tooltip.hidden = false;
+    const tipW = tooltip.offsetWidth || 140;
+    let left = bandRect.left - wrapRect.left + bandRect.width / 2 - tipW / 2;
+    left = Math.max(4, Math.min(left, wrapRect.width - tipW - 4));
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = "8px";
+  });
+  wrap.addEventListener("pointerleave", hide);
+}
+
+function renderRevConversionStrip(d) {
+  const k = d.kpis || {};
+  const rate = k.sql_to_customer_rate === null || k.sql_to_customer_rate === undefined
+    ? '<span class="dash-unavailable">Unavailable</span>'
+    : `${(k.sql_to_customer_rate * 100).toFixed(1)}%`;
+  const stages = [
+    { label: "SQLs", value: dashValue(k.sqls, fmtCount), sub: "Qualified leads" },
+    { label: "Customers", value: dashValue(k.customers, fmtCount), sub: "Closed-won deals" },
+    { label: "Closed-Won Revenue", value: dashValue(k.closed_won_revenue_usd, fmtMoney), sub: "USD · HubSpot" },
+    { label: "Avg Deal Value", value: dashValue(k.average_deal_value_usd, fmtMoney), sub: "Per customer" },
+  ];
+  const conns = [
+    rate,
+    k.revenue_per_sql_usd === null || k.revenue_per_sql_usd === undefined
+      ? '<span class="dash-unavailable">Unavailable</span>' : `${escapeHtml(fmtMoney(k.revenue_per_sql_usd))} / SQL`,
+    "",
+  ];
+  const cells = stages.map((s, i) => {
+    const conv = i > 0 ? conns[i - 1] : null;
+    const chip = i === 0 ? "" : `<span class="dash-funnel__conv">→ ${conv}</span>`;
+    return `${chip}
+      <div class="dash-funnel__stage" style="--funnel-accent:${DASH_FUNNEL_RAMP[i]}">
+        <div class="dash-funnel__stage-label">${escapeHtml(s.label)}</div>
+        <div class="dash-funnel__stage-value">${s.value}</div>
+        <div class="dash-funnel__stage-sub">${escapeHtml(s.sub)}</div>
+      </div>`;
+  }).join("");
+  return `
+    <section class="dash-panel dash-funnel-panel dash-anim" aria-label="Customer conversion">
+      <div class="dash-panel__header">
+        <div>
+          <h3 class="dash-panel__title">Customer Efficiency</h3>
+          <p class="dash-panel__sub">SQLs → Customers → Closed-Won Revenue → Avg Deal Value</p>
+        </div>
+      </div>
+      <div class="dash-funnel">${cells}</div>
+    </section>`;
+}
+
+function renderRevBreakdownPanel(title, sub, rows, nameKey, targetPage, opts) {
+  opts = opts || {};
+  const body = !rows || !rows.length
+    ? '<p class="rev-breakdown-empty">No attributed revenue in this window.</p>'
+    : `<ul class="rev-breakdown-list">${rows.map((r) => {
+        const extra = opts.spendConnected
+          ? `<span class="rev-breakdown-row__status">${escapeHtml(r.status || "")}</span>`
+          : revAttrBadge(r.attribution_status);
+        const custDeals = opts.spendConnected
+          ? `${dashValue(r.customers, fmtCount)} cust`
+          : `${dashValue(r.customers, fmtCount)} cust · ${dashValue(r.deals, fmtCount)} deals`;
+        return `
+        <li class="rev-breakdown-row">
+          <span class="rev-breakdown-row__name" title="${escapeHtml(r[nameKey] || "")}">${escapeHtml(r[nameKey] || "—")}</span>
+          <span class="rev-breakdown-row__value">${dashValue(r.revenue_usd, fmtMoney)}</span>
+          <span class="rev-breakdown-row__meta">${custDeals}</span>
+          ${extra}
+        </li>`;
+      }).join("")}</ul>`;
+  const link = dashCanNavigate(targetPage)
+    ? `<a class="rev-breakdown-link" href="#/${escapeHtml(targetPage)}">Open evidence →</a>`
+    : '<span class="rev-breakdown-link rev-breakdown-link--muted">Admin only</span>';
+  return `
+    <div class="dash-panel rev-breakdown-panel dash-anim">
+      <div class="dash-panel__header">
+        <div>
+          <h3 class="dash-panel__title">${escapeHtml(title)}</h3>
+          <p class="dash-panel__sub">${escapeHtml(sub)}</p>
+        </div>
+      </div>
+      ${body}
+      ${link}
+    </div>`;
+}
+
+function renderRevBreakdowns(d) {
+  const b = d.breakdowns || {};
+  return `
+    <div class="rev-breakdown-grid">
+      ${renderRevBreakdownPanel("Revenue by Campaign", "Top 5 by closed-won revenue",
+        b.by_campaign, "campaign", "roas-campaigns", {})}
+      ${renderRevBreakdownPanel("Revenue by Source", "Top 5 · Google Ads spend-connected only",
+        b.by_source, "source_group", "revenue-by-source", { spendConnected: true })}
+      ${renderRevBreakdownPanel("Revenue by Country", "Top 5 by closed-won revenue",
+        b.by_country, "country", "roas-countries", {})}
+    </div>`;
+}
+
+function renderRevConcentration(d) {
+  const c = d.deal_concentration;
+  if (!c) {
+    return `
+      <div class="dash-panel__header">
+        <div><h3 class="dash-panel__title">Deal Concentration</h3></div>
+      </div>
+      <p class="rev-breakdown-empty">Deal concentration is unavailable for this window.</p>`;
+  }
+  const verdictClass = c.label === "Highly concentrated" ? "rev-conc--high"
+    : (c.label === "Moderately concentrated" ? "rev-conc--mid" : "rev-conc--ok");
+  const bar = (share) => `
+    <div class="rev-conc-bar"><div class="rev-conc-bar__fill" style="width:${Math.round((share || 0) * 100)}%"></div></div>`;
+  return `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Deal Concentration</h3>
+        <p class="dash-panel__sub">Is revenue spread or lumpy?</p>
+      </div>
+    </div>
+    <div class="rev-conc">
+      <div class="rev-conc-verdict ${verdictClass}">${escapeHtml(c.label)}</div>
+      <div class="rev-conc-metric">
+        <span class="rev-conc-metric__label">Top deal</span>
+        <span class="rev-conc-metric__val">${Math.round((c.top_1_deal_share || 0) * 100)}%</span>
+        ${bar(c.top_1_deal_share)}
+      </div>
+      <div class="rev-conc-metric">
+        <span class="rev-conc-metric__label">Top 3 deals</span>
+        <span class="rev-conc-metric__val">${Math.round((c.top_3_deals_share || 0) * 100)}%</span>
+        ${bar(c.top_3_deals_share)}
+      </div>
+      <p class="rev-conc-foot">${dashValue(c.customers, fmtCount)} customers this window</p>
+    </div>`;
+}
+
+const REV_DEAL_COLUMNS = [
+  ["company", "Company"], ["company_id", "Company ID"], ["main_contact", "Main Contact"],
+  ["contact_id", "Contact ID"], ["deal", "Deal"], ["deal_id", "Deal ID"],
+  ["amount_usd", "Amount"], ["close_date", "Close Date"], ["campaign", "Campaign"],
+  ["source", "Source"], ["country", "Country"], ["attribution_status", "Attribution"],
+];
+
+function revDealCell(deal, key) {
+  if (key === "amount_usd") return dashValue(deal.amount_usd, fmtMoney); // null → Unavailable, never $0
+  if (key === "attribution_status") return revAttrBadge(deal.attribution_status);
+  return dashValue(deal[key]);
+}
+
+function renderRevTopDeals(d) {
+  const deals = d.top_deals || [];
+  if (!deals.length) {
+    return `
+      <div class="dash-panel__header">
+        <div><h3 class="dash-panel__title">Top Deals — Proof</h3></div>
+      </div>
+      <p class="rev-breakdown-empty">No closed-won deals to prove revenue in this window.</p>`;
+  }
+  const head = REV_DEAL_COLUMNS.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("");
+  const body = deals.map((deal, i) => {
+    const cells = REV_DEAL_COLUMNS.map(([key]) => `<td class="rev-deal-td rev-deal-td--${key}">${revDealCell(deal, key)}</td>`).join("");
+    return `<tr class="rev-deal-row" data-rev-deal="${i}" tabindex="0" role="button" aria-label="Open deal detail">${cells}</tr>`;
+  }).join("");
+  return `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Top Deals — Proof</h3>
+        <p class="dash-panel__sub">The closed-won deals behind this window's revenue · click a row for detail</p>
+      </div>
+    </div>
+    <div class="rev-deal-scroll">
+      <table class="rev-deal-table">
+        <thead><tr>${head}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>`;
+}
+
+function wireRevDealDrawers(root, d) {
+  const deals = d.top_deals || [];
+  const open = (i) => {
+    const deal = deals[i];
+    if (!deal) return;
+    const rows = [
+      ["Company", dashValue(deal.company)], ["Company ID", dashValue(deal.company_id)],
+      ["Main Contact", dashValue(deal.main_contact)], ["Contact ID", dashValue(deal.contact_id)],
+      ["Deal", dashValue(deal.deal)], ["Deal ID", dashValue(deal.deal_id)],
+      ["Amount", dashValue(deal.amount_usd, fmtMoney)], ["Close Date", dashValue(deal.close_date)],
+      ["Source", dashValue(deal.source)], ["Campaign", dashValue(deal.campaign)],
+      ["Country", dashValue(deal.country)], ["Attribution", revAttrBadge(deal.attribution_status)],
+      ["Attribution reason", dashValue(deal.attribution_reason)],
+    ];
+    let drawer = root.querySelector(".rev-deal-drawer");
+    if (!drawer) {
+      drawer = document.createElement("div");
+      drawer.className = "rev-deal-drawer";
+      root.querySelector(".rev-deals-panel").appendChild(drawer);
+    }
+    drawer.innerHTML = `
+      <div class="rev-deal-drawer__head">
+        <strong>${escapeHtml(deal.company || "Deal detail")}</strong>
+        <button type="button" class="rev-deal-drawer__close" aria-label="Close">×</button>
+      </div>
+      <dl class="rev-deal-drawer__grid">
+        ${rows.map(([label, val]) => `<div><dt>${escapeHtml(label)}</dt><dd>${val}</dd></div>`).join("")}
+      </dl>`;
+    drawer.querySelector(".rev-deal-drawer__close").addEventListener("click", () => drawer.remove());
+    drawer.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
+  root.querySelectorAll(".rev-deal-row").forEach((tr) => {
+    tr.addEventListener("click", () => open(Number(tr.dataset.revDeal)));
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(Number(tr.dataset.revDeal)); }
+    });
+  });
+}
+
+function renderRevTruthFooter(d) {
+  const ts = d.truth_status || {};
+  const chip = (label, status) => `
+    <span class="dash-footer-chip" title="${escapeHtml(`${label}: ${status || "unknown"}`)}">
+      <span class="dash-dot ${DASH_STATUS_DOT[status] || "dash-dot--muted"}"></span>${escapeHtml(label)}
+    </span>`;
+  const allGood = ts.revenue === "ready" && ts.deal_ledger === "ready"
+    && ts.source_attribution === "ready" && ts.campaign_attribution === "ready"
+    && ts.country_attribution === "ready";
+  return `
+    <footer class="dash-truth-footer ${allGood ? "dash-truth-footer--ok" : ""}">
+      ${chip("Revenue ledger", ts.deal_ledger)}
+      ${chip("HubSpot", ts.hubspot_integration)}
+      ${chip("Source attr.", ts.source_attribution)}
+      ${chip("Campaign attr.", ts.campaign_attribution)}
+      ${chip("Country attr.", ts.country_attribution)}
+      <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
+      ${allGood
+        ? '<span class="dash-footer-note">All revenue truth verified for this window.</span>'
+        : (dashCanNavigate("revenue-health")
+          ? '<a class="dash-footer-note" href="#/revenue-health">Some attribution needs review — open Revenue Health</a>'
+          : '<span class="dash-footer-note">Some attribution needs review — contact your administrator.</span>')}
     </footer>`;
 }
 
@@ -9539,11 +10170,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Wire up Executive Overview controls (business windows — PR-ADS-134)
   const dashRefresh = document.getElementById("dashboard-refresh-btn");
   const dashWindow  = document.getElementById("dashboard-window");
-  if (dashRefresh) dashRefresh.addEventListener("click", loadDashboardOverview);
+  // Refresh reloads whichever dashboard tab is active (PR-ADS-135).
+  if (dashRefresh) dashRefresh.addEventListener("click", loadDashboardTab);
   if (dashWindow) {
     dashWindow.value = getRoasBusinessWindow();
     dashWindow.addEventListener("change", handleBusinessWindowSelectChange);
   }
+
+  // Wire up dashboard inner tabs (Overview + Revenue — PR-ADS-135).
+  document.querySelectorAll(".dashboard-tab[data-dash-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => activateDashboardTab(btn.dataset.dashTab));
+  });
 
   // Wire up ROAS by Campaign controls (business windows — PR-ADS-107A)
   const roasCampRefresh = document.getElementById("roas-campaigns-refresh-btn");
@@ -9909,7 +10546,7 @@ function setRoasBusinessWindow(key) {
 function handleBusinessWindowSelectChange(e) {
   setRoasBusinessWindow(e.target.value);
   switch (_currentPage) {
-    case "dashboard":       loadDashboardOverview(); break;
+    case "dashboard":       loadDashboardTab(); break;
     case "roas-countries":  loadRoasCountries(); break;
     case "deals":           loadDeals();         break;
     case "revenue-health":  loadRevenueHealth(); break;
@@ -9951,7 +10588,7 @@ let roasCountryWindow = null;
 // Per-page request sequence tokens guard against stale-response races: only the
 // newest in-flight request for a page may render. Switching CQ→YTD→Last Quarter
 // quickly must never paint an older response over the newest selection.
-const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0, overview: 0 };
+const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0, overview: 0, dashRevenue: 0 };
 
 // PR-ADS-116: show the exact resolved date range beside each window selector.
 function formatWindowRange(win) {

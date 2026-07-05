@@ -1039,6 +1039,62 @@ def fetch_spend_daily_series(start: date | None, end: date) -> dict:
         return {"available": False, "rows": []}
 
 
+def fetch_lead_daily_series(start: date | None, end: date) -> dict:
+    """Per-day paid-search leads + SQLs by contact_created_at (PR-ADS-135).
+
+    Same durable `leads` table, same paid-search / pseudo-campaign / exclusion
+    filters and per-contact dedup as fetch_lead_quality, but grouped by the
+    business event date (contact_created_at) so the Dashboard Revenue tab can
+    draw a customer/SQL series over time. SQL = status_category 'qualified'.
+    Read-only. Days with no contacts are simply absent.
+
+    Returns {available, rows:[{event_date, leads, sqls}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH deduped AS (
+                        SELECT DISTINCT ON ({_CONTACT_KEY})
+                            (contact_created_at AT TIME ZONE 'UTC')::date AS event_date,
+                            status_category
+                        FROM leads
+                        WHERE source_type = 'paid_search'
+                          AND contact_created_at IS NOT NULL
+                          AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
+                          AND contact_created_at < (%s::date + INTERVAL '1 day')
+                          AND campaign_name IS NOT NULL
+                          AND lower(campaign_name) NOT IN %s
+                          AND campaign_name !~* 'email_campaign'
+                          AND {_CONTACT_KEY} NOT IN (SELECT lead_id FROM lead_truth_exclusions)
+                        ORDER BY {_CONTACT_KEY}, run_date DESC, id DESC
+                    )
+                    SELECT event_date,
+                           COUNT(*) AS leads,
+                           SUM(CASE WHEN status_category = 'qualified' THEN 1 ELSE 0 END) AS sqls
+                    FROM deduped
+                    GROUP BY event_date
+                    ORDER BY event_date
+                    """,
+                    (start, end, _PSEUDO_CAMPAIGNS),
+                )
+                rows = [
+                    {
+                        "event_date": _as_date(r.get("event_date")),
+                        "leads": int(r.get("leads") or 0),
+                        "sqls": int(r.get("sqls") or 0),
+                    }
+                    for r in _rows_as_dicts(cur)
+                ]
+            return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_lead_daily_series failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
 def fetch_spend_coverage(start: date | None, end: date) -> dict:
     """Verified/failed Google Ads spend chunks intersecting the window. Read-only.
 

@@ -304,10 +304,10 @@
         </header>
         <div id="page-explanation-dashboard" hidden></div>
 
-        <!-- Inner dashboard tabs — only Overview ships in PR-ADS-134 -->
+        <!-- Inner dashboard tabs — Overview (PR-ADS-134) + Revenue (PR-ADS-135) -->
         <nav class="dashboard-tabs" aria-label="Dashboard sections">
-          <button type="button" class="dashboard-tab is-active" aria-current="page">Overview</button>
-          <button type="button" class="dashboard-tab" disabled title="Coming soon">Revenue</button>
+          <button type="button" class="dashboard-tab is-active" data-dash-tab="overview" aria-current="page">Overview</button>
+          <button type="button" class="dashboard-tab" data-dash-tab="revenue">Revenue</button>
           <button type="button" class="dashboard-tab" disabled title="Coming soon">Channels</button>
           <button type="button" class="dashboard-tab" disabled title="Coming soon">Campaigns &amp; Keywords</button>
           <button type="button" class="dashboard-tab" disabled title="Coming soon">Countries</button>
@@ -338,6 +338,9 @@
 
         <div id="dashboard-overview-root" class="dashboard-overview">
           <p class="empty-state">Loading executive overview…</p>
+        </div>
+        <div id="dashboard-revenue-root" class="dashboard-overview" hidden>
+          <p class="empty-state">Loading revenue &amp; customers…</p>
         </div>
       </section>
 
