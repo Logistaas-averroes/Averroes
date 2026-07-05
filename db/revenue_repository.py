@@ -708,8 +708,11 @@ def revenue_integration_connected() -> bool:
 def fetch_source_leads(start: date | None, end: date) -> dict:
     """Classified contacts in the window, by acquisition group. Read-only.
 
-    Windowed by contact_created_at (the business event date). Returns
-    {available, rows:[{acquisition_group, status_category}]}.
+    Windowed by contact_created_at (the business event date). Also returns the
+    raw HubSpot source fields (source_primary_raw / source_detail_raw) so the
+    caller can derive the channel/platform taxonomy (PR-ADS-133) at read time
+    without a schema change. Returns {available, rows:[{acquisition_group,
+    status_category, source_primary_raw, source_detail_raw}]}.
     """
     try:
         with get_conn() as conn:
@@ -718,7 +721,8 @@ def fetch_source_leads(start: date | None, end: date) -> dict:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT acquisition_group, status_category
+                    SELECT acquisition_group, status_category,
+                           source_primary_raw, source_detail_raw
                     FROM contact_source_classification
                     WHERE contact_created_at IS NOT NULL
                       AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
@@ -736,8 +740,10 @@ def fetch_source_revenue(start: date | None, end: date) -> dict:
     """Closed-won deals in the window, by acquisition group. Read-only.
 
     Windowed by deal_close_date. Each deal appears once (deal_id is unique in
-    deal_source_attribution). Returns {available, rows:[{acquisition_group,
-    attribution_status, deal_amount_usd}]}.
+    deal_source_attribution). Also returns the raw HubSpot source fields so the
+    caller can derive the channel/platform taxonomy (PR-ADS-133) at read time.
+    Returns {available, rows:[{acquisition_group, attribution_status,
+    deal_amount_usd, source_primary_raw, source_detail_raw}]}.
     """
     try:
         with get_conn() as conn:
@@ -747,7 +753,8 @@ def fetch_source_revenue(start: date | None, end: date) -> dict:
                 cur.execute(
                     """
                     SELECT acquisition_group, attribution_status,
-                           deal_amount_usd::float AS deal_amount_usd
+                           deal_amount_usd::float AS deal_amount_usd,
+                           source_primary_raw, source_detail_raw
                     FROM deal_source_attribution
                     WHERE deal_close_date IS NOT NULL
                       AND deal_close_date >= COALESCE(%s::timestamptz, deal_close_date)
@@ -759,6 +766,115 @@ def fetch_source_revenue(start: date | None, end: date) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_source_revenue failed: %s", exc)
         return {"available": False, "rows": []}
+
+
+def fetch_source_contact_details(start: date | None, end: date) -> dict:
+    """Classified-contact detail rows for the Revenue by Source drawer (PR-ADS-133).
+
+    Read-only. Proves the Leads / SQLs behind a source platform. Windowed by
+    contact_created_at (the business event date for leads/SQLs — NEVER a deal
+    close date). LEFT JOINs `leads` for the company name (the only durable
+    per-contact company). Fields not durably stored (contact name, company id,
+    lifecycle) are absent so the caller returns null → the UI shows "Unavailable".
+    The caller derives the group/channel/platform from the raw source fields and
+    filters to the requested platform.
+
+    Returns rows [{contact_id, acquisition_group, status_category,
+    source_primary_raw, source_detail_raw, contact_created_at, company}].
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable("contact_source_classification")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT c.contact_id, c.acquisition_group, c.status_category,
+                           c.source_primary_raw, c.source_detail_raw,
+                           c.contact_created_at,
+                           l.company AS company
+                    FROM contact_source_classification c
+                    LEFT JOIN (
+                        SELECT DISTINCT ON (contact_id) contact_id, company
+                        FROM leads
+                        WHERE contact_id IS NOT NULL
+                        ORDER BY contact_id, created_at DESC
+                    ) l ON l.contact_id = c.contact_id
+                    WHERE c.contact_created_at IS NOT NULL
+                      AND c.contact_created_at >= COALESCE(%s::timestamptz, c.contact_created_at)
+                      AND c.contact_created_at < (%s::date + INTERVAL '1 day')
+                    ORDER BY c.contact_created_at DESC
+                    """,
+                    (start, end),
+                )
+                rows = _rows_as_dicts(cur)
+                for row in rows:
+                    row["contact_created_at"] = _as_date(row.get("contact_created_at"))
+            return {"available": True, "rows": rows, "table": "contact_source_classification"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_source_contact_details failed: %s", exc)
+        return _unavailable("contact_source_classification")
+
+
+def fetch_source_deal_details(start: date | None, end: date) -> dict:
+    """Closed-won deal detail rows for the Revenue by Source drawer (PR-ADS-133).
+
+    Read-only. One row per closed-won deal in the window (deal_id unique in
+    deal_source_attribution), windowed by deal_close_date. LEFT JOINs
+    gclid_attribution (company — the only durable per-deal company name) and
+    contact_source_classification (the associated contact's status_category).
+    Fields not durably stored (contact name, company id, deal name, lifecycle)
+    are simply absent so the caller returns null → the UI shows "Unavailable".
+    The caller derives the source group/channel/platform from the raw source
+    fields and filters to the requested platform.
+
+    Returns rows [{deal_id, associated_contact_id, acquisition_group, company,
+    deal_close_date, deal_amount_usd, source_primary_raw, source_detail_raw,
+    attribution_status, campaign_name, status_category}].
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable("deal_source_attribution")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT d.deal_id, d.associated_contact_id,
+                           d.acquisition_group,
+                           g.company AS company,
+                           d.deal_close_date,
+                           d.deal_amount_usd::float AS deal_amount_usd,
+                           d.source_primary_raw, d.source_detail_raw,
+                           d.attribution_status,
+                           g.campaign_name AS campaign_name,
+                           c.status_category AS status_category
+                    FROM deal_source_attribution d
+                    LEFT JOIN (
+                        SELECT DISTINCT ON (deal_id) deal_id, company, campaign_name
+                        FROM gclid_attribution
+                        WHERE deal_id IS NOT NULL
+                        ORDER BY deal_id, created_at DESC
+                    ) g ON g.deal_id = d.deal_id
+                    LEFT JOIN (
+                        SELECT DISTINCT ON (contact_id) contact_id, status_category
+                        FROM contact_source_classification
+                        WHERE contact_id IS NOT NULL
+                        ORDER BY contact_id, updated_at DESC
+                    ) c ON c.contact_id = d.associated_contact_id
+                    WHERE d.deal_close_date IS NOT NULL
+                      AND d.deal_close_date >= COALESCE(%s::timestamptz, d.deal_close_date)
+                      AND d.deal_close_date < (%s::date + INTERVAL '1 day')
+                    ORDER BY d.deal_amount_usd DESC NULLS LAST, d.deal_close_date DESC
+                    """,
+                    (start, end),
+                )
+                rows = _rows_as_dicts(cur)
+                for row in rows:
+                    row["deal_close_date"] = _as_date(row.get("deal_close_date"))
+            return {"available": True, "rows": rows, "table": "deal_source_attribution"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_source_deal_details failed: %s", exc)
+        return _unavailable("deal_source_attribution")
 
 
 # ── Canonical Google Ads spend truth (PR-ADS-118) ────────────────────────────

@@ -3813,43 +3813,288 @@ document.addEventListener("click", (e) => {
 // Google Ads is the only group with connected spend, so the only group that may
 // show ROAS. Every other group is revenue-only (ROAS unavailable, never $0/0x).
 
-function renderSourceSectionTable(group) {
+// ── PR-ADS-133: Revenue by Source — group → channel → platform taxonomy ──────
+// Each top-level group renders a section with its channels; each channel lists
+// its platform rows, and every platform row expands into a drawer proving the
+// clients/deals behind it. Only Google Ads is spend-connected, so only Google
+// Ads shows ROAS — every other row is revenue-only with an honest status label
+// (never a fabricated $0 / 0.00x). Missing values render "Unavailable".
+
+// SQL / Customer conversion rate off the lead base; Unavailable when no leads.
+function fmtSourceRate(numer, denom) {
+  if (!denom || denom <= 0 || numer === null || numer === undefined) return "Unavailable";
+  return (100 * numer / denom).toFixed(0) + "%";
+}
+
+// Group-level ROAS / status cell: Google shows ROAS; others show why not.
+function sourceStatusLabel(group) {
+  if (group.has_spend === true) {
+    return group.roas === null || group.roas === undefined ? "Unavailable" : fmtRoasMultiple(group.roas);
+  }
+  if (group.group === "offline") return "Imported CRM records — no reliable source attribution";
+  if (group.group === "unclassified") return "Needs review — source missing or unsafe";
+  return "Revenue-only — no connected spend source";
+}
+
+// Expand control for a platform row (opens the clients/deals drawer, lazy).
+function sourcePlatformExpandControl(idx, group, channel, platform, label) {
+  const aria = `Show clients / deals behind ${label || "this platform"}`;
+  return `<button type="button" class="source-expand-button" data-source-expand data-source-idx="${idx}"`
+    + ` data-source-group="${encodeURIComponent(group)}" data-source-channel="${encodeURIComponent(channel)}"`
+    + ` data-source-platform="${encodeURIComponent(platform)}" aria-expanded="false"`
+    + ` aria-label="${escapeHtml(aria)}" title="${escapeHtml(aria)}">▸</button>`;
+}
+
+function renderSourcePlatformRow(group, ch, pf, idx) {
+  // ROAS shows ONLY for a spend-connected platform (the canonical Google Ads
+  // bucket). fmtRoasMultiple already renders a null ROAS as "Unavailable", so a
+  // spend-connected-but-zero bucket never shows NaN; every other bucket shows its
+  // honest status string, never a fabricated ROAS. (group.has_spend gates the
+  // group; pf.spend gates the individual bucket — see PR-133 review.)
+  const hasSpend = pf.spend !== null && pf.spend !== undefined;
+  const statusCell = hasSpend ? fmtRoasMultiple(pf.roas) : `<span class="source-status">${escapeHtml(pf.status || "")}</span>`;
+  const spendCell = hasSpend ? fmtMoney(pf.spend) : '<span class="detail-unavailable">Unavailable</span>';
+  return `
+    <tr class="source-platform-row">
+      <td class="source-platform-name">${sourcePlatformExpandControl(idx, group.group, ch.channel, pf.platform, pf.label)}${escapeHtml(pf.label)}</td>
+      <td>${fmtCount(pf.leads)}</td>
+      <td>${fmtCount(pf.sqls)}</td>
+      <td>${fmtSourceRate(pf.sqls, pf.leads)}</td>
+      <td>${fmtCount(pf.customers)}</td>
+      <td>${fmtSourceRate(pf.customers, pf.leads)}</td>
+      <td>${fmtMoney(pf.won_revenue)}</td>
+      <td>${spendCell}</td>
+      <td>${statusCell}</td>
+    </tr>
+    <tr class="source-drilldown-row" data-source-drilldown-idx="${idx}" hidden>
+      <td colspan="9"><div class="source-drilldown-panel"></div></td>
+    </tr>`;
+}
+
+function renderSourceChannelRows(group, ch, gi, ci) {
+  // Only the spend-connected (canonical Paid Search) channel carries spend/ROAS;
+  // gate on ch.spend so a non-canonical channel in the Google group never shows it.
+  const hasSpend = ch.spend !== null && ch.spend !== undefined;
+  const spendCell = hasSpend ? fmtMoney(ch.spend) : '<span class="detail-unavailable">Unavailable</span>';
+  const statusCell = hasSpend ? fmtRoasMultiple(ch.roas) : "—";
+  const channelHead = `
+    <tr class="source-channel-row">
+      <td class="source-channel-name">${escapeHtml(ch.label)}</td>
+      <td>${fmtCount(ch.leads)}</td>
+      <td>${fmtCount(ch.sqls)}</td>
+      <td>${fmtSourceRate(ch.sqls, ch.leads)}</td>
+      <td>${fmtCount(ch.customers)}</td>
+      <td>${fmtSourceRate(ch.customers, ch.leads)}</td>
+      <td>${fmtMoney(ch.won_revenue)}</td>
+      <td>${spendCell}</td>
+      <td>${statusCell}</td>
+    </tr>`;
+  const platformRows = (ch.platforms || [])
+    .map((pf, pi) => renderSourcePlatformRow(group, ch, pf, `${gi}-${ci}-${pi}`))
+    .join("");
+  return channelHead + platformRows;
+}
+
+function renderSourceGroupSection(group, gi) {
+  const channels = group.channels || [];
+  const headerRow = `
+    <tr>
+      <th>Channel / Platform</th>
+      <th>Leads</th>
+      <th>SQLs</th>
+      <th>SQL Rate</th>
+      <th>Customers</th>
+      <th>Customer Rate</th>
+      <th>Won Revenue</th>
+      <th>Spend</th>
+      <th>ROAS / Status</th>
+    </tr>`;
+  const body = channels.length
+    ? channels.map((ch, ci) => renderSourceChannelRows(group, ch, gi, ci)).join("")
+    : `<tr><td colspan="9" class="source-drilldown-empty">No attributed activity in this window.</td></tr>`;
+  // Group KPI strip — Google shows Spend/ROAS; others show the revenue-only reason.
   const isGoogle = group.has_spend === true;
-  const header = isGoogle
-    ? `<tr><th>Source</th><th>Spend</th><th>Leads</th><th>SQLs</th><th>Customers</th><th>Won Revenue</th><th>ROAS</th></tr>`
-    : `<tr><th>Source</th><th>Leads</th><th>SQLs</th><th>Customers</th><th>Won Revenue</th><th>Attribution Status</th></tr>`;
-  const row = isGoogle
-    ? `<tr>
-         <td>${escapeHtml(group.label)}</td>
-         <td>${fmtMoney(group.spend)}</td>
-         <td>${fmtCount(group.leads)}</td>
-         <td>${fmtCount(group.sqls)}</td>
-         <td>${fmtCount(group.customers)}</td>
-         <td>${fmtMoney(group.won_revenue)}</td>
-         <td>${group.roas === null || group.roas === undefined ? "Unavailable" : fmtRoasMultiple(group.roas)}</td>
-       </tr>`
-    : `<tr>
-         <td>${escapeHtml(group.label)}</td>
-         <td>${fmtCount(group.leads)}</td>
-         <td>${fmtCount(group.sqls)}</td>
-         <td>${fmtCount(group.customers)}</td>
-         <td>${fmtMoney(group.won_revenue)}</td>
-         <td><span class="attribution-badge" title="No connected spend source for this group">ROAS unavailable — no connected spend source</span></td>
-       </tr>`;
+  const spendChip = isGoogle
+    ? `<div><span>Spend</span><strong>${fmtMoney(group.spend)}</strong></div>`
+    : `<div><span>Spend</span><strong>Unavailable</strong></div>`;
   return `
     <div class="panel revenue-source-section">
-      <div class="panel__header">${escapeHtml(group.label)}</div>
+      <div class="panel__header source-group-header">
+        <span class="source-group-title">${escapeHtml(group.label)}</span>
+        <span class="source-group-status">${escapeHtml(sourceStatusLabel(group))}</span>
+      </div>
+      <div class="revenue-summary-strip revenue-summary-strip--four source-group-kpis">
+        <div><span>Leads</span><strong>${fmtCount(group.leads)}</strong></div>
+        <div><span>Customers</span><strong>${fmtCount(group.customers)}</strong></div>
+        <div><span>Won Revenue</span><strong>${fmtMoney(group.won_revenue)}</strong></div>
+        ${spendChip}
+      </div>
       <div class="panel__body panel__body--flush">
-        <div class="table-scroll">
-          <table class="data-table roas-table revenue-decision-table">
-            ${header}
-            <tbody>${row}</tbody>
-          </table>
+        <div class="revenue-table-shell">
+          <div class="revenue-table-scroll">
+            <table class="data-table roas-table revenue-decision-table source-taxonomy-table">
+              ${headerRow}
+              <tbody>${body}</tbody>
+            </table>
+          </div>
         </div>
       </div>
-    </div>
-  `;
+    </div>`;
 }
+
+// ── Source platform drawer (clients / deals behind a platform) ───────────────
+let sourceDrilldownCache = {};
+
+function sourceDrilldownKey(group, channel, platform) {
+  return `${getRoasBusinessWindow()}:${group}:${channel}:${platform}`;
+}
+
+function renderSourceDrilldownRow(d) {
+  const amount = d.amount == null ? drilldownValue(null) : fmtMoney(d.amount);
+  return `
+    <tr>
+      <td>${drilldownValue(d.company)}</td>
+      <td>${drilldownValue(d.company_id)}</td>
+      <td>${drilldownValue(d.main_contact)}</td>
+      <td>${drilldownValue(d.contact_id)}</td>
+      <td>${drilldownValue(d.lifecycle_stage)}</td>
+      <td>${drilldownValue(d.status_category)}</td>
+      <td>${drilldownValue(d.deal)}</td>
+      <td>${drilldownValue(d.deal_id)}</td>
+      <td>${amount}</td>
+      <td>${drilldownValue(d.close_date)}</td>
+      <td>${drilldownValue(d.source)}</td>
+      <td>${drilldownValue(d.source_drilldown_1)}</td>
+      <td>${drilldownValue(d.source_drilldown_2)}</td>
+      <td>${drilldownValue(d.campaign_source_label)}</td>
+      <td>${drilldownValue(d.attribution_status)}</td>
+    </tr>`;
+}
+
+// One contact (lead / SQL) proof row. Same safe formatter; unavailable for any
+// field not durably stored (contact name, company id, lifecycle).
+function renderSourceContactRow(c) {
+  return `
+    <tr>
+      <td>${drilldownValue(c.company)}</td>
+      <td>${drilldownValue(c.company_id)}</td>
+      <td>${drilldownValue(c.main_contact)}</td>
+      <td>${drilldownValue(c.contact_id)}</td>
+      <td>${drilldownValue(c.lifecycle_stage)}</td>
+      <td>${drilldownValue(c.status_category)}</td>
+      <td>${c.is_sql ? "Yes" : "No"}</td>
+      <td>${drilldownValue(c.created_date)}</td>
+      <td>${drilldownValue(c.source)}</td>
+      <td>${drilldownValue(c.source_drilldown_1)}</td>
+      <td>${drilldownValue(c.source_drilldown_2)}</td>
+      <td>${drilldownValue(c.campaign_source_label)}</td>
+    </tr>`;
+}
+
+function renderSourceDrilldown(data) {
+  const status = (data && data.source_health && data.source_health.status) || "ready";
+  if (status === "database_unavailable") {
+    return `<p class="source-drilldown-muted">Source client details could not be loaded.</p>`;
+  }
+  const contacts = (data && data.contacts) || [];
+  const deals = (data && data.deals) || (data && data.rows) || [];
+  if (!contacts.length && !deals.length) {
+    return `<div class="source-drilldown-empty">No attributed closed-won client detail found for this source in this window.</div>`;
+  }
+  // Section 1 — Leads / SQLs proof (windowed by contact_created_at).
+  const contactHeader = `
+    <tr>
+      <th>Company</th><th>Company ID</th><th>Main Contact</th><th>Contact ID</th>
+      <th>Lifecycle</th><th>SQL / Customer Status</th><th>SQL</th><th>Created</th>
+      <th>Source</th><th>Source Drilldown 1</th><th>Source Drilldown 2</th>
+      <th>Campaign / Source</th>
+    </tr>`;
+  const contactsSection = contacts.length
+    ? `
+    <div class="source-drilldown-title">Leads / SQLs Behind This Source</div>
+    <div class="table-scroll source-drilldown-scroll">
+      <table class="data-table revenue-decision-table source-drilldown-table">
+        ${contactHeader}
+        <tbody>${contacts.map(renderSourceContactRow).join("")}</tbody>
+      </table>
+    </div>`
+    : `<div class="source-drilldown-title">Leads / SQLs Behind This Source</div>
+       <div class="source-drilldown-empty">No leads/SQLs found for this source in this window.</div>`;
+  // Section 2 — Closed-Won Deals proof (windowed by deal_close_date).
+  const dealHeader = `
+    <tr>
+      <th>Company</th><th>Company ID</th><th>Main Contact</th><th>Contact ID</th>
+      <th>Lifecycle</th><th>SQL / Customer Status</th><th>Deal</th><th>Deal ID</th>
+      <th>Amount</th><th>Close Date</th><th>Source</th><th>Source Drilldown 1</th>
+      <th>Source Drilldown 2</th><th>Campaign / Source</th><th>Attribution</th>
+    </tr>`;
+  const dealsSection = deals.length
+    ? `
+    <div class="source-drilldown-title">Closed-Won Deals Behind This Source</div>
+    <div class="table-scroll source-drilldown-scroll">
+      <table class="data-table revenue-decision-table source-drilldown-table">
+        ${dealHeader}
+        <tbody>${deals.map(renderSourceDrilldownRow).join("")}</tbody>
+      </table>
+    </div>`
+    : `<div class="source-drilldown-title">Closed-Won Deals Behind This Source</div>
+       <div class="source-drilldown-empty">No closed-won deals found for this source in this window.</div>`;
+  return `${contactsSection}${dealsSection}`;
+}
+
+async function loadSourceDrilldown(group, channel, platform, drawerRow) {
+  const container = drawerRow.querySelector(".source-drilldown-panel");
+  if (!container) return;
+  const key = sourceDrilldownKey(group, channel, platform);
+  if (sourceDrilldownCache[key]) {
+    container.innerHTML = renderSourceDrilldown(sourceDrilldownCache[key]);
+    return;
+  }
+  container.innerHTML = `<p class="source-drilldown-muted">Loading source client details…</p>`;
+  try {
+    const window_ = getRoasBusinessWindow();
+    const res = await fetch(
+      `/api/revenue-performance/source-platform-detail?window=${encodeURIComponent(window_)}`
+      + `&source_group=${encodeURIComponent(group)}&source_channel=${encodeURIComponent(channel)}`
+      + `&source_platform=${encodeURIComponent(platform)}`,
+      { credentials: "same-origin" }
+    );
+    if (!res.ok) {
+      container.innerHTML = `<p class="source-drilldown-muted">Source client details could not be loaded.</p>`;
+      return;
+    }
+    const data = await res.json();
+    sourceDrilldownCache[key] = data;
+    container.innerHTML = renderSourceDrilldown(data);
+  } catch (err) {
+    console.error("[loadSourceDrilldown]", err);
+    container.innerHTML = `<p class="source-drilldown-muted">Source client details could not be loaded.</p>`;
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-source-expand]");
+  if (!btn) return;
+  const idx = btn.getAttribute("data-source-idx");
+  const group = decodeURIComponent(btn.getAttribute("data-source-group") || "");
+  const channel = decodeURIComponent(btn.getAttribute("data-source-channel") || "");
+  const platform = decodeURIComponent(btn.getAttribute("data-source-platform") || "");
+  const drawer = document.querySelector(`.source-drilldown-row[data-source-drilldown-idx="${idx}"]`);
+  if (!drawer) return;
+  if (drawer.hasAttribute("hidden")) {
+    drawer.removeAttribute("hidden");
+    btn.setAttribute("aria-expanded", "true");
+    btn.textContent = "▾";
+    if (!drawer.dataset.loaded) {
+      drawer.dataset.loaded = "1";
+      loadSourceDrilldown(group, channel, platform, drawer);
+    }
+  } else {
+    drawer.setAttribute("hidden", "");
+    btn.setAttribute("aria-expanded", "false");
+    btn.textContent = "▸";
+  }
+});
 
 function renderRevenueBySourceHealth(summary) {
   const s = summary || {};
@@ -3866,15 +4111,21 @@ function renderRevenueBySourceHealth(summary) {
 function renderRevenueBySourcePage(data) {
   const body = document.getElementById("revenue-by-source-body");
   if (!body) return;
-  // PR-ADS-126: rows ARE the per-source groups from the canonical mart. Only the
-  // Google Ads group carries spend/ROAS (the mart sets has_spend / roas), so the
-  // frontend never decides which source has spend.
+  // PR-ADS-126: rows ARE the per-source groups from the canonical mart. PR-ADS-133
+  // enriches each group with a channel → platform breakdown; only the Google Ads
+  // group carries spend/ROAS (the mart sets has_spend / roas), so the frontend
+  // never decides which source has spend. Empty groups are dropped to keep the
+  // page a clean attribution view, not a diagnostics wall.
   const groups = (data && data.rows) || [];
+  const active = groups.filter((g) => g && ((g.channels && g.channels.length) || g.leads || g.customers));
+  const sections = active.length
+    ? active.map((g, gi) => renderSourceGroupSection(g, gi)).join("")
+    : `<div class="revenue-empty-inline">No attributed source activity in this window.</div>`;
   body.innerHTML = `
     ${renderMartSpendTruth(data)}
     ${renderMartDiagnostics(data)}
-    ${groups.map(renderSourceSectionTable).join("")}
-    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads provides spend; ROAS is shown only for Google Ads. Other groups are revenue-only, so ROAS is never fabricated.</p>
+    ${sections}
+    <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads provides spend, so only Google Ads shows ROAS. Every other channel/platform is revenue-only; ROAS is never fabricated. Expand a platform to prove the clients/deals behind it.</p>
   `;
 }
 

@@ -4362,6 +4362,81 @@ body.is-revenue-page #monitoring-banner {
   padding: 4px 0;
 }
 
+/* ── PR-ADS-133: Revenue by Source group → channel → platform taxonomy ───────
+   A clean attribution hierarchy: group section header + KPI strip, a channel
+   header row, indented platform rows each with an expand control opening a
+   full-width drawer of the clients/deals behind that platform. Only Google Ads
+   carries spend/ROAS; every other row is revenue-only (never a fake $0/0.00x). */
+.revenue-source-section { margin-bottom: 18px; }
+.source-group-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.source-group-title { font-weight: 700; }
+.source-group-status {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+}
+.source-group-kpis { margin: 12px 16px 4px; }
+.source-taxonomy-table .source-channel-row > td {
+  background: #f1f5f9;
+  font-weight: 600;
+  color: #334155;
+}
+.source-channel-name { padding-left: 8px; }
+.source-platform-row > td { color: #475569; }
+.source-platform-name { padding-left: 26px; }
+.source-status {
+  font-size: 12px;
+  color: #64748b;
+}
+.source-expand-button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 6px 0 0;
+  color: #475569;
+}
+.source-expand-button:hover { color: #0f172a; }
+.source-drilldown-row > td {
+  background: #f8fafc;
+  padding: 0;
+}
+.source-drilldown-panel { padding: 12px 16px; }
+.source-drilldown-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  margin: 14px 0 8px;
+}
+.source-drilldown-panel > .source-drilldown-title:first-child { margin-top: 0; }
+.source-drilldown-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.source-drilldown-table th,
+.source-drilldown-table td {
+  white-space: nowrap;
+  font-size: 13px;
+}
+.source-drilldown-empty {
+  font-size: 13px;
+  color: #64748b;
+  padding: 4px 0;
+}
+.source-drilldown-muted {
+  font-size: 13px;
+  color: #94a3b8;
+  font-style: italic;
+  padding: 4px 0;
+}
+
 /* ── PR-ADS-123: Google Ads Spend summary strip ─────────────────────────────
    Replaces the unstyled raw text block (which had no CSS at all) with a compact,
    contained card. Exact full-precision spend lives in the spend proof modal. */
