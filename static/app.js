@@ -25,7 +25,9 @@ const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ng
 // ad-window bar, monitoring warning, help/explanation blocks, and any
 // attribution-audit controls are suppressed here. Deals (Closed-Won Revenue
 // Ledger) and Revenue Health (admin diagnostics) joined in PR-ADS-113.
-const REVENUE_PAGES = ["roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source"];
+// PR-ADS-134: the Dashboard is now the Executive Overview — a business-truth
+// command center on business windows — so it joins the clean revenue chrome.
+const REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source"];
 
 function isRevenuePage(pageId) {
   return REVENUE_PAGES.includes(pageId);
@@ -49,6 +51,12 @@ function applyPageChrome(page) {
 
   const monitoringBanner = document.getElementById("monitoring-banner");
   if (monitoringBanner && revenuePage) monitoringBanner.hidden = true;
+
+  // PR-ADS-134: the Executive Overview carries its own truth footer — the
+  // global freshness strip is diagnostic chrome and stays off this page only
+  // (a class, not `hidden`, so the async freshness loader cannot re-show it).
+  const freshnessBar = document.getElementById("data-freshness-bar");
+  if (freshnessBar) freshnessBar.classList.toggle("is-dash-hidden", page === "dashboard");
 
   if (document.body) document.body.classList.toggle("is-revenue-page", revenuePage);
 }
@@ -119,11 +127,11 @@ const DERIVED_DATASET_PAGES = new Set(["ngrams", "waste"]);
 const PAGE_EXPLANATIONS = {
   dashboard: {
     title: "Dashboard",
-    purpose: "High-level summary of paid media performance, lead quality, waste, and campaign movement.",
-    source: "Campaign, lead, deal, waste, and report data.",
-    dependsOn: ["campaigns", "leads", "deals", "waste_terms"],
-    emptyMeans: "The dashboard may be waiting for campaign, HubSpot, or waste-analysis data.",
-    nextAction: "Open System Status to check pipeline health."
+    purpose: "Executive overview of spend, closed-won revenue, pipeline movement, and action signals for one business window.",
+    source: "Canonical Revenue Decision Mart — Google Ads spend truth and HubSpot closed-won revenue truth.",
+    dependsOn: ["campaigns", "leads", "deals", "gclid_attribution"],
+    emptyMeans: "No verified spend or closed-won revenue exists in the selected business window.",
+    nextAction: "Open Revenue Health to check spend, FX, and revenue truth status."
   },
   "action-queue": {
     title: "Action Queue",
@@ -294,11 +302,11 @@ const PAGE_EXPLANATIONS = {
 
 const PAGE_HELP_CONTENT = {
   dashboard: {
-    what: "High-level summary of paid media performance across campaigns, leads, deals, and waste. Designed for a quick daily health check.",
-    source: "Aggregated from Google Ads API campaigns, HubSpot contacts/deals, and waste analysis.",
-    howToUse: "Scan KPI cards for anomalies. Click into specific pages for drill-down. Use the time window selector to compare periods.",
-    doNotAssume: "Dashboard totals may lag if upstream pipelines have not completed. A green status dot means the API is online, not that data is fresh.",
-    checkNext: "System Status for pipeline health, or Action Queue for items needing human review."
+    what: "Executive overview of Google Ads spend, HubSpot closed-won revenue, pipeline conversion, source mix, and computed action signals for one business window.",
+    source: "Canonical Revenue Decision Mart (Google Ads spend truth + HubSpot closed-won revenue truth), Revenue by Source, and the closed-won deal ledger.",
+    howToUse: "Pick a business window, scan the hero KPIs and decision cards, then follow the evidence links (ROAS by Campaign, Revenue by Source, Action Queue) to drill down.",
+    doNotAssume: "'Unavailable' means the truth layer withheld a metric (FX, coverage, or lead-date safety) — it is never a $0. ROAS applies to Google Ads only; other sources are revenue-only.",
+    checkNext: "Revenue Health for truth blockers, or Action Queue for items needing human review."
   },
   "action-queue": {
     what: "Ranked list of items requiring human review — campaigns to investigate, waste to confirm, geo anomalies, keyword issues, and data quality flags.",
@@ -1293,7 +1301,7 @@ function navigate(page, options) {
 
 function loadPage(page) {
   switch (page) {
-    case "dashboard":     loadDashboard();                          break;
+    case "dashboard":     loadDashboardOverview();                  break;
     case "reports":       loadReports(); loadRevenueSnapshotHistory(); break;
     case "campaigns":     loadCampaigns();                          break;
     case "waste":         loadWaste();                              break;
@@ -1863,469 +1871,815 @@ function copyLatestReport() {
   }
 }
 
-// ── Dashboard page ─────────────────────────────────────────────────────────
+// ── Dashboard — Executive Overview command center (PR-ADS-134) ─────────────
+//
+// The old ad-window KPI dashboard is gone. The dashboard is now an executive
+// business-truth page: canonical KPIs, revenue-vs-spend trend, pipeline funnel,
+// channel mix, computed decision cards and ranked signals — all read from ONE
+// read-only contract (/api/dashboard/overview) composed from the canonical
+// Revenue Decision Mart. Truth rules are never loosened in the renderer:
+//   - Unavailable metrics render as "Unavailable", never a fabricated $0/0.00x.
+//   - Native GBP spend is never rendered with a "$".
+//   - ROAS renders for Google Ads only, and only when the API says it is safe.
+//   - A missing previous period renders "No comparison", never 0%.
 
-async function loadDashboard() {
-  const days = getSelectedDays();
+let dashOverview = null;
+let dashOverviewStatus = "loading";
 
-  let summary = null;
-  try {
-    summary = await fetchJSON(`/api/summary?days=${days}`);
-  } catch (_) { /* summary unavailable — KPIs show dashes */ }
+// Chart palette — brand hues snapped to the dataviz lightness/CVD checks
+// (validated: revenue bar #129ef5 + spend line #0a5f92 pass adjacent CVD;
+// the muted Offline slot is a deliberate de-emphasis, relieved by the labeled
+// legend list which carries every value as text).
+const DASH_SERIES_COLORS = { revenue: "#129ef5", spend: "#0a5f92" };
+const DASH_DONUT_COLORS = {
+  google_ads: "#129ef5",
+  other_paid: "#0a5f92",
+  organic: "#15803d",
+  offline: "#94a3b8",
+  unclassified: "#b45309",
+};
+// Ordinal ramp for the funnel stages (validated with --ordinal).
+const DASH_FUNNEL_RAMP = ["#6db8f8", "#3f9df0", "#1a80cf", "#0b5f92"];
 
-  renderKPIs(summary);
-
-  // Load run history timeline (non-blocking — failure does not affect other panels)
-  loadRunHistory();
-
-  // Load campaign data for the verdict summary panel
-  let campaigns = [];
-  try {
-    const campData = await fetchJSON(`/api/campaigns?days=${days}`);
-    campaigns = campData.campaigns || [];
-    renderVerdictSummary(campaigns);
-  } catch (_) {
-    renderVerdictSummaryEmpty();
-  }
-
-  // Load dashboard trends (non-blocking — failure does not break dashboard).
-  // Alerts panel is upgraded with trend alerts when available; falls back to
-  // campaign-verdict alerts otherwise.
-  loadDashboardTrends(campaigns);
-}
-
-function renderKPIs(summary) {
-  const spendEl = document.getElementById("kpi-spend");
-  const sqlsEl  = document.getElementById("kpi-sqls");
-  const cpqlEl  = document.getElementById("kpi-cpql");
-  const wasteEl = document.getElementById("kpi-waste");
-
-  if (!summary) {
-    ["kpi-spend", "kpi-sqls", "kpi-cpql", "kpi-waste"].forEach((id) => {
-      const el = document.getElementById(id);
-      if (el) el.textContent = "—";
-    });
-    return;
-  }
-
-  if (spendEl) spendEl.textContent = summary.total_spend_usd != null
-    ? fmtDollar(summary.total_spend_usd) : "—";
-  if (sqlsEl)  sqlsEl.textContent  = summary.confirmed_sqls != null
-    ? String(summary.confirmed_sqls) : "0";
-  if (cpqlEl)  cpqlEl.textContent  = summary.avg_cpql_usd != null
-    ? fmtDollar(summary.avg_cpql_usd) : "N/A";
-  if (wasteEl) wasteEl.textContent = summary.confirmed_waste_usd != null
-    ? fmtDollar(summary.confirmed_waste_usd) : "—";
-}
-
-// campaigns: array of { campaign_name, latest_verdict, avg_spend_usd, ... }
-function renderVerdictSummary(campaigns) {
-  const el = document.getElementById("dash-verdict-body");
-  if (!el) return;
-
-  const real = campaigns.filter((c) => c.avg_spend_usd != null && c.avg_spend_usd > 0);
-
-  if (real.length === 0) {
-    el.innerHTML = `<p class="empty-state">No campaign data yet. Trigger a weekly run to populate.</p>`;
-    return;
-  }
-
-  const sorted   = [...real].sort((a, b) => (b.avg_spend_usd || 0) - (a.avg_spend_usd || 0));
-  const maxSpend = sorted[0].avg_spend_usd || 1;
-
-  el.innerHTML = sorted.map((c) => {
-    const pct   = Math.max(5, Math.round((c.avg_spend_usd / maxSpend) * 100));
-    const v     = (c.latest_verdict || "").toUpperCase();
-    const spend = c.avg_spend_usd != null ? fmtDollar(c.avg_spend_usd) : "—";
-    return `
-      <div class="verdict-row">
-        <div class="verdict-row__name" title="${escapeHtml(c.campaign_name)}">${escapeHtml(c.campaign_name)}</div>
-        <div class="verdict-row__bar">
-          <div class="verdict-row__bar-fill verdict-row__bar-fill--${escapeHtml(v)}" style="width:${pct}%"></div>
-        </div>
-        <div class="verdict-row__meta">
-          <span class="verdict-row__spend">${spend}</span>
-          ${verdictBadge(v)}
-        </div>
-      </div>`;
-  }).join("");
-}
-
-function renderVerdictSummaryEmpty() {
-  const el = document.getElementById("dash-verdict-body");
-  if (el) el.innerHTML = `<p class="empty-state">No campaign data yet. Trigger a weekly run to populate.</p>`;
-}
-
-function renderAlerts(campaigns) {
-  const el = document.getElementById("dash-alerts-body");
-  if (!el) return;
-
-  const alerts = (campaigns || []).filter((c) =>
-    c.latest_verdict === "FIX" || c.latest_verdict === "CUT"
-  );
-
-  if (alerts.length === 0) {
-    el.innerHTML = `<p class="empty-state">No active alerts.</p>`;
-    return;
-  }
-
-  const icon = (v) => v === "CUT"
-    ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="alert-icon alert-icon--cut"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`
-    : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="alert-icon alert-icon--fix"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
-
-  el.innerHTML = alerts.map((c) => `
-    <div class="alert-item">
-      ${icon(c.latest_verdict)}
-      <div class="alert-text">
-        Campaign <span class="alert-campaign">${escapeHtml(c.campaign_name)}</span>
-        — verdict ${verdictBadge(c.latest_verdict)}
-        ${c.avg_spend_usd != null ? `· Spend: ${fmtDollar(c.avg_spend_usd)}` : ""}
-      </div>
-    </div>`).join("");
-}
-
-function renderAlertsEmpty() {
-  const el = document.getElementById("dash-alerts-body");
-  if (el) el.innerHTML = `<p class="empty-state">No alerts. Trigger a run to check for issues.</p>`;
-}
-
-function renderAlertsUnavailable() {
-  const el = document.getElementById("dash-alerts-body");
-  if (el) el.innerHTML = `<p class="empty-state">Alerts temporarily unavailable.</p>`;
-}
-
-// ── Dashboard trends (What Changed + Campaign Movement + Alerts upgrade) ────
-
-async function loadDashboardTrends(fallbackCampaigns) {
-  const trendsEl    = document.getElementById("dashboard-trends");
-  const movementEl  = document.getElementById("campaign-movement-list");
-
-  // Show loading states
-  if (trendsEl)   trendsEl.innerHTML   = `<p class="empty-state">Loading…</p>`;
-  if (movementEl) movementEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading…</p>`;
-
-  // Whether /api/campaigns returned actual data — used for fallback alert distinction
-  const hasFallbackData = Array.isArray(fallbackCampaigns) && fallbackCampaigns.length > 0;
-
-  let data = null;
-  try {
-    data = await fetchJSON(`/api/dashboard/trends?days=${getSelectedDays()}`);
-  } catch (_) {
-    // Endpoint unavailable — fall back to campaign-verdict alerts
-    if (trendsEl)   trendsEl.innerHTML   = `<p class="empty-state">Trend data temporarily unavailable.</p>`;
-    if (movementEl) movementEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Campaign movement data unavailable.</p>`;
-    if (hasFallbackData) {
-      renderAlerts(fallbackCampaigns);
-    } else {
-      renderAlertsUnavailable();
-    }
-    return;
-  }
-
-  if (data.db_unavailable) {
-    if (trendsEl)   trendsEl.innerHTML   = `<p class="empty-state">Trend data temporarily unavailable — database offline.</p>`;
-    if (movementEl) movementEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Campaign movement temporarily unavailable — database offline.</p>`;
-    if (hasFallbackData) {
-      renderAlerts(fallbackCampaigns);
-    } else {
-      renderAlertsUnavailable();
-    }
-    return;
-  }
-
-  const dq = data.data_quality || {};
-  const hasPrevious = dq.has_previous_period === true;
-
-  // ── Render summary trend cards ─────────────────────────────────────────────
-  renderTrendSummary(data.summary || {}, hasPrevious, trendsEl);
-
-  // ── Render campaign movement list ──────────────────────────────────────────
-  renderCampaignMovements(data.campaign_movements || [], hasPrevious, movementEl);
-
-  // ── Upgrade alerts panel with trend alerts (fall back to campaign verdicts) ─
-  const trendAlerts = data.alerts || [];
-  if (trendAlerts.length > 0) {
-    renderTrendAlerts(trendAlerts);
-  } else if (hasFallbackData) {
-    renderAlerts(fallbackCampaigns);
-  } else {
-    renderAlertsUnavailable();
-  }
-}
-
-// Direction semantics:
-//   spend   — up is neutral (context-dependent), down is neutral
-//   sqls    — up is good,  down is bad
-//   waste   — up is bad,   down is good
-//   junkRate — up is bad,  down is good
-const TREND_DIRECTION = {
-  spend_usd:           { up: "neutral", down: "neutral" },
-  confirmed_sqls:      { up: "good",    down: "bad"     },
-  confirmed_waste_usd: { up: "bad",     down: "good"    },
-  avg_junk_rate_pct:   { up: "bad",     down: "good"    },
+// Metric valence for delta chips: up is good for revenue/pipeline, neutral for
+// spend (more spend is neither win nor loss without revenue proof).
+const DASH_DELTA_VALENCE = {
+  spend_usd: "neutral",
+  revenue_usd: "up-good",
+  sqls: "up-good",
+  customers: "up-good",
+  roas: "up-good",
 };
 
-const TREND_LABELS = {
-  spend_usd:           "Spend",
-  confirmed_sqls:      "SQLs",
-  confirmed_waste_usd: "Waste Spend",
-  avg_junk_rate_pct:   "Avg Junk Rate",
-};
+async function loadDashboardOverview() {
+  const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.overview;
+  setWindowRangeLoading("dashboard-range");
 
-function _trendDirectionClass(key, trend) {
-  if (trend === "flat")              return "trend-neutral";
-  if (trend === "insufficient_data") return "trend-neutral";
-  const map = TREND_DIRECTION[key] || { up: "neutral", down: "neutral" };
-  const valence = trend === "up" ? map.up : map.down;
-  if (valence === "good")    return "trend-good";
-  if (valence === "bad")     return "trend-bad";
-  return "trend-neutral";
-}
-
-function _trendDirectionLabel(key, trend) {
-  if (trend === "insufficient_data") return "No comparison";
-  if (trend === "flat")              return "No change";
-  const map = TREND_DIRECTION[key] || { up: "neutral", down: "neutral" };
-  const valence = trend === "up" ? map.up : map.down;
-  if (valence === "good") return "Improved";
-  if (valence === "bad")  return "Worsened";
-  return trend === "up" ? "Higher" : "Lower";
-}
-
-function _fmtMetricValue(key, value) {
-  if (value === null || value === undefined) return "—";
-  if (key === "confirmed_sqls") return String(value);
-  if (key === "avg_junk_rate_pct") return value.toFixed(1) + "%";
-  return fmtDollar(value);
-}
-
-// Format a delta value for display. Junk-rate delta is in percentage points
-// (not %) so it is shown as "+6.5 pts" rather than "+6.5%".
-function _fmtMetricDeltaValue(key, value) {
-  if (value === null || value === undefined) return "—";
-  if (key === "avg_junk_rate_pct") {
-    return `${value > 0 ? "+" : ""}${value.toFixed(1)} pts`;
-  }
-  return (value > 0 ? "+" : "") + _fmtMetricValue(key, value);
-}
-
-function renderTrendSummary(summary, hasPrevious, container) {
-  if (!container) return;
-
-  const metricKeys = ["spend_usd", "confirmed_sqls", "confirmed_waste_usd", "avg_junk_rate_pct"];
-
-  const noDataNote = !hasPrevious
-    ? `<p class="trend-no-previous-note">Not enough previous-period data yet. Current values are shown without comparison.</p>`
-    : "";
-
-  const cards = metricKeys.map((key) => {
-    const m = summary[key];
-    if (!m) return "";
-    const dirCls   = _trendDirectionClass(key, m.trend);
-    const dirLabel = _trendDirectionLabel(key, m.trend);
-    const curVal   = _fmtMetricValue(key, m.current);
-    const prevVal  = _fmtMetricValue(key, m.previous);
-
-    // Delta display — junk-rate delta is percentage points, others use value formatter
-    let deltaStr = null;
-    if (m.delta !== null && m.delta !== undefined) {
-      const deltaFmt = _fmtMetricDeltaValue(key, m.delta);
-      const deltaPctFmt = (m.delta_pct !== null && key !== "avg_junk_rate_pct")
-        ? ` / ${m.delta_pct > 0 ? "+" : ""}${m.delta_pct.toFixed(1)}%`
-        : "";
-      deltaStr = deltaFmt + deltaPctFmt;
-    }
-
-    const arrowUp   = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>`;
-    const arrowDown = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>`;
-    const arrowIcon = m.trend === "up" ? arrowUp : (m.trend === "down" ? arrowDown : "");
-
-    return `
-      <div class="trend-card">
-        <div class="trend-card__label">${escapeHtml(TREND_LABELS[key] || key)}</div>
-        <div class="trend-card__current">${escapeHtml(curVal)}</div>
-        <div class="trend-card__comparison">vs. ${escapeHtml(prevVal)} previous</div>
-        ${deltaStr ? `<div class="trend-delta ${dirCls}">${arrowIcon}<span>${escapeHtml(deltaStr)}</span></div>` : ""}
-        <div class="trend-direction-badge ${dirCls}">${escapeHtml(dirLabel)}</div>
-      </div>`;
-  }).join("");
-
-  container.innerHTML = `${noDataNote}<div class="dashboard-trends">${cards}</div>`;
-}
-
-function renderCampaignMovements(movements, hasPrevious, container) {
-  if (!container) return;
-
-  if (movements.length === 0) {
-    if (!hasPrevious) {
-      container.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Not enough previous-period data yet. Trends will appear after more runs.</p>`;
+  const root = document.getElementById("dashboard-overview-root");
+  const genEl = document.getElementById("dashboard-generated");
+  if (root) {
+    if (dashOverview && dashOverviewStatus === "ok") {
+      // Refetch keeps the frame: hold the previous render, dimmed — no
+      // skeleton flash, no layout jump.
+      root.classList.add("is-refreshing");
     } else {
-      container.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">No campaign movement detected in this period.</p>`;
+      root.innerHTML = renderDashSkeleton();
     }
-    return;
   }
-
-  const rows = movements.map((m) => {
-    const cur  = m.current  || {};
-    const prev = m.previous || {};
-    const name = m.campaign_name || "—";
-    const mv   = m.movement || "stable";
-
-    const mvCls = {
-      improved:          "movement-improved",
-      worsened:          "movement-worsened",
-      stable:            "movement-stable",
-      new:               "movement-new",
-      dropped:           "movement-dropped",
-      insufficient_data: "movement-insufficient",
-    }[mv] || "movement-stable";
-
-    const mvLabel = {
-      improved:          "Improved",
-      worsened:          "Worsened",
-      stable:            "Stable",
-      new:               "New",
-      dropped:           "Dropped",
-      insufficient_data: "Insufficient data",
-    }[mv] || mv;
-
-    const spend    = cur.spend_usd      != null ? fmtDollar(cur.spend_usd)     : "—";
-    const sqls     = cur.confirmed_sqls != null ? String(cur.confirmed_sqls)   : "—";
-    const junk     = cur.junk_rate_pct  != null ? cur.junk_rate_pct.toFixed(1) + "%" : "—";
-    const verdict  = cur.verdict        || "";
-
-    const prevSpend  = prev.spend_usd      != null ? fmtDollar(prev.spend_usd)     : "—";
-    const prevSqls   = prev.confirmed_sqls != null ? String(prev.confirmed_sqls)   : "—";
-    const prevJunk   = prev.junk_rate_pct  != null ? prev.junk_rate_pct.toFixed(1) + "%" : "—";
-
-    // Investigate button if campaign name is available
-    const investigateBtn = name && name !== "—"
-      ? `<button class="investigate-button movement-investigate-btn" type="button" data-campaign="${escapeHtml(name)}">Investigate</button>`
-      : "";
-
-    return `
-      <div class="campaign-movement-item">
-        <div class="campaign-movement-item__header">
-          <span class="campaign-movement-item__name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-          <span class="movement-badge ${mvCls}">${escapeHtml(mvLabel)}</span>
-          ${verdictBadge(verdict)}
-          ${investigateBtn}
-        </div>
-        <div class="campaign-movement-item__metrics">
-          <span class="movement-metric"><span class="movement-metric__label">Spend</span> <span class="movement-metric__val">${escapeHtml(spend)}</span> <span class="movement-metric__prev">(was ${escapeHtml(prevSpend)})</span></span>
-          <span class="movement-metric"><span class="movement-metric__label">SQLs</span> <span class="movement-metric__val">${escapeHtml(sqls)}</span> <span class="movement-metric__prev">(was ${escapeHtml(prevSqls)})</span></span>
-          <span class="movement-metric"><span class="movement-metric__label">Junk</span> <span class="movement-metric__val">${escapeHtml(junk)}</span> <span class="movement-metric__prev">(was ${escapeHtml(prevJunk)})</span></span>
-        </div>
-        ${m.reason ? `<div class="campaign-movement-item__reason">${escapeHtml(m.reason)}</div>` : ""}
-      </div>`;
-  }).join("");
-
-  container.innerHTML = `<div class="campaign-movement-list">${rows}</div>`;
-
-  // Wire up Investigate buttons
-  container.querySelectorAll(".movement-investigate-btn").forEach((btn) => {
-    btn.addEventListener("click", () => openCampaignDrawer(btn.dataset.campaign));
-  });
-}
-
-function renderTrendAlerts(alerts) {
-  const el = document.getElementById("dash-alerts-body");
-  if (!el) return;
-
-  if (alerts.length === 0) {
-    el.innerHTML = `<p class="empty-state">No active alerts.</p>`;
-    return;
-  }
-
-  const severityIcon = (sev) => {
-    if (sev === "high") {
-      return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="alert-icon alert-icon--cut"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
-    }
-    return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="alert-icon alert-icon--fix"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
-  };
-
-  el.innerHTML = alerts.map((a) => `
-    <div class="alert-item">
-      ${severityIcon(a.severity)}
-      <div class="alert-text">
-        <span class="alert-severity-badge alert-severity-${escapeHtml(a.severity || "low")}">${escapeHtml((a.severity || "low").toUpperCase())}</span>
-        <span class="alert-campaign">${escapeHtml(a.campaign_name || "")}</span>
-        — <strong>${escapeHtml(a.title || "")}</strong>
-        <div class="alert-detail">${escapeHtml(a.detail || "")}</div>
-      </div>
-    </div>`).join("");
-}
-
-// ── Run history timeline ───────────────────────────────────────────────────
-
-async function loadRunHistory() {
-  const el = document.getElementById("run-history-timeline");
-  if (!el) return;
-
-  el.innerHTML = `<p class="empty-state">Loading run history…</p>`;
 
   try {
-    const data = await fetchJSON(`/api/runs?days=${getSelectedDays()}`);
-
-    if (data.db_unavailable) {
-      // Attempt JSONL fallback so the panel isn't completely empty during a DB outage.
-      let fallbackHtml = "";
-      try {
-        const fallback = await fetchJSON("/runs/latest");
-        if (fallback && fallback.status !== "empty" && fallback.run_type) {
-          fallbackHtml = renderRunHistoryItem(fallback);
-        }
-      } catch (_) { /* no JSONL fallback available */ }
-
-      el.innerHTML = (fallbackHtml
-        ? `<p class="empty-state" style="margin-bottom:var(--space-3)">Showing latest run from runtime log (database offline).</p>${fallbackHtml}`
-        : `<p class="empty-state">Run history temporarily unavailable — database offline.</p>`
-      );
-      return;
+    const data = await fetchJSON(
+      `/api/dashboard/overview?window=${encodeURIComponent(window_)}`
+    );
+    if (token !== _revReqSeq.overview) return; // stale response superseded
+    if (!_revResponseIsCurrent("overview", token, data)) return;
+    dashOverview = data;
+    dashOverviewStatus = "ok";
+    renderWindowRange("dashboard-range", data.window || null);
+    if (genEl) {
+      genEl.textContent = data.generated_at ? `Generated ${fmtDate(data.generated_at)}` : "";
     }
-
-    const runs = (data.runs || []).slice(0, 10);
-    if (runs.length === 0) {
-      el.innerHTML = `<p class="empty-state">No runs found in the selected window.</p>`;
-      return;
-    }
-
-    el.innerHTML = runs.map(renderRunHistoryItem).join("");
-  } catch (_) {
-    el.innerHTML = `<p class="empty-state">Could not load run history.</p>`;
+    renderDashboardOverview();
+  } catch (err) {
+    console.error("[loadDashboardOverview]", err);
+    if (token !== _revReqSeq.overview) return;
+    dashOverview = null;
+    dashOverviewStatus = "error";
+    if (genEl) genEl.textContent = "";
+    renderWindowRange("dashboard-range", null); // never leave "Loading…" stuck
+    renderDashboardOverview();
   }
 }
 
-function renderRunHistoryItem(run) {
-  const status   = normalizeRunStatus(run);
-  const dotCls   = status === "success" ? "run-entry__dot--success"
-                 : status === "failed"  ? "run-entry__dot--failed"
-                 : "run-entry__dot--empty";
-  const badgeCls = status === "success" ? "run-status-success"
-                 : status === "failed"  ? "run-status-failed"
-                 : status === "running" ? "run-status-running"
-                 : "";
+function renderDashSkeleton() {
+  const card = '<div class="dash-skeleton__card"></div>';
+  return `
+    <div class="dash-skeleton" aria-hidden="true">
+      <div class="dash-skeleton__row">${card.repeat(5)}</div>
+      <div class="dash-skeleton__wide"></div>
+      <div class="dash-skeleton__row">${card.repeat(4)}</div>
+    </div>
+    <p class="empty-state">Loading executive overview…</p>`;
+}
 
-  const timeStr = run.started_at && run.finished_at
-    ? `${fmtDate(run.started_at)} → ${fmtDate(run.finished_at)}`
-    : fmtDate(run.started_at || run.finished_at);
+function renderDashboardOverview() {
+  const root = document.getElementById("dashboard-overview-root");
+  if (!root) return;
+  root.classList.remove("is-refreshing");
 
-  const reportPart = run.report_path
-    ? `<span class="run-meta">${escapeHtml((run.report_path.split("/").pop()) || run.report_path)}</span>`
+  if (dashOverviewStatus !== "ok" || !dashOverview) {
+    const nextStep = dashCanNavigate("health")
+      ? 'Next step: check <a href="#/health">System Status</a> or retry with Refresh.'
+      : "Next step: retry with Refresh, or contact your administrator.";
+    root.innerHTML = `
+      <div class="revenue-blocked-card dash-error-card">
+        <h3 class="revenue-blocked-card__title">Executive overview unavailable</h3>
+        <p>The dashboard overview service could not be reached. Nothing is shown
+        because nothing safe could be computed — metrics are never fabricated.</p>
+        <p class="revenue-blocked-card__next">${nextStep}</p>
+      </div>`;
+    return;
+  }
+
+  const d = dashOverview;
+  root.innerHTML = `
+    ${renderDashTruthStrip(d)}
+    ${renderDashKpiRow(d)}
+    <div class="dash-main-grid">
+      <section class="dash-panel dash-chart-panel dash-anim" aria-label="Revenue vs spend trend">
+        ${renderDashTrendPanel(d)}
+      </section>
+      <aside class="dash-signal-rail dash-anim" aria-label="Top signals">
+        ${renderDashSignals(d)}
+      </aside>
+    </div>
+    ${renderDashFunnel(d)}
+    <div class="dash-lower-grid">
+      <section class="dash-panel dash-anim" aria-label="Channel mix">
+        ${renderDashSourceMix(d)}
+      </section>
+      <section class="dash-decisions dash-anim" aria-label="Decision cards">
+        ${renderDashDecisionCards(d)}
+      </section>
+    </div>
+    ${renderDashTruthFooter(d)}
+  `;
+  wireDashChartHover(root, d);
+}
+
+// One value cell that is NEVER a fake zero: null renders as "Unavailable".
+function dashValue(v, formatter) {
+  if (v === null || v === undefined) {
+    return '<span class="dash-unavailable">Unavailable</span>';
+  }
+  return escapeHtml(formatter ? formatter(v) : String(v));
+}
+
+// Admin-gated routes never render as live links for viewers — navigate() would
+// silently bounce them back to the dashboard, which reads as a broken link.
+const DASH_ADMIN_PAGES = ["revenue-health", "health", "backfill", "churn-input"];
+
+function dashCanNavigate(page) {
+  if (!DASH_ADMIN_PAGES.includes(page)) return true;
+  return !!(_currentUser && _currentUser.role === "admin");
+}
+
+// Delta chip for one period_change metric. A missing comparison is stated,
+// never rendered as 0%.
+function dashDeltaChip(metricKey, periodChange) {
+  const metrics = (periodChange && periodChange.metrics) || {};
+  const m = metrics[metricKey];
+  const label = (periodChange && periodChange.label) || "vs previous period";
+  if (!m || m.status !== "ok" || m.delta_pct === null || m.delta_pct === undefined) {
+    return '<span class="dash-delta dash-delta--none">No comparison</span>';
+  }
+  const pct = m.delta_pct * 100;
+  const magnitude = Math.abs(pct) >= 100 ? 0 : 1;
+  const text = `${pct > 0 ? "+" : ""}${pct.toFixed(magnitude)}%`;
+  const valence = DASH_DELTA_VALENCE[metricKey] || "neutral";
+  let cls = "dash-delta--flat";
+  if (m.direction === "up") {
+    cls = valence === "up-good" ? "dash-delta--good" : "dash-delta--neutral";
+  } else if (m.direction === "down") {
+    cls = valence === "up-good" ? "dash-delta--bad" : "dash-delta--neutral";
+  }
+  const arrow = m.direction === "up" ? "▲" : (m.direction === "down" ? "▼" : "•");
+  return `<span class="dash-delta ${cls}" title="${escapeHtml(label)}">` +
+    `<span aria-hidden="true">${arrow}</span> ${escapeHtml(text)}</span>`;
+}
+
+// Series values for sparklines — null unless the API says the series is ready.
+function dashTrendSeries(d, key) {
+  const trend = d.trend || {};
+  const statusKey = key === "spend_usd" ? "spend_status" : "revenue_status";
+  if (trend[statusKey] !== "ready") return null;
+  const vals = (trend.points || []).map((p) => p[key]);
+  if (vals.length < 2 || vals.some((v) => v === null || v === undefined)) return null;
+  return vals;
+}
+
+// 12-point-style sparkline: de-emphasis stroke, accent dot on the last point.
+function dashSparkline(values) {
+  if (!values || values.length < 2) return "";
+  const W = 120, H = 30, pad = 3;
+  const max = Math.max(...values, 1);
+  const min = Math.min(...values, 0);
+  const range = max - min || 1;
+  const x = (i) => pad + (W - pad * 2) * (i / (values.length - 1));
+  const y = (v) => pad + (H - pad * 2) * (1 - (v - min) / range);
+  const pts = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const lastX = x(values.length - 1).toFixed(1);
+  const lastY = y(values[values.length - 1]).toFixed(1);
+  return `<svg class="dash-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+    <polyline points="${pts}" fill="none" stroke="#cbd5e1" stroke-width="1.6"
+      stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="${lastX}" cy="${lastY}" r="2.6" fill="#129ef5" stroke="#ffffff" stroke-width="1.4"/>
+  </svg>`;
+}
+
+// Compact warning strip when the truth layer is not fully verified.
+function renderDashTruthStrip(d) {
+  const ts = d.truth_status || {};
+  if (ts.overall === "ready") return "";
+  const worst = [];
+  if (ts.revenue !== "ready") worst.push(`Revenue: ${ts.revenue}`);
+  if (ts.spend !== "ready") worst.push(`Spend: ${ts.spend}`);
+  if (ts.fx !== "ready") worst.push(`FX: ${ts.fx}`);
+  if (ts.source_attribution !== "ready") worst.push(`Sources: ${ts.source_attribution}`);
+  const tone = ts.overall === "blocked" ? "dash-truth-strip--blocked" : "";
+  const link = dashCanNavigate("revenue-health")
+    ? '<a class="dash-truth-strip__link" href="#/revenue-health">Open Revenue Health</a>'
+    : '<span class="dash-truth-strip__link">Contact your administrator</span>';
+  return `
+    <div class="dash-truth-strip ${tone}" role="status">
+      <span class="dash-truth-strip__label">Partial truth</span>
+      <span class="dash-truth-strip__detail">${escapeHtml(worst.join(" · "))}</span>
+      ${link}
+    </div>`;
+}
+
+function renderDashKpiRow(d) {
+  const k = d.kpis || {};
+  const pc = d.period_change || {};
+  const native = k.native_spend || {};
+
+  const spendSpark = dashSparkline(dashTrendSeries(d, "spend_usd"));
+  const revenueSpark = dashSparkline(dashTrendSeries(d, "revenue_usd"));
+
+  const nativeLine = native.amount !== null && native.amount !== undefined
+    ? `${escapeHtml(fmtCompactCurrency(native.amount, native.currency || "GBP"))} native`
+    : "Native spend unavailable";
+
+  const sqlRate = k.sql_rate !== null && k.sql_rate !== undefined
+    ? `${(k.sql_rate * 100).toFixed(1)}% of leads`
+    : "SQL rate unavailable";
+  const customerRate = k.customer_rate !== null && k.customer_rate !== undefined
+    ? `${(k.customer_rate * 100).toFixed(1)}% of leads`
     : "";
+
+  const cards = [
+    {
+      key: "spend",
+      label: "Google Ads Spend",
+      value: dashValue(k.google_ads_spend_usd, fmtMoney),
+      sub: nativeLine,
+      delta: dashDeltaChip("spend_usd", pc),
+      spark: spendSpark,
+      source: "Google Ads · USD reporting",
+      ok: k.google_ads_spend_usd !== null && k.google_ads_spend_usd !== undefined,
+    },
+    {
+      key: "revenue",
+      label: "Closed-Won Revenue",
+      value: dashValue(k.closed_won_revenue_usd, fmtMoney),
+      sub: "USD · HubSpot truth",
+      delta: dashDeltaChip("revenue_usd", pc),
+      spark: revenueSpark,
+      source: "HubSpot Closed-Won",
+      ok: k.closed_won_revenue_usd !== null && k.closed_won_revenue_usd !== undefined,
+    },
+    {
+      key: "customers",
+      label: "Customers",
+      value: dashValue(k.customers, fmtCount),
+      sub: customerRate || "Closed-won deals",
+      delta: dashDeltaChip("customers", pc),
+      spark: "",
+      source: "HubSpot Closed-Won",
+      ok: k.customers !== null && k.customers !== undefined,
+    },
+    {
+      key: "sqls",
+      label: "SQLs",
+      value: dashValue(k.sqls, fmtCount),
+      sub: sqlRate,
+      delta: dashDeltaChip("sqls", pc),
+      spark: "",
+      source: "HubSpot qualified leads",
+      ok: k.sqls !== null && k.sqls !== undefined,
+    },
+    {
+      key: "roas",
+      label: "Google Ads ROAS",
+      value: dashValue(k.google_ads_roas, fmtRoasMultiple),
+      sub: k.google_ads_roas !== null && k.google_ads_roas !== undefined
+        ? "Verified spend + revenue" : "Needs verified spend, FX, revenue",
+      delta: dashDeltaChip("roas", pc),
+      spark: "",
+      source: "Google Ads only",
+      ok: k.google_ads_roas !== null && k.google_ads_roas !== undefined,
+    },
+  ];
+
+  const compareNote = pc.available
+    ? `<p class="dash-compare-note">Change ${escapeHtml(pc.label || "vs previous period")}${pc.note ? ` — ${escapeHtml(pc.note)}` : ""}</p>`
+    : `<p class="dash-compare-note dash-compare-note--muted">No previous-period comparison${pc.reason ? ` — ${escapeHtml(pc.reason)}` : ""}</p>`;
 
   return `
-    <div class="run-history-item">
-      <div class="run-entry__dot ${dotCls}"></div>
-      <div class="run-entry__meta">
-        <div class="run-history-item__header">
-          <span class="run-entry__type">${fmt(run.run_type)} run</span>
-          <span class="run-status-badge ${badgeCls}">${escapeHtml(status)}</span>
-        </div>
-        <div class="run-entry__time">${timeStr}</div>
-        ${reportPart}
+    <div class="dash-kpi-grid">
+      ${cards.map((c) => `
+        <div class="dash-kpi-card dash-anim ${c.ok ? "" : "dash-kpi-card--unavailable"}" data-kpi="${c.key}">
+          <div class="dash-kpi-card__label">${escapeHtml(c.label)}</div>
+          <div class="dash-kpi-card__value">${c.value}</div>
+          <div class="dash-kpi-card__sub">${escapeHtml(c.sub)}</div>
+          <div class="dash-kpi-card__meta">${c.delta}${c.spark}</div>
+          <div class="dash-kpi-card__source">${escapeHtml(c.source)}</div>
+        </div>`).join("")}
+    </div>
+    ${compareNote}`;
+}
+
+// Round a chart max up to a clean tick value (1/2/2.5/5 × 10^k).
+function dashNiceCeil(v) {
+  if (v <= 0) return 1;
+  const exp = Math.floor(Math.log10(v));
+  const base = Math.pow(10, exp);
+  const unit = v / base;
+  let nice;
+  if (unit <= 1) nice = 1;
+  else if (unit <= 2) nice = 2;
+  else if (unit <= 2.5) nice = 2.5;
+  else if (unit <= 5) nice = 5;
+  else nice = 10;
+  return nice * base;
+}
+
+function dashCompactMoney(v) {
+  if (v === null || v === undefined) return "—";
+  if (Math.abs(v) >= 1000000) return "$" + (v / 1000000).toFixed(1) + "M";
+  if (Math.abs(v) >= 1000) return "$" + Math.round(v / 1000) + "k";
+  return "$" + Math.round(v);
+}
+
+function dashBucketLabel(iso, bucket) {
+  if (!iso) return "";
+  const dt = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(dt.getTime())) return iso;
+  const opts = bucket === "month"
+    ? { month: "short", year: "2-digit", timeZone: "UTC" }
+    : { day: "2-digit", month: "short", timeZone: "UTC" };
+  return dt.toLocaleDateString("en-GB", opts);
+}
+
+function renderDashTrendPanel(d) {
+  const trend = d.trend || {};
+  const k = d.kpis || {};
+  const bucketLabel = trend.bucket === "month" ? "Monthly" : (trend.bucket === "week" ? "Weekly" : "");
+
+  const notes = [];
+  if (trend.spend_status !== "ready") {
+    notes.push(`Spend series unavailable — ${trend.spend_reason || "not verified"}`);
+  }
+  if (trend.revenue_status !== "ready") {
+    notes.push(`Revenue series unavailable — ${trend.revenue_reason || "ledger unavailable"}`);
+  }
+
+  return `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Revenue vs Spend</h3>
+        <p class="dash-panel__sub">Is revenue moving with spend?${bucketLabel ? ` · ${bucketLabel}` : ""}</p>
       </div>
+      <div class="dash-legend">
+        <span class="dash-legend__item"><span class="dash-legend__swatch" style="background:${DASH_SERIES_COLORS.revenue}"></span>Revenue</span>
+        <span class="dash-legend__item"><span class="dash-legend__line" style="background:${DASH_SERIES_COLORS.spend}"></span>Spend</span>
+      </div>
+    </div>
+    ${notes.map((n) => `<p class="dash-series-note">${escapeHtml(n)}</p>`).join("")}
+    ${dashComboChartSVG(trend)}
+    <p class="dash-chart-caption">
+      Window totals — Revenue: ${dashValue(k.closed_won_revenue_usd, fmtMoney)} ·
+      Spend: ${dashValue(k.google_ads_spend_usd, fmtMoney)}
+    </p>`;
+}
+
+function dashComboChartSVG(trend) {
+  const points = (trend && trend.points) || [];
+  const revenueReady = trend && trend.revenue_status === "ready";
+  const spendReady = trend && trend.spend_status === "ready";
+  if (!points.length || (!revenueReady && !spendReady)) {
+    return '<div class="dash-chart-empty">No chartable trend in this window.</div>';
+  }
+
+  const W = 760, H = 240;
+  const padL = 52, padR = 14, padT = 12, padB = 30;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const n = points.length;
+  const slot = plotW / n;
+  const barW = Math.min(24, slot * 0.55);
+
+  const values = [];
+  points.forEach((p) => {
+    if (revenueReady && p.revenue_usd !== null && p.revenue_usd !== undefined) values.push(p.revenue_usd);
+    if (spendReady && p.spend_usd !== null && p.spend_usd !== undefined) values.push(p.spend_usd);
+  });
+  const yMax = dashNiceCeil(Math.max(1, ...values));
+  const xCenter = (i) => padL + slot * i + slot / 2;
+  const yPos = (v) => padT + plotH * (1 - v / yMax);
+  const baseline = padT + plotH;
+
+  // Hairline solid gridlines + clean y ticks.
+  const ticks = [0.25, 0.5, 0.75, 1];
+  const grid = ticks.map((t) => {
+    const y = yPos(yMax * t).toFixed(1);
+    return `<line x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}" stroke="#e0e6ef" stroke-width="1"/>
+      <text x="${padL - 8}" y="${Number(y) + 3}" text-anchor="end" class="dash-chart-tick">${dashCompactMoney(yMax * t)}</text>`;
+  }).join("");
+
+  // Revenue bars: rounded data-end, square baseline, from a single baseline.
+  let bars = "";
+  if (revenueReady) {
+    bars = points.map((p, i) => {
+      const v = p.revenue_usd;
+      if (v === null || v === undefined) return "";
+      const h = Math.max(0, baseline - yPos(v));
+      if (h === 0) return "";
+      const x = xCenter(i) - barW / 2;
+      const y = yPos(v);
+      const r = Math.min(4, barW / 2, h);
+      return `<path d="M${x.toFixed(1)},${baseline.toFixed(1)}
+        L${x.toFixed(1)},${(y + r).toFixed(1)}
+        Q${x.toFixed(1)},${y.toFixed(1)} ${(x + r).toFixed(1)},${y.toFixed(1)}
+        L${(x + barW - r).toFixed(1)},${y.toFixed(1)}
+        Q${(x + barW).toFixed(1)},${y.toFixed(1)} ${(x + barW).toFixed(1)},${(y + r).toFixed(1)}
+        L${(x + barW).toFixed(1)},${baseline.toFixed(1)} Z" fill="${DASH_SERIES_COLORS.revenue}" fill-opacity="0.92"/>`;
+    }).join("");
+  }
+
+  // Spend line + soft area wash + ringed markers.
+  let spendLayer = "";
+  if (spendReady) {
+    const linePts = points.map((p, i) =>
+      `${xCenter(i).toFixed(1)},${yPos(p.spend_usd || 0).toFixed(1)}`);
+    const areaPath = `M${padL + slot / 2},${baseline} L${linePts.join(" L")} L${(padL + slot * (n - 1) + slot / 2).toFixed(1)},${baseline} Z`;
+    const dots = points.map((p, i) =>
+      `<circle cx="${xCenter(i).toFixed(1)}" cy="${yPos(p.spend_usd || 0).toFixed(1)}" r="4"
+        fill="${DASH_SERIES_COLORS.spend}" stroke="#ffffff" stroke-width="2"/>`).join("");
+    spendLayer = `
+      <path d="${areaPath}" fill="${DASH_SERIES_COLORS.spend}" fill-opacity="0.08"/>
+      <polyline points="${linePts.join(" ")}" fill="none" stroke="${DASH_SERIES_COLORS.spend}"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      ${n <= 32 ? dots : ""}`;
+  }
+
+  // Sparse x labels: first, last, and evenly-spaced in between — a modulo
+  // label too close to the final label is dropped so they never collide.
+  const labelEvery = Math.max(1, Math.ceil(n / 6));
+  const xLabels = points.map((p, i) => {
+    if (i !== 0 && i !== n - 1) {
+      if (i % labelEvery !== 0) return "";
+      if (n - 1 - i < Math.max(2, Math.ceil(labelEvery * 0.6))) return "";
+    }
+    return `<text x="${xCenter(i).toFixed(1)}" y="${H - 8}" text-anchor="middle" class="dash-chart-tick">${escapeHtml(dashBucketLabel(p.period_start, trend.bucket))}</text>`;
+  }).join("");
+
+  // Full-height hover bands: the hit target is the whole bucket slot.
+  const hitBands = points.map((p, i) =>
+    `<rect class="dash-chart-hit" data-dash-idx="${i}" x="${(padL + slot * i).toFixed(1)}" y="${padT}"
+      width="${slot.toFixed(1)}" height="${plotH}" fill="transparent"/>`).join("");
+
+  return `
+    <div class="dash-chart-wrap">
+      <svg viewBox="0 0 ${W} ${H}" class="dash-combo-chart" role="img"
+        aria-label="Revenue bars and spend line per ${trend.bucket || "period"}">
+        ${grid}
+        <line x1="${padL}" x2="${W - padR}" y1="${baseline}" y2="${baseline}" stroke="#cbd5e1" stroke-width="1"/>
+        ${bars}
+        ${spendLayer}
+        ${xLabels}
+        ${hitBands}
+      </svg>
+      <div class="dash-chart-tooltip" hidden></div>
     </div>`;
+}
+
+// Crosshair-style hover: the hovered band highlights and one tooltip lists
+// EVERY series at that bucket. Tooltips enhance, never gate — the caption and
+// KPI cards carry the window totals as text.
+function wireDashChartHover(root, d) {
+  const wrap = root.querySelector(".dash-chart-wrap");
+  if (!wrap) return;
+  const tooltip = wrap.querySelector(".dash-chart-tooltip");
+  const points = ((d.trend || {}).points) || [];
+
+  function hide() {
+    if (tooltip) tooltip.hidden = true;
+    wrap.querySelectorAll(".dash-chart-hit.is-hover").forEach((el) => el.classList.remove("is-hover"));
+  }
+
+  wrap.addEventListener("pointermove", (e) => {
+    const band = e.target.closest(".dash-chart-hit");
+    if (!band || !tooltip) { hide(); return; }
+    const idx = Number(band.dataset.dashIdx);
+    const p = points[idx];
+    if (!p) { hide(); return; }
+
+    wrap.querySelectorAll(".dash-chart-hit.is-hover").forEach((el) => el.classList.remove("is-hover"));
+    band.classList.add("is-hover");
+
+    // Untrusted-data rule: tooltip content built with textContent, not HTML.
+    tooltip.textContent = "";
+    const title = document.createElement("div");
+    title.className = "dash-chart-tooltip__title";
+    title.textContent = dashBucketLabel(p.period_start, (d.trend || {}).bucket);
+    tooltip.appendChild(title);
+    const rows = [
+      ["Revenue", p.revenue_usd, DASH_SERIES_COLORS.revenue],
+      ["Spend", p.spend_usd, DASH_SERIES_COLORS.spend],
+      ["Customers", p.customers, null],
+    ];
+    rows.forEach(([label, value, color]) => {
+      const row = document.createElement("div");
+      row.className = "dash-chart-tooltip__row";
+      if (color) {
+        const key = document.createElement("span");
+        key.className = "dash-chart-tooltip__key";
+        key.style.background = color;
+        row.appendChild(key);
+      }
+      const val = document.createElement("strong");
+      val.textContent = value === null || value === undefined
+        ? "Unavailable"
+        : (label === "Customers" ? String(value) : fmtMoney(value));
+      const name = document.createElement("span");
+      name.textContent = ` ${label}`;
+      row.appendChild(val);
+      row.appendChild(name);
+      tooltip.appendChild(row);
+    });
+
+    const wrapRect = wrap.getBoundingClientRect();
+    const bandRect = band.getBoundingClientRect();
+    tooltip.hidden = false;
+    const tipW = tooltip.offsetWidth || 140;
+    let left = bandRect.left - wrapRect.left + bandRect.width / 2 - tipW / 2;
+    left = Math.max(4, Math.min(left, wrapRect.width - tipW - 4));
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = "8px";
+  });
+  wrap.addEventListener("pointerleave", hide);
+}
+
+function renderDashFunnel(d) {
+  const k = d.kpis || {};
+  const pc = d.period_change || {};
+  // Leads has no period-change metric (the contract compares spend / revenue /
+  // sqls / customers / roas) — its stage simply carries no delta chip.
+  const stages = [
+    { label: "Leads", value: k.leads, fmt: fmtCount, source: "HubSpot contacts", metric: null },
+    { label: "SQLs", value: k.sqls, fmt: fmtCount, source: "Qualified", metric: "sqls" },
+    { label: "Customers", value: k.customers, fmt: fmtCount, source: "Closed-won deals", metric: "customers" },
+    { label: "Closed-Won Revenue", value: k.closed_won_revenue_usd, fmt: fmtMoney, source: "USD · HubSpot", metric: "revenue_usd" },
+  ];
+  const conversions = [
+    dashConversion(k.sqls, k.leads),
+    dashConversion(k.customers, k.sqls),
+    null, // revenue is a value, not a count conversion
+  ];
+
+  const cells = stages.map((s, i) => {
+    const conv = i > 0 ? conversions[i - 1] : null;
+    const convChip = i === 0 ? "" : (
+      conv === null
+        ? '<span class="dash-funnel__conv dash-funnel__conv--muted" aria-hidden="true">→</span>'
+        : `<span class="dash-funnel__conv">→ ${escapeHtml(conv)}</span>`
+    );
+    const delta = s.metric ? `<div class="dash-funnel__stage-delta">${dashDeltaChip(s.metric, pc)}</div>` : "";
+    return `
+      ${convChip}
+      <div class="dash-funnel__stage" style="--funnel-accent:${DASH_FUNNEL_RAMP[i]}">
+        <div class="dash-funnel__stage-label">${escapeHtml(s.label)}</div>
+        <div class="dash-funnel__stage-value">${dashValue(s.value, s.fmt)}</div>
+        <div class="dash-funnel__stage-sub">${escapeHtml(s.source)}</div>
+        ${delta}
+      </div>`;
+  }).join("");
+
+  return `
+    <section class="dash-panel dash-funnel-panel dash-anim" aria-label="Pipeline funnel">
+      <div class="dash-panel__header">
+        <div>
+          <h3 class="dash-panel__title">Pipeline</h3>
+          <p class="dash-panel__sub">Leads → SQLs → Customers → Closed-Won Revenue</p>
+        </div>
+      </div>
+      <div class="dash-funnel">${cells}</div>
+    </section>`;
+}
+
+// Stage-to-stage conversion; null (not "0%") when either side is unavailable.
+function dashConversion(numerator, denominator) {
+  if (numerator === null || numerator === undefined) return null;
+  if (denominator === null || denominator === undefined || denominator <= 0) return null;
+  return `${((numerator / denominator) * 100).toFixed(1)}%`;
+}
+
+function renderDashSourceMix(d) {
+  const mix = d.source_mix || [];
+  // Revenue can be UNKNOWN (integration not connected) — distinct from a
+  // genuine $0. Unknown renders "Unavailable"; only known values sum.
+  const revenueKnown = mix.some((s) => s.revenue_usd !== null && s.revenue_usd !== undefined);
+  const total = mix.reduce((acc, s) => acc + (s.revenue_usd || 0), 0);
+
+  const legend = mix.map((s) => {
+    const color = DASH_DONUT_COLORS[s.key] || "#94a3b8";
+    const needsReview = s.key === "unclassified" &&
+      ((s.customers || 0) > 0 || (s.revenue_usd || 0) > 0 || (s.leads || 0) > 0);
+    // "Unclassified / Needs Review" carries its flag as a chip — keep the
+    // label itself short so neither is lost to ellipsis truncation.
+    const label = s.key === "unclassified" ? "Unclassified" : (s.label || s.key);
+    // No ROAS on mix rows (not even Google Ads) — the hero KPI carries the one
+    // canonical, safety-gated ROAS on this page.
+    const custPart = s.customers === null || s.customers === undefined
+      ? "" : ` <small>· ${escapeHtml(fmtCount(s.customers))} cust</small>`;
+    return `
+      <li class="dash-mix-row ${s.key === "offline" ? "dash-mix-row--muted" : ""}">
+        <span class="dash-mix-row__swatch" style="background:${color}"></span>
+        <span class="dash-mix-row__label">${escapeHtml(label)}${needsReview ? ' <span class="dash-mix-row__flag">Needs review</span>' : ""}</span>
+        <span class="dash-mix-row__value">${dashValue(s.revenue_usd, fmtMoney)}${custPart}</span>
+        <span class="dash-mix-row__status">${escapeHtml(s.status || "")}</span>
+      </li>`;
+  }).join("");
+
+  // Source attribution and the deal ledger are two durable views of the same
+  // closed-won truth; if they disagree beyond tolerance, say so — never let a
+  // pretty donut silently contradict the revenue KPI.
+  const kpiRevenue = (d.kpis || {}).closed_won_revenue_usd;
+  let reconcileNote = "";
+  if (kpiRevenue !== null && kpiRevenue !== undefined && kpiRevenue > 0 && total > 0) {
+    const driftPct = Math.abs(total - kpiRevenue) / kpiRevenue;
+    if (driftPct > 0.02) {
+      reconcileNote = `<p class="dash-series-note">Source-attributed total (${escapeHtml(fmtMoney(total))}) differs from closed-won revenue truth (${escapeHtml(fmtMoney(kpiRevenue))}) — source attribution is incomplete. See Revenue Health.</p>`;
+    }
+  }
+
+  return `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Channel Mix</h3>
+        <p class="dash-panel__sub">Closed-won revenue by acquisition source</p>
+      </div>
+    </div>
+    ${reconcileNote}
+    <div class="dash-mix">
+      ${dashDonutSVG(mix, total, revenueKnown)}
+      <ul class="dash-mix-list">${legend}</ul>
+    </div>`;
+}
+
+function dashDonutSVG(mix, total, revenueKnown) {
+  const size = 168, r = 58, cx = size / 2, cy = size / 2, stroke = 20;
+  const C = 2 * Math.PI * r;
+  if (!total) {
+    // Unknown revenue (integration not connected) is stated as Unavailable —
+    // an empty ring must never imply a verified "$0 from every source".
+    const centerTop = revenueKnown ? "—" : "Unavailable";
+    const centerSub = revenueKnown ? "No revenue" : "Revenue blocked";
+    return `
+      <div class="dash-donut">
+        <svg viewBox="0 0 ${size} ${size}" role="img" aria-label="${revenueKnown ? "No closed-won revenue in this window" : "Closed-won revenue unavailable"}">
+          <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#e0e6ef" stroke-width="${stroke}"/>
+        </svg>
+        <div class="dash-donut__center ${revenueKnown ? "" : "dash-donut__center--blocked"}"><strong>${centerTop}</strong><span>${centerSub}</span></div>
+      </div>`;
+  }
+  const segs = mix.filter((s) => (s.revenue_usd || 0) > 0);
+  const gap = segs.length > 1 ? 2 : 0; // 2px surface gap between fills
+  let offset = 0;
+  const circles = segs.map((s) => {
+    const frac = (s.revenue_usd || 0) / total;
+    const arc = Math.max(0, frac * C - gap);
+    const color = DASH_DONUT_COLORS[s.key] || "#94a3b8";
+    const el = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none"
+      stroke="${color}" stroke-width="${stroke}"
+      stroke-dasharray="${arc.toFixed(2)} ${(C - arc).toFixed(2)}"
+      stroke-dashoffset="${(-offset).toFixed(2)}"
+      data-dash-mix="${escapeHtml(s.key)}">
+      <title>${escapeHtml(`${s.label}: ${fmtMoney(s.revenue_usd)} (${Math.round(frac * 100)}%)`)}</title>
+    </circle>`;
+    offset += frac * C;
+    return el;
+  }).join("");
+  return `
+    <div class="dash-donut">
+      <svg viewBox="0 0 ${size} ${size}" role="img" aria-label="Closed-won revenue share by source group" style="transform:rotate(-90deg)">
+        ${circles}
+      </svg>
+      <div class="dash-donut__center"><strong>${escapeHtml(fmtMoney(total))}</strong><span>closed-won</span></div>
+    </div>`;
+}
+
+const DASH_SIGNAL_DEFS = [
+  { key: "best_campaign", label: "Best Campaign" },
+  { key: "best_country", label: "Best Country" },
+  { key: "best_source", label: "Best Source" },
+  { key: "biggest_waste", label: "Biggest Waste Signal" },
+  { key: "fastest_improving", label: "Fastest Improving" },
+  { key: "biggest_decline", label: "Biggest Decline" },
+];
+
+function dashSignalBody(key, s) {
+  if (key === "best_campaign" || key === "best_country") {
+    const roas = s.roas !== null && s.roas !== undefined ? ` · ${fmtRoasMultiple(s.roas)}` : "";
+    return {
+      value: s.label,
+      line: `${fmtMoney(s.revenue_usd)} closed-won · ${fmtCount(s.customers)} customer${(s.customers || 0) === 1 ? "" : "s"}${roas}`,
+    };
+  }
+  if (key === "best_source") {
+    return {
+      value: s.label,
+      line: `${fmtMoney(s.revenue_usd)} closed-won · ${s.status || "Revenue-only"}`,
+    };
+  }
+  if (key === "biggest_waste") {
+    const amount = s.currency === "USD"
+      ? fmtMoney(s.value)
+      : fmtCompactCurrency(s.value, s.currency || "GBP");
+    return {
+      value: amount,
+      line: `${fmtCount(s.campaign_count)} campaign${(s.campaign_count || 0) === 1 ? "" : "s"} with spend but no SQLs · top: ${s.top_campaign || "—"}`,
+    };
+  }
+  // fastest_improving / biggest_decline
+  const pct = s.delta_pct !== null && s.delta_pct !== undefined
+    ? `${s.delta_pct > 0 ? "+" : ""}${(s.delta_pct * 100).toFixed(1)}%` : "—";
+  return { value: s.label, line: `${pct} vs previous period` };
+}
+
+function renderDashSignals(d) {
+  const signals = d.top_signals || {};
+  const items = DASH_SIGNAL_DEFS.map(({ key, label }) => {
+    const s = signals[key];
+    if (!s) {
+      return `
+        <div class="dash-signal dash-signal--empty">
+          <div class="dash-signal__label">${escapeHtml(label)}</div>
+          <div class="dash-signal__line">No signal in this window</div>
+        </div>`;
+    }
+    const body = dashSignalBody(key, s);
+    const target = s.target_page ? `#/${escapeHtml(s.target_page)}` : null;
+    return `
+      <a class="dash-signal ${key === "biggest_waste" || key === "biggest_decline" ? "dash-signal--warn" : ""}"
+         href="${target || "#"}" ${target ? "" : 'tabindex="-1"'}>
+        <div class="dash-signal__label">${escapeHtml(label)}</div>
+        <div class="dash-signal__value">${escapeHtml(body.value || "—")}</div>
+        <div class="dash-signal__line">${escapeHtml(body.line || "")}</div>
+        <span class="dash-signal__cta" aria-hidden="true">View evidence →</span>
+      </a>`;
+  }).join("");
+
+  return `
+    <h3 class="dash-rail-title">Top Signals</h3>
+    <div class="dash-signal-list">${items}</div>`;
+}
+
+function renderDashDecisionCards(d) {
+  const cards = d.decision_cards || [];
+  if (!cards.length) return "";
+  return `
+    <div class="dash-decision-grid">
+      ${cards.map((c) => `
+        <div class="dash-decision-card dash-decision-card--${escapeHtml(c.type || "scale")}">
+          <div class="dash-decision-card__title">${escapeHtml(c.title || "")}</div>
+          <div class="dash-decision-card__headline">${escapeHtml(c.headline || "")}</div>
+          <p class="dash-decision-card__body">${escapeHtml(c.body || "")}</p>
+          ${c.target_page && dashCanNavigate(c.target_page) ? `<a class="dash-decision-card__link" href="#/${escapeHtml(c.target_page)}">${escapeHtml(c.target_label || "Open evidence")} →</a>` : ""}
+        </div>`).join("")}
+    </div>`;
+}
+
+const DASH_STATUS_DOT = {
+  ready: "dash-dot--ok",
+  partial: "dash-dot--warn",
+  blocked: "dash-dot--bad",
+  unavailable: "dash-dot--muted",
+};
+
+function renderDashTruthFooter(d) {
+  const ts = d.truth_status || {};
+  const chip = (label, status) => `
+    <span class="dash-footer-chip" title="${escapeHtml(`${label}: ${status || "unknown"}`)}">
+      <span class="dash-dot ${DASH_STATUS_DOT[status] || "dash-dot--muted"}"></span>${escapeHtml(label)}
+    </span>`;
+  const allGood = ts.overall === "ready";
+  return `
+    <footer class="dash-truth-footer ${allGood ? "dash-truth-footer--ok" : ""}">
+      ${chip("Spend", ts.spend)}
+      ${chip("Revenue", ts.revenue)}
+      ${chip("FX", ts.fx)}
+      ${chip("Sources", ts.source_attribution)}
+      ${chip("Geo", ts.geo)}
+      <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
+      ${allGood
+        ? '<span class="dash-footer-note">All truth sources verified for this window.</span>'
+        : (dashCanNavigate("health")
+          ? '<a class="dash-footer-note" href="#/health">Some sources need attention — open System Status</a>'
+          : '<span class="dash-footer-note">Some sources need attention — contact your administrator.</span>')}
+    </footer>`;
 }
 
 // ── Campaigns page ─────────────────────────────────────────────────────────
@@ -9182,6 +9536,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
 
+  // Wire up Executive Overview controls (business windows — PR-ADS-134)
+  const dashRefresh = document.getElementById("dashboard-refresh-btn");
+  const dashWindow  = document.getElementById("dashboard-window");
+  if (dashRefresh) dashRefresh.addEventListener("click", loadDashboardOverview);
+  if (dashWindow) {
+    dashWindow.value = getRoasBusinessWindow();
+    dashWindow.addEventListener("change", handleBusinessWindowSelectChange);
+  }
+
   // Wire up ROAS by Campaign controls (business windows — PR-ADS-107A)
   const roasCampRefresh = document.getElementById("roas-campaigns-refresh-btn");
   const roasCampWindow  = document.getElementById("roas-campaigns-window");
@@ -9546,6 +9909,7 @@ function setRoasBusinessWindow(key) {
 function handleBusinessWindowSelectChange(e) {
   setRoasBusinessWindow(e.target.value);
   switch (_currentPage) {
+    case "dashboard":       loadDashboardOverview(); break;
     case "roas-countries":  loadRoasCountries(); break;
     case "deals":           loadDeals();         break;
     case "revenue-health":  loadRevenueHealth(); break;
@@ -9587,7 +9951,7 @@ let roasCountryWindow = null;
 // Per-page request sequence tokens guard against stale-response races: only the
 // newest in-flight request for a page may render. Switching CQ→YTD→Last Quarter
 // quickly must never paint an older response over the newest selection.
-const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0 };
+const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0, overview: 0 };
 
 // PR-ADS-116: show the exact resolved date range beside each window selector.
 function formatWindowRange(win) {

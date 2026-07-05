@@ -984,6 +984,61 @@ def fetch_canonical_campaign_spend(start: date | None, end: date) -> dict:
         return {"available": False, "rows": []}
 
 
+def fetch_spend_daily_series(start: date | None, end: date) -> dict:
+    """Account-wide per-day canonical Google Ads spend (PR-ADS-134). Read-only.
+
+    Same canonical table (google_ads_campaign_daily_spend) and per-day FX join
+    as fetch_canonical_campaign_spend, but grouped by spend_date instead of
+    campaign_id so the Dashboard Overview can draw a spend-over-time series.
+    A day whose FX rate is missing keeps spend_usd=None (never native GBP
+    relabelled as USD). Days with no rows are simply absent — the CALLER must
+    only treat absent days as zero when the coverage ledger says the window is
+    fully verified (a missing chunk is never $0).
+
+    Returns {available, rows:[{spend_date, cost_micros, spend_native,
+             spend_usd, fx_complete}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.spend_date,
+                           SUM(s.cost_micros)::bigint AS cost_micros,
+                           SUM((s.cost_micros / 1000000.0) * fx.rate) AS spend_usd,
+                           SUM(CASE WHEN fx.rate IS NULL THEN 1 ELSE 0 END)
+                               AS fx_missing_rows
+                    FROM google_ads_campaign_daily_spend s
+                    LEFT JOIN fx_rates fx
+                      ON fx.rate_date = s.spend_date
+                     AND fx.base_currency = s.currency_code
+                     AND fx.quote_currency = %s
+                    WHERE (%s::date IS NULL OR s.spend_date >= %s) AND s.spend_date <= %s
+                    GROUP BY s.spend_date
+                    ORDER BY s.spend_date
+                    """,
+                    (FX_REPORTING_CURRENCY, start, start, end),
+                )
+                rows = []
+                for r in _rows_as_dicts(cur):
+                    micros = int(r.get("cost_micros") or 0)
+                    fx_missing = int(r.get("fx_missing_rows") or 0)
+                    usd = None if fx_missing else float(r.get("spend_usd") or 0.0)
+                    rows.append({
+                        "spend_date": _as_date(r.get("spend_date")),
+                        "cost_micros": micros,
+                        "spend_native": micros / 1_000_000,
+                        "spend_usd": usd,
+                        "fx_complete": fx_missing == 0,
+                    })
+            return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_spend_daily_series failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
 def fetch_spend_coverage(start: date | None, end: date) -> dict:
     """Verified/failed Google Ads spend chunks intersecting the window. Read-only.
 

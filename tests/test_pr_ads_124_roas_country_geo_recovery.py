@@ -72,7 +72,9 @@ def _load_geo():
 
 
 def test_apply_page_chrome_hides_all_three_chrome_elements():
-    fn = _fn("function applyPageChrome", span=900)
+    # span widened in PR-ADS-134 (the guard also scopes the freshness strip
+    # off the rebuilt Executive Overview dashboard).
+    fn = _fn("function applyPageChrome", span=1400)
     assert "time-range-bar" in fn       # 7d / 14d / 30d / 60d bar
     assert "page-help-btn" in fn        # Help button
     assert "monitoring-banner" in fn    # monitoring warning
