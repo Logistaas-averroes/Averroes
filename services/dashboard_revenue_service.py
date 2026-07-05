@@ -108,9 +108,11 @@ def _build_kpis(summary: dict, deal_rows: list, *, revenue_connected: bool,
     if revenue_connected:
         revenue_usd = summary.get("won_revenue_usd")
         customers = summary.get("customers")
-        # Raw ledger amounts: a missing amount is skipped, never read as $0.
+        # Largest Deal is Unavailable when ANY closed-won deal amount is unknown:
+        # the unknown deal could be the largest, so the max of known amounts is
+        # not a safe "largest deal" (kept strict — no "Largest Known Deal").
         amounts = [a for a in (_deal_amount(d) for d in deal_rows) if a is not None]
-        largest_deal = _round2(max(amounts)) if amounts else None
+        largest_deal = _round2(max(amounts)) if (amounts_complete and amounts) else None
         # An average that would include an unknown amount is uncomputable — it is
         # Unavailable, never revenue/customers with a null deal silently as $0.
         average = _avg_deal_value(revenue_usd, customers) if amounts_complete else None
@@ -488,7 +490,17 @@ def _build_truth_status(readiness: dict, ledger_status: str | None,
 
 
 def _fmt_usd_short(value) -> str:
-    v = float(value or 0.0)
+    """Compact USD copy for decision-card text.
+
+    An unknown amount is "Unavailable", never a fabricated $0 — a group whose
+    total is uncomputable (a null deal amount) must not read as $0 in card copy.
+    """
+    if value is None:
+        return "Unavailable"
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "Unavailable"
     if abs(v) >= 1_000_000:
         return f"${v / 1_000_000:.1f}M"
     if abs(v) >= 1_000:
@@ -513,11 +525,19 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
         })
     elif multi:
         top = multi[0]
+        if top.get("revenue_usd") is None:
+            # A deal amount in this group is unknown -> the total is Unavailable,
+            # never a fabricated $0. Deals/customers counts are still real.
+            body = (f"{top['campaign']} closed {top['deals']} deals across "
+                    f"{top['customers']} customers; its revenue total is Unavailable "
+                    "(a deal amount is unknown) — verify before scaling.")
+        else:
+            body = (f"{top['campaign']} closed {_fmt_usd_short(top['revenue_usd'])} across "
+                    f"{top['deals']} deals — the strongest repeatable revenue producer this window.")
         cards.append({
             "type": "scale", "title": "Scale",
             "headline": f"{top['campaign']} produced {top['customers']} customers",
-            "body": (f"{top['campaign']} closed {_fmt_usd_short(top['revenue_usd'])} across "
-                     f"{top['deals']} deals — the strongest repeatable revenue producer this window."),
+            "body": body,
             "target_page": "roas-campaigns", "target_label": "Open ROAS by Campaign",
         })
     else:
@@ -553,9 +573,13 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
     if unclassified_campaign or unclassified_country:
         blockers = []
         if unclassified_campaign:
-            blockers.append(f"{_fmt_usd_short(unclassified_campaign['revenue_usd'])} without a campaign")
+            rev = unclassified_campaign["revenue_usd"]
+            blockers.append("revenue with an Unavailable amount and no campaign"
+                            if rev is None else f"{_fmt_usd_short(rev)} without a campaign")
         if unclassified_country:
-            blockers.append(f"{_fmt_usd_short(unclassified_country['revenue_usd'])} without a country")
+            rev = unclassified_country["revenue_usd"]
+            blockers.append("revenue with an Unavailable amount and no country"
+                            if rev is None else f"{_fmt_usd_short(rev)} without a country")
         cards.append({
             "type": "investigate", "title": "Investigate",
             "headline": "Revenue with incomplete attribution",

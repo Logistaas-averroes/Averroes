@@ -408,18 +408,91 @@ def test_null_amount_makes_group_revenue_unavailable(monkeypatch):
     assert country["revenue_usd"] is None
 
 
-def test_null_amount_makes_avg_and_concentration_unavailable(monkeypatch):
-    # Review finding: average deal value must not divide mart revenue (null->0)
-    # by a customer count that includes the null-amount deal, and concentration
-    # shares are uncomputable without every amount. Both are Unavailable.
+def test_null_amount_makes_avg_concentration_and_largest_unavailable(monkeypatch):
+    # Review + follow-up: with an unknown deal amount, average deal value, deal
+    # concentration AND largest deal are all Unavailable (the unknown deal could
+    # be the largest). Deal/customer counts are still preserved.
     won, deals = _null_amount_dataset()
     out = _revenue(monkeypatch, won_rows=won, deal_rows=deals)
     assert out["kpis"]["average_deal_value_usd"] is None
     assert out["deal_concentration"] is None
-    # largest known deal is still a real number (a floor), and customers count
-    # still includes every closed-won deal.
-    assert out["kpis"]["largest_deal_usd"] is not None
+    assert out["kpis"]["largest_deal_usd"] is None  # strict: unknown could be largest
+    # Counts still include every closed-won deal.
     assert out["kpis"]["customers"] == 4
+
+
+def _card_strings(out):
+    """All human-facing decision-card text (headlines + bodies)."""
+    parts = []
+    for c in out["decision_cards"]:
+        parts.append(c.get("headline") or "")
+        parts.append(c.get("body") or "")
+    return " || ".join(parts)
+
+
+def test_decision_card_copy_never_fabricates_zero_for_unknown_revenue(monkeypatch):
+    # A closed-won deal with a null amount in an unattributed campaign/country:
+    # the Investigate card references that revenue but must say Unavailable, not $0.
+    unattributed_null = [
+        {"deal_id": "d1", "company": "Ghost Co", "country": None, "campaign_name": None,
+         "deal_close_date": "2026-06-14", "deal_amount_usd": None,
+         "deal_stage_label": "Closed Won", "match_status": "unknown", "match_source": None},
+        {"deal_id": "d2", "company": "Blue Cargo", "country": "United States",
+         "campaign_name": "Global Competitors", "deal_close_date": "2026-05-23",
+         "deal_amount_usd": 11000.0, "deal_stage_label": "Closed Won",
+         "match_status": "matched", "match_source": "gclid"},
+    ]
+    won = [
+        {"campaign_name": None, "country": None, "deal_id": "d1",
+         "deal_amount_usd": None, "match_status": "unknown"},
+        {"campaign_name": "Global Competitors", "country": "United States",
+         "deal_id": "d2", "deal_amount_usd": 11000.0, "match_status": "matched"},
+    ]
+    out = _revenue(monkeypatch, won_rows=won, deal_rows=unattributed_null)
+    # The unattributed group's revenue is unknown -> its breakdown revenue is None.
+    unc = next(r for r in out["breakdowns"]["by_campaign"] if r["attribution_status"] == "unattributed")
+    assert unc["revenue_usd"] is None
+    # Decision-card copy must not fabricate a $0 for that unknown revenue.
+    text = _card_strings(out)
+    assert "$0" not in text
+    assert "Unavailable" in text
+    # The Investigate card specifically references the unattributed revenue.
+    investigate = next(c for c in out["decision_cards"] if c["type"] == "investigate")
+    assert "$0" not in investigate["body"]
+    assert "Unavailable" in investigate["body"]
+
+
+def test_fmt_usd_short_none_is_unavailable():
+    from services.dashboard_revenue_service import _fmt_usd_short
+    assert _fmt_usd_short(None) == "Unavailable"
+    assert _fmt_usd_short(18000) == "$18.0k"
+    assert _fmt_usd_short(2_500_000) == "$2.5M"
+
+
+def test_scale_card_says_unavailable_when_top_group_revenue_unknown(monkeypatch):
+    # A multi-customer, attributed campaign whose total is Unavailable (one deal
+    # amount unknown): the Scale card names the customers but never a $0 total.
+    deals = [
+        {"deal_id": "d1", "company": "Acme", "country": "United States",
+         "campaign_name": "Global Competitors", "deal_close_date": "2026-06-14",
+         "deal_amount_usd": None, "deal_stage_label": "Closed Won",
+         "match_status": "matched", "match_source": "gclid"},
+        {"deal_id": "d2", "company": "Blue", "country": "United States",
+         "campaign_name": "Global Competitors", "deal_close_date": "2026-05-23",
+         "deal_amount_usd": 11000.0, "deal_stage_label": "Closed Won",
+         "match_status": "matched", "match_source": "gclid"},
+    ]
+    won = [
+        {"campaign_name": "Global Competitors", "country": "United States",
+         "deal_id": "d1", "deal_amount_usd": None, "match_status": "matched"},
+        {"campaign_name": "Global Competitors", "country": "United States",
+         "deal_id": "d2", "deal_amount_usd": 11000.0, "match_status": "matched"},
+    ]
+    out = _revenue(monkeypatch, won_rows=won, deal_rows=deals)
+    scale = next(c for c in out["decision_cards"] if c["type"] == "scale")
+    assert "$0" not in scale["body"]
+    assert "Unavailable" in scale["body"]
+    assert "Global Competitors" in scale["headline"]
 
 
 def test_bucket_label_is_portable(monkeypatch):
