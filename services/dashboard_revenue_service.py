@@ -563,7 +563,8 @@ def _build_decision_cards(kpis: dict, concentration: dict | None,
             "type": "watch", "title": "Watch",
             "headline": "Revenue is well spread" if concentration else "Concentration unavailable",
             "body": ("No single deal dominates this window's revenue." if concentration
-                     else "Deal concentration cannot be computed without closed-won revenue."),
+                     else "Deal concentration is unavailable — it needs closed-won "
+                          "revenue with every deal amount known."),
             "target_page": "deals", "target_label": "Open Deals",
         })
 

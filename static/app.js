@@ -2892,7 +2892,10 @@ function renderRevKpiRow(d) {
       key: "largest",
       label: "Largest Deal",
       value: dashValue(k.largest_deal_usd, fmtMoney),
-      sub: largestDealCompany ? escapeHtml(largestDealCompany) : "Single biggest closed-won deal",
+      // When the largest deal is Unavailable (an amount is unknown, so the
+      // biggest deal can't be identified), don't name a company under it.
+      sub: (k.largest_deal_usd !== null && k.largest_deal_usd !== undefined && largestDealCompany)
+        ? escapeHtml(largestDealCompany) : "Single biggest closed-won deal",
       delta: '<span class="dash-delta dash-delta--none">Single deal</span>',
       source: "HubSpot Closed-Won",
       ok: k.largest_deal_usd !== null && k.largest_deal_usd !== undefined,
@@ -3175,7 +3178,7 @@ function renderRevConcentration(d) {
       <div class="dash-panel__header">
         <div><h3 class="dash-panel__title">Deal Concentration</h3></div>
       </div>
-      <p class="rev-breakdown-empty">Concentration is unavailable without closed-won revenue.</p>`;
+      <p class="rev-breakdown-empty">Deal concentration is unavailable for this window.</p>`;
   }
   const verdictClass = c.label === "Highly concentrated" ? "rev-conc--high"
     : (c.label === "Moderately concentrated" ? "rev-conc--mid" : "rev-conc--ok");
