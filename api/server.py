@@ -64,6 +64,7 @@ Protected endpoints (require authenticated session):
   POST /api/source-attribution-backfill/run — Admin-only durable source-classification backfill (local DB only; PR-ADS-117).
   GET  /api/source-attribution-backfill/status — Latest source backfill progress/result (admin-only; PR-ADS-117).
   GET  /api/dashboard/overview     — Read-only Executive Overview command-center contract by business window (PR-ADS-134).
+  GET  /api/dashboard/revenue      — Read-only Dashboard Revenue & Customers contract by business window (PR-ADS-135).
 """
 
 import base64
@@ -6258,6 +6259,39 @@ async def get_dashboard_overview(
         log.error("Dashboard overview failed: %s", exc)
         raise HTTPException(
             status_code=500, detail="Dashboard overview computation failed"
+        ) from exc
+
+
+@app.get("/api/dashboard/revenue")
+async def get_dashboard_revenue(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Dashboard Revenue & Customers contract (PR-ADS-135).
+
+    ONE read-only payload for the Dashboard → Revenue tab: closed-won revenue /
+    customers / average deal value / largest deal / SQL→Customer efficiency,
+    previous-period movement, a revenue-and-customer trend, revenue breakdowns
+    by campaign / source / country, deal concentration, and the top closed-won
+    deal proof rows. Composes the canonical Revenue Decision Mart, the closed-won
+    deal ledger, and Revenue by Source — never new business math, never Google
+    Ads conversion value as revenue.
+
+    Uses business windows (current_quarter | last_quarter | last_6_months | ytd
+    | all_time), not ad-style day windows. Unavailable metrics are null plus a
+    reason — never a fabricated $0 / 0.00x / 0%. Read-only: no writes to Google
+    Ads, HubSpot, budgets, bids, campaigns, keywords, or offline conversions.
+    """
+    from services.dashboard_revenue_service import build_dashboard_revenue  # noqa: PLC0415
+
+    try:
+        return build_dashboard_revenue(window=window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Dashboard revenue failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Dashboard revenue computation failed"
         ) from exc
 
 

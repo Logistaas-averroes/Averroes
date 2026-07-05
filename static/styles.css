@@ -6356,3 +6356,206 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 #data-freshness-bar.is-dash-hidden { display: none; }
 .dash-funnel__stage-delta { margin-top: 4px; }
 .dash-donut__center--blocked strong { font-size: 12px; color: var(--c-warning); }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PR-ADS-135 — Dashboard Revenue & Customers tab
+   Reuses the PR-ADS-134 dashboard design system (tokens, cards, panels, chart
+   shell, decision cards, truth footer). Only Revenue-specific pieces below.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.dash-tab-intro { margin-bottom: var(--space-4); }
+.dash-tab-intro__title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+.dash-tab-intro__sub {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 2px 0 0;
+}
+
+/* Concentration panel sits in the main grid's aside slot. */
+.rev-concentration-panel { display: block; }
+.rev-conc { display: flex; flex-direction: column; gap: var(--space-3); }
+.rev-conc-verdict {
+  align-self: flex-start;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 4px 12px;
+  border-radius: 999px;
+}
+.rev-conc--ok { color: var(--c-success); background: var(--c-success-bg); }
+.rev-conc--mid { color: var(--c-warning); background: var(--c-warning-bg); }
+.rev-conc--high { color: var(--c-danger); background: var(--c-danger-bg); }
+.rev-conc-metric { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: baseline; }
+.rev-conc-metric__label { font-size: 12px; color: var(--text-secondary); }
+.rev-conc-metric__val { font-size: 16px; font-weight: 700; color: var(--text-primary); }
+.rev-conc-bar {
+  grid-column: 1 / -1;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  overflow: hidden;
+}
+.rev-conc-bar__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--brand-sky-accent);
+}
+.rev-conc-foot { font-size: 11px; color: var(--text-muted); margin: 0; }
+
+/* Revenue momentum chart annotations. */
+.rev-count-label {
+  font-size: 10px;
+  font-weight: 700;
+  fill: var(--brand-sky-accent);
+  font-family: var(--font-sans);
+}
+.rev-legend-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: rgba(18, 158, 245, 0.12);
+  color: var(--brand-sky-accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* Breakdown grid — three compact panels. */
+.rev-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-5);
+  margin-top: var(--space-5);
+  align-items: start;
+}
+.rev-breakdown-panel { display: flex; flex-direction: column; }
+.rev-breakdown-list { list-style: none; margin: 0 0 var(--space-3); padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.rev-breakdown-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1px 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.rev-breakdown-row:last-child { border-bottom: none; }
+.rev-breakdown-row__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rev-breakdown-row__value {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.rev-breakdown-row__meta { font-size: 11px; color: var(--text-muted); }
+.rev-breakdown-row__status { font-size: 11px; color: var(--text-muted); text-align: right; }
+.rev-breakdown-empty { font-size: 12px; color: var(--text-muted); padding: var(--space-3) 0; margin: 0; }
+.rev-breakdown-link {
+  margin-top: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--brand-sky-accent);
+  align-self: flex-start;
+}
+.rev-breakdown-link--muted { color: var(--text-muted); font-weight: 500; }
+
+.rev-attr {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.rev-attr--ok { color: var(--c-success); background: var(--c-success-bg); }
+.rev-attr--warn { color: var(--c-warning); background: var(--c-warning-bg); }
+.rev-attr--muted { color: var(--c-neutral); background: var(--c-neutral-bg); }
+
+/* Top deals proof table + drawer. */
+.rev-deals-panel { margin-top: var(--space-5); }
+.rev-deal-scroll { overflow-x: auto; }
+.rev-deal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  min-width: 900px;
+}
+.rev-deal-table th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  background: var(--surface-alt);
+  padding: 8px 10px;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+.rev-deal-td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.rev-deal-td--amount_usd { font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.rev-deal-td--company { font-weight: 600; color: var(--text-primary); }
+.rev-deal-row { cursor: pointer; transition: background 0.12s ease; }
+.rev-deal-row:hover, .rev-deal-row:focus { background: rgba(18, 158, 245, 0.06); outline: none; }
+.rev-deal-drawer {
+  margin-top: var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+  padding: var(--space-4);
+}
+.rev-deal-drawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.rev-deal-drawer__close {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.rev-deal-drawer__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+.rev-deal-drawer__grid dt {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.rev-deal-drawer__grid dd { margin: 2px 0 0; font-size: 13px; color: var(--text-primary); }
+
+@media (max-width: 1100px) {
+  .rev-breakdown-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 640px) {
+  .rev-deal-drawer__grid { grid-template-columns: minmax(0, 1fr); }
+}
