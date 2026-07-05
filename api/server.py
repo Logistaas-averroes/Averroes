@@ -63,6 +63,7 @@ Protected endpoints (require authenticated session):
   GET  /api/source-attribution-health — Durable source classification/attribution counts (PR-ADS-117).
   POST /api/source-attribution-backfill/run — Admin-only durable source-classification backfill (local DB only; PR-ADS-117).
   GET  /api/source-attribution-backfill/status — Latest source backfill progress/result (admin-only; PR-ADS-117).
+  GET  /api/dashboard/overview     — Read-only Executive Overview command-center contract by business window (PR-ADS-134).
 """
 
 import base64
@@ -6219,6 +6220,44 @@ async def get_revenue_performance_audit(
         log.error("Revenue performance audit failed: %s", exc)
         raise HTTPException(
             status_code=500, detail="Revenue performance audit failed"
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Executive Dashboard Overview (PR-ADS-134)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/dashboard/overview")
+async def get_dashboard_overview(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Executive Overview command-center contract (PR-ADS-134).
+
+    ONE read-only payload for the Dashboard → Overview page: canonical KPIs
+    (spend / closed-won revenue / SQLs / customers / ROAS availability),
+    previous-period movement, a spend-vs-revenue trend, the source mix, ranked
+    top signals, and computed decision cards. Composes the canonical Revenue
+    Decision Mart, Revenue by Source, and the closed-won deal ledger — never
+    new business math, never Google Ads conversion value as revenue.
+
+    Uses business windows (current_quarter | last_quarter | last_6_months |
+    ytd | all_time), not ad-style day windows. Unavailable metrics are null
+    plus a reason — never a fabricated $0 / 0.00x / 0%. Read-only: no writes
+    to Google Ads, HubSpot, budgets, bids, campaigns, keywords, or offline
+    conversions.
+    """
+    from services.dashboard_overview_service import build_dashboard_overview  # noqa: PLC0415
+
+    try:
+        return build_dashboard_overview(window=window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Dashboard overview failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Dashboard overview computation failed"
         ) from exc
 
 

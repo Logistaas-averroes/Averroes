@@ -296,74 +296,48 @@
         <span id="monitoring-banner-text" class="monitoring-banner__text"></span>
       </div>
 
-      <!-- Dashboard -->
+      <!-- Dashboard — Executive Overview command center (PR-ADS-134) -->
       <section id="page-dashboard" class="page" hidden>
         <header class="page-header">
           <h1 class="page-title">Dashboard</h1>
-          <p class="page-subtitle">Campaign intelligence overview</p>
+          <p class="page-subtitle">Executive overview of spend, revenue, pipeline, and action signals.</p>
         </header>
         <div id="page-explanation-dashboard" hidden></div>
-        <div class="kpi-grid">
-          <div class="kpi-card">
-            <div class="kpi-card__label">Total Spend (30d)</div>
-            <div class="kpi-card__value" id="kpi-spend">—</div>
+
+        <!-- Inner dashboard tabs — only Overview ships in PR-ADS-134 -->
+        <nav class="dashboard-tabs" aria-label="Dashboard sections">
+          <button type="button" class="dashboard-tab is-active" aria-current="page">Overview</button>
+          <button type="button" class="dashboard-tab" disabled title="Coming soon">Revenue</button>
+          <button type="button" class="dashboard-tab" disabled title="Coming soon">Channels</button>
+          <button type="button" class="dashboard-tab" disabled title="Coming soon">Campaigns &amp; Keywords</button>
+          <button type="button" class="dashboard-tab" disabled title="Coming soon">Countries</button>
+          <button type="button" class="dashboard-tab" disabled title="Coming soon">Deals</button>
+        </nav>
+
+        <!-- Command bar: truth chips + business window selector + freshness -->
+        <div class="dash-command-bar">
+          <div class="dash-command-bar__truth">
+            <span class="dash-chip dash-chip--readonly">Read-only</span>
+            <span class="dash-chip">Spend: Google Ads</span>
+            <span class="dash-chip">Revenue: HubSpot Closed-Won</span>
           </div>
-          <div class="kpi-card">
-            <div class="kpi-card__label">Confirmed SQLs</div>
-            <div class="kpi-card__value" id="kpi-sqls">—</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-card__label">Avg CPQL</div>
-            <div class="kpi-card__value" id="kpi-cpql">—</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-card__label">Confirmed Waste</div>
-            <div class="kpi-card__value" id="kpi-waste">—</div>
+          <div class="roas-window-controls dash-window-controls">
+            <label class="roas-window-label" for="dashboard-window">Window:</label>
+            <select id="dashboard-window" class="waste-filter-select" data-business-window-select aria-label="Business window">
+              <option value="current_quarter" selected>Current Quarter</option>
+              <option value="last_quarter">Last Quarter</option>
+              <option value="last_6_months">Last 6 Months</option>
+              <option value="ytd">YTD</option>
+              <option value="all_time">All Time</option>
+            </select>
+            <button id="dashboard-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
+            <span class="roas-window-range" id="dashboard-range" aria-live="polite"></span>
+            <span class="dash-generated" id="dashboard-generated"></span>
           </div>
         </div>
 
-        <!-- What Changed panel — previous-period trend comparison -->
-        <div class="panel" id="dashboard-trends-panel">
-          <div class="panel__header">
-            <span class="panel__header-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>
-            What Changed This Period
-          </div>
-          <div class="panel__body" id="dashboard-trends">
-            <p class="empty-state">Loading trend data…</p>
-          </div>
-        </div>
-
-        <!-- Campaign Movement panel -->
-        <div class="panel" id="campaign-movement-panel">
-          <div class="panel__header">
-            <span class="panel__header-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></span>
-            Campaign Movement
-          </div>
-          <div class="panel__body panel__body--flush" id="campaign-movement-list">
-            <p class="empty-state" style="padding:var(--space-5)">Loading campaign movements…</p>
-          </div>
-        </div>
-
-        <div class="panel">
-          <div class="panel__header">
-            <span class="panel__header-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/></svg></span>
-            Campaign Verdict Summary
-          </div>
-          <div class="panel__body" id="dash-verdict-body"><p class="empty-state">Loading campaigns…</p></div>
-        </div>
-        <div class="panel">
-          <div class="panel__header">
-            <span class="panel__header-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
-            Active Alerts
-          </div>
-          <div class="panel__body" id="dash-alerts-body"><p class="empty-state">Loading alerts…</p></div>
-        </div>
-        <div class="panel">
-          <div class="panel__header">
-            <span class="panel__header-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
-            Run History
-          </div>
-          <div class="panel__body" id="run-history-timeline"><p class="empty-state">Loading run history…</p></div>
+        <div id="dashboard-overview-root" class="dashboard-overview">
+          <p class="empty-state">Loading executive overview…</p>
         </div>
       </section>
 
