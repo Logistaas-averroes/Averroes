@@ -434,6 +434,21 @@ def test_disconnected_revenue_integration_never_shows_fake_zero_revenue(monkeypa
     assert scale["target_page"] == "revenue-health"
 
 
+def test_unreadable_deal_ledger_downgrades_revenue_truth_chip(monkeypatch):
+    # Copilot review (PR #134): with the integration connected but the deal
+    # ledger unreadable, the trend withholds its revenue series — the revenue
+    # truth chip must say "partial" in that state, never "ready".
+    import db.revenue_repository as repo
+    _patch_durable(monkeypatch)
+    monkeypatch.setattr(repo, "fetch_revenue_deals",
+                        lambda s, e: {"available": False, "rows": []})
+    from services.dashboard_overview_service import build_dashboard_overview
+    out = build_dashboard_overview(WINDOW, now=NOW)
+    assert out["trend"]["revenue_status"] == "unavailable"
+    assert out["truth_status"]["revenue"] == "partial"
+    assert out["truth_status"]["overall"] != "ready"
+
+
 def test_spend_series_fails_closed_on_inconsistent_daily_fx(monkeypatch):
     # Review fix: a day with spend_usd=None inside an otherwise-verified window
     # withholds the WHOLE series — it is never coerced to a $0 day.

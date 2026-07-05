@@ -749,7 +749,8 @@ def _build_decision_cards(campaign_rows: list, summary: dict, readiness: dict,
     return cards
 
 
-def _build_truth_status(spend_truth: dict, readiness: dict, source_mix: list) -> dict:
+def _build_truth_status(spend_truth: dict, readiness: dict, source_mix: list,
+                        ledger_status: str | None = None) -> dict:
     """Compact truth badges for the command bar / footer."""
     def _map3(status, ready="verified", partial=("incomplete",)):
         if status == ready:
@@ -760,7 +761,15 @@ def _build_truth_status(spend_truth: dict, readiness: dict, source_mix: list) ->
 
     spend = _map3(spend_truth.get("campaign_spend_status"))
     fx = _map3(spend_truth.get("fx_status"))
-    revenue = "ready" if readiness.get("revenue_integration_connected") else "blocked"
+    if not readiness.get("revenue_integration_connected"):
+        revenue = "blocked"
+    elif ledger_status is not None and ledger_status != "available":
+        # Connected, but the closed-won deal ledger could not be read — the
+        # trend withholds its revenue series in exactly this state, so the
+        # revenue chip must not claim "ready" (that would hide a real outage).
+        revenue = "partial"
+    else:
+        revenue = "ready"
 
     geo_status = spend_truth.get("country_spend_status")
     if geo_status in ("verified", "reconciled_with_residual"):
@@ -780,7 +789,8 @@ def _build_truth_status(spend_truth: dict, readiness: dict, source_mix: list) ->
 
     if revenue == "blocked":
         overall = "blocked"
-    elif spend == "ready" and fx == "ready" and source_attribution == "ready":
+    elif (revenue == "ready" and spend == "ready" and fx == "ready"
+          and source_attribution == "ready"):
         overall = "ready"
     else:
         overall = "partial"
@@ -879,7 +889,10 @@ def build_dashboard_overview(window: str = "current_quarter",
                              spend_truth, period_change)
     decision_cards = _build_decision_cards(campaign_rows, gated_summary, readiness,
                                            spend_truth, signals, source_mix)
-    truth_status = _build_truth_status(spend_truth, readiness, source_mix)
+    truth_status = _build_truth_status(
+        spend_truth, readiness, source_mix,
+        ledger_status=(deals_contract.get("source_health") or {}).get("ledger_status"),
+    )
 
     kpis = {
         # USD spend is strictly canonical: None whenever FX/coverage is unsafe.
