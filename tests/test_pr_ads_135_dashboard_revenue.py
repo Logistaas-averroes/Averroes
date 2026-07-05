@@ -370,6 +370,77 @@ def test_deal_concentration_logic(monkeypatch):
     assert c["customers"] == 4
 
 
+# ── Null-amount doctrine (Copilot + review): a missing amount is never a $0 ──
+
+def _null_amount_dataset():
+    """Default dataset but d1's amount is unknown (null) everywhere."""
+    won = [dict(WON_ROWS[0], deal_amount_usd=None)] + WON_ROWS[1:]
+    deals = [dict(DEAL_ROWS[0], deal_amount_usd=None)] + DEAL_ROWS[1:]
+    return won, deals
+
+
+def test_null_amount_makes_bucket_revenue_unavailable_not_zero(monkeypatch):
+    won, deals = _null_amount_dataset()
+    out = _revenue(monkeypatch, won_rows=won, deal_rows=deals)
+    trend = out["revenue_trend"]
+    # The bucket holding d1 (null amount) reports revenue_usd=None, but still
+    # counts the deal/customer — never a fabricated $0 from the unknown amount.
+    null_pts = [p for p in trend["points"] if p["revenue_usd"] is None and p["deals"] > 0]
+    assert null_pts, "expected a bucket with a null amount to report null revenue"
+    assert all(p["customers"] >= 1 for p in null_pts)
+    # A bucket that CONTAINS deals never fabricates $0 from an unknown amount:
+    # it is either a real known sum or None. (An empty bucket — no deals — is a
+    # genuine verified $0 inside a ready series, which is allowed.)
+    for p in trend["points"]:
+        if p["deals"] > 0:
+            assert p["revenue_usd"] is None or p["revenue_usd"] > 0
+
+
+def test_null_amount_makes_group_revenue_unavailable(monkeypatch):
+    won, deals = _null_amount_dataset()
+    out = _revenue(monkeypatch, won_rows=won, deal_rows=deals)
+    # d1 is Global Competitors / United States — those groups have an unknown
+    # amount, so their revenue total is Unavailable (None), counts preserved.
+    camp = next(r for r in out["breakdowns"]["by_campaign"] if r["campaign"] == "Global Competitors")
+    assert camp["revenue_usd"] is None
+    assert camp["deals"] >= 1 and camp["customers"] >= 1
+    country = next(r for r in out["breakdowns"]["by_country"] if r["country"] == "United States")
+    assert country["revenue_usd"] is None
+
+
+def test_null_amount_makes_avg_and_concentration_unavailable(monkeypatch):
+    # Review finding: average deal value must not divide mart revenue (null->0)
+    # by a customer count that includes the null-amount deal, and concentration
+    # shares are uncomputable without every amount. Both are Unavailable.
+    won, deals = _null_amount_dataset()
+    out = _revenue(monkeypatch, won_rows=won, deal_rows=deals)
+    assert out["kpis"]["average_deal_value_usd"] is None
+    assert out["deal_concentration"] is None
+    # largest known deal is still a real number (a floor), and customers count
+    # still includes every closed-won deal.
+    assert out["kpis"]["largest_deal_usd"] is not None
+    assert out["kpis"]["customers"] == 4
+
+
+def test_bucket_label_is_portable(monkeypatch):
+    # No glibc-only "%-d" — a weekly label renders with no leading zero.
+    out = _revenue(monkeypatch)
+    labels = [p["period_label"] for p in out["revenue_trend"]["points"]]
+    assert labels, "expected trend points"
+    import re
+    for lbl in labels:
+        assert re.match(r"^\d{1,2} [A-Z][a-z]{2}$", lbl), f"unexpected label {lbl!r}"
+
+
+def test_revenue_and_customer_trend_share_one_grain(monkeypatch):
+    # Both trends must resolve the same (start, end, bucket) so the customer
+    # series never disagrees with the revenue series on time grain.
+    out = _revenue(monkeypatch)
+    rev, cust = out["revenue_trend"], out["customer_trend"]
+    assert rev["bucket"] == cust["bucket"]
+    assert [p["period_start"] for p in rev["points"]] == [p["period_start"] for p in cust["points"]]
+
+
 # ══════════════════ 4. Breakdowns preserve unattributed ═════════════════════
 
 

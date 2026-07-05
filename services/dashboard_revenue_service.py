@@ -100,7 +100,8 @@ def _avg_deal_value(revenue_usd, customers):
     return _round2(revenue_usd / customers)
 
 
-def _build_kpis(summary: dict, deal_rows: list, *, revenue_connected: bool) -> dict:
+def _build_kpis(summary: dict, deal_rows: list, *, revenue_connected: bool,
+                amounts_complete: bool) -> dict:
     """Revenue hero KPIs — every unsafe metric is None, never a fabricated 0."""
     sqls = summary.get("sqls")
 
@@ -110,13 +111,16 @@ def _build_kpis(summary: dict, deal_rows: list, *, revenue_connected: bool) -> d
         # Raw ledger amounts: a missing amount is skipped, never read as $0.
         amounts = [a for a in (_deal_amount(d) for d in deal_rows) if a is not None]
         largest_deal = _round2(max(amounts)) if amounts else None
+        # An average that would include an unknown amount is uncomputable — it is
+        # Unavailable, never revenue/customers with a null deal silently as $0.
+        average = _avg_deal_value(revenue_usd, customers) if amounts_complete else None
     else:
-        revenue_usd = customers = largest_deal = None
+        revenue_usd = customers = largest_deal = average = None
 
     return {
         "closed_won_revenue_usd": revenue_usd,
         "customers": customers,
-        "average_deal_value_usd": _avg_deal_value(revenue_usd, customers),
+        "average_deal_value_usd": average,
         "largest_deal_usd": largest_deal,
         "sqls": sqls,
         # customers / SQLs and revenue / SQLs — None when either side is unsafe.
@@ -193,48 +197,65 @@ def _series_bounds(window_block: dict, deal_rows: list, lead_rows: list):
 
 
 def _bucket_label(bstart, bucket: str) -> str:
+    if not hasattr(bstart, "strftime"):
+        return str(bstart)
     if bucket == "month":
         return bstart.strftime("%b %Y")
-    return bstart.strftime("%-d %b") if hasattr(bstart, "strftime") else str(bstart)
+    # Portable day-of-month (avoid glibc-only "%-d"): strip a leading zero.
+    return f"{bstart.day} {bstart.strftime('%b')}"
 
 
-def _build_revenue_trend(window_block: dict, deal_rows: list, *,
+def _build_revenue_trend(bounds, deal_rows: list, *,
                          revenue_ready: bool, revenue_reason) -> dict:
-    """Revenue / customers / deals per bucket — withheld, never fabricated."""
+    """Revenue / customers / deals per bucket — withheld, never fabricated.
+
+    ``bounds`` is a shared (start, end, bucket) tuple so the revenue and
+    customer trends always agree on the time grain (they anchor all_time to the
+    same earliest data point).
+    """
     if not revenue_ready:
         return {"bucket": None, "points": [], "status": "unavailable",
                 "reason": revenue_reason or "Revenue ledger unavailable."}
 
-    start, end, bucket = _series_bounds(window_block, deal_rows, [])
+    start, end, bucket = bounds
     if bucket is None:
         return {"bucket": None, "points": [], "status": "unavailable",
                 "reason": "No datable closed-won revenue in this window."}
 
     revenue_by: dict = {}
     deals_by: dict = {}
+    unknown_amount_by: dict = {}  # bucket has ≥1 deal with a null amount
     for deal in deal_rows:
         day = _parse_iso_date(deal.get("deal_close_date"))
         if day is None or day < start or day > end:
             continue
         key = max(_bucket_start(day, bucket), start)
-        revenue_by[key] = revenue_by.get(key, 0.0) + (_deal_amount(deal) or 0.0)
+        amount = _deal_amount(deal)
+        if amount is None:
+            # A missing amount makes the bucket total uncomputable — never a $0.
+            unknown_amount_by[key] = True
+        else:
+            revenue_by[key] = revenue_by.get(key, 0.0) + amount
         deals_by[key] = deals_by.get(key, 0) + 1
 
     points = []
     for bstart in _bucket_starts(start, end, bucket):
+        # If any deal in the bucket has an unknown amount, the bucket revenue is
+        # Unavailable (null) — the known partial sum would imply completeness.
+        revenue = None if unknown_amount_by.get(bstart) else _round2(revenue_by.get(bstart, 0.0))
         points.append({
             "period_start": bstart.isoformat(),
             "period_label": _bucket_label(bstart, bucket),
             # A closed-won deal == a customer in this system (deduped per deal).
-            "revenue_usd": _round2(revenue_by.get(bstart, 0.0)),
+            "revenue_usd": revenue,
             "customers": deals_by.get(bstart, 0),
             "deals": deals_by.get(bstart, 0),
         })
     return {"bucket": bucket, "points": points, "status": "ready", "reason": None}
 
 
-def _build_customer_trend(window_block: dict, deal_rows: list, *,
-                          revenue_ready: bool) -> dict:
+def _build_customer_trend(bounds, deal_rows: list, lead_rows: list, *,
+                          revenue_ready: bool, sqls_ready: bool) -> dict:
     """Customers (by close date) + SQLs (by created date) per bucket.
 
     The two series live on DIFFERENT event-date grains (a long B2B cycle: the
@@ -242,15 +263,10 @@ def _build_customer_trend(window_block: dict, deal_rows: list, *,
     so this strip shows the two real counts over time but never a per-bucket
     conversion rate — that cross-grain ratio would be fabricated efficiency.
     The honest window-level SQL→Customer rate lives in the KPIs / strip.
-    """
-    lead_series = repo.fetch_lead_daily_series(
-        _parse_iso_date(window_block.get("start_date")),
-        _parse_iso_date(window_block.get("end_date")),
-    )
-    lead_rows = lead_series.get("rows") or [] if lead_series.get("available") else []
-    sqls_ready = bool(lead_series.get("available"))
 
-    start, end, bucket = _series_bounds(window_block, deal_rows, lead_rows)
+    Shares the revenue trend's ``bounds`` so both trends report on ONE grain.
+    """
+    start, end, bucket = bounds
     if bucket is None:
         return {"bucket": None, "points": [], "customers_status": "unavailable",
                 "sqls_status": "ready" if sqls_ready else "unavailable"}
@@ -290,7 +306,14 @@ def _build_customer_trend(window_block: dict, deal_rows: list, *,
 
 def _group_deals(deal_rows: list, key_field: str, *, unknown_label: str,
                  target_page: str) -> list:
-    """Group ledger deals by campaign/country, preserving unattributed revenue."""
+    """Group ledger deals by campaign/country, preserving unattributed revenue.
+
+    Deals and customers are always counted (never dropped). The group's revenue
+    total sums the KNOWN amounts and flags ``amount_unknown`` when any deal in
+    the group has a null amount — a group total is uncomputable if a part is
+    unknown, so the renderer shows Unavailable rather than a partial sum that
+    would imply completeness (or a fabricated $0 contribution).
+    """
     groups: dict = {}
     for deal in deal_rows:
         raw = (deal.get(key_field) or "").strip()
@@ -298,14 +321,24 @@ def _group_deals(deal_rows: list, key_field: str, *, unknown_label: str,
         label = raw if has_group else unknown_label
         g = groups.setdefault(label, {
             "label": label, "revenue_usd": 0.0, "customers": 0, "deals": 0,
-            "has_group": has_group, "attributed": 0,
+            "has_group": has_group, "attributed": 0, "amount_unknown": False,
         })
-        g["revenue_usd"] += (_deal_amount(deal) or 0.0)
+        amount = _deal_amount(deal)
+        if amount is None:
+            g["amount_unknown"] = True
+        else:
+            g["revenue_usd"] += amount
         g["customers"] += 1
         g["deals"] += 1
         if _attribution_status(deal, has_group=has_group) == "attributed":
             g["attributed"] += 1
-    return sorted(groups.values(), key=lambda x: x["revenue_usd"], reverse=True)
+    # Order by known revenue; groups whose total is unknown sort last (they carry
+    # no assertable total to rank on).
+    return sorted(
+        groups.values(),
+        key=lambda x: (not x["amount_unknown"], x["revenue_usd"]),
+        reverse=True,
+    )
 
 
 def _breakdown_rows(grouped: list, *, name_key: str, target_page: str) -> list:
@@ -319,7 +352,9 @@ def _breakdown_rows(grouped: list, *, name_key: str, target_page: str) -> list:
             status = "partial"
         rows.append({
             name_key: g["label"],
-            "revenue_usd": _round2(g["revenue_usd"]),
+            # Unavailable (None) when any deal amount is unknown — never a
+            # partial sum implying completeness, never a fabricated $0.
+            "revenue_usd": None if g["amount_unknown"] else _round2(g["revenue_usd"]),
             "customers": g["customers"],
             "deals": g["deals"],
             "attribution_status": status,
@@ -352,7 +387,14 @@ def _build_source_breakdown(window: str, now, *, revenue_connected: bool) -> lis
     return rows[:_BREAKDOWN_LIMIT]
 
 
-def _build_deal_concentration(deal_rows: list, *, revenue_connected: bool) -> dict | None:
+def _build_deal_concentration(deal_rows: list, *, revenue_connected: bool,
+                              amounts_complete: bool) -> dict | None:
+    # Concentration shares (top-1 / top-3 of total) are uncomputable if any deal
+    # amount is unknown — a missing part makes the total, and therefore every
+    # share, unknowable. Return None (Unavailable) rather than shares of a
+    # partial total that would misstate concentration.
+    if not amounts_complete:
+        return None
     amounts = sorted(
         (a for a in (_deal_amount(d) for d in deal_rows) if a is not None),
         reverse=True,
@@ -628,11 +670,25 @@ def build_dashboard_revenue(window: str = "current_quarter",
     elif ledger_status != "available":
         revenue_reason = "Closed-won deal ledger unavailable."
 
-    kpis = _build_kpis(summary, deal_rows, revenue_connected=revenue_connected)
+    # A window is amount-complete when every closed-won deal has a known amount;
+    # any null makes completeness-requiring aggregates (average, concentration,
+    # group/bucket totals) Unavailable rather than embed a fabricated $0.
+    amounts_complete = all(_deal_amount(d) is not None for d in deal_rows)
+
+    # Fetch the per-day SQL series once and resolve ONE (start, end, bucket) so
+    # the revenue and customer trends always share the same time grain.
+    lead_series = repo.fetch_lead_daily_series(start_date, end_date)
+    lead_rows = (lead_series.get("rows") or []) if lead_series.get("available") else []
+    sqls_ready = bool(lead_series.get("available"))
+    trend_bounds = _series_bounds(window_block, deal_rows, lead_rows)
+
+    kpis = _build_kpis(summary, deal_rows, revenue_connected=revenue_connected,
+                       amounts_complete=amounts_complete)
     period_change = _build_period_change(window, ref_now, kpis)
     revenue_trend = _build_revenue_trend(
-        window_block, deal_rows, revenue_ready=revenue_ready, revenue_reason=revenue_reason)
-    customer_trend = _build_customer_trend(window_block, deal_rows, revenue_ready=revenue_ready)
+        trend_bounds, deal_rows, revenue_ready=revenue_ready, revenue_reason=revenue_reason)
+    customer_trend = _build_customer_trend(
+        trend_bounds, deal_rows, lead_rows, revenue_ready=revenue_ready, sqls_ready=sqls_ready)
 
     ledger_for_breakdown = deal_rows if revenue_ready else []
     grouped_campaign = _group_deals(ledger_for_breakdown, "campaign_name",
@@ -650,7 +706,8 @@ def build_dashboard_revenue(window: str = "current_quarter",
         (r.get("source_group") or "").lower().startswith("unclassified") for r in by_source
     )
 
-    concentration = _build_deal_concentration(deal_rows, revenue_connected=revenue_connected)
+    concentration = _build_deal_concentration(
+        deal_rows, revenue_connected=revenue_connected, amounts_complete=amounts_complete)
     top_deals = _build_top_deals(deal_rows, revenue_connected=revenue_connected)
 
     truth_status = _build_truth_status(

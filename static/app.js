@@ -2980,11 +2980,18 @@ function revMomentumChartSVG(trend) {
   }).join("");
 
   const bars = points.map((p, i) => {
+    const hasCustomers = (p.customers !== null && p.customers !== undefined && p.customers > 0);
     const v = p.revenue_usd || 0;
     const h = Math.max(0, baseline - yPos(v));
     const x = xCenter(i) - barW / 2, y = yPos(v), r = Math.min(4, barW / 2, h || 4);
-    if (h === 0) return "";
-    const countLabel = (p.customers !== null && p.customers !== undefined)
+    // A bucket with customers but null/zero summed revenue (a permitted null
+    // amount — never faked as $0) still shows its customer count at the
+    // baseline, so real customer activity is never hidden from the chart.
+    if (h === 0) {
+      return hasCustomers
+        ? `<text x="${xCenter(i).toFixed(1)}" y="${(baseline - 6).toFixed(1)}" text-anchor="middle" class="rev-count-label">${escapeHtml(String(p.customers))}</text>` : "";
+    }
+    const countLabel = hasCustomers
       ? `<text x="${xCenter(i).toFixed(1)}" y="${(y - 6).toFixed(1)}" text-anchor="middle" class="rev-count-label">${escapeHtml(String(p.customers))}</text>` : "";
     return `<path d="M${x.toFixed(1)},${baseline.toFixed(1)}
       L${x.toFixed(1)},${(y + r).toFixed(1)}
