@@ -736,6 +736,42 @@ def fetch_source_leads(start: date | None, end: date) -> dict:
         return {"available": False, "rows": []}
 
 
+def fetch_source_leads_daily(start: date | None, end: date) -> dict:
+    """Per-day classified contacts by acquisition group (PR-ADS-136). Read-only.
+
+    Same durable `contact_source_classification` table and window semantics as
+    fetch_source_leads, but also returns the contact_created_at event date so the
+    Dashboard Channels tab can draw an SQL-over-time series per channel. Read-only.
+
+    Returns {available, rows:[{event_date, acquisition_group, status_category,
+             source_primary_raw, source_detail_raw}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT (contact_created_at AT TIME ZONE 'UTC')::date AS event_date,
+                           acquisition_group, status_category,
+                           source_primary_raw, source_detail_raw
+                    FROM contact_source_classification
+                    WHERE contact_created_at IS NOT NULL
+                      AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
+                      AND contact_created_at < (%s::date + INTERVAL '1 day')
+                    """,
+                    (start, end),
+                )
+                rows = _rows_as_dicts(cur)
+                for r in rows:
+                    r["event_date"] = _as_date(r.get("event_date"))
+                return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_source_leads_daily failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
 def fetch_source_revenue(start: date | None, end: date) -> dict:
     """Closed-won deals in the window, by acquisition group. Read-only.
 
@@ -765,6 +801,44 @@ def fetch_source_revenue(start: date | None, end: date) -> dict:
                 return {"available": True, "rows": _rows_as_dicts(cur)}
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_source_revenue failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
+def fetch_source_revenue_daily(start: date | None, end: date) -> dict:
+    """Per-day closed-won deals by acquisition group (PR-ADS-136). Read-only.
+
+    Same durable `deal_source_attribution` table and window semantics as
+    fetch_source_revenue, but also returns the deal_close_date so the Dashboard
+    Channels tab can draw a customer/revenue-over-time series per channel. A
+    missing deal amount stays null (never coerced to $0). Read-only.
+
+    Returns {available, rows:[{close_date, acquisition_group, attribution_status,
+             deal_amount_usd, source_primary_raw, source_detail_raw}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT (deal_close_date AT TIME ZONE 'UTC')::date AS close_date,
+                           acquisition_group, attribution_status,
+                           deal_amount_usd::float AS deal_amount_usd,
+                           source_primary_raw, source_detail_raw
+                    FROM deal_source_attribution
+                    WHERE deal_close_date IS NOT NULL
+                      AND deal_close_date >= COALESCE(%s::timestamptz, deal_close_date)
+                      AND deal_close_date < (%s::date + INTERVAL '1 day')
+                    """,
+                    (start, end),
+                )
+                rows = _rows_as_dicts(cur)
+                for r in rows:
+                    r["close_date"] = _as_date(r.get("close_date"))
+                return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_source_revenue_daily failed: %s", exc)
         return {"available": False, "rows": []}
 
 
