@@ -368,12 +368,64 @@ def test_unattributed_revenue_preserved_and_excluded_from_roas(monkeypatch):
     assert out["kpis"]["roas"] == round(29000.0 / 13000.0, 2)
 
 
+def test_disconnected_integration_blanks_customers_and_revenue(monkeypatch):
+    # A disconnected revenue integration must render Unavailable customers/revenue,
+    # never a verified $0 / 0-customer proof. Spend + SQLs survive (independent).
+    out = _campaigns(monkeypatch, revenue_connected=False)
+    k = out["kpis"]
+    assert k["customers"] is None
+    assert k["won_revenue_usd"] is None
+    assert k["roas"] is None
+    assert k["verified_spend_native"]["amount"] == 10000.0  # spend survives
+    assert k["sqls"] == 25  # SQLs come from contacts and survive
+    for c in out["campaigns"]:
+        assert c["customers"] is None, f"{c['campaign_name']} customers must be None"
+        assert c["won_revenue_usd"] is None and c["roas"] is None
+    assert out["truth_status"]["revenue"] == "blocked"
+
+
 def test_no_fake_deltas_when_previous_baseline_missing(monkeypatch):
     out = _campaigns(monkeypatch, window="all_time")
     pc = out["period_change"]
     assert pc["available"] is False
     assert pc["metrics"] == {}
     assert "period_change" in {u["metric"] for u in out["unavailable"]}
+
+
+def test_previous_period_unknown_amount_withholds_revenue_delta(monkeypatch):
+    # The previous-period revenue baseline counts a null-amount deal as $0 in the
+    # mart summary; if the previous window had an unknown amount, the revenue delta
+    # must be withheld (No comparison), never measured against a lowered $0.
+    import db.revenue_repository as repo
+    _patch_durable(monkeypatch)
+
+    def deals_by_window(start, end):
+        prev = start is not None and getattr(start, "year", 9999) < 2026
+        rows = ([dict(DEAL_ROWS[0], deal_amount_usd=None)] if prev else list(DEAL_ROWS))
+        return {"available": True, "rows": rows}
+
+    monkeypatch.setattr(repo, "fetch_revenue_deals", deals_by_window)
+    from services.dashboard_campaigns_service import build_dashboard_campaigns
+    out = build_dashboard_campaigns("ytd", now=NOW)
+    rev = out["period_change"]["metrics"]["won_revenue_usd"]
+    assert rev["status"] != "ok"  # baseline withheld → no fabricated growth %
+
+
+def test_attribution_status_preserves_mapping_distinction(monkeypatch):
+    # "matched" → "mapped"; "unavailable" → "mapping_unavailable" (never collapsed
+    # to a single "unmapped"); the unattributed callout is its own status.
+    out = _campaigns(monkeypatch)
+    assert _camp(out, "Global Competitors")["attribution_status"] == "mapped"
+    assert _camp(out, "Unattributed / Needs Review")["attribution_status"] == "unattributed"
+
+
+def test_unavailable_card_copy_accurate_for_healthy_window(monkeypatch):
+    # Healthy window (FX verified, revenue complete, ROAS present): the Unavailable
+    # card must NOT claim FX/revenue is incomplete — it flags keyword attribution.
+    out = _campaigns(monkeypatch)
+    card = next(c for c in out["decision_cards"] if c["type"] == "unavailable")
+    assert "keyword" in card["body"].lower()
+    assert "fx coverage is incomplete" not in card["body"].lower()
 
 
 def test_fmt_usd_short_none_is_unavailable():

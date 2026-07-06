@@ -860,9 +860,11 @@ def fetch_keyword_theme_snapshot() -> dict:
             if conn is None:
                 return {"available": False, "run_date": None, "rows": []}
             with conn.cursor() as cur:
+                # Select run_date alongside the rows (all share the single MAX
+                # run_date) so the snapshot date needs no second round trip.
                 cur.execute(
                     """
-                    SELECT campaign_name, ad_group, keyword, match_type,
+                    SELECT run_date, campaign_name, ad_group, keyword, match_type,
                            spend_usd::float AS spend_usd,
                            clicks, impressions, conversions::float AS conversions
                     FROM keywords
@@ -870,11 +872,9 @@ def fetch_keyword_theme_snapshot() -> dict:
                     """
                 )
                 rows = _rows_as_dicts(cur)
-                run_date = None
-                if rows:
-                    cur.execute("SELECT MAX(run_date) FROM keywords")
-                    got = cur.fetchone()
-                    run_date = _as_date(got[0]) if got else None
+                run_date = _as_date(rows[0].get("run_date")) if rows else None
+                for r in rows:
+                    r.pop("run_date", None)
                 return {"available": True, "run_date": run_date, "rows": rows}
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_keyword_theme_snapshot failed: %s", exc)
@@ -907,10 +907,10 @@ def fetch_search_term_signals(start: date | None, end: date) -> dict:
                            is_flagged_waste, junk_category
                     FROM search_terms
                     WHERE source_date IS NOT NULL
-                      AND source_date >= COALESCE(%s::date, source_date)
+                      AND (%s::date IS NULL OR source_date >= %s::date)
                       AND source_date <= %s::date
                     """,
-                    (start, end),
+                    (start, start, end),
                 )
                 return {"available": True, "rows": _rows_as_dicts(cur)}
     except Exception as exc:  # noqa: BLE001

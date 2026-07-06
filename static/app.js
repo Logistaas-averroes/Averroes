@@ -1934,6 +1934,9 @@ const DASH_DELTA_VALENCE = {
   // PR-ADS-136 channels-tab metric keys.
   total_customers: "up-good",
   total_sqls: "up-good",
+  // PR-ADS-137 campaigns-tab metric keys.
+  won_revenue_usd: "up-good",
+  verified_spend_usd: "neutral",
 };
 
 // ── Dashboard inner-tab controller (PR-ADS-135) ───────────────────────────
@@ -4247,7 +4250,8 @@ function renderCampKpiRow(d) {
       value: (k.roas !== null && k.roas !== undefined)
         ? escapeHtml(fmtRoasMultiple(k.roas))
         : '<span class="dash-unavailable">Unavailable</span>',
-      sub: `${dashValue(k.campaigns_with_spend, fmtCount)} campaigns with spend`,
+      // Plain-text sub (the card template escapes it) — never embed dashValue HTML.
+      sub: `${(k.campaigns_with_spend === null || k.campaigns_with_spend === undefined) ? "—" : fmtCount(k.campaigns_with_spend)} campaigns with spend`,
       delta: dashDeltaChip("roas", pc),
       source: "Revenue ÷ verified USD spend",
       ok: k.roas !== null && k.roas !== undefined,
@@ -4313,13 +4317,15 @@ function campBubbleSVG(rows) {
     return `<text x="${x}" y="${H - 10}" text-anchor="middle" class="dash-chart-tick">${escapeHtml(fmtCompactCurrency(maxX * t, "GBP"))}</text>`;
   }).join("");
 
-  const bubbles = rows.slice().sort((a, b) => rOf(b.sqls) - rOf(a.sqls)).map((r) => {
-    const i = rows.indexOf(r);
-    const rad = rOf(r.sqls);
-    const cx = xOf(r.spend_native).toFixed(1), cy = yOf(r.customers).toFixed(1);
-    return `<circle class="dash-chart-hit camp-bubble" data-camp-bubble="${i}" cx="${cx}" cy="${cy}" r="${rad.toFixed(1)}"
+  // Carry the original index (avoid O(n²) indexOf inside the sorted map); large
+  // bubbles drawn first so small ones stay hoverable on top.
+  const bubbles = rows.map((r, i) => ({ r, i }))
+    .sort((a, b) => rOf(b.r.sqls) - rOf(a.r.sqls)).map(({ r, i }) => {
+      const rad = rOf(r.sqls);
+      const cx = xOf(r.spend_native).toFixed(1), cy = yOf(r.customers).toFixed(1);
+      return `<circle class="dash-chart-hit camp-bubble" data-camp-bubble="${i}" cx="${cx}" cy="${cy}" r="${rad.toFixed(1)}"
       fill="${campStatusColor(r.status)}" fill-opacity="0.55" stroke="${campStatusColor(r.status)}" stroke-width="1.4"/>`;
-  }).join("");
+    }).join("");
 
   return `
     <div class="dash-chart-wrap camp-bubble-wrap">
@@ -4448,8 +4454,12 @@ function renderCampKeywordThemes(d) {
       </div>
     </div>`;
   if (kt.status !== "ready" || !(kt.themes || []).length) {
+    // Role-gate the Keywords link consistently with the tab's other navigation.
+    const kwLink = dashCanNavigate("keywords")
+      ? 'Open the <a href="#/keywords">Keywords</a> page for current keyword detail.'
+      : "The Keywords page has current keyword detail.";
     return `${header}
-      <p class="camp-keyword-note">Keyword themes are unavailable${kt.reason ? ` — ${escapeHtml(kt.reason)}` : ""}. Open the <a href="#/keywords">Keywords</a> page for current keyword detail.</p>`;
+      <p class="camp-keyword-note">Keyword themes are unavailable${kt.reason ? ` — ${escapeHtml(kt.reason)}` : ""}. ${kwLink}</p>`;
   }
   const note = `<p class="camp-keyword-note">Recent keyword snapshot${kt.run_date ? ` (as of ${escapeHtml(kt.run_date)})` : ""} — not window-scoped, and keyword-level SQLs / customers / revenue / ROAS have no durable attribution.</p>`;
   const rows = kt.themes.map((t) => `

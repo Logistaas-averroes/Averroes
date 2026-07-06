@@ -6808,8 +6808,10 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .camp-drawer__link { font-size: 12px; color: var(--c-primary, #129ef5); text-decoration: none; font-weight: 600; }
 
 @media (max-width: 1100px) {
-  .camp-theme-row { grid-template-columns: minmax(100px, 1.4fr) auto auto; }
-  .camp-theme-row__kw, .camp-theme-row__out { display: none; }
+  /* Keep the "SQLs / revenue Unavailable" disclosure (__out) visible — only the
+     keyword count (__kw) is dropped on narrow viewports. */
+  .camp-theme-row { grid-template-columns: minmax(100px, 1.3fr) auto minmax(110px, 1fr); }
+  .camp-theme-row__kw { display: none; }
 }
 @media (max-width: 640px) {
   .camp-drawer__summary { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }

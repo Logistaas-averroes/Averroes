@@ -108,7 +108,7 @@ def _canonical_spend_by_campaign(spend_result: dict) -> dict:
             "usd": r.get("spend_usd"),
             "fx_complete": bool(r.get("fx_complete")),
         }
-        if r.get("campaign_id"):
+        if r.get("campaign_id") is not None:
             by_id[str(r["campaign_id"])] = entry
         if r.get("campaign_name"):
             by_name[_norm(r["campaign_name"])] = entry
@@ -169,7 +169,7 @@ def _group_deals_by_campaign(deals_rows: list, label_to_canonical: dict) -> tupl
 
 
 def _campaign_status(*, native_spend, usd_spend, fx_complete, sqls, customers,
-                     won_revenue, roas, spend_state, amount_unknown) -> str:
+                     won_revenue, spend_state, amount_unknown) -> str:
     """Business status for a campaign row (never an engineering term)."""
     has_spend = native_spend is not None and native_spend > 0
     unmapped = spend_state in (None, "unmapped") and not has_spend
@@ -178,9 +178,10 @@ def _campaign_status(*, native_spend, usd_spend, fx_complete, sqls, customers,
     if amount_unknown and (customers or 0) > 0:
         # Customers exist but their revenue can't be totalled → attribution review.
         return STATUS_ATTRIBUTION_MISSING
-    if (sqls or 0) > 0 and (customers or 0) == 0:
+    if (sqls or 0) > 0 or (customers or 0) > 0:
+        # Demand (SQLs) and/or customers, but no proven closed-won revenue yet.
         return STATUS_SQL_PRODUCER
-    if has_spend and (sqls or 0) == 0 and (customers or 0) == 0:
+    if has_spend:
         # Spend exists but no SQL/customer proof. If the USD spend is missing only
         # because FX is incomplete, say so; otherwise it's genuinely unproven.
         if usd_spend is None and not fx_complete:
@@ -191,8 +192,14 @@ def _campaign_status(*, native_spend, usd_spend, fx_complete, sqls, customers,
     return STATUS_SPEND_NO_PROOF
 
 
+# Google Ads spend mapping state (from the mart's spend_mapping) → UI label. The
+# mart distinguishes "matched" from "unavailable" — never collapse them, so the
+# UI can tell "mapping doesn't exist" from "mapping data unavailable".
+_MAPPING_STATUS = {"matched": "mapped", "unavailable": "mapping_unavailable"}
+
+
 def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
-                         unknown_amount_keys: set) -> list:
+                         unknown_amount_keys: set, native_currency: str = "GBP") -> list:
     """Merge mart campaign rows (outcomes + mapping) with the per-campaign native/
     USD spend split and the closed-won proof deals. Preserves revenue that maps to
     no campaign under an Unattributed / Needs Review row."""
@@ -216,13 +223,13 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
         status = _campaign_status(
             native_spend=native_spend, usd_spend=usd_spend, fx_complete=fx_complete,
             sqls=m.get("sqls"), customers=m.get("customers"), won_revenue=won,
-            roas=row_roas, spend_state=m.get("spend_state"), amount_unknown=amount_unknown)
+            spend_state=m.get("spend_state"), amount_unknown=amount_unknown)
 
         rows.append({
             "campaign_id": m.get("campaign_id"),
             "campaign_name": m.get("campaign_name"),
             "spend_native": native_spend,
-            "native_currency": "GBP",
+            "native_currency": native_currency,
             "spend_usd": usd_spend,
             "fx_complete": fx_complete,
             "sqls": m.get("sqls"),
@@ -232,7 +239,7 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
             "roas_available": row_roas is not None,
             "status": status,
             "spend_state": m.get("spend_state"),
-            "attribution_status": "mapped" if m.get("spend_mapping") == "matched" else "unmapped",
+            "attribution_status": _MAPPING_STATUS.get(m.get("spend_mapping"), "mapping_unavailable"),
             "deals": deals_by_key.get(cid) or deals_by_key.get(key) or [],
             "target_page": "roas-campaigns",
         })
@@ -248,7 +255,7 @@ def _build_campaign_rows(mart_rows: list, spend_maps: dict, deals_by_key: dict,
             "campaign_id": None,
             "campaign_name": UNATTRIBUTED_LABEL,
             "spend_native": None,
-            "native_currency": "GBP",
+            "native_currency": native_currency,
             "spend_usd": None,
             "fx_complete": False,
             "sqls": None,
@@ -288,7 +295,11 @@ def _build_kpis(campaign_rows: list, spend_truth: dict) -> dict:
     sqls_incomplete = any(r.get("sqls") is None for r in google_rows)
     total_sqls = None if sqls_incomplete else sum((r.get("sqls") or 0) for r in google_rows)
 
-    total_customers = sum((r.get("customers") or 0) for r in google_rows)
+    # Customers: Unavailable if any row withholds them (a disconnected revenue
+    # integration blanks them) — never a fabricated 0.
+    customers_incomplete = any(r.get("customers") is None for r in google_rows)
+    total_customers = (None if customers_incomplete
+                       else sum((r.get("customers") or 0) for r in google_rows))
 
     # Revenue: Unavailable if ANY Google campaign's revenue is unknown (never a
     # partial sum implying completeness).
@@ -529,19 +540,32 @@ def _build_decision_cards(campaign_rows: list, kpis: dict, keyword_themes: dict,
             "target_page": "search-terms", "target_label": "Open Search Terms",
         })
 
-    # Unavailable — where ROAS / USD spend is withheld.
-    reasons = []
-    if spend_truth.get("fx_status") != "verified":
-        reasons.append("FX")
-    if kpis.get("roas") is None:
-        reasons.append("ROAS")
-    reason_txt = (" and ".join(reasons) if reasons else "some metrics")
+    # Unavailable — explain WHY ROAS / USD spend is withheld, ACCURATELY (ROAS is
+    # None either because FX/USD is incomplete, revenue is incomplete, or there is
+    # simply no closed-won revenue yet — these read very differently).
+    fx_ok = spend_truth.get("fx_status") == "verified"
+    usd_present = kpis.get("verified_spend_usd") is not None
+    revenue_known = kpis.get("won_revenue_usd") is not None
+    if not fx_ok or not usd_present:
+        headline = "USD spend & ROAS unavailable"
+        body = ("USD spend and ROAS are withheld because FX coverage is incomplete — "
+                "native GBP spend is still shown, never a fabricated USD or ROAS.")
+    elif not revenue_known:
+        headline = "ROAS unavailable"
+        body = ("ROAS is withheld because some closed-won revenue is incomplete (an "
+                "unknown deal amount) — never a lowered $0.")
+    elif kpis.get("roas") is None:
+        headline = "ROAS not yet meaningful"
+        body = ("There is no closed-won revenue yet to measure against this window's "
+                "verified spend, so ROAS is not shown — never a fabricated 0.00x.")
+    else:
+        headline = "Keyword outcome attribution unavailable"
+        body = ("Spend, revenue and ROAS are verified for this window. Keyword-level "
+                "SQLs / customers / revenue have no durable attribution — keyword and "
+                "search-term panels are read-only evidence.")
     cards.append({
         "type": "unavailable", "title": "Unavailable",
-        "headline": f"{'ROAS' if 'ROAS' in reasons else 'Some metrics'} unavailable",
-        "body": (f"{reason_txt} is withheld where FX, revenue, or attribution is "
-                 "incomplete — native GBP spend is still shown, never a fabricated "
-                 "USD or ROAS."),
+        "headline": headline, "body": body,
         "target_page": "revenue-health", "target_label": "Open Revenue Health",
     })
     return cards
@@ -605,6 +629,9 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     prev_key, prev_now, label, note = ref
     try:
         prev_mart = build_revenue_decision_mart(view="campaign", window=prev_key, now=prev_now)
+        pw = prev_mart.get("window") or {}
+        prev_deals = repo.fetch_revenue_deals(
+            _parse_iso_date(pw.get("start_date")), _parse_iso_date(pw.get("end_date")))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Dashboard campaigns previous-period build failed: %s", exc)
         return {"available": False, "label": label, "note": note, "metrics": {},
@@ -612,7 +639,12 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     ps = prev_mart.get("summary") or {}
     pst = prev_mart.get("spend_truth") or {}
     connected = bool((prev_mart.get("readiness") or {}).get("revenue_integration_connected"))
-    prev_rev = ps.get("won_revenue_usd") if connected else None
+    # The mart summary counts a null-amount deal as $0; if the previous window had
+    # ANY unknown deal amount, its revenue total is not a trustworthy baseline —
+    # withhold it (No comparison) rather than measuring against a lowered $0.
+    prev_amount_unknown = any(d.get("deal_amount_usd") is None
+                              for d in (prev_deals.get("rows") or []))
+    prev_rev = ps.get("won_revenue_usd") if (connected and not prev_amount_unknown) else None
     prev_cust = ps.get("customers") if connected else None
     metrics = {
         "won_revenue_usd": _delta_metric(kpis.get("won_revenue_usd"), prev_rev),
@@ -642,6 +674,8 @@ def build_dashboard_campaigns(window: str = "current_quarter",
     mart_rows = mart.get("rows") or []
     spend_truth = mart.get("spend_truth") or {}
     readiness = mart.get("readiness") or {}
+    revenue_connected = bool(readiness.get("revenue_integration_connected"))
+    native_currency = spend_truth.get("native_currency") or "GBP"
 
     start = _parse_iso_date(window_block.get("start_date") or resolved.get("start_date"))
     end = _parse_iso_date(window_block.get("end_date") or resolved.get("end_date"))
@@ -661,7 +695,19 @@ def build_dashboard_campaigns(window: str = "current_quarter",
     deals_by_key, unknown_amount_keys = _group_deals_by_campaign(
         deals.get("rows") or [], label_to_canonical)
 
-    campaign_rows = _build_campaign_rows(mart_rows, spend_maps, deals_by_key, unknown_amount_keys)
+    campaign_rows = _build_campaign_rows(mart_rows, spend_maps, deals_by_key,
+                                         unknown_amount_keys, native_currency)
+
+    if not revenue_connected:
+        # Closed-won customers AND revenue come from the revenue integration, so
+        # both are unknown when it is disconnected — blank them (spend / SQLs
+        # survive). The mart returns a mart-level $0/0 here, which would otherwise
+        # render as a VERIFIED zero. Never fabricate a $0 or a 0-customer proof.
+        for c in campaign_rows:
+            c["customers"] = None
+            c["won_revenue_usd"] = None
+            c["roas"] = None
+            c["roas_available"] = False
 
     kpis = _build_kpis(campaign_rows, spend_truth)
     period_change = _build_period_change(window, ref_now, kpis)
