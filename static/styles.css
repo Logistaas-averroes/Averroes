@@ -6649,7 +6649,13 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
   font-size: 12px;
   transition: background 0.12s ease;
 }
-.chan-channel-row:hover, .chan-channel-row:focus { background: rgba(18, 158, 245, 0.06); outline: none; }
+.chan-channel-row:hover { background: rgba(18, 158, 245, 0.06); }
+/* Keep a clear keyboard focus ring (a11y) — never suppress the outline. */
+.chan-channel-row:focus-visible {
+  background: rgba(18, 158, 245, 0.06);
+  outline: 2px solid var(--c-primary, #129ef5);
+  outline-offset: -2px;
+}
 .chan-channel-row__dot { width: 10px; height: 10px; border-radius: 3px; }
 .chan-channel-row__name { font-weight: 600; color: var(--text-primary); }
 .chan-channel-row__metric { color: var(--text-secondary); font-variant-numeric: tabular-nums; }

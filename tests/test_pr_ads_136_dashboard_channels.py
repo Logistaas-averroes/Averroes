@@ -308,8 +308,9 @@ def test_read_only_and_conversion_value_never_used(monkeypatch):
     assert out["read_only"] is True
     assert out["google_ads_conversion_value_used"] is False
     assert out["source_truth"] == "revenue_by_source_taxonomy"
-    # Service composes the shared classifier, never re-implements taxonomy.
-    assert "classify_source_taxonomy" in SERVICE
+    # Service composes the shared classifier via the source service's own taxonomy
+    # helpers (identical classification to the channel-mix path), never re-implements it.
+    assert "_taxonomy_for_section" in SERVICE
     assert "conversion value" in SERVICE.lower()
 
 
@@ -407,7 +408,11 @@ def test_null_amount_makes_google_revenue_and_roas_unavailable(monkeypatch):
     google = _ch(out, "google_ads")
     assert google["won_revenue_usd"] is None and google["won_revenue_usd"] != 0
     assert google["roas"] is None
-    assert google["spend_connected"] is False  # ROAS can't be trusted → not connected
+    # ROAS is withheld (roas_available False) because revenue is incomplete, but
+    # the Google Ads spend SOURCE is still connected and its spend still shown.
+    assert google["roas_available"] is False
+    assert google["spend_connected"] is True
+    assert google["spend_usd"] is not None
     # The spend/revenue split cannot be completed either.
     assert out["kpis"]["spend_connected_revenue_usd"] is None
     assert out["kpis"]["revenue_only_revenue_usd"] is None
@@ -456,6 +461,72 @@ def test_fmt_usd_short_none_is_unavailable():
     assert _fmt_usd_short(None) == "Unavailable"
     assert _fmt_usd_short(29000) == "$29.0k"
     assert _fmt_usd_short(2_500_000) == "$2.5M"
+
+
+def test_roas_available_iff_roas_is_a_real_number(monkeypatch):
+    # roas_available is a strict invariant: true exactly when roas is present.
+    out = _channels(monkeypatch)
+    for c in out["channel_mix"]:
+        assert c["roas_available"] == (c["roas"] is not None)
+    for p in out["platform_matrix"]:
+        assert p["roas_available"] == (p["roas"] is not None)
+    # Disconnected: roas is cleared → roas_available must be cleared too (no stale
+    # "connected ROAS" pair), while the Google spend source may stay connected.
+    out2 = _channels(monkeypatch, revenue_connected=False)
+    for row in out2["channel_mix"] + out2["platform_matrix"]:
+        assert row["roas"] is None and row["roas_available"] is False
+
+
+def test_unverifiable_raw_revenue_fails_closed(monkeypatch):
+    # The second (unknown-amount detection) fetch_source_revenue call failing must
+    # not let a possibly-understated total render as complete — fail closed.
+    import db.revenue_repository as repo
+    _patch_durable(monkeypatch)
+    state = {"n": 0}
+
+    def flaky(s, e):
+        state["n"] += 1
+        # 1st call (inside build_revenue_by_source) succeeds; 2nd (detection) fails.
+        return ({"available": True, "rows": list(SOURCE_REV_ROWS)} if state["n"] == 1
+                else {"available": False, "rows": []})
+
+    monkeypatch.setattr(repo, "fetch_source_revenue", flaky)
+    from services.dashboard_channels_service import build_dashboard_channels
+    out = build_dashboard_channels(WINDOW, now=NOW)
+    for c in out["channel_mix"]:
+        assert c["won_revenue_usd"] is None, "revenue must be Unavailable when amounts unverifiable"
+        assert c["roas"] is None
+    for p in out["platform_matrix"]:
+        assert p["won_revenue_usd"] is None and p["roas"] is None
+    # Counts still survive (they don't depend on the amount).
+    assert any((c["customers"] or 0) > 0 for c in out["channel_mix"])
+
+
+def test_group_disagree_deal_not_force_credited_to_google(monkeypatch):
+    # A deal STORED in the google_ads group but with a missing raw primary source
+    # (source-unconfirmed) must route to Unclassified in BOTH the channel mix and
+    # the trend — identical classification, never force-credited to Google Ads.
+    ambiguous_rev = [
+        {"acquisition_group": "google_ads", "attribution_status": "attributed",
+         "deal_amount_usd": 50000.0, "source_primary_raw": None, "source_detail_raw": None},
+    ]
+    ambiguous_daily = [
+        {"close_date": "2026-05-10", "acquisition_group": "google_ads",
+         "attribution_status": "attributed", "deal_amount_usd": 50000.0,
+         "source_primary_raw": None, "source_detail_raw": None},
+    ]
+    out = _channels(monkeypatch, source_rev=ambiguous_rev, source_rev_daily=ambiguous_daily)
+    unclassified = _ch(out, "unclassified")
+    google = _ch(out, "google_ads")
+    # Channel mix: the customer + $50k land in Unclassified, not Google Ads.
+    assert unclassified is not None and (unclassified["customers"] or 0) >= 1
+    assert google is None or (google["customers"] or 0) == 0
+    # Trend: the same close-date bucket credits Unclassified, never Google Ads.
+    trend_channels = {ch["channel"] for p in out["trend"]["points"] for ch in p["channels"]}
+    assert "unclassified" in trend_channels
+    google_trend_cust = sum(ch["customers"] for p in out["trend"]["points"]
+                            for ch in p["channels"] if ch["channel"] == "google_ads")
+    assert google_trend_cust == 0
 
 
 # ══════════════════ 5. Trend (per channel, own event date) ══════════════════

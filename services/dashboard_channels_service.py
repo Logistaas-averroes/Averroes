@@ -62,9 +62,7 @@ from analysis.source_classification import (
     CH_REFERRALS_PARTNERS,
     CH_SALESNASH,
     CH_UNSPECIFIED,
-    GROUP_GOOGLE_ADS,
     GROUP_UNCLASSIFIED,
-    classify_source_taxonomy,
 )
 from db import revenue_repository as repo
 from services.revenue_decision_mart import build_revenue_decision_mart
@@ -228,7 +226,8 @@ def _unknown_amount_maps(revenue_rows: list) -> tuple[set, set]:
 
 
 def _build_channels_and_platforms(source_groups: list, google_spend: dict,
-                                  exec_unknown: set, platform_unknown: set) -> tuple[list, list]:
+                                  exec_unknown: set, platform_unknown: set,
+                                  amounts_verifiable: bool = True) -> tuple[list, list]:
     """Fold the nested source taxonomy into executive channels + a platform matrix.
 
     Every level's counts and revenue come straight from build_revenue_by_source
@@ -236,6 +235,11 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
     attach ONLY to the Google Ads channel, and only from the canonical mart spend.
     A channel/platform whose raw rows include an unknown deal amount reports its
     revenue (and ROAS) as null — never a silently lowered $0.
+
+    ``amounts_verifiable`` is False when the raw closed-won source rows could not
+    be re-read to detect unknown amounts; then NO revenue total can be trusted as
+    complete, so every channel/platform revenue (and ROAS) is reported as
+    Unavailable — fail closed, never a silently lowered total.
     """
     channels: dict = {}
     platforms: list = []
@@ -246,8 +250,10 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
             agg = channels.setdefault(exec_ch, _new_bucket())
             ch_won = ch.get("won_revenue")
             # An unknown amount anywhere in this executive channel makes its total
-            # Unavailable (the source service's sum silently absorbed it as $0).
-            ch_amount_known = ch_won is not None and exec_ch not in exec_unknown
+            # Unavailable (the source service's sum silently absorbed it as $0). If
+            # the raw rows were unverifiable, no total can be trusted → all unknown.
+            ch_amount_known = (amounts_verifiable and ch_won is not None
+                               and exec_ch not in exec_unknown)
             _accumulate(agg, ch.get("leads"), ch.get("sqls"), ch.get("customers"),
                         ch_won, amount_known=ch_amount_known)
 
@@ -255,11 +261,14 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
                 is_google = (exec_ch == CX_GOOGLE_ADS
                              and pf.get("platform") == "google_ads")
                 pf_key = (group.get("group"), ch.get("channel"), pf.get("platform"))
-                pf_amount_known = (pf.get("won_revenue") is not None
+                pf_amount_known = (amounts_verifiable and pf.get("won_revenue") is not None
                                    and pf_key not in platform_unknown)
                 pf_won = pf.get("won_revenue") if pf_amount_known else None
-                spend_connected = bool(is_google and google_spend["usd"] is not None
-                                       and pf_amount_known)
+                pf_roas = _google_roas(pf_won, google_spend["usd"]) if is_google else None
+                # spend_connected reflects the SPEND source (Google Ads, FX-verified) —
+                # it does NOT depend on revenue completeness. ROAS availability is the
+                # separate gate: roas_available iff roas is a real (trustworthy) number.
+                spend_connected = bool(is_google and google_spend["usd"] is not None)
                 platforms.append({
                     "platform": pf.get("platform"),
                     "platform_label": pf.get("label"),
@@ -272,9 +281,9 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
                     "customers": pf.get("customers"),
                     "won_revenue_usd": _round2(pf_won) if pf_won is not None else None,
                     "spend_usd": google_spend["usd"] if is_google else None,
-                    "roas": (_google_roas(pf_won, google_spend["usd"]) if is_google else None),
+                    "roas": pf_roas,
                     "spend_connected": spend_connected,
-                    "roas_available": spend_connected,
+                    "roas_available": pf_roas is not None,
                     "status": _channel_status(exec_ch, spend_connected),
                 })
 
@@ -286,10 +295,11 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
             continue
         is_google = exec_ch == CX_GOOGLE_ADS
         won = None if agg["amount_unknown"] else _round2(agg["won_revenue"])
-        # Spend stays connected only when Google's USD spend is verified AND the
-        # channel's revenue is complete (so its ROAS is a true value, never lowered).
-        spend_connected = bool(is_google and google_spend["usd"] is not None
-                               and won is not None)
+        roas = _google_roas(won, google_spend["usd"]) if is_google else None
+        # spend_connected reflects the Google Ads spend SOURCE (FX-verified USD),
+        # independent of revenue completeness. ROAS is gated separately:
+        # roas_available iff roas is a real number (never a lowered/None value).
+        spend_connected = bool(is_google and google_spend["usd"] is not None)
         channel_rows.append({
             "channel": exec_ch,
             "channel_label": EXEC_CHANNEL_LABELS[exec_ch],
@@ -301,9 +311,9 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
             "native_spend": ({"amount": google_spend["native_amount"],
                               "currency": google_spend["native_currency"]}
                              if is_google else None),
-            "roas": (_google_roas(won, google_spend["usd"]) if is_google else None),
+            "roas": roas,
             "spend_connected": spend_connected,
-            "roas_available": spend_connected,
+            "roas_available": roas is not None,
             "status": _channel_status(exec_ch, spend_connected),
         })
 
@@ -378,15 +388,18 @@ def _series_bounds(window_block, lead_rows, rev_rows):
 
 
 def _exec_channel_from_raw(primary_raw, detail_raw, acquisition_group) -> str:
-    """Executive channel for a raw source row, via the shared classifier only."""
-    tax = classify_source_taxonomy(primary_raw, detail_raw)
-    # Honour the durable stored group: if the deal's group differs from the
-    # contact-derived group (ambiguous/unclassified deal), fall to Unclassified.
-    if acquisition_group and tax["source_group"] != acquisition_group:
-        if acquisition_group == GROUP_GOOGLE_ADS:
-            return CX_GOOGLE_ADS
-        return CX_UNCLASSIFIED
-    return exec_channel_for(tax["source_channel"])
+    """Executive channel for a raw source row — IDENTICAL to the channel-mix path.
+
+    Uses the source service's OWN section/taxonomy helpers (the same ones
+    build_revenue_by_source uses), so the trend classifies a deal exactly as the
+    channel-mix / platform-matrix does. A deal whose stored group disagrees with
+    its raw source (e.g. missing primary on a Google-grouped deal) folds into the
+    section's Unspecified channel → Unclassified — never force-credited to Google
+    Ads, and never divergent between the two panels of the same tab.
+    """
+    section = _section_bucket(acquisition_group or GROUP_UNCLASSIFIED)
+    ch, _cl, _pf, _pl = _taxonomy_for_section(section, primary_raw, detail_raw)
+    return exec_channel_for(ch)
 
 
 def _bucket_label(bstart, bucket: str) -> str:
@@ -708,14 +721,19 @@ def build_dashboard_channels(window: str = "current_quarter",
     google_spend = _canonical_google_spend(mart)
 
     # Re-read the raw closed-won source rows to detect unknown deal amounts the
-    # source service silently summed as $0 (same window bounds it resolved).
+    # source service silently summed as $0 (same window bounds it resolved). If
+    # this fetch is unavailable we cannot verify amounts are known, so revenue is
+    # reported Unavailable rather than trusting a possibly-understated total.
     start_key = _parse_iso_date(window_block.get("start_date"))
     end_key = _parse_iso_date(window_block.get("end_date"))
-    raw_revenue = repo.fetch_source_revenue(start_key, end_key) if end_key else {"rows": []}
+    raw_revenue = repo.fetch_source_revenue(start_key, end_key) if end_key else {
+        "available": True, "rows": []}
+    amounts_verifiable = bool(raw_revenue.get("available"))
     exec_unknown, platform_unknown = _unknown_amount_maps(raw_revenue.get("rows") or [])
 
     channel_rows, platforms = _build_channels_and_platforms(
-        source_groups, google_spend, exec_unknown, platform_unknown)
+        source_groups, google_spend, exec_unknown, platform_unknown,
+        amounts_verifiable=amounts_verifiable)
 
     # Gate revenue-derived KPIs on the revenue integration (never fake $0).
     gated_summary = {
@@ -728,14 +746,19 @@ def build_dashboard_channels(window: str = "current_quarter",
         # so both are unknown when it is disconnected — blank them (Leads / SQLs
         # come from contacts and survive). Never imply a verified $0 / customer
         # count from an unwired integration. Consistent with the gated hero KPIs.
+        # spend_connected/status stay as-is: the Google Ads SPEND source remains
+        # connected when only the REVENUE integration is down. But ROAS needs
+        # revenue, so roas and roas_available are cleared (kept consistent).
         for c in channel_rows:
             c["customers"] = None
             c["won_revenue_usd"] = None
             c["roas"] = None
+            c["roas_available"] = False
         for p in platforms:
             p["customers"] = None
             p["won_revenue_usd"] = None
             p["roas"] = None
+            p["roas_available"] = False
 
     kpis = _build_kpis(channel_rows, gated_summary, google_spend)
     top_channel, top_platform = _top_channel_and_platform(channel_rows, platforms)

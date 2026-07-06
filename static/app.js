@@ -3620,7 +3620,7 @@ function chanMomentumChartSVG(trend, metric) {
   return `
     <div class="dash-chart-wrap chan-momentum-wrap">
       <svg viewBox="0 0 ${W} ${H}" class="dash-combo-chart" role="img"
-        aria-label="Channel ${escapeHtml(metric)} per ${trend.bucket || "period"}, stacked by channel">
+        aria-label="Channel ${escapeHtml(metric)} per ${escapeHtml(trend.bucket || "period")}, stacked by channel">
         ${grid}
         <line x1="${padL}" x2="${W - padR}" y1="${baseline}" y2="${baseline}" stroke="#cbd5e1" stroke-width="1"/>
         ${bars}
@@ -3871,7 +3871,9 @@ function wireChanQualityHover(root, d) {
 const CHAN_SPEND_UNAVAILABLE = "Unavailable — no connected spend source";
 
 function chanPlatformSpendCell(p) {
-  if (p.spend_connected && p.spend_usd !== null && p.spend_usd !== undefined) {
+  // Show spend whenever a real spend figure is present (Google Ads, FX-verified);
+  // spend is independent of ROAS, which is gated separately by roas_available.
+  if (p.spend_usd !== null && p.spend_usd !== undefined) {
     return escapeHtml(fmtMoney(p.spend_usd));
   }
   return `<span class="dash-unavailable" title="${escapeHtml(CHAN_SPEND_UNAVAILABLE)}">${escapeHtml(CHAN_SPEND_UNAVAILABLE)}</span>`;
@@ -3936,8 +3938,13 @@ function renderChanChannelList(d) {
       <p class="rev-breakdown-empty">No channel activity in this window.</p>`;
   }
   const body = rows.map((r, i) => {
-    const spendCell = r.spend_connected && r.spend_usd !== null && r.spend_usd !== undefined
-      ? `${escapeHtml(fmtMoney(r.spend_usd))} · ${escapeHtml(fmtRoasMultiple(r.roas))}`
+    // Show spend whenever present; append ROAS only when it is a real, trusted
+    // value (roas_available) — never a "· Unavailable" suffix, never on a
+    // non-Google row. Mirrors chanPlatformRoasCell's gating.
+    const spendKnown = r.spend_usd !== null && r.spend_usd !== undefined;
+    const roasKnown = r.roas_available && r.roas !== null && r.roas !== undefined;
+    const spendCell = spendKnown
+      ? `${escapeHtml(fmtMoney(r.spend_usd))}${roasKnown ? ` · ${escapeHtml(fmtRoasMultiple(r.roas))}` : ""}`
       : `<span class="dash-unavailable">${escapeHtml(CHAN_SPEND_UNAVAILABLE)}</span>`;
     return `
     <li class="chan-channel-row" data-chan-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.channel_label || "channel")} detail">
