@@ -1181,7 +1181,7 @@ function hashToPage(hash) {
 
 // Dashboard inner-tab state (PR-ADS-135). Overview is the default; Revenue is
 // linkable/bookmarkable via #/dashboard?tab=revenue.
-const DASHBOARD_TABS = ["overview", "revenue", "channels"];
+const DASHBOARD_TABS = ["overview", "revenue", "channels", "campaigns"];
 
 function hashToDashTab(hash) {
   const q = (hash || "").split("?")[1] || "";
@@ -1959,9 +1959,11 @@ function activateDashboardTab(tab, options) {
   const overviewRoot = document.getElementById("dashboard-overview-root");
   const revenueRoot = document.getElementById("dashboard-revenue-root");
   const channelsRoot = document.getElementById("dashboard-channels-root");
+  const campaignsRoot = document.getElementById("dashboard-campaigns-root");
   if (overviewRoot) overviewRoot.hidden = target !== "overview";
   if (revenueRoot) revenueRoot.hidden = target !== "revenue";
   if (channelsRoot) channelsRoot.hidden = target !== "channels";
+  if (campaignsRoot) campaignsRoot.hidden = target !== "campaigns";
 
   if (options.updateHash !== false) {
     // Overview is the default → keep the URL clean; other tabs are bookmarkable.
@@ -1971,6 +1973,7 @@ function activateDashboardTab(tab, options) {
 
   if (target === "revenue") loadDashboardRevenue();
   else if (target === "channels") loadDashboardChannels();
+  else if (target === "campaigns") loadDashboardCampaigns();
   else loadDashboardOverview();
 }
 
@@ -4045,6 +4048,555 @@ function renderChanTruthFooter(d) {
       <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
       ${allGood
         ? '<span class="dash-footer-note">Channel truth verified — only Google Ads is spend-connected; other channels are revenue-only by design.</span>'
+        : (dashCanNavigate("revenue-health")
+          ? '<a class="dash-footer-note" href="#/revenue-health">Some attribution needs review — open Revenue Health</a>'
+          : '<span class="dash-footer-note">Some attribution needs review — contact your administrator.</span>')}
+    </footer>`;
+}
+
+// ── Dashboard — Campaigns & Keywords tab (PR-ADS-137) ──────────────────────
+//
+// Fourth dashboard tab. Reuses the PR-134/135/136 design system end to end (KPI
+// cards, chart shell, decision cards, truth footer, loading/refetch/unavailable
+// states) — NO new visual language. It answers: which Google Ads campaigns and
+// keyword/search-intent themes produce real business outcomes, and which spend
+// without proof? Truth doctrine is identical: Google Ads spend is native GBP
+// (never labelled USD); HubSpot closed-won is revenue truth (USD); campaign ROAS
+// only when spend + FX + revenue are safe; keyword themes carry NO outcome
+// attribution and NO ROAS; search-term panels are read-only evidence.
+
+let dashCampaigns = null;
+let dashCampaignsStatus = "loading";
+
+// Campaign status → colour + dot class (bubble map + badges).
+const CAMP_STATUS_META = {
+  "Revenue proven": { color: "#22b07d", dot: "camp-dot--proven" },
+  "SQL producer": { color: "#129ef5", dot: "camp-dot--sql" },
+  "Spend without SQL / customer proof": { color: "#ff8a3d", dot: "camp-dot--waste" },
+  "Revenue attribution missing": { color: "#7c5cff", dot: "camp-dot--attr" },
+  "FX unavailable": { color: "#8896a6", dot: "camp-dot--muted" },
+  "Mapping needs review": { color: "#b6bfca", dot: "camp-dot--muted" },
+};
+function campStatusColor(status) {
+  return (CAMP_STATUS_META[status] || { color: "#b6bfca" }).color;
+}
+
+async function loadDashboardCampaigns() {
+  const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.dashCampaigns;
+  setWindowRangeLoading("dashboard-range");
+
+  const root = document.getElementById("dashboard-campaigns-root");
+  const genEl = document.getElementById("dashboard-generated");
+  if (root) {
+    if (dashCampaigns && dashCampaignsStatus === "ok") {
+      root.classList.add("is-refreshing");
+    } else {
+      root.innerHTML = renderDashSkeleton();
+    }
+  }
+
+  try {
+    const data = await fetchJSON(
+      `/api/dashboard/campaigns?window=${encodeURIComponent(window_)}`
+    );
+    if (token !== _revReqSeq.dashCampaigns) return;
+    if (!_revResponseIsCurrent("dashCampaigns", token, data)) return;
+    dashCampaigns = data;
+    dashCampaignsStatus = "ok";
+    renderWindowRange("dashboard-range", data.window || null);
+    if (genEl) genEl.textContent = data.generated_at ? `Generated ${fmtDate(data.generated_at)}` : "";
+    renderDashboardCampaigns();
+  } catch (err) {
+    console.error("[loadDashboardCampaigns]", err);
+    if (token !== _revReqSeq.dashCampaigns) return;
+    dashCampaigns = null;
+    dashCampaignsStatus = "error";
+    if (genEl) genEl.textContent = "";
+    renderWindowRange("dashboard-range", null);
+    renderDashboardCampaigns();
+  }
+}
+
+function renderDashboardCampaigns() {
+  const root = document.getElementById("dashboard-campaigns-root");
+  if (!root) return;
+  root.classList.remove("is-refreshing");
+
+  if (dashCampaignsStatus !== "ok" || !dashCampaigns) {
+    const nextStep = dashCanNavigate("health")
+      ? 'Next step: check <a href="#/health">System Status</a> or retry with Refresh.'
+      : "Next step: retry with Refresh, or contact your administrator.";
+    root.innerHTML = `
+      <div class="revenue-blocked-card dash-error-card">
+        <h3 class="revenue-blocked-card__title">Campaigns &amp; Keywords unavailable</h3>
+        <p>The dashboard campaigns service could not be reached. Nothing is shown
+        because nothing safe could be computed — metrics are never fabricated.</p>
+        <p class="revenue-blocked-card__next">${nextStep}</p>
+      </div>`;
+    return;
+  }
+
+  const d = dashCampaigns;
+  root.innerHTML = `
+    <div class="dash-tab-intro dash-anim">
+      <h2 class="dash-tab-intro__title">Campaigns &amp; Keywords</h2>
+      <p class="dash-tab-intro__sub">Which Google Ads campaigns and keyword themes produce SQLs, customers and closed-won revenue — and which spend without proof. Spend is Google Ads (native GBP); revenue is HubSpot closed-won (USD).</p>
+    </div>
+    ${renderCampKpiRow(d)}
+    <section class="dash-panel dash-chart-panel dash-anim camp-map-panel" aria-label="Campaign performance map">
+      ${renderCampPerformanceMap(d)}
+    </section>
+    <section class="dash-panel dash-anim camp-leaderboard-panel" aria-label="Campaign leaderboard">
+      ${renderCampLeaderboard(d)}
+    </section>
+    <div class="dash-main-grid">
+      <section class="dash-panel dash-anim camp-keyword-panel" aria-label="Keyword theme intelligence">
+        ${renderCampKeywordThemes(d)}
+      </section>
+      <aside class="dash-panel dash-anim camp-search-panel" aria-label="Search term signals">
+        ${renderCampSearchSignals(d)}
+      </aside>
+    </div>
+    <section class="dash-decisions dash-anim" aria-label="Campaign decision cards">
+      ${renderDashDecisionCards(d)}
+    </section>
+    ${renderCampTruthFooter(d)}
+  `;
+  wireCampBubbleHover(root, d);
+  wireCampDrawers(root, d);
+}
+
+// Native GBP spend cell (never a "$"), with USD appended only when FX-safe.
+function campSpendCell(row) {
+  if (row.spend_native === null || row.spend_native === undefined) {
+    return '<span class="dash-unavailable">Unavailable</span>';
+  }
+  const native = escapeHtml(fmtCompactCurrency(row.spend_native, row.native_currency || "GBP"));
+  if (row.spend_usd !== null && row.spend_usd !== undefined) {
+    return `${native} <span class="camp-usd">· ${escapeHtml(fmtMoney(row.spend_usd))}</span>`;
+  }
+  return native;
+}
+
+function campRoasCell(row) {
+  // ROAS only when it is a real, trusted value; else the status conveys the outcome.
+  if (row.roas_available && row.roas !== null && row.roas !== undefined) {
+    return `<span class="camp-roas">${escapeHtml(fmtRoasMultiple(row.roas))}</span>`;
+  }
+  return `<span class="camp-status" style="--camp-accent:${campStatusColor(row.status)}">${escapeHtml(row.status || "—")}</span>`;
+}
+
+// Compact native-currency magnitude for the hero value (symbol + magnitude, no
+// trailing code word) so a long "£10.0k GBP" never truncates. The £ symbol makes
+// the currency unambiguous; the currency code is restated in the sub line.
+function campNativeBig(native) {
+  if (!native || native.amount === null || native.amount === undefined) {
+    return '<span class="dash-unavailable">Unavailable</span>';
+  }
+  const sym = currencySymbol(native.currency || "GBP");
+  const abs = Math.abs(native.amount);
+  let body;
+  if (abs >= 1e6) body = (native.amount / 1e6).toFixed(1) + "M";
+  else if (abs >= 1e3) body = (native.amount / 1e3).toFixed(1) + "k";
+  else body = Number(native.amount).toFixed(0);
+  return escapeHtml(`${sym}${body}`);
+}
+
+function renderCampKpiRow(d) {
+  const k = d.kpis || {};
+  const pc = d.period_change || {};
+  const native = k.verified_spend_native || {};
+  const nativeVal = campNativeBig(native);
+  const cur = escapeHtml(native.currency || "GBP");
+  const usdSub = (k.verified_spend_usd !== null && k.verified_spend_usd !== undefined)
+    ? `${cur} native · ${escapeHtml(fmtMoney(k.verified_spend_usd))} USD`
+    : `${cur} native · USD unavailable (FX)`;
+
+  const cards = [
+    {
+      key: "spend", label: "Verified Google Ads Spend",
+      value: nativeVal, sub: usdSub,
+      delta: dashDeltaChip("verified_spend_usd", pc),
+      source: "Google Ads · native GBP",
+      ok: native.amount !== null && native.amount !== undefined,
+    },
+    {
+      key: "sqls", label: "SQLs from Google Ads",
+      value: dashValue(k.sqls, fmtCount), sub: "Qualified leads · this window",
+      delta: dashDeltaChip("sqls", pc),
+      source: "HubSpot qualified leads",
+      ok: k.sqls !== null && k.sqls !== undefined,
+    },
+    {
+      key: "customers", label: "Customers",
+      value: dashValue(k.customers, fmtCount), sub: "Closed-won · campaign-attributed",
+      delta: dashDeltaChip("customers", pc),
+      source: "HubSpot Closed-Won",
+      ok: k.customers !== null && k.customers !== undefined,
+    },
+    {
+      key: "revenue", label: "Won Revenue",
+      value: dashValue(k.won_revenue_usd, fmtMoney), sub: "USD · HubSpot closed-won",
+      delta: dashDeltaChip("won_revenue_usd", pc),
+      source: "HubSpot Closed-Won",
+      ok: k.won_revenue_usd !== null && k.won_revenue_usd !== undefined,
+    },
+    {
+      key: "roas", label: "Google Ads ROAS",
+      value: (k.roas !== null && k.roas !== undefined)
+        ? escapeHtml(fmtRoasMultiple(k.roas))
+        : '<span class="dash-unavailable">Unavailable</span>',
+      sub: `${dashValue(k.campaigns_with_spend, fmtCount)} campaigns with spend`,
+      delta: dashDeltaChip("roas", pc),
+      source: "Revenue ÷ verified USD spend",
+      ok: k.roas !== null && k.roas !== undefined,
+    },
+  ];
+
+  const compareNote = pc.available
+    ? `<p class="dash-compare-note">Change ${escapeHtml(pc.label || "vs previous period")}${pc.note ? ` — ${escapeHtml(pc.note)}` : ""}</p>`
+    : `<p class="dash-compare-note dash-compare-note--muted">No previous-period comparison${pc.reason ? ` — ${escapeHtml(pc.reason)}` : ""}</p>`;
+
+  return `
+    <div class="dash-kpi-grid">
+      ${cards.map((c) => `
+        <div class="dash-kpi-card dash-anim ${c.ok ? "" : "dash-kpi-card--unavailable"}" data-kpi="${c.key}">
+          <div class="dash-kpi-card__label">${escapeHtml(c.label)}</div>
+          <div class="dash-kpi-card__value">${c.value}</div>
+          <div class="dash-kpi-card__sub">${escapeHtml(c.sub)}</div>
+          <div class="dash-kpi-card__meta">${c.delta}</div>
+          <div class="dash-kpi-card__source">${escapeHtml(c.source)}</div>
+        </div>`).join("")}
+    </div>
+    ${compareNote}`;
+}
+
+// Campaign performance bubble map: x = native spend (GBP), y = customers, size = SQLs.
+function renderCampPerformanceMap(d) {
+  const rows = (d.campaigns || []).filter((r) =>
+    r.spend_native !== null && r.spend_native !== undefined && r.spend_native > 0);
+  const legend = Object.keys(CAMP_STATUS_META).map((s) =>
+    `<span class="dash-legend__item"><span class="dash-legend__swatch" style="background:${CAMP_STATUS_META[s].color}"></span>${escapeHtml(s)}</span>`).join("");
+  return `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Campaign Performance Map</h3>
+        <p class="dash-panel__sub">Spend (native GBP) × Customers · bubble size = SQLs · colour = status</p>
+      </div>
+    </div>
+    ${campBubbleSVG(rows)}
+    <div class="dash-legend camp-legend">${legend}</div>`;
+}
+
+function campBubbleSVG(rows) {
+  if (!rows.length) {
+    return '<div class="dash-chart-empty">No campaigns with verified spend in this window.</div>';
+  }
+  const W = 760, H = 320, padL = 60, padR = 24, padT = 20, padB = 44;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const maxX = dashNiceCeil(Math.max(1, ...rows.map((r) => r.spend_native || 0)) * 1.15);
+  const maxY = dashNiceCeil(Math.max(1, ...rows.map((r) => r.customers || 0)) * 1.15);
+  const maxSql = Math.max(1, ...rows.map((r) => r.sqls || 0));
+  const xOf = (v) => padL + plotW * ((v || 0) / maxX);
+  const yOf = (v) => padT + plotH * (1 - (v || 0) / maxY);
+  const rOf = (sqls) => (sqls === null || sqls === undefined) ? 6 : 8 + 22 * Math.sqrt((sqls || 0) / maxSql);
+
+  const ticks = [0, 0.25, 0.5, 0.75, 1];
+  const gridY = ticks.map((t) => {
+    const y = (padT + plotH * (1 - t)).toFixed(1);
+    return `<line x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}" stroke="#eef1f6" stroke-width="1"/>
+      <text x="${padL - 8}" y="${Number(y) + 3}" text-anchor="end" class="dash-chart-tick">${escapeHtml(fmtCount(Math.round(maxY * t)))}</text>`;
+  }).join("");
+  const gridX = ticks.map((t) => {
+    const x = xOf(maxX * t).toFixed(1);
+    return `<text x="${x}" y="${H - 10}" text-anchor="middle" class="dash-chart-tick">${escapeHtml(fmtCompactCurrency(maxX * t, "GBP"))}</text>`;
+  }).join("");
+
+  const bubbles = rows.slice().sort((a, b) => rOf(b.sqls) - rOf(a.sqls)).map((r) => {
+    const i = rows.indexOf(r);
+    const rad = rOf(r.sqls);
+    const cx = xOf(r.spend_native).toFixed(1), cy = yOf(r.customers).toFixed(1);
+    return `<circle class="dash-chart-hit camp-bubble" data-camp-bubble="${i}" cx="${cx}" cy="${cy}" r="${rad.toFixed(1)}"
+      fill="${campStatusColor(r.status)}" fill-opacity="0.55" stroke="${campStatusColor(r.status)}" stroke-width="1.4"/>`;
+  }).join("");
+
+  return `
+    <div class="dash-chart-wrap camp-bubble-wrap">
+      <svg viewBox="0 0 ${W} ${H}" class="dash-combo-chart" role="img"
+        aria-label="Campaign performance: native GBP spend on x, customers on y, SQLs as bubble size">
+        ${gridY}
+        <line x1="${padL}" x2="${W - padR}" y1="${(padT + plotH).toFixed(1)}" y2="${(padT + plotH).toFixed(1)}" stroke="#cbd5e1" stroke-width="1"/>
+        <line x1="${padL}" x2="${padL}" y1="${padT}" y2="${(padT + plotH).toFixed(1)}" stroke="#cbd5e1" stroke-width="1"/>
+        ${gridX}
+        <text x="${(padL + plotW / 2).toFixed(1)}" y="${H - 26}" text-anchor="middle" class="dash-chart-axis">Spend (£) →</text>
+        ${bubbles}
+      </svg>
+      <div class="dash-chart-tooltip" hidden></div>
+    </div>`;
+}
+
+function wireCampBubbleHover(root, d) {
+  const wrap = root.querySelector(".camp-bubble-wrap");
+  if (!wrap) return;
+  const tooltip = wrap.querySelector(".dash-chart-tooltip");
+  const rows = (d.campaigns || []).filter((r) =>
+    r.spend_native !== null && r.spend_native !== undefined && r.spend_native > 0);
+
+  function hide() {
+    if (tooltip) tooltip.hidden = true;
+    wrap.querySelectorAll(".camp-bubble.is-hover").forEach((el) => el.classList.remove("is-hover"));
+  }
+  wrap.addEventListener("pointermove", (e) => {
+    const dot = e.target.closest(".camp-bubble");
+    if (!dot || !tooltip) { hide(); return; }
+    const r = rows[Number(dot.dataset.campBubble)];
+    if (!r) { hide(); return; }
+    wrap.querySelectorAll(".camp-bubble.is-hover").forEach((el) => el.classList.remove("is-hover"));
+    dot.classList.add("is-hover");
+    tooltip.textContent = "";
+    const title = document.createElement("div");
+    title.className = "dash-chart-tooltip__title";
+    title.textContent = r.campaign_name || "";
+    tooltip.appendChild(title);
+    const usd = (r.spend_usd !== null && r.spend_usd !== undefined) ? fmtMoney(r.spend_usd) : "Unavailable";
+    const roas = (r.roas_available && r.roas !== null && r.roas !== undefined) ? fmtRoasMultiple(r.roas) : "Unavailable";
+    [["Spend (£)", r.spend_native !== null && r.spend_native !== undefined ? fmtCompactCurrency(r.spend_native, r.native_currency || "GBP") : "Unavailable"],
+     ["Spend (USD)", usd],
+     ["SQLs", r.sqls === null || r.sqls === undefined ? "Unavailable" : String(r.sqls)],
+     ["Customers", r.customers === null || r.customers === undefined ? "Unavailable" : String(r.customers)],
+     ["Revenue", r.won_revenue_usd === null || r.won_revenue_usd === undefined ? "Unavailable" : fmtMoney(r.won_revenue_usd)],
+     ["ROAS", roas],
+     ["Status", r.status || "—"]].forEach(([label, val]) => {
+      const rowEl = document.createElement("div");
+      rowEl.className = "dash-chart-tooltip__row";
+      const strong = document.createElement("strong");
+      strong.textContent = val;
+      const name = document.createElement("span");
+      name.textContent = ` ${label}`;
+      rowEl.appendChild(strong);
+      rowEl.appendChild(name);
+      tooltip.appendChild(rowEl);
+    });
+    const wrapRect = wrap.getBoundingClientRect();
+    const dotRect = dot.getBoundingClientRect();
+    tooltip.hidden = false;
+    const tipW = tooltip.offsetWidth || 170;
+    let left = dotRect.left - wrapRect.left + dotRect.width / 2 - tipW / 2;
+    left = Math.max(4, Math.min(left, wrapRect.width - tipW - 4));
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = "8px";
+  });
+  wrap.addEventListener("pointerleave", hide);
+}
+
+const CAMP_NEXT_ACTION = {
+  "Revenue proven": "Scale — open ROAS by Campaign",
+  "SQL producer": "Review SQL quality",
+  "Spend without SQL / customer proof": "Review — spend without proof",
+  "Revenue attribution missing": "Open Revenue Health",
+  "FX unavailable": "FX incomplete — USD/ROAS withheld",
+  "Mapping needs review": "Map campaign spend",
+};
+
+function renderCampLeaderboard(d) {
+  const rows = d.campaigns || [];
+  if (!rows.length) {
+    return `
+      <div class="dash-panel__header"><div><h3 class="dash-panel__title">Campaign Leaderboard</h3></div></div>
+      <p class="rev-breakdown-empty">No campaign activity in this window.</p>`;
+  }
+  const head = ["Campaign", "Spend", "SQLs", "Customers", "Revenue", "ROAS / Status", "Next action"]
+    .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const body = rows.map((r, i) => {
+    const isUnattributed = r.attribution_status === "unattributed";
+    return `
+    <tr class="camp-row ${isUnattributed ? "camp-row--unattributed" : ""}" data-camp-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.campaign_name || "campaign")} detail">
+      <td class="camp-td camp-td--name">
+        <span class="camp-dot ${(CAMP_STATUS_META[r.status] || {}).dot || "camp-dot--muted"}"></span>${escapeHtml(r.campaign_name || "—")}
+      </td>
+      <td class="camp-num">${campSpendCell(r)}</td>
+      <td class="camp-num">${dashValue(r.sqls, fmtCount)}</td>
+      <td class="camp-num">${dashValue(r.customers, fmtCount)}</td>
+      <td class="camp-num">${dashValue(r.won_revenue_usd, fmtMoney)}</td>
+      <td>${campRoasCell(r)}</td>
+      <td class="camp-next">${escapeHtml(CAMP_NEXT_ACTION[r.status] || "Open ROAS by Campaign")}</td>
+    </tr>`;
+  }).join("");
+  return `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Campaign Leaderboard</h3>
+        <p class="dash-panel__sub">Every campaign's spend, SQLs, customers and revenue · click a row for proof · ROAS only when spend + FX + revenue are safe</p>
+      </div>
+    </div>
+    <div class="camp-scroll">
+      <table class="camp-table">
+        <thead><tr>${head}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderCampKeywordThemes(d) {
+  const kt = d.keyword_themes || {};
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Keyword Theme Intelligence</h3>
+        <p class="dash-panel__sub">Recent Google Ads keyword spend by theme · read-only evidence</p>
+      </div>
+    </div>`;
+  if (kt.status !== "ready" || !(kt.themes || []).length) {
+    return `${header}
+      <p class="camp-keyword-note">Keyword themes are unavailable${kt.reason ? ` — ${escapeHtml(kt.reason)}` : ""}. Open the <a href="#/keywords">Keywords</a> page for current keyword detail.</p>`;
+  }
+  const note = `<p class="camp-keyword-note">Recent keyword snapshot${kt.run_date ? ` (as of ${escapeHtml(kt.run_date)})` : ""} — not window-scoped, and keyword-level SQLs / customers / revenue / ROAS have no durable attribution.</p>`;
+  const rows = kt.themes.map((t) => `
+    <li class="camp-theme-row">
+      <span class="camp-theme-row__name">${escapeHtml(t.theme_label || "—")}</span>
+      <span class="camp-theme-row__spend">${dashValue(t.spend_usd, fmtMoney)}</span>
+      <span class="camp-theme-row__clicks">${dashValue(t.clicks, fmtCount)} clicks</span>
+      <span class="camp-theme-row__kw">${dashValue(t.keywords, fmtCount)} kw</span>
+      <span class="camp-theme-row__out">SQLs / revenue <span class="dash-unavailable">Unavailable</span></span>
+    </li>`).join("");
+  return `${header}${note}<ul class="camp-theme-list">${rows}</ul>`;
+}
+
+function renderCampSignalList(title, terms, kind) {
+  const body = !terms || !terms.length
+    ? '<li class="rev-breakdown-empty">None in this window.</li>'
+    : terms.map((t) => `
+      <li class="camp-signal-row camp-signal-row--${kind}">
+        <span class="camp-signal-row__term" title="${escapeHtml(t.search_term || "")}">${escapeHtml(t.search_term || "—")}</span>
+        <span class="camp-signal-row__spend">${dashValue(t.spend_usd, fmtMoney)}</span>
+        <span class="camp-signal-row__meta">${dashValue(t.clicks, fmtCount)} clicks${t.junk_category ? ` · ${escapeHtml(t.junk_category)}` : ""}</span>
+      </li>`).join("");
+  return `<div class="camp-signal-col camp-signal-col--${kind}">
+    <div class="camp-signal-col__head">${escapeHtml(title)}</div>
+    <ul class="camp-signal-list">${body}</ul>
+  </div>`;
+}
+
+function renderCampSearchSignals(d) {
+  const s = d.search_term_signals || {};
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Search Term Signals</h3>
+        <p class="dash-panel__sub">Waste-analysis evidence · <strong>read-only — no platform write</strong></p>
+      </div>
+    </div>`;
+  if (s.status !== "ready") {
+    return `${header}<p class="camp-keyword-note">Search-term signals are unavailable${s.reason ? ` — ${escapeHtml(s.reason)}` : ""}.</p>`;
+  }
+  const linkTerms = dashCanNavigate("search-terms")
+    ? '<a class="camp-signal-link" href="#/search-terms">Review in Search Terms →</a>' : "";
+  const linkWaste = dashCanNavigate("waste")
+    ? '<a class="camp-signal-link" href="#/waste">Open Flagged Waste Terms →</a>' : "";
+  return `${header}
+    <div class="camp-signal-grid">
+      ${renderCampSignalList("Value — reviewed clean", s.value_terms, "value")}
+      ${renderCampSignalList("Waste — flagged", s.waste_terms, "waste")}
+      ${renderCampSignalList("Needs review — unanalyzed", s.needs_review, "review")}
+    </div>
+    <div class="camp-signal-foot">${linkTerms}${linkWaste}<span class="camp-signal-note">Evidence only — no platform write.</span></div>`;
+}
+
+const CAMP_DEAL_COLUMNS = [
+  ["company", "Company"], ["company_id", "Company ID"], ["main_contact", "Main Contact"],
+  ["contact_id", "Contact ID"], ["deal", "Deal"], ["deal_id", "Deal ID"],
+  ["amount_usd", "Amount"], ["close_date", "Close Date"], ["attribution_status", "Attribution"],
+];
+
+function campDealCell(deal, key) {
+  if (key === "amount_usd") return dashValue(deal.amount_usd, fmtMoney); // null → Unavailable, never $0
+  return dashValue(deal[key]);
+}
+
+function wireCampDrawers(root, d) {
+  const rows = d.campaigns || [];
+  const kt = d.keyword_themes || {};
+  const open = (i) => {
+    const r = rows[i];
+    if (!r) return;
+    const deals = r.deals || [];
+    const dealHead = CAMP_DEAL_COLUMNS.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("");
+    const dealBody = deals.length
+      ? deals.map((deal) => `<tr>${CAMP_DEAL_COLUMNS.map(([key]) => `<td class="camp-deal-td camp-deal-td--${key}">${campDealCell(deal, key)}</td>`).join("")}</tr>`).join("")
+      : `<tr><td colspan="${CAMP_DEAL_COLUMNS.length}" class="rev-breakdown-empty">No closed-won deals to prove this campaign in this window.</td></tr>`;
+
+    const links = [
+      ["roas-campaigns", "Open ROAS by Campaign"],
+      ["keywords", "Open Keywords"],
+      ["search-terms", "Open Search Terms"],
+      ["waste", "Open Flagged Waste Terms"],
+      ["revenue-health", "Open Revenue Health"],
+    ].filter(([page]) => dashCanNavigate(page))
+      .map(([page, label]) => `<a class="camp-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
+
+    let drawer = root.querySelector(".camp-drawer");
+    if (!drawer) {
+      drawer = document.createElement("div");
+      drawer.className = "camp-drawer";
+      root.querySelector(".camp-leaderboard-panel").appendChild(drawer);
+    }
+    drawer.innerHTML = `
+      <div class="camp-drawer__head">
+        <strong>${escapeHtml(r.campaign_name || "Campaign")}</strong>
+        <span class="camp-status" style="--camp-accent:${campStatusColor(r.status)}">${escapeHtml(r.status || "")}</span>
+        <button type="button" class="camp-drawer__close" aria-label="Close">×</button>
+      </div>
+      <dl class="camp-drawer__summary">
+        <div><dt>Spend (native)</dt><dd>${campSpendCell(r)}</dd></div>
+        <div><dt>SQLs</dt><dd>${dashValue(r.sqls, fmtCount)}</dd></div>
+        <div><dt>Customers</dt><dd>${dashValue(r.customers, fmtCount)}</dd></div>
+        <div><dt>Revenue</dt><dd>${dashValue(r.won_revenue_usd, fmtMoney)}</dd></div>
+        <div><dt>ROAS / status</dt><dd>${campRoasCell(r)}</dd></div>
+        <div><dt>Mapping</dt><dd>${escapeHtml(r.attribution_status || "—")}</dd></div>
+      </dl>
+      <div class="camp-drawer__section">
+        <h4 class="camp-drawer__h">Revenue proof — closed-won deals</h4>
+        <div class="camp-deal-scroll">
+          <table class="camp-deal-table"><thead><tr>${dealHead}</tr></thead><tbody>${dealBody}</tbody></table>
+        </div>
+      </div>
+      <div class="camp-drawer__section">
+        <h4 class="camp-drawer__h">Keyword themes</h4>
+        <p class="camp-keyword-note">${kt.status === "ready"
+          ? "Recent keyword themes are account-wide (not per-campaign) — open Keywords for campaign detail."
+          : "Keyword themes are unavailable for this window."}</p>
+      </div>
+      <div class="camp-drawer__actions">${links}</div>`;
+    drawer.querySelector(".camp-drawer__close").addEventListener("click", () => drawer.remove());
+    drawer.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
+  root.querySelectorAll(".camp-row").forEach((tr) => {
+    tr.addEventListener("click", () => open(Number(tr.dataset.campRow)));
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(Number(tr.dataset.campRow)); }
+    });
+  });
+}
+
+function renderCampTruthFooter(d) {
+  const ts = d.truth_status || {};
+  const chip = (label, status) => `
+    <span class="dash-footer-chip" title="${escapeHtml(`${label}: ${status || "unknown"}`)}">
+      <span class="dash-dot ${DASH_STATUS_DOT[status] || "dash-dot--muted"}"></span>${escapeHtml(label)}
+    </span>`;
+  const allGood = ts.spend === "ready" && ts.fx === "ready" && ts.revenue === "ready"
+    && ts.campaign_attribution === "ready";
+  return `
+    <footer class="dash-truth-footer ${allGood ? "dash-truth-footer--ok" : ""}">
+      ${chip("Google Ads spend", ts.spend)}
+      ${chip("FX", ts.fx)}
+      ${chip("Revenue", ts.revenue)}
+      ${chip("Campaign attr.", ts.campaign_attribution)}
+      ${chip("Keyword attr.", ts.keyword_attribution)}
+      <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
+      ${allGood
+        ? '<span class="dash-footer-note">Campaign truth verified — keyword/search-term panels are read-only evidence.</span>'
         : (dashCanNavigate("revenue-health")
           ? '<a class="dash-footer-note" href="#/revenue-health">Some attribution needs review — open Revenue Health</a>'
           : '<span class="dash-footer-note">Some attribution needs review — contact your administrator.</span>')}
@@ -11326,7 +11878,7 @@ let roasCountryWindow = null;
 // Per-page request sequence tokens guard against stale-response races: only the
 // newest in-flight request for a page may render. Switching CQ→YTD→Last Quarter
 // quickly must never paint an older response over the newest selection.
-const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0, overview: 0, dashRevenue: 0, dashChannels: 0 };
+const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0, overview: 0, dashRevenue: 0, dashChannels: 0, dashCampaigns: 0 };
 
 // PR-ADS-116: show the exact resolved date range beside each window selector.
 function formatWindowRange(win) {

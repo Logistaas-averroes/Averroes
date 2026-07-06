@@ -304,12 +304,12 @@
         </header>
         <div id="page-explanation-dashboard" hidden></div>
 
-        <!-- Inner dashboard tabs — Overview (134) + Revenue (135) + Channels (136) -->
+        <!-- Inner dashboard tabs — Overview (134) + Revenue (135) + Channels (136) + Campaigns (137) -->
         <nav class="dashboard-tabs" aria-label="Dashboard sections">
           <button type="button" class="dashboard-tab is-active" data-dash-tab="overview" aria-current="page">Overview</button>
           <button type="button" class="dashboard-tab" data-dash-tab="revenue">Revenue</button>
           <button type="button" class="dashboard-tab" data-dash-tab="channels">Channels</button>
-          <button type="button" class="dashboard-tab" disabled title="Coming soon">Campaigns &amp; Keywords</button>
+          <button type="button" class="dashboard-tab" data-dash-tab="campaigns">Campaigns &amp; Keywords</button>
           <button type="button" class="dashboard-tab" disabled title="Coming soon">Countries</button>
           <button type="button" class="dashboard-tab" disabled title="Coming soon">Deals</button>
         </nav>
@@ -344,6 +344,9 @@
         </div>
         <div id="dashboard-channels-root" class="dashboard-overview" hidden>
           <p class="empty-state">Loading channels &amp; platforms…</p>
+        </div>
+        <div id="dashboard-campaigns-root" class="dashboard-overview" hidden>
+          <p class="empty-state">Loading campaigns &amp; keywords…</p>
         </div>
       </section>
 

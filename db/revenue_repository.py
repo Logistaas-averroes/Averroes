@@ -842,6 +842,82 @@ def fetch_source_revenue_daily(start: date | None, end: date) -> dict:
         return {"available": False, "rows": []}
 
 
+def fetch_keyword_theme_snapshot() -> dict:
+    """Latest keyword-performance snapshot for the Dashboard Campaigns tab (PR-ADS-137).
+
+    Read-only. The `keywords` table stores per-scheduler-run lookback aggregates
+    keyed by `run_date`, so summing across runs double-counts and the snapshot has
+    NO business-window or outcome (SQL/customer/revenue) attribution. To avoid
+    double-counting we return ONLY the single most-recent `run_date` snapshot —
+    honest "recent activity", never window-scoped. Spend is Google Ads USD
+    (`spend_usd`); there is no native-GBP or outcome column on this table.
+
+    Returns {available, run_date, rows:[{campaign_name, ad_group, keyword,
+             match_type, spend_usd, clicks, impressions, conversions}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "run_date": None, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT campaign_name, ad_group, keyword, match_type,
+                           spend_usd::float AS spend_usd,
+                           clicks, impressions, conversions::float AS conversions
+                    FROM keywords
+                    WHERE run_date = (SELECT MAX(run_date) FROM keywords)
+                    """
+                )
+                rows = _rows_as_dicts(cur)
+                run_date = None
+                if rows:
+                    cur.execute("SELECT MAX(run_date) FROM keywords")
+                    got = cur.fetchone()
+                    run_date = _as_date(got[0]) if got else None
+                return {"available": True, "run_date": run_date, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_keyword_theme_snapshot failed: %s", exc)
+        return {"available": False, "run_date": None, "rows": []}
+
+
+def fetch_search_term_signals(start: date | None, end: date) -> dict:
+    """Window-scoped search-term signal rows for the Dashboard Campaigns tab (PR-ADS-137).
+
+    Read-only. Windowed by `source_date` (the true Google Ads per-day performance
+    date; the natural key dedupes per term per day, so no cross-run double-count).
+    The only durable classification is the tri-state `is_flagged_waste`
+    (True=waste, False=reviewed clean, NULL=unanalyzed / needs review); there is
+    NO SQL/customer/revenue outcome attribution on search terms. Spend is Google
+    Ads USD (`spend_usd`). The caller buckets rows into value / waste / needs-review.
+
+    Returns {available, rows:[{search_term, campaign_name, spend_usd, clicks,
+             conversions, is_flagged_waste, junk_category}]}.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT search_term, campaign_name,
+                           spend_usd::float AS spend_usd,
+                           clicks, conversions::float AS conversions,
+                           is_flagged_waste, junk_category
+                    FROM search_terms
+                    WHERE source_date IS NOT NULL
+                      AND source_date >= COALESCE(%s::date, source_date)
+                      AND source_date <= %s::date
+                    """,
+                    (start, end),
+                )
+                return {"available": True, "rows": _rows_as_dicts(cur)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_search_term_signals failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
 def fetch_source_contact_details(start: date | None, end: date) -> dict:
     """Classified-contact detail rows for the Revenue by Source drawer (PR-ADS-133).
 
