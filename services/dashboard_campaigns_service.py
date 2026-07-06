@@ -572,7 +572,8 @@ def _build_decision_cards(campaign_rows: list, kpis: dict, keyword_themes: dict,
 
 
 def _build_truth_status(spend_truth: dict, readiness: dict, campaign_rows: list,
-                        keyword_themes: dict, search_signals: dict) -> dict:
+                        keyword_themes: dict, search_signals: dict,
+                        deal_proof_available: bool = True) -> dict:
     fx = spend_truth.get("fx_status")
     cov = spend_truth.get("campaign_spend_status")
     if fx == "verified" and cov == "verified":
@@ -582,26 +583,53 @@ def _build_truth_status(spend_truth: dict, readiness: dict, campaign_rows: list,
     else:
         google_ads_spend = "unavailable"
 
-    has_unattributed = any(r["campaign_name"] == UNATTRIBUTED_LABEL for r in campaign_rows)
+    # Campaign attribution is "ready" ONLY when every campaign row is cleanly
+    # mapped: any unattributed bucket, any mapping-unavailable row, or any
+    # "Mapping needs review" status makes it partial.
+    attribution_partial = any(
+        r["campaign_name"] == UNATTRIBUTED_LABEL
+        or r.get("attribution_status") != "mapped"
+        or r.get("status") == STATUS_MAPPING_REVIEW
+        for r in campaign_rows
+    )
     return {
         "spend": google_ads_spend,
         "fx": "ready" if fx == "verified" else ("partial" if fx == "incomplete" else "unavailable"),
         "revenue": "ready" if readiness.get("revenue_integration_connected") else "blocked",
-        "campaign_attribution": "partial" if has_unattributed else "ready",
+        "campaign_attribution": "partial" if attribution_partial else "ready",
+        # Client/deal proof comes from the closed-won deal ledger; when that is
+        # down we cannot prove campaigns even if the mart revenue is canonical.
+        "deal_proof": "ready" if deal_proof_available else "unavailable",
         "keyword_attribution": "unavailable",  # no keyword→outcome attribution exists
         "search_terms": search_signals.get("status", "unavailable"),
     }
 
 
 def _build_unavailable(kpis: dict, spend_truth: dict, keyword_themes: dict,
-                       search_signals: dict, period_change: dict) -> list:
+                       search_signals: dict, period_change: dict,
+                       deal_proof_available: bool = True) -> list:
     out = []
     if kpis.get("verified_spend_usd") is None:
         out.append({"metric": "verified_spend_usd",
                     "reason": "USD spend requires verified FX; native GBP spend is shown instead."})
     if kpis.get("roas") is None:
-        out.append({"metric": "roas",
-                    "reason": "Campaign ROAS requires verified spend, FX and complete revenue."})
+        # State the ACTUAL reason ROAS is None (aligned with the decision card):
+        # FX/USD incomplete, revenue incomplete, or simply no closed-won revenue.
+        fx_ok = spend_truth.get("fx_status") == "verified"
+        usd_present = kpis.get("verified_spend_usd") is not None
+        if not fx_ok or not usd_present:
+            roas_reason = ("Campaign ROAS requires verified FX / USD spend; native GBP "
+                           "spend is shown instead.")
+        elif kpis.get("won_revenue_usd") is None:
+            roas_reason = ("Campaign ROAS requires complete revenue — an unknown deal "
+                           "amount makes it incomplete.")
+        else:
+            roas_reason = "ROAS not yet meaningful; no closed-won revenue in this window."
+        out.append({"metric": "roas", "reason": roas_reason})
+    if not deal_proof_available:
+        out.append({"metric": "deal_proof",
+                    "reason": "Closed-won deal proof is unavailable — the deal ledger could "
+                              "not be read. Campaign revenue may still be canonical from the mart."})
     if kpis.get("sqls") is None:
         out.append({"metric": "sqls",
                     "reason": "SQLs withheld — lead business event dates are unavailable."})
@@ -691,7 +719,11 @@ def build_dashboard_campaigns(window: str = "current_quarter",
         for lbl in [m.get("campaign_name"), *(m.get("aliases") or [])]:
             if lbl:
                 label_to_canonical[_norm(lbl)] = cid
+    # The closed-won deal ledger backs drawer PROOF, null-amount detection, and the
+    # Unattributed bucket. If it is unavailable we must NOT imply a campaign has no
+    # deals — the mart revenue can stay canonical, but client/deal proof is withheld.
     deals = repo.fetch_revenue_deals(start, end)
+    deal_proof_available = bool(deals.get("available"))
     deals_by_key, unknown_amount_keys = _group_deals_by_campaign(
         deals.get("rows") or [], label_to_canonical)
 
@@ -716,9 +748,9 @@ def build_dashboard_campaigns(window: str = "current_quarter",
     decision_cards = _build_decision_cards(campaign_rows, kpis, keyword_themes,
                                            search_signals, spend_truth)
     truth_status = _build_truth_status(spend_truth, readiness, campaign_rows,
-                                       keyword_themes, search_signals)
+                                       keyword_themes, search_signals, deal_proof_available)
     unavailable = _build_unavailable(kpis, spend_truth, keyword_themes,
-                                     search_signals, period_change)
+                                     search_signals, period_change, deal_proof_available)
 
     return {
         "window": window_block,
@@ -726,6 +758,10 @@ def build_dashboard_campaigns(window: str = "current_quarter",
         "read_only": True,
         "source_truth": "revenue_decision_mart_campaign_view",
         "google_ads_conversion_value_used": False,
+        # Closed-won deal PROOF availability (separate from mart revenue truth):
+        # false when the deal ledger could not be read, so drawers must not claim
+        # a campaign has no deals.
+        "deal_proof_available": deal_proof_available,
         "kpis": kpis,
         "period_change": period_change,
         "campaigns": campaign_rows,

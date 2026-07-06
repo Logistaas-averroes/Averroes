@@ -760,7 +760,7 @@ def test_channels_kpi_cards_render_five_metrics():
 
 def test_channels_reuses_pr134_design_system():
     start = JS.find("// ── Dashboard — Channels & Platforms")
-    end = JS.find("// ── Campaigns page")
+    end = JS.find("// ── Dashboard — Campaigns & Keywords tab")
     assert start != -1 and end > start, "channels block not found"
     block = JS[start:end]
     for cls in ("dash-kpi-card", "dash-panel", "dash-truth-footer",
@@ -773,7 +773,7 @@ def test_channels_reuses_pr134_design_system():
 
 
 def test_channels_momentum_metric_toggle_defaults_customers():
-    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Campaigns page")]
+    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Dashboard — Campaigns & Keywords tab")]
     assert '_chanMomentumMetric = "customers"' in block
     assert "chan-metric-btn" in block
     for m in ("SQLs", "Customers", "Revenue"):
@@ -781,7 +781,7 @@ def test_channels_momentum_metric_toggle_defaults_customers():
 
 
 def test_channels_platform_matrix_never_shows_roas_on_non_google():
-    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Campaigns page")]
+    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Dashboard — Campaigns & Keywords tab")]
     # ROAS is gated on roas_available (Google Ads only); non-connected rows route
     # to an Unavailable cell — never fmtRoasMultiple.
     assert "roas_available" in block
@@ -792,7 +792,7 @@ def test_channels_platform_matrix_never_shows_roas_on_non_google():
 
 
 def test_channels_block_has_no_undefined_or_null_leaks():
-    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Campaigns page")]
+    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Dashboard — Campaigns & Keywords tab")]
     assert ">undefined<" not in block
     assert ">null<" not in block
     assert ">NaN<" not in block
@@ -812,7 +812,7 @@ def test_channels_responsive_classes_exist():
 
 
 def test_channel_drawer_is_platform_breakdown_not_deal_proof():
-    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Campaigns page")]
+    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Dashboard — Campaigns & Keywords tab")]
     # The drawer is explicitly a PLATFORM breakdown and disclaims client/deal proof.
     assert "platform breakdown" in block
     assert "not individual client/deal records" in block
@@ -822,7 +822,7 @@ def test_channel_drawer_is_platform_breakdown_not_deal_proof():
 
 
 def test_native_gbp_shown_when_usd_unavailable():
-    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Campaigns page")]
+    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Dashboard — Campaigns & Keywords tab")]
     # Spend cells fall back to native GBP (fmtCompactCurrency, never $) when USD
     # is unavailable but the spend source is connected.
     assert "native_spend" in block

@@ -6770,7 +6770,9 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .camp-search-panel { display: block; }
 .camp-signal-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
 .camp-signal-col__head { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
-.camp-signal-col--value .camp-signal-col__head { color: var(--c-success); }
+/* "Reviewed clean" is a waste-review pass, NOT a revenue/value signal — keep it
+   a neutral colour so it never reads as proven value. */
+.camp-signal-col--value .camp-signal-col__head { color: var(--text-secondary); }
 .camp-signal-col--waste .camp-signal-col__head { color: var(--c-danger); }
 .camp-signal-col--review .camp-signal-col__head { color: var(--c-warning); }
 .camp-signal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }

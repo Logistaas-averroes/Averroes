@@ -4506,7 +4506,7 @@ function renderCampSearchSignals(d) {
     ? '<a class="camp-signal-link" href="#/waste">Open Flagged Waste Terms →</a>' : "";
   return `${header}
     <div class="camp-signal-grid">
-      ${renderCampSignalList("Value — reviewed clean", s.value_terms, "value")}
+      ${renderCampSignalList("Reviewed clean — not flagged waste", s.value_terms, "value")}
       ${renderCampSignalList("Waste — flagged", s.waste_terms, "waste")}
       ${renderCampSignalList("Needs review — unanalyzed", s.needs_review, "review")}
     </div>
@@ -4531,10 +4531,15 @@ function wireCampDrawers(root, d) {
     const r = rows[i];
     if (!r) return;
     const deals = r.deals || [];
+    const dealProofAvailable = d.deal_proof_available !== false;
     const dealHead = CAMP_DEAL_COLUMNS.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("");
-    const dealBody = deals.length
-      ? deals.map((deal) => `<tr>${CAMP_DEAL_COLUMNS.map(([key]) => `<td class="camp-deal-td camp-deal-td--${key}">${campDealCell(deal, key)}</td>`).join("")}</tr>`).join("")
-      : `<tr><td colspan="${CAMP_DEAL_COLUMNS.length}" class="rev-breakdown-empty">No closed-won deals to prove this campaign in this window.</td></tr>`;
+    // When the deal ledger is unavailable we cannot prove OR disprove deals — say
+    // Unavailable, never "No closed-won deals" (which would imply the campaign has none).
+    const dealBody = !dealProofAvailable
+      ? `<tr><td colspan="${CAMP_DEAL_COLUMNS.length}" class="dash-unavailable">Closed-won deal proof unavailable — the deal ledger could not be read (revenue may still be canonical).</td></tr>`
+      : deals.length
+        ? deals.map((deal) => `<tr>${CAMP_DEAL_COLUMNS.map(([key]) => `<td class="camp-deal-td camp-deal-td--${key}">${campDealCell(deal, key)}</td>`).join("")}</tr>`).join("")
+        : `<tr><td colspan="${CAMP_DEAL_COLUMNS.length}" class="rev-breakdown-empty">No closed-won deals to prove this campaign in this window.</td></tr>`;
 
     const links = [
       ["roas-campaigns", "Open ROAS by Campaign"],
@@ -4596,13 +4601,14 @@ function renderCampTruthFooter(d) {
       <span class="dash-dot ${DASH_STATUS_DOT[status] || "dash-dot--muted"}"></span>${escapeHtml(label)}
     </span>`;
   const allGood = ts.spend === "ready" && ts.fx === "ready" && ts.revenue === "ready"
-    && ts.campaign_attribution === "ready";
+    && ts.campaign_attribution === "ready" && ts.deal_proof === "ready";
   return `
     <footer class="dash-truth-footer ${allGood ? "dash-truth-footer--ok" : ""}">
       ${chip("Google Ads spend", ts.spend)}
       ${chip("FX", ts.fx)}
       ${chip("Revenue", ts.revenue)}
       ${chip("Campaign attr.", ts.campaign_attribution)}
+      ${chip("Deal proof", ts.deal_proof)}
       ${chip("Keyword attr.", ts.keyword_attribution)}
       <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
       ${allGood

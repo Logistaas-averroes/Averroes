@@ -411,6 +411,73 @@ def test_previous_period_unknown_amount_withholds_revenue_delta(monkeypatch):
     assert rev["status"] != "ok"  # baseline withheld → no fabricated growth %
 
 
+def test_deal_ledger_unavailable_does_not_claim_no_deals(monkeypatch):
+    # The deal ledger is down but the mart still has canonical campaign revenue.
+    # Proof must be reported unavailable — never "No closed-won deals" — and the
+    # mart revenue stays canonical (not blanked just because proof is unavailable).
+    import db.revenue_repository as repo
+    _patch_durable(monkeypatch)
+    monkeypatch.setattr(repo, "fetch_revenue_deals",
+                        lambda s, e: {"available": False, "rows": []})
+    from services.dashboard_campaigns_service import build_dashboard_campaigns
+    out = build_dashboard_campaigns(WINDOW, now=NOW)
+    assert out["deal_proof_available"] is False
+    assert out["truth_status"]["deal_proof"] == "unavailable"
+    assert "deal_proof" in {u["metric"] for u in out["unavailable"]}
+    # Mart revenue remains the canonical number (mart is ready).
+    g = _camp(out, "Global Competitors")
+    assert g["won_revenue_usd"] == 29000.0
+    assert out["kpis"]["won_revenue_usd"] == 29000.0
+    assert out["kpis"]["customers"] == 2
+    # No deals to display, but the row must NOT be rendered as "no deals" — the
+    # contract exposes deal_proof_available for the drawer to say Unavailable.
+    assert g["deals"] == []
+
+
+def test_drawer_handles_deal_proof_unavailable():
+    fn = _slice(JS, "function wireCampDrawers", 3200)
+    assert "deal_proof_available" in fn
+    assert "Closed-won deal proof unavailable" in fn
+
+
+def test_deal_proof_chip_in_truth_footer():
+    footer = _slice(JS, "function renderCampTruthFooter", 1400)
+    assert "Deal proof" in footer
+    assert "ts.deal_proof" in footer
+
+
+def test_mapping_unavailable_makes_campaign_attribution_partial():
+    from services.dashboard_campaigns_service import _build_truth_status
+    spend_truth = {"fx_status": "verified", "campaign_spend_status": "verified"}
+    readiness = {"revenue_integration_connected": True}
+    ready_sig = {"status": "ready"}
+    # A mapping-unavailable campaign, NO unattributed row → still partial.
+    rows = [{"campaign_name": "X", "attribution_status": "mapping_unavailable",
+             "status": "FX unavailable"}]
+    ts = _build_truth_status(spend_truth, readiness, rows, ready_sig, ready_sig, True)
+    assert ts["campaign_attribution"] == "partial"
+    # A cleanly-mapped-only set → ready.
+    rows_ok = [{"campaign_name": "X", "attribution_status": "mapped",
+                "status": "Revenue proven"}]
+    ts_ok = _build_truth_status(spend_truth, readiness, rows_ok, ready_sig, ready_sig, True)
+    assert ts_ok["campaign_attribution"] == "ready"
+
+
+def test_search_clean_bucket_not_labeled_value():
+    block = JS[JS.find("// ── Dashboard — Campaigns & Keywords tab"):JS.find("// ── Campaigns page")]
+    # "Value" must not be the visible clean-terms label (no revenue claim).
+    assert "Value — reviewed clean" not in block
+    assert "Reviewed clean — not flagged waste" in block
+
+
+def test_unavailable_roas_reason_reflects_fx(monkeypatch):
+    canon = dict(CANONICAL, fx_complete=False, fx_missing_days=5, total_spend_usd=None,
+                 rows=[dict(r, spend_usd=None, fx_complete=False) for r in CANONICAL["rows"]])
+    out = _campaigns(monkeypatch, canonical=canon)
+    roas_u = next(u for u in out["unavailable"] if u["metric"] == "roas")
+    assert "FX" in roas_u["reason"] or "USD" in roas_u["reason"]
+
+
 def test_attribution_status_preserves_mapping_distinction(monkeypatch):
     # "matched" → "mapped"; "unavailable" → "mapping_unavailable" (never collapsed
     # to a single "unmapped"); the unattributed callout is its own status.
