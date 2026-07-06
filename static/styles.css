@@ -6559,3 +6559,132 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 @media (max-width: 640px) {
   .rev-deal-drawer__grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PR-ADS-136 — Dashboard Channels & Platforms tab
+   Reuses the PR-ADS-134/135 dashboard design system (tokens, cards, panels,
+   chart shell, decision cards, truth footer). Only Channels-specific pieces
+   below. Only Google Ads is spend-connected; every other channel is
+   revenue-only — spend/ROAS render "Unavailable", never a fabricated $0.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Momentum metric toggle (SQLs / Customers / Revenue). */
+.chan-metric-toggle { display: inline-flex; gap: 2px; background: var(--surface-alt); border: 1px solid var(--border); border-radius: 999px; padding: 2px; flex-shrink: 0; }
+.chan-metric-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.chan-metric-btn:hover { color: var(--text-primary); }
+.chan-metric-btn.is-active { background: var(--surface-card); color: var(--c-primary, #129ef5); box-shadow: var(--shadow-xs, 0 1px 2px rgba(15, 23, 42, 0.08)); }
+.chan-legend { flex-wrap: wrap; gap: var(--space-2) var(--space-3); margin-top: var(--space-3); }
+
+/* Channel mix donut + legend. */
+.chan-mix-panel { display: block; }
+.chan-mix { display: flex; align-items: center; gap: var(--space-4); flex-wrap: wrap; }
+.chan-donut-wrap { flex: 0 0 auto; width: 160px; }
+.chan-donut { width: 160px; height: 160px; }
+.chan-donut__total { font-size: 26px; font-weight: 700; fill: var(--text-primary); }
+.chan-donut__label { font-size: 11px; fill: var(--text-muted); }
+.chan-mix-list { list-style: none; margin: 0; padding: 0; flex: 1 1 200px; min-width: 200px; display: flex; flex-direction: column; gap: 6px; }
+.chan-mix-row { display: grid; grid-template-columns: 12px 1fr auto auto; gap: 8px; align-items: baseline; font-size: 12px; }
+.chan-mix-row__dot { width: 10px; height: 10px; border-radius: 3px; align-self: center; }
+.chan-mix-row__name { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chan-mix-row__cust { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.chan-mix-row__rev { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Quality-vs-revenue bubble chart. */
+.chan-quality-panel { display: block; }
+.chan-bubble-wrap { position: relative; }
+.chan-bubble { cursor: pointer; transition: fill-opacity 0.12s ease; }
+.chan-bubble:hover, .chan-bubble.is-hover { fill-opacity: 0.78; }
+.dash-chart-axis { font-size: 11px; fill: var(--text-muted); font-weight: 600; }
+
+/* Platform matrix table. */
+.chan-platform-scroll { overflow-x: auto; }
+.chan-platform-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 820px; }
+.chan-platform-table th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  background: var(--surface-alt);
+  padding: 8px 10px;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+.chan-platform-td, .chan-platform-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
+.chan-platform-td--name { font-weight: 600; color: var(--text-primary); }
+.chan-num { font-variant-numeric: tabular-nums; }
+.chan-status {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.chan-status--connected { color: var(--c-success); background: var(--c-success-bg); }
+.chan-status--revenue { color: var(--text-secondary); background: var(--surface-alt); }
+
+/* Channel detail list + drawer. */
+.chan-channels-panel { position: relative; }
+.chan-channel-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.chan-channel-row {
+  display: grid;
+  grid-template-columns: 12px minmax(140px, 1.4fr) repeat(3, minmax(70px, 0.8fr)) minmax(160px, 1.2fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 8px;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.12s ease;
+}
+.chan-channel-row:hover { background: rgba(18, 158, 245, 0.06); }
+/* Keep a clear keyboard focus ring (a11y) — never suppress the outline. */
+.chan-channel-row:focus-visible {
+  background: rgba(18, 158, 245, 0.06);
+  outline: 2px solid var(--c-primary, #129ef5);
+  outline-offset: -2px;
+}
+.chan-channel-row__dot { width: 10px; height: 10px; border-radius: 3px; }
+.chan-channel-row__name { font-weight: 600; color: var(--text-primary); }
+.chan-channel-row__metric { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.chan-channel-row__spend { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.chan-channel-drawer {
+  margin-top: var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+  padding: var(--space-4);
+}
+.chan-channel-drawer__head { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); font-size: 14px; color: var(--text-primary); }
+.chan-channel-drawer__close { margin-left: auto; border: none; background: transparent; font-size: 20px; line-height: 1; color: var(--text-muted); cursor: pointer; }
+.chan-channel-drawer__note { margin: 0 0 var(--space-3); font-size: 11px; color: var(--text-muted); }
+.chan-drawer-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.chan-drawer-table th { text-align: left; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.chan-drawer-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+
+@media (max-width: 1100px) {
+  .chan-channel-row {
+    grid-template-columns: 12px minmax(120px, 1.4fr) repeat(3, minmax(60px, 0.8fr)) auto;
+  }
+  .chan-channel-row__spend { display: none; }
+}
+@media (max-width: 640px) {
+  .chan-mix { justify-content: center; }
+  .chan-channel-row {
+    grid-template-columns: 12px 1fr auto;
+    row-gap: 4px;
+  }
+  .chan-channel-row__metric:nth-of-type(3) { display: none; }
+}
