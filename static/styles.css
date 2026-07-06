@@ -6669,6 +6669,7 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 }
 .chan-channel-drawer__head { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); font-size: 14px; color: var(--text-primary); }
 .chan-channel-drawer__close { margin-left: auto; border: none; background: transparent; font-size: 20px; line-height: 1; color: var(--text-muted); cursor: pointer; }
+.chan-channel-drawer__note { margin: 0 0 var(--space-3); font-size: 11px; color: var(--text-muted); }
 .chan-drawer-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .chan-drawer-table th { text-align: left; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .chan-drawer-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text-secondary); }

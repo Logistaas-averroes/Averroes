@@ -265,10 +265,11 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
                                    and pf_key not in platform_unknown)
                 pf_won = pf.get("won_revenue") if pf_amount_known else None
                 pf_roas = _google_roas(pf_won, google_spend["usd"]) if is_google else None
-                # spend_connected reflects the SPEND source (Google Ads, FX-verified) —
-                # it does NOT depend on revenue completeness. ROAS availability is the
-                # separate gate: roas_available iff roas is a real (trustworthy) number.
-                spend_connected = bool(is_google and google_spend["usd"] is not None)
+                # spend_connected reflects the Google Ads spend SOURCE being connected —
+                # i.e. native (GBP) spend exists. It does NOT require USD/FX: when FX
+                # is missing the source stays connected, native GBP is shown, and USD
+                # spend + ROAS are Unavailable. roas_available is the separate ROAS gate.
+                spend_connected = bool(is_google and google_spend["native_amount"] is not None)
                 platforms.append({
                     "platform": pf.get("platform"),
                     "platform_label": pf.get("label"),
@@ -281,6 +282,9 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
                     "customers": pf.get("customers"),
                     "won_revenue_usd": _round2(pf_won) if pf_won is not None else None,
                     "spend_usd": google_spend["usd"] if is_google else None,
+                    "native_spend": ({"amount": google_spend["native_amount"],
+                                      "currency": google_spend["native_currency"]}
+                                     if is_google else None),
                     "roas": pf_roas,
                     "spend_connected": spend_connected,
                     "roas_available": pf_roas is not None,
@@ -296,10 +300,10 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
         is_google = exec_ch == CX_GOOGLE_ADS
         won = None if agg["amount_unknown"] else _round2(agg["won_revenue"])
         roas = _google_roas(won, google_spend["usd"]) if is_google else None
-        # spend_connected reflects the Google Ads spend SOURCE (FX-verified USD),
-        # independent of revenue completeness. ROAS is gated separately:
-        # roas_available iff roas is a real number (never a lowered/None value).
-        spend_connected = bool(is_google and google_spend["usd"] is not None)
+        # spend_connected reflects the Google Ads spend SOURCE being connected
+        # (native GBP spend exists), independent of USD/FX and of revenue. ROAS is
+        # gated separately: roas_available iff roas is a real, USD-based number.
+        spend_connected = bool(is_google and google_spend["native_amount"] is not None)
         channel_rows.append({
             "channel": exec_ch,
             "channel_label": EXEC_CHANNEL_LABELS[exec_ch],
@@ -326,27 +330,41 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
     return channel_rows, platforms
 
 
-def _build_kpis(channel_rows: list, mart_summary: dict, google_spend: dict) -> dict:
-    """Hero KPIs: spend-connected vs revenue-only revenue, customers, SQLs, top platform."""
+def _build_kpis(channel_rows: list) -> dict:
+    """Hero KPIs derived FROM the channel rows so they reconcile exactly with the
+    channel mix, platform matrix and trend (all built from the Revenue-by-Source
+    taxonomy) — never a mart total on a different denominator.
+
+    SQLs come from contacts and are always available (they survive a revenue
+    outage). Customers/revenue come from closed-won deals: customers is Unavailable
+    if any channel's is (a disconnected revenue integration blanks them), and
+    revenue is Unavailable unless EVERY channel's revenue is known — never a
+    partial sum implying completeness.
+    """
+    total_sqls = sum((c.get("sqls") or 0) for c in channel_rows)
+
+    customers_incomplete = any(c.get("customers") is None for c in channel_rows)
+    total_customers = (None if customers_incomplete
+                       else sum((c.get("customers") or 0) for c in channel_rows))
+
+    revenue_incomplete = any(c.get("won_revenue_usd") is None for c in channel_rows)
+    total_revenue = 0.0
     spend_connected_revenue = 0.0
     revenue_only_revenue = 0.0
-    revenue_incomplete = False
     for c in channel_rows:
         won = c.get("won_revenue_usd")
         if won is None:
-            revenue_incomplete = True
             continue
+        total_revenue += won
         if c["spend_connected"]:
             spend_connected_revenue += won
         else:
             revenue_only_revenue += won
 
-    # Totals require completeness; if any channel's revenue is unknown, the split
-    # is Unavailable rather than a partial sum implying completeness.
     return {
-        "total_sqls": mart_summary.get("sqls"),
-        "total_customers": mart_summary.get("customers"),
-        "closed_won_revenue_usd": mart_summary.get("won_revenue_usd"),
+        "total_sqls": total_sqls,
+        "total_customers": total_customers,
+        "closed_won_revenue_usd": None if revenue_incomplete else _round2(total_revenue),
         "spend_connected_revenue_usd": (None if revenue_incomplete
                                         else _round2(spend_connected_revenue)),
         "revenue_only_revenue_usd": (None if revenue_incomplete
@@ -679,6 +697,7 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     prev_key, prev_now, label, note = ref
     try:
         prev_mart = build_revenue_decision_mart(view="campaign", window=prev_key, now=prev_now)
+        prev_source = build_revenue_by_source(prev_key, now=prev_now)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Dashboard channels previous-period build failed: %s", exc)
         return {"available": False, "label": label, "note": note, "metrics": {},
@@ -687,7 +706,9 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     connected = bool((prev_mart.get("readiness") or {}).get("revenue_integration_connected"))
     prev_rev = ps.get("won_revenue_usd") if connected else None
     prev_cust = ps.get("customers") if connected else None
-    prev_sqls = ps.get("sqls")
+    # SQLs on this tab are source-based (from the taxonomy), so the previous-period
+    # baseline must be too — a campaign-mart SQL count is a different denominator.
+    prev_sqls = sum((g.get("sqls") or 0) for g in (prev_source.get("groups") or []))
     metrics = {
         "closed_won_revenue_usd": _delta_metric(kpis.get("closed_won_revenue_usd"), prev_rev),
         "total_customers": _delta_metric(kpis.get("total_customers"), prev_cust),
@@ -711,7 +732,6 @@ def build_dashboard_channels(window: str = "current_quarter",
 
     mart = build_revenue_decision_mart(view="campaign", window=window, now=now)
     window_block = mart.get("window") or {}
-    mart_summary = mart.get("summary") or {}
     readiness = mart.get("readiness") or {}
     revenue_connected = bool(readiness.get("revenue_integration_connected"))
 
@@ -735,17 +755,12 @@ def build_dashboard_channels(window: str = "current_quarter",
         source_groups, google_spend, exec_unknown, platform_unknown,
         amounts_verifiable=amounts_verifiable)
 
-    # Gate revenue-derived KPIs on the revenue integration (never fake $0).
-    gated_summary = {
-        "sqls": mart_summary.get("sqls"),
-        "customers": mart_summary.get("customers") if revenue_connected else None,
-        "won_revenue_usd": mart_summary.get("won_revenue_usd") if revenue_connected else None,
-    }
     if not revenue_connected:
         # Closed-won customers AND revenue both come from the revenue integration,
         # so both are unknown when it is disconnected — blank them (Leads / SQLs
         # come from contacts and survive). Never imply a verified $0 / customer
-        # count from an unwired integration. Consistent with the gated hero KPIs.
+        # count from an unwired integration. The hero KPIs derive from these rows,
+        # so they become Unavailable in lockstep — no separate mart gate needed.
         # spend_connected/status stay as-is: the Google Ads SPEND source remains
         # connected when only the REVENUE integration is down. But ROAS needs
         # revenue, so roas and roas_available are cleared (kept consistent).
@@ -760,7 +775,10 @@ def build_dashboard_channels(window: str = "current_quarter",
             p["roas"] = None
             p["roas_available"] = False
 
-    kpis = _build_kpis(channel_rows, gated_summary, google_spend)
+    # Hero KPIs derive from the channel rows so they reconcile with the mix /
+    # matrix / trend (all Revenue-by-Source), never a mart total on a different
+    # denominator (mart SQLs are campaign-based; these are source-based).
+    kpis = _build_kpis(channel_rows)
     top_channel, top_platform = _top_channel_and_platform(channel_rows, platforms)
     kpis["top_channel"] = top_channel
     kpis["top_platform"] = top_platform

@@ -319,7 +319,9 @@ def test_revenue_is_hubspot_closed_won(monkeypatch):
     k = out["kpis"]
     assert k["closed_won_revenue_usd"] == 42000.0
     assert k["total_customers"] == 4
-    assert k["total_sqls"] == 20  # mart lead-quality SQLs
+    # SQLs are source-based on this tab (sum of channel rows): 20 google + 6 paid
+    # social + 8 organic social = 34 — reconciles with the mix/trend, not the mart.
+    assert k["total_sqls"] == 34
 
 
 def test_kpi_spend_connected_vs_revenue_only_split(monkeypatch):
@@ -330,6 +332,34 @@ def test_kpi_spend_connected_vs_revenue_only_split(monkeypatch):
     assert k["spend_connected_revenue_usd"] == 29000.0
     assert k["revenue_only_revenue_usd"] == 13000.0
     assert round(k["spend_connected_share"], 4) == round(29000.0 / 42000.0, 4)
+
+
+def test_kpis_reconcile_with_channel_rows(monkeypatch):
+    # The Channels-tab KPI totals derive from the channel rows (Revenue-by-Source),
+    # so they reconcile exactly with the mix, matrix and trend — not a mart total.
+    out = _channels(monkeypatch)
+    k = out["kpis"]
+    rows = out["channel_mix"]
+    assert k["total_sqls"] == sum(c["sqls"] for c in rows)
+    assert k["total_customers"] == sum(c["customers"] for c in rows)  # revenue connected
+    assert k["closed_won_revenue_usd"] == round(sum(c["won_revenue_usd"] for c in rows), 2)
+    # KPI SQLs also equals the trend's SQL sum (same source taxonomy).
+    trend_sqls = sum(ch["sqls"] for p in out["trend"]["points"] for ch in p["channels"])
+    assert k["total_sqls"] == trend_sqls
+
+
+def test_kpi_revenue_unavailable_when_any_channel_amount_unknown(monkeypatch):
+    # One unknown deal amount makes the KPI revenue Unavailable (never a partial
+    # sum), while SQLs/customers still reconcile with the channel rows.
+    src_rev = [dict(SOURCE_REV_ROWS[0], deal_amount_usd=None)] + SOURCE_REV_ROWS[1:]
+    out = _channels(monkeypatch, source_rev=src_rev)
+    k = out["kpis"]
+    assert k["closed_won_revenue_usd"] is None
+    assert k["spend_connected_revenue_usd"] is None
+    assert k["revenue_only_revenue_usd"] is None
+    rows = out["channel_mix"]
+    assert k["total_sqls"] == sum(c["sqls"] for c in rows)
+    assert k["total_customers"] == sum((c["customers"] or 0) for c in rows)
 
 
 def test_channels_map_to_executive_buckets(monkeypatch):
@@ -385,14 +415,25 @@ def test_platform_matrix_roas_only_on_google(monkeypatch):
             assert p["spend_connected"] is False
 
 
-def test_fx_incomplete_makes_google_spend_and_roas_unavailable(monkeypatch):
+def test_fx_incomplete_keeps_spend_connected_via_native_gbp(monkeypatch):
+    # Native GBP spend present but FX/USD unavailable: the Google Ads spend SOURCE
+    # stays connected (native GBP available), USD spend + ROAS are Unavailable, and
+    # the status must NOT say "no connected spend source".
     canon = dict(CANONICAL, fx_complete=False, fx_missing_days=5, total_spend_usd=None,
                  rows=[dict(r, spend_usd=None) for r in CANONICAL["rows"]])
     out = _channels(monkeypatch, canonical=canon)
     google = _ch(out, "google_ads")
-    assert google["spend_usd"] is None and google["spend_usd"] != 0
-    assert google["roas"] is None
-    assert google["spend_connected"] is False
+    assert google["spend_usd"] is None and google["spend_usd"] != 0  # USD Unavailable
+    assert google["roas"] is None and google["roas_available"] is False  # ROAS Unavailable
+    assert google["spend_connected"] is True  # native GBP source still connected
+    # Native GBP spend remains available and is never labelled USD.
+    assert google["native_spend"] and google["native_spend"]["amount"] == 10000.0
+    assert google["native_spend"]["currency"] == "GBP"
+    assert "no connected spend source" not in (google["status"] or "").lower()
+    # The Google Ads platform row carries the same native GBP fallback.
+    gp = next(p for p in out["platform_matrix"] if p["channel"] == "google_ads")
+    assert gp["spend_usd"] is None and gp["spend_connected"] is True
+    assert gp["native_spend"] and gp["native_spend"]["currency"] == "GBP"
     assert out["truth_status"]["google_ads_spend"] in ("partial", "unavailable")
 
 
@@ -768,6 +809,24 @@ def test_channels_responsive_classes_exist():
         assert cls in CSS, f"{cls} missing from styles.css"
     assert "@media (max-width: 1100px)" in CSS
     assert "@media (max-width: 640px)" in CSS
+
+
+def test_channel_drawer_is_platform_breakdown_not_deal_proof():
+    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Campaigns page")]
+    # The drawer is explicitly a PLATFORM breakdown and disclaims client/deal proof.
+    assert "platform breakdown" in block
+    assert "not individual client/deal records" in block
+    # The channels block never claims per-deal / per-client proof rows.
+    for phrase in ("deal proof", "client proof", "deal-level proof", "deals — proof"):
+        assert phrase not in block.lower()
+
+
+def test_native_gbp_shown_when_usd_unavailable():
+    block = JS[JS.find("// ── Dashboard — Channels & Platforms"):JS.find("// ── Campaigns page")]
+    # Spend cells fall back to native GBP (fmtCompactCurrency, never $) when USD
+    # is unavailable but the spend source is connected.
+    assert "native_spend" in block
+    assert "fmtCompactCurrency(nat.amount" in block
 
 
 def test_channels_error_and_loading_states_exist():

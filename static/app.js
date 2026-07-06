@@ -3871,10 +3871,16 @@ function wireChanQualityHover(root, d) {
 const CHAN_SPEND_UNAVAILABLE = "Unavailable — no connected spend source";
 
 function chanPlatformSpendCell(p) {
-  // Show spend whenever a real spend figure is present (Google Ads, FX-verified);
-  // spend is independent of ROAS, which is gated separately by roas_available.
+  // Show USD spend whenever present (Google Ads, FX-verified). Spend is
+  // independent of ROAS, which is gated separately by roas_available.
   if (p.spend_usd !== null && p.spend_usd !== undefined) {
     return escapeHtml(fmtMoney(p.spend_usd));
+  }
+  // FX/USD unavailable but the Google Ads spend source is connected: show native
+  // GBP (never $) so the row is not mislabelled "no connected spend source".
+  const nat = p.native_spend;
+  if (nat && nat.amount !== null && nat.amount !== undefined) {
+    return escapeHtml(fmtCompactCurrency(nat.amount, nat.currency || "GBP"));
   }
   return `<span class="dash-unavailable" title="${escapeHtml(CHAN_SPEND_UNAVAILABLE)}">${escapeHtml(CHAN_SPEND_UNAVAILABLE)}</span>`;
 }
@@ -3938,14 +3944,22 @@ function renderChanChannelList(d) {
       <p class="rev-breakdown-empty">No channel activity in this window.</p>`;
   }
   const body = rows.map((r, i) => {
-    // Show spend whenever present; append ROAS only when it is a real, trusted
-    // value (roas_available) — never a "· Unavailable" suffix, never on a
-    // non-Google row. Mirrors chanPlatformRoasCell's gating.
+    // Show USD spend when present (append ROAS only when it is a real, trusted
+    // value — never a "· Unavailable" suffix, never on a non-Google row); else
+    // fall back to native GBP (spend source connected, FX/USD unavailable); else
+    // Unavailable. Mirrors chanPlatformSpendCell / chanPlatformRoasCell gating.
     const spendKnown = r.spend_usd !== null && r.spend_usd !== undefined;
     const roasKnown = r.roas_available && r.roas !== null && r.roas !== undefined;
-    const spendCell = spendKnown
-      ? `${escapeHtml(fmtMoney(r.spend_usd))}${roasKnown ? ` · ${escapeHtml(fmtRoasMultiple(r.roas))}` : ""}`
-      : `<span class="dash-unavailable">${escapeHtml(CHAN_SPEND_UNAVAILABLE)}</span>`;
+    const nat = r.native_spend;
+    const nativeKnown = nat && nat.amount !== null && nat.amount !== undefined;
+    let spendCell;
+    if (spendKnown) {
+      spendCell = `${escapeHtml(fmtMoney(r.spend_usd))}${roasKnown ? ` · ${escapeHtml(fmtRoasMultiple(r.roas))}` : ""}`;
+    } else if (nativeKnown) {
+      spendCell = escapeHtml(fmtCompactCurrency(nat.amount, nat.currency || "GBP"));
+    } else {
+      spendCell = `<span class="dash-unavailable">${escapeHtml(CHAN_SPEND_UNAVAILABLE)}</span>`;
+    }
     return `
     <li class="chan-channel-row" data-chan-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.channel_label || "channel")} detail">
       <span class="chan-channel-row__dot" style="background:${chanColor(r.channel)}"></span>
@@ -3993,10 +4007,11 @@ function wireChanChannelDrawers(root, d) {
     }
     drawer.innerHTML = `
       <div class="chan-channel-drawer__head">
-        <strong>${escapeHtml(r.channel_label || "Channel")}</strong>
+        <strong>${escapeHtml(r.channel_label || "Channel")} — platform breakdown</strong>
         <span class="chan-status ${r.spend_connected ? "chan-status--connected" : "chan-status--revenue"}">${escapeHtml(r.status || "")}</span>
         <button type="button" class="chan-channel-drawer__close" aria-label="Close">×</button>
       </div>
+      <p class="chan-channel-drawer__note">Platform-level SQLs, customers and revenue for this channel — not individual client/deal records.</p>
       <table class="chan-drawer-table">
         <thead><tr><th>Platform</th><th>SQLs</th><th>Customers</th><th>Revenue</th><th>Spend</th><th>ROAS</th></tr></thead>
         <tbody>${pfBody}</tbody>
