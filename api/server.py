@@ -67,6 +67,7 @@ Protected endpoints (require authenticated session):
   GET  /api/dashboard/revenue      — Read-only Dashboard Revenue & Customers contract by business window (PR-ADS-135).
   GET  /api/dashboard/channels     — Read-only Dashboard Channels & Platforms contract by business window (PR-ADS-136).
   GET  /api/dashboard/campaigns    — Read-only Dashboard Campaigns & Keywords contract by business window (PR-ADS-137).
+  GET  /api/dashboard/countries    — Read-only Dashboard Countries & Geo Intelligence contract by business window (PR-ADS-138).
 """
 
 import base64
@@ -6377,6 +6378,49 @@ async def get_dashboard_campaigns(
         log.error("Dashboard campaigns failed: %s", exc)
         raise HTTPException(
             status_code=500, detail="Dashboard campaigns computation failed"
+        ) from exc
+
+
+@app.get("/api/dashboard/countries")
+async def get_dashboard_countries(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Dashboard Countries & Geo Intelligence contract (PR-ADS-138).
+
+    ONE read-only payload for the Dashboard → Countries tab: which countries /
+    markets produce SQLs, customers and closed-won revenue, and where is Google
+    Ads spend present without business proof. Composes the canonical Revenue
+    Decision Mart (view="country") for the per-country spend/SQLs/customers/
+    revenue/ROAS/mapping truth plus the geo reconciliation status and residual,
+    the canonical per-country native-GBP + FX-gated-USD geo spend, and the
+    closed-won deal ledger for drawer proof. It adds NO new business math and NO
+    new attribution model.
+
+    Google Ads API is spend truth (native GBP); HubSpot closed-won is revenue
+    truth (USD) — native GBP is never labelled USD. Geo ROAS is shown only when a
+    country has real attributed spend, FX and revenue are safe, and geo
+    reconciliation is unblockable, never from the Google Ads conversion value.
+    The unattributed geo residual and closed-won revenue that maps to no country
+    are preserved in an explicit "Unattributed / No Country" bucket — never
+    distributed across real countries, never mapped, never given a ROAS.
+
+    Uses business windows (current_quarter | last_quarter | last_6_months | ytd
+    | all_time), not ad-style day windows. Unavailable metrics are null plus a
+    reason — never a fabricated $0 / 0.00x / 0%. Read-only: no writes to Google
+    Ads, HubSpot, budgets, bids, campaigns, keywords, negatives, or offline
+    conversions.
+    """
+    from services.dashboard_countries_service import build_dashboard_countries  # noqa: PLC0415
+
+    try:
+        return build_dashboard_countries(window=window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Dashboard countries failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Dashboard countries computation failed"
         ) from exc
 
 

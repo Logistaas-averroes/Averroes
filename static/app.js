@@ -1181,7 +1181,7 @@ function hashToPage(hash) {
 
 // Dashboard inner-tab state (PR-ADS-135). Overview is the default; Revenue is
 // linkable/bookmarkable via #/dashboard?tab=revenue.
-const DASHBOARD_TABS = ["overview", "revenue", "channels", "campaigns"];
+const DASHBOARD_TABS = ["overview", "revenue", "channels", "campaigns", "countries"];
 
 function hashToDashTab(hash) {
   const q = (hash || "").split("?")[1] || "";
@@ -1937,6 +1937,8 @@ const DASH_DELTA_VALENCE = {
   // PR-ADS-137 campaigns-tab metric keys.
   won_revenue_usd: "up-good",
   verified_spend_usd: "neutral",
+  // PR-ADS-138 countries-tab metric key.
+  geo_roas: "up-good",
 };
 
 // ── Dashboard inner-tab controller (PR-ADS-135) ───────────────────────────
@@ -1963,10 +1965,12 @@ function activateDashboardTab(tab, options) {
   const revenueRoot = document.getElementById("dashboard-revenue-root");
   const channelsRoot = document.getElementById("dashboard-channels-root");
   const campaignsRoot = document.getElementById("dashboard-campaigns-root");
+  const countriesRoot = document.getElementById("dashboard-countries-root");
   if (overviewRoot) overviewRoot.hidden = target !== "overview";
   if (revenueRoot) revenueRoot.hidden = target !== "revenue";
   if (channelsRoot) channelsRoot.hidden = target !== "channels";
   if (campaignsRoot) campaignsRoot.hidden = target !== "campaigns";
+  if (countriesRoot) countriesRoot.hidden = target !== "countries";
 
   if (options.updateHash !== false) {
     // Overview is the default → keep the URL clean; other tabs are bookmarkable.
@@ -1977,6 +1981,7 @@ function activateDashboardTab(tab, options) {
   if (target === "revenue") loadDashboardRevenue();
   else if (target === "channels") loadDashboardChannels();
   else if (target === "campaigns") loadDashboardCampaigns();
+  else if (target === "countries") loadDashboardCountries();
   else loadDashboardOverview();
 }
 
@@ -4616,6 +4621,632 @@ function renderCampTruthFooter(d) {
         : (dashCanNavigate("revenue-health")
           ? '<a class="dash-footer-note" href="#/revenue-health">Some attribution needs review — open Revenue Health</a>'
           : '<span class="dash-footer-note">Some attribution needs review — contact your administrator.</span>')}
+    </footer>`;
+}
+
+// ── Dashboard — Countries & Geo Intelligence tab (PR-ADS-138) ──────────────
+//
+// Fifth dashboard tab. Reuses the PR-134/135/136/137 design system end to end
+// (KPI cards, chart shell, decision cards, truth footer, loading/refetch/
+// unavailable states) — NO new visual language. It answers: which countries /
+// markets produce SQLs, customers and closed-won revenue, and where is Google
+// Ads spend present without business proof? Truth doctrine is identical: Google
+// Ads spend is native GBP (never labelled USD); HubSpot closed-won is revenue
+// truth (USD); geo ROAS only when a country has real attributed spend, FX +
+// revenue are safe, and geo reconciliation is unblockable. The unattributed
+// residual (spend with no country + revenue with no country) is PRESERVED in an
+// explicit bucket — never mapped, never given a ROAS, never a drawer.
+
+let dashCountries = null;
+let dashCountriesStatus = "loading";
+
+// Country status → colour + dot class (market map bubbles + badges).
+const CTRY_STATUS_META = {
+  "Revenue proven": { color: "#22b07d", dot: "ctry-dot--proven" },
+  "Customer proven": { color: "#3ac6a1", dot: "ctry-dot--customer" },
+  "SQL producer": { color: "#129ef5", dot: "ctry-dot--sql" },
+  "Spend without customer proof": { color: "#ff8a3d", dot: "ctry-dot--waste" },
+  "FX unavailable": { color: "#8896a6", dot: "ctry-dot--muted" },
+  "Geo attribution needs review": { color: "#7c5cff", dot: "ctry-dot--attr" },
+  "No spend in window": { color: "#b6bfca", dot: "ctry-dot--muted" },
+};
+function ctryStatusColor(status) {
+  return (CTRY_STATUS_META[status] || { color: "#b6bfca" }).color;
+}
+
+const CTRY_NEXT_ACTION = {
+  "Revenue proven": "Scale — open ROAS by Country",
+  "Customer proven": "Confirm revenue attribution",
+  "SQL producer": "Review SQL quality",
+  "Spend without customer proof": "Review — spend without proof",
+  "FX unavailable": "FX incomplete — USD/ROAS withheld",
+  "Geo attribution needs review": "Open Revenue Health",
+  "No spend in window": "No spend to judge",
+};
+
+async function loadDashboardCountries() {
+  const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.dashCountries;
+  setWindowRangeLoading("dashboard-range");
+
+  const root = document.getElementById("dashboard-countries-root");
+  const genEl = document.getElementById("dashboard-generated");
+  if (root) {
+    if (dashCountries && dashCountriesStatus === "ok") {
+      root.classList.add("is-refreshing");
+    } else {
+      root.innerHTML = renderDashSkeleton();
+    }
+  }
+
+  try {
+    const data = await fetchJSON(
+      `/api/dashboard/countries?window=${encodeURIComponent(window_)}`
+    );
+    if (token !== _revReqSeq.dashCountries) return;
+    if (!_revResponseIsCurrent("dashCountries", token, data)) return;
+    dashCountries = data;
+    dashCountriesStatus = "ok";
+    renderWindowRange("dashboard-range", data.window || null);
+    if (genEl) genEl.textContent = data.generated_at ? `Generated ${fmtDate(data.generated_at)}` : "";
+    renderDashboardCountries();
+  } catch (err) {
+    console.error("[loadDashboardCountries]", err);
+    if (token !== _revReqSeq.dashCountries) return;
+    dashCountries = null;
+    dashCountriesStatus = "error";
+    if (genEl) genEl.textContent = "";
+    renderWindowRange("dashboard-range", null);
+    renderDashboardCountries();
+  }
+}
+
+function renderDashboardCountries() {
+  const root = document.getElementById("dashboard-countries-root");
+  if (!root) return;
+  root.classList.remove("is-refreshing");
+
+  if (dashCountriesStatus !== "ok" || !dashCountries) {
+    const nextStep = dashCanNavigate("health")
+      ? 'Next step: check <a href="#/health">System Status</a> or retry with Refresh.'
+      : "Next step: retry with Refresh, or contact your administrator.";
+    root.innerHTML = `
+      <div class="revenue-blocked-card dash-error-card">
+        <h3 class="revenue-blocked-card__title">Countries &amp; Markets unavailable</h3>
+        <p>The dashboard countries service could not be reached. Nothing is shown
+        because nothing safe could be computed — metrics are never fabricated.</p>
+        <p class="revenue-blocked-card__next">${nextStep}</p>
+      </div>`;
+    return;
+  }
+
+  const d = dashCountries;
+  root.innerHTML = `
+    <div class="dash-tab-intro dash-anim">
+      <h2 class="dash-tab-intro__title">Countries &amp; Markets</h2>
+      <p class="dash-tab-intro__sub">Where Google Ads spend, SQLs, customers and closed-won revenue are actually showing up. Spend is native GBP; revenue is HubSpot closed-won USD.</p>
+    </div>
+    ${renderCtryKpiRow(d)}
+    <section class="dash-panel dash-chart-panel dash-anim ctry-map-panel" aria-label="Geo performance map">
+      ${renderCtryGeoMap(d)}
+    </section>
+    <section class="dash-panel dash-anim ctry-leaderboard-panel" aria-label="Country leaderboard">
+      ${renderCtryLeaderboard(d)}
+    </section>
+    <div class="dash-main-grid ctry-lower-grid">
+      <section class="dash-panel dash-anim ctry-region-panel" aria-label="Regional mix">
+        ${renderCtryRegionalMix(d)}
+      </section>
+      <aside class="dash-panel dash-anim ctry-residual-panel" aria-label="Unattributed residual">
+        ${renderCtryResidualPanel(d)}
+      </aside>
+    </div>
+    <section class="dash-decisions dash-anim" aria-label="Geo signal cards">
+      ${renderDashDecisionCards(d)}
+    </section>
+    ${renderCtryTruthFooter(d)}
+  `;
+  wireCtryBubbleHover(root, d);
+  wireCtryDrawers(root, d);
+}
+
+// Native GBP spend cell (never a "$"), with USD appended only when FX-safe.
+function ctrySpendCell(row) {
+  if (row.spend_native === null || row.spend_native === undefined) {
+    return '<span class="dash-unavailable">Unavailable</span>';
+  }
+  const native = escapeHtml(fmtCompactCurrency(row.spend_native, row.native_currency || "GBP"));
+  if (row.spend_usd !== null && row.spend_usd !== undefined) {
+    return `${native} <span class="ctry-usd">· ${escapeHtml(fmtMoney(row.spend_usd))}</span>`;
+  }
+  return native;
+}
+
+function ctryRoasCell(row) {
+  if (row.roas_available && row.roas !== null && row.roas !== undefined) {
+    return `<span class="ctry-roas">${escapeHtml(fmtRoasMultiple(row.roas))}</span>`;
+  }
+  return `<span class="ctry-status" style="--ctry-accent:${ctryStatusColor(row.status)}">${escapeHtml(row.status || "—")}</span>`;
+}
+
+// Compact native-currency magnitude for the hero value (symbol + magnitude, no
+// trailing code word) so a long "£10.0k GBP" never truncates. The £ symbol makes
+// the currency unambiguous; the currency code is restated in the sub line.
+function ctryNativeBig(native) {
+  if (!native || native.amount === null || native.amount === undefined) {
+    return '<span class="dash-unavailable">Unavailable</span>';
+  }
+  const sym = currencySymbol(native.currency || "GBP");
+  const abs = Math.abs(native.amount);
+  let body;
+  if (abs >= 1e6) body = (native.amount / 1e6).toFixed(1) + "M";
+  else if (abs >= 1e3) body = (native.amount / 1e3).toFixed(1) + "k";
+  else body = Number(native.amount).toFixed(0);
+  return escapeHtml(`${sym}${body}`);
+}
+
+function renderCtryKpiRow(d) {
+  const k = d.kpis || {};
+  const pc = d.period_change || {};
+  const native = k.verified_spend_native || {};
+  const nativeVal = ctryNativeBig(native);
+  const cur = escapeHtml(native.currency || "GBP");
+  const usdSub = (k.verified_spend_usd !== null && k.verified_spend_usd !== undefined)
+    ? `${cur} native · ${escapeHtml(fmtMoney(k.verified_spend_usd))} USD`
+    : `${cur} native · USD unavailable (FX)`;
+
+  const cards = [
+    {
+      key: "spend", label: "Verified Geo Spend",
+      value: nativeVal, sub: usdSub,
+      delta: dashDeltaChip("verified_spend_usd", pc),
+      source: "Google Ads · native GBP · country-attributed",
+      ok: native.amount !== null && native.amount !== undefined,
+    },
+    {
+      key: "sqls", label: "SQLs",
+      value: dashValue(k.sqls, fmtCount), sub: "Qualified leads · country-attributed",
+      delta: dashDeltaChip("sqls", pc),
+      source: "HubSpot qualified leads",
+      ok: k.sqls !== null && k.sqls !== undefined,
+    },
+    {
+      key: "customers", label: "Customers",
+      value: dashValue(k.customers, fmtCount),
+      sub: `Closed-won · ${(k.countries_with_customers === null || k.countries_with_customers === undefined) ? "—" : fmtCount(k.countries_with_customers)} countries`,
+      delta: dashDeltaChip("customers", pc),
+      source: "HubSpot Closed-Won",
+      ok: k.customers !== null && k.customers !== undefined,
+    },
+    {
+      key: "revenue", label: "Won Revenue",
+      value: dashValue(k.won_revenue_usd, fmtMoney), sub: "USD · HubSpot closed-won",
+      delta: dashDeltaChip("won_revenue_usd", pc),
+      source: "HubSpot Closed-Won",
+      ok: k.won_revenue_usd !== null && k.won_revenue_usd !== undefined,
+    },
+    {
+      key: "roas", label: "Geo ROAS",
+      value: (k.geo_roas !== null && k.geo_roas !== undefined)
+        ? escapeHtml(fmtRoasMultiple(k.geo_roas))
+        : '<span class="dash-unavailable">Unavailable</span>',
+      sub: `${(k.countries_with_spend === null || k.countries_with_spend === undefined) ? "—" : fmtCount(k.countries_with_spend)} countries with spend`,
+      delta: dashDeltaChip("geo_roas", pc),
+      source: "Revenue ÷ verified USD spend",
+      ok: k.geo_roas !== null && k.geo_roas !== undefined,
+    },
+    {
+      key: "residual", label: "Residual Revenue",
+      value: dashValue(k.residual_revenue_usd, fmtMoney),
+      sub: `${(k.residual_customers === null || k.residual_customers === undefined) ? "—" : fmtCount(k.residual_customers)} customers · no country`,
+      delta: '<span class="dash-delta dash-delta--none">Isolated</span>',
+      source: "Preserved · never distributed",
+      ok: k.residual_revenue_usd !== null && k.residual_revenue_usd !== undefined,
+    },
+  ];
+
+  const compareNote = pc.available
+    ? `<p class="dash-compare-note">Change ${escapeHtml(pc.label || "vs previous period")}${pc.note ? ` — ${escapeHtml(pc.note)}` : ""}</p>`
+    : `<p class="dash-compare-note dash-compare-note--muted">No previous-period comparison${pc.reason ? ` — ${escapeHtml(pc.reason)}` : ""}</p>`;
+
+  return `
+    <div class="dash-kpi-grid ctry-kpi-grid">
+      ${cards.map((c) => `
+        <div class="dash-kpi-card dash-anim ${c.ok ? "" : "dash-kpi-card--unavailable"}" data-kpi="${c.key}">
+          <div class="dash-kpi-card__label">${escapeHtml(c.label)}</div>
+          <div class="dash-kpi-card__value">${c.value}</div>
+          <div class="dash-kpi-card__sub">${escapeHtml(c.sub)}</div>
+          <div class="dash-kpi-card__meta">${c.delta}</div>
+          <div class="dash-kpi-card__source">${escapeHtml(c.source)}</div>
+        </div>`).join("")}
+    </div>
+    ${compareNote}`;
+}
+
+// Market map: region lanes, each a horizontal strip of country bubbles. Bubble
+// size = customers (falls back to native spend when no customers anywhere so the
+// map is never uniformly flat); colour = business status. The residual is NEVER
+// mapped — it is not a country.
+function ctryMapSizeMetric(rows) {
+  // Prefer customers; if no country has customers, fall back to native spend.
+  const anyCustomers = rows.some((r) => (r.customers || 0) > 0);
+  const metric = anyCustomers
+    ? (r) => r.customers || 0
+    : (r) => r.spend_native || 0;
+  return { metric, label: anyCustomers ? "customers" : "native spend" };
+}
+
+function renderCtryGeoMap(d) {
+  const rows = (d.countries || []).filter((r) => !r.is_residual);
+  const legend = Object.keys(CTRY_STATUS_META).map((s) =>
+    `<span class="dash-legend__item"><span class="dash-legend__swatch" style="background:${CTRY_STATUS_META[s].color}"></span>${escapeHtml(s)}</span>`).join("");
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Geo Performance Map</h3>
+        <p class="dash-panel__sub">Countries grouped by region · bubble size = customers · colour = status · click a market for proof</p>
+      </div>
+    </div>`;
+  if (!rows.length) {
+    return `${header}<div class="dash-chart-empty">No country activity in this window.</div>`;
+  }
+
+  const { metric, label } = ctryMapSizeMetric(rows);
+  const maxMetric = Math.max(1, ...rows.map(metric));
+  const rOf = (r) => 12 + 26 * Math.sqrt(metric(r) / maxMetric);
+
+  // Preserve the original index (bubbles reference d.countries by index for
+  // hover + drawer), so map each row to its index BEFORE grouping.
+  const indexed = rows.map((r) => ({ r, idx: (d.countries || []).indexOf(r) }));
+  const byRegion = {};
+  indexed.forEach((entry) => {
+    const region = entry.r.region || "Unknown / Needs Review";
+    (byRegion[region] = byRegion[region] || []).push(entry);
+  });
+  const REGION_ORDER = ["North America", "Europe", "Middle East", "LATAM", "Africa", "APAC", "Unknown / Needs Review"];
+  const regions = REGION_ORDER.filter((rg) => byRegion[rg]);
+
+  const lanes = regions.map((region) => {
+    const entries = byRegion[region].slice().sort((a, b) => metric(b.r) - metric(a.r));
+    const pad = 10, gap = 14, laneH = 118, labelH = 22;
+    let x = pad;
+    const nodes = entries.map(({ r, idx }) => {
+      const rad = rOf(r);
+      const cx = x + rad;
+      x = cx + rad + gap;
+      const cy = (laneH - labelH) / 2;
+      const code = r.country_code || (r.country_name || "").slice(0, 3).toUpperCase();
+      return `
+        <g class="ctry-bubble-g">
+          <circle class="dash-chart-hit ctry-bubble" data-ctry-bubble="${idx}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${rad.toFixed(1)}"
+            fill="${ctryStatusColor(r.status)}" fill-opacity="0.55" stroke="${ctryStatusColor(r.status)}" stroke-width="1.4"/>
+          <text x="${cx.toFixed(1)}" y="${(laneH - labelH + 14).toFixed(1)}" text-anchor="middle" class="ctry-bubble-label">${escapeHtml(code)}</text>
+        </g>`;
+    }).join("");
+    const svgW = Math.max(x + pad, 200);
+    // Region revenue: Unavailable (never a fabricated $0) if any market's revenue
+    // is unknown — e.g. a disconnected revenue integration blanks them all.
+    const wonVals = byRegion[region].map((e) => e.r.won_revenue_usd);
+    const won = wonVals.some((v) => v === null || v === undefined)
+      ? null : wonVals.reduce((acc, v) => acc + v, 0);
+    return `
+      <div class="ctry-lane">
+        <div class="ctry-lane__head">
+          <span class="ctry-lane__region">${escapeHtml(region)}</span>
+          <span class="ctry-lane__meta">${escapeHtml(fmtCount(entries.length))} ${entries.length === 1 ? "market" : "markets"} · ${escapeHtml(_fmtUsdShort(won))}</span>
+        </div>
+        <div class="ctry-lane__strip">
+          <svg viewBox="0 0 ${svgW} 118" width="${svgW}" height="118" class="ctry-lane-svg" role="img" aria-label="${escapeHtml(region)} markets">
+            ${nodes}
+          </svg>
+        </div>
+      </div>`;
+  }).join("");
+
+  return `${header}
+    <div class="ctry-map">${lanes}</div>
+    <div class="dash-legend ctry-legend">${legend}<span class="ctry-legend__note">Bubble size = ${escapeHtml(label)}</span></div>
+    <div class="dash-chart-tooltip ctry-map-tooltip" hidden></div>`;
+}
+
+function _fmtUsdShort(v) {
+  if (v === null || v === undefined) return "Unavailable";
+  const n = Number(v);
+  if (!isFinite(n)) return "Unavailable";
+  if (Math.abs(n) >= 1e6) return "$" + (n / 1e6).toFixed(1) + "M";
+  if (Math.abs(n) >= 1e3) return "$" + (n / 1e3).toFixed(1) + "k";
+  return "$" + n.toFixed(0);
+}
+
+function wireCtryBubbleHover(root, d) {
+  const map = root.querySelector(".ctry-map-panel");
+  if (!map) return;
+  const tooltip = map.querySelector(".ctry-map-tooltip");
+  const rows = d.countries || [];
+
+  function hide() {
+    if (tooltip) tooltip.hidden = true;
+    map.querySelectorAll(".ctry-bubble.is-hover").forEach((el) => el.classList.remove("is-hover"));
+  }
+  map.addEventListener("pointermove", (e) => {
+    const dot = e.target.closest(".ctry-bubble");
+    if (!dot || !tooltip) { hide(); return; }
+    const r = rows[Number(dot.dataset.ctryBubble)];
+    if (!r) { hide(); return; }
+    map.querySelectorAll(".ctry-bubble.is-hover").forEach((el) => el.classList.remove("is-hover"));
+    dot.classList.add("is-hover");
+    tooltip.textContent = "";
+    const title = document.createElement("div");
+    title.className = "dash-chart-tooltip__title";
+    title.textContent = `${r.country_name || "—"} · ${r.region || ""}`;
+    tooltip.appendChild(title);
+    const usd = (r.spend_usd !== null && r.spend_usd !== undefined) ? fmtMoney(r.spend_usd) : "Unavailable";
+    const roas = (r.roas_available && r.roas !== null && r.roas !== undefined) ? fmtRoasMultiple(r.roas) : "Unavailable";
+    [["Spend (£)", r.spend_native !== null && r.spend_native !== undefined ? fmtCompactCurrency(r.spend_native, r.native_currency || "GBP") : "Unavailable"],
+     ["Spend (USD)", usd],
+     ["SQLs", r.sqls === null || r.sqls === undefined ? "Unavailable" : String(r.sqls)],
+     ["Customers", r.customers === null || r.customers === undefined ? "Unavailable" : String(r.customers)],
+     ["Revenue", r.won_revenue_usd === null || r.won_revenue_usd === undefined ? "Unavailable" : fmtMoney(r.won_revenue_usd)],
+     ["ROAS", roas],
+     ["Status", r.status || "—"]].forEach(([lbl, val]) => {
+      const rowEl = document.createElement("div");
+      rowEl.className = "dash-chart-tooltip__row";
+      const strong = document.createElement("strong");
+      strong.textContent = val;
+      const name = document.createElement("span");
+      name.textContent = ` ${lbl}`;
+      rowEl.appendChild(strong);
+      rowEl.appendChild(name);
+      tooltip.appendChild(rowEl);
+    });
+    const mapRect = map.getBoundingClientRect();
+    const dotRect = dot.getBoundingClientRect();
+    tooltip.hidden = false;
+    const tipW = tooltip.offsetWidth || 180;
+    let left = dotRect.left - mapRect.left + dotRect.width / 2 - tipW / 2;
+    left = Math.max(4, Math.min(left, mapRect.width - tipW - 4));
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${Math.max(4, dotRect.top - mapRect.top - 8)}px`;
+  });
+  map.addEventListener("pointerleave", hide);
+}
+
+function renderCtryLeaderboard(d) {
+  const real = (d.countries || []).filter((r) => !r.is_residual);
+  const residual = d.residual || null;
+  if (!real.length && !residual) {
+    return `
+      <div class="dash-panel__header"><div><h3 class="dash-panel__title">Country Leaderboard</h3></div></div>
+      <p class="rev-breakdown-empty">No country activity in this window.</p>`;
+  }
+  const head = ["Country", "Region", "Spend", "SQLs", "Customers", "Revenue", "ROAS / Status", "Next action"]
+    .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const body = real.map((r, i) => `
+    <tr class="ctry-row" data-ctry-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.country_name || "country")} detail">
+      <td class="ctry-td ctry-td--name">
+        <span class="ctry-dot ${(CTRY_STATUS_META[r.status] || {}).dot || "ctry-dot--muted"}"></span>${escapeHtml(r.country_name || "—")}
+      </td>
+      <td class="ctry-td--region">${escapeHtml(r.region || "—")}</td>
+      <td class="ctry-num">${ctrySpendCell(r)}</td>
+      <td class="ctry-num">${dashValue(r.sqls, fmtCount)}</td>
+      <td class="ctry-num">${dashValue(r.customers, fmtCount)}</td>
+      <td class="ctry-num">${dashValue(r.won_revenue_usd, fmtMoney)}</td>
+      <td>${ctryRoasCell(r)}</td>
+      <td class="ctry-next">${escapeHtml(CTRY_NEXT_ACTION[r.status] || "Open ROAS by Country")}</td>
+    </tr>`).join("");
+
+  // Residual row — pinned to the bottom, NOT clickable, never a ROAS. It is the
+  // isolated "no country" bucket, never treated as a real market.
+  let residualRow = "";
+  if (residual) {
+    residualRow = `
+      <tr class="ctry-row ctry-row--residual" aria-label="Unattributed residual (not a country)">
+        <td class="ctry-td ctry-td--name"><span class="ctry-dot ctry-dot--muted"></span>${escapeHtml(residual.label || "Unattributed / No Country")}</td>
+        <td class="ctry-td--region">—</td>
+        <td class="ctry-num">${ctrySpendCell(residual)}</td>
+        <td class="ctry-num"><span class="dash-unavailable">Unavailable</span></td>
+        <td class="ctry-num">${dashValue(residual.customers, fmtCount)}</td>
+        <td class="ctry-num">${dashValue(residual.won_revenue_usd, fmtMoney)}</td>
+        <td><span class="ctry-status ctry-status--residual">Unattributed</span></td>
+        <td class="ctry-next">Preserved — never distributed</td>
+      </tr>`;
+  }
+  return `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Country Leaderboard</h3>
+        <p class="dash-panel__sub">Every market's spend, SQLs, customers and revenue · click a row for proof · ROAS only when spend + FX + revenue + geo reconciliation are safe</p>
+      </div>
+    </div>
+    <div class="ctry-scroll">
+      <table class="ctry-table">
+        <thead><tr>${head}</tr></thead>
+        <tbody>${body}${residualRow}</tbody>
+      </table>
+    </div>`;
+}
+
+// Regional mix — horizontal bars. Metric chosen by availability (revenue →
+// customers → native spend); never a fabricated percentage when the denominator
+// is missing (a region with an unavailable metric shows no bar).
+function _ctryRegionalBarMetric(rows) {
+  if (rows.some((r) => (r.won_revenue_usd || 0) > 0)) return "won_revenue_usd";
+  if (rows.some((r) => (r.customers || 0) > 0)) return "customers";
+  if (rows.some((r) => (r.spend_native || 0) > 0)) return "spend_native";
+  return null;
+}
+
+function renderCtryRegionalMix(d) {
+  const rows = d.regional_mix || [];
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Regional Mix</h3>
+        <p class="dash-panel__sub">Where spend, customers and revenue concentrate</p>
+      </div>
+    </div>`;
+  if (!rows.length) {
+    return `${header}<p class="rev-breakdown-empty">No regional activity in this window.</p>`;
+  }
+  const metricKey = _ctryRegionalBarMetric(rows);
+  const metricLabel = { won_revenue_usd: "revenue", customers: "customers", spend_native: "native spend" }[metricKey] || "activity";
+  const max = metricKey ? Math.max(1, ...rows.map((r) => (r[metricKey] === null || r[metricKey] === undefined) ? 0 : r[metricKey])) : 0;
+  const bars = rows.map((r) => {
+    const val = metricKey ? r[metricKey] : null;
+    const pct = (metricKey && val !== null && val !== undefined && max > 0) ? Math.max(2, (val / max) * 100) : 0;
+    const barVal = (val === null || val === undefined)
+      ? '<span class="dash-unavailable">Unavailable</span>'
+      : (metricKey === "won_revenue_usd" ? escapeHtml(fmtMoney(val))
+         : metricKey === "spend_native" ? escapeHtml(fmtCompactCurrency(val, r.native_currency || "GBP"))
+         : escapeHtml(fmtCount(val)));
+    return `
+      <li class="ctry-region-row">
+        <div class="ctry-region-row__top">
+          <span class="ctry-region-row__name"><span class="ctry-dot ${(CTRY_STATUS_META[r.status] || {}).dot || "ctry-dot--muted"}"></span>${escapeHtml(r.region || "—")}</span>
+          <span class="ctry-region-row__val">${barVal}</span>
+        </div>
+        <div class="ctry-region-bar"><span class="ctry-region-bar__fill" style="width:${pct.toFixed(1)}%;background:${ctryStatusColor(r.status)}"></span></div>
+        <div class="ctry-region-row__meta">
+          <span>${escapeHtml(fmtCount(r.countries || 0))} ${r.countries === 1 ? "market" : "markets"}</span>
+          <span>Spend ${r.spend_native === null || r.spend_native === undefined ? "—" : escapeHtml(fmtCompactCurrency(r.spend_native, r.native_currency || "GBP"))}</span>
+          <span>Customers ${dashValue(r.customers, fmtCount)}</span>
+          <span>${r.roas_available && r.roas !== null && r.roas !== undefined ? "ROAS " + escapeHtml(fmtRoasMultiple(r.roas)) : escapeHtml(r.status || "—")}</span>
+        </div>
+      </li>`;
+  }).join("");
+  return `${header}
+    <p class="ctry-region-note">Bars scaled by ${escapeHtml(metricLabel)}${metricKey ? "" : " — unavailable"}.</p>
+    <ul class="ctry-region-list">${bars}</ul>`;
+}
+
+function renderCtryResidualPanel(d) {
+  const res = d.residual || null;
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Unattributed / No Country</h3>
+        <p class="dash-panel__sub">Isolated — never distributed across markets</p>
+      </div>
+    </div>`;
+  if (!res) {
+    return `${header}<p class="rev-breakdown-empty">No unattributed residual in this window.</p>`;
+  }
+  return `${header}
+    <dl class="ctry-residual-tiles">
+      <div><dt>Residual revenue</dt><dd>${dashValue(res.won_revenue_usd, fmtMoney)}</dd></div>
+      <div><dt>Customers</dt><dd>${dashValue(res.customers, fmtCount)}</dd></div>
+      <div><dt>SQLs</dt><dd>${dashValue(res.sqls, fmtCount)}</dd></div>
+      <div><dt>Geo spend residual</dt><dd>${res.spend_native === null || res.spend_native === undefined ? '<span class="dash-unavailable">Unavailable</span>' : escapeHtml(fmtCompactCurrency(res.spend_native, res.native_currency || "GBP"))}</dd></div>
+    </dl>
+    <p class="ctry-residual-note">${escapeHtml(res.reason || "Revenue and spend with no country are preserved separately — never spread across real countries.")}</p>`;
+}
+
+const CTRY_DEAL_COLUMNS = [
+  ["company", "Company"], ["company_id", "Company ID"], ["main_contact", "Main Contact"],
+  ["contact_id", "Contact ID"], ["deal", "Deal"], ["deal_id", "Deal ID"],
+  ["amount_usd", "Amount"], ["close_date", "Close Date"], ["campaign_name", "Campaign (source)"],
+  ["attribution_status", "Attribution"],
+];
+
+function ctryDealCell(deal, key) {
+  if (key === "amount_usd") return dashValue(deal.amount_usd, fmtMoney); // null → Unavailable, never $0
+  return dashValue(deal[key]);
+}
+
+function wireCtryDrawers(root, d) {
+  const rows = (d.countries || []).filter((r) => !r.is_residual);
+  const open = (i) => {
+    const r = rows[i];
+    if (!r) return;
+    const deals = r.deals || [];
+    const dealProofAvailable = d.deal_proof_available !== false;
+    const dealHead = CTRY_DEAL_COLUMNS.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("");
+    // When the deal ledger is unavailable we cannot prove OR disprove deals — say
+    // Unavailable, never "No closed-won deals" (which would imply the country has none).
+    const dealBody = !dealProofAvailable
+      ? `<tr><td colspan="${CTRY_DEAL_COLUMNS.length}" class="dash-unavailable">Closed-won deal proof unavailable — the deal ledger could not be read (revenue may still be canonical).</td></tr>`
+      : deals.length
+        ? deals.map((deal) => `<tr>${CTRY_DEAL_COLUMNS.map(([key]) => `<td class="ctry-deal-td ctry-deal-td--${key}">${ctryDealCell(deal, key)}</td>`).join("")}</tr>`).join("")
+        : `<tr><td colspan="${CTRY_DEAL_COLUMNS.length}" class="rev-breakdown-empty">No closed-won deals to prove this country in this window.</td></tr>`;
+
+    const links = [
+      ["roas-countries", "Open ROAS by Country"],
+      ["deals", "Open Deals"],
+      ["revenue-health", "Open Revenue Health"],
+    ].filter(([page]) => dashCanNavigate(page))
+      .map(([page, label]) => `<a class="ctry-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
+
+    let drawer = root.querySelector(".ctry-drawer");
+    if (!drawer) {
+      drawer = document.createElement("div");
+      drawer.className = "ctry-drawer";
+      root.querySelector(".ctry-leaderboard-panel").appendChild(drawer);
+    }
+    drawer.innerHTML = `
+      <div class="ctry-drawer__head">
+        <strong>${escapeHtml(r.country_name || "Country")}</strong>
+        <span class="ctry-drawer__region">${escapeHtml(r.region || "")}</span>
+        <span class="ctry-status" style="--ctry-accent:${ctryStatusColor(r.status)}">${escapeHtml(r.status || "")}</span>
+        <button type="button" class="ctry-drawer__close" aria-label="Close">×</button>
+      </div>
+      <dl class="ctry-drawer__summary">
+        <div><dt>Spend (native)</dt><dd>${ctrySpendCell(r)}</dd></div>
+        <div><dt>SQLs</dt><dd>${dashValue(r.sqls, fmtCount)}</dd></div>
+        <div><dt>Customers</dt><dd>${dashValue(r.customers, fmtCount)}</dd></div>
+        <div><dt>Revenue</dt><dd>${dashValue(r.won_revenue_usd, fmtMoney)}</dd></div>
+        <div><dt>Geo ROAS / status</dt><dd>${ctryRoasCell(r)}</dd></div>
+        <div><dt>Top campaign</dt><dd>${dashValue(r.top_campaign)}</dd></div>
+      </dl>
+      <div class="ctry-drawer__section">
+        <h4 class="ctry-drawer__h">Revenue proof — closed-won deals</h4>
+        <div class="ctry-deal-scroll">
+          <table class="ctry-deal-table"><thead><tr>${dealHead}</tr></thead><tbody>${dealBody}</tbody></table>
+        </div>
+      </div>
+      <div class="ctry-drawer__actions">${links}</div>`;
+    drawer.querySelector(".ctry-drawer__close").addEventListener("click", () => drawer.remove());
+    drawer.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
+  root.querySelectorAll(".ctry-row:not(.ctry-row--residual)").forEach((tr) => {
+    tr.addEventListener("click", () => open(Number(tr.dataset.ctryRow)));
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(Number(tr.dataset.ctryRow)); }
+    });
+  });
+  // Map bubbles open the same drawer (bubbles carry the d.countries index).
+  root.querySelectorAll(".ctry-bubble").forEach((b) => {
+    b.addEventListener("click", () => {
+      const all = d.countries || [];
+      const r = all[Number(b.dataset.ctryBubble)];
+      if (!r || r.is_residual) return;
+      const idx = rows.indexOf(r);
+      if (idx >= 0) open(idx);
+    });
+  });
+}
+
+function renderCtryTruthFooter(d) {
+  const ts = d.truth_status || {};
+  const chip = (label, status) => `
+    <span class="dash-footer-chip" title="${escapeHtml(`${label}: ${status || "unknown"}`)}">
+      <span class="dash-dot ${DASH_STATUS_DOT[status] || "dash-dot--muted"}"></span>${escapeHtml(label)}
+    </span>`;
+  const allGood = ts.spend === "ready" && ts.fx === "ready" && ts.revenue === "ready"
+    && ts.geo_attribution === "ready" && ts.residual === "ready" && ts.deal_proof === "ready";
+  return `
+    <footer class="dash-truth-footer ${allGood ? "dash-truth-footer--ok" : ""}">
+      ${chip("Google Ads spend", ts.spend)}
+      ${chip("FX", ts.fx)}
+      ${chip("Revenue", ts.revenue)}
+      ${chip("Geo attribution", ts.geo_attribution)}
+      ${chip("Residual", ts.residual)}
+      ${chip("Deal proof", ts.deal_proof)}
+      <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
+      ${allGood
+        ? '<span class="dash-footer-note">Country truth verified — residual is isolated, never distributed.</span>'
+        : (dashCanNavigate("revenue-health")
+          ? '<a class="dash-footer-note" href="#/revenue-health">Some geo attribution needs review — open Revenue Health</a>'
+          : '<span class="dash-footer-note">Some geo attribution needs review — contact your administrator.</span>')}
     </footer>`;
 }
 
@@ -11894,7 +12525,7 @@ let roasCountryWindow = null;
 // Per-page request sequence tokens guard against stale-response races: only the
 // newest in-flight request for a page may render. Switching CQ→YTD→Last Quarter
 // quickly must never paint an older response over the newest selection.
-const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0, overview: 0, dashRevenue: 0, dashChannels: 0, dashCampaigns: 0 };
+const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0, overview: 0, dashRevenue: 0, dashChannels: 0, dashCampaigns: 0, dashCountries: 0 };
 
 // PR-ADS-116: show the exact resolved date range beside each window selector.
 function formatWindowRange(win) {

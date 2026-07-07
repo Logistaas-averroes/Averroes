@@ -623,7 +623,7 @@ def test_campaigns_tab_enabled_overview_default():
 
 def test_campaigns_tab_is_hash_linkable():
     assert '"campaigns"' in _slice(JS, "const DASHBOARD_TABS", 120)
-    fn = _slice(JS, "function activateDashboardTab", 1500)
+    fn = _slice(JS, "function activateDashboardTab", 2000)
     assert "dashboard-campaigns-root" in fn
     assert "loadDashboardCampaigns" in fn
 

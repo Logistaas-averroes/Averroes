@@ -737,7 +737,7 @@ def test_channels_tab_enabled_overview_default():
 def test_channels_tab_is_hash_linkable():
     assert "hashToDashTab" in JS
     assert '"channels"' in _slice(JS, "const DASHBOARD_TABS", 120)
-    fn = _slice(JS, "function activateDashboardTab", 1400)
+    fn = _slice(JS, "function activateDashboardTab", 2000)
     assert "dashboard-channels-root" in fn
     assert "loadDashboardChannels" in fn
 

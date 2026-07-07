@@ -6818,3 +6818,135 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 @media (max-width: 640px) {
   .camp-drawer__summary { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PR-ADS-138 — Dashboard Countries & Geo Intelligence tab
+   Reuses the PR-ADS-134/135/136/137 dashboard design system (tokens, cards,
+   panels, chart shell, decision cards, truth footer). Only Countries-specific
+   pieces below. Spend is native GBP (never "$"); geo ROAS only where spend + FX
+   + revenue + geo reconciliation are safe; the residual is isolated, never
+   mapped, never given a ROAS.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.ctry-kpi-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+
+/* Status dots + badges (shared palette with the campaign map). */
+.ctry-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: middle; }
+.ctry-dot--proven { background: #22b07d; }
+.ctry-dot--customer { background: #3ac6a1; }
+.ctry-dot--sql { background: #129ef5; }
+.ctry-dot--waste { background: #ff8a3d; }
+.ctry-dot--attr { background: #7c5cff; }
+.ctry-dot--muted { background: #b6bfca; }
+.ctry-status {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  color: var(--ctry-accent, var(--text-secondary));
+  background: color-mix(in srgb, var(--ctry-accent, #b6bfca) 12%, transparent);
+}
+.ctry-status--residual { --ctry-accent: #8896a6; }
+.ctry-roas { font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.ctry-usd { color: var(--text-muted); font-size: 11px; }
+
+/* Geo market map — region lanes of country bubbles. */
+.ctry-map-panel { display: block; position: relative; }
+.ctry-map { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-2); }
+.ctry-lane { border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-alt); padding: var(--space-2) var(--space-3) 0; }
+.ctry-lane__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.ctry-lane__region { font-size: 12px; font-weight: 700; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.04em; }
+.ctry-lane__meta { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.ctry-lane__strip { overflow-x: auto; overflow-y: hidden; }
+.ctry-lane-svg { display: block; }
+.ctry-bubble { cursor: pointer; transition: fill-opacity 0.12s ease; }
+.ctry-bubble:hover, .ctry-bubble.is-hover { fill-opacity: 0.82; }
+.ctry-bubble-label { font-size: 10px; font-weight: 600; fill: var(--text-secondary); font-variant-numeric: tabular-nums; pointer-events: none; }
+.ctry-map-tooltip { position: absolute; z-index: 5; }
+.ctry-legend { flex-wrap: wrap; gap: var(--space-2) var(--space-3); margin-top: var(--space-3); align-items: center; }
+.ctry-legend__note { font-size: 11px; color: var(--text-muted); font-style: italic; }
+
+/* Leaderboard table. */
+.ctry-leaderboard-panel { position: relative; }
+.ctry-scroll { overflow-x: auto; }
+.ctry-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 860px; }
+.ctry-table th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  background: var(--surface-alt);
+  padding: 8px 10px;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+.ctry-td, .ctry-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
+.ctry-td--name { font-weight: 600; color: var(--text-primary); }
+.ctry-td--region { color: var(--text-muted); font-size: 11px; }
+.ctry-num { font-variant-numeric: tabular-nums; }
+.ctry-next { color: var(--text-muted); font-size: 11px; }
+.ctry-row { cursor: pointer; transition: background 0.12s ease; }
+.ctry-row:hover { background: rgba(18, 158, 245, 0.06); }
+.ctry-row:focus-visible { background: rgba(18, 158, 245, 0.06); outline: 2px solid var(--c-primary, #129ef5); outline-offset: -2px; }
+/* The residual is NOT a country — muted, non-interactive, pinned at the bottom. */
+.ctry-row--residual { background: var(--surface-alt); cursor: default; }
+.ctry-row--residual:hover { background: var(--surface-alt); }
+.ctry-row--residual .ctry-td--name { color: var(--text-secondary); font-style: italic; }
+
+/* Regional mix bars. */
+.ctry-region-panel { display: block; }
+.ctry-region-note { font-size: 11px; color: var(--text-muted); margin: 0 0 var(--space-3); }
+.ctry-region-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.ctry-region-row { display: flex; flex-direction: column; gap: 4px; }
+.ctry-region-row__top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.ctry-region-row__name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.ctry-region-row__val { font-size: 12px; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.ctry-region-bar { height: 8px; border-radius: 999px; background: var(--surface-alt); overflow: hidden; }
+.ctry-region-bar__fill { display: block; height: 100%; border-radius: 999px; min-width: 2px; transition: width 0.3s ease; }
+.ctry-region-row__meta { display: flex; flex-wrap: wrap; gap: 4px var(--space-3); font-size: 11px; color: var(--text-muted); }
+.ctry-region-row__meta span { font-variant-numeric: tabular-nums; }
+
+/* Residual panel. */
+.ctry-residual-panel { display: block; }
+.ctry-residual-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); margin: 0 0 var(--space-3); }
+.ctry-residual-tiles dt { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+.ctry-residual-tiles dd { margin: 2px 0 0; font-size: 15px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.ctry-residual-note { font-size: 11px; color: var(--text-muted); margin: 0; line-height: 1.5; }
+
+/* Country drawer. */
+.ctry-drawer {
+  margin-top: var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+  padding: var(--space-4);
+}
+.ctry-drawer__head { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); font-size: 14px; color: var(--text-primary); }
+.ctry-drawer__region { font-size: 11px; color: var(--text-muted); }
+.ctry-drawer__close { margin-left: auto; border: none; background: transparent; font-size: 20px; line-height: 1; color: var(--text-muted); cursor: pointer; }
+.ctry-drawer__summary { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--space-3); margin: 0 0 var(--space-4); }
+.ctry-drawer__summary dt { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+.ctry-drawer__summary dd { margin: 2px 0 0; font-size: 13px; color: var(--text-primary); }
+.ctry-drawer__section { margin-bottom: var(--space-4); }
+.ctry-drawer__h { font-size: 12px; font-weight: 700; color: var(--text-primary); margin: 0 0 var(--space-2); }
+.ctry-deal-scroll { overflow-x: auto; }
+.ctry-deal-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 860px; }
+.ctry-deal-table th { text-align: left; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.ctry-deal-td { padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
+.ctry-deal-td--amount_usd { font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.ctry-deal-td--company { font-weight: 600; color: var(--text-primary); }
+.ctry-drawer__actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.ctry-drawer__link { font-size: 12px; color: var(--c-primary, #129ef5); text-decoration: none; font-weight: 600; }
+
+@media (max-width: 1100px) {
+  .ctry-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .ctry-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ctry-residual-tiles { grid-template-columns: minmax(0, 1fr); }
+  .ctry-drawer__summary { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
