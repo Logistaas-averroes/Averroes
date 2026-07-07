@@ -132,8 +132,11 @@ SQL_LEADS = {"available": True, "rows": [
      "country": "United States", "sql_date": date(2026, 6, 10), "has_gclid": True, "has_closed_won_deal": False},
     {"contact_id": "c3", "company": "Old Lead", "campaign_name": "Brand - UK",
      "country": "United Kingdom", "sql_date": date(2026, 1, 5), "has_gclid": True, "has_closed_won_deal": False},
-    {"contact_id": None, "company": "No Attr", "campaign_name": None,
-     "country": None, "sql_date": date(2026, 6, 15), "has_gclid": False, "has_closed_won_deal": False},
+    # A qualified paid-search SQL WITH a campaign but no gclid → attribution review
+    # (the reachable case; the fetcher requires a non-null campaign to reconcile with
+    # the canonical SQL count, so gclid presence is the attribution signal).
+    {"contact_id": "c7", "company": "No Attr", "campaign_name": "Brand - UK",
+     "country": "United Kingdom", "sql_date": date(2026, 6, 15), "has_gclid": False, "has_closed_won_deal": False},
 ]}
 
 
@@ -414,6 +417,52 @@ def test_sql_no_deal_unavailable_when_source_down(monkeypatch):
     assert out["sql_no_deal"] == []
     assert out["kpis"]["sqls_not_closed_won"] is None
     assert "sql_no_deal" in {u["metric"] for u in out["unavailable"]}
+    # The reason names the lead-source outage (not the disconnected case).
+    reason = next(u["reason"] for u in out["unavailable"] if u["metric"] == "sql_no_deal")
+    assert "lead source" in reason.lower() or "qualified-lead source" in reason.lower()
+
+
+def test_sql_no_deal_unavailable_when_revenue_disconnected(monkeypatch):
+    # When there are no durable closed-won deals, has_closed_won_deal is unreliable,
+    # so the panel is Unavailable with a DISTINCT reason (not the lead-source outage).
+    out = _deals(monkeypatch, revenue_connected=False)
+    assert out["sql_no_deal_available"] is False
+    assert out["sql_no_deal"] == []
+    assert out["kpis"]["sqls_not_closed_won"] is None
+    reason = next(u["reason"] for u in out["unavailable"] if u["metric"] == "sql_no_deal")
+    assert "disconnected" in reason.lower()
+
+
+def test_sql_no_gclid_is_attribution_review(monkeypatch):
+    # A qualified SQL with a campaign but no gclid → "Attribution needs review"
+    # (reachable in production; the null-campaign case is filtered out upstream).
+    out = _deals(monkeypatch)
+    by = {r["company"]: r for r in out["sql_no_deal"]}
+    assert by["No Attr"]["status"] == "Attribution needs review"
+
+
+def test_null_amount_withholds_aggregate_revenue(monkeypatch):
+    # Regression (backend review): a closed-won deal with a null amount must NOT be
+    # summed as $0 in the aggregates. The top-line KPI + the affected campaign's
+    # revenue are withheld (Unavailable), consistent with the deal row, and the
+    # unavailable payload flags closed_won_revenue_usd. Customers still count.
+    deals = DEAL_ROWS[:2] + [dict(DEAL_ROWS[2], deal_amount_usd=None, campaign_name="Global Competitors")]
+    out = _deals(monkeypatch, deals=deals)
+    assert out["kpis"]["closed_won_revenue_usd"] is None  # never a lowered $0
+    assert out["kpis"]["closed_won_customers"] == 3       # customers still counted
+    assert "closed_won_revenue_usd" in {u["metric"] for u in out["unavailable"]}
+    gc = next(r for r in out["campaign_breakdown"] if r["campaign_name"] == "Global Competitors")
+    assert gc["closed_won_revenue_usd"] is None
+    assert gc["closed_won_customers"] == 2  # customers survive
+
+
+def test_funnel_none_count_is_unavailable_not_no_activity(monkeypatch):
+    # Regression (Copilot): a withheld (None) count must read "Stage unavailable",
+    # never "No activity in window". Disconnected → Closed Won customers is None.
+    out = _deals(monkeypatch, revenue_connected=False)
+    closed_won = next(s for s in out["funnel"] if s["stage"] == "Closed Won")
+    assert closed_won["count"] is None
+    assert closed_won["status"] == "Stage unavailable"
 
 
 # ══════════════════ 6. Disconnected / ledger outage / period change ═════════
@@ -484,6 +533,17 @@ def test_new_repo_fetcher_is_read_only():
                       "requests.post", "requests.patch", "requests.put"):
         assert forbidden not in body, f"fetch_sql_lead_details must be read-only ('{forbidden}')"
     assert "select" in body
+
+
+def test_sql_fetcher_status_filter_is_post_dedup():
+    # Regression (backend review): the SQL definition must mirror fetch_lead_quality
+    # (dedup across all rows, then latest-row-wins qualified) so the panel's SQL count
+    # reconciles with the canonical `sqls` KPI. Status is filtered in the OUTER query,
+    # never inside the dedup CTE.
+    body = _repo_fn_body("fetch_sql_lead_details")
+    assert "WHERE d.status_category = 'qualified'" in body
+    cte = body[:body.find("SELECT d.contact_id")]
+    assert "status_category = 'qualified'" not in cte
 
 
 def test_no_platform_writes_in_touched_files():

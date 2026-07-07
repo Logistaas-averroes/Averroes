@@ -274,10 +274,10 @@ def fetch_sql_lead_details(start: date | None, end: date) -> dict:
                             campaign_name,
                             country,
                             contact_created_at,
+                            status_category,
                             (gclid IS NOT NULL AND gclid <> '') AS has_gclid
                         FROM leads
                         WHERE source_type = 'paid_search'
-                          AND status_category = 'qualified'
                           AND contact_created_at IS NOT NULL
                           AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
                           AND contact_created_at < (%s::date + INTERVAL '1 day')
@@ -298,6 +298,7 @@ def fetch_sql_lead_details(start: date | None, end: date) -> dict:
                                  AND (g.deal_stage = %s OR g.deal_stage_label ILIKE %s)
                            ) AS has_closed_won_deal
                     FROM deduped d
+                    WHERE d.status_category = 'qualified'
                     ORDER BY d.contact_created_at DESC
                     """,
                     (start, end, _PSEUDO_CAMPAIGNS, WON_DEAL_STAGE_ID, _WON_LABEL_LIKE),
