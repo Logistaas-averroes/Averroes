@@ -405,36 +405,70 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
     return rows
 
 
-def _build_residual(spend_truth: dict, residual_deals: list,
-                    residual_amount_unknown: bool, revenue_connected: bool) -> dict:
-    """The explicit 'Unattributed / No Country' bucket.
+def _residual_gap(total, real_rows: list, key: str):
+    """Canonical residual for one metric = window total − Σ(real country rows).
 
-    Combines two things that have NO country attribution and must never be spread
-    across real countries: (1) closed-won revenue whose deal carries no country,
-    and (2) the Google Ads geo residual — spend the geographic view does not
-    assign to a country. It is never mapped, never given a ROAS, never a drawer.
+    None when the total is unknown or ANY real row withholds the metric (the
+    residual cannot be derived by subtraction from an incomplete set). Never a
+    negative (clamped to 0 to absorb rounding)."""
+    if total is None:
+        return None
+    if any(r.get(key) is None for r in real_rows):
+        return None
+    gap = total - sum((r.get(key) or 0) for r in real_rows)
+    return gap if gap > 0 else 0
+
+
+def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
+                    mart_residual_row: dict | None, residual_amount_unknown: bool,
+                    revenue_connected: bool) -> dict:
+    """The explicit 'Unattributed / No Country' bucket — the CANONICAL residual.
+
+    Residual customers / revenue / SQLs are derived from the canonical Revenue
+    Decision Mart (its window TOTAL minus the sum of the real country rows), NOT
+    from the drawer deal ledger — so they SURVIVE a deal-ledger outage instead of
+    collapsing to a fake $0 / empty. The deal ledger is used ONLY to detect an
+    unknown residual deal amount (which then withholds the residual revenue total,
+    never a lowered $0). The geo-spend residual (spend the geographic view does not
+    assign to a country) is carried from spend_truth (with the mart residual row as
+    a fallback). It is never mapped, never given a ROAS, never a drawer.
     """
-    customers = len(residual_deals) if revenue_connected else None
     if not revenue_connected:
+        # Customers AND revenue come from the revenue integration → unknown.
+        customers = None
         won = None
-    elif residual_amount_unknown:
-        won = None
+        sqls = None
     else:
-        won = _round2(sum((d["amount_usd"] or 0.0) for d in residual_deals))
+        gap = _residual_gap(summary.get("customers"), real_rows, "customers")
+        customers = None if gap is None else int(round(gap))
+        gap_sqls = _residual_gap(summary.get("sqls"), real_rows, "sqls")
+        sqls = None if gap_sqls is None else int(round(gap_sqls))
+        # Revenue: canonical mart residual, withheld if a residual deal has an
+        # unknown amount (the mart total counts it as $0, so the derived residual
+        # would be lowered) — never a fabricated / lowered $0.
+        if residual_amount_unknown:
+            won = None
+        else:
+            won = _round2(_residual_gap(summary.get("won_revenue_usd"), real_rows, "won_revenue_usd"))
+
+    native = spend_truth.get("country_residual_native")
+    usd = spend_truth.get("country_residual_usd")
+    if native is None and mart_residual_row is not None:
+        native = mart_residual_row.get("spend_native")
+        usd = mart_residual_row.get("spend_usd")
+
     reason_bits = []
     if spend_truth.get("country_residual_reason"):
         reason_bits.append(spend_truth["country_residual_reason"])
-    reason_bits.append("Closed-won revenue with no country is preserved here — never "
-                       "spread across real countries.")
+    reason_bits.append("Closed-won revenue or customers that could not be safely assigned "
+                       "to a country — preserved separately, never spread across real countries.")
     return {
         "label": RESIDUAL_LABEL,
         "customers": customers,
         "won_revenue_usd": won,
-        # The closed-won deal ledger carries no SQL grain, so SQLs-without-country
-        # are structurally Unavailable — never a fabricated 0.
-        "sqls": None,
-        "spend_native": spend_truth.get("country_residual_native"),
-        "spend_usd": spend_truth.get("country_residual_usd"),
+        "sqls": sqls,
+        "spend_native": native,
+        "spend_usd": usd,
         "native_currency": spend_truth.get("native_currency") or "GBP",
         "reason": " ".join(reason_bits),
         "roas": None,
@@ -771,12 +805,18 @@ def _build_unavailable(kpis: dict, spend_truth: dict, period_change: dict,
     if kpis.get("sqls") is None:
         out.append({"metric": "sqls",
                     "reason": "SQLs withheld — lead business event dates are unavailable."})
-    if kpis.get("residual_customers") is None:
-        # Use the exact KPI field name so a client can attach the reason to the
-        # residual KPI (kpis.residual_revenue_usd), consistent with the other entries.
-        out.append({"metric": "residual_revenue_usd",
-                    "reason": "Revenue with no country is withheld — the revenue integration "
-                              "is disconnected."})
+    # Residual revenue: withheld either because the revenue integration is
+    # disconnected (customers also unknown) or because a residual closed-won deal
+    # has an unknown amount (customers still countable). Use the exact KPI field
+    # name so a client can attach the reason to kpis.residual_revenue_usd.
+    if kpis.get("residual_revenue_usd") is None:
+        if kpis.get("residual_customers") is None:
+            residual_reason = ("Revenue with no country is withheld — the revenue integration "
+                               "is disconnected.")
+        else:
+            residual_reason = ("Residual revenue requires complete amounts — an unknown closed-won "
+                               "deal amount with no country makes it incomplete (never a lowered $0).")
+        out.append({"metric": "residual_revenue_usd", "reason": residual_reason})
     if not period_change.get("available"):
         out.append({"metric": "period_change",
                     "reason": period_change.get("reason") or "No comparison available."})
@@ -794,13 +834,18 @@ def _assemble(window: str, now: datetime | None) -> dict:
     mart = build_revenue_decision_mart(view="country", window=window, now=now)
     window_block = mart.get("window") or {}
     mart_rows = mart.get("rows") or []
+    summary = mart.get("summary") or {}
     spend_truth = mart.get("spend_truth") or {}
     readiness = mart.get("readiness") or {}
     revenue_connected = bool(readiness.get("revenue_integration_connected"))
     native_currency = spend_truth.get("native_currency") or "GBP"
     country_roas_unblockable = bool(spend_truth.get("country_roas_unblockable"))
 
-    # The residual is an appended mart row (is_residual). It is NOT a country.
+    # The residual is an appended mart row (is_residual). It is NOT a country —
+    # extract it (its geo-spend residual) BEFORE filtering the real countries. The
+    # canonical residual REVENUE / CUSTOMERS come from the mart window total minus
+    # the real country rows (see _build_residual), never the drawer deal ledger.
+    mart_residual_row = next((r for r in mart_rows if r.get("is_residual")), None)
     mart_real_rows = [r for r in mart_rows if not r.get("is_residual")]
 
     start = _parse_iso_date(window_block.get("start_date"))
@@ -819,8 +864,8 @@ def _assemble(window: str, now: datetime | None) -> dict:
         mart_real_rows, geo_maps, geo_available, deals_by_key, unknown_amount_keys,
         country_roas_unblockable, revenue_connected, native_currency)
 
-    residual = _build_residual(spend_truth, residual_deals, residual_amount_unknown,
-                               revenue_connected)
+    residual = _build_residual(summary, country_rows, spend_truth, mart_residual_row,
+                               residual_amount_unknown, revenue_connected)
     kpis = _build_kpis(country_rows, residual, spend_truth, country_roas_unblockable,
                        geo_available, revenue_connected)
 

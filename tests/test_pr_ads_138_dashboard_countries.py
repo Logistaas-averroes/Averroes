@@ -376,11 +376,16 @@ def test_residual_never_mapped_never_roas_never_drawer(monkeypatch):
     assert res["drawer_available"] is False
 
 
-def test_build_residual_isolates_geo_spend_residual():
-    # The geo residual (spend the geographic view does not assign to a country) is
-    # carried on the residual bucket from spend_truth — never spread across
-    # countries — and revenue-with-no-country comes from the deal ledger.
+def test_build_residual_is_canonical_mart_minus_countries():
+    # Residual customers / revenue / SQLs are the mart window TOTAL minus the sum
+    # of the real country rows (canonical), NOT the drawer deal ledger. The geo
+    # spend residual is carried from spend_truth. Never spread across countries.
     from services.dashboard_countries_service import _build_residual
+    summary = {"customers": 5, "won_revenue_usd": 90000.0, "sqls": 40}
+    real_rows = [
+        {"customers": 3, "won_revenue_usd": 60000.0, "sqls": 25},
+        {"customers": 1, "won_revenue_usd": 15000.0, "sqls": 10},
+    ]
     spend_truth = {
         "native_currency": "GBP",
         "country_residual_native": 500.0,
@@ -388,20 +393,72 @@ def test_build_residual_isolates_geo_spend_residual():
         "country_residual_reason":
             "Google Ads geographic view does not assign this spend to a country.",
     }
-    res = _build_residual(spend_truth, [{"amount_usd": 15000.0}], False, True)
+    res = _build_residual(summary, real_rows, spend_truth, None, False, True)
+    assert res["customers"] == 1          # 5 − (3+1)
+    assert res["won_revenue_usd"] == 15000.0   # 90000 − (60000+15000)
+    assert res["sqls"] == 5               # 40 − (25+10)
     assert res["spend_native"] == 500.0
     assert res["spend_usd"] == 640.0
-    assert res["won_revenue_usd"] == 15000.0
-    assert res["customers"] == 1
     assert res["roas"] is None and res["drawer_available"] is False
     assert "does not assign this spend to a country" in res["reason"]
 
 
 def test_build_residual_null_amount_is_unavailable_not_zero():
+    # A residual deal with an unknown amount withholds residual revenue (never a
+    # lowered $0) but customers stay countable from the canonical mart total.
     from services.dashboard_countries_service import _build_residual
-    res = _build_residual({"native_currency": "GBP"}, [{"amount_usd": None}], True, True)
+    summary = {"customers": 3, "won_revenue_usd": 33000.0, "sqls": 20}
+    real_rows = [{"customers": 2, "won_revenue_usd": 29000.0, "sqls": 20}]
+    res = _build_residual(summary, real_rows, {"native_currency": "GBP"}, None, True, True)
     assert res["won_revenue_usd"] is None  # never a lowered $0
-    assert res["customers"] == 1
+    assert res["customers"] == 1           # 3 − 2, still countable
+
+
+def test_residual_survives_deal_ledger_outage_from_mart(monkeypatch):
+    # BLOCKER regression: residual customers / revenue come from the canonical mart
+    # (summary − real countries), so a deal-ledger outage must NOT drop them to
+    # 0 / empty. Proof drawers are unavailable, but the residual truth survives.
+    import db.revenue_repository as repo
+    _patch_durable(monkeypatch)
+    monkeypatch.setattr(repo, "fetch_revenue_deals", lambda s, e: {"available": False, "rows": []})
+    from services.dashboard_countries_service import build_dashboard_countries
+    out = build_dashboard_countries(WINDOW, now=NOW)
+    assert out["residual"]["customers"] == 1              # from the mart, not the ledger
+    assert out["residual"]["won_revenue_usd"] == 4000.0   # from the mart, not the ledger
+    assert out["residual"]["won_revenue_usd"] != 0        # never a fabricated $0
+    assert out["kpis"]["residual_customers"] == 1
+    assert out["kpis"]["residual_revenue_usd"] == 4000.0
+    assert out["deal_proof_available"] is False
+    assert "deal_proof" in {u["metric"] for u in out["unavailable"]}
+
+
+def test_residual_deal_null_amount_withholds_revenue_keeps_customers(monkeypatch):
+    # The no-country residual deal (d4) has an unknown amount → residual revenue is
+    # Unavailable (never a lowered $0), but customers stay countable, and the
+    # unavailable payload flags residual_revenue_usd with the unknown-amount reason.
+    deals = DEAL_ROWS[:2] + [dict(DEAL_ROWS[2], deal_amount_usd=None)]
+    out = _countries(monkeypatch, deals=deals)
+    assert out["residual"]["won_revenue_usd"] is None
+    assert out["residual"]["customers"] == 1
+    assert out["kpis"]["residual_revenue_usd"] is None
+    ru = next(u for u in out["unavailable"] if u["metric"] == "residual_revenue_usd")
+    assert "amount" in ru["reason"].lower()
+
+
+def test_residual_excluded_from_country_kpis_and_roas(monkeypatch):
+    # Residual is never a country row, never gets a ROAS, and is never in the
+    # country-attributed KPI ROAS numerator.
+    out = _countries(monkeypatch)
+    real = [c for c in out["countries"] if not c["is_residual"]]
+    assert len(real) == len(out["countries"])  # residual is not in countries[]
+    assert out["residual"]["roas"] is None and out["residual"]["roas_available"] is False
+    assert out["residual"]["drawer_available"] is False
+    # Country-attributed KPIs exclude the residual; ROAS numerator is real-only.
+    assert out["kpis"]["customers"] == sum(c["customers"] for c in real)
+    assert out["kpis"]["won_revenue_usd"] == round(sum(c["won_revenue_usd"] for c in real), 2)
+    assert out["kpis"]["won_revenue_usd"] == 29000.0
+    assert out["kpis"]["residual_revenue_usd"] == 4000.0
+    assert out["kpis"]["geo_roas"] == round(29000.0 / 13000.0, 2)
 
 
 # ══════════════════ 5. No fake $0 / disconnected / period change ═════════════
