@@ -6688,3 +6688,133 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
   }
   .chan-channel-row__metric:nth-of-type(3) { display: none; }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PR-ADS-137 — Dashboard Campaigns & Keywords tab
+   Reuses the PR-ADS-134/135/136 dashboard design system (tokens, cards, panels,
+   chart shell, decision cards, truth footer). Only Campaigns-specific pieces
+   below. Spend is native GBP (never "$"); ROAS only where spend + FX + revenue
+   are safe; keyword/search-term panels are read-only evidence.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.camp-map-panel { display: block; }
+.camp-bubble-wrap { position: relative; }
+.camp-bubble { cursor: pointer; transition: fill-opacity 0.12s ease; }
+.camp-bubble:hover, .camp-bubble.is-hover { fill-opacity: 0.82; }
+.camp-legend { flex-wrap: wrap; gap: var(--space-2) var(--space-3); margin-top: var(--space-3); }
+
+/* Status dots + badges. */
+.camp-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: middle; }
+.camp-dot--proven { background: #22b07d; }
+.camp-dot--sql { background: #129ef5; }
+.camp-dot--waste { background: #ff8a3d; }
+.camp-dot--attr { background: #7c5cff; }
+.camp-dot--muted { background: #b6bfca; }
+.camp-status {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  color: var(--camp-accent, var(--text-secondary));
+  background: color-mix(in srgb, var(--camp-accent, #b6bfca) 12%, transparent);
+}
+.camp-roas { font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.camp-usd { color: var(--text-muted); font-size: 11px; }
+
+/* Leaderboard table. */
+.camp-scroll { overflow-x: auto; }
+.camp-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 820px; }
+.camp-table th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  background: var(--surface-alt);
+  padding: 8px 10px;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+.camp-td, .camp-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
+.camp-td--name { font-weight: 600; color: var(--text-primary); }
+.camp-num { font-variant-numeric: tabular-nums; }
+.camp-next { color: var(--text-muted); font-size: 11px; }
+.camp-row { cursor: pointer; transition: background 0.12s ease; }
+.camp-row:hover { background: rgba(18, 158, 245, 0.06); }
+.camp-row:focus-visible { background: rgba(18, 158, 245, 0.06); outline: 2px solid var(--c-primary, #129ef5); outline-offset: -2px; }
+.camp-row--unattributed { background: var(--surface-alt); }
+.camp-row--unattributed .camp-td--name { color: var(--text-secondary); font-style: italic; }
+
+/* Keyword themes. */
+.camp-keyword-panel { display: block; }
+.camp-keyword-note { font-size: 11px; color: var(--text-muted); margin: 0 0 var(--space-3); }
+.camp-theme-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.camp-theme-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.4fr) auto auto auto minmax(120px, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.camp-theme-row__name { font-weight: 600; color: var(--text-primary); }
+.camp-theme-row__spend { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.camp-theme-row__clicks, .camp-theme-row__kw { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.camp-theme-row__out { color: var(--text-muted); font-size: 11px; text-align: right; }
+
+/* Search-term signal panel. */
+.camp-search-panel { display: block; }
+.camp-signal-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
+.camp-signal-col__head { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+/* "Reviewed clean" is a waste-review pass, NOT a revenue/value signal — keep it
+   a neutral colour so it never reads as proven value. */
+.camp-signal-col--value .camp-signal-col__head { color: var(--text-secondary); }
+.camp-signal-col--waste .camp-signal-col__head { color: var(--c-danger); }
+.camp-signal-col--review .camp-signal-col__head { color: var(--c-warning); }
+.camp-signal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.camp-signal-row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.camp-signal-row__term { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.camp-signal-row__spend { color: var(--text-secondary); font-variant-numeric: tabular-nums; text-align: right; }
+.camp-signal-row__meta { grid-column: 1 / -1; color: var(--text-muted); font-size: 11px; }
+.camp-signal-foot { margin-top: var(--space-3); display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
+.camp-signal-link { font-size: 12px; color: var(--c-primary, #129ef5); text-decoration: none; font-weight: 600; }
+.camp-signal-note { font-size: 11px; color: var(--text-muted); }
+
+/* Campaign drawer. */
+.camp-leaderboard-panel { position: relative; }
+.camp-drawer {
+  margin-top: var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+  padding: var(--space-4);
+}
+.camp-drawer__head { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); font-size: 14px; color: var(--text-primary); }
+.camp-drawer__close { margin-left: auto; border: none; background: transparent; font-size: 20px; line-height: 1; color: var(--text-muted); cursor: pointer; }
+.camp-drawer__summary { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--space-3); margin: 0 0 var(--space-4); }
+.camp-drawer__summary dt { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+.camp-drawer__summary dd { margin: 2px 0 0; font-size: 13px; color: var(--text-primary); }
+.camp-drawer__section { margin-bottom: var(--space-4); }
+.camp-drawer__h { font-size: 12px; font-weight: 700; color: var(--text-primary); margin: 0 0 var(--space-2); }
+.camp-deal-scroll { overflow-x: auto; }
+.camp-deal-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 720px; }
+.camp-deal-table th { text-align: left; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.camp-deal-td { padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
+.camp-deal-td--amount_usd { font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.camp-deal-td--company { font-weight: 600; color: var(--text-primary); }
+.camp-drawer__actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.camp-drawer__link { font-size: 12px; color: var(--c-primary, #129ef5); text-decoration: none; font-weight: 600; }
+
+@media (max-width: 1100px) {
+  /* Keep the "SQLs / revenue Unavailable" disclosure (__out) visible — only the
+     keyword count (__kw) is dropped on narrow viewports. */
+  .camp-theme-row { grid-template-columns: minmax(100px, 1.3fr) auto minmax(110px, 1fr); }
+  .camp-theme-row__kw { display: none; }
+}
+@media (max-width: 640px) {
+  .camp-drawer__summary { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}

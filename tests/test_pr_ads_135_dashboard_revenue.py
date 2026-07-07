@@ -667,7 +667,9 @@ def test_revenue_tab_enabled_overview_default():
 def test_revenue_tab_is_hash_linkable():
     assert "hashToDashTab" in JS
     assert "?tab=" in JS
-    fn = _slice(JS, "function activateDashboardTab", 1200)
+    # The shared tab controller grows as tabs are enabled (134→137); widen the
+    # window so the Revenue root + loader are still covered.
+    fn = _slice(JS, "function activateDashboardTab", 1800)
     assert "dashboard-revenue-root" in fn
     assert "loadDashboardRevenue" in fn
 

@@ -66,6 +66,7 @@ Protected endpoints (require authenticated session):
   GET  /api/dashboard/overview     — Read-only Executive Overview command-center contract by business window (PR-ADS-134).
   GET  /api/dashboard/revenue      — Read-only Dashboard Revenue & Customers contract by business window (PR-ADS-135).
   GET  /api/dashboard/channels     — Read-only Dashboard Channels & Platforms contract by business window (PR-ADS-136).
+  GET  /api/dashboard/campaigns    — Read-only Dashboard Campaigns & Keywords contract by business window (PR-ADS-137).
 """
 
 import base64
@@ -6333,6 +6334,49 @@ async def get_dashboard_channels(
         log.error("Dashboard channels failed: %s", exc)
         raise HTTPException(
             status_code=500, detail="Dashboard channels computation failed"
+        ) from exc
+
+
+@app.get("/api/dashboard/campaigns")
+async def get_dashboard_campaigns(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Dashboard Campaigns & Keywords contract (PR-ADS-137).
+
+    ONE read-only payload for the Dashboard → Campaigns tab: which Google Ads
+    campaigns and keyword/search-intent themes produce real business outcomes
+    (SQLs / customers / closed-won revenue) and which spend without proof.
+    Composes the canonical Revenue Decision Mart (view="campaign") for the
+    per-campaign spend/SQLs/customers/revenue/ROAS/mapping truth, the canonical
+    per-campaign native-GBP + FX-gated-USD spend, the closed-won deal ledger for
+    drawer proof, and read-only keyword/search-term evidence. It adds NO new
+    business math and NO new taxonomy.
+
+    Google Ads API is spend truth (native GBP); HubSpot closed-won is revenue
+    truth (USD) — native GBP is never labelled USD. Campaign ROAS is shown only
+    when spend, FX and revenue are safe, never from the Google Ads conversion
+    value. Keyword themes carry NO outcome attribution and NO ROAS; search-term
+    panels present the existing waste-analysis classification as read-only
+    evidence. Revenue that maps to no campaign is preserved under "Unattributed /
+    Needs Review", never dropped.
+
+    Uses business windows (current_quarter | last_quarter | last_6_months | ytd
+    | all_time), not ad-style day windows. Unavailable metrics are null plus a
+    reason — never a fabricated $0 / 0.00x / 0%. Read-only: no writes to Google
+    Ads, HubSpot, budgets, bids, campaigns, keywords, negatives, or offline
+    conversions.
+    """
+    from services.dashboard_campaigns_service import build_dashboard_campaigns  # noqa: PLC0415
+
+    try:
+        return build_dashboard_campaigns(window=window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Dashboard campaigns failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Dashboard campaigns computation failed"
         ) from exc
 
 
