@@ -772,7 +772,9 @@ def _build_unavailable(kpis: dict, spend_truth: dict, period_change: dict,
         out.append({"metric": "sqls",
                     "reason": "SQLs withheld — lead business event dates are unavailable."})
     if kpis.get("residual_customers") is None:
-        out.append({"metric": "residual_revenue",
+        # Use the exact KPI field name so a client can attach the reason to the
+        # residual KPI (kpis.residual_revenue_usd), consistent with the other entries.
+        out.append({"metric": "residual_revenue_usd",
                     "reason": "Revenue with no country is withheld — the revenue integration "
                               "is disconnected."})
     if not period_change.get("available"):

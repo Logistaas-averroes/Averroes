@@ -4896,8 +4896,10 @@ function renderCtryGeoMap(d) {
   const rOf = (r) => 12 + 26 * Math.sqrt(metric(r) / maxMetric);
 
   // Preserve the original index (bubbles reference d.countries by index for
-  // hover + drawer), so map each row to its index BEFORE grouping.
-  const indexed = rows.map((r) => ({ r, idx: (d.countries || []).indexOf(r) }));
+  // hover + drawer). Build the lookup once (O(n)) rather than an indexOf scan per
+  // row (O(n²)), matching the other dashboard maps.
+  const countryIndex = new Map((d.countries || []).map((c, i) => [c, i]));
+  const indexed = rows.map((r) => ({ r, idx: countryIndex.get(r) }));
   const byRegion = {};
   indexed.forEach((entry) => {
     const region = entry.r.region || "Unknown / Needs Review";
