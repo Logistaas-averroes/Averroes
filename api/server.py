@@ -68,6 +68,7 @@ Protected endpoints (require authenticated session):
   GET  /api/dashboard/channels     — Read-only Dashboard Channels & Platforms contract by business window (PR-ADS-136).
   GET  /api/dashboard/campaigns    — Read-only Dashboard Campaigns & Keywords contract by business window (PR-ADS-137).
   GET  /api/dashboard/countries    — Read-only Dashboard Countries & Geo Intelligence contract by business window (PR-ADS-138).
+  GET  /api/dashboard/deals        — Read-only Dashboard Deals & Pipeline Intelligence contract by business window (PR-ADS-139).
 """
 
 import base64
@@ -6421,6 +6422,44 @@ async def get_dashboard_countries(
         log.error("Dashboard countries failed: %s", exc)
         raise HTTPException(
             status_code=500, detail="Dashboard countries computation failed"
+        ) from exc
+
+
+@app.get("/api/dashboard/deals")
+async def get_dashboard_deals(
+    window: str = Query(default="current_quarter"),
+    _user=Depends(require_auth),
+):
+    """Dashboard Deals, Opportunities & Pipeline Intelligence contract (PR-ADS-139).
+
+    ONE read-only payload for the Dashboard → Deals tab: what happens after an SQL —
+    how many became closed-won customers, how much closed-won revenue that produced,
+    which sources / campaigns create it, and which qualified SQLs have not yet become
+    customers. Composes the canonical Revenue Decision Mart (deal + campaign views)
+    for SQLs / customers / closed-won revenue, the Revenue-by-Source contract for the
+    source → pipeline breakdown, and the closed-won deal ledger for proof.
+
+    HubSpot closed-won is revenue truth (USD). Open pipeline is NOT revenue; a
+    closed-lost deal is NOT negative revenue; an opportunity is NOT a customer. This
+    tab shows no ROAS. The durable HubSpot deal ledger stores CLOSED-WON deals only,
+    so open opportunities, closed-lost deals, opportunity aging, opportunity-created
+    counts and the two opportunity-conversion rates are rendered "Unavailable" — never
+    invented. Unavailable metrics are null plus a reason — never a fabricated $0 / 0%.
+
+    Uses business windows (current_quarter | last_quarter | last_6_months | ytd
+    | all_time), not ad-style day windows. Read-only: no writes to HubSpot, Google
+    Ads, budgets, bids, campaigns, keywords, negatives, or offline conversions.
+    """
+    from services.dashboard_deals_service import build_dashboard_deals  # noqa: PLC0415
+
+    try:
+        return build_dashboard_deals(window=window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("Dashboard deals failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Dashboard deals computation failed"
         ) from exc
 
 

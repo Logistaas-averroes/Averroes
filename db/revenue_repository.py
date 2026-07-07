@@ -244,6 +244,73 @@ def fetch_lead_quality(start: date | None, end: date) -> dict:
         return _unavailable("leads", {"event_date_safe": False})
 
 
+def fetch_sql_lead_details(start: date | None, end: date) -> dict:
+    """Per-contact qualified SQL details for the pipeline "not yet closed-won" panel.
+
+    PR-ADS-139: read-only per-SQL rows (the same paid-search, event-date-safe,
+    pseudo-/email-excluded, deduped-per-contact population that ``fetch_lead_quality``
+    counts) PLUS whether that contact has ANY closed-won deal in the durable ledger.
+    A contact WITHOUT a closed-won deal is a qualified lead that has not become a
+    customer — the honest, durable signal (open / lost pipeline is NOT synced, so
+    this is deliberately "not yet closed-won", never claimed as "no deal").
+
+    Windowed by the HubSpot ``contact_created_at`` business event date (the SQL date),
+    never the scheduler run_date. Read-only (SELECT only).
+
+    Returns rows [{contact_id, company, campaign_name, country, sql_date, has_gclid,
+    has_closed_won_deal}].
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable("leads")
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH deduped AS (
+                        SELECT DISTINCT ON ({_CONTACT_KEY})
+                            NULLIF(contact_id, '') AS contact_id,
+                            company,
+                            campaign_name,
+                            country,
+                            contact_created_at,
+                            (gclid IS NOT NULL AND gclid <> '') AS has_gclid
+                        FROM leads
+                        WHERE source_type = 'paid_search'
+                          AND status_category = 'qualified'
+                          AND contact_created_at IS NOT NULL
+                          AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
+                          AND contact_created_at < (%s::date + INTERVAL '1 day')
+                          AND campaign_name IS NOT NULL
+                          AND lower(campaign_name) NOT IN %s
+                          AND campaign_name !~* 'email_campaign'
+                          AND {_CONTACT_KEY} NOT IN (SELECT lead_id FROM lead_truth_exclusions)
+                        ORDER BY {_CONTACT_KEY}, run_date DESC, id DESC
+                    )
+                    SELECT d.contact_id, d.company, d.campaign_name, d.country,
+                           d.contact_created_at AS sql_date, d.has_gclid,
+                           EXISTS (
+                               SELECT 1 FROM gclid_attribution g
+                               WHERE g.contact_id = d.contact_id
+                                 AND d.contact_id IS NOT NULL
+                                 AND g.deal_id IS NOT NULL
+                                 AND g.deal_close_date IS NOT NULL
+                                 AND (g.deal_stage = %s OR g.deal_stage_label ILIKE %s)
+                           ) AS has_closed_won_deal
+                    FROM deduped d
+                    ORDER BY d.contact_created_at DESC
+                    """,
+                    (start, end, _PSEUDO_CAMPAIGNS, WON_DEAL_STAGE_ID, _WON_LABEL_LIKE),
+                )
+                rows = _rows_as_dicts(cur)
+                for row in rows:
+                    row["sql_date"] = _as_date(row.get("sql_date"))
+            return {"available": True, "rows": rows, "table": "leads"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_sql_lead_details failed: %s", exc)
+        return _unavailable("leads")
+
+
 def fetch_won_revenue(start: date | None, end: date) -> dict:
     """Closed-won revenue/customers from the durable `gclid_attribution` table.
 
