@@ -6950,3 +6950,110 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
   .ctry-residual-tiles { grid-template-columns: minmax(0, 1fr); }
   .ctry-drawer__summary { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PR-ADS-139 — Dashboard Deals, Opportunities & Pipeline Intelligence tab
+   Reuses the PR-ADS-134/135/136/137/138 dashboard design system (tokens, cards,
+   panels, funnel, decision cards, truth footer, drawers). Only Deals-specific
+   pieces below. Closed-won is revenue truth (USD); open pipeline is NOT revenue;
+   NO ROAS on this tab; open/lost/aging stages render Unavailable, never faked.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.deal-kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+/* Status dots + pills. */
+.deal-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: middle; }
+.deal-dot--proven { background: #22b07d; }
+.deal-dot--sql { background: #129ef5; }
+.deal-dot--pending { background: #ff8a3d; }
+.deal-dot--aging { background: #e0564e; }
+.deal-dot--attr { background: #7c5cff; }
+.deal-dot--muted { background: #b6bfca; }
+.deal-status {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  color: var(--deal-accent, var(--text-secondary));
+  background: color-mix(in srgb, var(--deal-accent, #b6bfca) 12%, transparent);
+}
+
+/* Pipeline funnel. */
+.deal-funnel-panel { display: block; }
+.deal-funnel { display: flex; flex-wrap: wrap; align-items: stretch; gap: 4px; margin-top: var(--space-2); }
+.deal-funnel__stage {
+  flex: 1 1 120px;
+  min-width: 110px;
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--deal-accent, var(--border-strong));
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.deal-funnel__stage--unavailable { opacity: 0.68; border-top-style: dashed; }
+.deal-funnel__label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.deal-funnel__value { font-size: 22px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.deal-funnel__amt { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.deal-funnel__status { font-size: 10px; color: var(--text-muted); margin-top: auto; }
+.deal-funnel__arrow { display: flex; align-items: center; color: var(--text-muted); font-size: 12px; padding: 0 2px; }
+.deal-funnel__conv { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text-secondary); }
+.deal-stage-note { font-size: 11px; color: var(--text-muted); font-style: italic; margin: var(--space-3) 0 0; line-height: 1.5; }
+
+/* Opportunity aging (structurally Unavailable). */
+.deal-aging-panel { display: block; }
+.deal-aging-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.deal-aging-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: baseline; font-size: 12px; padding: 8px 4px; border-bottom: 1px solid var(--border); }
+.deal-aging-row__bucket { font-weight: 600; color: var(--text-primary); }
+.deal-aging-row__count, .deal-aging-row__amt { font-variant-numeric: tabular-nums; color: var(--text-secondary); text-align: right; }
+
+/* Tables (source / campaign / deals / sql-no-deal). */
+.deal-source-panel, .deal-campaign-panel, .deal-table-panel, .deal-sql-panel { display: block; }
+.deal-scroll { overflow-x: auto; }
+.deal-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 720px; }
+.deal-table--rows { min-width: 820px; }
+.deal-table th {
+  text-align: left; font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-muted); background: var(--surface-alt);
+  padding: 8px 10px; white-space: nowrap; border-bottom: 1px solid var(--border);
+}
+.deal-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
+.deal-td--name { font-weight: 600; color: var(--text-primary); }
+.deal-num { font-variant-numeric: tabular-nums; }
+.deal-row { cursor: pointer; transition: background 0.12s ease; }
+.deal-row:hover { background: rgba(18, 158, 245, 0.06); }
+.deal-row:focus-visible { background: rgba(18, 158, 245, 0.06); outline: 2px solid var(--brand-sky-accent); outline-offset: -2px; }
+.deal-panel-foot { margin-top: var(--space-3); display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.deal-link { font-size: 12px; color: var(--brand-sky-accent); text-decoration: none; font-weight: 600; }
+
+/* Deal drawer. */
+.deal-table-panel { position: relative; }
+.deal-drawer {
+  margin-top: var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+  padding: var(--space-4);
+}
+.deal-drawer__head { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); font-size: 14px; color: var(--text-primary); }
+.deal-drawer__close { margin-left: auto; border: none; background: transparent; font-size: 20px; line-height: 1; color: var(--text-muted); cursor: pointer; }
+.deal-drawer__section { margin-bottom: var(--space-4); }
+.deal-drawer__h { font-size: 12px; font-weight: 700; color: var(--text-primary); margin: 0 0 var(--space-2); }
+.deal-drawer__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--space-3); margin: 0; }
+.deal-drawer__grid dt { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+.deal-drawer__grid dd { margin: 2px 0 0; font-size: 13px; color: var(--text-primary); }
+.deal-review-note { font-size: 12px; color: var(--text-secondary); margin: 0; line-height: 1.5; }
+.deal-drawer__actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.deal-drawer__link { font-size: 12px; color: var(--brand-sky-accent); text-decoration: none; font-weight: 600; }
+
+@media (max-width: 1100px) {
+  .deal-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .deal-kpi-grid { grid-template-columns: minmax(0, 1fr); }
+  .deal-drawer__grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}

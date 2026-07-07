@@ -1181,7 +1181,7 @@ function hashToPage(hash) {
 
 // Dashboard inner-tab state (PR-ADS-135). Overview is the default; Revenue is
 // linkable/bookmarkable via #/dashboard?tab=revenue.
-const DASHBOARD_TABS = ["overview", "revenue", "channels", "campaigns", "countries"];
+const DASHBOARD_TABS = ["overview", "revenue", "channels", "campaigns", "countries", "deals"];
 
 function hashToDashTab(hash) {
   const q = (hash || "").split("?")[1] || "";
@@ -1939,6 +1939,9 @@ const DASH_DELTA_VALENCE = {
   verified_spend_usd: "neutral",
   // PR-ADS-138 countries-tab metric key.
   geo_roas: "up-good",
+  // PR-ADS-139 deals-tab metric keys.
+  closed_won_customers: "up-good",
+  sql_to_customer_rate: "up-good",
 };
 
 // ── Dashboard inner-tab controller (PR-ADS-135) ───────────────────────────
@@ -1966,11 +1969,13 @@ function activateDashboardTab(tab, options) {
   const channelsRoot = document.getElementById("dashboard-channels-root");
   const campaignsRoot = document.getElementById("dashboard-campaigns-root");
   const countriesRoot = document.getElementById("dashboard-countries-root");
+  const dealsRoot = document.getElementById("dashboard-deals-root");
   if (overviewRoot) overviewRoot.hidden = target !== "overview";
   if (revenueRoot) revenueRoot.hidden = target !== "revenue";
   if (channelsRoot) channelsRoot.hidden = target !== "channels";
   if (campaignsRoot) campaignsRoot.hidden = target !== "campaigns";
   if (countriesRoot) countriesRoot.hidden = target !== "countries";
+  if (dealsRoot) dealsRoot.hidden = target !== "deals";
 
   if (options.updateHash !== false) {
     // Overview is the default → keep the URL clean; other tabs are bookmarkable.
@@ -1982,6 +1987,7 @@ function activateDashboardTab(tab, options) {
   else if (target === "channels") loadDashboardChannels();
   else if (target === "campaigns") loadDashboardCampaigns();
   else if (target === "countries") loadDashboardCountries();
+  else if (target === "deals") loadDashboardDeals();
   else loadDashboardOverview();
 }
 
@@ -5249,6 +5255,471 @@ function renderCtryTruthFooter(d) {
         : (dashCanNavigate("revenue-health")
           ? '<a class="dash-footer-note" href="#/revenue-health">Some geo attribution needs review — open Revenue Health</a>'
           : '<span class="dash-footer-note">Some geo attribution needs review — contact your administrator.</span>')}
+    </footer>`;
+}
+
+// ── Dashboard — Deals, Opportunities & Pipeline Intelligence tab (PR-ADS-139) ─
+//
+// Sixth and final dashboard tab. Reuses the PR-134/135/136/137/138 design system
+// end to end (KPI cards, funnel, decision cards, truth footer, drawers, loading/
+// refetch/unavailable states) — NO new visual language. It answers: what happens
+// after an SQL — opportunity creation, closed-won revenue, and which SQLs have not
+// yet become customers. Truth doctrine: HubSpot closed-won is revenue truth (USD);
+// open pipeline is NOT revenue; opportunities are NOT customers; NO ROAS here. The
+// durable ledger stores closed-won ONLY, so open pipeline / aging / closed-lost /
+// opportunity rates render "Unavailable" — never invented.
+
+let dashDeals = null;
+let dashDealsStatus = "loading";
+
+const DEAL_STATUS_META = {
+  "Revenue proven": { color: "#22b07d", dot: "deal-dot--proven" },
+  "SQL producer": { color: "#129ef5", dot: "deal-dot--sql" },
+  "SQL — not yet a customer": { color: "#ff8a3d", dot: "deal-dot--pending" },
+  "Aging SQL — needs sales review": { color: "#e0564e", dot: "deal-dot--aging" },
+  "Amount unavailable": { color: "#8896a6", dot: "deal-dot--muted" },
+  "Attribution needs review": { color: "#7c5cff", dot: "deal-dot--attr" },
+  "Stage unavailable": { color: "#b6bfca", dot: "deal-dot--muted" },
+  "No activity in window": { color: "#b6bfca", dot: "deal-dot--muted" },
+};
+function dealStatusColor(status) {
+  return (DEAL_STATUS_META[status] || { color: "#b6bfca" }).color;
+}
+function dealStatusDot(status) {
+  return (DEAL_STATUS_META[status] || {}).dot || "deal-dot--muted";
+}
+
+// Conversion rate (fraction 0..1) → "%", or Unavailable — never a fabricated 0%.
+function dealRate(v) {
+  if (v === null || v === undefined) return '<span class="dash-unavailable">Unavailable</span>';
+  return escapeHtml((v * 100).toFixed(1) + "%");
+}
+
+async function loadDashboardDeals() {
+  const window_ = getRoasBusinessWindow();
+  const token = ++_revReqSeq.dashDeals;
+  setWindowRangeLoading("dashboard-range");
+
+  const root = document.getElementById("dashboard-deals-root");
+  const genEl = document.getElementById("dashboard-generated");
+  if (root) {
+    if (dashDeals && dashDealsStatus === "ok") {
+      root.classList.add("is-refreshing");
+    } else {
+      root.innerHTML = renderDashSkeleton();
+    }
+  }
+
+  try {
+    const data = await fetchJSON(
+      `/api/dashboard/deals?window=${encodeURIComponent(window_)}`
+    );
+    if (token !== _revReqSeq.dashDeals) return;
+    if (!_revResponseIsCurrent("dashDeals", token, data)) return;
+    dashDeals = data;
+    dashDealsStatus = "ok";
+    renderWindowRange("dashboard-range", data.window || null);
+    if (genEl) genEl.textContent = data.generated_at ? `Generated ${fmtDate(data.generated_at)}` : "";
+    renderDashboardDeals();
+  } catch (err) {
+    console.error("[loadDashboardDeals]", err);
+    if (token !== _revReqSeq.dashDeals) return;
+    dashDeals = null;
+    dashDealsStatus = "error";
+    if (genEl) genEl.textContent = "";
+    renderWindowRange("dashboard-range", null);
+    renderDashboardDeals();
+  }
+}
+
+function renderDashboardDeals() {
+  const root = document.getElementById("dashboard-deals-root");
+  if (!root) return;
+  root.classList.remove("is-refreshing");
+
+  if (dashDealsStatus !== "ok" || !dashDeals) {
+    const nextStep = dashCanNavigate("health")
+      ? 'Next step: check <a href="#/health">System Status</a> or retry with Refresh.'
+      : "Next step: retry with Refresh, or contact your administrator.";
+    root.innerHTML = `
+      <div class="revenue-blocked-card dash-error-card">
+        <h3 class="revenue-blocked-card__title">Deals &amp; Pipeline unavailable</h3>
+        <p>The dashboard deals service could not be reached. Nothing is shown
+        because nothing safe could be computed — metrics are never fabricated.</p>
+        <p class="revenue-blocked-card__next">${nextStep}</p>
+      </div>`;
+    return;
+  }
+
+  const d = dashDeals;
+  root.innerHTML = `
+    <div class="dash-tab-intro dash-anim">
+      <h2 class="dash-tab-intro__title">Deals &amp; Pipeline</h2>
+      <p class="dash-tab-intro__sub">What happens after SQL: opportunity creation, open pipeline, closed-won revenue, lost deals, and stuck opportunities. Open pipeline is not revenue.</p>
+    </div>
+    ${renderDealKpiRow(d)}
+    <section class="dash-panel dash-anim deal-funnel-panel" aria-label="Pipeline funnel">
+      ${renderDealFunnel(d)}
+    </section>
+    <div class="dash-main-grid deal-mid-grid">
+      <section class="dash-panel dash-anim deal-source-panel" aria-label="Source to pipeline">
+        ${renderDealSourcePipeline(d)}
+      </section>
+      <aside class="dash-panel dash-anim deal-aging-panel" aria-label="Opportunity aging">
+        ${renderDealAging(d)}
+      </aside>
+    </div>
+    <section class="dash-panel dash-anim deal-campaign-panel" aria-label="Campaign to pipeline">
+      ${renderDealCampaignPipeline(d)}
+    </section>
+    <section class="dash-panel dash-anim deal-table-panel" aria-label="Closed-won deals">
+      ${renderDealTable(d)}
+    </section>
+    <section class="dash-panel dash-anim deal-sql-panel" aria-label="SQLs not yet closed-won">
+      ${renderDealSqlNoDeal(d)}
+    </section>
+    <section class="dash-decisions dash-anim" aria-label="Pipeline decision cards">
+      ${renderDashDecisionCards(d)}
+    </section>
+    ${renderDealTruthFooter(d)}
+  `;
+  wireDealDrawers(root, d);
+}
+
+function renderDealKpiRow(d) {
+  const k = d.kpis || {};
+  const pc = d.period_change || {};
+  const cards = [
+    { key: "sqls", label: "SQLs", value: dashValue(k.sqls, fmtCount),
+      sub: "Qualified leads · this window", delta: dashDeltaChip("sqls", pc),
+      source: "HubSpot qualified leads", ok: k.sqls !== null && k.sqls !== undefined },
+    { key: "opps", label: "Opportunities Created",
+      value: '<span class="dash-unavailable">Unavailable</span>',
+      sub: "Open opportunity stage not in ledger", delta: '<span class="dash-delta dash-delta--none">No comparison</span>',
+      source: "HubSpot deal ledger", ok: false },
+    { key: "open", label: "Open Pipeline",
+      value: '<span class="dash-unavailable">Unavailable</span>',
+      sub: "Open deals only — not revenue", delta: '<span class="dash-delta dash-delta--none">No comparison</span>',
+      source: "HubSpot deal ledger", ok: false },
+    { key: "revenue", label: "Closed-Won Revenue", value: dashValue(k.closed_won_revenue_usd, fmtMoney),
+      sub: "HubSpot closed-won USD", delta: dashDeltaChip("closed_won_revenue_usd", pc),
+      source: "HubSpot Closed-Won", ok: k.closed_won_revenue_usd !== null && k.closed_won_revenue_usd !== undefined },
+    { key: "customers", label: "Customers", value: dashValue(k.closed_won_customers, fmtCount),
+      sub: "Closed-won · this window", delta: dashDeltaChip("closed_won_customers", pc),
+      source: "HubSpot Closed-Won", ok: k.closed_won_customers !== null && k.closed_won_customers !== undefined },
+    { key: "sql2cust", label: "SQL → Customer Rate", value: dealRate(k.sql_to_customer_rate),
+      sub: "Closed-won ÷ SQLs · full funnel", delta: dashDeltaChip("sql_to_customer_rate", pc),
+      source: "HubSpot", ok: k.sql_to_customer_rate !== null && k.sql_to_customer_rate !== undefined },
+    { key: "opp2cust", label: "Opportunity → Customer Rate",
+      value: '<span class="dash-unavailable">Unavailable</span>',
+      sub: "Opportunity stage not in ledger", delta: '<span class="dash-delta dash-delta--none">No comparison</span>',
+      source: "HubSpot deal ledger", ok: false },
+    { key: "notwon", label: "SQLs Not Yet Closed-Won", value: dashValue(k.sqls_not_closed_won, fmtCount),
+      sub: "Qualified · no closed-won deal", delta: '<span class="dash-delta dash-delta--none">Sales gap</span>',
+      source: "Open/lost pipeline not visible", ok: k.sqls_not_closed_won !== null && k.sqls_not_closed_won !== undefined },
+  ];
+
+  const compareNote = pc.available
+    ? `<p class="dash-compare-note">Change ${escapeHtml(pc.label || "vs previous period")}${pc.note ? ` — ${escapeHtml(pc.note)}` : ""}</p>`
+    : `<p class="dash-compare-note dash-compare-note--muted">No previous-period comparison${pc.reason ? ` — ${escapeHtml(pc.reason)}` : ""}</p>`;
+
+  return `
+    <div class="dash-kpi-grid deal-kpi-grid">
+      ${cards.map((c) => `
+        <div class="dash-kpi-card dash-anim ${c.ok ? "" : "dash-kpi-card--unavailable"}" data-kpi="${c.key}">
+          <div class="dash-kpi-card__label">${escapeHtml(c.label)}</div>
+          <div class="dash-kpi-card__value">${c.value}</div>
+          <div class="dash-kpi-card__sub">${escapeHtml(c.sub)}</div>
+          <div class="dash-kpi-card__meta">${c.delta}</div>
+          <div class="dash-kpi-card__source">${escapeHtml(c.source)}</div>
+        </div>`).join("")}
+    </div>
+    ${compareNote}`;
+}
+
+function renderDealFunnel(d) {
+  const stages = d.funnel || [];
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Pipeline Funnel</h3>
+        <p class="dash-panel__sub">SQL → Opportunities → Open Pipeline → Closed Won → Closed Lost · open pipeline is not revenue</p>
+      </div>
+    </div>`;
+  if (!stages.length) {
+    return `${header}<p class="rev-breakdown-empty">No pipeline activity in this window.</p>`;
+  }
+  const cells = stages.map((s, i) => {
+    const unavailable = s.status === "Stage unavailable";
+    const countHtml = unavailable
+      ? '<span class="dash-unavailable">Unavailable</span>'
+      : dashValue(s.count, fmtCount);
+    const amount = (s.amount_usd !== null && s.amount_usd !== undefined)
+      ? `<div class="deal-funnel__amt">${escapeHtml(fmtMoney(s.amount_usd))}</div>` : "";
+    const rate = (s.rate_from_previous !== null && s.rate_from_previous !== undefined)
+      ? `<span class="deal-funnel__conv">→ ${dealRate(s.rate_from_previous)}</span>` : "";
+    const arrowFallback = '<span aria-hidden="true">→</span>';
+    const conv = i > 0 ? `<div class="deal-funnel__arrow">${rate || arrowFallback}</div>` : "";
+    return `
+      ${conv}
+      <div class="deal-funnel__stage ${unavailable ? "deal-funnel__stage--unavailable" : ""}" style="--deal-accent:${dealStatusColor(s.status)}">
+        <div class="deal-funnel__label">${escapeHtml(s.stage)}</div>
+        <div class="deal-funnel__value">${countHtml}</div>
+        ${amount}
+        <div class="deal-funnel__status"><span class="deal-dot ${dealStatusDot(s.status)}"></span>${escapeHtml(s.status)}</div>
+      </div>`;
+  }).join("");
+  const note = d.pipeline_stage_data_available === false
+    ? `<p class="deal-stage-note">${escapeHtml(d.pipeline_stage_reason || "Open opportunity stage data is unavailable from the durable HubSpot deal ledger.")}</p>`
+    : "";
+  return `${header}<div class="deal-funnel">${cells}</div>${note}`;
+}
+
+function renderDealAging(d) {
+  const buckets = d.aging_buckets || [];
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Opportunity Aging</h3>
+        <p class="dash-panel__sub">Open opportunities by age</p>
+      </div>
+    </div>`;
+  const rows = buckets.map((b) => `
+    <li class="deal-aging-row">
+      <span class="deal-aging-row__bucket">${escapeHtml(b.bucket)}</span>
+      <span class="deal-aging-row__count">${b.open_opportunities === null || b.open_opportunities === undefined ? '<span class="dash-unavailable">Unavailable</span>' : dashValue(b.open_opportunities, fmtCount)}</span>
+      <span class="deal-aging-row__amt">${b.open_pipeline_usd === null || b.open_pipeline_usd === undefined ? '<span class="dash-unavailable">Unavailable</span>' : escapeHtml(fmtMoney(b.open_pipeline_usd))}</span>
+    </li>`).join("");
+  const note = `<p class="deal-stage-note">Opportunity aging needs open deals and deal create dates, which are not stored in the durable HubSpot deal ledger — shown as Unavailable, never fabricated.</p>`;
+  return `${header}<ul class="deal-aging-list">${rows}</ul>${note}`;
+}
+
+function dealPipelineCell(row) {
+  // Open pipeline is structurally unavailable on this tab.
+  return '<span class="dash-unavailable">Unavailable</span>';
+}
+
+function renderDealSourcePipeline(d) {
+  const rows = d.source_breakdown || [];
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Source → Pipeline</h3>
+        <p class="dash-panel__sub">Which source creates customers &amp; revenue · no ROAS here</p>
+      </div>
+    </div>`;
+  if (!rows.length) {
+    return `${header}<p class="rev-breakdown-empty">No source activity in this window.</p>`;
+  }
+  const head = ["Source", "SQLs", "Open Pipeline", "Customers", "Revenue", "SQL → Customer", "Status"]
+    .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const body = rows.map((r) => `
+    <tr>
+      <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${escapeHtml(r.source_detail || "—")}</td>
+      <td class="deal-num">${dashValue(r.sqls, fmtCount)}</td>
+      <td class="deal-num">${dealPipelineCell(r)}</td>
+      <td class="deal-num">${dashValue(r.closed_won_customers, fmtCount)}</td>
+      <td class="deal-num">${dashValue(r.closed_won_revenue_usd, fmtMoney)}</td>
+      <td class="deal-num">${dealRate(r.sql_to_customer_rate)}</td>
+      <td><span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "—")}</span></td>
+    </tr>`).join("");
+  return `${header}
+    <div class="deal-scroll">
+      <table class="deal-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+    </div>`;
+}
+
+function renderDealCampaignPipeline(d) {
+  const rows = d.campaign_breakdown || [];
+  const linkCampaigns = dashCanNavigate("dashboard")
+    ? '<a class="deal-link" href="#/dashboard?tab=campaigns">Open Campaigns tab →</a>' : "";
+  const linkRoas = dashCanNavigate("roas-campaigns")
+    ? '<a class="deal-link" href="#/roas-campaigns">Open ROAS by Campaign →</a>' : "";
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Campaign → Pipeline</h3>
+        <p class="dash-panel__sub">Google Ads campaigns · SQLs → customers → closed-won revenue · ROAS lives on the spend pages</p>
+      </div>
+    </div>`;
+  if (!rows.length) {
+    return `${header}<p class="rev-breakdown-empty">No campaign pipeline activity in this window.</p>`;
+  }
+  const head = ["Campaign", "SQLs", "Open Pipeline", "Customers", "Revenue", "SQL → Customer", "Status"]
+    .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const body = rows.map((r) => `
+    <tr>
+      <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${escapeHtml(r.campaign_name || "—")}</td>
+      <td class="deal-num">${dashValue(r.sqls, fmtCount)}</td>
+      <td class="deal-num">${dealPipelineCell(r)}</td>
+      <td class="deal-num">${dashValue(r.closed_won_customers, fmtCount)}</td>
+      <td class="deal-num">${dashValue(r.closed_won_revenue_usd, fmtMoney)}</td>
+      <td class="deal-num">${dealRate(r.sql_to_customer_rate)}</td>
+      <td><span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "—")}</span></td>
+    </tr>`).join("");
+  return `${header}
+    <div class="deal-scroll">
+      <table class="deal-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+    </div>
+    <div class="deal-panel-foot">${linkCampaigns}${linkRoas}</div>`;
+}
+
+function renderDealTable(d) {
+  const rows = d.deals || [];
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">Closed-Won Deals</h3>
+        <p class="dash-panel__sub">Revenue proof · click a deal for detail · open / lost deals are not in the durable ledger</p>
+      </div>
+    </div>`;
+  if (d.deal_proof_available === false) {
+    return `${header}<p class="deal-stage-note">Closed-won deal proof is unavailable — ${d.truth_status && d.truth_status.deals === "blocked" ? "the revenue integration is disconnected" : "the deal ledger could not be read"}.</p>`;
+  }
+  if (!rows.length) {
+    return `${header}<p class="rev-breakdown-empty">No closed-won deals in this window.</p>`;
+  }
+  const head = ["Deal / Company", "Stage", "Amount", "Age", "Close Date", "Campaign", "Country", "Status"]
+    .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const body = rows.map((r, i) => `
+    <tr class="deal-row" data-deal-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.company || "deal")} detail">
+      <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${dashValue(r.company)}</td>
+      <td>${dashValue(r.stage)}</td>
+      <td class="deal-num">${dashValue(r.amount_usd, fmtMoney)}</td>
+      <td class="deal-num">${dashValue(r.age_days, fmtCount)}</td>
+      <td>${dashValue(r.close_date)}</td>
+      <td>${dashValue(r.campaign_name)}</td>
+      <td>${dashValue(r.country)}</td>
+      <td><span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "—")}</span></td>
+    </tr>`).join("");
+  return `${header}
+    <div class="deal-scroll">
+      <table class="deal-table deal-table--rows"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+    </div>`;
+}
+
+const DEAL_DRAWER_FIELDS = [
+  ["company", "Company"], ["company_id", "Company ID"], ["main_contact", "Main Contact"],
+  ["contact_id", "Contact ID"], ["deal_name", "Deal"], ["deal_id", "Deal ID"],
+  ["amount_usd", "Amount"], ["stage", "Stage"], ["stage_group", "Stage group"],
+  ["created_date", "Created date"], ["close_date", "Close date"], ["age_days", "Age (days)"],
+  ["days_to_close", "Days to close"], ["source_group", "Source group"], ["source_detail", "Source detail"],
+  ["campaign_name", "Campaign / source"], ["country", "Country"], ["attribution_status", "Attribution"],
+];
+
+function dealDrawerCell(deal, key) {
+  if (key === "amount_usd") return dashValue(deal.amount_usd, fmtMoney); // null → Unavailable, never $0
+  if (key === "age_days" || key === "days_to_close") return dashValue(deal[key], fmtCount);
+  return dashValue(deal[key]);
+}
+
+function dealRecommendedReview(deal) {
+  if (deal.amount_usd === null || deal.amount_usd === undefined)
+    return "Amount missing — pipeline value unavailable for this deal.";
+  return "Closed won — revenue proof. Open pipeline / aging is not tracked in the durable ledger.";
+}
+
+function wireDealDrawers(root, d) {
+  const rows = d.deals || [];
+  const open = (i) => {
+    const r = rows[i];
+    if (!r) return;
+    let drawer = root.querySelector(".deal-drawer");
+    if (!drawer) {
+      drawer = document.createElement("div");
+      drawer.className = "deal-drawer";
+      root.querySelector(".deal-table-panel").appendChild(drawer);
+    }
+    const tiles = DEAL_DRAWER_FIELDS.map(([key, label]) =>
+      `<div><dt>${escapeHtml(label)}</dt><dd>${dealDrawerCell(r, key)}</dd></div>`).join("");
+    const links = [
+      ["roas-campaigns", "Open ROAS by Campaign"],
+      ["deals", "Open Deals ledger"],
+      ["revenue-health", "Open Revenue Health"],
+    ].filter(([page]) => dashCanNavigate(page))
+      .map(([page, label]) => `<a class="deal-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
+    drawer.innerHTML = `
+      <div class="deal-drawer__head">
+        <strong>${escapeHtml(r.company || "Deal")}</strong>
+        <span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "")}</span>
+        <button type="button" class="deal-drawer__close" aria-label="Close">×</button>
+      </div>
+      <div class="deal-drawer__section">
+        <h4 class="deal-drawer__h">Deal &amp; attribution proof</h4>
+        <dl class="deal-drawer__grid">${tiles}</dl>
+      </div>
+      <div class="deal-drawer__section">
+        <h4 class="deal-drawer__h">Recommended review</h4>
+        <p class="deal-review-note">${escapeHtml(dealRecommendedReview(r))}</p>
+      </div>
+      <div class="deal-drawer__actions">${links}</div>`;
+    drawer.querySelector(".deal-drawer__close").addEventListener("click", () => drawer.remove());
+    drawer.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
+  root.querySelectorAll(".deal-row").forEach((tr) => {
+    tr.addEventListener("click", () => open(Number(tr.dataset.dealRow)));
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(Number(tr.dataset.dealRow)); }
+    });
+  });
+}
+
+function renderDealSqlNoDeal(d) {
+  const rows = d.sql_no_deal || [];
+  const total = d.sql_no_deal_total || 0;
+  const header = `
+    <div class="dash-panel__header">
+      <div>
+        <h3 class="dash-panel__title">SQLs Not Yet Closed-Won</h3>
+        <p class="dash-panel__sub">Qualified SQLs with no closed-won deal · <strong>read-only</strong> — open / lost pipeline is not visible</p>
+      </div>
+    </div>`;
+  if (d.sql_no_deal_available === false) {
+    return `${header}<p class="deal-stage-note">Per-SQL linkage is unavailable — the qualified-lead source could not be read for this window.</p>`;
+  }
+  if (!rows.length) {
+    return `${header}<p class="rev-breakdown-empty">Every qualified SQL has a closed-won deal in this window.</p>`;
+  }
+  const head = ["Company / Contact", "SQL Date", "Days Since SQL", "Campaign", "Country", "Status"]
+    .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const body = rows.map((r) => `
+    <tr>
+      <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${dashValue(r.company)}</td>
+      <td>${dashValue(r.sql_date)}</td>
+      <td class="deal-num">${dashValue(r.days_since_sql, fmtCount)}</td>
+      <td>${dashValue(r.campaign_name)}</td>
+      <td>${dashValue(r.country)}</td>
+      <td><span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "—")}</span></td>
+    </tr>`).join("");
+  const more = total > rows.length
+    ? `<p class="deal-stage-note">Showing ${escapeHtml(fmtCount(rows.length))} of ${escapeHtml(fmtCount(total))} qualified SQLs with no closed-won deal.</p>` : "";
+  return `${header}
+    <div class="deal-scroll">
+      <table class="deal-table deal-table--rows"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+    </div>${more}`;
+}
+
+function renderDealTruthFooter(d) {
+  const ts = d.truth_status || {};
+  const chip = (label, status) => `
+    <span class="dash-footer-chip" title="${escapeHtml(`${label}: ${status || "unknown"}`)}">
+      <span class="dash-dot ${DASH_STATUS_DOT[status] || "dash-dot--muted"}"></span>${escapeHtml(label)}
+    </span>`;
+  const allGood = ts.sqls === "ready" && ts.deals === "ready"
+    && ts.amounts === "ready" && ts.attribution === "ready";
+  return `
+    <footer class="dash-truth-footer ${allGood ? "dash-truth-footer--ok" : ""}">
+      ${chip("SQLs", ts.sqls)}
+      ${chip("Deals", ts.deals)}
+      ${chip("Stages", ts.stages)}
+      ${chip("Amounts", ts.amounts)}
+      ${chip("Attribution", ts.attribution)}
+      <span class="dash-footer-chip dash-footer-chip--readonly">Read-only</span>
+      ${allGood
+        ? '<span class="dash-footer-note">Pipeline truth verified — open pipeline is separate from closed-won revenue.</span>'
+        : (dashCanNavigate("revenue-health")
+          ? '<a class="dash-footer-note" href="#/revenue-health">Some pipeline proof needs review — open Revenue Health</a>'
+          : '<span class="dash-footer-note">Some pipeline proof needs review — contact your administrator.</span>')}
     </footer>`;
 }
 
@@ -12527,7 +12998,7 @@ let roasCountryWindow = null;
 // Per-page request sequence tokens guard against stale-response races: only the
 // newest in-flight request for a page may render. Switching CQ→YTD→Last Quarter
 // quickly must never paint an older response over the newest selection.
-const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0, overview: 0, dashRevenue: 0, dashChannels: 0, dashCampaigns: 0, dashCountries: 0 };
+const _revReqSeq = { campaigns: 0, countries: 0, deals: 0, health: 0, bySource: 0, overview: 0, dashRevenue: 0, dashChannels: 0, dashCampaigns: 0, dashCountries: 0, dashDeals: 0 };
 
 // PR-ADS-116: show the exact resolved date range beside each window selector.
 function formatWindowRange(win) {

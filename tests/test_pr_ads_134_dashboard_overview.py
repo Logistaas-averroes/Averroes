@@ -707,10 +707,10 @@ def test_dashboard_tabs_only_overview_active():
     assert 'class="dashboard-tab is-active"' in section
     for label in ("Revenue", "Channels", "Campaigns &amp; Keywords", "Countries", "Deals"):
         assert label in section
-    # Overview is the active tab. PR-ADS-135 enabled Revenue, 136 enabled Channels,
-    # 137 enabled Campaigns & Keywords and 138 enabled Countries, so the one
-    # remaining future tab (Deals) is the disabled placeholder that routes nowhere yet.
-    assert section.count('class="dashboard-tab" disabled') == 1
+    # Overview is the active tab. PR-ADS-135/136/137/138/139 enabled Revenue,
+    # Channels, Campaigns & Keywords, Countries and Deals in turn — so all six
+    # dashboard tabs are now live and no disabled placeholder remains.
+    assert section.count('class="dashboard-tab" disabled') == 0
 
 
 def test_business_window_selector_exists_and_is_wired():
