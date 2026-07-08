@@ -109,7 +109,42 @@ def _load_build():
         pytest.skip(f"service import unavailable: {exc}")
 
 
-def _patch_sources(monkeypatch, *, lead_rows=None, revenue_rows=None, spend_rows=None, seen=None):
+def _verified_truth(usd_spend, native_spend=None):
+    """A canonical Google Ads spend-truth block in the verified state."""
+    return {
+        "state": "verified",
+        "google_ads_spend_source": "canonical_campaign_daily_spend",
+        "native_currency": "GBP",
+        "native_spend": native_spend,
+        "usd_spend": usd_spend,
+        "fx_status": "verified",
+        "spend_coverage_status": "verified",
+        "roas_available": True,
+        "geo_spend_used": False,
+        "geo_spend_note": "Geo spend is diagnostic and is not used as the source-level "
+                          "Google Ads denominator.",
+    }
+
+
+def _unavailable_truth():
+    """No canonical Google Ads spend source — spend/ROAS Unavailable (never $0)."""
+    return {
+        "state": "source_unavailable",
+        "google_ads_spend_source": "unavailable",
+        "native_currency": "GBP",
+        "native_spend": None,
+        "usd_spend": None,
+        "fx_status": "unavailable",
+        "spend_coverage_status": "unavailable",
+        "roas_available": False,
+        "geo_spend_used": False,
+        "geo_spend_note": "Geo spend is diagnostic and is not used as the source-level "
+                          "Google Ads denominator.",
+    }
+
+
+def _patch_sources(monkeypatch, *, lead_rows=None, revenue_rows=None, spend_rows=None,
+                   spend_truth=None, seen=None):
     def cap_leads(start, end, *a, **k):
         if seen is not None:
             seen["leads"] = (start, end)
@@ -125,10 +160,25 @@ def _patch_sources(monkeypatch, *, lead_rows=None, revenue_rows=None, spend_rows
             seen["spend"] = (start, end)
         return {"available": True, "rows": spend_rows or [], "coverage_start": None, "coverage_end": None}
 
+    # PR-ADS-140: Google Ads source spend now comes from the CANONICAL campaign
+    # spend truth (same as the mart), NOT the geo table. Default: derive a verified
+    # truth from spend_rows (USD == their sum) so the spend/ROAS assertions hold; an
+    # empty spend source yields the "source unavailable" truth (never a fake $0).
+    if spend_truth is None:
+        total = round(sum(float(r.get("spend") or 0) for r in (spend_rows or [])), 2)
+        spend_truth = _verified_truth(total) if spend_rows else _unavailable_truth()
+
+    def cap_truth(window, now=None):
+        if seen is not None:
+            seen["spend_truth_window"] = window
+        return dict(spend_truth)
+
     try:
         monkeypatch.setattr("db.revenue_repository.fetch_source_leads", cap_leads)
         monkeypatch.setattr("db.revenue_repository.fetch_source_revenue", cap_revenue)
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", cap_spend)
+        monkeypatch.setattr(
+            "services.revenue_spend_truth_service.build_google_ads_spend_truth", cap_truth)
         monkeypatch.setattr("db.writers.source_attribution_health_counts",
                             lambda: {"contacts_classified": 0, "deals_attributed": 0,
                                      "ambiguous_deals": 0, "unclassified_deals": 0})
@@ -207,7 +257,10 @@ def test_window_correct_same_bounds_all_sources(monkeypatch):
     assert out["window"]["start_date"] == "2026-01-01"
     assert out["window"]["end_date"] == "2026-03-31"
     expect = (date(2026, 1, 1), date(2026, 3, 31))
-    assert seen["leads"] == expect and seen["revenue"] == expect and seen["spend"] == expect
+    # Leads/revenue read the resolved date bounds; PR-ADS-140: Google Ads spend is
+    # the canonical spend truth, resolved from the SAME business-window key.
+    assert seen["leads"] == expect and seen["revenue"] == expect
+    assert seen["spend_truth_window"] == "last_quarter"
 
 
 def test_no_fabricated_zero_spend_or_roas(monkeypatch):
@@ -271,7 +324,7 @@ def test_page_sections_and_roas_only_for_google():
     body = JS[fn_idx:fn_idx + 1600]
     assert ">Spend<" in body and ">ROAS / Status<" in body
     assert ">Channel / Platform<" in body
-    status = JS[JS.find("function sourceStatusLabel"):JS.find("function sourceStatusLabel") + 600]
+    status = JS[JS.find("function sourceStatusLabel"):JS.find("function sourceStatusLabel") + 900]
     assert "Revenue-only — no connected spend source" in status
     # Health summary surfaces the four counts.
     health = JS[JS.find("function renderRevenueBySourceHealth"):JS.find("function renderRevenueBySourceHealth") + 700]

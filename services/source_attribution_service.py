@@ -25,6 +25,7 @@ from analysis.source_classification import (
     classify_source, classify_source_taxonomy, attribute_deal,
 )
 from db import revenue_repository as repo
+from services import revenue_spend_truth_service
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,26 @@ STATUS_ROAS_AVAILABLE = "ROAS available"
 STATUS_REVENUE_ONLY = "Revenue-only — no connected spend source"
 STATUS_OFFLINE = "Imported CRM records — no reliable source attribution"
 STATUS_NEEDS_REVIEW = "Needs review — source missing or unsafe"
+
+# PR-ADS-140: honest Google Ads spend-truth states. Revenue by Source now reads
+# the CANONICAL campaign-daily spend (same truth as the mart) instead of geo
+# spend, so the Google Ads row can be in one of four states — each with its own
+# label, never a fabricated $0 / 0.00x.
+STATUS_FX_WITHHELD = "FX unavailable — USD ROAS withheld"
+STATUS_COVERAGE_INCOMPLETE = "Canonical spend coverage incomplete"
+STATUS_GOOGLE_SPEND_UNAVAILABLE = "Google Ads spend source unavailable"
+
+# state -> (roas_status code, human status label) for the Google Ads group.
+_GOOGLE_STATE_STATUS = {
+    revenue_spend_truth_service.STATE_VERIFIED:
+        ("available", STATUS_ROAS_AVAILABLE),
+    revenue_spend_truth_service.STATE_FX_INCOMPLETE:
+        ("unavailable_fx", STATUS_FX_WITHHELD),
+    revenue_spend_truth_service.STATE_COVERAGE_INCOMPLETE:
+        ("unavailable_coverage", STATUS_COVERAGE_INCOMPLETE),
+    revenue_spend_truth_service.STATE_SOURCE_UNAVAILABLE:
+        ("unavailable_no_spend_source", STATUS_GOOGLE_SPEND_UNAVAILABLE),
+}
 
 
 def _platform_status(group: str, is_canonical: bool = False) -> str:
@@ -121,7 +142,8 @@ def _section_bucket(acquisition_group: str) -> str:
     return GROUP_UNCLASSIFIED
 
 
-def _finalize_channels(group: str, channels: dict, group_spend) -> list:
+def _finalize_channels(group: str, channels: dict, group_spend,
+                       google_status_label: str | None = None) -> list:
     """Shape the nested channel/platform dicts into sorted list rows (PR-ADS-133).
 
     Only the Google Ads group carries spend/ROAS, and only on its canonical
@@ -131,6 +153,11 @@ def _finalize_channels(group: str, channels: dict, group_spend) -> list:
     Google bucket — keeps spend/ROAS None (never a fabricated $0 / 0.00x) and
     gets an honest status label. When the Google spend source is unavailable
     (group_spend is None), even the canonical bucket shows spend/ROAS None.
+
+    PR-ADS-140: ``google_status_label`` is the canonical Google Ads spend-truth
+    status (ROAS available / FX withheld / coverage incomplete / source
+    unavailable). It labels the canonical bucket so a withheld-USD state reads
+    honestly instead of always claiming "ROAS available".
     """
     has_spend = group in GROUPS_WITH_SPEND
     out = []
@@ -154,7 +181,9 @@ def _finalize_channels(group: str, channels: dict, group_spend) -> list:
                 "spend": group_spend if canonical_platform else None,
                 # Bucket-level ROAS = this bucket's won revenue / spend.
                 "roas": _roas(pf_won, group_spend) if canonical_platform else None,
-                "status": _platform_status(group, is_canonical=canonical_platform),
+                "status": ((google_status_label or STATUS_ROAS_AVAILABLE)
+                           if canonical_platform and google_status_label is not None
+                           else _platform_status(group, is_canonical=canonical_platform)),
             })
         platforms.sort(key=lambda p: (p["won_revenue"], p["leads"]), reverse=True)
         out.append({
@@ -187,7 +216,12 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
 
     leads = repo.fetch_source_leads(start, end)
     revenue = repo.fetch_source_revenue(start, end)
-    spend = repo.fetch_campaign_country_spend(start, end)
+    # PR-ADS-140: Google Ads source spend is the CANONICAL campaign-daily spend
+    # truth — the SAME number the Revenue Decision Mart shows at the top — NOT the
+    # geo/country table (repo.fetch_campaign_country_spend). Geo spend stays
+    # diagnostic only and is never the source-level Google Ads denominator, so the
+    # page can no longer tell two spend truths (canonical top vs geo Google Ads row).
+    spend_truth = revenue_spend_truth_service.build_google_ads_spend_truth(window, now=now)
 
     buckets = {g: {"leads": 0, "sqls": 0, "customers": 0, "won_revenue": 0.0}
                for g in SECTION_ORDER}
@@ -231,24 +265,41 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         platform["customers"] += 1
         platform["won_revenue"] += amount
 
-    # Only Google Ads has a connected spend source. When that source is
-    # unavailable OR returns no rows, spend is None (NOT a fabricated $0) so the UI
-    # renders "Unavailable" and ROAS stays null — never a $0 denominator.
-    spend_rows = spend.get("rows") or []
-    spend_source_available = bool(spend.get("available")) and bool(spend_rows)
-    google_spend = (round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
-                    if spend_source_available else None)
+    # Only Google Ads has a connected spend source, and it is the CANONICAL
+    # campaign-daily spend (PR-ADS-140). Its spend is the reporting USD spend, shown
+    # ONLY when the denominator is FX-safe (verified). Every other state — FX
+    # incomplete, coverage incomplete, no source — yields spend None (NOT a
+    # fabricated $0) so ROAS stays null and the UI renders an honest status.
+    google_state = spend_truth.get("state")
+    google_roas_status, google_status_label = _GOOGLE_STATE_STATUS.get(
+        google_state,
+        ("unavailable_no_spend_source", STATUS_GOOGLE_SPEND_UNAVAILABLE))
+    google_spend = (spend_truth.get("usd_spend")
+                    if google_state == revenue_spend_truth_service.STATE_VERIFIED
+                    else None)
 
     groups = []
     for g in SECTION_ORDER:
         b = buckets[g]
         has_spend = g in GROUPS_WITH_SPEND
         won = round(b["won_revenue"], 2)
-        group_spend = google_spend if has_spend else None
-        # ROAS is available ONLY for Google Ads, and only with real (non-null) spend.
-        roas = _roas(won, group_spend) if has_spend else None
-        # Spend is connected only when there is a real spend source for this group.
-        spend_connected = has_spend and group_spend is not None
+        if has_spend:
+            group_spend = google_spend
+            # ROAS = Google Ads won revenue / canonical USD spend, only with real
+            # (non-null) spend — never a $0 denominator, never a fabricated 0.00x.
+            roas = _roas(won, group_spend)
+            roas_status = google_roas_status
+            status_label = google_status_label
+            channels = _finalize_channels(g, nested[g], group_spend,
+                                          google_status_label=google_status_label)
+        else:
+            # Non-Google sources are revenue-only: no connected spend source, so
+            # spend/ROAS stay None (never $0 / 0.00x).
+            group_spend = None
+            roas = None
+            roas_status = "unavailable_no_spend_source"
+            status_label = None
+            channels = _finalize_channels(g, nested[g], None)
         groups.append({
             "group": g,
             "label": GROUP_LABELS[g],
@@ -259,11 +310,12 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
             "customers": b["customers"],
             "won_revenue": won,
             "roas": roas,
-            # Non-Google groups have no connected spend source; Google shows it as
-            # unavailable when the spend source itself is missing for the window.
-            "roas_status": ("available" if spend_connected
-                            else "unavailable_no_spend_source"),
-            "channels": _finalize_channels(g, nested[g], group_spend),
+            "roas_status": roas_status,
+            # PR-ADS-140: honest Google Ads spend-truth label (ROAS available / FX
+            # withheld / coverage incomplete / source unavailable). None for
+            # non-Google groups, which keep their revenue-only status.
+            "spend_status_label": status_label,
+            "channels": channels,
         })
 
     summary = source_attribution_health_counts()
@@ -272,6 +324,10 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         "window": resolved,
         "groups": groups,
         "summary": summary,
+        # PR-ADS-140: proof for the Google Ads spend number — the canonical
+        # campaign-daily spend truth (native GBP + USD reporting + FX/coverage
+        # status). Geo spend is diagnostic and explicitly NOT used here.
+        "source_spend_truth": spend_truth,
         "source_truth": "hubspot_original_source_classification",
         "google_ads_conversion_value_used": False,
         "generated_at": datetime.now(timezone.utc).isoformat(),

@@ -369,13 +369,18 @@ def _view_payload(view: str, window: str, core: dict, now: datetime | None) -> d
         carry. For the deal view this surfaces deal_ledger_status so a durable
         ledger OUTAGE is never silently rendered as a truthful empty window.
     """
-    payload = {"rows": [], "ledger_summary": None, "data_health": {}}
+    payload = {"rows": [], "ledger_summary": None, "data_health": {},
+               "source_spend_truth": None}
     if view == "campaign":
         payload["rows"] = core.get("campaigns") or []
     elif view == "country":
         payload["rows"] = core.get("countries") or []
     elif view == "source":
-        payload["rows"] = build_revenue_by_source(window, now=now).get("groups") or []
+        source = build_revenue_by_source(window, now=now)
+        payload["rows"] = source.get("groups") or []
+        # PR-ADS-140: carry the Google Ads spend-truth proof block so the page can
+        # prove its Google Ads spend reconciles with the canonical top-line.
+        payload["source_spend_truth"] = source.get("source_spend_truth")
     elif view == "deal":
         deals = build_revenue_deals(window, now=now)
         payload["rows"] = deals.get("deals") or []
@@ -432,6 +437,8 @@ def build_revenue_decision_mart(
         # Deal view: the ledger's own summary (consistent with its rows) and the
         # ledger availability signal. None / empty for the other views.
         "ledger_summary": payload["ledger_summary"],
+        # Source view (PR-ADS-140): canonical Google Ads spend-truth proof block.
+        "source_spend_truth": payload.get("source_spend_truth"),
         "data_health": payload["data_health"],
         "diagnostics": diagnostics,
         "source_truth": "revenue_decision_mart",
@@ -478,9 +485,10 @@ def _difference_reasons(page_key: str, spend_truth: dict, *, status: str) -> lis
     if page_key == "roas_by_country" and spend_truth["country_spend_status"] != "verified":
         reasons.append("different_geo_reconciliation")
     if page_key == "revenue_by_source":
-        # Source page Google Ads spend is the geo total; canonical campaign spend
-        # is the ROAS denominator — a classic different-source-table mismatch.
-        reasons.append("different_source_table")
+        # PR-ADS-140: Revenue by Source now reads the SAME canonical campaign-daily
+        # spend as the mart (geo spend is diagnostic only), so a difference is
+        # NEVER a different-source-table mismatch. Any residual difference is an
+        # FX-coverage difference — the source USD spend is withheld until FX is safe.
         if spend_truth["fx_status"] != "verified":
             reasons.append("different_fx_coverage")
     if spend_truth["campaign_spend_status"] != "verified":

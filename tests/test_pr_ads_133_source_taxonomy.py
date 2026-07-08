@@ -127,6 +127,26 @@ def _patch_sources(monkeypatch, *, lead_rows=None, revenue_rows=None, spend_rows
                         lambda s, e: {"available": True, "rows": revenue_rows or []})
     monkeypatch.setattr(repo, "fetch_campaign_country_spend",
                         lambda s, e: {"available": True, "rows": spend_rows or []})
+    # PR-ADS-140: Google Ads source spend is the CANONICAL campaign spend truth (same
+    # as the mart), not geo spend. Derive a verified truth from spend_rows (USD == sum)
+    # so the spend/ROAS assertions hold; empty spend → source unavailable (never $0).
+    import services.revenue_spend_truth_service as truth_svc
+    _total = round(sum(float(r.get("spend") or 0) for r in (spend_rows or [])), 2)
+    _truth = ({
+        "state": "verified", "google_ads_spend_source": "canonical_campaign_daily_spend",
+        "native_currency": "GBP", "native_spend": _total, "usd_spend": _total,
+        "fx_status": "verified", "spend_coverage_status": "verified",
+        "roas_available": True, "geo_spend_used": False,
+        "geo_spend_note": "Geo spend is diagnostic.",
+    } if spend_rows else {
+        "state": "source_unavailable", "google_ads_spend_source": "unavailable",
+        "native_currency": "GBP", "native_spend": None, "usd_spend": None,
+        "fx_status": "unavailable", "spend_coverage_status": "unavailable",
+        "roas_available": False, "geo_spend_used": False,
+        "geo_spend_note": "Geo spend is diagnostic.",
+    })
+    monkeypatch.setattr(truth_svc, "build_google_ads_spend_truth",
+                        lambda window, now=None: dict(_truth))
     import db.writers as w
     monkeypatch.setattr(w, "source_attribution_health_counts",
                         lambda: {"contacts_classified": 0, "deals_attributed": 0,
@@ -247,6 +267,13 @@ def test_google_spend_null_when_source_unavailable(monkeypatch):
     # Spend source reports unavailable.
     monkeypatch.setattr(repo, "fetch_campaign_country_spend",
                         lambda s, e: {"available": False, "rows": []})
+    # PR-ADS-140: canonical Google Ads spend truth reports no source.
+    import services.revenue_spend_truth_service as truth_svc
+    monkeypatch.setattr(truth_svc, "build_google_ads_spend_truth", lambda window, now=None: {
+        "state": "source_unavailable", "google_ads_spend_source": "unavailable",
+        "native_currency": "GBP", "native_spend": None, "usd_spend": None,
+        "fx_status": "unavailable", "spend_coverage_status": "unavailable",
+        "roas_available": False, "geo_spend_used": False, "geo_spend_note": "diagnostic"})
     import db.writers as w
     monkeypatch.setattr(w, "source_attribution_health_counts",
                         lambda: {"contacts_classified": 0, "deals_attributed": 0,
@@ -419,7 +446,7 @@ def test_frontend_renders_hierarchy():
     assert "source-channel-row" in JS
     assert "source-platform-row" in JS
     # Page still reads the mart rows and keeps the mart chrome.
-    page = _slice(JS, "function renderRevenueBySourcePage", span=900)
+    page = _slice(JS, "function renderRevenueBySourcePage", span=1200)
     assert "data.rows" in page
     assert "renderSourceGroupSection" in page
 
@@ -448,7 +475,7 @@ def test_drawer_renders_validation_columns():
 
 def test_frontend_no_fake_roas_for_non_google():
     # Non-Google platform/channel rows show the status text, never a ROAS number.
-    status = _slice(JS, "function sourceStatusLabel", span=600)
+    status = _slice(JS, "function sourceStatusLabel", span=900)
     assert "Revenue-only — no connected spend source" in status
     assert "Imported CRM records — no reliable source attribution" in status
     assert "Needs review — source missing or unsafe" in status
