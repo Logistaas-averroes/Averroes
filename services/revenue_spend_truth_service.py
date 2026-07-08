@@ -39,7 +39,8 @@ GEO_SPEND_NOTE = (
 
 # Spend-truth states for the Google Ads source group. Each maps to a distinct,
 # honest presentation state — never a fabricated $0 / 0.00x.
-STATE_VERIFIED = "verified"                       # USD spend + ROAS available
+STATE_VERIFIED = "verified"                       # USD spend > 0 + ROAS available
+STATE_VERIFIED_ZERO = "verified_zero_spend"       # verified $0 spend — ROAS unavailable
 STATE_FX_INCOMPLETE = "fx_incomplete"             # native GBP exists; USD/ROAS withheld
 STATE_COVERAGE_INCOMPLETE = "coverage_incomplete"  # canonical coverage unverified
 STATE_SOURCE_UNAVAILABLE = "source_unavailable"    # no canonical Google Ads spend source
@@ -95,23 +96,30 @@ def derive_google_ads_spend_truth(source_health: dict | None) -> dict:
         state = STATE_COVERAGE_INCOMPLETE
     elif fx_status != "verified":
         state = STATE_FX_INCOMPLETE
+    elif not usd_total or usd_total <= 0:
+        # Verified coverage + verified FX, but the window genuinely spent $0. ROAS
+        # has no denominator, so it is a distinct honest state — never a "ROAS
+        # available" label sitting next to an unavailable ROAS.
+        state = STATE_VERIFIED_ZERO
     else:
         state = STATE_VERIFIED
 
-    # USD spend is exposed ONLY when the denominator is fully FX-safe (verified).
-    usd_spend = usd_total if state == STATE_VERIFIED else None
-    # Native GBP evidence is kept for verified AND fx-incomplete (so the page can
-    # still prove native GBP spend when USD/ROAS are withheld). For an unverified
-    # coverage / missing source, even native is Unavailable (never a partial total
-    # dressed up as complete).
+    _verified_states = (STATE_VERIFIED, STATE_VERIFIED_ZERO)
+    # USD spend is exposed when the denominator is fully FX-safe — including a
+    # verified $0 (a real, verified zero, matching the mart's top-line usd_spend).
+    usd_spend = usd_total if state in _verified_states else None
+    # Native GBP evidence is kept for the FX-safe states AND fx-incomplete (so the
+    # page can still prove native GBP spend when USD/ROAS are withheld). For an
+    # unverified coverage / missing source, even native is Unavailable (never a
+    # partial total dressed up as complete).
     native_spend = (native_total
-                    if state in (STATE_VERIFIED, STATE_FX_INCOMPLETE) else None)
+                    if state in _verified_states + (STATE_FX_INCOMPLETE,) else None)
 
     if state == STATE_COVERAGE_INCOMPLETE:
         spend_coverage_status = "incomplete"
     elif state == STATE_SOURCE_UNAVAILABLE:
         spend_coverage_status = "unavailable"
-    else:  # verified OR fx_incomplete — canonical coverage itself is complete
+    else:  # verified / verified_zero / fx_incomplete — canonical coverage complete
         spend_coverage_status = "verified"
 
     return {
@@ -123,6 +131,8 @@ def derive_google_ads_spend_truth(source_health: dict | None) -> dict:
         "usd_spend": usd_spend,
         "fx_status": fx_status,
         "spend_coverage_status": spend_coverage_status,
+        # ROAS is available ONLY with a positive USD denominator — a verified $0
+        # window has no ROAS (divide-by-zero), so roas_available is False there.
         "roas_available": roas_available_raw and state == STATE_VERIFIED,
         # The geo/country table is never the source-level Google Ads denominator.
         "geo_spend_used": False,

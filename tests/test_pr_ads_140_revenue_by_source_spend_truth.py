@@ -313,6 +313,52 @@ def test_coverage_incomplete_unavailable_no_fake_zero(monkeypatch):
     assert g["roas_status"] == "unavailable_coverage"
 
 
+def test_verified_zero_spend_is_honest_not_roas_available(monkeypatch):
+    # Verified coverage + verified FX but a genuine $0 spend window: ROAS has no
+    # denominator, so the row must NOT be labelled "ROAS available" (Copilot review).
+    build = _load_build()
+    _patch_source_service(
+        monkeypatch,
+        truth={"state": "verified_zero_spend",
+               "google_ads_spend_source": "canonical_campaign_daily_spend",
+               "native_currency": "GBP", "native_spend": 0.0, "usd_spend": 0.0,
+               "fx_status": "verified", "spend_coverage_status": "verified",
+               "roas_available": False, "geo_spend_used": False,
+               "geo_spend_note": "diagnostic"},
+        revenue_rows=[{"acquisition_group": "google_ads",
+                       "attribution_status": "attributed", "deal_amount_usd": 5000.0}],
+    )
+    out = build(WINDOW, now=NOW)
+    g = _google(out)
+    # Spend is the verified $0 (matches the mart top-line), but ROAS is unavailable.
+    assert g["spend"] == 0.0
+    assert g["roas"] is None
+    assert g["roas_status"] == "unavailable_zero_spend"
+    assert g["spend_status_label"] == "No Google Ads spend in this window"
+    # The label is never "ROAS available" when ROAS is unavailable.
+    assert g["spend_status_label"] != "ROAS available"
+
+
+def test_derive_gates_roas_available_on_positive_usd(monkeypatch):
+    # derive_google_ads_spend_truth must not report roas_available=True for a
+    # verified-zero USD denominator (contract-consistency; Copilot review).
+    from services.revenue_spend_truth_service import derive_google_ads_spend_truth
+    zero = derive_google_ads_spend_truth({
+        "spend_source": "canonical_google_ads_api", "spend_native_total": 0.0,
+        "spend_usd_total": 0.0, "campaign_roas_available": True,
+        "fx_coverage_status": "complete", "campaign_spend_coverage_status": "complete",
+        "spend_native_currency": "GBP"})
+    assert zero["state"] == "verified_zero_spend"
+    assert zero["roas_available"] is False
+    # A positive denominator stays verified with ROAS available.
+    pos = derive_google_ads_spend_truth({
+        "spend_source": "canonical_google_ads_api", "spend_native_total": 72281.92,
+        "spend_usd_total": 97300.0, "campaign_roas_available": True,
+        "fx_coverage_status": "complete", "campaign_spend_coverage_status": "complete",
+        "spend_native_currency": "GBP"})
+    assert pos["state"] == "verified" and pos["roas_available"] is True
+
+
 def test_no_google_spend_source_unavailable(monkeypatch):
     build = _load_build()
     _patch_source_service(

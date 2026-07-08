@@ -48,11 +48,16 @@ STATUS_NEEDS_REVIEW = "Needs review — source missing or unsafe"
 STATUS_FX_WITHHELD = "FX unavailable — USD ROAS withheld"
 STATUS_COVERAGE_INCOMPLETE = "Canonical spend coverage incomplete"
 STATUS_GOOGLE_SPEND_UNAVAILABLE = "Google Ads spend source unavailable"
+STATUS_NO_SPEND_IN_WINDOW = "No Google Ads spend in this window"
 
 # state -> (roas_status code, human status label) for the Google Ads group.
 _GOOGLE_STATE_STATUS = {
     revenue_spend_truth_service.STATE_VERIFIED:
         ("available", STATUS_ROAS_AVAILABLE),
+    # Verified $0 spend: ROAS has no denominator, so it is honestly unavailable —
+    # never a "ROAS available" label next to an unavailable ROAS.
+    revenue_spend_truth_service.STATE_VERIFIED_ZERO:
+        ("unavailable_zero_spend", STATUS_NO_SPEND_IN_WINDOW),
     revenue_spend_truth_service.STATE_FX_INCOMPLETE:
         ("unavailable_fx", STATUS_FX_WITHHELD),
     revenue_spend_truth_service.STATE_COVERAGE_INCOMPLETE:
@@ -60,6 +65,13 @@ _GOOGLE_STATE_STATUS = {
     revenue_spend_truth_service.STATE_SOURCE_UNAVAILABLE:
         ("unavailable_no_spend_source", STATUS_GOOGLE_SPEND_UNAVAILABLE),
 }
+
+# Google Ads states whose canonical USD spend is a real, verified figure (shown as
+# the group spend, matching the mart top-line — including a verified $0).
+_GOOGLE_SPEND_SHOWN_STATES = (
+    revenue_spend_truth_service.STATE_VERIFIED,
+    revenue_spend_truth_service.STATE_VERIFIED_ZERO,
+)
 
 
 def _platform_status(group: str, is_canonical: bool = False) -> str:
@@ -275,7 +287,7 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         google_state,
         ("unavailable_no_spend_source", STATUS_GOOGLE_SPEND_UNAVAILABLE))
     google_spend = (spend_truth.get("usd_spend")
-                    if google_state == revenue_spend_truth_service.STATE_VERIFIED
+                    if google_state in _GOOGLE_SPEND_SHOWN_STATES
                     else None)
 
     groups = []
