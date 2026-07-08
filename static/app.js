@@ -7224,11 +7224,24 @@ function fmtSourceRate(numer, denom) {
 // Group-level ROAS / status cell: Google shows ROAS; others show why not.
 function sourceStatusLabel(group) {
   if (group.has_spend === true) {
-    return group.roas === null || group.roas === undefined ? "Unavailable" : fmtRoasMultiple(group.roas);
+    if (group.roas !== null && group.roas !== undefined) return fmtRoasMultiple(group.roas);
+    // PR-ADS-140: when canonical Google Ads spend/ROAS is withheld, show the exact
+    // honest reason (FX withheld / coverage incomplete / source unavailable) —
+    // never a bare "Unavailable" and never "no connected spend source".
+    return group.spend_status_label || "Unavailable";
   }
   if (group.group === "offline") return "Imported CRM records — no reliable source attribution";
   if (group.group === "unclassified") return "Needs review — source missing or unsafe";
   return "Revenue-only — no connected spend source";
+}
+
+// PR-ADS-140: compact proof chip inside the Google Ads section — the Revenue by
+// Source Google Ads spend is the canonical campaign spend, NOT country/geo spend.
+function renderSourceSpendProofChip(spendTruth) {
+  const st = spendTruth || {};
+  const tip = st.geo_spend_note
+    || "Country geo spend is diagnostic and is not used as the Revenue by Source denominator.";
+  return `<span class="source-proof-chip" title="${escapeHtml(tip)}">Spend source: canonical campaign spend</span>`;
 }
 
 // Expand control for a platform row (opens the clients/deals drawer, lazy).
@@ -7290,7 +7303,7 @@ function renderSourceChannelRows(group, ch, gi, ci) {
   return channelHead + platformRows;
 }
 
-function renderSourceGroupSection(group, gi) {
+function renderSourceGroupSection(group, gi, spendTruth) {
   const channels = group.channels || [];
   const headerRow = `
     <tr>
@@ -7309,14 +7322,25 @@ function renderSourceGroupSection(group, gi) {
     : `<tr><td colspan="9" class="source-drilldown-empty">No attributed activity in this window.</td></tr>`;
   // Group KPI strip — Google shows Spend/ROAS; others show the revenue-only reason.
   const isGoogle = group.has_spend === true;
+  // PR-ADS-140: the Google Ads spend chip is the CANONICAL campaign spend (the
+  // same USD number shown at the top), with the native GBP evidence as a subline —
+  // never the old geo/country-derived figure. Unavailable (never $0) when withheld.
+  const st = spendTruth || {};
+  const nativeSub = (isGoogle && st.native_spend !== null && st.native_spend !== undefined)
+    ? `<small class="source-spend-native">${escapeHtml(fmtCompactCurrency(st.native_spend, st.native_currency))} native</small>`
+    : "";
+  const googleSpendText = group.spend === null || group.spend === undefined
+    ? "Unavailable" : fmtMoney(group.spend);
   const spendChip = isGoogle
-    ? `<div><span>Spend</span><strong>${fmtMoney(group.spend)}</strong></div>`
+    ? `<div><span>Spend</span><strong>${googleSpendText}</strong>${nativeSub}</div>`
     : `<div><span>Spend</span><strong>Unavailable</strong></div>`;
+  const proofChip = isGoogle ? renderSourceSpendProofChip(st) : "";
   return `
     <div class="panel revenue-source-section">
       <div class="panel__header source-group-header">
         <span class="source-group-title">${escapeHtml(group.label)}</span>
         <span class="source-group-status">${escapeHtml(sourceStatusLabel(group))}</span>
+        ${proofChip}
       </div>
       <div class="revenue-summary-strip revenue-summary-strip--four source-group-kpis">
         <div><span>Leads</span><strong>${fmtCount(group.leads)}</strong></div>
@@ -7512,9 +7536,13 @@ function renderRevenueBySourcePage(data) {
   // never decides which source has spend. Empty groups are dropped to keep the
   // page a clean attribution view, not a diagnostics wall.
   const groups = (data && data.rows) || [];
+  // PR-ADS-140: the canonical Google Ads spend-truth proof block (native GBP + USD
+  // reporting + FX/coverage status). Drives the Google Ads spend chip subline and
+  // the "canonical campaign spend" proof chip so the page proves its number.
+  const spendTruth = (data && data.source_spend_truth) || {};
   const active = groups.filter((g) => g && ((g.channels && g.channels.length) || g.leads || g.customers));
   const sections = active.length
-    ? active.map((g, gi) => renderSourceGroupSection(g, gi)).join("")
+    ? active.map((g, gi) => renderSourceGroupSection(g, gi, spendTruth)).join("")
     : `<div class="revenue-empty-inline">No attributed source activity in this window.</div>`;
   body.innerHTML = `
     ${renderMartSpendTruth(data)}
