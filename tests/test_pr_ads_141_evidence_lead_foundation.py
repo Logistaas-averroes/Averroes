@@ -552,7 +552,9 @@ def test_campaign_detail_rejects_invalid_window(monkeypatch):
 
 def test_frontend_drawer_uses_evidence_window_not_365():
     # Drawer sub-fetches pass window=getEvidenceWindow(), never a days downgrade.
-    assert "/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&window=${encodeURIComponent(getEvidenceWindow())}" in APP_JS
+    # (PR-ADS-143 inserts an optional &campaign_key=… between name and window.)
+    assert "/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}" in APP_JS
+    assert "&window=${encodeURIComponent(getEvidenceWindow())}" in APP_JS
     # The hidden all_time->365 helper is gone entirely.
     assert "evidenceWindowDays" not in APP_JS
     # Attribution preview + quality drawer calls also send window=.

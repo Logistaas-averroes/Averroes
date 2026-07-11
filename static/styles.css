@@ -2101,6 +2101,12 @@ body.is-revenue-page #monitoring-banner {
 .campaign-decision-row:hover { background: rgba(18, 158, 245, 0.05); }
 .campaign-decision-row:focus-visible { outline: 2px solid var(--brand-sky-accent); outline-offset: -2px; }
 .td-sub { display: block; font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+.campaign-alias-hint, .campaign-map-note {
+  display: inline-block; margin-left: 8px; font-size: 10px; font-weight: 600;
+  padding: 1px 6px; border-radius: 999px; vertical-align: middle;
+  background: var(--surface-alt); color: var(--text-muted); border: 1px solid var(--border);
+}
+.campaign-map-note { color: #b45309; border-color: rgba(245,158,11,0.32); }
 .campaign-open-icon { font-size: 18px; font-weight: 700; color: var(--text-muted); line-height: 1; }
 .campaign-decision-row:hover .campaign-open-icon { color: var(--brand-sky-accent); }
 

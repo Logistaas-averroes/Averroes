@@ -246,7 +246,9 @@ GENUINE selected-window campaign evidence (PR-ADS-143). The selected Evidence Wi
 **Auth:** Auth
 **Query params:**
 - `window` (string) — evidence window: `7d | 14d | 30d | 60d | 180d | all_time`. **Authoritative** when present; an unknown value returns **400** (never silently coerced).
-- `days` (integer, default 30) — legacy fallback; mapped to the nearest evidence window when `window` is absent.
+- `days` (integer, default 30) — legacy fallback used only when `window` is absent. Honoured **exactly** (90 stays 90, 365 stays 365 — never snapped to the nearest dropdown window); out of range (not 1–365) → **400**.
+
+Window boundaries are **inclusive of exactly N calendar dates** (`start = end − (N−1)`) and resolved in the Google Ads **account timezone (Europe/London)**, not an implicit UTC date. `all_time` → no lower bound.
 
 **Sources (durable, reconciled):**
 - **Spend** — `db.revenue_repository.fetch_canonical_campaign_spend(start, end)` over `google_ads_campaign_daily_spend`: native GBP always, FX-safe USD (`None` when FX coverage is incomplete — never native relabelled as USD). This is the **same canonical source** Revenue by Source and the Revenue Decision Mart use, so per-window spend reconciles exactly.
@@ -283,6 +285,8 @@ The campaign universe is the **UNION** of canonical campaigns with spend and map
       "verdicted_leads": 65,
       "junk_rate_pct": 18.46,
       "cpql_usd": 1398.62,
+      "campaign_key": "101",
+      "aliases": ["mexico,chile"],
       "mapping_status": "mapped",
       "outcome_status": "SQL producer"
     }
@@ -294,7 +298,12 @@ The campaign universe is the **UNION** of canonical campaigns with spend and map
     "spend_currency": "GBP",
     "confirmed_sqls_total": 68,
     "confirmed_junk_total": 179,
-    "overall_cpql_usd": 1896.42
+    "overall_cpql_usd": 1896.42,
+    "overall_cpql_scope": "mapped_only",
+    "mapping_coverage": {
+      "mapped_sqls": 68, "unmatched_sqls": 2, "excluded_not_google_sqls": 7,
+      "total_paid_search_sqls": 77, "status": "partial"
+    }
   },
   "audit": {
     "spend_source": "google_ads_campaign_daily_spend (canonical)",
@@ -311,17 +320,19 @@ The campaign universe is the **UNION** of canonical campaigns with spend and map
 }
 ```
 
-**Outcome status (factual, window-safe — never an action verdict).** The SCALE/HOLD/FIX/CUT verdict doctrine is **NOT valid for arbitrary windows** (it bakes a fixed 30-day design — `min_confirmed_sqls_30d`, `analysis_window_days: 30` — plus a hardcoded `$200` dollar floor, and emits action recommendations calibrated per fixed run-period). So each row carries a factual `outcome_status` computed from the selected-window totals only, first match wins:
-1. **Data unavailable** — spend and lead sources both unavailable (never coerced to 0).
-2. **SQL producer** — `confirmed_sqls > 0`.
-3. **Junk-heavy** — `junk_rate_pct ≥ 25` on a verdicted sample `≥ 5` (both from config; rate + count, never a dollar floor).
-4. **Spend without SQL proof** — `spend_native > 0`, no confirmed SQLs.
-5. **Mapping review** — lead outcomes exist but no canonical spend row maps (absence of a spend row is **not** £0).
+**Campaign identity mapping.** Campaigns are keyed by **`campaign_id`** (the stable Google Ads identity — two campaigns whose display names normalize to the same text are never merged). HubSpot/external lead labels are mapped to canonical campaigns through the durable `google_ads_campaign_identity` table (approved rows only), keyed by the normalized `external_campaign_label`. Precedence: (1) durable approved mapping (`manual` / `exact_normalized`); (2) exact-normalized fallback (`normalize_campaign_name`) against canonical spend names, applied **only** when no durable mapping exists and exactly one spend campaign matches; **never fuzzy**. `match_method = not_google_ads` labels are **excluded** from the Google Ads SQL/CPQL scope (surfaced only in `mapping_coverage`). Labels with no mapping are preserved as **Mapping Review** rows (`mapping_status: "unmatched"`, `campaign_id: null`). Each row exposes `campaign_key` (stable drawer key) and `aliases` (all approved external labels for that canonical campaign). `/api/campaign-detail` accepts `campaign_key` to resolve the headline by id, not display name.
+
+**Outcome status (factual, window-safe — never an action verdict).** The SCALE/HOLD/FIX/CUT verdict doctrine is **NOT valid for arbitrary windows** (it bakes a fixed 30-day design — `min_confirmed_sqls_30d`, `analysis_window_days: 30` — plus a hardcoded `$200` dollar floor, and emits action recommendations calibrated per fixed run-period). So each row carries a factual `outcome_status` computed from the selected-window totals only, first match wins (**risk-first**):
+1. **Mapping review** — an unmatched lead label (no canonical spend id).
+2. **Data unavailable** — spend and lead sources both unavailable (never coerced to 0).
+3. **Junk-heavy** — `junk_rate_pct ≥ 25` on a verdicted sample `≥ 5` (rate + count from config; wins over an incidental SQL so 1 SQL + overwhelming junk is never shown green).
+4. **SQL producer** — `confirmed_sqls > 0`.
+5. **Spend without SQL proof** — `spend_native > 0`, no confirmed SQLs.
 6. **No outcome evidence** — nothing to show for the window.
 
 **Null / unavailable behaviour (no fabricated zeros).** `spend_native`/`spend_usd` are `None` for a campaign with no canonical spend row (unmapped/unavailable — never £0). Lead metrics are genuine `0` when the lead source is live and the campaign has no rows, but `None` when the lead source is unavailable. `cpql_usd` = window USD spend ÷ confirmed SQLs; `None` when spend/FX or the SQL denominator is unavailable, and a genuine zero SQL count renders `N/A` (never `$0`). `spend_usd` is `None` (withheld) whenever FX coverage is incomplete — native GBP is still returned.
 
-**Summary / KPIs.** `spend_native`/`spend_usd` come straight from the canonical window totals, so the KPI spend **reconciles exactly** with canonical spend for the window (and, for `all_time`, with the same canonical all-time spend used by Revenue by Source / the Revenue Decision Mart). `confirmed_sqls_total`/`confirmed_junk_total` sum genuine values only (an unavailable metric is never summed as 0). `overall_cpql_usd` = window USD spend ÷ total confirmed SQLs.
+**Summary / KPIs + CPQL scope.** `spend_native`/`spend_usd` come straight from the canonical window totals, so the KPI spend **reconciles exactly** with canonical spend for the window (and, for `all_time`, with the same canonical all-time spend used by Revenue by Source / the Revenue Decision Mart). `confirmed_sqls_total`/`confirmed_junk_total` are the **Google-Ads-mapped** scope only. `overall_cpql_usd` = canonical Google Ads **USD spend ÷ SQLs mapped to those same Google Ads campaigns** — it **excludes** unmatched and not-Google-Ads SQLs, so an unmatched qualified lead can never lower it. `overall_cpql_scope` is `"complete"` when mapping coverage is complete, else `"mapped_only"` (the UI discloses "Mapped campaigns only"), or `"unavailable"`. `mapping_coverage` exposes `mapped_sqls`, `unmatched_sqls`, `excluded_not_google_sqls`, `total_paid_search_sqls`, and `status` (`complete | partial | unavailable`).
 
 **Audit metadata (machine-verifiable reconciliation — not shown in the UI).** For every window the `audit` block exposes `spend_source`, `lead_source`, `window_start`, `window_end`, `all_time`, `fx_status` (`verified | incomplete | unavailable`), `spend_reconciliation_status` and `lead_reconciliation_status` (`pass | variance | unavailable`). Reconciliation asserts: sum of per-campaign native spend = canonical native total; sum of per-campaign USD = canonical USD total when FX is complete; per-campaign SQL/junk totals = the deduplicated lead aggregate; `all_time` has no lower date bound; no amount is sourced from `AVG()`/`SUM()` over overlapping snapshot rows.
 

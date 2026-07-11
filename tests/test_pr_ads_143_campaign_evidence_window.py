@@ -57,12 +57,17 @@ def _spend(rows, *, total_native, total_usd, fx_complete=True, fx_missing=0,
 
 
 def _spend_row(name, native, usd, *, cid=None, fx=True):
-    return {"campaign_id": cid, "campaign_name": name, "spend": native,
-            "spend_usd": usd, "fx_complete": fx}
+    # Default a stable campaign_id from the name (canonical spend is keyed by id).
+    return {"campaign_id": cid if cid is not None else f"id-{name.lower()}",
+            "campaign_name": name, "spend": native, "spend_usd": usd, "fx_complete": fx}
 
 
 def _leads(rows, *, available=True, event_date_safe=True):
     return {"available": available, "rows": rows, "event_date_safe": event_date_safe}
+
+
+def _identity(mappings=None, *, available=True):
+    return {"available": available, "mappings": mappings or []}
 
 
 def _lead_rows(spec):
@@ -74,7 +79,7 @@ def _lead_rows(spec):
     return out
 
 
-def _patch(monkeypatch, spend_result, lead_result):
+def _patch(monkeypatch, spend_result, lead_result, identity_result=None):
     import db.revenue_repository as repo
     calls = {}
     def _fs(start, end):
@@ -83,8 +88,12 @@ def _patch(monkeypatch, spend_result, lead_result):
     def _fl(start, end):
         calls["leads"] = (start, end)
         return lead_result
+    def _fi(customer_id=None):
+        calls["identity"] = customer_id
+        return identity_result if identity_result is not None else _identity()
     monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", _fs)
     monkeypatch.setattr(repo, "fetch_lead_quality", _fl)
+    monkeypatch.setattr(repo, "fetch_campaign_identity", _fi)
     return calls
 
 
@@ -223,7 +232,7 @@ def test_handler_fallback_uses_unavailable_response():
 def test_evidence_row_return_type_is_dict_not_none():
     # Return annotation + docstring match behaviour (always a dict, never None).
     seg = SERVICE[SERVICE.find("def build_campaign_evidence_row("):
-                  SERVICE.find("def build_campaign_evidence_row(") + 400]
+                  SERVICE.find("def build_campaign_evidence_row(") + 900]
     assert "-> dict[str, Any]:" in seg
     assert "Always returns a dict (never None)" in seg
 
@@ -281,7 +290,7 @@ def test_status_mapping_review_leads_without_spend(monkeypatch):
     c = _status_for(monkeypatch, [], {"orphan": {"in_progress": 1, "unknown": 2}},
                     name="orphan")
     assert c["outcome_status"] == "Mapping review"
-    assert c["spend_native"] is None and c["mapping_status"] == "unmapped_spend"
+    assert c["spend_native"] is None and c["mapping_status"] == "unmatched"
 
 
 def test_status_data_unavailable(monkeypatch):
@@ -464,3 +473,245 @@ def test_campaigns_handler_delegates_to_service():
     body = SERVER[idx:SERVER.find("\n@app.", idx + 1)]
     assert "build_campaign_evidence(" in body
     assert "FROM campaigns" not in body        # no snapshot SQL in the handler
+
+
+# ════════════ 11. Durable campaign-identity mapping (PR-ADS-143 round 2) ════════
+from datetime import datetime, timezone  # noqa: E402
+
+FIXED_NOW = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)
+
+
+def _by_name(out):
+    return {c["campaign_name"]: c for c in out["campaigns"]}
+
+
+def _by_id(out):
+    return {c.get("campaign_id"): c for c in out["campaigns"] if c.get("campaign_id")}
+
+
+def test_mexico_chile_mapped_to_approved_canonical(monkeypatch):
+    spend = _spend([_spend_row("Emerging - Markets", 500.0, 630.0, cid="102")],
+                   total_native=500.0, total_usd=630.0)
+    ident = _identity([{"customer_id": "111", "campaign_id": "102",
+                        "canonical_campaign_name": "Emerging - Markets",
+                        "external_campaign_label": "mexico,chile", "match_method": "manual"}])
+    leads = _leads(_lead_rows({"mexico,chile": {"qualified": 2}}))
+    _patch(monkeypatch, spend, leads, ident)
+    out = _build("30d")
+    row = _by_id(out)["102"]
+    assert row["confirmed_sqls"] == 2                 # mapped onto campaign 102
+    assert "mexico,chile" in row["aliases"]
+    assert row["mapping_status"] == "mapped"
+
+
+def test_manual_alias_mapping(monkeypatch):
+    spend = _spend([_spend_row("Gulf Region", 300.0, 378.0, cid="9")],
+                   total_native=300.0, total_usd=378.0)
+    ident = _identity([{"customer_id": "111", "campaign_id": "9",
+                        "canonical_campaign_name": "Gulf Region",
+                        "external_campaign_label": "gulf-promo-2026", "match_method": "manual"}])
+    leads = _leads(_lead_rows({"gulf-promo-2026": {"qualified": 3}}))
+    _patch(monkeypatch, spend, leads, ident)
+    out = _build("30d")
+    assert _by_id(out)["9"]["confirmed_sqls"] == 3
+
+
+def test_not_google_ads_excluded_from_scope(monkeypatch):
+    spend = _spend([_spend_row("Brand - UK", 1000.0, 1260.0, cid="1")],
+                   total_native=1000.0, total_usd=1260.0)
+    ident = _identity([{"customer_id": "111", "campaign_id": None,
+                        "canonical_campaign_name": None,
+                        "external_campaign_label": "bing brand", "match_method": "not_google_ads"}])
+    leads = _leads(_lead_rows({"brand - uk": {"qualified": 5},
+                               "bing brand": {"qualified": 4}}))
+    _patch(monkeypatch, spend, leads, ident)
+    out = _build("30d")
+    # The not_google_ads label is not a table row and is excluded from CPQL scope.
+    assert "bing brand" not in _by_name(out)
+    cov = out["summary"]["mapping_coverage"]
+    assert cov["excluded_not_google_sqls"] == 4
+    assert out["summary"]["confirmed_sqls_total"] == 5           # mapped only
+    # Overall CPQL uses mapped SQLs only (1260/5), scope disclosed.
+    assert out["summary"]["overall_cpql_usd"] == 252.0
+    assert out["summary"]["overall_cpql_scope"] == "mapped_only"
+
+
+def test_unmatched_label_is_mapping_review(monkeypatch):
+    spend = _spend([_spend_row("Brand - UK", 1000.0, 1260.0, cid="1")],
+                   total_native=1000.0, total_usd=1260.0)
+    leads = _leads(_lead_rows({"brand - uk": {"qualified": 5},
+                               "totally unknown label": {"junk": 2}}))
+    _patch(monkeypatch, spend, leads, _identity([]))
+    out = _build("30d")
+    review = _by_name(out).get("totally unknown label")
+    assert review is not None and review["outcome_status"] == "Mapping review"
+    assert review["campaign_id"] is None and review["spend_native"] is None
+    assert out["summary"]["mapping_coverage"]["unmatched_sqls"] == 0
+
+
+def test_two_campaign_ids_same_display_name_not_merged(monkeypatch):
+    # Two DISTINCT ids share the display name "Gulf" — they must stay separate, and
+    # a lead whose name normalizes to "gulf" is ambiguous → unmatched (never merged).
+    spend = _spend([_spend_row("Gulf", 100.0, 126.0, cid="201"),
+                    _spend_row("Gulf", 200.0, 252.0, cid="202")],
+                   total_native=300.0, total_usd=378.0)
+    leads = _leads(_lead_rows({"gulf": {"qualified": 3}}))
+    _patch(monkeypatch, spend, leads, _identity([]))
+    out = _build("30d")
+    ids = _by_id(out)
+    assert "201" in ids and "202" in ids                        # both preserved
+    assert ids["201"]["confirmed_sqls"] == 0 and ids["202"]["confirmed_sqls"] == 0
+    # The ambiguous lead is NOT merged into either id — it is unmatched.
+    assert out["summary"]["mapping_coverage"]["unmatched_sqls"] == 3
+
+
+def test_punctuation_and_spacing_variations_match(monkeypatch):
+    spend = _spend([_spend_row("Brand - UK", 1000.0, 1260.0, cid="1")],
+                   total_native=1000.0, total_usd=1260.0)
+    # Lead label with extra punctuation/spacing normalizes equal to the spend name.
+    leads = _leads(_lead_rows({"Brand   -   UK!!": {"qualified": 4}}))
+    _patch(monkeypatch, spend, leads, _identity([]))
+    out = _build("30d")
+    assert _by_id(out)["1"]["confirmed_sqls"] == 4              # exact-normalized match
+
+
+# ── CPQL alignment (adversarial) ──
+
+
+def test_unmatched_qualified_lead_never_lowers_canonical_cpql(monkeypatch):
+    spend = _spend([_spend_row("Brand - UK", 1000.0, 1260.0, cid="1")],
+                   total_native=1000.0, total_usd=1260.0)
+    base_leads = _leads(_lead_rows({"brand - uk": {"qualified": 2}}))
+    _patch(monkeypatch, spend, base_leads, _identity([]))
+    cpql_before = _build("30d")["summary"]["overall_cpql_usd"]   # 1260/2 = 630
+    # Add 100 UNMATCHED qualified leads — canonical CPQL must NOT drop.
+    poisoned = _leads(_lead_rows({"brand - uk": {"qualified": 2},
+                                  "unmatched noise": {"qualified": 100}}))
+    _patch(monkeypatch, spend, poisoned, _identity([]))
+    after = _build("30d")["summary"]
+    assert after["overall_cpql_usd"] == cpql_before == 630.0     # unchanged
+    assert after["overall_cpql_scope"] == "mapped_only"
+    assert after["mapping_coverage"]["unmatched_sqls"] == 100
+
+
+def test_per_campaign_cpql_uses_only_that_campaigns_mapped_sqls(monkeypatch):
+    spend = _spend([_spend_row("A", 1000.0, 1000.0, cid="a"),
+                    _spend_row("B", 2000.0, 2000.0, cid="b")],
+                   total_native=3000.0, total_usd=3000.0)
+    leads = _leads(_lead_rows({"a": {"qualified": 4}, "b": {"qualified": 10}}))
+    _patch(monkeypatch, spend, leads, _identity([]))
+    ids = _by_id(_build("30d"))
+    assert ids["a"]["cpql_usd"] == 250.0        # 1000/4
+    assert ids["b"]["cpql_usd"] == 200.0        # 2000/10
+
+
+# ── Exact rolling-day boundaries (fixed now) ──
+
+
+@pytest.mark.parametrize("window,expect", [("7d", 7), ("14d", 14), ("30d", 30),
+                                           ("60d", 60), ("180d", 180)])
+def test_exact_inclusive_day_boundaries(monkeypatch, window, expect):
+    _patch(monkeypatch, _spend([], total_native=0.0, total_usd=0.0),
+           _leads([]), _identity([]))
+    out = _build_now(window)
+    from datetime import date
+    start = date.fromisoformat(out["window_start"])
+    end = date.fromisoformat(out["window_end"])
+    assert (end - start).days + 1 == expect        # exactly N calendar dates
+    assert out["all_time"] is False
+
+
+def test_all_time_has_no_lower_bound(monkeypatch):
+    _patch(monkeypatch, _spend([], total_native=0.0, total_usd=0.0),
+           _leads([]), _identity([]))
+    out = _build_now("all_time")
+    assert out["window_start"] is None and out["all_time"] is True
+
+
+def test_account_timezone_is_europe_london():
+    from services.campaign_evidence_service import ACCOUNT_TZ
+    assert ACCOUNT_TZ == "Europe/London"
+
+
+def _build_now(window):
+    from services.campaign_evidence_service import build_campaign_evidence
+    return build_campaign_evidence(window, now=FIXED_NOW)
+
+
+# ── Exact numeric days (no snapping) ──
+
+
+def test_numeric_days_honoured_exactly(monkeypatch):
+    _patch(monkeypatch, _spend([], total_native=0.0, total_usd=0.0),
+           _leads([]), _identity([]))
+    from services.campaign_evidence_service import build_campaign_evidence
+    from datetime import date
+    for days in (90, 365, 45):
+        out = build_campaign_evidence(window=None, days=days, now=FIXED_NOW)
+        assert out["window"] == f"{days}d"          # never snapped to a dropdown window
+        start = date.fromisoformat(out["window_start"])
+        end = date.fromisoformat(out["window_end"])
+        assert (end - start).days + 1 == days
+
+
+def test_out_of_range_days_rejected(monkeypatch):
+    _patch(monkeypatch, _spend([], total_native=0.0, total_usd=0.0),
+           _leads([]), _identity([]))
+    from services.campaign_evidence_service import build_campaign_evidence, EvidenceWindowError
+    with pytest.raises(EvidenceWindowError):
+        build_campaign_evidence(window=None, days=400, now=FIXED_NOW)
+
+
+def test_endpoint_days_not_snapped_to_window():
+    # The handler passes exact days to the service, never mapping 365→180d etc.
+    idx = SERVER.find("def api_campaigns(")
+    body = SERVER[idx:SERVER.find("\n@app.", idx + 1)]
+    assert "build_campaign_evidence(window=None, days=days)" in body
+    assert "_days_to_evidence_window" not in SERVER      # nearest-window mapper removed
+
+
+# ── Risk-first outcome status (section 7) ──
+
+
+def test_high_junk_with_sql_is_junk_heavy_not_sql_producer(monkeypatch):
+    # 1 SQL + overwhelming, well-sampled junk → Junk-heavy wins (risk-first).
+    spend = _spend([_spend_row("Noisy", 500.0, 630.0, cid="n")],
+                   total_native=500.0, total_usd=630.0)
+    leads = _leads(_lead_rows({"noisy": {"qualified": 1, "junk": 20}}))
+    _patch(monkeypatch, spend, leads, _identity([]))
+    row = _by_id(_build("30d"))["n"]
+    assert row["confirmed_sqls"] == 1 and row["junk_rate_pct"] >= 25
+    assert row["outcome_status"] == "Junk-heavy"
+
+
+def test_junk_heavy_precedence_documented():
+    assert "RISK-FIRST" in SERVICE
+
+
+# ── Freshness dependency (section 6) ──
+
+
+def test_campaign_freshness_uses_canonical_spend_and_hubspot():
+    # The campaigns PAGE freshness now reflects BOTH canonical spend AND HubSpot
+    # contacts (worst-of); it no longer tracks only the snapshot `campaigns` table.
+    assert 'campaigns:         ["google_ads_api/canonical_spend", "hubspot/contacts"]' in APP_JS
+    assert 'campaigns:               ["google_ads_api/canonical_spend", "hubspot/contacts"]' in APP_JS
+    # No campaigns-page mapping still points at the snapshot campaigns dataset alone.
+    assert 'campaigns:         ["google_ads_api/campaigns"]' not in APP_JS
+    assert 'campaigns:               ["google_ads_api/campaigns"]' not in APP_JS
+    fresh = open(os.path.join(ROOT, "services", "freshness_service.py"), encoding="utf-8").read()
+    assert '"canonical_spend": {' in fresh
+    assert '"google_ads_campaign_daily_spend"' in fresh
+
+
+# ── Audit surfaces mapping + timezone ──
+
+
+def test_audit_surfaces_identity_and_timezone(monkeypatch):
+    _patch(monkeypatch, _spend([_spend_row("A", 10.0, 12.0, cid="a")],
+                                total_native=10.0, total_usd=12.0),
+           _leads(_lead_rows({"a": {"qualified": 1}})), _identity([]))
+    audit = _build("30d")["audit"]
+    assert audit["account_timezone"] == "Europe/London"
+    assert audit["identity_source"] == "google_ads_campaign_identity (approved mappings)"
+    assert audit["identity_available"] is True

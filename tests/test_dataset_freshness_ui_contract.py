@@ -35,6 +35,7 @@ _APP_JS_TEXT = _APP_JS.read_text(encoding="utf-8")
 # Known canonical freshness dataset keys (must match _KNOWN_DATASETS in server.py)
 KNOWN_DATASET_KEYS: set[str] = {
     "google_ads_api/campaigns",
+    "google_ads_api/canonical_spend",   # PR-ADS-143: canonical daily-spend freshness
     "google_ads_api/keywords",
     "google_ads_api/search_terms",
     "google_ads_api/geo",

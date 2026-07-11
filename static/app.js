@@ -120,7 +120,10 @@ let _latestRunForMeta = null;
 // Derived pages (ngrams, waste) share their source dataset (google_ads_api/search_terms)
 // because no separate freshness record exists for the derived output.
 const PAGE_DATASET_MAP = {
-  campaigns:         ["google_ads_api/campaigns"],
+  // PR-ADS-143: the Campaign Evidence page depends on BOTH canonical Google Ads
+  // daily spend AND HubSpot contacts; the compact freshness reflects the worst of
+  // the two, so it never shows fresh when HubSpot contacts are stale/failed.
+  campaigns:         ["google_ads_api/canonical_spend", "hubspot/contacts"],
   waste:             ["google_ads_api/search_terms"],   // waste_terms derived from search_terms
   search_terms:      ["google_ads_api/search_terms"],
   ngrams:            ["google_ads_api/search_terms"],   // n-grams derived from search_terms
@@ -469,7 +472,7 @@ const PAGE_DEPENDENCIES = {
   dashboard:               ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals", "google_ads_api/search_terms"],
   "action-queue":          ["google_ads_api/campaigns", "google_ads_api/search_terms", "hubspot/contacts"],
   reports:                 ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals"],
-  campaigns:               ["google_ads_api/campaigns"],
+  campaigns:               ["google_ads_api/canonical_spend", "hubspot/contacts"],
   waste:                   ["google_ads_api/search_terms"],
   "search-terms":          ["google_ads_api/search_terms"],
   ngrams:                  ["google_ads_api/search_terms"],
@@ -6022,6 +6025,12 @@ function renderCampaignEvidenceKPIs() {
     : "native spend unavailable";
   const cpql = s.overall_cpql_usd != null ? fmtDollar(s.overall_cpql_usd)
     : `<span class="detail-unavailable">N/A</span>`;
+  // CPQL scope disclosure — mapped-Google-Ads-only when lead mapping is partial, so
+  // it is never presented as an account-wide figure.
+  const cov = s.mapping_coverage || {};
+  const cpqlSub = s.overall_cpql_scope === "mapped_only"
+    ? `<span class="detail-unavailable" title="${fmtCount(cov.unmatched_sqls)} unmatched + ${fmtCount(cov.excluded_not_google_sqls)} non-Google SQLs excluded">Mapped campaigns only</span>`
+    : "USD spend ÷ mapped SQLs";
   return `
     <div class="evidence-kpi-grid campaign-kpi-grid">
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Campaigns</div>
@@ -6032,13 +6041,13 @@ function renderCampaignEvidenceKPIs() {
         <div class="dash-kpi-card__sub">${spendSub}</div></div>
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Confirmed SQLs</div>
         <div class="dash-kpi-card__value">${fmtCount(s.confirmed_sqls_total)}</div>
-        <div class="dash-kpi-card__sub">HubSpot-qualified, this window</div></div>
+        <div class="dash-kpi-card__sub">Mapped Google Ads, this window</div></div>
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Confirmed Junk</div>
         <div class="dash-kpi-card__value">${fmtCount(s.confirmed_junk_total)}</div>
         <div class="dash-kpi-card__sub">Excludes wrong-fit</div></div>
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Overall CPQL</div>
         <div class="dash-kpi-card__value">${cpql}</div>
-        <div class="dash-kpi-card__sub">USD spend ÷ confirmed SQLs</div></div>
+        <div class="dash-kpi-card__sub">${cpqlSub}</div></div>
     </div>`;
 }
 
@@ -6142,7 +6151,9 @@ function renderCampaignDecisionTable() {
   const body = rows.map(renderCampaignEvidenceRow).join("");
   host.innerHTML = `<table class="data-table campaign-decision-table">${thead}<tbody>${body}</tbody></table>`;
   host.querySelectorAll("[data-campaign-open]").forEach((el) => {
-    const open = () => openCampaignDrawer(decodeURIComponent(el.getAttribute("data-campaign-open")));
+    const open = () => openCampaignDrawer(
+      decodeURIComponent(el.getAttribute("data-campaign-open")),
+      el.getAttribute("data-campaign-key") || null);
     el.addEventListener("click", (e) => {
       if (e.target.closest("a")) return;
       open();
@@ -6181,10 +6192,16 @@ function renderCampaignEvidenceRow(c) {
     : (c.confirmed_sqls === 0 ? "N/A"
     : (c.cpql_usd != null ? fmtDollar(c.cpql_usd) : "—"));
   const nameEnc = encodeURIComponent(c.campaign_name || "");
+  // Stable key for drawer resolution — campaign_id/campaign_key, never display name alone.
+  const keyAttr = c.campaign_key != null ? ` data-campaign-key="${escapeHtml(String(c.campaign_key))}"` : "";
+  const aliasHint = (c.aliases && c.aliases.length)
+    ? `<span class="campaign-alias-hint" title="Also: ${escapeHtml(c.aliases.join(", "))}">+${c.aliases.length} alias${c.aliases.length === 1 ? "" : "es"}</span>` : "";
+  const mapNote = c.mapping_status === "unmatched"
+    ? `<span class="campaign-map-note" title="Lead label with no canonical Google Ads campaign mapping">unmapped</span>` : "";
   return `
-    <tr class="campaign-decision-row" tabindex="0" role="button" data-campaign-open="${nameEnc}"
+    <tr class="campaign-decision-row" tabindex="0" role="button" data-campaign-open="${nameEnc}"${keyAttr}
         aria-label="Open evidence for ${escapeHtml(c.campaign_name || "campaign")}">
-      <td class="td--name" data-label="Campaign">${escapeHtml(c.campaign_name || "—")}</td>
+      <td class="td--name" data-label="Campaign">${escapeHtml(c.campaign_name || "—")}${aliasHint}${mapNote}</td>
       <td data-label="Status">${campaignStatusBadge(c.outcome_status)}</td>
       <td class="td--num" data-label="Spend">${campaignSpendCell(c)}</td>
       <td class="td--num" data-label="Leads">${leads}</td>
@@ -11823,7 +11840,7 @@ async function loadCampaignDrawerNgrams(campaignName, requestId = null) {
 }
 
 
-async function openCampaignDrawer(campaignName) {
+async function openCampaignDrawer(campaignName, campaignKey = null) {
   if (!campaignName) return;
   _drawerOpenCampaign = campaignName;
   activeCampaignDrawerName = campaignName;
@@ -11865,8 +11882,9 @@ async function openCampaignDrawer(campaignName) {
     drawerNgramStatus = "loading";
     drawerNgramRows   = [];
 
+    const keyParam = campaignKey ? `&campaign_key=${encodeURIComponent(campaignKey)}` : "";
     const detail = await fetchJSON(
-      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&window=${encodeURIComponent(getEvidenceWindow())}`
+      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}${keyParam}&window=${encodeURIComponent(getEvidenceWindow())}`
     );
 
     if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
@@ -12030,6 +12048,7 @@ function renderCampaignDrawer(data) {
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         Canonical Google Ads spend reconciled with deduplicated HubSpot lead outcomes for this window${fxNote}
       </div>
+      ${(camp.aliases && camp.aliases.length) ? `<p class="drawer-source-note">Approved external aliases: ${camp.aliases.map((a) => escapeHtml(a)).join(", ")}</p>` : ""}
       <p class="drawer-readonly-note">Outcome status is factual, evidence-based and read-only. No Google Ads changes are made.</p>
     </div>`;
 

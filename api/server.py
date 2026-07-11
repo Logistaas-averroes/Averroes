@@ -879,10 +879,11 @@ def api_campaigns(
     recommendations), so each row carries a factual, window-safe ``outcome_status``
     computed from the selected-window totals only — never a recomputed verdict.
     """
-    # Legacy ``days=`` maps onto the nearest evidence window for backward compat;
-    # ``window=`` (7d…180d/all_time) is authoritative. Unknown window → 400.
-    resolved_window = window if (isinstance(window, str) and window) \
-        else _days_to_evidence_window(days)
+    # ``window=`` (7d…180d/all_time) is authoritative. When only ``days=`` is
+    # given it is honoured EXACTLY (90 stays 90, 365 stays 365 — never snapped to
+    # the nearest dropdown window); out-of-range days → 400.
+    use_window = isinstance(window, str) and bool(window)
+    resolved_window = window if use_window else f"{days}d"
 
     from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
     from services.campaign_evidence_service import (  # noqa: PLC0415
@@ -890,7 +891,9 @@ def api_campaigns(
         unavailable_response,
     )
     try:
-        return build_campaign_evidence(resolved_window)
+        if use_window:
+            return build_campaign_evidence(window)
+        return build_campaign_evidence(window=None, days=days)
     except EvidenceWindowError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -899,18 +902,6 @@ def api_campaigns(
         # "unavailable" — never a fabricated 0, never a partial ad-hoc dict.
         log.error("[api/campaigns] error: %s", exc, exc_info=True)
         return unavailable_response(resolved_window)
-
-
-def _days_to_evidence_window(days: int) -> str:
-    """Map a legacy ``days=`` value to the nearest supported evidence window."""
-    from analysis.evidence_windows import EVIDENCE_WINDOW_DAYS  # noqa: PLC0415
-    numeric = [(k, v) for k, v in EVIDENCE_WINDOW_DAYS.items() if v is not None]
-    try:
-        target = int(days)
-    except (TypeError, ValueError):
-        return "30d"
-    best = min(numeric, key=lambda kv: abs(kv[1] - target))
-    return best[0]
 
 
 # Lead dedup key: latest run per contact (rows with no contact_id stay individual,
@@ -1547,7 +1538,8 @@ def api_leads_country_summary(
 
 # ── Campaign detail — shared builder ───────────────────────────────────────────
 
-def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None = None) -> dict:
+def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None = None,
+                           campaign_key: str | None = None) -> dict:
     """Assemble full campaign investigation payload for a given campaign.
 
     PR-ADS-143: the headline campaign card is GENUINE selected-window evidence —
@@ -1575,11 +1567,15 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
             from services.campaign_evidence_service import (  # noqa: PLC0415
                 build_campaign_evidence_row,
             )
-            row = build_campaign_evidence_row(window_key, campaign_name)
+            row = build_campaign_evidence_row(window_key, campaign_name,
+                                              campaign_key=campaign_key)
             if row and not row.get("_not_found") and not row.get("db_unavailable"):
                 campaign_card = {
                     "campaign_name":   row.get("campaign_name"),
                     "campaign_id":     row.get("campaign_id"),
+                    "campaign_key":    row.get("campaign_key"),
+                    # Approved external aliases belonging to this canonical campaign.
+                    "aliases":         row.get("aliases") or [],
                     # Selected-window canonical spend (native GBP + FX-safe USD).
                     "spend_native":    row.get("spend_native"),
                     "spend_usd":       row.get("spend_usd"),
@@ -1915,6 +1911,11 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
 def api_campaign_detail_query(
     user: dict = Depends(require_auth),
     campaign_name: str = Query(..., description="Campaign name (URL-encoded)"),
+    campaign_key: str | None = Query(
+        default=None,
+        description="Stable campaign key/id — resolves the headline without relying "
+                    "on the display name when an id exists.",
+    ),
     days: int = Query(default=30, description="Number of days to look back (1–365)"),
     window: str | None = Query(
         default=None,
@@ -1927,11 +1928,13 @@ def api_campaign_detail_query(
     contain literal forward slashes. The frontend must call
     encodeURIComponent(campaign_name) before appending to the URL.
     PR-ADS-141: honours the evidence window (all_time = no lower date bound) so the
-    drawer proof matches the Campaigns headline window exactly.
+    drawer proof matches the Campaigns headline window exactly. PR-ADS-143: prefers
+    ``campaign_key`` (stable id) over the display name for headline resolution.
     Phase 1 read-only — no writes to Google Ads or HubSpot.
     """
     days_val, window_key = _resolve_evidence_window(window, days)
-    result = _build_campaign_detail(campaign_name, days_val, window_key=window_key)
+    result = _build_campaign_detail(campaign_name, days_val, window_key=window_key,
+                                    campaign_key=campaign_key)
     result["window"] = window_key
     return result
 
