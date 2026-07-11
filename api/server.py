@@ -1553,35 +1553,34 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
     waste evidence is still returned. Returns a safe shape with db_unavailable=True
     when the database is down. Read-only — no writes to Google Ads or HubSpot.
     """
-    # Normalize to lowercase/strip to match canonical stored values
-    # (db/writers.py normalizes to lower+strip on every write).
-    name_key = campaign_name.strip().lower()
-
-    # ── Headline card — GENUINE selected-window evidence (not a snapshot) ──────
-    # Built from the same service the Campaign Evidence table uses, so the card
-    # and the table row agree exactly. Computed before the DB block below (which
-    # gathers the supplementary lead/country/keyword/waste evidence sections).
+    # ── Headline card + supplementary lead evidence — GENUINE selected-window ──
+    # evidence from the SAME service the Campaign Evidence table uses, aggregated
+    # across the campaign's approved ALIAS SET on the event-date (contact_created_at)
+    # grain, so the drawer Lead Quality / Countries / Recent Leads reconcile EXACTLY
+    # with the table row. Keyword + waste previews are gathered from the DB below.
     campaign_card = None
+    drawer_lead_quality = None
+    drawer_countries: list = []
+    drawer_recent: list = []
+    drawer_label_set: list = []
     if window_key:
         try:
             from services.campaign_evidence_service import (  # noqa: PLC0415
-                build_campaign_evidence_row,
+                build_campaign_drawer_evidence,
             )
-            row = build_campaign_evidence_row(window_key, campaign_name,
-                                              campaign_key=campaign_key)
-            if row and not row.get("_not_found") and not row.get("db_unavailable"):
+            ev = build_campaign_drawer_evidence(window_key, campaign_name,
+                                                campaign_key=campaign_key)
+            row = ev.get("campaign")
+            if row and not row.get("db_unavailable"):
                 campaign_card = {
                     "campaign_name":   row.get("campaign_name"),
                     "campaign_id":     row.get("campaign_id"),
                     "campaign_key":    row.get("campaign_key"),
-                    # Approved external aliases belonging to this canonical campaign.
                     "aliases":         row.get("aliases") or [],
-                    # Selected-window canonical spend (native GBP + FX-safe USD).
                     "spend_native":    row.get("spend_native"),
                     "spend_usd":       row.get("spend_usd"),
                     "spend_currency":  row.get("spend_currency"),
                     "fx_complete":     row.get("fx_complete"),
-                    # Selected-window deduplicated lead outcomes (event-date grain).
                     "total_leads":     row.get("total_leads"),
                     "confirmed_sqls":  row.get("confirmed_sqls"),
                     "confirmed_junk":  row.get("confirmed_junk"),
@@ -1598,30 +1597,24 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
                     "window_end":      row.get("window_end"),
                     "all_time":        row.get("all_time"),
                 }
+                drawer_lead_quality = ev.get("lead_quality")
+                drawer_countries = ev.get("countries") or []
+                drawer_recent = ev.get("recent_leads") or []
+                drawer_label_set = ev.get("label_set") or []
         except Exception as exc:  # noqa: BLE001
-            log.warning("[campaign-detail] headline build failed: %s", exc)
-
-    # PR-ADS-141: evidence-window date bound. `days is None` (all_time) omits the
-    # lower date restriction from EVERY drawer query — never a hidden 365-day
-    # downgrade. Otherwise the rolling bound is prepended to each WHERE.
-    if days is None:
-        date_and = ""
-        date_params: list = []
-    else:
-        date_and = "run_date >= NOW() - INTERVAL '1 day' * %s AND "
-        date_params = [days]
+            log.warning("[campaign-detail] drawer evidence build failed: %s", exc)
 
     _empty: dict = {
         "days":          days,
         "campaign_name": campaign_name,
-        # Headline card is genuine selected-window evidence (durable source); it
-        # survives even when the supplementary-evidence connection is unavailable.
+        # Headline card + lead evidence are genuine selected-window evidence (durable
+        # source); they survive even when the keyword/waste connection is unavailable.
         "campaign":      campaign_card,
-        "lead_quality":  None,
-        "countries":     [],
+        "lead_quality":  drawer_lead_quality,
+        "countries":     drawer_countries,
         "keywords":      [],
         "waste_terms":   [],
-        "recent_leads":  [],
+        "recent_leads":  drawer_recent,
     }
     _db_empty = {**_empty, "db_unavailable": True}
 
@@ -1632,258 +1625,80 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
                 return _db_empty
 
             with conn.cursor() as cur:
-                # Headline card comes from the selected-window service (above), not
-                # the scheduler snapshot. Even when it is None (no evidence in the
-                # window), we continue to return lead/keyword/waste evidence below.
+                # Headline card + lead evidence come from the selected-window service
+                # (above); this connection only gathers the keyword + waste previews.
                 campaign_out = campaign_card
 
-                # ── Lead quality — deduped by contact_id, campaign-scoped ─────
-                # Direct equality on campaign_name (already normalized).
-                cur.execute(
-                    f"""
-                    WITH deduped AS (
-                        SELECT DISTINCT ON (
-                            CASE
-                                WHEN contact_id IS NOT NULL AND contact_id <> ''
-                                THEN contact_id
-                                ELSE CAST(id AS TEXT)
-                            END
-                        )
-                            status_category
-                        FROM leads
-                        WHERE {date_and}campaign_name = %s
-                        ORDER BY
-                            CASE
-                                WHEN contact_id IS NOT NULL AND contact_id <> ''
-                                THEN contact_id
-                                ELSE CAST(id AS TEXT)
-                            END,
-                            run_date DESC,
-                            id DESC
-                    )
-                    SELECT
-                        COUNT(*)                                                    AS total_leads,
-                        SUM(CASE WHEN status_category = 'qualified'   THEN 1 ELSE 0 END) AS confirmed_sqls,
-                        SUM(CASE WHEN status_category = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
-                        SUM(CASE WHEN status_category = 'junk'        THEN 1 ELSE 0 END) AS confirmed_junk,
-                        SUM(CASE WHEN status_category = 'wrong_fit'   THEN 1 ELSE 0 END) AS wrong_fit,
-                        SUM(CASE WHEN status_category = 'unknown'     THEN 1 ELSE 0 END) AS unknown
-                    FROM deduped
-                    """,
-                    (*date_params, name_key),
-                )
-                lq_row = cur.fetchone()
-                lq_cols = [d[0] for d in cur.description]
-                lq = dict(zip(lq_cols, lq_row)) if lq_row else None
+                # Normalized label set (canonical name + approved aliases) for
+                # matching the keyword/waste tables to the SAME campaign identity.
+                label_set_lower = sorted({(lbl or "").strip().lower()
+                                          for lbl in drawer_label_set if lbl})
 
-                lead_quality_out = None
-                if lq and lq.get("total_leads"):
-                    confirmed_sqls = int(lq["confirmed_sqls"] or 0)
-                    in_progress    = int(lq["in_progress"]    or 0)
-                    confirmed_junk = int(lq["confirmed_junk"] or 0)
-                    wrong_fit      = int(lq["wrong_fit"]      or 0)
-                    unknown        = int(lq["unknown"]        or 0)
-                    verdicted      = confirmed_sqls + in_progress + confirmed_junk + wrong_fit
-                    junk_rate      = None
-                    if verdicted > 0:
-                        junk_rate = round((confirmed_junk / verdicted) * 100, 2)
-                    lead_quality_out = {
-                        "total_leads":     int(lq["total_leads"] or 0),
-                        "confirmed_sqls":  confirmed_sqls,
-                        "in_progress":     in_progress,
-                        "confirmed_junk":  confirmed_junk,
-                        "wrong_fit":       wrong_fit,
-                        "unknown":         unknown,
-                        "verdicted_leads": verdicted,
-                        "junk_rate_pct":   junk_rate,
-                    }
-
-                # ── Country breakdown — deduped campaign leads by country ──────
-                # Direct equality on campaign_name (already normalized).
-                cur.execute(
-                    f"""
-                    WITH deduped AS (
-                        SELECT DISTINCT ON (
-                            CASE
-                                WHEN contact_id IS NOT NULL AND contact_id <> ''
-                                THEN contact_id
-                                ELSE CAST(id AS TEXT)
-                            END
-                        )
-                            country,
-                            status_category
-                        FROM leads
-                        WHERE {date_and}campaign_name = %s
-                        ORDER BY
-                            CASE
-                                WHEN contact_id IS NOT NULL AND contact_id <> ''
-                                THEN contact_id
-                                ELSE CAST(id AS TEXT)
-                            END,
-                            run_date DESC,
-                            id DESC
-                    )
-                    SELECT
-                        COALESCE(NULLIF(BTRIM(country), ''), '(unknown)') AS country,
-                        COUNT(*)                                     AS total_leads,
-                        SUM(CASE WHEN status_category = 'qualified'   THEN 1 ELSE 0 END) AS confirmed_sqls,
-                        SUM(CASE WHEN status_category = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
-                        SUM(CASE WHEN status_category = 'junk'        THEN 1 ELSE 0 END) AS confirmed_junk,
-                        SUM(CASE WHEN status_category = 'wrong_fit'   THEN 1 ELSE 0 END) AS wrong_fit,
-                        SUM(CASE WHEN status_category = 'unknown'     THEN 1 ELSE 0 END) AS unknown
-                    FROM deduped
-                    GROUP BY COALESCE(NULLIF(BTRIM(country), ''), '(unknown)')
-                    ORDER BY total_leads DESC
-                    """,
-                    (*date_params, name_key),
-                )
-                country_rows = cur.fetchall()
-                country_cols = [d[0] for d in cur.description]
-                countries_out = []
-                for row in country_rows:
-                    r = dict(zip(country_cols, row))
-                    c_sqls = int(r["confirmed_sqls"] or 0)
-                    c_prog = int(r["in_progress"]    or 0)
-                    c_junk = int(r["confirmed_junk"] or 0)
-                    c_wfit = int(r["wrong_fit"]      or 0)
-                    c_unk  = int(r["unknown"]        or 0)
-                    # verdicted_leads = qualified + in_progress + junk + wrong_fit
-                    # (consistent with /api/leads/country-summary definition)
-                    c_verd = c_sqls + c_prog + c_junk + c_wfit
-                    c_junk_rate = round((c_junk / c_verd) * 100, 2) if c_verd > 0 else None
-                    countries_out.append({
-                        "country":        r["country"],
-                        "total_leads":    int(r["total_leads"] or 0),
-                        "confirmed_sqls": c_sqls,
-                        "in_progress":    c_prog,
-                        "confirmed_junk": c_junk,
-                        "wrong_fit":      c_wfit,
-                        "unknown":        c_unk,
-                        "junk_rate_pct":  c_junk_rate,
-                    })
-
-                # ── Keywords preview — top 10 by spend for this campaign ───────
-                # Direct equality on campaign_name (already normalized).
-                cur.execute(
-                    f"""
-                    SELECT
-                        keyword,
-                        match_type,
-                        SUM(spend_usd)     AS spend_usd,
-                        SUM(clicks)        AS clicks,
-                        SUM(impressions)   AS impressions,
-                        SUM(conversions)   AS conversions,
-                        AVG(quality_score) AS quality_score,
-                        CASE
-                            WHEN SUM(clicks) > 0 THEN SUM(spend_usd) / SUM(clicks)
-                            ELSE 0
-                        END                AS cpc_usd
-                    FROM keywords
-                    WHERE {date_and}campaign_name = %s
-                    GROUP BY keyword, match_type
-                    ORDER BY spend_usd DESC NULLS LAST
-                    LIMIT 10
-                    """,
-                    (*date_params, name_key),
-                )
-                kw_rows = cur.fetchall()
-                kw_cols = [d[0] for d in cur.description]
+                # ── Keywords preview — LATEST snapshot per keyword (never summed) ──
+                # The keywords table stores overlapping scheduler snapshots, so we
+                # take the latest coherent snapshot per keyword (DISTINCT ON …
+                # ORDER BY run_date DESC) — NOT a SUM across run_date snapshots — and
+                # label it as such. Matched by the campaign's approved label set.
                 keywords_out = []
-                for row in kw_rows:
-                    r = dict(zip(kw_cols, row))
-                    keywords_out.append({
-                        "keyword":       r["keyword"],
-                        "match_type":    r["match_type"],
-                        "spend_usd":     round(float(r["spend_usd"]),     2) if r["spend_usd"]     is not None else 0.0,
-                        "clicks":        int(r["clicks"]   or 0),
-                        "impressions":   int(r["impressions"] or 0),
-                        "conversions":   round(float(r["conversions"]),   2) if r["conversions"]   is not None else 0.0,
-                        "quality_score": round(float(r["quality_score"]), 2) if r["quality_score"] is not None else None,
-                        "cpc_usd":       round(float(r["cpc_usd"]),       2) if r["cpc_usd"]       is not None else 0.0,
-                    })
-
-                # ── Waste terms preview — top 10 by spend for this campaign ───
-                # Direct equality on campaign_name (already normalized).
-                cur.execute(
-                    f"""
-                    SELECT
-                        search_term,
-                        SUM(spend_usd)          AS spend_usd,
-                        junk_category,
-                        matched_pattern,
-                        SUM(crm_junk_confirmed) AS crm_junk_confirmed,
-                        MAX(run_date)           AS run_date
-                    FROM waste_terms
-                    WHERE {date_and}campaign_name = %s
-                    GROUP BY search_term, junk_category, matched_pattern
-                    ORDER BY spend_usd DESC NULLS LAST
-                    LIMIT 10
-                    """,
-                    (*date_params, name_key),
-                )
-                wt_rows = cur.fetchall()
-                wt_cols = [d[0] for d in cur.description]
-                waste_out = []
-                for row in wt_rows:
-                    r = dict(zip(wt_cols, row))
-                    waste_out.append({
-                        "search_term":        r["search_term"],
-                        "spend_usd":          round(float(r["spend_usd"]), 2) if r["spend_usd"] is not None else 0.0,
-                        "junk_category":      r["junk_category"],
-                        "matched_pattern":    r["matched_pattern"],
-                        "crm_junk_confirmed": int(r["crm_junk_confirmed"] or 0),
-                        "run_date":           str(r["run_date"]) if r["run_date"] else None,
-                    })
-
-                # ── Recent leads — 10 most recent deduped leads ───────────────
-                # Direct equality on campaign_name (already normalized).
-                cur.execute(
-                    f"""
-                    WITH deduped AS (
-                        SELECT DISTINCT ON (
-                            CASE
-                                WHEN contact_id IS NOT NULL AND contact_id <> ''
-                                THEN contact_id
-                                ELSE CAST(id AS TEXT)
-                            END
-                        )
-                            company,
-                            country,
-                            keyword,
-                            mql_status,
-                            status_category,
-                            run_date
-                        FROM leads
-                        WHERE {date_and}campaign_name = %s
-                        ORDER BY
-                            CASE
-                                WHEN contact_id IS NOT NULL AND contact_id <> ''
-                                THEN contact_id
-                                ELSE CAST(id AS TEXT)
-                            END,
-                            run_date DESC,
-                            id DESC
+                if label_set_lower:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT ON (keyword, match_type)
+                            keyword, match_type, spend_usd, clicks, impressions,
+                            conversions, quality_score, run_date,
+                            CASE WHEN clicks > 0 THEN spend_usd / clicks ELSE NULL END AS cpc_usd
+                        FROM keywords
+                        WHERE lower(btrim(campaign_name)) = ANY(%s)
+                        ORDER BY keyword, match_type, run_date DESC, id DESC
+                        """,
+                        (label_set_lower,),
                     )
-                    SELECT company, country, keyword, mql_status, status_category, run_date
-                    FROM deduped
-                    ORDER BY run_date DESC
-                    LIMIT 10
-                    """,
-                    (*date_params, name_key),
-                )
-                rl_rows = cur.fetchall()
-                rl_cols = [d[0] for d in cur.description]
-                recent_leads_out = []
-                for row in rl_rows:
-                    r = dict(zip(rl_cols, row))
-                    recent_leads_out.append({
-                        "company":         r["company"],
-                        "country":         r["country"],
-                        "keyword":         r["keyword"],
-                        "mql_status":      r["mql_status"],
-                        "status_category": r["status_category"],
-                        "run_date":        str(r["run_date"]) if r["run_date"] else None,
-                    })
+                    kw_rows = cur.fetchall()
+                    kw_cols = [d[0] for d in cur.description]
+                    kws = [dict(zip(kw_cols, row)) for row in kw_rows]
+                    kws.sort(key=lambda r: (r["spend_usd"] is None, -(float(r["spend_usd"]) if r["spend_usd"] is not None else 0.0)))
+                    for r in kws[:10]:
+                        keywords_out.append({
+                            "keyword":       r["keyword"],
+                            "match_type":    r["match_type"],
+                            "spend_usd":     round(float(r["spend_usd"]), 2) if r["spend_usd"] is not None else None,
+                            "clicks":        int(r["clicks"]) if r["clicks"] is not None else None,
+                            "impressions":   int(r["impressions"]) if r["impressions"] is not None else None,
+                            "conversions":   round(float(r["conversions"]), 2) if r["conversions"] is not None else None,
+                            "quality_score": round(float(r["quality_score"]), 2) if r["quality_score"] is not None else None,
+                            "cpc_usd":       round(float(r["cpc_usd"]), 2) if r["cpc_usd"] is not None else None,
+                            "run_date":      str(r["run_date"]) if r["run_date"] else None,
+                        })
+
+                # ── Waste terms preview — LATEST snapshot per term (never summed) ──
+                # Same overlap-safe rule: one coherent latest snapshot per term, not
+                # a SUM across scheduler runs. Matched by the approved label set.
+                waste_out = []
+                if label_set_lower:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT ON (search_term, junk_category, matched_pattern)
+                            search_term, spend_usd, junk_category, matched_pattern,
+                            crm_junk_confirmed, run_date
+                        FROM waste_terms
+                        WHERE lower(btrim(campaign_name)) = ANY(%s)
+                        ORDER BY search_term, junk_category, matched_pattern, run_date DESC, id DESC
+                        """,
+                        (label_set_lower,),
+                    )
+                    wt_rows = cur.fetchall()
+                    wt_cols = [d[0] for d in cur.description]
+                    wts = [dict(zip(wt_cols, row)) for row in wt_rows]
+                    wts.sort(key=lambda r: (r["spend_usd"] is None, -(float(r["spend_usd"]) if r["spend_usd"] is not None else 0.0)))
+                    for r in wts[:10]:
+                        waste_out.append({
+                            "search_term":        r["search_term"],
+                            "spend_usd":          round(float(r["spend_usd"]), 2) if r["spend_usd"] is not None else None,
+                            "junk_category":      r["junk_category"],
+                            "matched_pattern":    r["matched_pattern"],
+                            "crm_junk_confirmed": int(r["crm_junk_confirmed"] or 0),
+                            "run_date":           str(r["run_date"]) if r["run_date"] else None,
+                        })
 
     except Exception as exc:  # noqa: BLE001
         log.error("[api/campaign-detail] database error: %s", exc, exc_info=True)
@@ -1893,16 +1708,18 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
         "days":          days,
         "campaign_name": campaign_name,
         "campaign":      campaign_out,
-        "lead_quality":  lead_quality_out,
-        "countries":     countries_out,
+        "lead_quality":  drawer_lead_quality,
+        "countries":     drawer_countries,
         "keywords":      keywords_out,
         "waste_terms":   waste_out,
-        "recent_leads":  recent_leads_out,
+        "recent_leads":  drawer_recent,
+        "label_set":     drawer_label_set,
+        "keywords_note": "Latest keyword snapshot — not selected-window totals",
         "data_sources": {
-            "campaign":     "PostgreSQL campaigns table",
-            "lead_quality": "HubSpot-derived leads table",
-            "keywords":     "Windsor keyword performance",
-            "waste_terms":  "Waste detection from search terms",
+            "campaign":     "Canonical daily Google Ads spend + HubSpot event-date lead evidence",
+            "lead_quality": "HubSpot leads (durable, contact_created_at, deduped, paid-search)",
+            "keywords":     "Google Ads API keyword performance (latest snapshot — not window totals)",
+            "waste_terms":  "Waste detection from search terms (latest snapshot)",
         },
     }
 

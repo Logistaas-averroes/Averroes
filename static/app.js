@@ -346,10 +346,10 @@ const PAGE_HELP_CONTENT = {
     checkNext: "Data Runs to see when the last report was generated."
   },
   campaigns: {
-    what: "Campaign truth table — every campaign with its spend, quality score, verdict (SCALE/HOLD/FIX/CUT), and key performance metrics.",
-    source: "Google Ads API campaign data synced via the campaign pipeline.",
-    howToUse: "Sort by verdict or spend to prioritise attention. Click a campaign name to open the detail drawer. Use the time window to compare periods.",
-    doNotAssume: "Verdicts are computed from available data. A HOLD verdict does not mean the campaign is bad — it means insufficient signal to recommend scaling.",
+    what: "Campaign Evidence — genuine selected-window totals for spend, leads, SQLs, junk and CPQL, with a factual Outcome Status per campaign (SQL producer · Junk-heavy · Spend without SQL proof · Mapping review · No outcome evidence · Data unavailable). Outcome Status is a description of the window's evidence, not a scale/cut recommendation.",
+    source: "Canonical daily Google Ads API spend (native GBP + FX-safe USD — the same source as Revenue by Source) reconciled with deduplicated HubSpot lead outcomes on the HubSpot event date (contact_created_at). Lead labels are mapped to canonical Google Ads campaigns through the approved campaign-identity table; unmatched labels appear as Mapping Review rows.",
+    howToUse: "Pick an Evidence Window (7d…All time; All time is genuine cumulative totals). Filter by status/outcome and sort. Click a row to open the drawer — its lead evidence aggregates across the campaign's approved aliases and reconciles exactly with the row.",
+    doNotAssume: "Read-only — no Google Ads or HubSpot changes are made. Spend is canonical Google Ads truth, never a snapshot; overall CPQL uses mapped Google Ads SQLs only (unmatched / Not-Google-Ads SQLs are disclosed, never fold into it).",
     checkNext: "Campaign detail drawer for drill-down, or ROAS by Campaign for revenue attribution."
   },
   "search-terms": {
@@ -6025,12 +6025,14 @@ function renderCampaignEvidenceKPIs() {
     : "native spend unavailable";
   const cpql = s.overall_cpql_usd != null ? fmtDollar(s.overall_cpql_usd)
     : `<span class="detail-unavailable">N/A</span>`;
-  // CPQL scope disclosure — mapped-Google-Ads-only when lead mapping is partial, so
-  // it is never presented as an account-wide figure.
+  // CPQL label — the numerator is ALL canonical Google Ads USD spend; the
+  // denominator is mapped SQLs. Label it honestly by coverage (never "mapped
+  // campaigns only", which would misdescribe the total-spend numerator). Tooltip
+  // discloses the unmatched + not-Google-Ads SQLs excluded from the denominator.
   const cov = s.mapping_coverage || {};
   const cpqlSub = s.overall_cpql_scope === "mapped_only"
-    ? `<span class="detail-unavailable" title="${fmtCount(cov.unmatched_sqls)} unmatched + ${fmtCount(cov.excluded_not_google_sqls)} non-Google SQLs excluded">Mapped campaigns only</span>`
-    : "USD spend ÷ mapped SQLs";
+    ? `<span class="detail-unavailable" title="Denominator excludes ${fmtCount(cov.unmatched_sqls)} unmatched + ${fmtCount(cov.excluded_not_google_sqls)} Not-Google-Ads SQLs">All Google Ads spend ÷ mapped SQLs</span>`
+    : "Google Ads spend ÷ confirmed SQLs";
   return `
     <div class="evidence-kpi-grid campaign-kpi-grid">
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Campaigns</div>
@@ -12216,7 +12218,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
           </thead>
           <tbody>${kwRows}</tbody>
         </table>
-        <p class="drawer-source-note">Keyword metrics are Google Ads API platform metrics only.</p>
+        <p class="drawer-source-note">${escapeHtml(data.keywords_note || "Latest keyword snapshot — not selected-window totals")}. Google Ads API platform metrics only.</p>
         <button class="btn btn--secondary drawer-keywords-fullpage-btn" type="button">Open full Keyword Evidence</button>
       </div>`;
   }

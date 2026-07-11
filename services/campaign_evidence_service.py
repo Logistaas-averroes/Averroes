@@ -510,9 +510,11 @@ def build_campaign_evidence_row(window: str, campaign_name: str,
                                 campaign_key: str | None = None) -> dict[str, Any]:
     """Single campaign's selected-window evidence row (for the drawer headline).
 
-    Prefers the stable ``campaign_key`` / ``campaign_id`` when supplied (so the
-    drawer never resolves by display name alone when an id exists); falls back to
-    exact-normalized name match. Always returns a dict (never None): the matched
+    STABLE-KEY lookup: when ``campaign_key`` is supplied it matches ONLY the
+    ``campaign_key`` / ``campaign_id`` — never a display-name fallback — so a key
+    that does not exist returns ``_not_found`` (a wrong key can never resolve to a
+    same-named duplicate campaign). Exact-normalized name match is used ONLY when no
+    ``campaign_key`` was supplied. Always returns a dict (never None): the matched
     row (same shape ``build_campaign_evidence`` emits, so the drawer headline
     matches the table exactly), a ``{"_not_found": True, ...}`` sentinel, or a
     ``{"db_unavailable": True, ...}`` sentinel. Read-only.
@@ -522,13 +524,13 @@ def build_campaign_evidence_row(window: str, campaign_name: str,
     want_key = str(campaign_key) if campaign_key is not None else None
     want_norm = normalize_campaign_name(campaign_name)
     for row in payload.get("campaigns", []):
-        matches = False
         if want_key is not None:
+            # Key supplied → id/key match ONLY (no display-name fallback).
             matches = (str(row.get("campaign_key")) == want_key
                        or (row.get("campaign_id") is not None
                            and str(row.get("campaign_id")) == want_key))
-        if not matches and normalize_campaign_name(row.get("campaign_name")) == want_norm:
-            matches = True
+        else:
+            matches = normalize_campaign_name(row.get("campaign_name")) == want_norm
         if matches:
             return {**row, "window": payload.get("window"),
                     "window_start": payload.get("window_start"),
@@ -537,6 +539,103 @@ def build_campaign_evidence_row(window: str, campaign_name: str,
                     "db_unavailable": db_unavailable}
     return {"_not_found": True, "window": payload.get("window"),
             "db_unavailable": db_unavailable}
+
+
+def _lead_split(rows: list) -> dict:
+    """Lead-quality split (approved denominator) from a set of deduped lead rows."""
+    agg = _new_outcomes(None)
+    for r in rows:
+        _add_lead(agg, r.get("status_category"))
+    jr, verdicted = _junk_rate(agg[_QUALIFIED], agg[_IN_PROGRESS], agg[_JUNK], agg[_WRONG_FIT])
+    return {
+        "total_leads": agg["total_leads"],
+        "confirmed_sqls": agg[_QUALIFIED], "in_progress": agg[_IN_PROGRESS],
+        "confirmed_junk": agg[_JUNK], "wrong_fit": agg[_WRONG_FIT], "unknown": agg[_UNKNOWN],
+        "verdicted_leads": verdicted, "junk_rate_pct": jr,
+    }
+
+
+def _country_split(rows: list) -> list:
+    """Per-country lead split (same approved denominator), sorted by lead count."""
+    by_country: dict = {}
+    for r in rows:
+        c = (r.get("country") or "").strip() or "(unknown)"
+        by_country.setdefault(c, []).append(r)
+    out = []
+    for country, crows in by_country.items():
+        split = _lead_split(crows)
+        out.append({"country": country, **split})
+    out.sort(key=lambda x: -x["total_leads"])
+    return out
+
+
+def build_campaign_drawer_evidence(window: str, campaign_name: str,
+                                   campaign_key: str | None = None,
+                                   now: datetime | None = None,
+                                   recent_limit: int = 10) -> dict[str, Any]:
+    """Drawer supplementary evidence (Lead Quality / Countries / Recent Leads) for
+    a single campaign, aggregated across its APPROVED ALIAS SET using the SAME
+    durable event-date lead population and per-campaign assignment as the table —
+    so the drawer totals reconcile EXACTLY with the table row. Read-only.
+
+    Returns {campaign(row) | None, lead_quality, countries, recent_leads,
+    label_set, db_unavailable}. Country/Recent for a Mapping Review row use only
+    that exact unmatched external label.
+    """
+    import db.revenue_repository as repo  # noqa: PLC0415
+
+    row = build_campaign_evidence_row(window, campaign_name, now=now,
+                                      campaign_key=campaign_key)
+    if row.get("db_unavailable"):
+        return {"campaign": None, "lead_quality": None, "countries": [],
+                "recent_leads": [], "label_set": [], "db_unavailable": True}
+    if row.get("_not_found"):
+        return {"campaign": None, "lead_quality": None, "countries": [],
+                "recent_leads": [], "label_set": [], "db_unavailable": False}
+
+    start, end, _ = _window_bounds(window, now)
+    spend_result = repo.fetch_canonical_campaign_spend(start, end)
+    identity_result = repo.fetch_campaign_identity(spend_result.get("customer_id"))
+    _, norm_to_ids = _spend_by_campaign_id(spend_result)
+    identity_by_label, aliases_by_id = _identity_index(identity_result)
+
+    target_id = row.get("campaign_id")
+    is_review = row.get("mapping_status") == "unmatched"
+    review_norm = normalize_campaign_name(row.get("campaign_name")) if is_review else None
+
+    detail = repo.fetch_campaign_lead_detail(start, end)
+    mine = []
+    for r in (detail.get("rows") or []):
+        kind, key = _assign_lead(r.get("campaign_name"), identity_by_label, norm_to_ids)
+        if is_review:
+            if kind == "unmatched" and key == review_norm:
+                mine.append(r)
+        elif kind == "google_ads" and str(key) == str(target_id):
+            mine.append(r)
+
+    # Label set: canonical spend name + all approved aliases (excludes not_google_ads,
+    # which never carry a campaign_id); for a review row, only the exact label.
+    if is_review:
+        label_set = [row.get("campaign_name")]
+    else:
+        label_set = sorted({row.get("campaign_name"), *aliases_by_id.get(str(target_id), set())}
+                           - {None})
+
+    recent = [{
+        "company": r.get("company"), "country": r.get("country"),
+        "keyword": r.get("keyword"), "mql_status": r.get("mql_status"),
+        "status_category": r.get("status_category"),
+        "run_date": str(r.get("contact_created_at")) if r.get("contact_created_at") else None,
+    } for r in mine[:recent_limit]]
+
+    return {
+        "campaign": row,
+        "lead_quality": _lead_split(mine) if mine else _lead_split([]),
+        "countries": _country_split(mine),
+        "recent_leads": recent,
+        "label_set": label_set,
+        "db_unavailable": False,
+    }
 
 
 def _empty_summary() -> dict:

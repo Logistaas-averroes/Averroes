@@ -244,6 +244,57 @@ def fetch_lead_quality(start: date | None, end: date) -> dict:
         return _unavailable("leads", {"event_date_safe": False})
 
 
+def fetch_campaign_lead_detail(start: date | None, end: date) -> dict:
+    """Per-contact deduped paid-search lead DETAIL for the Campaign Evidence drawer.
+
+    IDENTICAL population, filters, event-date window (contact_created_at) and
+    per-contact dedup as ``fetch_lead_quality`` — just more per-contact columns —
+    so the drawer's Lead Quality / Country / Recent Leads reconcile EXACTLY with the
+    Campaign table row. Read-only.
+
+    Returns rows [{campaign_name, country, keyword, company, mql_status,
+    status_category, contact_id, contact_created_at, has_gclid}].
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable("leads")
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH deduped AS (
+                        SELECT DISTINCT ON ({_CONTACT_KEY})
+                            campaign_name, country, keyword, company, mql_status,
+                            status_category, contact_id, contact_created_at,
+                            (gclid IS NOT NULL AND gclid <> '') AS has_gclid
+                        FROM leads
+                        WHERE source_type = 'paid_search'
+                          AND contact_created_at IS NOT NULL
+                          AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
+                          AND contact_created_at < (%s::date + INTERVAL '1 day')
+                          AND campaign_name IS NOT NULL
+                          AND lower(campaign_name) NOT IN %s
+                          AND campaign_name !~* 'email_campaign'
+                          AND {_CONTACT_KEY} NOT IN (SELECT lead_id FROM lead_truth_exclusions)
+                        ORDER BY {_CONTACT_KEY}, run_date DESC, id DESC
+                    )
+                    SELECT campaign_name, country, keyword, company, mql_status,
+                           status_category, contact_id, contact_created_at, has_gclid
+                    FROM deduped
+                    ORDER BY contact_created_at DESC
+                    """,
+                    (start, end, _PSEUDO_CAMPAIGNS),
+                )
+                rows = _rows_as_dicts(cur)
+                for r in rows:
+                    r["contact_created_at"] = _as_date(r.get("contact_created_at"))
+            return {"available": True, "rows": rows, "table": "leads",
+                    "date_field": "contact_created_at"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_campaign_lead_detail failed: %s", exc)
+        return _unavailable("leads")
+
+
 def fetch_sql_lead_details(start: date | None, end: date) -> dict:
     """Per-contact qualified SQL details for the pipeline "not yet closed-won" panel.
 

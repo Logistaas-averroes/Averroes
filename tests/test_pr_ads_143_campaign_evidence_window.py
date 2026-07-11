@@ -454,9 +454,11 @@ def test_drawer_uses_window_card_no_snapshot():
 
 def test_backend_drawer_card_is_window_evidence():
     idx = SERVER.find("def _build_campaign_detail(")
-    body = SERVER[idx:idx + 3500]
-    assert "build_campaign_evidence_row" in body
+    body = SERVER[idx:idx + 4000]
+    assert "build_campaign_drawer_evidence" in body      # service-backed, event-date
     assert '"snapshot_date"' not in body and '"verdict"' not in body
+    # No run_date lead-window boundary remains in the drawer.
+    assert "run_date >= NOW() - INTERVAL '1 day' * %s AND " not in SERVER[idx:idx + 12000]
 
 
 # ════════════════ 10. Regression — Revenue/Dashboard/mapping untouched ════════════
@@ -715,3 +717,145 @@ def test_audit_surfaces_identity_and_timezone(monkeypatch):
     assert audit["account_timezone"] == "Europe/London"
     assert audit["identity_source"] == "google_ads_campaign_identity (approved mappings)"
     assert audit["identity_available"] is True
+
+
+# ════════════ 12. Drawer truth repair (PR-ADS-143 round 3) ════════════════════
+
+def _detail(rows, *, available=True):
+    return {"available": available, "rows": rows}
+
+
+def _patch_drawer(monkeypatch, spend_result, lead_result, identity_result, detail_result):
+    """Patch the durable layer incl. fetch_campaign_lead_detail for drawer tests."""
+    import db.revenue_repository as repo
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: spend_result)
+    monkeypatch.setattr(repo, "fetch_lead_quality", lambda s, e: lead_result)
+    monkeypatch.setattr(repo, "fetch_campaign_identity",
+                        lambda customer_id=None: identity_result)
+    monkeypatch.setattr(repo, "fetch_campaign_lead_detail", lambda s, e: detail_result)
+
+
+def _drawer(window, name, key=None):
+    from services.campaign_evidence_service import build_campaign_drawer_evidence
+    return build_campaign_drawer_evidence(window, name, campaign_key=key, now=FIXED_NOW)
+
+
+def _detail_row(label, cat, *, country="MX", cid="c", created="2026-07-05"):
+    return {"campaign_name": label, "status_category": cat, "country": country,
+            "keyword": "kw", "company": "Co", "mql_status": "x", "contact_id": cid,
+            "contact_created_at": created, "has_gclid": False}
+
+
+def test_drawer_aggregates_across_approved_aliases_and_reconciles(monkeypatch):
+    # Canonical "Mexico, Chile, Colombia" (id 500); approved alias "mexico,chile";
+    # leads exist ONLY under the alias. Table and drawer must agree exactly.
+    spend = _spend([_spend_row("Mexico, Chile, Colombia", 800.0, 1008.0, cid="500")],
+                   total_native=800.0, total_usd=1008.0)
+    ident = _identity([{"customer_id": "111", "campaign_id": "500",
+                        "canonical_campaign_name": "Mexico, Chile, Colombia",
+                        "external_campaign_label": "mexico,chile", "match_method": "manual"}])
+    lq = _leads(_lead_rows({"mexico,chile": {"qualified": 4, "junk": 2}}))
+    detail = _detail([_detail_row("mexico,chile", "qualified", cid=f"q{i}") for i in range(4)]
+                     + [_detail_row("mexico,chile", "junk", country="CL", cid=f"j{i}") for i in range(2)])
+    _patch_drawer(monkeypatch, spend, lq, ident, detail)
+
+    trow = _by_id(_build("30d"))["500"]
+    ev = _drawer("30d", "Mexico, Chile, Colombia", key="500")
+    dq = ev["lead_quality"]
+    assert dq["confirmed_sqls"] == trow["confirmed_sqls"] == 4
+    assert dq["confirmed_junk"] == trow["confirmed_junk"] == 2
+    assert dq["total_leads"] == trow["total_leads"] == 6
+    assert dq["junk_rate_pct"] == trow["junk_rate_pct"]
+    # Aliases feed the label set that scopes every drawer lead section.
+    assert "mexico,chile" in ev["label_set"] and "Mexico, Chile, Colombia" in ev["label_set"]
+    # Countries + recent leads derived from the SAME alias-scoped population.
+    assert {c["country"] for c in ev["countries"]} == {"MX", "CL"}
+    assert len(ev["recent_leads"]) == 6
+
+
+def test_drawer_lead_detail_bounds_on_contact_created_at_not_run_date():
+    repo_src = open(os.path.join(ROOT, "db", "revenue_repository.py"), encoding="utf-8").read()
+    fn = repo_src[repo_src.find("def fetch_campaign_lead_detail("):
+                  repo_src.find("def fetch_sql_lead_details(")]
+    assert "contact_created_at >=" in fn and "contact_created_at <" in fn
+    assert "source_type = 'paid_search'" in fn
+    assert "lead_truth_exclusions" in fn
+    assert "email_campaign" in fn                      # pseudo/email exclusion
+    # The window is NOT bounded on run_date.
+    assert "run_date >=" not in fn and "run_date <" not in fn
+
+
+def test_backfilled_contact_excluded_from_recent_window(monkeypatch):
+    # A contact synced recently but CREATED before the window must not appear.
+    spend = _spend([_spend_row("Brand - UK", 100.0, 120.0, cid="1")],
+                   total_native=100.0, total_usd=120.0)
+    lq = _leads(_lead_rows({"brand - uk": {"qualified": 1}}))
+    # Simulate the durable event-date filter: only in-window contacts are returned.
+    def _detail_fn(start, end):
+        rows = [_detail_row("brand - uk", "qualified", cid="fresh", created="2026-07-05")]
+        old = _detail_row("brand - uk", "qualified", cid="backfilled", created="2020-01-01")
+        # The real query drops old contact_created_at; the fake honours the window.
+        from datetime import date
+        if start is None or date.fromisoformat(old["contact_created_at"]) >= start:
+            rows.append(old)
+        return {"available": True, "rows": rows}
+    import db.revenue_repository as repo
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: spend)
+    monkeypatch.setattr(repo, "fetch_lead_quality", lambda s, e: lq)
+    monkeypatch.setattr(repo, "fetch_campaign_identity", lambda customer_id=None: _identity([]))
+    monkeypatch.setattr(repo, "fetch_campaign_lead_detail", _detail_fn)
+    ev = _drawer("30d", "Brand - UK", key="1")
+    companies = [r["run_date"] for r in ev["recent_leads"]]
+    assert "2020-01-01" not in companies              # backfilled contact excluded
+    assert len(ev["recent_leads"]) == 1
+
+
+def test_keyword_and_waste_snapshots_not_summed():
+    kw = _region(SERVER, "# ── Keywords preview — LATEST snapshot per keyword",
+                 "# ── Waste terms preview")
+    assert "DISTINCT ON (keyword, match_type)" in kw
+    assert "run_date DESC" in kw
+    assert "SUM(spend_usd)" not in kw and "SUM(clicks)" not in kw
+    waste = _region(SERVER, "# ── Waste terms preview — LATEST snapshot per term",
+                    "except Exception")
+    assert "DISTINCT ON (search_term, junk_category, matched_pattern)" in waste
+    assert "SUM(spend_usd)" not in waste
+
+
+def test_stable_key_wrong_key_returns_not_found_no_name_fallback(monkeypatch):
+    # Two campaigns share the display name "Gulf"; a wrong key must NOT fall back
+    # to a same-named row.
+    spend = _spend([_spend_row("Gulf", 100.0, 120.0, cid="201"),
+                    _spend_row("Gulf", 200.0, 240.0, cid="202")],
+                   total_native=300.0, total_usd=360.0)
+    _patch(monkeypatch, spend, _leads([]), _identity([]))
+    from services.campaign_evidence_service import build_campaign_evidence_row
+    got = build_campaign_evidence_row("30d", "Gulf", campaign_key="999")
+    assert got.get("_not_found") is True
+    # Correct key resolves to exactly that id.
+    ok = build_campaign_evidence_row("30d", "Gulf", campaign_key="202")
+    assert ok.get("campaign_id") == "202"
+
+
+def test_help_content_has_no_verdict_instructions():
+    help_content = _region(APP_JS, "const PAGE_HELP_CONTENT = {", "\n};")
+    help_block = _region(help_content, "campaigns: {", "  \"search-terms\": {")
+    for v in ("SCALE", "HOLD", "FIX", "CUT"):
+        assert v not in help_block, f"stale verdict term {v} in campaigns help"
+    assert "Outcome Status" in help_block
+    assert "campaign-identity" in help_block or "Mapping Review" in help_block
+
+
+def test_no_windsor_label_in_campaign_evidence():
+    # The drawer data_sources + keyword note must not label keyword evidence "Windsor".
+    ds = _region(SERVER, '"data_sources": {', "},",)
+    assert "Windsor" not in ds
+    assert "latest snapshot" in ds.lower()
+    # The frontend keyword note is honest about the latest-snapshot source.
+    assert "Latest keyword snapshot" in APP_JS
+
+
+def test_drawer_data_sources_identify_canonical_headline():
+    ds = _region(SERVER, '"data_sources": {', "},")
+    assert "Canonical daily Google Ads spend" in ds
+    assert "HubSpot" in ds and "contact_created_at" in ds
