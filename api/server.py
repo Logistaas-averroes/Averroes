@@ -758,27 +758,99 @@ def _clamp_days(days: int) -> int:
     return max(1, min(365, days))
 
 
-def _db_empty_response(days: int, key: str) -> dict[str, Any]:
-    """Return a structured empty response when the database is unavailable."""
-    return {"days": days, key: [], "db_unavailable": True}
+def _db_empty_response(days, key: str, window=None) -> dict[str, Any]:
+    """Return a structured empty response when the database is unavailable.
+
+    ``window`` (when provided) echoes the resolved evidence-window key so a
+    db-unavailable response still reports the requested window (never a fake
+    number, just an empty + db_unavailable flag).
+    """
+    resp: dict[str, Any] = {"days": days, key: [], "db_unavailable": True}
+    if window is not None:
+        resp["window"] = window
+    return resp
+
+
+# ── Evidence windows (PR-ADS-141) ───────────────────────────────────────────
+# Platform Evidence + Lead Intelligence pages select an *evidence window*
+# (7d/14d/30d/60d/180d/all_time), distinct from the business windows used by the
+# Dashboard and Revenue pages. When a request carries `window`, it is the
+# authoritative selector (an unknown value is a 400, never coerced); otherwise the
+# legacy clamped `days` integer is used. Read-only — these helpers never write.
+
+
+def _resolve_evidence_window(window, days, *, allow_all_time: bool = True):
+    """Resolve a page request's evidence window to ``(days_or_none, window_key)``.
+
+    ``days_or_none`` is an int lookback, or None for all_time (no lower bound).
+    Raises HTTPException(400) for an unknown window, or all_time when the endpoint
+    cannot safely serve it — never silently coerced, never faked.
+    """
+    from analysis.evidence_windows import (  # noqa: PLC0415
+        resolve_evidence_window, EvidenceWindowError,
+    )
+    # Only a real, non-empty string counts as "window provided". (A direct call
+    # that leaves the FastAPI Query default in place, or an empty string, falls
+    # back to the legacy `days` path.)
+    if isinstance(window, str) and window:
+        try:
+            resolved = resolve_evidence_window(window, allow_all_time=allow_all_time)
+        except EvidenceWindowError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return resolved["days"], resolved["key"]
+    clamped = _clamp_days(days)
+    return clamped, f"{clamped}d"
+
+
+def _evidence_date_clause(column: str, days) -> tuple[str, list]:
+    """Read-only SQL date-bound fragment for an evidence window.
+
+    ``days is None`` (all_time) -> ("TRUE", []) — no lower bound.
+    ``days`` int -> ("<col> >= NOW() - INTERVAL '1 day' * %s", [days]).
+
+    ``column`` is a fixed internal literal chosen by the caller (never user
+    input), so injecting it into the SQL text is safe.
+    """
+    if days is None:
+        return "TRUE", []
+    return f"{column} >= NOW() - INTERVAL '1 day' * %s", [days]
+
+
+def _resolve_search_terms_window(window, days, *, legacy_max: int):
+    """Evidence-window resolution for the search-terms family (read-only).
+
+    The search-terms/ngrams endpoints keep their own legacy day caps for bare
+    ``days`` calls, but the ``window`` selector (7d…180d, all_time) reaches the
+    full durable range. Returns ``(days_or_none, window_key)``; 400 on an unknown
+    window (never silently coerced).
+    """
+    if isinstance(window, str) and window:
+        return _resolve_evidence_window(window, days)
+    clamped = max(1, min(legacy_max, days))
+    return clamped, f"{clamped}d"
 
 
 @app.get("/api/campaigns")
 def api_campaigns(
     user: dict = Depends(require_auth),
     days: int = Query(default=30, description="Number of days to look back (1–365)"),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
 ) -> dict[str, Any]:
-    """Return aggregated campaign metrics for the last N days. Requires auth."""
-    days = _clamp_days(days)
+    """Return aggregated campaign metrics for the evidence window. Requires auth."""
+    days, window_key = _resolve_evidence_window(window, days)
+    date_clause, date_params = _evidence_date_clause("run_date", days)
 
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
             if conn is None:
-                return _db_empty_response(days, "campaigns")
+                return _db_empty_response(days, "campaigns", window_key)
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     WITH date_filtered AS (
                         SELECT
                             LOWER(campaign_name) AS campaign_name,
@@ -792,7 +864,7 @@ def api_campaigns(
                             created_at,
                             id
                         FROM campaigns
-                        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                        WHERE {date_clause}
                     ),
                     latest_verdicts AS (
                         SELECT DISTINCT ON (campaign_name)
@@ -823,7 +895,7 @@ def api_campaigns(
                     GROUP BY agg.campaign_name, lv.latest_verdict
                     ORDER BY avg_spend_usd DESC NULLS LAST
                     """,
-                    (days,),
+                    (*date_params,),
                 )
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
@@ -847,51 +919,141 @@ def api_campaigns(
                     })
     except Exception as exc:  # noqa: BLE001
         log.error("[api/campaigns] database error: %s", exc, exc_info=True)
-        return _db_empty_response(days, "campaigns")
+        return _db_empty_response(days, "campaigns", window_key)
 
     return {
         "days": days,
+        "window": window_key,
         "generated_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "campaigns": campaigns,
     }
+
+
+# Lead dedup key: latest run per contact (rows with no contact_id stay individual,
+# keyed by their row id) — matches /api/leads/country-summary and the old
+# client-side dedup exactly.
+_LEAD_DEDUP_KEY = (
+    "CASE WHEN contact_id IS NOT NULL AND contact_id <> '' "
+    "THEN contact_id ELSE CAST(id AS TEXT) END"
+)
+# Presentation cap on the returned row list (In Progress Leads shows cards from
+# these). Aggregates below are ALWAYS complete for the whole window — the cap
+# never truncates the reported totals.
+_LEADS_ROW_LIMIT = 1000
+_LEAD_STATUS_CATS = ("qualified", "in_progress", "junk", "wrong_fit", "unknown")
+# Presentation cap on the waste row list; total_count discloses the full window.
+_WASTE_ROW_LIMIT = 500
+
+
+def _empty_lead_aggregates() -> dict[str, Any]:
+    totals = {"total": 0, **{c: 0 for c in _LEAD_STATUS_CATS}}
+    return {"totals": totals, "by_campaign": []}
 
 
 @app.get("/api/leads")
 def api_leads(
     user: dict = Depends(require_auth),
     days: int = Query(default=30, description="Number of days to look back (1–365)"),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
 ) -> dict[str, Any]:
-    """Return lead rows for the last N days. Requires auth."""
-    days = _clamp_days(days)
+    """Return lead rows + COMPLETE aggregates for the evidence window. Requires auth.
+
+    PR-ADS-141: the row list is deduped server-side (latest run per contact) and
+    capped for presentation, but ``aggregates`` (totals by status + per-campaign
+    breakdown) are computed over the WHOLE window with no row cap — so All-time
+    Lead Quality KPIs/breakdown are never silently truncated. ``total_count`` /
+    ``returned_count`` / ``has_more`` disclose when the row list is a partial page.
+    Read-only.
+    """
+    days, window_key = _resolve_evidence_window(window, days)
+    date_clause, date_params = _evidence_date_clause("run_date", days)
+
+    def _empty(extra_flag=False):
+        resp = _db_empty_response(days, "leads", window_key)
+        resp.update({
+            "total_count": 0, "returned_count": 0, "has_more": False,
+            "aggregates": _empty_lead_aggregates(),
+        })
+        return resp
+
+    deduped_cte = f"""
+        WITH deduped AS (
+            SELECT DISTINCT ON ({_LEAD_DEDUP_KEY})
+                contact_id, company, campaign_name, keyword, country,
+                mql_status, status_category, gclid, source_type, run_date, id
+            FROM leads
+            WHERE {date_clause}
+            ORDER BY {_LEAD_DEDUP_KEY}, run_date DESC, id DESC
+        )
+    """
 
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
             if conn is None:
-                return _db_empty_response(days, "leads")
+                return _empty()
             with conn.cursor() as cur:
+                # Row page — deduped, presentation-capped.
                 cur.execute(
-                    """
+                    deduped_cte + """
                     SELECT contact_id, company, campaign_name, keyword, country,
                            mql_status, status_category, gclid, source_type, run_date
-                    FROM leads
-                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                    FROM deduped
                     ORDER BY run_date DESC, id DESC
-                    LIMIT 1000
+                    LIMIT %s
                     """,
-                    (days,),
+                    (*date_params, _LEADS_ROW_LIMIT),
                 )
-                rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
-                leads = [dict(zip(cols, row)) for row in rows]
+                leads = [dict(zip(cols, row)) for row in cur.fetchall()]
                 for lead in leads:
                     if lead.get("run_date"):
                         lead["run_date"] = str(lead["run_date"])
+
+                # COMPLETE aggregates — every deduped lead in the window, by
+                # campaign + status. No row cap: All-time totals are truthful.
+                cur.execute(
+                    deduped_cte + """
+                    SELECT COALESCE(NULLIF(BTRIM(campaign_name), ''), '(unknown)') AS campaign_name,
+                           status_category,
+                           COUNT(*) AS n
+                    FROM deduped
+                    GROUP BY 1, 2
+                    """,
+                    (*date_params,),
+                )
+                agg_rows = cur.fetchall()
     except Exception as exc:  # noqa: BLE001
         log.error("[api/leads] database error: %s", exc, exc_info=True)
-        return _db_empty_response(days, "leads")
+        return _empty()
 
-    return {"days": days, "leads": leads}
+    totals = {"total": 0, **{c: 0 for c in _LEAD_STATUS_CATS}}
+    by_camp: dict[str, dict] = {}
+    for camp, cat, n in agg_rows:
+        n = int(n or 0)
+        cat = cat if cat in _LEAD_STATUS_CATS else "unknown"
+        totals["total"] += n
+        totals[cat] += n
+        g = by_camp.setdefault(camp, {"campaign_name": camp, "total": 0,
+                                      **{c: 0 for c in _LEAD_STATUS_CATS}})
+        g["total"] += n
+        g[cat] += n
+    by_campaign = sorted(by_camp.values(), key=lambda r: r["total"], reverse=True)
+
+    total_count = totals["total"]
+    returned_count = len(leads)
+    return {
+        "days": days,
+        "window": window_key,
+        "leads": leads,
+        "total_count": total_count,
+        "returned_count": returned_count,
+        "has_more": total_count > returned_count,
+        "aggregates": {"totals": totals, "by_campaign": by_campaign},
+    }
 
 
 @app.get("/api/deals")
@@ -939,26 +1101,43 @@ def api_deals(
 def api_waste(
     user: dict = Depends(require_auth),
     days: int = Query(default=30, description="Number of days to look back (1–365)"),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
 ) -> dict[str, Any]:
-    """Return waste term rows for the last N days. Requires auth."""
-    days = _clamp_days(days)
+    """Return waste term rows for the evidence window. Requires auth.
+
+    PR-ADS-141: the row list is presentation-capped (_WASTE_ROW_LIMIT), so the
+    response discloses ``total_count`` / ``returned_count`` / ``has_more`` /
+    ``truncated`` — All-time results are never silently reported as complete.
+    Read-only.
+    """
+    days, window_key = _resolve_evidence_window(window, days)
+    date_clause, date_params = _evidence_date_clause("run_date", days)
+
+    def _empty():
+        resp = _db_empty_response(days, "waste", window_key)
+        resp.update({"total_count": 0, "returned_count": 0,
+                     "has_more": False, "truncated": False})
+        return resp
 
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
             if conn is None:
-                return _db_empty_response(days, "waste")
+                return _empty()
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT search_term, campaign_name, spend_usd,
                            junk_category, matched_pattern, crm_junk_confirmed, run_date
                     FROM waste_terms
-                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                    WHERE {date_clause}
                     ORDER BY spend_usd DESC NULLS LAST, run_date DESC
-                    LIMIT 500
+                    LIMIT %s
                     """,
-                    (days,),
+                    (*date_params, _WASTE_ROW_LIMIT),
                 )
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
@@ -968,11 +1147,26 @@ def api_waste(
                         item["run_date"] = str(item["run_date"])
                     if item.get("spend_usd") is not None:
                         item["spend_usd"] = float(item["spend_usd"])
+                # Complete count for the whole window (disclose truncation).
+                cur.execute(
+                    f"SELECT COUNT(*) FROM waste_terms WHERE {date_clause}",
+                    (*date_params,),
+                )
+                total_count = int((cur.fetchone() or (0,))[0] or 0)
     except Exception as exc:  # noqa: BLE001
         log.error("[api/waste] database error: %s", exc, exc_info=True)
-        return _db_empty_response(days, "waste")
+        return _empty()
 
-    return {"days": days, "waste": waste_out}
+    returned_count = len(waste_out)
+    return {
+        "days": days,
+        "window": window_key,
+        "waste": waste_out,
+        "total_count": total_count,
+        "returned_count": returned_count,
+        "has_more": total_count > returned_count,
+        "truncated": total_count > returned_count,
+    }
 
 
 @app.get("/api/runs")
@@ -1144,18 +1338,23 @@ def api_summary(
 def api_geo(
     user: dict = Depends(require_auth),
     days: int = Query(default=30, description="Number of days to look back (1–365)"),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
 ) -> dict[str, Any]:
-    """Return aggregated Windsor geo performance by country/campaign for the last N days. Requires auth."""
-    days = _clamp_days(days)
+    """Return aggregated Windsor geo performance by country/campaign for the evidence window. Requires auth."""
+    days, window_key = _resolve_evidence_window(window, days)
+    date_clause, date_params = _evidence_date_clause("run_date", days)
 
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
             if conn is None:
-                return _db_empty_response(days, "rows")
+                return _db_empty_response(days, "rows", window_key)
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         country,
                         campaign_name,
@@ -1166,11 +1365,11 @@ def api_geo(
                         COUNT(DISTINCT run_id) AS runs,
                         MAX(run_date)         AS last_run_date
                     FROM geo
-                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                    WHERE {date_clause}
                     GROUP BY country, campaign_name
                     ORDER BY spend_usd DESC
                     """,
-                    (days,),
+                    (*date_params,),
                 )
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
@@ -1189,27 +1388,32 @@ def api_geo(
                     })
     except Exception as exc:  # noqa: BLE001
         log.error("[api/geo] database error: %s", exc, exc_info=True)
-        return _db_empty_response(days, "rows")
+        return _db_empty_response(days, "rows", window_key)
 
-    return {"days": days, "rows": geo_out}
+    return {"days": days, "window": window_key, "rows": geo_out}
 
 
 @app.get("/api/keywords")
 def api_keywords(
     user: dict = Depends(require_auth),
     days: int = Query(default=30, description="Number of days to look back (1–365)"),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
 ) -> dict[str, Any]:
-    """Return aggregated Windsor keyword performance for the last N days. Requires auth."""
-    days = _clamp_days(days)
+    """Return aggregated Windsor keyword performance for the evidence window. Requires auth."""
+    days, window_key = _resolve_evidence_window(window, days)
+    date_clause, date_params = _evidence_date_clause("run_date", days)
 
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
             if conn is None:
-                return _db_empty_response(days, "rows")
+                return _db_empty_response(days, "rows", window_key)
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         campaign_name,
                         ad_group,
@@ -1227,11 +1431,11 @@ def api_keywords(
                         COUNT(DISTINCT run_id) AS runs,
                         MAX(run_date)         AS last_run_date
                     FROM keywords
-                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                    WHERE {date_clause}
                     GROUP BY campaign_name, ad_group, keyword, match_type
                     ORDER BY spend_usd DESC
                     """,
-                    (days,),
+                    (*date_params,),
                 )
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
@@ -1254,29 +1458,34 @@ def api_keywords(
                     })
     except Exception as exc:  # noqa: BLE001
         log.error("[api/keywords] database error: %s", exc, exc_info=True)
-        return _db_empty_response(days, "rows")
+        return _db_empty_response(days, "rows", window_key)
 
-    return {"days": days, "rows": kw_out}
+    return {"days": days, "window": window_key, "rows": kw_out}
 
 
 @app.get("/api/leads/country-summary")
 def api_leads_country_summary(
     user: dict = Depends(require_auth),
     days: int = Query(default=30, description="Number of days to look back (1–365)"),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
 ) -> dict[str, Any]:
-    """Return HubSpot lead quality aggregated by country for the last N days. Requires auth."""
-    days = _clamp_days(days)
+    """Return HubSpot lead quality aggregated by country for the evidence window. Requires auth."""
+    days, window_key = _resolve_evidence_window(window, days)
+    date_clause, date_params = _evidence_date_clause("run_date", days)
 
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
             if conn is None:
-                return _db_empty_response(days, "rows")
+                return _db_empty_response(days, "rows", window_key)
             with conn.cursor() as cur:
                 # Deduplicate leads by contact_id (latest run per contact),
                 # then aggregate status counts per country.
                 cur.execute(
-                    """
+                    f"""
                     WITH deduped AS (
                         SELECT DISTINCT ON (
                             CASE
@@ -1291,7 +1500,7 @@ def api_leads_country_summary(
                             status_category,
                             run_date
                         FROM leads
-                        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
+                        WHERE {date_clause}
                         ORDER BY
                             CASE
                                 WHEN contact_id IS NOT NULL AND contact_id <> ''
@@ -1316,7 +1525,7 @@ def api_leads_country_summary(
                     GROUP BY COALESCE(NULLIF(BTRIM(country), ''), '(unknown)')
                     ORDER BY total_leads DESC
                     """,
-                    (days,),
+                    (*date_params,),
                 )
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description]
@@ -1347,9 +1556,9 @@ def api_leads_country_summary(
                     })
     except Exception as exc:  # noqa: BLE001
         log.error("[api/leads/country-summary] database error: %s", exc, exc_info=True)
-        return _db_empty_response(days, "rows")
+        return _db_empty_response(days, "rows", window_key)
 
-    return {"days": days, "rows": summary_out}
+    return {"days": days, "window": window_key, "rows": summary_out}
 
 
 # ── Campaign detail — shared builder ───────────────────────────────────────────
@@ -1371,6 +1580,16 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
     # Normalize to lowercase/strip to match canonical stored values
     # (db/writers.py normalizes to lower+strip on every write).
     name_key = campaign_name.strip().lower()
+
+    # PR-ADS-141: evidence-window date bound. `days is None` (all_time) omits the
+    # lower date restriction from EVERY drawer query — never a hidden 365-day
+    # downgrade. Otherwise the rolling bound is prepended to each WHERE.
+    if days is None:
+        date_and = ""
+        date_params: list = []
+    else:
+        date_and = "run_date >= NOW() - INTERVAL '1 day' * %s AND "
+        date_params = [days]
 
     _empty: dict = {
         "days":          days,
@@ -1394,7 +1613,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                 # ── Campaign summary — latest snapshot in window ──────────────
                 # Direct equality on campaign_name; index on campaigns(campaign_name) is usable.
                 cur.execute(
-                    """
+                    f"""
                     WITH date_filtered AS (
                         SELECT
                             id, run_id, run_date, campaign_name,
@@ -1403,8 +1622,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                             junk_rate_pct, cpql_usd, verdict, verdict_reason,
                             created_at
                         FROM campaigns
-                        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                          AND campaign_name = %s
+                        WHERE {date_and}campaign_name = %s
                     ),
                     run_stats AS (
                         SELECT
@@ -1431,7 +1649,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                     CROSS JOIN run_stats rs
                     ORDER BY df.campaign_name, df.run_date DESC, df.created_at DESC, df.id DESC
                     """,
-                    (days, name_key),
+                    (*date_params, name_key),
                 )
                 camp_row = cur.fetchone()
 
@@ -1462,7 +1680,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                 # ── Lead quality — deduped by contact_id, campaign-scoped ─────
                 # Direct equality on campaign_name (already normalized).
                 cur.execute(
-                    """
+                    f"""
                     WITH deduped AS (
                         SELECT DISTINCT ON (
                             CASE
@@ -1473,8 +1691,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                         )
                             status_category
                         FROM leads
-                        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                          AND campaign_name = %s
+                        WHERE {date_and}campaign_name = %s
                         ORDER BY
                             CASE
                                 WHEN contact_id IS NOT NULL AND contact_id <> ''
@@ -1493,7 +1710,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                         SUM(CASE WHEN status_category = 'unknown'     THEN 1 ELSE 0 END) AS unknown
                     FROM deduped
                     """,
-                    (days, name_key),
+                    (*date_params, name_key),
                 )
                 lq_row = cur.fetchone()
                 lq_cols = [d[0] for d in cur.description]
@@ -1524,7 +1741,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                 # ── Country breakdown — deduped campaign leads by country ──────
                 # Direct equality on campaign_name (already normalized).
                 cur.execute(
-                    """
+                    f"""
                     WITH deduped AS (
                         SELECT DISTINCT ON (
                             CASE
@@ -1536,8 +1753,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                             country,
                             status_category
                         FROM leads
-                        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                          AND campaign_name = %s
+                        WHERE {date_and}campaign_name = %s
                         ORDER BY
                             CASE
                                 WHEN contact_id IS NOT NULL AND contact_id <> ''
@@ -1559,7 +1775,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                     GROUP BY COALESCE(NULLIF(BTRIM(country), ''), '(unknown)')
                     ORDER BY total_leads DESC
                     """,
-                    (days, name_key),
+                    (*date_params, name_key),
                 )
                 country_rows = cur.fetchall()
                 country_cols = [d[0] for d in cur.description]
@@ -1589,7 +1805,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                 # ── Keywords preview — top 10 by spend for this campaign ───────
                 # Direct equality on campaign_name (already normalized).
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         keyword,
                         match_type,
@@ -1603,13 +1819,12 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                             ELSE 0
                         END                AS cpc_usd
                     FROM keywords
-                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                      AND campaign_name = %s
+                    WHERE {date_and}campaign_name = %s
                     GROUP BY keyword, match_type
                     ORDER BY spend_usd DESC NULLS LAST
                     LIMIT 10
                     """,
-                    (days, name_key),
+                    (*date_params, name_key),
                 )
                 kw_rows = cur.fetchall()
                 kw_cols = [d[0] for d in cur.description]
@@ -1630,7 +1845,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                 # ── Waste terms preview — top 10 by spend for this campaign ───
                 # Direct equality on campaign_name (already normalized).
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         search_term,
                         SUM(spend_usd)          AS spend_usd,
@@ -1639,13 +1854,12 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                         SUM(crm_junk_confirmed) AS crm_junk_confirmed,
                         MAX(run_date)           AS run_date
                     FROM waste_terms
-                    WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                      AND campaign_name = %s
+                    WHERE {date_and}campaign_name = %s
                     GROUP BY search_term, junk_category, matched_pattern
                     ORDER BY spend_usd DESC NULLS LAST
                     LIMIT 10
                     """,
-                    (days, name_key),
+                    (*date_params, name_key),
                 )
                 wt_rows = cur.fetchall()
                 wt_cols = [d[0] for d in cur.description]
@@ -1664,7 +1878,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                 # ── Recent leads — 10 most recent deduped leads ───────────────
                 # Direct equality on campaign_name (already normalized).
                 cur.execute(
-                    """
+                    f"""
                     WITH deduped AS (
                         SELECT DISTINCT ON (
                             CASE
@@ -1680,8 +1894,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                             status_category,
                             run_date
                         FROM leads
-                        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-                          AND campaign_name = %s
+                        WHERE {date_and}campaign_name = %s
                         ORDER BY
                             CASE
                                 WHEN contact_id IS NOT NULL AND contact_id <> ''
@@ -1696,7 +1909,7 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                     ORDER BY run_date DESC
                     LIMIT 10
                     """,
-                    (days, name_key),
+                    (*date_params, name_key),
                 )
                 rl_rows = cur.fetchall()
                 rl_cols = [d[0] for d in cur.description]
@@ -1739,15 +1952,24 @@ def api_campaign_detail_query(
     user: dict = Depends(require_auth),
     campaign_name: str = Query(..., description="Campaign name (URL-encoded)"),
     days: int = Query(default=30, description="Number of days to look back (1–365)"),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
 ) -> dict[str, Any]:
     """Return campaign drill-down detail via query parameter. Preferred endpoint.
 
     Using a query parameter avoids routing issues with campaign names that
     contain literal forward slashes. The frontend must call
     encodeURIComponent(campaign_name) before appending to the URL.
+    PR-ADS-141: honours the evidence window (all_time = no lower date bound) so the
+    drawer proof matches the Campaigns headline window exactly.
     Phase 1 read-only — no writes to Google Ads or HubSpot.
     """
-    return _build_campaign_detail(campaign_name, _clamp_days(days))
+    days_val, window_key = _resolve_evidence_window(window, days)
+    result = _build_campaign_detail(campaign_name, days_val)
+    result["window"] = window_key
+    return result
 
 
 @app.get("/api/campaigns/{campaign_name}/detail")
@@ -1755,6 +1977,10 @@ def api_campaign_detail_path(
     campaign_name: str,
     user: dict = Depends(require_auth),
     days: int = Query(default=30, description="Number of days to look back (1–365)"),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
 ) -> dict[str, Any]:
     """Return campaign drill-down detail via path segment. Legacy compatibility route.
 
@@ -1762,7 +1988,10 @@ def api_campaign_detail_path(
     Campaign names containing literal '/' cannot be addressed via this route.
     Phase 1 read-only — no writes to Google Ads or HubSpot.
     """
-    return _build_campaign_detail(campaign_name, _clamp_days(days))
+    days_val, window_key = _resolve_evidence_window(window, days)
+    result = _build_campaign_detail(campaign_name, days_val)
+    result["window"] = window_key
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -3458,6 +3687,10 @@ def api_search_terms(
         default=_SEARCH_TERMS_DEFAULT_DAYS,
         description="Number of days to look back (1–90)",
     ),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
     campaign: str = Query(default=None, description="Filter by exact campaign_name"),
     match_type: str = Query(default=None, description="Filter by match_type (contains, case-insensitive)"),
     q: str = Query(default=None, description="Case-insensitive contains search on search_term"),
@@ -3475,14 +3708,15 @@ def api_search_terms(
     limit: int = Query(default=100, description="Page size (1–500)"),
     cursor: str = Query(default=None, description="Opaque pagination cursor from previous response"),
 ) -> dict[str, Any]:
-    """Return paginated search-term fact rows for the last N days.
+    """Return paginated search-term fact rows for the evidence window.
 
     Uses cursor/keyset pagination on (source_date DESC, id DESC).
     Auth required. Read-only. No writes to Google Ads or HubSpot.
     Source: search_terms table (PR-ADS-040).
     """
     # ── Clamp / validate params ────────────────────────────────────────────
-    days  = max(1, min(_SEARCH_TERMS_MAX_DAYS, days))
+    days, window_key = _resolve_search_terms_window(
+        window, days, legacy_max=_SEARCH_TERMS_MAX_DAYS)
     limit = max(1, min(_SEARCH_TERMS_MAX_LIMIT, limit))
 
     # ── Resolve effective waste state ──────────────────────────────────────
@@ -3490,6 +3724,7 @@ def api_search_terms(
 
     _safe_empty: dict[str, Any] = {
         "days": days,
+        "window": window_key,
         "filters": {
             "waste_state": effective_state,
         },
@@ -3530,10 +3765,13 @@ def api_search_terms(
 
             with conn.cursor() as cur:
                 # ── Build base WHERE clauses (window + filters; excludes cursor) ──
-                base_conditions: list[str] = [
-                    "source_date >= NOW() - INTERVAL '1 day' * %s",
-                ]
-                base_params: list[Any] = [days]
+                # all_time (days is None) omits the date bound entirely — no lower
+                # bound, never a fabricated empty window.
+                base_conditions: list[str] = []
+                base_params: list[Any] = []
+                if days is not None:
+                    base_conditions.append("source_date >= NOW() - INTERVAL '1 day' * %s")
+                    base_params.append(days)
 
                 if campaign_key is not None:
                     base_conditions.append("campaign_name = %s")
@@ -3559,7 +3797,7 @@ def api_search_terms(
                     base_conditions.append("spend_usd >= %s")
                     base_params.append(min_spend)
 
-                base_where_sql = " AND ".join(base_conditions)
+                base_where_sql = " AND ".join(base_conditions) or "TRUE"
 
                 # ── Count full filtered window (not current page) ────────────
                 cur.execute(
@@ -3580,7 +3818,7 @@ def api_search_terms(
                     )
                     params += [cursor_date, cursor_date, cursor_id]
 
-                where_sql = " AND ".join(conditions)
+                where_sql = " AND ".join(conditions) or "TRUE"
 
                 # Fetch limit+1 to detect whether more rows exist
                 fetch_limit = limit + 1
@@ -3661,6 +3899,7 @@ def api_search_terms(
 
     return {
         "days": days,
+        "window": window_key,
         "filters": {
             "waste_state": effective_state,
         },
@@ -3707,6 +3946,10 @@ def api_search_terms_summary(
     ),
     waste_only: bool = Query(default=False, description="Deprecated. If true, equivalent to waste_state=flagged. Ignored when waste_state is provided."),
     min_spend: float = Query(default=None, description="Minimum spend_usd threshold"),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
 ) -> dict[str, Any]:
     """Return aggregate summary counts for the selected filter/window.
 
@@ -3720,7 +3963,8 @@ def api_search_terms_summary(
     Does not write to Google Ads or HubSpot.
     """
     # ── Clamp / validate params ────────────────────────────────────────────
-    days = max(1, min(_SEARCH_TERMS_MAX_DAYS, days))
+    days, window_key = _resolve_search_terms_window(
+        window, days, legacy_max=_SEARCH_TERMS_MAX_DAYS)
 
     # ── Resolve effective waste state ──────────────────────────────────────
     effective_state = _resolve_waste_state_param(waste_state, waste_only)
@@ -3744,6 +3988,7 @@ def api_search_terms_summary(
 
     _safe_empty: dict[str, Any] = {
         "days": days,
+        "window": window_key,
         "filters": {
             "waste_state": effective_state,
         },
@@ -3773,10 +4018,12 @@ def api_search_terms_summary(
                 # ── Build base WHERE clauses (no waste_state) ─────────────
                 # Used for the analysis_state breakdown so all three buckets
                 # are always visible even when the user filters by one state.
-                base_conditions: list[str] = [
-                    "source_date >= NOW() - INTERVAL '1 day' * %s",
-                ]
-                base_params: list[Any] = [days]
+                # all_time (days is None) omits the date bound — no lower bound.
+                base_conditions: list[str] = []
+                base_params: list[Any] = []
+                if days is not None:
+                    base_conditions.append("source_date >= NOW() - INTERVAL '1 day' * %s")
+                    base_params.append(days)
 
                 if campaign_key is not None:
                     base_conditions.append("campaign_name = %s")
@@ -3794,7 +4041,7 @@ def api_search_terms_summary(
                     base_conditions.append("spend_usd >= %s")
                     base_params.append(min_spend)
 
-                base_where_sql = " AND ".join(base_conditions)
+                base_where_sql = " AND ".join(base_conditions) or "TRUE"
 
                 # ── Build filtered WHERE clauses (with waste_state) ────────
                 # Used for the top-line summary so it honours the selected state.
@@ -3809,7 +4056,7 @@ def api_search_terms_summary(
                     filtered_conditions.append("is_flagged_waste IS NULL")
                 # "all" — no additional condition
 
-                filtered_where_sql = " AND ".join(filtered_conditions)
+                filtered_where_sql = " AND ".join(filtered_conditions) or "TRUE"
 
                 # ── Query 1: top-line summary (filtered scope) ─────────────
                 # All user-supplied values go through parameterised %s.
@@ -3910,6 +4157,7 @@ def api_search_terms_summary(
 
     return {
         "days": days,
+        "window": window_key,
         "filters": filters_out,
         "summary": {
             "total_terms":                   total_terms,
@@ -3982,6 +4230,10 @@ def api_search_terms_ngrams(
         default=_NGRAMS_DEFAULT_DAYS,
         description="Number of days to look back (1–30 for prototype)",
     ),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
     campaign: str = Query(default=None, description="Filter by exact campaign_name"),
     match_type: str = Query(default=None, description="Filter by match_type (contains, case-insensitive)"),
     waste_state: str = Query(
@@ -4006,7 +4258,8 @@ def api_search_terms_ngrams(
     negative keyword candidates.
     """
     # ── Clamp / validate params ────────────────────────────────────────────
-    days  = max(1, min(_NGRAMS_MAX_DAYS, days))
+    days, window_key = _resolve_search_terms_window(
+        window, days, legacy_max=_NGRAMS_MAX_DAYS)
     limit = max(1, min(_NGRAMS_MAX_LIMIT, limit))
 
     # ── Validate n ────────────────────────────────────────────────────────
@@ -4033,6 +4286,7 @@ def api_search_terms_ngrams(
     # ── Safe empty fallback ────────────────────────────────────────────────
     _safe_empty: dict[str, Any] = {
         "days": days,
+        "window": window_key,
         "filters": {
             "waste_state": effective_state,
             "n":           n_list,
@@ -4061,10 +4315,12 @@ def api_search_terms_ngrams(
 
             with conn.cursor() as cur:
                 # ── Build WHERE clauses ───────────────────────────────────
-                conditions: list[str] = [
-                    "source_date >= NOW() - INTERVAL '1 day' * %s",
-                ]
-                params: list[Any] = [days]
+                # all_time (days is None) omits the date bound — no lower bound.
+                conditions: list[str] = []
+                params: list[Any] = []
+                if days is not None:
+                    conditions.append("source_date >= NOW() - INTERVAL '1 day' * %s")
+                    params.append(days)
 
                 if campaign_key is not None:
                     conditions.append("campaign_name = %s")
@@ -4090,7 +4346,7 @@ def api_search_terms_ngrams(
                     conditions.append("is_flagged_waste IS NULL")
                 # "all" — no additional condition
 
-                where_sql = " AND ".join(conditions)
+                where_sql = " AND ".join(conditions) or "TRUE"
 
                 # Fetch cap+1 rows so we can accurately detect whether additional
                 # rows existed beyond the cap.  We trim back to cap after the fetch.
@@ -4158,6 +4414,7 @@ def api_search_terms_ngrams(
 
     return {
         "days": days,
+        "window": window_key,
         "filters": filters_out,
         "rows": returned_ngrams,
         "summary": {
@@ -4221,6 +4478,10 @@ def _decode_gclid_cursor(token: str):
 def api_gclid_attribution(
     user: dict = Depends(require_auth),
     days: int = Query(default=_GCLID_ATTR_DEFAULT_DAYS, description="Number of days to look back (1–365)"),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
     campaign: str = Query(default=None, description="Filter by exact campaign_name"),
     gclid: str = Query(default=None, description="Filter by exact gclid value"),
     contact_id: str = Query(default=None, description="Filter by contact_id"),
@@ -4229,18 +4490,20 @@ def api_gclid_attribution(
     limit: int = Query(default=100, description="Page size (1–500)"),
     cursor: str = Query(default=None, description="Opaque pagination cursor from previous response"),
 ) -> dict[str, Any]:
-    """Return paginated GCLID attribution rows for the last N days.
+    """Return paginated GCLID attribution rows for the evidence window.
 
     Uses cursor/keyset pagination on (created_at DESC, id DESC).
     Auth required. Read-only.
     Source: gclid_attribution table (PR-ADS-044).
     Does not upload offline conversions. Does not write to Google Ads or HubSpot.
     """
-    days  = max(1, min(_GCLID_ATTR_MAX_DAYS, days))
+    days, window_key = _resolve_search_terms_window(
+        window, days, legacy_max=_GCLID_ATTR_MAX_DAYS)
     limit = max(1, min(_GCLID_ATTR_MAX_LIMIT, limit))
 
     _safe_empty: dict[str, Any] = {
         "days": days,
+        "window": window_key,
         "rows": [],
         "pagination": {
             "limit":       limit,
@@ -4279,10 +4542,12 @@ def api_gclid_attribution(
                 return _safe_empty
 
             with conn.cursor() as cur:
-                conditions: list[str] = [
-                    "created_at >= NOW() - INTERVAL '1 day' * %s",
-                ]
-                params: list[Any] = [days]
+                # all_time (days is None) omits the created_at bound — no lower bound.
+                conditions: list[str] = []
+                params: list[Any] = []
+                if days is not None:
+                    conditions.append("created_at >= NOW() - INTERVAL '1 day' * %s")
+                    params.append(days)
 
                 if cursor_ts is not None and cursor_id is not None:
                     conditions.append(
@@ -4310,7 +4575,7 @@ def api_gclid_attribution(
                     conditions.append("match_status = %s")
                     params.append(match_status.strip())
 
-                where_sql = " AND ".join(conditions)
+                where_sql = " AND ".join(conditions) or "TRUE"
                 fetch_limit = limit + 1
                 params.append(fetch_limit)
 
@@ -4394,6 +4659,7 @@ def api_gclid_attribution(
 
     return {
         "days": days,
+        "window": window_key,
         "rows": out,
         "pagination": {
             "limit":       limit,
@@ -4599,12 +4865,16 @@ def api_attribution_quality(
         default=_ATTR_QUALITY_DEFAULT_DAYS,
         description="Number of days to look back (1–365)",
     ),
+    window: str | None = Query(
+        default=None,
+        description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
+    ),
     campaign: str = Query(
         default=None,
         description="Optional exact canonical campaign name filter",
     ),
 ) -> dict[str, Any]:
-    """Return read-only attribution quality signals for the last N days.
+    """Return read-only attribution quality signals for the evidence window.
 
     Auth required. Read-only.
     Source tables: gclid_attribution, sync_state, gclid_coverage_snapshots.
@@ -4612,10 +4882,12 @@ def api_attribution_quality(
     Does not upload offline conversions. Does not write to any external system.
     Signals are attribution evidence/completeness indicators only.
     """
-    days = max(1, min(_ATTR_QUALITY_MAX_DAYS, days))
+    days, window_key = _resolve_search_terms_window(
+        window, days, legacy_max=_ATTR_QUALITY_MAX_DAYS)
 
     _safe_db_unavailable: dict[str, Any] = {
         "days":           days,
+        "window":         window_key,
         "summary":        {},
         "rates":          {},
         "signals":        [],
@@ -4639,16 +4911,18 @@ def api_attribution_quality(
                 # agg_conditions contains only programmer-supplied literal strings with %s
                 # placeholders; all user input (days, campaign_key) goes into agg_params.
                 # The WHERE clause is never built from raw request data.
-                agg_conditions: list[str] = [
-                    "created_at >= NOW() - INTERVAL '1 day' * %s",
-                ]
-                agg_params: list[Any] = [days]
+                # all_time (days is None) omits the created_at bound — no lower bound.
+                agg_conditions: list[str] = []
+                agg_params: list[Any] = []
+                if days is not None:
+                    agg_conditions.append("created_at >= NOW() - INTERVAL '1 day' * %s")
+                    agg_params.append(days)
 
                 if campaign_key is not None:
                     agg_conditions.append("campaign_name = %s")
                     agg_params.append(campaign_key)
 
-                agg_where = " AND ".join(agg_conditions)
+                agg_where = " AND ".join(agg_conditions) or "TRUE"
 
                 cur.execute(
                     f"""
@@ -4793,6 +5067,7 @@ def api_attribution_quality(
 
     result: dict[str, Any] = {
         "days":    days,
+        "window":  window_key,
         "summary": summary,
         "rates":   rates,
         "signals": signals,
