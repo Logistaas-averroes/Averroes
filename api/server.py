@@ -830,6 +830,51 @@ def _resolve_search_terms_window(window, days, *, legacy_max: int):
     return clamped, f"{clamped}d"
 
 
+def _round2(value):
+    """Round to 2 dp, passing None straight through (never fabricate a 0)."""
+    if value is None:
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nullable_int(value):
+    """Coerce to int, preserving None (an unavailable metric is NOT a real 0).
+
+    Only a value the source positively records is converted; ``None`` (the
+    column was NULL / the metric was never captured) stays ``None`` so the UI
+    can render "—"/"Unavailable" instead of a fabricated zero.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _empty_campaign_summary() -> dict[str, Any]:
+    """Zeroed decision summary for the db-unavailable / empty campaign response."""
+    return {
+        "campaigns_with_evidence": 0,
+        "confirmed_sqls_total": 0,
+        "confirmed_junk_total": 0,
+        "verdict_counts": {"SCALE": 0, "HOLD": 0, "FIX": 0, "CUT": 0},
+        "completeness": {
+            "confirmed_sqls": {"status": "complete", "available": 0, "missing": 0},
+            "confirmed_junk": {"status": "complete", "available": 0, "missing": 0},
+        },
+        "spend_requiring_review": {
+            "status": "unavailable",
+            "value": None,
+            "reason": ("Spend aggregation requires contract verification — per-run "
+                       "snapshot spend cannot be summed into a selected-window total."),
+        },
+    }
+
+
 @app.get("/api/campaigns")
 def api_campaigns(
     user: dict = Depends(require_auth),
