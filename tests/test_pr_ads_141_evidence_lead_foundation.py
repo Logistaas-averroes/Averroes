@@ -215,7 +215,8 @@ def test_evidence_windows_defined_with_all_six_options():
 def test_evidence_pages_list_and_helper():
     block = APP_JS[APP_JS.find("const EVIDENCE_PAGES"):
                    APP_JS.find("const EVIDENCE_PAGES") + 300]
-    for route in ("campaigns", "search-terms", "keywords", "geo",
+    # BLOCKER 2: ngrams is derived Search Term evidence and uses the dropdown too.
+    for route in ("campaigns", "search-terms", "ngrams", "keywords", "geo",
                   "leads", "opportunities", "waste"):
         assert f'"{route}"' in block, f"EVIDENCE_PAGES missing {route}"
     assert "function isEvidencePage(" in APP_JS
@@ -337,3 +338,241 @@ def test_no_null_undefined_nan_in_new_frontend_helpers():
         assert bad not in region
     # The shell renders escaped, defined content only.
     assert "renderEvidencePageShell" in region
+
+
+# ════════════════ BLOCKER 1 — complete totals, explicit truncation ═══════════
+#
+# A tiny fake DB so we can exercise the aggregate/truncation SQL paths without a
+# real Postgres. Each cursor returns canned results chosen by matching the SQL.
+
+
+class _FakeCursor:
+    def __init__(self, responder):
+        self._responder = responder
+        self._rows = []
+        self.description = []
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        self.executed.append(sql)
+        rows, cols = self._responder(sql, params)
+        self._rows = rows
+        self.description = [(c,) for c in cols]
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _FakeConn:
+    def __init__(self, responder):
+        self._responder = responder
+        self.cursors = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def cursor(self):
+        cur = _FakeCursor(self._responder)
+        self.cursors.append(cur)
+        return cur
+
+
+def _patch_conn(monkeypatch, responder):
+    import db.connection as conn_mod
+    monkeypatch.setattr(conn_mod, "get_conn", lambda: _FakeConn(responder))
+
+
+def test_leads_all_time_aggregates_complete_beyond_row_cap(monkeypatch):
+    # 1500 leads in the window; the row page is capped at 1000, but the aggregate
+    # totals (and per-campaign breakdown) cover ALL 1500 — never truncated.
+    LEAD_COLS = ["contact_id", "company", "campaign_name", "keyword", "country",
+                 "mql_status", "status_category", "gclid", "source_type", "run_date"]
+
+    def responder(sql, params):
+        if "GROUP BY 1, 2" in sql:  # complete aggregates
+            return ([("Alpha", "qualified", 800),
+                     ("Alpha", "junk", 200),
+                     ("Beta", "in_progress", 500)],
+                    ["campaign_name", "status_category", "n"])
+        # row page (capped at 1000)
+        rows = [("c%d" % i, None, "Alpha", None, None, None, "qualified",
+                 None, None, "2026-07-01") for i in range(1000)]
+        return (rows, LEAD_COLS)
+
+    _patch_conn(monkeypatch, responder)
+    import importlib
+    server = importlib.import_module("api.server")
+    out = server.api_leads(user={"e": "x"}, days=30, window="all_time")
+
+    assert out["window"] == "all_time"
+    # Row list is capped, but totals are COMPLETE (1500), and disclosed as partial.
+    assert out["returned_count"] == 1000
+    assert out["total_count"] == 1500
+    assert out["has_more"] is True
+    assert out["aggregates"]["totals"]["total"] == 1500
+    assert out["aggregates"]["totals"]["qualified"] == 800
+    assert out["aggregates"]["totals"]["junk"] == 200
+    assert out["aggregates"]["totals"]["in_progress"] == 500
+    # Per-campaign breakdown is complete and sums back to the totals.
+    by_camp = {c["campaign_name"]: c for c in out["aggregates"]["by_campaign"]}
+    assert by_camp["Alpha"]["total"] == 1000 and by_camp["Alpha"]["qualified"] == 800
+    assert by_camp["Beta"]["in_progress"] == 500
+
+
+def test_waste_all_time_discloses_truncation_beyond_500(monkeypatch):
+    WASTE_COLS = ["search_term", "campaign_name", "spend_usd",
+                  "junk_category", "matched_pattern", "crm_junk_confirmed", "run_date"]
+
+    def responder(sql, params):
+        if "COUNT(*)" in sql:                 # complete count
+            return ([(1200,)], ["count"])
+        rows = [("term%d" % i, "Alpha", 1.0, None, None, 0, "2026-07-01")
+                for i in range(500)]          # capped page
+        return (rows, WASTE_COLS)
+
+    _patch_conn(monkeypatch, responder)
+    import importlib
+    server = importlib.import_module("api.server")
+    out = server.api_waste(user={"e": "x"}, days=30, window="all_time")
+
+    assert out["window"] == "all_time"
+    assert out["returned_count"] == 500
+    assert out["total_count"] == 1200          # full window count, not the page
+    assert out["has_more"] is True
+    assert out["truncated"] is True
+
+
+def test_leads_aggregates_shape_empty_when_db_unavailable(monkeypatch):
+    import db.connection as conn_mod
+    monkeypatch.setattr(conn_mod, "get_conn", lambda: _NoneConn())
+    import importlib
+    server = importlib.import_module("api.server")
+    out = server.api_leads(user={"e": "x"}, days=30, window="all_time")
+    assert out["db_unavailable"] is True
+    assert out["total_count"] == 0 and out["has_more"] is False
+    assert out["aggregates"]["totals"]["total"] == 0   # never a fabricated number
+
+
+class _NoneConn:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_frontend_lead_quality_uses_complete_aggregates():
+    fn = APP_JS[APP_JS.find("async function loadLeads"):
+                APP_JS.find("async function loadLeads") + 2600]
+    # KPIs + breakdown read the server aggregates, not a client-side row tally.
+    assert "data.aggregates" in fn
+    assert "agg.totals" in fn and "agg.by_campaign" in fn
+    # It must NOT recompute totals by iterating a truncated leads array.
+    assert "leads.forEach" not in fn
+
+
+def test_frontend_in_progress_discloses_truncation():
+    fn = APP_JS[APP_JS.find("async function loadOpportunities"):
+                APP_JS.find("async function loadOpportunities") + 3800]
+    assert "data.has_more" in fn
+    assert "data.total_count" in fn and "data.returned_count" in fn
+    assert "Showing" in fn
+
+
+def test_frontend_waste_discloses_showing_x_of_y_and_partial_export():
+    render = APP_JS[APP_JS.find("function renderWasteTable"):
+                    APP_JS.find("function renderWasteTable") + 1600]
+    assert "_wasteMeta.truncated" in render
+    assert "Showing" in render and "of" in render
+    exp = APP_JS[APP_JS.find("function downloadWasteCSV"):
+                 APP_JS.find("function downloadWasteCSV") + 900]
+    assert "_partial_first" in exp   # export never implies a complete library
+
+
+# ════════════════ BLOCKER 3 — campaign drawer honours the window ═════════════
+
+
+def test_campaign_detail_all_time_sql_has_no_lower_bound(monkeypatch):
+    # Every drawer query for all_time must omit the run_date lower bound.
+    captured = {"sql": []}
+
+    def responder(sql, params):
+        captured["sql"].append(sql)
+        return ([], ["x"])
+
+    _patch_conn(monkeypatch, responder)
+    import importlib
+    server = importlib.import_module("api.server")
+    out = server.api_campaign_detail_query(
+        user={"e": "x"}, campaign_name="alpha", days=30, window="all_time")
+
+    assert out["window"] == "all_time"
+    assert captured["sql"], "no queries executed"
+    for sql in captured["sql"]:
+        assert "run_date >=" not in sql, "all_time drawer query still has a lower bound"
+        assert "campaign_name = %s" in sql   # still scoped to the campaign
+
+
+def test_campaign_detail_numeric_window_keeps_lower_bound(monkeypatch):
+    captured = {"sql": []}
+
+    def responder(sql, params):
+        captured["sql"].append(sql)
+        return ([], ["x"])
+
+    _patch_conn(monkeypatch, responder)
+    import importlib
+    server = importlib.import_module("api.server")
+    server.api_campaign_detail_query(
+        user={"e": "x"}, campaign_name="alpha", days=30, window="180d")
+    assert any("run_date >=" in s for s in captured["sql"])
+
+
+def test_campaign_detail_rejects_invalid_window(monkeypatch):
+    import importlib
+    server = importlib.import_module("api.server")
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        server.api_campaign_detail_query(
+            user={"e": "x"}, campaign_name="alpha", days=30, window="99d")
+    assert exc.value.status_code == 400
+
+
+def test_frontend_drawer_uses_evidence_window_not_365():
+    # Drawer sub-fetches pass window=getEvidenceWindow(), never a days downgrade.
+    assert "/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&window=${encodeURIComponent(getEvidenceWindow())}" in APP_JS
+    # The hidden all_time->365 helper is gone entirely.
+    assert "evidenceWindowDays" not in APP_JS
+    # Attribution preview + quality drawer calls also send window=.
+    preview = APP_JS[APP_JS.find("async function loadCampaignAttributionPreview"):
+                     APP_JS.find("async function loadCampaignAttributionPreview") + 900]
+    assert 'params.set("window", getEvidenceWindow())' in preview
+    quality = APP_JS[APP_JS.find("async function loadCampaignAttributionQuality"):
+                     APP_JS.find("async function loadCampaignAttributionQuality") + 900]
+    assert 'params.set("window", getEvidenceWindow())' in quality
+
+
+def test_campaign_detail_and_attribution_accept_window_endpoint(client_cookie):
+    # End-to-end: the drawer endpoints accept the evidence window (200, not 422/400)
+    # and reject an unknown one.
+    client, cookie = client_cookie
+    for url in ("/api/campaign-detail?campaign_name=x&window=all_time",
+                "/api/attribution/quality?window=all_time&campaign=x",
+                "/api/gclid-attribution?window=all_time&campaign=x"):
+        assert client.get(url, cookies={"ads_session": cookie}).status_code == 200, url
+    for url in ("/api/campaign-detail?campaign_name=x&window=99d",
+                "/api/attribution/quality?window=99d",
+                "/api/gclid-attribution?window=99d"):
+        assert client.get(url, cookies={"ads_session": cookie}).status_code == 400, url

@@ -512,9 +512,10 @@ const DEFAULT_EVIDENCE_WINDOW = "30d";
 
 // Routes that use the evidence window dropdown. (UI names differ from routes:
 // countries=geo, lead-quality=leads, in-progress-leads=opportunities,
-// flagged-waste-terms=waste.)
+// flagged-waste-terms=waste.) N-Grams is derived Search Term evidence, so it
+// uses the same Evidence window dropdown (its request is window-driven).
 const EVIDENCE_PAGES = [
-  "campaigns", "search-terms", "keywords", "geo",
+  "campaigns", "search-terms", "ngrams", "keywords", "geo",
   "leads", "opportunities", "waste",
 ];
 
@@ -1038,17 +1039,6 @@ function evidenceWindowDef(value) {
 // Query fragment for evidence endpoints: `window=<key>` (never a fake days value).
 function evidenceWindowQuery() {
   return `window=${encodeURIComponent(getEvidenceWindow())}`;
-}
-
-// Effective integer days for legacy day-based sub-fetches (e.g. the campaign
-// drawer) reachable from an evidence page. all_time maps to the widest supported
-// lookback so a detail view still loads; the headline evidence endpoints use the
-// true unbounded `window=all_time` instead.
-function evidenceWindowDays() {
-  const def = evidenceWindowDef();
-  // all_time maps to the widest legacy day ceiling (shared with VALID_DAY_WINDOWS
-  // so it can never diverge if that cap changes).
-  return def.days == null ? Math.max(...VALID_DAY_WINDOWS) : def.days;
 }
 
 function setEvidenceWindow(value) {
@@ -5995,6 +5985,9 @@ async function loadCampaigns() {
 // ── Waste Terms page ───────────────────────────────────────────────────────
 
 let _wasteData = [];  // raw API response, reset on each load
+// PR-ADS-141: truncation metadata for the waste library ({total_count,
+// returned_count, truncated}) so the UI can disclose "Showing X of Y".
+let _wasteMeta = { total_count: 0, returned_count: 0, truncated: false };
 
 const JUNK_CATEGORY_LABELS = {
   job_seeker:           "Job Seeker",
@@ -6033,6 +6026,13 @@ async function loadWaste() {
   try {
     const data = await fetchJSON(`/api/waste?${evidenceWindowQuery()}`);
     _wasteData = data.waste || [];
+    // PR-ADS-141: disclose truncation — the row list is a presentation-capped
+    // page, so All time never silently implies the complete waste library.
+    _wasteMeta = {
+      total_count:    Number(data.total_count != null ? data.total_count : _wasteData.length),
+      returned_count: Number(data.returned_count != null ? data.returned_count : _wasteData.length),
+      truncated:      data.truncated === true || data.has_more === true,
+    };
 
     populateWasteFilters(_wasteData);
     renderWasteKPIs(_wasteData);
@@ -6040,6 +6040,7 @@ async function loadWaste() {
 
   } catch (_) {
     _wasteData = [];
+    _wasteMeta = { total_count: 0, returned_count: 0, truncated: false };
     if (tableEl) tableEl.innerHTML =
       `<p class="empty-state" style="padding:var(--space-5)">Could not load waste terms. Check API health or run status.</p>`;
   }
@@ -6121,6 +6122,13 @@ function renderWasteTable(items) {
       </tr>
     </thead>`;
 
+  // PR-ADS-141: disclose when the window holds more terms than were loaded.
+  const truncationNote = _wasteMeta.truncated
+    ? `<p class="deal-stage-note">Showing ${escapeHtml(fmtCount(_wasteMeta.returned_count))} of `
+      + `${escapeHtml(fmtCount(_wasteMeta.total_count))} waste terms in this window `
+      + `(highest spend first). Narrow the window for the complete library.</p>`
+    : "";
+
   const tbody = items.map((t) => {
     const highSpend = (t.spend_usd || 0) >= WASTE_HIGH_SPEND_USD;
     return `
@@ -6135,7 +6143,7 @@ function renderWasteTable(items) {
       </tr>`;
   }).join("");
 
-  tableEl.innerHTML = `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+  tableEl.innerHTML = truncationNote + `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
 }
 
 // Returns the currently visible (filtered) waste terms based on filter control state.
@@ -6221,21 +6229,15 @@ async function loadLeads() {
 
   try {
     const data  = await fetchJSON(`/api/leads?${evidenceWindowQuery()}`);
-    // Deduplicate by contact_id — leads endpoint returns one row per run per lead.
-    // Rows without contact_id are kept individually (not collapsed under null key).
-    const seen  = new Map();
-    for (const [index, lead] of (data.leads || []).entries()) {
-      const dedupeKey = hasValidContactId(lead)
-        ? `contact:${lead.contact_id}`
-        : `row:${index}`;
-      const existing = seen.get(dedupeKey);
-      if (!existing || lead.run_date > existing.run_date) {
-        seen.set(dedupeKey, lead);
-      }
-    }
-    const leads = Array.from(seen.values());
+    // PR-ADS-141: KPIs and the per-campaign breakdown come from COMPLETE
+    // server-side aggregates over the whole evidence window (deduped by contact),
+    // never a truncated row list — so All time is never silently incomplete.
+    const agg        = (data && data.aggregates) || { totals: {}, by_campaign: [] };
+    const totals     = agg.totals || {};
+    const byCampaign = agg.by_campaign || [];
+    const totalLeads = Number(totals.total || 0);
 
-    if (leads.length === 0) {
+    if (totalLeads === 0) {
       if (tableEl) tableEl.innerHTML = buildEmptyState({
         pageKey: "leads",
         canonicalStatus: getPageCanonicalStatus("leads"),
@@ -6247,41 +6249,10 @@ async function loadLeads() {
       return;
     }
 
-    // Aggregate KPIs
-    let sumTotal = 0, sumSQL = 0, sumJunk = 0, sumProgress = 0;
-    leads.forEach((l) => {
-      const cat = l.status_category || "unknown";
-      sumTotal++;
-      if (cat === "qualified")   sumSQL++;
-      if (cat === "junk")        sumJunk++;
-      if (cat === "in_progress") sumProgress++;
-    });
-
-    if (totalEl)    totalEl.textContent    = String(sumTotal);
-    if (sqlsEl)     sqlsEl.textContent     = String(sumSQL);
-    if (junkEl)     junkEl.textContent     = String(sumJunk);
-    if (progressEl) progressEl.textContent = String(sumProgress);
-
-    // Group by campaign for per-campaign breakdown
-    const byCampaign = new Map();
-    leads.forEach((l) => {
-      const name = l.campaign_name || "(unknown)";
-      if (!byCampaign.has(name)) {
-        byCampaign.set(name, { total: 0, sql: 0, progress: 0, junk: 0, wrong_fit: 0, unknown: 0 });
-      }
-      const g = byCampaign.get(name);
-      g.total++;
-      const cat = l.status_category || "unknown";
-      if (cat === "qualified")   g.sql++;
-      if (cat === "in_progress") g.progress++;
-      if (cat === "junk")        g.junk++;
-      if (cat === "wrong_fit")   g.wrong_fit++;
-      if (cat === "unknown")     g.unknown++;
-    });
-
-    // Sort by total leads desc
-    const rows = Array.from(byCampaign.entries())
-      .sort((a, b) => b[1].total - a[1].total);
+    if (totalEl)    totalEl.textContent    = String(totalLeads);
+    if (sqlsEl)     sqlsEl.textContent     = String(Number(totals.qualified || 0));
+    if (junkEl)     junkEl.textContent     = String(Number(totals.junk || 0));
+    if (progressEl) progressEl.textContent = String(Number(totals.in_progress || 0));
 
     const thead = `
       <thead>
@@ -6297,21 +6268,27 @@ async function loadLeads() {
         </tr>
       </thead>`;
 
-    const tbody = rows.map(([name, g]) => {
-      const junkPct = g.total > 0 ? Math.round((g.junk / g.total) * 100) : 0;
+    const tbody = byCampaign.map((g) => {
+      const total     = Number(g.total || 0);
+      const sql       = Number(g.qualified || 0);
+      const progress  = Number(g.in_progress || 0);
+      const junk      = Number(g.junk || 0);
+      const wrongFit  = Number(g.wrong_fit || 0);
+      const unknown   = Number(g.unknown || 0);
+      const junkPct = total > 0 ? Math.round((junk / total) * 100) : 0;
       const barCls  = junkPct < uiThresholds.junk_rate.low_pct   ? "progress-bar__fill--low" :
                       junkPct <= uiThresholds.junk_rate.high_pct ? "progress-bar__fill--mid" : "progress-bar__fill--high";
       const junkCls = junkPct < uiThresholds.junk_rate.low_pct   ? "junk--low" :
                       junkPct <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
       return `
         <tr>
-          <td class="td--name">${escapeHtml(name)}</td>
-          <td class="td--num">${g.total}</td>
-          <td class="td--num">${g.sql}</td>
-          <td class="td--num">${g.progress}</td>
-          <td class="td--num">${g.junk}</td>
-          <td class="td--num">${g.wrong_fit}</td>
-          <td class="td--num">${g.unknown}</td>
+          <td class="td--name">${escapeHtml(g.campaign_name || "(unknown)")}</td>
+          <td class="td--num">${total}</td>
+          <td class="td--num">${sql}</td>
+          <td class="td--num">${progress}</td>
+          <td class="td--num">${junk}</td>
+          <td class="td--num">${wrongFit}</td>
+          <td class="td--num">${unknown}</td>
           <td>
             <div style="display:flex;align-items:center;gap:8px;">
               <div class="progress-bar" style="width:80px">
@@ -9483,7 +9460,10 @@ function downloadWasteCSV() {
     t.junk_category || "", t.matched_pattern || "",
     t.crm_junk_confirmed, t.run_date,
   ]);
-  downloadCSV(`waste_terms_${getEvidenceWindow()}.csv`, headers, rows);
+  // PR-ADS-141: when the row list is a partial page, name the file so it never
+  // implies the complete waste library for the window.
+  const suffix = _wasteMeta.truncated ? `_partial_first${_wasteMeta.returned_count}` : "";
+  downloadCSV(`waste_terms_${getEvidenceWindow()}${suffix}.csv`, headers, rows);
 }
 
 // ── GCLID Attribution page ───────────────────────────────────────────────────
@@ -10306,7 +10286,17 @@ async function loadOpportunities() {
         </div>`;
     };
 
-    el.innerHTML = renderGroup("Meeting Booked", booked)
+    // PR-ADS-141: the leads row list is a presentation-capped page. When the
+    // window holds more leads than were returned, disclose it — never imply the
+    // in-progress list is complete for All time.
+    const truncationNote = data.has_more
+      ? `<div class="evidence-status-chip evidence-status-chip--warning" style="margin-bottom:12px;display:inline-flex">`
+        + `Showing in-progress leads from the ${fmtCount(data.returned_count)} most recent of `
+        + `${fmtCount(data.total_count)} leads in this window — narrow the window for a complete list.</div>`
+      : "";
+
+    el.innerHTML = truncationNote
+                 + renderGroup("Meeting Booked", booked)
                  + renderGroup("Pending Meeting", pending)
                  + renderGroup("Connecting", connecting);
 
@@ -11466,8 +11456,9 @@ async function loadCampaignAttributionPreview(campaignName, requestId = null) {
 
   try {
     const params = new URLSearchParams();
-    // Campaign drawer opens from the Campaigns evidence page — follow its window.
-    params.set("days", String(evidenceWindowDays()));
+    // Campaign drawer opens from the Campaigns evidence page — follow its window
+    // exactly (incl. all_time = no lower bound), never a hidden 365-day downgrade.
+    params.set("window", getEvidenceWindow());
     params.set("limit", "5");
     params.set("campaign", campaignName);
 
@@ -11512,7 +11503,7 @@ async function loadCampaignAttributionQuality(campaignName, requestId = null) {
 
   try {
     const params = new URLSearchParams();
-    params.set("days", String(evidenceWindowDays()));
+    params.set("window", getEvidenceWindow());
     params.set("campaign", campaignName);
 
     const data = await fetchJSON(`/api/attribution/quality?${params.toString()}`);
@@ -11624,7 +11615,7 @@ async function openCampaignDrawer(campaignName) {
     drawerNgramRows   = [];
 
     const detail = await fetchJSON(
-      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${evidenceWindowDays()}`
+      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&window=${encodeURIComponent(getEvidenceWindow())}`
     );
 
     if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
