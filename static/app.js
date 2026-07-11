@@ -59,6 +59,26 @@ function applyPageChrome(page) {
   if (freshnessBar) freshnessBar.classList.toggle("is-dash-hidden", page === "dashboard");
 
   if (document.body) document.body.classList.toggle("is-revenue-page", revenuePage);
+
+  // PR-ADS-141: Platform Evidence + Lead Intelligence pages use the Evidence
+  // window dropdown; the legacy 7d/14d/30d/60d day buttons are hidden there.
+  // Every other non-revenue page keeps the day buttons. Evidence pages also
+  // collapse the big explainer card into a compact page-truth chip strip.
+  applyEvidenceChrome(page);
+}
+
+// Toggle the evidence-window dropdown vs the legacy day buttons for a page.
+function applyEvidenceChrome(page) {
+  const evidencePage = isEvidencePage(page);
+  const dayLabel = document.getElementById("time-range-day-label");
+  if (dayLabel) dayLabel.hidden = evidencePage;
+  document.querySelectorAll(".time-range-btn").forEach((btn) => {
+    btn.hidden = evidencePage;
+  });
+  const evidenceControl = document.getElementById("evidence-window-control");
+  if (evidenceControl) evidenceControl.hidden = !evidencePage;
+  if (evidencePage) renderEvidenceWindowDropdown();
+  if (document.body) document.body.classList.toggle("is-evidence-page", evidencePage);
 }
 
 // ── UI threshold state ─────────────────────────────────────────────────────
@@ -474,6 +494,33 @@ const PAGE_DEPENDENCIES = {
 let _currentUser   = null;  // { username, role } or null
 let _currentPage   = null;  // active page id string
 const VALID_DAY_WINDOWS = [7, 14, 30, 60, 90, 365];
+
+// ── Evidence windows (PR-ADS-141) ──────────────────────────────────────────
+// Platform Evidence (Campaigns, Search Terms, Keywords, Countries) and Lead
+// Intelligence (Lead Quality, In Progress Leads, Flagged Waste Terms) pages use
+// an *evidence window* dropdown — distinct from the *business windows* used by
+// the Dashboard and Revenue & Attribution pages. The two vocabularies never mix.
+const EVIDENCE_WINDOWS = [
+  { value: "7d",       label: "7 days",   days: 7 },
+  { value: "14d",      label: "14 days",  days: 14 },
+  { value: "30d",      label: "30 days",  days: 30 },
+  { value: "60d",      label: "60 days",  days: 60 },
+  { value: "180d",     label: "180 days", days: 180 },
+  { value: "all_time", label: "All time", days: null },
+];
+const DEFAULT_EVIDENCE_WINDOW = "30d";
+
+// Routes that use the evidence window dropdown. (UI names differ from routes:
+// countries=geo, lead-quality=leads, in-progress-leads=opportunities,
+// flagged-waste-terms=waste.)
+const EVIDENCE_PAGES = [
+  "campaigns", "search-terms", "keywords", "geo",
+  "leads", "opportunities", "waste",
+];
+
+function isEvidencePage(page) {
+  return EVIDENCE_PAGES.includes(page);
+}
 
 let _selectedDays  = (() => {
   try {
@@ -960,6 +1007,121 @@ function windowParamToDays(value) {
 function handleSyncedWindowSelectChange(e) {
   const days = windowParamToDays(e.target.value);
   setSelectedDays(days);
+}
+
+// ── Evidence window selector (PR-ADS-141) ───────────────────────────────────
+// The evidence window is a string key (7d/14d/30d/60d/180d/all_time) used by the
+// Platform Evidence + Lead Intelligence page loaders. It is sent to the backend
+// as `window=<key>` — the endpoint resolves it (all_time = no lower date bound)
+// and never silently coerces an unknown value.
+
+let _evidenceWindow = (() => {
+  try {
+    const stored = sessionStorage.getItem("evidence_window");
+    return EVIDENCE_WINDOWS.some((w) => w.value === stored) ? stored : DEFAULT_EVIDENCE_WINDOW;
+  } catch (_) {
+    return DEFAULT_EVIDENCE_WINDOW;
+  }
+})();
+
+function getEvidenceWindow() {
+  return _evidenceWindow;
+}
+
+// The definition ({value,label,days}) for a window key (defaults to current).
+function evidenceWindowDef(value) {
+  const key = value || _evidenceWindow;
+  return EVIDENCE_WINDOWS.find((w) => w.value === key)
+    || EVIDENCE_WINDOWS.find((w) => w.value === DEFAULT_EVIDENCE_WINDOW);
+}
+
+// Query fragment for evidence endpoints: `window=<key>` (never a fake days value).
+function evidenceWindowQuery() {
+  return `window=${encodeURIComponent(getEvidenceWindow())}`;
+}
+
+// Effective integer days for legacy day-based sub-fetches (e.g. the campaign
+// drawer) reachable from an evidence page. all_time maps to the widest supported
+// lookback so a detail view still loads; the headline evidence endpoints use the
+// true unbounded `window=all_time` instead.
+function evidenceWindowDays() {
+  const def = evidenceWindowDef();
+  return def.days == null ? 365 : def.days;
+}
+
+function setEvidenceWindow(value) {
+  const def = EVIDENCE_WINDOWS.find((w) => w.value === value);
+  const normalized = def ? def.value : DEFAULT_EVIDENCE_WINDOW;
+  _evidenceWindow = normalized;
+  try { sessionStorage.setItem("evidence_window", normalized); } catch (_) { /* ignore */ }
+  syncEvidenceWindowControls(normalized);
+  // Close the campaign drawer so stale detail from the previous window is dropped.
+  closeCampaignDrawer();
+  if (_currentPage) loadPage(_currentPage);
+  loadDataFreshness();
+}
+
+// Populate the evidence dropdown options (idempotent) and select the current one.
+function renderEvidenceWindowDropdown() {
+  const select = document.getElementById("evidence-window-select");
+  if (!select) return;
+  if (select.options.length !== EVIDENCE_WINDOWS.length) {
+    select.innerHTML = EVIDENCE_WINDOWS
+      .map((w) => `<option value="${w.value}">${w.label}</option>`)
+      .join("");
+  }
+  select.value = getEvidenceWindow();
+}
+
+function syncEvidenceWindowControls(value) {
+  const select = document.getElementById("evidence-window-select");
+  if (select && select.value !== value) select.value = value;
+}
+
+function handleEvidenceWindowSelectChange(e) {
+  setEvidenceWindow(e.target.value);
+}
+
+// ── Modern evidence page shell (PR-ADS-141 foundation) ──────────────────────
+// Reusable, truth-safe chrome for the Platform Evidence + Lead Intelligence
+// pages. This PR lays down the shared component + CSS; the page-by-page revamps
+// (PR-ADS-142+) render their content into it. It never fabricates values — any
+// missing field renders "Unavailable", never null/undefined/NaN/$0.
+
+// One compact status/context chip. `tone` ∈ readonly|source|ok|warning|info.
+function evidenceChip(label, tone = "info") {
+  return `<span class="evidence-status-chip evidence-status-chip--${tone}">${escapeHtml(label)}</span>`;
+}
+
+// Compact "Page truth" strip: what the page is + its source + read-only, as
+// chips (never a big diagnostic wall). Derived from PAGE_EXPLANATIONS so it stays
+// consistent with the Help drawer.
+function renderEvidenceTruthStrip(pageKey) {
+  const info = (typeof PAGE_EXPLANATIONS === "object" && PAGE_EXPLANATIONS[pageKey]) || {};
+  const chips = [];
+  if (info.title) chips.push(evidenceChip(info.title, "info"));
+  if (info.source) chips.push(evidenceChip(info.source, "source"));
+  chips.push(evidenceChip("Read-only", "readonly"));
+  return `<div class="evidence-truth-strip">${chips.join("")}</div>`;
+}
+
+// Modern page shell wrapper. `truthChips` (array of {label,tone}) and a
+// `dataStatus` chip render in the compact command header; `children` is the
+// page body HTML.
+function renderEvidencePageShell({ title, subtitle, truthChips = [], dataStatus = null, children = "" } = {}) {
+  const chips = truthChips.map((c) => evidenceChip(c.label, c.tone || "info")).join("");
+  const statusHtml = dataStatus ? evidenceChip(dataStatus.label, dataStatus.tone || "info") : "";
+  return `
+    <section class="evidence-shell">
+      <header class="evidence-command-bar">
+        <div class="evidence-command-bar__head">
+          <h2 class="evidence-command-bar__title">${escapeHtml(title || "")}</h2>
+          ${subtitle ? `<p class="evidence-command-bar__sub">${escapeHtml(subtitle)}</p>` : ""}
+        </div>
+        <div class="evidence-command-bar__chips">${chips}${statusHtml}</div>
+      </header>
+      <div class="evidence-shell__body">${children}</div>
+    </section>`;
 }
 
 // ── Fetch helpers ──────────────────────────────────────────────────────────
@@ -5737,7 +5899,7 @@ async function loadCampaigns() {
     `<p class="empty-state" style="padding:var(--space-5)">Loading campaigns…</p>`;
 
   try {
-    const data = await fetchJSON(`/api/campaigns?days=${getSelectedDays()}`);
+    const data = await fetchJSON(`/api/campaigns?${evidenceWindowQuery()}`);
     const campaigns = data.campaigns || [];
 
     if (campaigns.length === 0) {
@@ -5856,7 +6018,6 @@ function junkCategoryBadge(cat) {
 
 async function loadWaste() {
   renderPageDatasetFreshness("waste");
-  const days = getSelectedDays();
 
   const tableEl = document.getElementById("waste-table-body");
   if (tableEl) tableEl.innerHTML =
@@ -5868,7 +6029,7 @@ async function loadWaste() {
   });
 
   try {
-    const data = await fetchJSON(`/api/waste?days=${days}`);
+    const data = await fetchJSON(`/api/waste?${evidenceWindowQuery()}`);
     _wasteData = data.waste || [];
 
     populateWasteFilters(_wasteData);
@@ -6057,7 +6218,7 @@ async function loadLeads() {
     `<p class="empty-state" style="padding:var(--space-5)">Loading lead quality data…</p>`;
 
   try {
-    const data  = await fetchJSON(`/api/leads?days=${getSelectedDays()}`);
+    const data  = await fetchJSON(`/api/leads?${evidenceWindowQuery()}`);
     // Deduplicate by contact_id — leads endpoint returns one row per run per lead.
     // Rows without contact_id are kept individually (not collapsed under null key).
     const seen  = new Map();
@@ -8237,18 +8398,18 @@ async function loadGeo() {
   if (tableEl) tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading geo intelligence…</p>`;
   if (mapEl)   mapEl.innerHTML   = "";
 
-  const days = getSelectedDays();
+  const evWindow = evidenceWindowQuery();
 
   // Fetch both endpoints; partial failures are tolerated.
   let perfData  = null;
   let leadsData = null;
 
   try {
-    perfData = await fetchJSON(`/api/geo?days=${days}`);
+    perfData = await fetchJSON(`/api/geo?${evWindow}`);
   } catch (_) { /* geo performance unavailable */ }
 
   try {
-    leadsData = await fetchJSON(`/api/leads/country-summary?days=${days}`);
+    leadsData = await fetchJSON(`/api/leads/country-summary?${evWindow}`);
   } catch (_) { /* lead country summary unavailable */ }
 
   // Both failed
@@ -8567,7 +8728,7 @@ let _searchTermsSummaryReqId = 0;
 
 function buildSearchTermsParams({ cursor = null } = {}) {
   const params = new URLSearchParams();
-  params.set("days", String(getSelectedDays()));
+  params.set("window", getEvidenceWindow());
   params.set("limit", "100");
 
   const q         = document.getElementById("search-terms-query")?.value.trim();
@@ -8983,7 +9144,7 @@ let ngramIsLoading = false;
 
 function buildNgramParams() {
   const params = new URLSearchParams();
-  params.set("days", String(getSelectedDays()));
+  params.set("window", getEvidenceWindow());
   params.set("limit", "100");
 
   const q         = document.getElementById("ngrams-query")?.value.trim();
@@ -9288,8 +9449,7 @@ function downloadNgramsCSV() {
     r.total_spend_usd, r.total_clicks, r.total_impressions, r.google_conversions,
     r.flagged_waste_rows, r.clean_rows, r.unanalyzed_rows, r.flagged_waste_spend_usd,
   ]);
-  const days = getSelectedDays();
-  downloadCSV(`ngrams_${days}d.csv`, headers, rows);
+  downloadCSV(`ngrams_${getEvidenceWindow()}.csv`, headers, rows);
 }
 
 function downloadSearchTermsCSV() {
@@ -9306,8 +9466,7 @@ function downloadSearchTermsCSV() {
     r.spend_usd, r.clicks, r.impressions, r.conversions,
     r.junk_category || "", r.matched_pattern || "",
   ]);
-  const days = getSelectedDays();
-  downloadCSV(`search_terms_${days}d.csv`, headers, rows);
+  downloadCSV(`search_terms_${getEvidenceWindow()}.csv`, headers, rows);
 }
 
 function downloadWasteCSV() {
@@ -9322,8 +9481,7 @@ function downloadWasteCSV() {
     t.junk_category || "", t.matched_pattern || "",
     t.crm_junk_confirmed, t.run_date,
   ]);
-  const days = getSelectedDays();
-  downloadCSV(`waste_terms_${days}d.csv`, headers, rows);
+  downloadCSV(`waste_terms_${getEvidenceWindow()}.csv`, headers, rows);
 }
 
 // ── GCLID Attribution page ───────────────────────────────────────────────────
@@ -9791,10 +9949,9 @@ async function loadKeywords() {
   });
 
   keywordLoadStatus = "loading";
-  const days = getSelectedDays();
 
   try {
-    const data = await fetchJSON(`/api/keywords?days=${days}`);
+    const data = await fetchJSON(`/api/keywords?${evidenceWindowQuery()}`);
 
     if (data.db_unavailable) {
       keywordLoadStatus = "db_unavailable";
@@ -10094,7 +10251,7 @@ async function loadOpportunities() {
   el.innerHTML = `<p class="empty-state">Loading in-progress leads…</p>`;
 
   try {
-    const data  = await fetchJSON(`/api/leads?days=${getSelectedDays()}`);
+    const data  = await fetchJSON(`/api/leads?${evidenceWindowQuery()}`);
 
     // Deduplicate by contact_id (same null-safe approach as loadLeads)
     const seen = new Map();
@@ -11307,7 +11464,8 @@ async function loadCampaignAttributionPreview(campaignName, requestId = null) {
 
   try {
     const params = new URLSearchParams();
-    params.set("days", String(getSelectedDays()));
+    // Campaign drawer opens from the Campaigns evidence page — follow its window.
+    params.set("days", String(evidenceWindowDays()));
     params.set("limit", "5");
     params.set("campaign", campaignName);
 
@@ -11352,7 +11510,7 @@ async function loadCampaignAttributionQuality(campaignName, requestId = null) {
 
   try {
     const params = new URLSearchParams();
-    params.set("days", String(getSelectedDays()));
+    params.set("days", String(evidenceWindowDays()));
     params.set("campaign", campaignName);
 
     const data = await fetchJSON(`/api/attribution/quality?${params.toString()}`);
@@ -11391,7 +11549,7 @@ async function loadCampaignDrawerNgrams(campaignName, requestId = null) {
 
   try {
     const params = new URLSearchParams();
-    params.set("days",     String(getSelectedDays()));
+    params.set("window",   getEvidenceWindow());
     params.set("campaign", campaignName);
     params.set("limit",    "20");
 
@@ -11464,7 +11622,7 @@ async function openCampaignDrawer(campaignName) {
     drawerNgramRows   = [];
 
     const detail = await fetchJSON(
-      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${getSelectedDays()}`
+      `/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&days=${evidenceWindowDays()}`
     );
 
     if (!isCurrentCampaignDrawerRequest(campaignName, requestId)) return;
@@ -12427,6 +12585,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   // Sync active state to the stored/default value on page load
   updateWindowControls(_selectedDays);
+
+  // PR-ADS-141: wire the Evidence window dropdown (Platform Evidence + Lead
+  // Intelligence pages). Populated + shown by applyPageChrome on those pages.
+  renderEvidenceWindowDropdown();
+  const evidenceSelect = document.getElementById("evidence-window-select");
+  if (evidenceSelect) evidenceSelect.addEventListener("change", handleEvidenceWindowSelectChange);
 
   // Wire up waste filter controls
   const wasteSearch  = document.getElementById("waste-filter-search");

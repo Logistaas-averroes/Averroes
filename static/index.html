@@ -274,11 +274,20 @@
 
       <!-- Time range selector — shown on all data pages -->
       <div class="time-range-bar" id="time-range-bar">
-        <span class="time-range-bar__label">Window:</span>
+        <!-- Legacy day-window buttons — used by non-evidence operational pages.
+             Hidden on Platform Evidence + Lead Intelligence pages (PR-ADS-141),
+             which use the Evidence window dropdown below instead. -->
+        <span class="time-range-bar__label" id="time-range-day-label">Window:</span>
         <button class="time-range-btn" data-days="7"  type="button">7d</button>
         <button class="time-range-btn" data-days="14" type="button">14d</button>
         <button class="time-range-btn active" data-days="30" type="button">30d</button>
         <button class="time-range-btn" data-days="60" type="button">60d</button>
+        <!-- Evidence window dropdown (PR-ADS-141) — Platform Evidence + Lead
+             Intelligence pages only. Populated by renderEvidenceWindowDropdown(). -->
+        <label class="evidence-window" id="evidence-window-control" hidden>
+          <span class="evidence-window__label">Evidence window</span>
+          <select id="evidence-window-select" class="evidence-window__select" aria-label="Evidence window"></select>
+        </label>
         <button class="page-help-btn" id="page-help-btn" type="button" aria-label="Page help" title="Page help guide" hidden>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           <span class="page-help-btn__label">Help</span>

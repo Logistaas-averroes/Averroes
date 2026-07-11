@@ -1900,6 +1900,141 @@ body.is-revenue-page #monitoring-banner {
   outline-offset: 2px;
 }
 
+/* ── Evidence window selector + shell (PR-ADS-141) ────────────────────────── */
+/* Platform Evidence + Lead Intelligence pages: a clean dropdown replaces the
+   legacy 7d/14d/30d/60d buttons, plus a reusable modern page-shell foundation. */
+.evidence-window {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.evidence-window__label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.evidence-window__select {
+  padding: 4px 28px 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-card);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.evidence-window__select:hover {
+  border-color: var(--brand-sky-accent);
+  color: var(--brand-sky-accent);
+}
+.evidence-window__select:focus-visible {
+  outline: 2px solid var(--brand-sky-accent);
+  outline-offset: 2px;
+}
+
+/* Compact page-truth strip — evidence pages collapse the big explainer card to
+   a slim chip row (full detail stays in the Help drawer). */
+.is-evidence-page .page-explanation__grid { display: none; }
+.is-evidence-page .page-explanation {
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-3);
+  background: var(--surface-alt);
+}
+
+/* Reusable status/context chips. */
+.evidence-status-chip,
+.evidence-truth-strip .evidence-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-card);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.evidence-status-chip--readonly { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
+.evidence-status-chip--source   { background: #ecfeff; border-color: #a5f3fc; color: #155e75; }
+.evidence-status-chip--ok       { background: #ecfdf5; border-color: #a7f3d0; color: #065f46; }
+.evidence-status-chip--warning  { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+
+.evidence-truth-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/* Modern freshness chip — on evidence pages the per-page run-meta line becomes a
+   compact, product-grade status pill (never hidden, just cleaner). Scoped to
+   evidence pages so other pages keep their existing freshness line. */
+.is-evidence-page .run-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-card);
+}
+.is-evidence-page .run-meta::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex: none;
+}
+.is-evidence-page .run-meta.is-fresh::before { background: #10b981; }
+.is-evidence-page .run-meta.is-stale::before { background: #f59e0b; }
+.is-evidence-page .run-meta.is-canonical-warning::before { background: #f59e0b; }
+
+/* ── Modern evidence page shell (foundation for PR-ADS-142+) ──────────────── */
+.evidence-shell { display: flex; flex-direction: column; gap: var(--space-4); }
+.evidence-command-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.evidence-command-bar__title { font-size: 18px; font-weight: 700; margin: 0; }
+.evidence-command-bar__sub { font-size: 13px; color: var(--text-muted); margin: 2px 0 0; }
+.evidence-command-bar__chips { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+
+.evidence-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+}
+.evidence-table-shell {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface-card);
+}
+.evidence-table-scroll { overflow-x: auto; max-width: 100%; }
+.evidence-empty-state {
+  padding: var(--space-6);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.evidence-drawer-shell {
+  border-top: 1px solid var(--border);
+  background: var(--surface-alt);
+  padding: var(--space-4);
+}
+
 /* ── Waste Terms page ─────────────────────────────────────────────────────── */
 
 /* Controls bar (search + dropdowns + copy button) */
