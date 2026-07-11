@@ -210,9 +210,10 @@ def test_startup_force_closes_help_drawer():
 # ── Cache busting ──────────────────────────────────────────────────────────
 
 def test_cache_busting_versions_are_098():
-    """index.html must reference app.js?v=098 and styles.css?v=098."""
-    assert "app.js?v=098" in HTML, "Cache busting version must be updated to v=098 (app.js)"
-    assert "styles.css?v=098" in HTML, "Cache busting version must be updated to v=098 (styles.css)"
+    """index.html must reference app.js and styles.css at the same cache-bust version
+    (bumped to v=099 in PR-ADS-143 for the Campaign Evidence rebuild)."""
+    assert "app.js?v=099" in HTML, "Cache busting version must be updated to v=099 (app.js)"
+    assert "styles.css?v=099" in HTML, "Cache busting version must be updated to v=099 (styles.css)"
 
 
 def test_help_drawer_hidden_rule_exists():

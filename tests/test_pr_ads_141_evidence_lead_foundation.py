@@ -504,8 +504,11 @@ def test_frontend_waste_discloses_showing_x_of_y_and_partial_export():
 # ════════════════ BLOCKER 3 — campaign drawer honours the window ═════════════
 
 
-def test_campaign_detail_all_time_sql_has_no_lower_bound(monkeypatch):
-    # Every drawer query for all_time must omit the run_date lower bound.
+def test_campaign_detail_all_time_returns_window(monkeypatch):
+    # PR-ADS-143: the drawer no longer runs run_date-bounded SQL — lead evidence is
+    # event-date (contact_created_at) via the campaign-evidence service, keyword/
+    # waste are latest-snapshot. all_time must not hidden-downgrade (window stays
+    # all_time). With no DB, the safe shape still carries the window.
     captured = {"sql": []}
 
     def responder(sql, params):
@@ -517,27 +520,26 @@ def test_campaign_detail_all_time_sql_has_no_lower_bound(monkeypatch):
     server = importlib.import_module("api.server")
     out = server.api_campaign_detail_query(
         user={"e": "x"}, campaign_name="alpha", days=30, window="all_time")
-
     assert out["window"] == "all_time"
-    assert captured["sql"], "no queries executed"
+    # No drawer query bounds on run_date any more (event-date / latest-snapshot only).
     for sql in captured["sql"]:
-        assert "run_date >=" not in sql, "all_time drawer query still has a lower bound"
-        assert "campaign_name = %s" in sql   # still scoped to the campaign
+        assert "run_date >=" not in sql
 
 
-def test_campaign_detail_numeric_window_keeps_lower_bound(monkeypatch):
-    captured = {"sql": []}
-
-    def responder(sql, params):
-        captured["sql"].append(sql)
-        return ([], ["x"])
-
-    _patch_conn(monkeypatch, responder)
-    import importlib
-    server = importlib.import_module("api.server")
-    server.api_campaign_detail_query(
-        user={"e": "x"}, campaign_name="alpha", days=30, window="180d")
-    assert any("run_date >=" in s for s in captured["sql"])
+def test_campaign_drawer_no_longer_bounds_on_run_date():
+    # PR-ADS-143 contract: the drawer builds lead evidence via the event-date
+    # service and never bounds any query on run_date; keyword/waste are latest
+    # snapshots scoped by the approved label set.
+    import os as _os
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    src = open(_os.path.join(root, "api", "server.py"), encoding="utf-8").read()
+    fn = src[src.find("def _build_campaign_detail("):src.find("def api_campaign_detail_query(")]
+    assert "run_date >= NOW() - INTERVAL" not in fn
+    assert "build_campaign_drawer_evidence" in fn
+    repo = open(_os.path.join(root, "db", "revenue_repository.py"), encoding="utf-8").read()
+    detail = repo[repo.find("def fetch_campaign_lead_detail("):
+                  repo.find("def fetch_sql_lead_details(")]
+    assert "contact_created_at >=" in detail and "run_date >=" not in detail
 
 
 def test_campaign_detail_rejects_invalid_window(monkeypatch):
@@ -552,7 +554,9 @@ def test_campaign_detail_rejects_invalid_window(monkeypatch):
 
 def test_frontend_drawer_uses_evidence_window_not_365():
     # Drawer sub-fetches pass window=getEvidenceWindow(), never a days downgrade.
-    assert "/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}&window=${encodeURIComponent(getEvidenceWindow())}" in APP_JS
+    # (PR-ADS-143 inserts an optional &campaign_key=… between name and window.)
+    assert "/api/campaign-detail?campaign_name=${encodeURIComponent(campaignName)}" in APP_JS
+    assert "&window=${encodeURIComponent(getEvidenceWindow())}" in APP_JS
     # The hidden all_time->365 helper is gone entirely.
     assert "evidenceWindowDays" not in APP_JS
     # Attribution preview + quality drawer calls also send window=.

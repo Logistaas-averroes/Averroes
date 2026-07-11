@@ -241,101 +241,112 @@ All endpoints below require authentication, accept a `?days=` query parameter (d
 ---
 
 #### `GET /api/campaigns?window=30d`
-Decision-grade campaign evidence — **one latest stored snapshot per campaign** (PR-ADS-142).
+GENUINE selected-window campaign evidence (PR-ADS-143). The selected Evidence Window controls the **actual** metrics — spend, leads, SQLs, junk, junk rate and CPQL are computed from durable source tables for the window, **never** the `campaigns` scheduler snapshot.
 
 **Auth:** Auth
 **Query params:**
-- `window` (string) — evidence window, one of `7d | 14d | 30d | 60d | 180d | all_time`. **Overrides `days`** when present. An unknown value returns **400** (never silently coerced).
-- `days` (integer, default 30, max 365) — legacy look-back; used only when `window` is absent.
+- `window` (string) — evidence window: `7d | 14d | 30d | 60d | 180d | all_time`. **Authoritative** when present; an unknown value returns **400** (never silently coerced).
+- `days` (integer, default 30) — legacy fallback used only when `window` is absent. Honoured **exactly** (90 stays 90, 365 stays 365 — never snapped to the nearest dropdown window); out of range (not 1–365) → **400**.
 
-`window` and `days` filter **which stored snapshot dates are eligible**, by `run_date`. `all_time` removes the lower date bound entirely (no hidden 365-day cap). The window does **not** rebuild any metric into an all-time / selected-window business total — see *Latest-snapshot semantics* below.
+Window boundaries are **inclusive of exactly N calendar dates** (`start = end − (N−1)`) and resolved in the Google Ads **account timezone (Europe/London)**, not an implicit UTC date. `all_time` → no lower bound.
+
+**Sources (durable, reconciled):**
+- **Spend** — `db.revenue_repository.fetch_canonical_campaign_spend(start, end)` over `google_ads_campaign_daily_spend`: native GBP always, FX-safe USD (`None` when FX coverage is incomplete — never native relabelled as USD). This is the **same canonical source** Revenue by Source and the Revenue Decision Mart use, so per-window spend reconciles exactly.
+- **Lead outcomes** — `fetch_lead_quality(start, end)` over the durable `leads` table, bounded on the HubSpot business-event date (`contact_created_at`, the same grain as `spend_date`), deduplicated per contact, paid-search only, pseudo/email campaigns excluded. Confirmed SQL = status `qualified`; confirmed junk = `junk`. Junk rate uses the **approved denominator unchanged** (`verdicted = qualified + in_progress + junk + wrong_fit`; excludes `unknown`).
+
+The campaign universe is the **UNION** of canonical campaigns with spend and mapped campaigns with lead outcomes — a campaign is never dropped because one side has no record. Campaigns join by the canonical lowercase campaign name (leads carry no `campaign_id`; the `_CAMPAIGN_CANONICAL` write-time vocabulary is authoritative). `all_time` means **NO lower date bound** → genuine cumulative totals, NOT the latest scheduler snapshot.
 
 **Response 200:**
 ```json
 {
-  "days": 30,
   "window": "30d",
-  "generated_at": "2026-04-30T15:00:00Z",
+  "window_start": "2026-06-11",
+  "window_end": "2026-07-11",
+  "all_time": false,
+  "generated_at": "2026-07-11T10:00:00Z",
+  "spend_semantics": "selected_window_canonical_total",
+  "spend_currency": "GBP",
+  "reporting_currency": "USD",
+  "lead_semantics": "selected_window_deduplicated_event_date",
   "campaigns": [
     {
-      "campaign_name": "gulf",
-      "verdict": "SCALE",
-      "latest_verdict": "SCALE",
-      "verdict_reason": "6.0% junk rate below 25% threshold",
-      "spend_usd": 1400.00,
-      "confirmed_sqls": 2,
-      "confirmed_junk": 1,
-      "junk_rate_pct": 6.0,
-      "cpql_usd": 700.00,
-      "clicks": 320,
-      "impressions": 41000,
-      "conversions": 3.0,
-      "total_leads": 18,
-      "run_count": 4,
-      "last_run_date": "2026-04-29",
-      "metric_semantics": "latest_stored_snapshot",
-      "snapshot_date": "2026-04-29",
-      "snapshot_metric_period_days": null,
-      "snapshot_period_available": false
+      "campaign_name": "Brand - UK",
+      "campaign_id": "101",
+      "spend_native": 42180.5,
+      "spend_usd": 53147.4,
+      "spend_currency": "GBP",
+      "fx_complete": true,
+      "total_leads": 214,
+      "confirmed_sqls": 38,
+      "confirmed_junk": 12,
+      "in_progress": 9,
+      "wrong_fit": 6,
+      "unknown": 149,
+      "verdicted_leads": 65,
+      "junk_rate_pct": 18.46,
+      "cpql_usd": 1398.62,
+      "campaign_key": "101",
+      "aliases": ["mexico,chile"],
+      "mapping_status": "mapped",
+      "outcome_status": "SQL producer"
     }
   ],
-  "spend_semantics": "latest_run_snapshot",
-  "spend_status": "snapshot",
-  "spend_currency": "USD",
-  "metric_semantics": "latest_stored_snapshot",
-  "snapshot_metric_period_days": null,
-  "snapshot_period_available": false,
   "summary": {
-    "campaigns_with_evidence": 1,
-    "confirmed_sqls_total": 2,
-    "confirmed_junk_total": 1,
-    "verdict_counts": { "SCALE": 1, "HOLD": 0, "FIX": 0, "CUT": 0 },
-    "completeness": {
-      "confirmed_sqls": { "status": "complete", "available": 1, "missing": 0 },
-      "confirmed_junk": { "status": "complete", "available": 1, "missing": 0 }
-    },
-    "spend_requiring_review": {
-      "status": "unavailable",
-      "value": null,
-      "reason": "Spend aggregation requires contract verification — per-run snapshot spend cannot be summed into a selected-window total."
+    "campaigns": 7,
+    "spend_usd": 128956.42,
+    "spend_native": 105213.95,
+    "spend_currency": "GBP",
+    "confirmed_sqls_total": 68,
+    "confirmed_junk_total": 179,
+    "overall_cpql_usd": 1896.42,
+    "overall_cpql_scope": "mapped_only",
+    "mapping_coverage": {
+      "mapped_sqls": 68, "unmatched_sqls": 2, "excluded_not_google_sqls": 7,
+      "total_paid_search_sqls": 77, "status": "partial"
     }
+  },
+  "audit": {
+    "spend_source": "google_ads_campaign_daily_spend (canonical)",
+    "lead_source": "leads (durable · contact_created_at · deduped · paid_search)",
+    "window_start": "2026-06-11",
+    "window_end": "2026-07-11",
+    "all_time": false,
+    "fx_status": "verified",
+    "spend_reconciliation_status": "pass",
+    "lead_reconciliation_status": "pass",
+    "event_date_safe": true,
+    "fx_missing_days": 0
   }
 }
 ```
 
-**Latest-snapshot semantics (source of truth — read carefully).**
-Every per-campaign metric (`spend_usd`, `confirmed_sqls`, `confirmed_junk`, `junk_rate_pct`, `cpql_usd`, `clicks`, `impressions`, `conversions`, `total_leads`) is the campaign's **single most recent stored snapshot** — the latest run's own recorded values, chosen via `DISTINCT ON (campaign_name) ORDER BY run_date DESC`. All figures in a row come from the **same run**, so the row is internally coherent and matches the `/api/campaign-detail` drawer. These are **NOT** genuine 7d/14d/30d/180d/all-time business totals, and `all_time` returns the same latest snapshot (across all stored snapshot dates) — not a lifetime sum. `metric_semantics` is `"latest_stored_snapshot"` at both the top level and per campaign.
+**Campaign identity mapping.** Campaigns are keyed by **`campaign_id`** (the stable Google Ads identity — two campaigns whose display names normalize to the same text are never merged). HubSpot/external lead labels are mapped to canonical campaigns through the durable `google_ads_campaign_identity` table (approved rows only), keyed by the normalized `external_campaign_label`. Precedence: (1) durable approved mapping (`manual` / `exact_normalized`); (2) exact-normalized fallback (`normalize_campaign_name`) against canonical spend names, applied **only** when no durable mapping exists and exactly one spend campaign matches; **never fuzzy**. `match_method = not_google_ads` labels are **excluded** from the Google Ads SQL/CPQL scope (surfaced only in `mapping_coverage`). Labels with no mapping are preserved as **Mapping Review** rows (`mapping_status: "unmatched"`, `campaign_id: null`). Each row exposes `campaign_key` (stable drawer key) and `aliases` (all approved external labels for that canonical campaign). `/api/campaign-detail` accepts `campaign_key` to resolve the headline by id, not display name.
 
-**Snapshot metric period.** `snapshot_metric_period_days` is `null` and `snapshot_period_available` is `false`. The true per-snapshot analysis period is **not provable per row**: it varies by run type (daily pull = 2 days, weekly/monthly = 30 days) and by data source within a single run (ads vs HubSpot lookbacks differ), and the `campaigns` table stores no period column. Per the honesty contract, an unprovable period is reported as unavailable rather than guessed. `snapshot_date` is the campaign's latest snapshot `run_date`.
+**Outcome status (factual, window-safe — never an action verdict).** The SCALE/HOLD/FIX/CUT verdict doctrine is **NOT valid for arbitrary windows** (it bakes a fixed 30-day design — `min_confirmed_sqls_30d`, `analysis_window_days: 30` — plus a hardcoded `$200` dollar floor, and emits action recommendations calibrated per fixed run-period). So each row carries a factual `outcome_status` computed from the selected-window totals only, first match wins (**risk-first**):
+1. **Mapping review** — an unmatched lead label (no canonical spend id).
+2. **Data unavailable** — spend and lead sources both unavailable (never coerced to 0).
+3. **Junk-heavy** — `junk_rate_pct ≥ 25` on a verdicted sample `≥ 5` (rate + count from config; wins over an incidental SQL so 1 SQL + overwhelming junk is never shown green).
+4. **SQL producer** — `confirmed_sqls > 0`.
+5. **Spend without SQL proof** — `spend_native > 0`, no confirmed SQLs.
+6. **No outcome evidence** — nothing to show for the window.
 
-**Spend semantics/status.** `spend_semantics: "latest_run_snapshot"`, `spend_status: "snapshot"`, `spend_currency: "USD"`. Per-run snapshot spend **cannot** be summed into a trustworthy selected-window total, so `summary.spend_requiring_review` is `status: "unavailable"` with `value: null` and a `reason` — never a fabricated sum.
+**Null / unavailable behaviour (no fabricated zeros).** `spend_native`/`spend_usd` are `None` for a campaign with no canonical spend row (unmapped/unavailable — never £0). Lead metrics are genuine `0` when the lead source is live and the campaign has no rows, but `None` when the lead source is unavailable. `cpql_usd` = window USD spend ÷ confirmed SQLs; `None` when spend/FX or the SQL denominator is unavailable, and a genuine zero SQL count renders `N/A` (never `$0`). `spend_usd` is `None` (withheld) whenever FX coverage is incomplete — native GBP is still returned.
 
-**Null / unavailable behaviour (no fabricated zeros).** `spend_usd`, `clicks`, `impressions`, `conversions`, `total_leads`, `confirmed_sqls`, `confirmed_junk`, `junk_rate_pct` preserve `null` when the source did not record a value. A `null` is **never** coerced to `0`; only a value the source positively recorded (including a genuine `0`) is returned. `cpql_usd` is `null` when there is no positive confirmed-SQL count (division undefined) — the UI renders `N/A` for a genuine zero and `—` when SQLs are unavailable.
+**Summary / KPIs + CPQL scope.** `spend_native`/`spend_usd` come straight from the canonical window totals, so the KPI spend **reconciles exactly** with canonical spend for the window (and, for `all_time`, with the same canonical all-time spend used by Revenue by Source / the Revenue Decision Mart). `confirmed_sqls_total`/`confirmed_junk_total` are the **Google-Ads-mapped** scope only. `overall_cpql_usd` = canonical Google Ads **USD spend ÷ SQLs mapped to those same Google Ads campaigns** — it **excludes** unmatched and not-Google-Ads SQLs, so an unmatched qualified lead can never lower it. `overall_cpql_scope` is `"complete"` when mapping coverage is complete, else `"mapped_only"` (the UI discloses "Mapped campaigns only"), or `"unavailable"`. `mapping_coverage` exposes `mapped_sqls`, `unmatched_sqls`, `excluded_not_google_sqls`, `total_paid_search_sqls`, and `status` (`complete | partial | unavailable`).
 
-**Summary completeness.** `summary.completeness.confirmed_sqls` and `.confirmed_junk` each expose `{ status: "complete" | "partial", available, missing }`. `available` counts campaigns that contributed a real value to the total; `missing` counts campaigns whose metric was unavailable. A `null` metric is counted as `missing` — it is **never** added to the total as `0`. `status` is `"partial"` iff `missing > 0`.
+**Audit metadata (machine-verifiable reconciliation — not shown in the UI).** For every window the `audit` block exposes `spend_source`, `lead_source`, `window_start`, `window_end`, `all_time`, `fx_status` (`verified | incomplete | unavailable`), `spend_reconciliation_status` and `lead_reconciliation_status` (`pass | variance | unavailable`). Reconciliation asserts: sum of per-campaign native spend = canonical native total; sum of per-campaign USD = canonical USD total when FX is complete; per-campaign SQL/junk totals = the deduplicated lead aggregate; `all_time` has no lower date bound; no amount is sourced from `AVG()`/`SUM()` over overlapping snapshot rows.
 
-**All-time behaviour.** `window=all_time` omits the lower date bound so every stored snapshot date is eligible, then still returns exactly one latest snapshot per campaign. It is a latest-snapshot view over all history, not a lifetime aggregate.
-
-**DB-unavailable shape.** When the database is unavailable the endpoint returns (never a 500):
+**DB-unavailable shape.** When both durable sources are down (never a 500):
 ```json
 {
-  "days": 30, "window": "30d", "campaigns": [], "db_unavailable": true,
-  "spend_semantics": "latest_run_snapshot", "spend_status": "snapshot", "spend_currency": "USD",
-  "metric_semantics": "latest_stored_snapshot",
-  "snapshot_metric_period_days": null, "snapshot_period_available": false,
-  "summary": {
-    "campaigns_with_evidence": 0, "confirmed_sqls_total": 0, "confirmed_junk_total": 0,
-    "verdict_counts": { "SCALE": 0, "HOLD": 0, "FIX": 0, "CUT": 0 },
-    "completeness": {
-      "confirmed_sqls": { "status": "complete", "available": 0, "missing": 0 },
-      "confirmed_junk": { "status": "complete", "available": 0, "missing": 0 }
-    },
-    "spend_requiring_review": { "status": "unavailable", "value": null, "reason": "…" }
-  }
+  "window": "30d", "db_unavailable": true, "campaigns": [],
+  "spend_semantics": "selected_window_canonical_total",
+  "summary": {"campaigns": 0, "spend_usd": null, "spend_native": null, "spend_currency": "GBP", "confirmed_sqls_total": null, "confirmed_junk_total": null, "overall_cpql_usd": null},
+  "audit": {"...": "reconciliation statuses are 'unavailable'"}
 }
 ```
 
-> **BREAKING (PR-ADS-142).** The prior per-campaign fields `avg_spend_usd`, `total_confirmed_sqls`, `avg_junk_rate_pct`, `avg_cpql_usd`, and `trend` were **removed** — they averaged/summed across overlapping runs and misrepresented rolling snapshots as window totals. They are replaced by the coherent latest-snapshot fields above (`spend_usd`, `confirmed_sqls`, `junk_rate_pct`, `cpql_usd`, plus `confirmed_junk`). A repo-wide consumer search (`avg_spend_usd`, `total_confirmed_sqls`, `avg_junk_rate_pct`, `avg_cpql_usd`, `trend`) found **no remaining consumers** of the `/api/campaigns` response — the only consumer (`static/app.js` `loadCampaignEvidence`) was fully migrated — so no deprecated aliases are retained. `latest_verdict` is kept as a backward-compat alias of `verdict`. (`total_confirmed_sqls` still exists in the *rule-advisor analysis* summary, a separate structure, unaffected by this change.)
+> **BREAKING (PR-ADS-143).** The Campaign Evidence page no longer uses the `campaigns` scheduler-snapshot contract. Removed per-campaign fields: `verdict`, `latest_verdict`, `verdict_reason`, `clicks`, `impressions`, `conversions`, `run_count`, `last_run_date`, and all `metric_semantics`/`snapshot_date`/`snapshot_metric_period_days`/`snapshot_period_available` snapshot metadata (the PR-142 latest-snapshot contract). Removed summary fields: `verdict_counts`, `completeness`, `spend_requiring_review`. New per-campaign fields: `spend_native`, `spend_usd`, `spend_currency`, `fx_complete`, `total_leads`, `confirmed_sqls`, `confirmed_junk`, `in_progress`, `wrong_fit`, `unknown`, `verdicted_leads`, `junk_rate_pct`, `cpql_usd`, `mapping_status`, `outcome_status`; new top-level `window_start`/`window_end`/`all_time`/`audit`; new summary shape `{campaigns, spend_usd, spend_native, confirmed_sqls_total, confirmed_junk_total, overall_cpql_usd}`. The only consumer (`static/app.js` `loadCampaignEvidence`) was migrated in the same change. Revenue by Source, the Revenue Decision Mart, ROAS by Campaign, Dashboard campaign totals, FX logic and campaign mapping rules are unchanged.
 
 ---
 
@@ -717,7 +728,9 @@ Example partial response:
 **When database is unavailable:** `{ "days": 30, "campaign_name": "...", "campaign": null, "lead_quality": null, "countries": [], "keywords": [], "waste_terms": [], "recent_leads": [], "db_unavailable": true }`
 
 **Data source details:**
-- `campaign` — latest snapshot row from the campaigns table for the campaign name in the selected window. All snapshot metrics use **latest-snapshot semantics** (not summed across overlapping runs): the object carries `metric_semantics: "latest_stored_snapshot"`, `snapshot_date` (the latest snapshot `run_date`), `snapshot_metric_period_days: null`, and `snapshot_period_available: false` (the per-snapshot analysis period is not provable per row — see `/api/campaigns`). Snapshot metrics preserve `null` when unrecorded (`total_leads`, `confirmed_sqls`, `junk_count`, `spend_usd`, `clicks`, `impressions`, `conversions`, `junk_rate_pct`, `cpql_usd`) — a `null` is never coerced to `0`. The drawer discloses the snapshot date + (unavailable) analysis period, and notes that the `lead_quality` split is recomputed for the selected window while snapshot metrics are not.
+- `campaign` — GENUINE selected-window headline evidence (PR-ADS-143), built from the SAME `services.campaign_evidence_service` the `/api/campaigns` table uses, so the drawer headline matches the table row exactly. Fields: `campaign_id`, `campaign_key`, `aliases`, `spend_native`, `spend_usd`, `spend_currency`, `fx_complete`, `total_leads`, `confirmed_sqls`, `confirmed_junk`, `in_progress`, `wrong_fit`, `unknown`, `verdicted_leads`, `junk_rate_pct`, `cpql_usd`, `outcome_status`, `mapping_status`, `window`, `window_start`, `window_end`, `all_time`. It is **not** a scheduler snapshot — there is no `verdict`, `snapshot_date`, or `snapshot_metric_period_days`. Accepts `campaign_key` (query param) to resolve by stable id — when supplied it matches the id ONLY (no display-name fallback), so a wrong key returns absent rather than a same-named duplicate. Unavailable metrics preserve `null` (never coerced to 0).
+- `lead_quality` / `countries` / `recent_leads` — aggregated from the durable `leads` table across the campaign's **approved alias set** (canonical Google Ads name + every approved `external_campaign_label`, excluding `not_google_ads`), on the HubSpot event date (`contact_created_at`), deduplicated per contact with the same paid-search / pseudo-email / lead-truth exclusions — so they **reconcile exactly** with the table row. A Mapping Review row uses only its exact unmatched label. `label_set` echoes the labels used.
+- `keywords` / `waste_terms` — the **latest coherent Google Ads API snapshot** per keyword / term (`DISTINCT ON … ORDER BY run_date DESC`), scoped by the campaign's label set — **never SUM'd across overlapping scheduler snapshots**. `keywords_note` = "Latest keyword snapshot — not selected-window totals". `data_sources` labels them as latest Google Ads API snapshots (no "Windsor" label); the headline is "Canonical daily Google Ads spend + HubSpot event-date lead evidence".
 - `lead_quality` — HubSpot-derived `status_category` from the leads table, deduplicated by `contact_id` (latest run per contact wins; null `contact_id` rows treated as unique).
 - `countries` — deduped leads grouped by `COALESCE(NULLIF(BTRIM(country), ''), '(unknown)')`, sorted by total leads descending. Includes `in_progress` in both the response and the verdicted_leads denominator (consistent with lead-quality).
 - `keywords` — top 10 keyword rows by spend from the keywords table, aggregated by keyword + match_type. Google Ads API platform metrics only — no HubSpot lead quality joined.

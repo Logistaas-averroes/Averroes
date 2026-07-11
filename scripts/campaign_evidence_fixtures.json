@@ -1,0 +1,54 @@
+{
+  "/auth/me": {"authenticated": true, "username": "viewer", "role": "viewer"},
+  "/api/config/ui-thresholds": {
+    "junk_rate": {"low_pct": 15, "high_pct": 30},
+    "spend": {"high_spend_usd": 100},
+    "quality_score": {"strong_min": 8, "medium_min": 5}
+  },
+  "/api/campaigns": {
+    "window": "all_time",
+    "window_start": null,
+    "window_end": "2026-07-11",
+    "all_time": true,
+    "generated_at": "2026-07-11T10:00:00Z",
+    "spend_semantics": "selected_window_canonical_total",
+    "spend_currency": "GBP",
+    "reporting_currency": "USD",
+    "lead_semantics": "selected_window_deduplicated_event_date",
+    "campaigns": [
+      {"campaign_key": "101", "campaign_id": "101", "campaign_name": "Brand - UK", "aliases": [], "spend_native": 42180.5, "spend_usd": 53147.4, "spend_currency": "GBP", "fx_complete": true, "total_leads": 214, "confirmed_sqls": 38, "confirmed_junk": 12, "in_progress": 9, "wrong_fit": 6, "unknown": 149, "verdicted_leads": 65, "junk_rate_pct": 18.46, "cpql_usd": 1398.62, "mapping_status": "mapped", "outcome_status": "SQL producer"},
+      {"campaign_key": "102", "campaign_id": "102", "campaign_name": "Emerging - Markets", "aliases": ["mexico,chile"], "spend_native": 28640.0, "spend_usd": 36086.4, "spend_currency": "GBP", "fx_complete": true, "total_leads": 132, "confirmed_sqls": 21, "confirmed_junk": 8, "in_progress": 5, "wrong_fit": 4, "unknown": 94, "verdicted_leads": 38, "junk_rate_pct": 21.05, "cpql_usd": 1718.4, "mapping_status": "mapped", "outcome_status": "SQL producer"},
+      {"campaign_key": "103", "campaign_id": "103", "campaign_name": "Europe Low CPC", "aliases": [], "spend_native": 15920.75, "spend_usd": 20059.9, "spend_currency": "GBP", "fx_complete": true, "total_leads": 340, "confirmed_sqls": 3, "confirmed_junk": 141, "in_progress": 7, "wrong_fit": 11, "unknown": 178, "verdicted_leads": 162, "junk_rate_pct": 87.04, "cpql_usd": 6686.63, "mapping_status": "mapped", "outcome_status": "Junk-heavy"},
+      {"campaign_key": "104", "campaign_id": "104", "campaign_name": "Compliance - Markets", "aliases": [], "spend_native": 9310.2, "spend_usd": 11730.85, "spend_currency": "GBP", "fx_complete": true, "total_leads": 41, "confirmed_sqls": 0, "confirmed_junk": 3, "in_progress": 2, "wrong_fit": 1, "unknown": 35, "verdicted_leads": 6, "junk_rate_pct": 50.0, "cpql_usd": null, "mapping_status": "mapped", "outcome_status": "Spend without SQL proof"},
+      {"campaign_key": "105", "campaign_id": "105", "campaign_name": "APAC - Freight", "aliases": ["apac-freight-q2"], "spend_native": 6042.0, "spend_usd": null, "spend_currency": "GBP", "fx_complete": false, "total_leads": 58, "confirmed_sqls": 4, "confirmed_junk": 9, "in_progress": 3, "wrong_fit": 2, "unknown": 40, "verdicted_leads": 18, "junk_rate_pct": 50.0, "cpql_usd": null, "mapping_status": "mapped", "outcome_status": "SQL producer"},
+      {"campaign_key": "107", "campaign_id": "107", "campaign_name": "Emerging - APAC", "aliases": [], "spend_native": 3120.5, "spend_usd": 3931.83, "spend_currency": "GBP", "fx_complete": true, "total_leads": 0, "confirmed_sqls": 0, "confirmed_junk": 0, "in_progress": 0, "wrong_fit": 0, "unknown": 0, "verdicted_leads": 0, "junk_rate_pct": null, "cpql_usd": null, "mapping_status": "mapped", "outcome_status": "Spend without SQL proof"},
+      {"campaign_key": "unmatched:paid social retarget", "campaign_id": null, "campaign_name": "paid social retarget", "aliases": [], "spend_native": null, "spend_usd": null, "spend_currency": "GBP", "fx_complete": false, "total_leads": 27, "confirmed_sqls": 2, "confirmed_junk": 6, "in_progress": 1, "wrong_fit": 2, "unknown": 16, "verdicted_leads": 11, "junk_rate_pct": 54.55, "cpql_usd": null, "mapping_status": "unmatched", "outcome_status": "Mapping review"}
+    ],
+    "summary": {
+      "campaigns": 7,
+      "spend_usd": 128956.42,
+      "spend_native": 105213.95,
+      "spend_currency": "GBP",
+      "confirmed_sqls_total": 66,
+      "confirmed_junk_total": 173,
+      "overall_cpql_usd": 1953.88,
+      "overall_cpql_scope": "mapped_only",
+      "mapping_coverage": {"mapped_sqls": 66, "unmatched_sqls": 2, "excluded_not_google_sqls": 7, "total_paid_search_sqls": 75, "status": "partial"}
+    },
+    "audit": {
+      "spend_source": "google_ads_campaign_daily_spend (canonical)",
+      "lead_source": "leads (durable · contact_created_at · deduped · paid_search)",
+      "identity_source": "google_ads_campaign_identity (approved mappings)",
+      "identity_available": true,
+      "account_timezone": "Europe/London",
+      "window_start": null,
+      "window_end": "2026-07-11",
+      "all_time": true,
+      "fx_status": "incomplete",
+      "spend_reconciliation_status": "pass",
+      "lead_reconciliation_status": "pass",
+      "event_date_safe": true,
+      "fx_missing_days": 3
+    }
+  }
+}

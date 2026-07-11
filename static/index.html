@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=098" />
+  <link rel="stylesheet" href="/static/styles.css?v=099" />
 </head>
 <body>
 
@@ -457,10 +457,12 @@
       </section>
 
       <!-- Campaigns -->
-      <section id="page-campaigns" class="page" hidden>
-        <!-- PR-ADS-142: Campaign Evidence decision page. Command header, compact
-             KPI strip + verdict filter chips, and one decision table rendered by
-             loadCampaignEvidence(). The legacy oversized verdict cards are gone. -->
+      <section id="page-campaigns" class="page page--wide" hidden>
+        <!-- PR-ADS-143: Campaign Evidence page — GENUINE selected-window totals
+             (canonical Google Ads spend reconciled with deduplicated HubSpot lead
+             outcomes), a compact KPI strip, one clean full-width decision table,
+             and a factual outcome status. Rendered by loadCampaignEvidence().
+             Source/methodology live in the Help drawer, not a strip above the table. -->
         <div id="page-explanation-campaigns" hidden></div>
         <p id="run-meta-campaigns" class="run-meta" data-section="campaigns"></p>
         <div id="campaign-evidence-shell"></div>
@@ -1428,6 +1430,6 @@
     </div>
   </aside>
 
-  <script src="/static/app.js?v=098"></script>
+  <script src="/static/app.js?v=099"></script>
 </body>
 </html>

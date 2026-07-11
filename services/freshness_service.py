@@ -118,6 +118,17 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "page": "campaigns",
     },
+    # PR-ADS-143: the Campaign Evidence page reads canonical daily spend (not the
+    # `campaigns` snapshot), so its freshness tracks the real upstream table.
+    "canonical_spend": {
+        "table": "google_ads_campaign_daily_spend",
+        "date_column": "spend_date",
+        "source": "google_ads_api",
+        "dataset": "canonical_spend",
+        "stale_threshold_days": 8,
+        "depends_on": [],
+        "page": "campaigns",
+    },
     "search_terms": {
         "table": "search_terms",
         "date_column": "source_date",
