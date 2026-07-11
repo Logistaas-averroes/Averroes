@@ -207,6 +207,15 @@ def test_decision_aggregates_and_verdicts_passthrough(monkeypatch):
     assert verdicts == {"brand - uk": "SCALE", "junk camp": "FIX"}
 
 
+def test_missing_conversions_not_fabricated_to_zero(monkeypatch):
+    # Copilot review: a NULL conversions must stay None (drawer renders "—"),
+    # never a fabricated 0.0.
+    rows = [("c", "HOLD", "", None, None, None, None, 0, 0, 0, None, None, 1, None)]
+    _patch_campaigns(monkeypatch, rows)
+    out = _server().api_campaigns(user={"e": "x"}, days=30, window="30d")
+    assert out["campaigns"][0]["conversions"] is None
+
+
 def test_campaigns_db_unavailable_shape(monkeypatch):
     import db.connection as conn_mod
 
@@ -352,6 +361,15 @@ def test_responsive_table_and_mobile_cards():
     assert "@media (max-width: 640px)" in STYLES          # mobile: stacked cards
     assert ".campaign-decision-table td::before" in STYLES  # data-label cards
     assert "data-label=" in APP_JS
+
+
+def test_row_open_handler_wired_once_not_double():
+    # Copilot review: only the <tr> carries data-campaign-open, so the click
+    # handler fires once (the inner button bubbles to the row) — no double open.
+    row = APP_JS[APP_JS.find("function renderCampaignEvidenceRow"):
+                 APP_JS.find("function renderCampaignEvidenceRow") + 2000]
+    assert row.count("data-campaign-open") == 1        # the <tr> only
+    assert 'class="btn btn--secondary campaign-open-btn">' in row   # button has none
 
 
 def test_row_is_keyboard_openable_and_drawer_escapes():

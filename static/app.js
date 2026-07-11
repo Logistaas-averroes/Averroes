@@ -6162,7 +6162,7 @@ function renderCampaignEvidenceRow(c) {
       <td data-label="Junk Rate" class="${junkCls}">${junkStr}</td>
       <td class="td--num ${cpql === "N/A" ? "td--na" : ""}" data-label="CPQL">${cpql}</td>
       <td data-label="Evidence"><span class="campaign-ev-compact">${escapeHtml(ev.compact)}</span>${ev.note ? `<span class="campaign-ev-note">${escapeHtml(ev.note)}</span>` : ""}</td>
-      <td data-label=""><button type="button" class="btn btn--secondary campaign-open-btn" data-campaign-open="${nameEnc}">Open evidence</button></td>
+      <td data-label=""><button type="button" class="btn btn--secondary campaign-open-btn">Open evidence</button></td>
     </tr>`;
 }
 

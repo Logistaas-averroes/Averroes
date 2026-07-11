@@ -949,7 +949,9 @@ def api_campaigns(
                                            if int(r["confirmed_sqls"] or 0) > 0 else None),
                         "clicks":         int(r["clicks"] or 0),
                         "impressions":    int(r["impressions"] or 0),
-                        "conversions":    _round2(r["conversions"]) or 0.0,
+                        # Missing conversions stay None (drawer renders "—") — never
+                        # a fabricated 0.0, per the no-fake-zero contract.
+                        "conversions":    _round2(r["conversions"]),
                         "total_leads":    int(r["total_leads"] or 0),
                         "run_count":      int(r["run_count"] or 0),
                         "last_run_date":  str(r["last_run_date"]) if r["last_run_date"] else None,
