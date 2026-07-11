@@ -2060,6 +2060,13 @@ body.is-revenue-page #monitoring-banner {
 .campaign-ev-compact { display: block; font-weight: 600; }
 .campaign-ev-note { display: block; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 .campaign-open-btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; }
+/* Snapshot-vs-window honesty disclosure under the KPI strip. */
+.campaign-snapshot-disclosure {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: var(--space-2) 0 var(--space-3);
+  line-height: 1.45;
+}
 
 /* Tablet: hide lower-priority columns (keep Campaign, Decision, SQLs,
    Junk Rate, CPQL, Open evidence). Confirmed Junk + Spend + Evidence hide. */
@@ -2096,6 +2103,14 @@ body.is-revenue-page #monitoring-banner {
     border: none;
     text-align: right;
   }
+  /* Restore Spend Evidence (col 3) and Confirmed Junk (col 5) on mobile cards —
+     the tablet rule above hides them with a more specific nth-child() selector
+     that a bare `td { display: block }` cannot override, so re-assert them here
+     at equal specificity (this block wins by source order). Evidence-summary
+     text (col 8) stays hidden on mobile; Open evidence (col 9) remains. */
+  .campaign-decision-table td:nth-child(3),
+  .campaign-decision-table td:nth-child(5) { display: flex; }
+  .campaign-decision-table td:nth-child(8) { display: none; }
   .campaign-decision-table td::before {
     content: attr(data-label);
     font-size: 11px;
@@ -2691,6 +2706,15 @@ body.is-revenue-page #monitoring-banner {
   margin: var(--space-2) 0 0;
   font-style: italic;
 }
+/* Latest-snapshot disclosure in the drawer header — clarifies that snapshot
+   metrics are not a selected-window total. */
+.drawer-snapshot-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: var(--space-2) 0 0;
+  line-height: 1.4;
+}
+.drawer-snapshot-note strong { color: var(--text-primary); font-weight: 700; }
 
 .drawer-kpi__value {
   font-size: 18px;

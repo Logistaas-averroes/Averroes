@@ -840,6 +840,21 @@ def _round2(value):
         return None
 
 
+def _nullable_int(value):
+    """Coerce to int, preserving None (an unavailable metric is NOT a real 0).
+
+    Only a value the source positively records is converted; ``None`` (the
+    column was NULL / the metric was never captured) stays ``None`` so the UI
+    can render "—"/"Unavailable" instead of a fabricated zero.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _empty_campaign_summary() -> dict[str, Any]:
     """Zeroed decision summary for the db-unavailable / empty campaign response."""
     return {
@@ -847,6 +862,10 @@ def _empty_campaign_summary() -> dict[str, Any]:
         "confirmed_sqls_total": 0,
         "confirmed_junk_total": 0,
         "verdict_counts": {"SCALE": 0, "HOLD": 0, "FIX": 0, "CUT": 0},
+        "completeness": {
+            "confirmed_sqls": {"status": "complete", "available": 0, "missing": 0},
+            "confirmed_junk": {"status": "complete", "available": 0, "missing": 0},
+        },
         "spend_requiring_review": {
             "status": "unavailable",
             "value": None,
@@ -887,6 +906,9 @@ def api_campaigns(
             "spend_semantics": "latest_run_snapshot",
             "spend_status": "snapshot",
             "spend_currency": "USD",
+            "metric_semantics": "latest_stored_snapshot",
+            "snapshot_metric_period_days": None,
+            "snapshot_period_available": False,
             "summary": _empty_campaign_summary(),
         })
         return resp
@@ -934,48 +956,100 @@ def api_campaigns(
                 campaigns = []
                 for row in rows:
                     r = dict(zip(cols, row))
+                    # Preserve NULL for every metric — an unavailable value is NOT a
+                    # real 0. Only values the source positively records survive; a
+                    # NULL column stays None so the UI renders "—"/"Unavailable".
+                    confirmed_sqls = _nullable_int(r["confirmed_sqls"])
+                    snapshot_date = (str(r["last_run_date"])
+                                     if r["last_run_date"] else None)
                     campaigns.append({
                         "campaign_name":  r["campaign_name"],
                         "verdict":        r["verdict"],
                         "latest_verdict": r["verdict"],   # backward-compat alias
                         "verdict_reason": r["verdict_reason"],
                         "spend_usd":      _round2(r["spend_usd"]),
-                        "confirmed_sqls": int(r["confirmed_sqls"] or 0),
-                        "confirmed_junk": int(r["junk_count"] or 0),
+                        "confirmed_sqls": confirmed_sqls,
+                        "confirmed_junk": _nullable_int(r["junk_count"]),
                         "junk_rate_pct":  _round2(r["junk_rate_pct"]),
-                        # CPQL stays None (renders N/A) when there are no confirmed
-                        # SQLs — never a fabricated 0.
+                        # CPQL stays None (renders N/A) unless there is a genuine
+                        # positive SQL count — never a fabricated 0.
                         "cpql_usd":       (_round2(r["cpql_usd"])
-                                           if int(r["confirmed_sqls"] or 0) > 0 else None),
-                        "clicks":         int(r["clicks"] or 0),
-                        "impressions":    int(r["impressions"] or 0),
+                                           if (confirmed_sqls or 0) > 0 else None),
+                        "clicks":         _nullable_int(r["clicks"]),
+                        "impressions":    _nullable_int(r["impressions"]),
                         # Missing conversions stay None (drawer renders "—") — never
                         # a fabricated 0.0, per the no-fake-zero contract.
                         "conversions":    _round2(r["conversions"]),
-                        "total_leads":    int(r["total_leads"] or 0),
+                        "total_leads":    _nullable_int(r["total_leads"]),
                         "run_count":      int(r["run_count"] or 0),
-                        "last_run_date":  str(r["last_run_date"]) if r["last_run_date"] else None,
+                        "last_run_date":  snapshot_date,
+                        # ── Honest snapshot-vs-window metadata (PR-ADS-142 audit) ──
+                        # Every metric on this row is the campaign's LATEST STORED
+                        # SNAPSHOT (one coherent run), NOT a genuine selected-window
+                        # total. The Evidence Window only filters which stored
+                        # snapshot dates are eligible — it never rebuilds the metrics
+                        # into an all-time / window business total.
+                        "metric_semantics": "latest_stored_snapshot",
+                        "snapshot_date": snapshot_date,
+                        # The real per-snapshot metric period is NOT provable per-row:
+                        # it varies by run type (daily=2d, weekly/monthly=30d) and by
+                        # data source within one run (ads vs HubSpot use different
+                        # lookbacks), and the campaigns table stores no period column.
+                        # Per the contract, unprovable → null + explicit unavailable.
+                        "snapshot_metric_period_days": None,
+                        "snapshot_period_available": False,
                     })
     except Exception as exc:  # noqa: BLE001
         log.error("[api/campaigns] database error: %s", exc, exc_info=True)
         return _empty()
 
     # Decision aggregates for the KPI strip (from the same rows the table shows).
+    # These are sums of LATEST-SNAPSHOT verdicts/counts across campaigns — they are
+    # NOT selected-window business totals. An unavailable (None) metric is NEVER
+    # coerced to 0 in the sum; it is counted as missing so completeness is explicit.
     verdict_counts = {"SCALE": 0, "HOLD": 0, "FIX": 0, "CUT": 0}
     sqls_total = 0
     junk_total = 0
+    sqls_available = sqls_missing = 0
+    junk_available = junk_missing = 0
     for c in campaigns:
         v = (c["verdict"] or "").strip().upper()
         if v in verdict_counts:
             verdict_counts[v] += 1
-        sqls_total += c["confirmed_sqls"]
-        junk_total += c["confirmed_junk"]
+        if c["confirmed_sqls"] is None:
+            sqls_missing += 1
+        else:
+            sqls_total += c["confirmed_sqls"]
+            sqls_available += 1
+        if c["confirmed_junk"] is None:
+            junk_missing += 1
+        else:
+            junk_total += c["confirmed_junk"]
+            junk_available += 1
+
+    sqls_complete = sqls_missing == 0
+    junk_complete = junk_missing == 0
 
     summary = {
         "campaigns_with_evidence": len(campaigns),
+        # Latest-snapshot sums, with explicit completeness (never a silent 0-fill).
         "confirmed_sqls_total": sqls_total,
         "confirmed_junk_total": junk_total,
         "verdict_counts": verdict_counts,
+        # Completeness disclosure: how many campaigns contributed a real value vs
+        # had the metric unavailable. "complete" iff nothing was missing.
+        "completeness": {
+            "confirmed_sqls": {
+                "status": "complete" if sqls_complete else "partial",
+                "available": sqls_available,
+                "missing": sqls_missing,
+            },
+            "confirmed_junk": {
+                "status": "complete" if junk_complete else "partial",
+                "available": junk_available,
+                "missing": junk_missing,
+            },
+        },
         # Per-run snapshot spend cannot be summed into a trustworthy selected-window
         # total (Path B/C) — disclosed as Unavailable, never a fabricated sum.
         "spend_requiring_review": {
@@ -995,6 +1069,14 @@ def api_campaigns(
         "spend_semantics": "latest_run_snapshot",
         "spend_status": "snapshot",
         "spend_currency": "USD",
+        # Every per-campaign metric is the latest stored snapshot, NOT a genuine
+        # selected-window total. The Evidence Window only filters which snapshot
+        # dates are eligible; it never converts a snapshot into an all-time or
+        # selected-window business total. The metric period is unprovable per-row
+        # (varies by run type / data source, unstored) → reported as unavailable.
+        "metric_semantics": "latest_stored_snapshot",
+        "snapshot_metric_period_days": None,
+        "snapshot_period_available": False,
         "summary": summary,
     }
 
@@ -1727,21 +1809,32 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                 if camp_row is not None:
                     camp_cols = [d[0] for d in cur.description]
                     camp_dict = dict(zip(camp_cols, camp_row))
+                    _snap_date = (str(camp_dict["last_run_date"])
+                                  if camp_dict["last_run_date"] else None)
                     campaign_out = {
                         "campaign_name":  camp_dict["campaign_name"],
                         "spend_usd":      float(camp_dict["spend_usd"])      if camp_dict["spend_usd"]      is not None else None,
                         "clicks":         int(camp_dict["clicks"])            if camp_dict["clicks"]          is not None else None,
                         "impressions":    int(camp_dict["impressions"])       if camp_dict["impressions"]     is not None else None,
                         "conversions":    float(camp_dict["conversions"])     if camp_dict["conversions"]     is not None else None,
-                        "total_leads":    int(camp_dict["total_leads"])       if camp_dict["total_leads"]     is not None else 0,
-                        "confirmed_sqls": int(camp_dict["confirmed_sqls"])    if camp_dict["confirmed_sqls"]  is not None else 0,
-                        "junk_count":     int(camp_dict["junk_count"])        if camp_dict["junk_count"]      is not None else 0,
+                        # Preserve NULL — an unavailable snapshot metric is never a real 0.
+                        "total_leads":    int(camp_dict["total_leads"])       if camp_dict["total_leads"]     is not None else None,
+                        "confirmed_sqls": int(camp_dict["confirmed_sqls"])    if camp_dict["confirmed_sqls"]  is not None else None,
+                        "junk_count":     int(camp_dict["junk_count"])        if camp_dict["junk_count"]      is not None else None,
                         "junk_rate_pct":  float(camp_dict["junk_rate_pct"])   if camp_dict["junk_rate_pct"]   is not None else None,
                         "cpql_usd":       float(camp_dict["cpql_usd"])        if camp_dict["cpql_usd"]        is not None else None,
                         "verdict":        camp_dict["verdict"],
                         "verdict_reason": camp_dict["verdict_reason"],
                         "runs":           int(camp_dict["runs"])              if camp_dict["runs"]            is not None else 0,
-                        "last_run_date":  str(camp_dict["last_run_date"])     if camp_dict["last_run_date"]   else None,
+                        "last_run_date":  _snap_date,
+                        # Honest snapshot-vs-window metadata (PR-ADS-142 audit): this
+                        # card is the campaign's LATEST STORED SNAPSHOT, not a window
+                        # total. Surface the snapshot date + (unprovable) analysis
+                        # period so the drawer can disclose it.
+                        "metric_semantics": "latest_stored_snapshot",
+                        "snapshot_date": _snap_date,
+                        "snapshot_metric_period_days": None,
+                        "snapshot_period_available": False,
                     }
                 # Note: do NOT return early here. Even when campaign_out is None
                 # (no snapshot in this window, e.g. a daily-pulse-only window),

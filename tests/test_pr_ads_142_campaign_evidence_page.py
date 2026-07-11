@@ -367,14 +367,14 @@ def test_row_open_handler_wired_once_not_double():
     # Copilot review: only the <tr> carries data-campaign-open, so the click
     # handler fires once (the inner button bubbles to the row) — no double open.
     row = APP_JS[APP_JS.find("function renderCampaignEvidenceRow"):
-                 APP_JS.find("function renderCampaignEvidenceRow") + 2000]
+                 APP_JS.find("function wireCampaignEvidenceControls")]
     assert row.count("data-campaign-open") == 1        # the <tr> only
     assert 'class="btn btn--secondary campaign-open-btn">' in row   # button has none
 
 
 def test_row_is_keyboard_openable_and_drawer_escapes():
     row = APP_JS[APP_JS.find("function renderCampaignEvidenceRow"):
-                 APP_JS.find("function renderCampaignEvidenceRow") + 2000]
+                 APP_JS.find("function wireCampaignEvidenceControls")]
     assert 'tabindex="0"' in row and 'role="button"' in row
     # Drawer keyboard handling (Escape closes) is retained.
     handler = APP_JS[APP_JS.find("function _drawerKeyHandler"):
@@ -388,3 +388,219 @@ def test_revenue_pages_untouched():
     rev = APP_JS[APP_JS.find("const REVENUE_PAGES"):APP_JS.find("const REVENUE_PAGES") + 200]
     for rp in ("roas-campaigns", "roas-countries", "deals", "revenue-by-source"):
         assert rp in rev
+
+
+# ════════════════ 6. Pre-merge audit — snapshot-vs-window honesty ════════════
+# Validation for the 10 audit points: latest-snapshot semantics, null
+# preservation, summary completeness, contract accuracy, consumer migration,
+# mobile visibility, formula stability, and Revenue/Dashboard isolation.
+
+
+def _rows_nullable():
+    # A row where EVERY metric the source can leave NULL is NULL — clicks,
+    # impressions, conversions, total_leads, confirmed_sqls, junk_count,
+    # junk_rate_pct, cpql_usd, spend_usd. Only verdict + name are populated.
+    return [("null camp", "HOLD", "insufficient",
+             None, None, None, None, None, None, None, None, None, 1, "2026-07-02")]
+
+
+# Point 1 — the UI never presents snapshot metrics as selected-window totals.
+def test_ui_labels_disclose_latest_snapshot_not_window_total():
+    kpi = APP_JS[APP_JS.find("function renderCampaignEvidenceKPIs"):
+                 APP_JS.find("function renderCampaignEvidenceKPIs") + 2200]
+    assert "Confirmed SQLs — Latest Snapshot" in kpi
+    assert "Confirmed Junk — Latest Snapshot" in kpi
+    assert "Spend Evidence — Latest Snapshot" in kpi
+    # The visible disclosure banner is verbatim from the contract.
+    assert ("Evidence Window filters stored snapshot dates. It does not convert "
+            "the snapshot into an all-time or selected-window business total." in APP_JS)
+    # Table column headers carry the same latest-snapshot framing (incl. CPQL).
+    tbl = APP_JS[APP_JS.find("function renderCampaignDecisionTable"):
+                 APP_JS.find("function renderCampaignDecisionTable") + 1600]
+    assert "CPQL — Latest Snapshot" in tbl
+
+
+# Point 2 — all_time returns the latest snapshot per campaign across ALL stored
+# snapshot dates (no lower bound, still one row per campaign), and the response
+# discloses latest-snapshot semantics at both levels.
+def test_all_time_is_latest_snapshot_not_lifetime_sum(monkeypatch):
+    sink = _patch_campaigns(monkeypatch, _rows_two())
+    out = _server().api_campaigns(user={"e": "x"}, days=30, window="all_time")
+    sql_all = " ".join(s for cur in sink for s in cur.executed)
+    assert "run_date >=" not in sql_all                 # no lower bound
+    assert "DISTINCT ON (df.campaign_name)" in sql_all   # one snapshot per campaign
+    assert out["metric_semantics"] == "latest_stored_snapshot"
+    for c in out["campaigns"]:
+        assert c["metric_semantics"] == "latest_stored_snapshot"
+
+
+# Point 3 — snapshot date + (unavailable) analysis period are present per
+# campaign and surfaced in the drawer.
+def test_snapshot_date_and_period_present_per_campaign(monkeypatch):
+    _patch_campaigns(monkeypatch, _rows_two())
+    out = _server().api_campaigns(user={"e": "x"}, days=30, window="30d")
+    c = out["campaigns"][0]
+    assert c["snapshot_date"] == "2026-07-01"
+    # Period is unprovable per-row → null + explicit unavailable flag.
+    assert c["snapshot_metric_period_days"] is None
+    assert c["snapshot_period_available"] is False
+
+
+def test_drawer_shows_snapshot_date_and_period():
+    drawer = APP_JS[APP_JS.find("function renderCampaignDrawer"):
+                    APP_JS.find("function _appendDrawerEvidenceSections")]
+    # The drawer builds snapshot date + analysis-period disclosure text.
+    assert "snapshot_date" in drawer
+    assert "snapshot analysis period unavailable" in drawer
+    assert "latest stored snapshot" in drawer
+
+
+def _build_detail_body():
+    idx = SERVER.find("def _build_campaign_detail(")
+    end = SERVER.find("\n@app.", idx)
+    return SERVER[idx:end if end != -1 else idx + 14000]
+
+
+def test_detail_endpoint_emits_snapshot_metadata():
+    body = _build_detail_body()
+    assert '"metric_semantics": "latest_stored_snapshot"' in body
+    assert '"snapshot_metric_period_days": None' in body
+    assert '"snapshot_period_available": False' in body
+
+
+# Point 4 — NULL metrics stay unavailable (None), never fabricated to 0.
+def test_null_metrics_preserved_not_zero(monkeypatch):
+    _patch_campaigns(monkeypatch, _rows_nullable())
+    out = _server().api_campaigns(user={"e": "x"}, days=30, window="30d")
+    c = out["campaigns"][0]
+    for field in ("clicks", "impressions", "conversions", "total_leads",
+                  "confirmed_sqls", "confirmed_junk", "junk_rate_pct", "spend_usd",
+                  "cpql_usd"):
+        assert c[field] is None, f"{field} should be None (unavailable), not 0"
+
+
+def test_genuine_zero_is_preserved_as_zero(monkeypatch):
+    # A source-recorded 0 stays 0 (not None) — only NULL becomes unavailable.
+    rows = [("zero camp", "FIX", "no sqls", 10.0, 0, 0, 0.0, 0, 0, 0, 0.0, None, 1, "2026-07-02")]
+    _patch_campaigns(monkeypatch, rows)
+    out = _server().api_campaigns(user={"e": "x"}, days=30, window="30d")
+    c = out["campaigns"][0]
+    assert c["confirmed_sqls"] == 0 and c["confirmed_junk"] == 0
+    assert c["clicks"] == 0 and c["impressions"] == 0
+    assert c["cpql_usd"] is None            # 0 SQLs → CPQL undefined (N/A), not $0
+
+
+def test_frontend_row_renders_null_as_dash_and_zero_as_zero():
+    row = APP_JS[APP_JS.find("function renderCampaignEvidenceRow"):
+                 APP_JS.find("function wireCampaignEvidenceControls")]
+    # null SQLs/junk → an unavailable dash, genuine 0 → "0" via fmtCount.
+    assert "const sqls = c.confirmed_sqls;" in row   # raw value, not `|| 0` coerced
+    assert "sqls == null" in row                     # unavailable → dash
+    assert "c.confirmed_junk == null" in row
+    # CPQL: "—" when SQLs unavailable, "N/A" when a genuine 0.
+    assert 'sqls == null ? "—"' in row
+    assert 'sqls === 0 ? "N/A"' in row
+
+
+# Point 5 — summary completeness is explicit; a missing metric is counted as
+# missing, never summed as 0.
+def test_summary_completeness_partial_when_a_metric_is_null(monkeypatch):
+    rows = [
+        ("has camp", "SCALE", "ok", 100.0, 10, 100, 2.0, 20, 5, 1, 5.0, 20.0, 1, "2026-07-02"),
+        ("null camp", "HOLD", "n/a", None, None, None, None, None, None, None, None, None, 1, "2026-07-02"),
+    ]
+    _patch_campaigns(monkeypatch, rows)
+    out = _server().api_campaigns(user={"e": "x"}, days=30, window="30d")
+    comp = out["summary"]["completeness"]
+    assert comp["confirmed_sqls"] == {"status": "partial", "available": 1, "missing": 1}
+    assert comp["confirmed_junk"] == {"status": "partial", "available": 1, "missing": 1}
+    # The null row's SQLs (None) is NOT added as 0 — total is the one real value.
+    assert out["summary"]["confirmed_sqls_total"] == 5
+    assert out["summary"]["confirmed_junk_total"] == 1
+
+
+def test_summary_completeness_complete_when_all_present(monkeypatch):
+    _patch_campaigns(monkeypatch, _rows_two())
+    out = _server().api_campaigns(user={"e": "x"}, days=30, window="30d")
+    comp = out["summary"]["completeness"]
+    assert comp["confirmed_sqls"]["status"] == "complete"
+    assert comp["confirmed_junk"]["status"] == "complete"
+    assert comp["confirmed_sqls"]["missing"] == 0
+
+
+def test_frontend_kpi_discloses_completeness():
+    fn = APP_JS[APP_JS.find("function campaignCompletenessSub"):
+                APP_JS.find("function campaignCompletenessSub") + 400]
+    assert 'comp.status === "partial"' in fn
+    assert "unavailable" in fn
+
+
+# Point 6 — the canonical API contract matches the response shape.
+CONTRACT = open(os.path.join(ROOT, "docs", "API_CONTRACT.md"), encoding="utf-8").read()
+
+
+def test_api_contract_documents_latest_snapshot_contract():
+    seg = CONTRACT[CONTRACT.find("GET /api/campaigns"):
+                   CONTRACT.find("GET /api/leads")]
+    assert seg, "campaigns contract section missing"
+    for token in ("latest_stored_snapshot", "snapshot_metric_period_days",
+                  "snapshot_period_available", "metric_semantics",
+                  "spend_semantics", "completeness", "all_time",
+                  "confirmed_junk", "db_unavailable"):
+        assert token in seg, f"API_CONTRACT missing {token} in /api/campaigns section"
+    # The breaking replacement of the old averaged fields is documented.
+    for old in ("avg_spend_usd", "total_confirmed_sqls", "avg_junk_rate_pct",
+                "avg_cpql_usd", "trend"):
+        assert old in seg, f"API_CONTRACT should document removal of {old}"
+    assert "BREAKING" in seg
+
+
+# Point 7 — old field consumers are migrated (no aliases needed); latest_verdict
+# alias retained.
+def test_no_stale_consumers_of_removed_campaign_fields():
+    # The only /api/campaigns consumer (loadCampaignEvidence) reads the new fields.
+    for removed in ("avg_spend_usd", "total_confirmed_sqls",
+                    "avg_junk_rate_pct", "avg_cpql_usd"):
+        assert removed not in APP_JS, f"frontend still references removed field {removed}"
+    # Backward-compat alias preserved so any lingering reader of latest_verdict works.
+    assert '"latest_verdict": r["verdict"]' in SERVER
+
+
+# Point 8 — mobile cards show Spend Evidence (col 3) and Confirmed Junk (col 5).
+def test_mobile_shows_spend_and_confirmed_junk_columns():
+    mobile = STYLES[STYLES.find("@media (max-width: 640px)"):
+                    STYLES.find("@media (max-width: 640px)") + 1600]
+    # Tablet hides cols 3/5 via a more specific nth-child rule; the mobile block
+    # must re-assert them so Spend Evidence + Confirmed Junk appear on cards.
+    assert ".campaign-decision-table td:nth-child(3)" in mobile
+    assert ".campaign-decision-table td:nth-child(5)" in mobile
+    seg = mobile[mobile.find("td:nth-child(3)"):mobile.find("td:nth-child(3)") + 120]
+    assert "display: flex" in seg
+    # Evidence summary text (col 8) stays hidden on mobile; Open evidence remains.
+    assert "td:nth-child(8) { display: none; }" in mobile
+
+
+# Point 9 — verdict / junk-rate / CPQL formulas are unchanged (surfaced, not
+# recomputed). The endpoint never calls determine_verdict or reclassifies.
+def test_verdict_and_cpql_formulas_unchanged():
+    core = open(os.path.join(ROOT, "analysis", "core.py"), encoding="utf-8").read()
+    # Verdict formula lives in analysis/core.py determine_verdict — untouched.
+    assert "def determine_verdict(" in core
+    # CPQL formula (spend / confirmed_sqls) unchanged in the pipeline.
+    assert "round(spend / confirmed_sqls, 2)" in core
+    # The endpoint surfaces stored verdict/cpql — it does not import determine_verdict.
+    start = SERVER.find("def api_campaigns(")
+    nxt = SERVER.find("\n@app.", start + 1)
+    body = SERVER[start:nxt]
+    assert "determine_verdict" not in body
+
+
+# Point 10 — Revenue and Dashboard endpoints/pages are untouched by this slice.
+def test_revenue_and_dashboard_handlers_not_modified_by_campaigns_slice():
+    start = SERVER.find("def api_campaigns(")
+    nxt = SERVER.find("\n@app.", start + 1)
+    body = SERVER[start:nxt]
+    # The campaigns handler does not reach into revenue/dashboard services.
+    for foreign in ("dashboard_overview_service", "dashboard_revenue_service",
+                    "revenue_by_source", "closed_won", "get_revenue_performance"):
+        assert foreign not in body

@@ -171,10 +171,10 @@ const PAGE_EXPLANATIONS = {
   },
   campaigns: {
     title: "Campaigns",
-    purpose: "Campaign truth table — spend, quality, verdict, and performance metrics.",
-    source: "Google Ads API campaign data.",
+    purpose: "Campaign decision table — verdict, spend, and lead-quality outcomes from each campaign's latest stored snapshot.",
+    source: "Google Ads campaign evidence plus HubSpot lead-quality outcomes. Metrics are the latest stored snapshot, not a selected-window total.",
     dependsOn: ["campaigns"],
-    emptyMeans: "No Google Ads API campaign data has been synced yet for this window. Run the daily/weekly scheduler or check System Status.",
+    emptyMeans: "No campaign snapshot has been synced yet for this window. Run the daily/weekly scheduler or check System Status.",
     nextAction: "Check System Status → Google Ads API / Campaigns."
   },
   "search-terms": {
@@ -5903,17 +5903,20 @@ function campaignVerdict(c) {
 }
 
 // Factual evidence statement — generated only from existing fields. No advice.
+// Every figure is the campaign's LATEST STORED SNAPSHOT, not a window total.
+// A null metric stays "unavailable" — never coerced to a fabricated 0.
 function campaignEvidenceSummary(c) {
-  const sqls = Number(c.confirmed_sqls || 0);
+  const sqls = c.confirmed_sqls;   // may be null (unavailable) or a genuine 0
   const jr   = c.junk_rate_pct;
-  const parts = [`${sqls} SQL${sqls === 1 ? "" : "s"}`];
+  const sqlsKnown = sqls != null;
+  const parts = [sqlsKnown ? `${sqls} SQL${sqls === 1 ? "" : "s"}` : "SQLs unavailable"];
   parts.push(jr == null ? "junk rate unavailable" : `${Math.round(jr)}% junk`);
   const compact = parts.join(" · ");
   let note = "";
-  if (jr == null)                                            note = "Insufficient verdicted leads";
-  else if (sqls > 0 && jr <= uiThresholds.junk_rate.low_pct) note = "Confirmed SQL production with low junk";
-  else if (sqls === 0 && jr >= uiThresholds.junk_rate.high_pct) note = "High junk exposure warrants review";
-  else if (sqls === 0)                                       note = "No confirmed SQL outcome in this window";
+  if (jr == null)                                                 note = "Insufficient verdicted leads";
+  else if (sqlsKnown && sqls > 0 && jr <= uiThresholds.junk_rate.low_pct) note = "Confirmed SQL production with low junk";
+  else if (sqlsKnown && sqls === 0 && jr >= uiThresholds.junk_rate.high_pct) note = "High junk exposure warrants review";
+  else if (sqlsKnown && sqls === 0)                              note = "No confirmed SQL outcome in the latest stored snapshot.";
   return { compact, note };
 }
 
@@ -6002,9 +6005,19 @@ function campaignEvidenceChips() {
   ];
 }
 
+// Completeness sub-line for a latest-snapshot KPI: discloses when some campaigns
+// had the metric unavailable (never silently 0-filled into the total).
+function campaignCompletenessSub(comp, fallback) {
+  if (comp && comp.status === "partial") {
+    return `<span class="detail-unavailable">${fmtCount(comp.missing)} unavailable · sum of ${fmtCount(comp.available)}</span>`;
+  }
+  return fallback;
+}
+
 function renderCampaignEvidenceKPIs() {
   const s = _campaignSummary || {};
   const sr = s.spend_requiring_review || {};
+  const comp = s.completeness || {};
   const spendReview = sr.status === "verified" && sr.value != null
     ? fmtDollar(sr.value)
     : `<span class="detail-unavailable" title="${escapeHtml(sr.reason || "Spend aggregation requires contract verification")}">Unavailable</span>`;
@@ -6012,16 +6025,17 @@ function renderCampaignEvidenceKPIs() {
     <div class="evidence-kpi-grid campaign-kpi-grid">
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Campaigns With Evidence</div>
         <div class="dash-kpi-card__value">${fmtCount(s.campaigns_with_evidence)}</div></div>
-      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Confirmed SQLs</div>
+      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Confirmed SQLs — Latest Snapshot</div>
         <div class="dash-kpi-card__value">${fmtCount(s.confirmed_sqls_total)}</div>
-        <div class="dash-kpi-card__sub">HubSpot-confirmed qualified</div></div>
-      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Confirmed Junk</div>
+        <div class="dash-kpi-card__sub">${campaignCompletenessSub(comp.confirmed_sqls, "HubSpot-confirmed qualified")}</div></div>
+      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Confirmed Junk — Latest Snapshot</div>
         <div class="dash-kpi-card__value">${fmtCount(s.confirmed_junk_total)}</div>
-        <div class="dash-kpi-card__sub">Excludes wrong-fit</div></div>
-      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Spend Requiring Review</div>
+        <div class="dash-kpi-card__sub">${campaignCompletenessSub(comp.confirmed_junk, "Excludes wrong-fit")}</div></div>
+      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Spend Evidence — Latest Snapshot</div>
         <div class="dash-kpi-card__value">${spendReview}</div>
-        <div class="dash-kpi-card__sub">FIX / CUT campaigns</div></div>
-    </div>`;
+        <div class="dash-kpi-card__sub">Per-run snapshot — not a window total</div></div>
+    </div>
+    <p class="campaign-snapshot-disclosure">Evidence Window filters stored snapshot dates. It does not convert the snapshot into an all-time or selected-window business total.</p>`;
 }
 
 // Verdict distribution as compact clickable filter chips (not four big cards).
@@ -6115,11 +6129,11 @@ function renderCampaignDecisionTable() {
       <tr>
         <th>Campaign</th>
         <th>Decision</th>
-        <th class="td--num">Spend evidence</th>
-        <th class="td--num">Confirmed SQLs</th>
-        <th class="td--num">Confirmed Junk</th>
+        <th class="td--num">Spend Evidence — Latest Snapshot</th>
+        <th class="td--num">Confirmed SQLs — Latest Snapshot</th>
+        <th class="td--num">Confirmed Junk — Latest Snapshot</th>
         <th>Junk Rate</th>
-        <th class="td--num">CPQL</th>
+        <th class="td--num">CPQL — Latest Snapshot</th>
         <th>Evidence</th>
         <th scope="col"><span class="sr-only">Open evidence</span></th>
       </tr>
@@ -6145,9 +6159,18 @@ function renderCampaignEvidenceRow(c) {
                   jr < uiThresholds.junk_rate.low_pct   ? "junk--low" :
                   jr <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
   const junkStr = jr != null ? jr.toFixed(1) + "%" : "—";
-  const sqls = Number(c.confirmed_sqls || 0);
-  // CPQL is N/A when there are no confirmed SQLs — never a fabricated $0.
-  const cpql = sqls === 0 ? "N/A" : (c.cpql_usd != null ? fmtDollar(c.cpql_usd) : "—");
+  // Preserve null: an unavailable metric renders "—", never a fabricated 0.
+  // A genuine 0 (source recorded zero) renders "0".
+  const sqls = c.confirmed_sqls;   // null (unavailable) | genuine integer
+  const sqlsCell = sqls == null
+    ? `<span class="detail-unavailable">—</span>` : fmtCount(sqls);
+  const junkCell = c.confirmed_junk == null
+    ? `<span class="detail-unavailable">—</span>` : fmtCount(c.confirmed_junk);
+  // CPQL: unavailable when SQLs unavailable ("—"); N/A when SQLs is a genuine 0
+  // (division undefined); never a fabricated $0.
+  const cpql = sqls == null ? "—"
+    : (sqls === 0 ? "N/A"
+    : (c.cpql_usd != null ? fmtDollar(c.cpql_usd) : "—"));
   const spend = c.spend_usd != null ? fmtDollar(c.spend_usd) : `<span class="detail-unavailable">Unavailable</span>`;
   const ev = campaignEvidenceSummary(c);
   const nameEnc = encodeURIComponent(c.campaign_name || "");
@@ -6156,9 +6179,9 @@ function renderCampaignEvidenceRow(c) {
         aria-label="Open evidence for ${escapeHtml(c.campaign_name || "campaign")}">
       <td class="td--name" data-label="Campaign">${escapeHtml(c.campaign_name || "—")}</td>
       <td data-label="Decision">${verdictBadge(v)}</td>
-      <td class="td--num" data-label="Spend evidence" title="Per-run snapshot spend — not a selected-window total">${spend}</td>
-      <td class="td--num" data-label="Confirmed SQLs">${fmtCount(sqls)}</td>
-      <td class="td--num" data-label="Confirmed Junk">${fmtCount(Number(c.confirmed_junk || 0))}</td>
+      <td class="td--num" data-label="Spend Evidence" title="Per-run snapshot spend — not a selected-window total">${spend}</td>
+      <td class="td--num" data-label="Confirmed SQLs">${sqlsCell}</td>
+      <td class="td--num" data-label="Confirmed Junk">${junkCell}</td>
       <td data-label="Junk Rate" class="${junkCls}">${junkStr}</td>
       <td class="td--num ${cpql === "N/A" ? "td--na" : ""}" data-label="CPQL">${cpql}</td>
       <td data-label="Evidence"><span class="campaign-ev-compact">${escapeHtml(ev.compact)}</span>${ev.note ? `<span class="campaign-ev-note">${escapeHtml(ev.note)}</span>` : ""}</td>
@@ -11992,6 +12015,12 @@ function renderCampaignDrawer(data) {
 
   // ── Header summary ─────────────────────────────────────────────────────
   const v = (camp.verdict || "").toUpperCase();
+  // Snapshot analysis period is not provable per-row (varies by run type / data
+  // source, unstored) → disclose "Unavailable" rather than guess a window.
+  const snapDate = camp.snapshot_date || camp.last_run_date || "—";
+  const snapPeriod = camp.snapshot_metric_period_days != null
+    ? `${camp.snapshot_metric_period_days}-day snapshot window`
+    : "snapshot analysis period unavailable";
   const headerHtml = `
     <div class="drawer-section drawer-section--header">
       <div class="drawer-header-meta">
@@ -12002,11 +12031,15 @@ function renderCampaignDrawer(data) {
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         Campaign truth from DB · Last run: ${escapeHtml(camp.last_run_date || "—")} · ${camp.runs != null ? camp.runs : "—"} run${camp.runs === 1 ? "" : "s"} in window
       </div>
+      <p class="drawer-snapshot-note">Snapshot metrics (spend, junk rate, CPQL, conversions) are the <strong>latest stored snapshot</strong> — dated ${escapeHtml(snapDate)}, ${escapeHtml(snapPeriod)}. Not a selected-window total. The Lead Quality Split below is recomputed for the selected evidence window.</p>
       <p class="drawer-readonly-note">Decision state is evidence-based and read-only. No Google Ads changes are made.</p>
     </div>`;
 
   // ── KPI row ────────────────────────────────────────────────────────────
-  const cpqlStr  = camp.confirmed_sqls === 0 ? "N/A" : (camp.cpql_usd != null ? fmtDollar(camp.cpql_usd) : "—");
+  // CPQL: "—" when SQLs unavailable (null), "N/A" when a genuine 0, else dollar.
+  const cpqlStr  = camp.confirmed_sqls == null ? "—"
+    : (camp.confirmed_sqls === 0 ? "N/A"
+    : (camp.cpql_usd != null ? fmtDollar(camp.cpql_usd) : "—"));
   const junkStr  = camp.junk_rate_pct  != null ? camp.junk_rate_pct.toFixed(1) + "%" : "—";
   const sqlsHint = lq ? `${lq.confirmed_sqls}` : (camp.confirmed_sqls != null ? String(camp.confirmed_sqls) : "—");
   const kpiHtml = `
