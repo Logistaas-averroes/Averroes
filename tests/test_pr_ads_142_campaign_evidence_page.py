@@ -604,3 +604,111 @@ def test_revenue_and_dashboard_handlers_not_modified_by_campaigns_slice():
     for foreign in ("dashboard_overview_service", "dashboard_revenue_service",
                     "revenue_by_source", "closed_won", "get_revenue_performance"):
         assert foreign not in body
+
+
+# ════════════════ 7. Filter/sort/KPI — null is never zero (behavioural) ════════
+# The prior tests assert source shape; these EXECUTE the real extracted
+# filter/sort/KPI functions in Node to prove runtime behaviour: a null metric is
+# never classified as a zero-outcome campaign, sorts after genuine zeros, and
+# renders the KPI as Unavailable when no campaign supplied the metric.
+
+
+def _slice_between(hay, start_marker, end_marker):
+    i = hay.find(start_marker)
+    assert i != -1, f"marker not found: {start_marker}"
+    j = hay.find(end_marker, i + len(start_marker))
+    assert j != -1, f"end marker not found: {end_marker}"
+    return hay[i:j]
+
+
+def _run_campaign_js(assertions):
+    """Eval the real extracted filter/sort/KPI functions + assertions in Node."""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    verdict_fn = _slice_between(APP_JS, "function campaignVerdict(", "// Factual evidence")
+    order_ln = _slice_between(APP_JS, "const CAMPAIGN_VERDICT_ORDER", "\n")
+    filter_fn = _slice_between(APP_JS, "function filterCampaignEvidence(", "// Descending comparator")
+    desc_fn = _slice_between(APP_JS, "function _campDescNullLast(", "function sortCampaignEvidence")
+    sort_fn = _slice_between(APP_JS, "function sortCampaignEvidence(", "function renderCampaignDecisionTable")
+    kpi_fn = _slice_between(APP_JS, "function campaignKpiValue(", "function renderCampaignEvidenceKPIs")
+    program = f"""
+const assert = require('assert');
+{order_ln};
+let _campaignFilters = {{ search: '', verdict: 'all', outcome: 'all', sort: 'attention' }};
+function fmtCount(v) {{ if (v === null || v === undefined) return '—'; return String(v); }}
+{verdict_fn}
+{filter_fn}
+{desc_fn}
+{sort_fn}
+{kpi_fn}
+{assertions}
+console.log('OK');
+"""
+    res = subprocess.run([node, "-e", program], capture_output=True, text=True)
+    assert res.returncode == 0, f"node failed:\n{res.stdout}\n{res.stderr}"
+    assert "OK" in res.stdout
+
+
+def test_null_sqls_not_classified_as_no_confirmed_sql():
+    _run_campaign_js("""
+const rows = [
+  { campaign_name: 'genuine-zero', confirmed_sqls: 0, confirmed_junk: 0, junk_rate_pct: 10 },
+  { campaign_name: 'unavailable',  confirmed_sqls: null, confirmed_junk: null, junk_rate_pct: null },
+];
+_campaignFilters = { search:'', verdict:'all', outcome:'no_sql', sort:'attention' };
+const noSql = filterCampaignEvidence(rows).map(c => c.campaign_name);
+assert.deepStrictEqual(noSql, ['genuine-zero']);   // null row excluded
+
+_campaignFilters.outcome = 'has_sql';
+const hasSql = filterCampaignEvidence([
+  { campaign_name:'pos', confirmed_sqls:5 },
+  { campaign_name:'zero', confirmed_sqls:0 },
+  { campaign_name:'null', confirmed_sqls:null },
+]).map(c => c.campaign_name);
+assert.deepStrictEqual(hasSql, ['pos']);
+
+_campaignFilters.outcome = 'has_junk';
+const hasJunk = filterCampaignEvidence([
+  { campaign_name:'jpos', confirmed_junk:3 },
+  { campaign_name:'jzero', confirmed_junk:0 },
+  { campaign_name:'jnull', confirmed_junk:null },
+]).map(c => c.campaign_name);
+assert.deepStrictEqual(hasJunk, ['jpos']);
+""")
+
+
+def test_null_metrics_sort_after_genuine_zero():
+    _run_campaign_js("""
+const rows = [
+  { campaign_name:'a-zero', confirmed_sqls:0 },
+  { campaign_name:'b-five', confirmed_sqls:5 },
+  { campaign_name:'c-null', confirmed_sqls:null },
+];
+_campaignFilters = { search:'', verdict:'all', outcome:'all', sort:'sqls' };
+const order = sortCampaignEvidence(rows).map(c => c.campaign_name);
+assert.deepStrictEqual(order, ['b-five', 'a-zero', 'c-null']); // null LAST, zero before null
+
+// CPQL sort: null sinks below a genuine value, never coerced to 0.
+_campaignFilters.sort = 'cpql';
+const cp = sortCampaignEvidence([
+  { campaign_name:'cnull', cpql_usd:null },
+  { campaign_name:'clow',  cpql_usd:10 },
+]).map(c => c.campaign_name);
+assert.deepStrictEqual(cp, ['clow', 'cnull']);
+""")
+
+
+def test_kpi_renders_unavailable_when_no_campaign_supplied_metric():
+    _run_campaign_js("""
+// No campaign supplied the metric → Unavailable, never 0.
+const none = campaignKpiValue(0, { status:'partial', available:0, missing:3 });
+assert.ok(none.includes('Unavailable'), none);
+// Some genuine values present → the real total renders.
+const some = campaignKpiValue(5, { status:'partial', available:2, missing:1 });
+assert.strictEqual(some, '5');
+const all = campaignKpiValue(7, { status:'complete', available:3, missing:0 });
+assert.strictEqual(all, '7');
+""")

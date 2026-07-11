@@ -6014,6 +6014,16 @@ function campaignCompletenessSub(comp, fallback) {
   return fallback;
 }
 
+// KPI value for a latest-snapshot total: when NO campaign supplied the metric
+// (available === 0 && missing > 0), the total is meaningless — render
+// "Unavailable" instead of a misleading 0.
+function campaignKpiValue(total, comp) {
+  if (comp && comp.available === 0 && comp.missing > 0) {
+    return `<span class="detail-unavailable">Unavailable</span>`;
+  }
+  return fmtCount(total);
+}
+
 function renderCampaignEvidenceKPIs() {
   const s = _campaignSummary || {};
   const sr = s.spend_requiring_review || {};
@@ -6026,10 +6036,10 @@ function renderCampaignEvidenceKPIs() {
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Campaigns With Evidence</div>
         <div class="dash-kpi-card__value">${fmtCount(s.campaigns_with_evidence)}</div></div>
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Confirmed SQLs — Latest Snapshot</div>
-        <div class="dash-kpi-card__value">${fmtCount(s.confirmed_sqls_total)}</div>
+        <div class="dash-kpi-card__value">${campaignKpiValue(s.confirmed_sqls_total, comp.confirmed_sqls)}</div>
         <div class="dash-kpi-card__sub">${campaignCompletenessSub(comp.confirmed_sqls, "HubSpot-confirmed qualified")}</div></div>
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Confirmed Junk — Latest Snapshot</div>
-        <div class="dash-kpi-card__value">${fmtCount(s.confirmed_junk_total)}</div>
+        <div class="dash-kpi-card__value">${campaignKpiValue(s.confirmed_junk_total, comp.confirmed_junk)}</div>
         <div class="dash-kpi-card__sub">${campaignCompletenessSub(comp.confirmed_junk, "Excludes wrong-fit")}</div></div>
       <div class="dash-kpi-card"><div class="dash-kpi-card__label">Spend Evidence — Latest Snapshot</div>
         <div class="dash-kpi-card__value">${spendReview}</div>
@@ -6080,26 +6090,43 @@ function filterCampaignEvidence(rows) {
   return rows.filter((c) => {
     if (f.search && !(c.campaign_name || "").toLowerCase().includes(f.search.toLowerCase())) return false;
     if (f.verdict !== "all" && campaignVerdict(c) !== f.verdict) return false;
-    const sqls = Number(c.confirmed_sqls || 0);
-    const junk = Number(c.confirmed_junk || 0);
+    // Truth-integrity: an unavailable (null) metric is NEVER classified as a
+    // zero-outcome campaign. Outcome filters match only on genuine recorded
+    // values — a null row belongs to none of has/no confirmed SQL / has junk.
+    const sqls = c.confirmed_sqls;   // null (unavailable) | genuine integer
+    const junk = c.confirmed_junk;
     const insufficient = c.junk_rate_pct == null;
-    if (f.outcome === "has_sql" && sqls <= 0) return false;
-    if (f.outcome === "no_sql" && sqls > 0) return false;
-    if (f.outcome === "has_junk" && junk <= 0) return false;
+    if (f.outcome === "has_sql"  && !(sqls != null && sqls > 0))  return false;
+    if (f.outcome === "no_sql"   && !(sqls != null && sqls === 0)) return false;
+    if (f.outcome === "has_junk" && !(junk != null && junk > 0))  return false;
     if (f.outcome === "insufficient" && !insufficient) return false;
     return true;
   });
+}
+
+// Descending comparator that places null/unavailable values LAST (never coerced
+// to 0) so genuine numbers rank first and "unavailable" sinks to the bottom.
+function _campDescNullLast(getter) {
+  return (a, b) => {
+    const va = getter(a), vb = getter(b);
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;    // a unavailable → after b
+    if (vb == null) return -1;   // b unavailable → after a
+    return vb - va;              // both genuine → highest first
+  };
 }
 
 function sortCampaignEvidence(rows) {
   const by = _campaignFilters.sort;
   const spend = (c) => Number(c.spend_usd || 0);
   const arr = [...rows];
-  if (by === "spend")      arr.sort((a, b) => spend(b) - spend(a));
-  else if (by === "sqls")  arr.sort((a, b) => Number(b.confirmed_sqls || 0) - Number(a.confirmed_sqls || 0));
-  else if (by === "junk_rate") arr.sort((a, b) => (b.junk_rate_pct || 0) - (a.junk_rate_pct || 0));
-  else if (by === "junk")  arr.sort((a, b) => Number(b.confirmed_junk || 0) - Number(a.confirmed_junk || 0));
-  else if (by === "cpql")  arr.sort((a, b) => (b.cpql_usd || 0) - (a.cpql_usd || 0));
+  // Numeric sorts: genuine values first (descending), null/unavailable last —
+  // a missing metric is never treated as 0.
+  if (by === "spend")      arr.sort(_campDescNullLast((c) => c.spend_usd));
+  else if (by === "sqls")  arr.sort(_campDescNullLast((c) => c.confirmed_sqls));
+  else if (by === "junk_rate") arr.sort(_campDescNullLast((c) => c.junk_rate_pct));
+  else if (by === "junk")  arr.sort(_campDescNullLast((c) => c.confirmed_junk));
+  else if (by === "cpql")  arr.sort(_campDescNullLast((c) => c.cpql_usd));
   else if (by === "name")  arr.sort((a, b) => (a.campaign_name || "").localeCompare(b.campaign_name || ""));
   else {
     // Attention priority: CUT, FIX, HOLD, SCALE; then higher spend, higher junk, fewer SQLs.
