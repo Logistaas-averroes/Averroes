@@ -171,10 +171,10 @@ const PAGE_EXPLANATIONS = {
   },
   campaigns: {
     title: "Campaigns",
-    purpose: "Campaign truth table — spend, quality, verdict, and performance metrics.",
-    source: "Google Ads API campaign data.",
+    purpose: "Campaign decision table — verdict, spend, and lead-quality outcomes from each campaign's latest stored snapshot.",
+    source: "Google Ads campaign evidence plus HubSpot lead-quality outcomes. Metrics are the latest stored snapshot, not a selected-window total.",
     dependsOn: ["campaigns"],
-    emptyMeans: "No Google Ads API campaign data has been synced yet for this window. Run the daily/weekly scheduler or check System Status.",
+    emptyMeans: "No campaign snapshot has been synced yet for this window. Run the daily/weekly scheduler or check System Status.",
     nextAction: "Check System Status → Google Ads API / Campaigns."
   },
   "search-terms": {
@@ -573,6 +573,11 @@ let gclidAttributionPrefill = null;
 
 // N-Gram page prefill (set when navigating from campaign drawer)
 let ngramsPrefill = null;
+
+// Keyword / Waste page prefill (set when navigating from the campaign drawer,
+// PR-ADS-142). The loaders apply the campaign filter if the input exists.
+let keywordsPrefill = null;
+let wastePrefill = null;
 
 // Campaign drawer N-Gram drilldown state
 let drawerNgramRows = [];
@@ -5879,107 +5884,361 @@ function renderDealTruthFooter(d) {
 
 // ── Campaigns page ─────────────────────────────────────────────────────────
 
-async function loadCampaigns() {
-  renderPageDatasetFreshness("campaigns");
-  const tableEl = document.getElementById("camp-table-body");
-  const scaleEl = document.getElementById("vc-scale");
-  const fixEl   = document.getElementById("vc-fix");
-  const holdEl  = document.getElementById("vc-hold");
-  const cutEl   = document.getElementById("vc-cut");
+// ── Campaign Evidence decision page (PR-ADS-142) ────────────────────────────
+// Google Ads activity reconciled with HubSpot lead-quality outcomes. The page
+// answers, at a glance, which campaigns need attention and WHY — from existing
+// evidence only. Read-only: the system explains, humans decide. No fabricated
+// values (missing → Unavailable / N/A / —). Spend is an honest per-run snapshot.
 
-  if (tableEl) tableEl.innerHTML =
-    `<p class="empty-state" style="padding:var(--space-5)">Loading campaigns…</p>`;
+let _campaignEvidence = [];       // raw campaign rows from /api/campaigns
+let _campaignSummary  = null;     // decision aggregates for the KPI strip
+let _campaignSpendMeta = { spend_semantics: null, spend_status: null, spend_currency: "USD" };
+let _campaignLoadState = "idle";  // idle | ok | empty | db_unavailable | error
+const _campaignFilters = { search: "", verdict: "all", outcome: "all", sort: "attention" };
+
+const CAMPAIGN_VERDICT_ORDER = { CUT: 0, FIX: 1, HOLD: 2, SCALE: 3 };
+
+function campaignVerdict(c) {
+  return (c.verdict || c.latest_verdict || "").trim().toUpperCase();
+}
+
+// Factual evidence statement — generated only from existing fields. No advice.
+// Every figure is the campaign's LATEST STORED SNAPSHOT, not a window total.
+// A null metric stays "unavailable" — never coerced to a fabricated 0.
+function campaignEvidenceSummary(c) {
+  const sqls = c.confirmed_sqls;   // may be null (unavailable) or a genuine 0
+  const jr   = c.junk_rate_pct;
+  const sqlsKnown = sqls != null;
+  const parts = [sqlsKnown ? `${sqls} SQL${sqls === 1 ? "" : "s"}` : "SQLs unavailable"];
+  parts.push(jr == null ? "junk rate unavailable" : `${Math.round(jr)}% junk`);
+  const compact = parts.join(" · ");
+  let note = "";
+  if (jr == null)                                                 note = "Insufficient verdicted leads";
+  else if (sqlsKnown && sqls > 0 && jr <= uiThresholds.junk_rate.low_pct) note = "Confirmed SQL production with low junk";
+  else if (sqlsKnown && sqls === 0 && jr >= uiThresholds.junk_rate.high_pct) note = "High junk exposure warrants review";
+  else if (sqlsKnown && sqls === 0)                              note = "No confirmed SQL outcome in the latest stored snapshot.";
+  return { compact, note };
+}
+
+async function loadCampaignEvidence() {
+  renderPageDatasetFreshness("campaigns");
+  const shell = document.getElementById("campaign-evidence-shell");
+  if (!shell) return;
+  shell.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading campaign evidence…</p>`;
+  _campaignLoadState = "loading";
 
   try {
     const data = await fetchJSON(`/api/campaigns?${evidenceWindowQuery()}`);
-    const campaigns = data.campaigns || [];
-
-    if (campaigns.length === 0) {
-      if (tableEl) tableEl.innerHTML = buildEmptyState({
-        pageKey: "campaigns",
-        canonicalStatus: getPageCanonicalStatus("campaigns"),
-        rowsInWindow: 0,
-      });
-      ["vc-scale", "vc-fix", "vc-hold", "vc-cut"].forEach((id) => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = "0";
-      });
-      return;
-    }
-
-    // Count verdicts
-    let nScale = 0, nFix = 0, nHold = 0, nCut = 0;
-    campaigns.forEach((c) => {
-      const v = (c.latest_verdict || "").toUpperCase();
-      if (v === "SCALE")     nScale++;
-      else if (v === "FIX")  nFix++;
-      else if (v === "HOLD") nHold++;
-      else if (v === "CUT")  nCut++;
-    });
-
-    if (scaleEl) scaleEl.textContent = String(nScale);
-    if (fixEl)   fixEl.textContent   = String(nFix);
-    if (holdEl)  holdEl.textContent  = String(nHold);
-    if (cutEl)   cutEl.textContent   = String(nCut);
-
-    // Sort by spend desc, null spend goes to bottom
-    const sorted = [...campaigns].sort((a, b) =>
-      (b.avg_spend_usd || 0) - (a.avg_spend_usd || 0)
-    );
-
-    const thead = `
-      <thead>
-        <tr>
-          <th>Campaign</th>
-          <th class="td--num">Spend (avg/run)</th>
-          <th class="td--num">Leads</th>
-          <th class="td--num">SQLs</th>
-          <th>Junk %</th>
-          <th class="td--num">CPQL</th>
-          <th>Verdict</th>
-          <th class="td--num">Runs</th>
-          <th scope="col"><span class="sr-only">Actions</span></th>
-        </tr>
-      </thead>`;
-
-    const tbody = sorted.map((c) => {
-      const v       = (c.latest_verdict || "").toUpperCase();
-      const junkPct = c.avg_junk_rate_pct;
-      const junkCls = junkPct == null ? "" :
-                      junkPct < uiThresholds.junk_rate.low_pct   ? "junk--low" :
-                      junkPct <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
-      const junkStr = junkPct != null ? junkPct.toFixed(1) + "%" : "—";
-      const cpql    = c.total_confirmed_sqls === 0 ? "N/A" :
-                      c.avg_cpql_usd != null ? fmtDollar(c.avg_cpql_usd) : "—";
-      const spend   = c.avg_spend_usd != null ? fmtDollar(c.avg_spend_usd) : "—";
-
-      return `
-        <tr>
-          <td class="td--name">${escapeHtml(c.campaign_name || "—")}</td>
-          <td class="td--num">${spend}</td>
-          <td class="td--num">${c.total_leads != null ? String(c.total_leads) : "—"}</td>
-          <td class="td--num">${c.total_confirmed_sqls != null ? String(c.total_confirmed_sqls) : "0"}</td>
-          <td class="${junkCls}">${junkStr}</td>
-          <td class="td--num ${cpql === "N/A" ? "td--na" : ""}">${cpql}</td>
-          <td>${verdictBadge(v)}</td>
-          <td class="td--num">${c.run_count != null ? String(c.run_count) : "—"}</td>
-          <td><button class="investigate-button" type="button" data-campaign="${escapeHtml(c.campaign_name || "")}">Investigate</button></td>
-        </tr>`;
-    }).join("");
-
-    if (tableEl) {
-      tableEl.innerHTML =
-        `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
-      // Wire up Investigate buttons — each opens the campaign detail drawer
-      tableEl.querySelectorAll(".investigate-button").forEach((btn) => {
-        btn.addEventListener("click", () => openCampaignDrawer(btn.dataset.campaign));
-      });
-    }
-
+    _campaignEvidence   = data.campaigns || [];
+    _campaignSummary    = data.summary || null;
+    _campaignSpendMeta  = {
+      spend_semantics: data.spend_semantics || null,
+      spend_status:    data.spend_status || null,
+      spend_currency:  data.spend_currency || "USD",
+    };
+    _campaignLoadState = data.db_unavailable ? "db_unavailable"
+      : (_campaignEvidence.length ? "ok" : "empty");
+    renderCampaignEvidencePage();
   } catch (_) {
-    if (tableEl) tableEl.innerHTML =
-      `<p class="empty-state" style="padding:var(--space-5)">Could not load campaign data.</p>`;
+    _campaignLoadState = "error";
+    shell.innerHTML = `
+      <div class="evidence-empty-state">
+        Campaign evidence is unavailable.<br>The underlying dataset could not be read.
+      </div>`;
   }
+}
+// Router entry (kept for compatibility).
+function loadCampaigns() { return loadCampaignEvidence(); }
+
+function renderCampaignEvidencePage() {
+  const shell = document.getElementById("campaign-evidence-shell");
+  if (!shell) return;
+
+  if (_campaignLoadState === "db_unavailable") {
+    shell.innerHTML = renderEvidencePageShell({
+      title: "Campaign Evidence",
+      subtitle: "Google Ads activity reconciled with HubSpot lead-quality outcomes.",
+      truthChips: campaignEvidenceChips(),
+      children: `<div class="evidence-empty-state">Campaign evidence is unavailable.<br>The underlying dataset could not be read.</div>`,
+    });
+    return;
+  }
+  if (_campaignLoadState === "empty") {
+    // Doctrine-consistent contextual empty state (never believable zero KPIs),
+    // plus the required "No campaign evidence…" message and a System Status link.
+    const emptyBody = buildEmptyState({
+      pageKey: "campaigns",
+      canonicalStatus: getPageCanonicalStatus("campaigns"),
+      rowsInWindow: 0,
+    });
+    shell.innerHTML = renderEvidencePageShell({
+      title: "Campaign Evidence",
+      subtitle: "Google Ads activity reconciled with HubSpot lead-quality outcomes.",
+      truthChips: campaignEvidenceChips(),
+      children: `<div class="evidence-empty-state">No campaign evidence is available in this window.
+          <div style="margin-top:8px"><a href="#/health">Open System Status →</a></div></div>
+        ${emptyBody}`,
+    });
+    return;
+  }
+
+  shell.innerHTML = renderEvidencePageShell({
+    title: "Campaign Evidence",
+    subtitle: "Google Ads activity reconciled with HubSpot lead-quality outcomes.",
+    truthChips: campaignEvidenceChips(),
+    children: `
+      ${renderCampaignEvidenceKPIs()}
+      ${renderCampaignDecisionFilters()}
+      <div class="evidence-table-shell"><div class="evidence-table-scroll" id="campaign-decision-table"></div></div>
+    `,
+  });
+  renderCampaignDecisionTable();
+  wireCampaignEvidenceControls();
+}
+
+// Command-header status chips (source + read-only). Freshness stays in run-meta.
+function campaignEvidenceChips() {
+  return [
+    { label: "Google Ads campaign evidence", tone: "source" },
+    { label: "HubSpot lead outcomes", tone: "source" },
+    { label: "Read-only", tone: "readonly" },
+  ];
+}
+
+// Completeness sub-line for a latest-snapshot KPI: discloses when some campaigns
+// had the metric unavailable (never silently 0-filled into the total).
+function campaignCompletenessSub(comp, fallback) {
+  if (comp && comp.status === "partial") {
+    return `<span class="detail-unavailable">${fmtCount(comp.missing)} unavailable · sum of ${fmtCount(comp.available)}</span>`;
+  }
+  return fallback;
+}
+
+// KPI value for a latest-snapshot total: when NO campaign supplied the metric
+// (available === 0 && missing > 0), the total is meaningless — render
+// "Unavailable" instead of a misleading 0.
+function campaignKpiValue(total, comp) {
+  if (comp && comp.available === 0 && comp.missing > 0) {
+    return `<span class="detail-unavailable">Unavailable</span>`;
+  }
+  return fmtCount(total);
+}
+
+function renderCampaignEvidenceKPIs() {
+  const s = _campaignSummary || {};
+  const sr = s.spend_requiring_review || {};
+  const comp = s.completeness || {};
+  const spendReview = sr.status === "verified" && sr.value != null
+    ? fmtDollar(sr.value)
+    : `<span class="detail-unavailable" title="${escapeHtml(sr.reason || "Spend aggregation requires contract verification")}">Unavailable</span>`;
+  return `
+    <div class="evidence-kpi-grid campaign-kpi-grid">
+      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Campaigns With Evidence</div>
+        <div class="dash-kpi-card__value">${fmtCount(s.campaigns_with_evidence)}</div></div>
+      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Confirmed SQLs — Latest Snapshot</div>
+        <div class="dash-kpi-card__value">${campaignKpiValue(s.confirmed_sqls_total, comp.confirmed_sqls)}</div>
+        <div class="dash-kpi-card__sub">${campaignCompletenessSub(comp.confirmed_sqls, "HubSpot-confirmed qualified")}</div></div>
+      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Confirmed Junk — Latest Snapshot</div>
+        <div class="dash-kpi-card__value">${campaignKpiValue(s.confirmed_junk_total, comp.confirmed_junk)}</div>
+        <div class="dash-kpi-card__sub">${campaignCompletenessSub(comp.confirmed_junk, "Excludes wrong-fit")}</div></div>
+      <div class="dash-kpi-card"><div class="dash-kpi-card__label">Spend Evidence — Latest Snapshot</div>
+        <div class="dash-kpi-card__value">${spendReview}</div>
+        <div class="dash-kpi-card__sub">Per-run snapshot — not a window total</div></div>
+    </div>
+    <p class="campaign-snapshot-disclosure">Evidence Window filters stored snapshot dates. It does not convert the snapshot into an all-time or selected-window business total.</p>`;
+}
+
+// Verdict distribution as compact clickable filter chips (not four big cards).
+function renderCampaignDecisionFilters() {
+  const vc = (_campaignSummary && _campaignSummary.verdict_counts) || {};
+  const total = _campaignEvidence.length;
+  const chip = (key, label, n) =>
+    `<button type="button" class="revenue-filter-chip campaign-verdict-chip${_campaignFilters.verdict === key ? " is-active" : ""}" data-campaign-verdict="${key}">${label} ${fmtCount(n)}</button>`;
+  const chips = [
+    chip("all", "All", total),
+    chip("SCALE", "SCALE", vc.SCALE || 0),
+    chip("HOLD", "HOLD", vc.HOLD || 0),
+    chip("FIX", "FIX", vc.FIX || 0),
+    chip("CUT", "CUT", vc.CUT || 0),
+  ].join("");
+  return `
+    <div class="campaign-filter-chips revenue-filter-chips">${chips}</div>
+    <div class="campaign-controls">
+      <input type="search" id="campaign-search" class="waste-search-input" placeholder="Search campaign name…" aria-label="Search campaign name" value="${escapeHtml(_campaignFilters.search)}">
+      <select id="campaign-outcome" class="waste-filter-select" aria-label="Outcome signal">
+        <option value="all">All outcomes</option>
+        <option value="has_sql">Has confirmed SQL</option>
+        <option value="no_sql">No confirmed SQL</option>
+        <option value="has_junk">Has confirmed junk</option>
+        <option value="insufficient">Insufficient verdicts</option>
+      </select>
+      <select id="campaign-sort" class="waste-filter-select" aria-label="Sort campaigns">
+        <option value="attention">Attention priority</option>
+        <option value="spend">Highest spend</option>
+        <option value="sqls">Most SQLs</option>
+        <option value="junk_rate">Highest junk rate</option>
+        <option value="junk">Highest confirmed junk</option>
+        <option value="cpql">Highest CPQL</option>
+        <option value="name">Campaign name</option>
+      </select>
+      <button type="button" id="campaign-clear-filters" class="revenue-filter-chip campaign-clear-btn">Clear filters</button>
+    </div>`;
+}
+
+function filterCampaignEvidence(rows) {
+  const f = _campaignFilters;
+  return rows.filter((c) => {
+    if (f.search && !(c.campaign_name || "").toLowerCase().includes(f.search.toLowerCase())) return false;
+    if (f.verdict !== "all" && campaignVerdict(c) !== f.verdict) return false;
+    // Truth-integrity: an unavailable (null) metric is NEVER classified as a
+    // zero-outcome campaign. Outcome filters match only on genuine recorded
+    // values — a null row belongs to none of has/no confirmed SQL / has junk.
+    const sqls = c.confirmed_sqls;   // null (unavailable) | genuine integer
+    const junk = c.confirmed_junk;
+    const insufficient = c.junk_rate_pct == null;
+    if (f.outcome === "has_sql"  && !(sqls != null && sqls > 0))  return false;
+    if (f.outcome === "no_sql"   && !(sqls != null && sqls === 0)) return false;
+    if (f.outcome === "has_junk" && !(junk != null && junk > 0))  return false;
+    if (f.outcome === "insufficient" && !insufficient) return false;
+    return true;
+  });
+}
+
+// Descending comparator that places null/unavailable values LAST (never coerced
+// to 0) so genuine numbers rank first and "unavailable" sinks to the bottom.
+function _campDescNullLast(getter) {
+  return (a, b) => {
+    const va = getter(a), vb = getter(b);
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;    // a unavailable → after b
+    if (vb == null) return -1;   // b unavailable → after a
+    return vb - va;              // both genuine → highest first
+  };
+}
+
+function sortCampaignEvidence(rows) {
+  const by = _campaignFilters.sort;
+  const spend = (c) => Number(c.spend_usd || 0);
+  const arr = [...rows];
+  // Numeric sorts: genuine values first (descending), null/unavailable last —
+  // a missing metric is never treated as 0.
+  if (by === "spend")      arr.sort(_campDescNullLast((c) => c.spend_usd));
+  else if (by === "sqls")  arr.sort(_campDescNullLast((c) => c.confirmed_sqls));
+  else if (by === "junk_rate") arr.sort(_campDescNullLast((c) => c.junk_rate_pct));
+  else if (by === "junk")  arr.sort(_campDescNullLast((c) => c.confirmed_junk));
+  else if (by === "cpql")  arr.sort(_campDescNullLast((c) => c.cpql_usd));
+  else if (by === "name")  arr.sort((a, b) => (a.campaign_name || "").localeCompare(b.campaign_name || ""));
+  else {
+    // Attention priority: CUT, FIX, HOLD, SCALE; then higher spend, higher junk, fewer SQLs.
+    arr.sort((a, b) => {
+      const va = CAMPAIGN_VERDICT_ORDER[campaignVerdict(a)] ?? 99;
+      const vb = CAMPAIGN_VERDICT_ORDER[campaignVerdict(b)] ?? 99;
+      if (va !== vb) return va - vb;
+      if (spend(b) !== spend(a)) return spend(b) - spend(a);
+      if (Number(b.confirmed_junk || 0) !== Number(a.confirmed_junk || 0))
+        return Number(b.confirmed_junk || 0) - Number(a.confirmed_junk || 0);
+      return Number(a.confirmed_sqls || 0) - Number(b.confirmed_sqls || 0);
+    });
+  }
+  return arr;
+}
+
+function renderCampaignDecisionTable() {
+  const host = document.getElementById("campaign-decision-table");
+  if (!host) return;
+  const rows = sortCampaignEvidence(filterCampaignEvidence(_campaignEvidence));
+  if (rows.length === 0) {
+    host.innerHTML = `<div class="evidence-empty-state">No campaigns match the current filters.</div>`;
+    return;
+  }
+  const thead = `
+    <thead>
+      <tr>
+        <th>Campaign</th>
+        <th>Decision</th>
+        <th class="td--num">Spend Evidence — Latest Snapshot</th>
+        <th class="td--num">Confirmed SQLs — Latest Snapshot</th>
+        <th class="td--num">Confirmed Junk — Latest Snapshot</th>
+        <th>Junk Rate</th>
+        <th class="td--num">CPQL — Latest Snapshot</th>
+        <th>Evidence</th>
+        <th scope="col"><span class="sr-only">Open evidence</span></th>
+      </tr>
+    </thead>`;
+  const body = rows.map(renderCampaignEvidenceRow).join("");
+  host.innerHTML = `<table class="data-table campaign-decision-table">${thead}<tbody>${body}</tbody></table>`;
+  host.querySelectorAll("[data-campaign-open]").forEach((el) => {
+    const open = () => openCampaignDrawer(decodeURIComponent(el.getAttribute("data-campaign-open")));
+    el.addEventListener("click", (e) => {
+      if (e.target.closest("a")) return;   // let inner links work
+      open();
+    });
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
+  });
+}
+
+function renderCampaignEvidenceRow(c) {
+  const v = campaignVerdict(c);
+  const jr = c.junk_rate_pct;
+  const junkCls = jr == null ? "" :
+                  jr < uiThresholds.junk_rate.low_pct   ? "junk--low" :
+                  jr <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
+  const junkStr = jr != null ? jr.toFixed(1) + "%" : "—";
+  // Preserve null: an unavailable metric renders "—", never a fabricated 0.
+  // A genuine 0 (source recorded zero) renders "0".
+  const sqls = c.confirmed_sqls;   // null (unavailable) | genuine integer
+  const sqlsCell = sqls == null
+    ? `<span class="detail-unavailable">—</span>` : fmtCount(sqls);
+  const junkCell = c.confirmed_junk == null
+    ? `<span class="detail-unavailable">—</span>` : fmtCount(c.confirmed_junk);
+  // CPQL: unavailable when SQLs unavailable ("—"); N/A when SQLs is a genuine 0
+  // (division undefined); never a fabricated $0.
+  const cpql = sqls == null ? "—"
+    : (sqls === 0 ? "N/A"
+    : (c.cpql_usd != null ? fmtDollar(c.cpql_usd) : "—"));
+  const spend = c.spend_usd != null ? fmtDollar(c.spend_usd) : `<span class="detail-unavailable">Unavailable</span>`;
+  const ev = campaignEvidenceSummary(c);
+  const nameEnc = encodeURIComponent(c.campaign_name || "");
+  return `
+    <tr class="campaign-decision-row" tabindex="0" role="button" data-campaign-open="${nameEnc}"
+        aria-label="Open evidence for ${escapeHtml(c.campaign_name || "campaign")}">
+      <td class="td--name" data-label="Campaign">${escapeHtml(c.campaign_name || "—")}</td>
+      <td data-label="Decision">${verdictBadge(v)}</td>
+      <td class="td--num" data-label="Spend Evidence" title="Per-run snapshot spend — not a selected-window total">${spend}</td>
+      <td class="td--num" data-label="Confirmed SQLs">${sqlsCell}</td>
+      <td class="td--num" data-label="Confirmed Junk">${junkCell}</td>
+      <td data-label="Junk Rate" class="${junkCls}">${junkStr}</td>
+      <td class="td--num ${cpql === "N/A" ? "td--na" : ""}" data-label="CPQL">${cpql}</td>
+      <td data-label="Evidence"><span class="campaign-ev-compact">${escapeHtml(ev.compact)}</span>${ev.note ? `<span class="campaign-ev-note">${escapeHtml(ev.note)}</span>` : ""}</td>
+      <td data-label=""><button type="button" class="btn btn--secondary campaign-open-btn">Open evidence</button></td>
+    </tr>`;
+}
+
+function wireCampaignEvidenceControls() {
+  const search = document.getElementById("campaign-search");
+  if (search) {
+    search.addEventListener("input", (e) => { _campaignFilters.search = e.target.value; renderCampaignDecisionTable(); });
+  }
+  const outcome = document.getElementById("campaign-outcome");
+  if (outcome) { outcome.value = _campaignFilters.outcome; outcome.addEventListener("change", (e) => { _campaignFilters.outcome = e.target.value; renderCampaignDecisionTable(); }); }
+  const sort = document.getElementById("campaign-sort");
+  if (sort) { sort.value = _campaignFilters.sort; sort.addEventListener("change", (e) => { _campaignFilters.sort = e.target.value; renderCampaignDecisionTable(); }); }
+  document.querySelectorAll("[data-campaign-verdict]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _campaignFilters.verdict = btn.getAttribute("data-campaign-verdict");
+      document.querySelectorAll("[data-campaign-verdict]").forEach((b) =>
+        b.classList.toggle("is-active", b === btn));
+      renderCampaignDecisionTable();
+    });
+  });
+  const clear = document.getElementById("campaign-clear-filters");
+  if (clear) clear.addEventListener("click", () => {
+    _campaignFilters.search = ""; _campaignFilters.verdict = "all";
+    _campaignFilters.outcome = "all"; _campaignFilters.sort = "attention";
+    renderCampaignEvidencePage();
+  });
 }
 
 // ── Waste Terms page ───────────────────────────────────────────────────────
@@ -6035,6 +6294,14 @@ async function loadWaste() {
     };
 
     populateWasteFilters(_wasteData);
+    // PR-ADS-142: apply a campaign prefill from the campaign drawer, if present.
+    if (wastePrefill && wastePrefill.campaign) {
+      const sel = document.getElementById("waste-filter-campaign");
+      if (sel && Array.from(sel.options).some((o) => o.value === wastePrefill.campaign)) {
+        sel.value = wastePrefill.campaign;
+      }
+      wastePrefill = null;
+    }
     renderWasteKPIs(_wasteData);
     applyWasteFilters();
 
@@ -9954,6 +10221,14 @@ async function loadKeywords() {
     renderKeywordsKPIs(keywordRows);
     renderMatchTypeSummary(keywordRows);
     populateKeywordFilters(keywordRows);
+    // PR-ADS-142: apply a campaign prefill from the campaign drawer, if present.
+    if (keywordsPrefill && keywordsPrefill.campaign) {
+      const sel = document.getElementById("kw-filter-campaign");
+      if (sel && Array.from(sel.options).some((o) => o.value === keywordsPrefill.campaign)) {
+        sel.value = keywordsPrefill.campaign;
+      }
+      keywordsPrefill = null;
+    }
     applyKeywordFilters();
 
   } catch (_) {
@@ -11767,6 +12042,12 @@ function renderCampaignDrawer(data) {
 
   // ── Header summary ─────────────────────────────────────────────────────
   const v = (camp.verdict || "").toUpperCase();
+  // Snapshot analysis period is not provable per-row (varies by run type / data
+  // source, unstored) → disclose "Unavailable" rather than guess a window.
+  const snapDate = camp.snapshot_date || camp.last_run_date || "—";
+  const snapPeriod = camp.snapshot_metric_period_days != null
+    ? `${camp.snapshot_metric_period_days}-day snapshot window`
+    : "snapshot analysis period unavailable";
   const headerHtml = `
     <div class="drawer-section drawer-section--header">
       <div class="drawer-header-meta">
@@ -11777,10 +12058,15 @@ function renderCampaignDrawer(data) {
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         Campaign truth from DB · Last run: ${escapeHtml(camp.last_run_date || "—")} · ${camp.runs != null ? camp.runs : "—"} run${camp.runs === 1 ? "" : "s"} in window
       </div>
+      <p class="drawer-snapshot-note">Snapshot metrics (spend, junk rate, CPQL, conversions) are the <strong>latest stored snapshot</strong> — dated ${escapeHtml(snapDate)}, ${escapeHtml(snapPeriod)}. Not a selected-window total. The Lead Quality Split below is recomputed for the selected evidence window.</p>
+      <p class="drawer-readonly-note">Decision state is evidence-based and read-only. No Google Ads changes are made.</p>
     </div>`;
 
   // ── KPI row ────────────────────────────────────────────────────────────
-  const cpqlStr  = camp.confirmed_sqls === 0 ? "N/A" : (camp.cpql_usd != null ? fmtDollar(camp.cpql_usd) : "—");
+  // CPQL: "—" when SQLs unavailable (null), "N/A" when a genuine 0, else dollar.
+  const cpqlStr  = camp.confirmed_sqls == null ? "—"
+    : (camp.confirmed_sqls === 0 ? "N/A"
+    : (camp.cpql_usd != null ? fmtDollar(camp.cpql_usd) : "—"));
   const junkStr  = camp.junk_rate_pct  != null ? camp.junk_rate_pct.toFixed(1) + "%" : "—";
   const sqlsHint = lq ? `${lq.confirmed_sqls}` : (camp.confirmed_sqls != null ? String(camp.confirmed_sqls) : "—");
   const kpiHtml = `
@@ -11809,6 +12095,7 @@ function renderCampaignDrawer(data) {
         <div class="drawer-kpi">
           <div class="drawer-kpi__label">Google Conv.</div>
           <div class="drawer-kpi__value">${camp.conversions != null ? camp.conversions.toFixed(1) : "—"}</div>
+          <div class="drawer-kpi__note">Platform event — not a confirmed SQL or customer</div>
         </div>
       </div>
     </div>`;
@@ -11928,6 +12215,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
           <tbody>${kwRows}</tbody>
         </table>
         <p class="drawer-source-note">Keyword metrics are Google Ads API platform metrics only.</p>
+        <button class="btn btn--secondary drawer-keywords-fullpage-btn" type="button">Open full Keyword Evidence</button>
       </div>`;
   }
 
@@ -11963,6 +12251,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             Copy waste terms from this campaign
           </button>
+          <button class="btn btn--secondary drawer-waste-fullpage-btn" type="button" style="margin-left:var(--space-2)">Open full Waste Evidence</button>
           <p class="drawer-source-note" style="margin-top:var(--space-2)">Review-only — no action controls.</p>
         </div>
       </div>`;
@@ -12279,6 +12568,27 @@ function _appendDrawerEvidenceSections(container, data, lq) {
       if (_campName) ngramsPrefill = { campaign: _campName };
       closeCampaignDrawer();
       navigate("ngrams");
+    });
+  }
+
+  // PR-ADS-142: "Open full Keyword / Waste Evidence" — navigate to the dedicated
+  // evidence page with the campaign filter prefilled (no duplicate table here).
+  const kwFullBtn = container.querySelector(".drawer-keywords-fullpage-btn");
+  if (kwFullBtn) {
+    const _campName = _drawerOpenCampaign;
+    kwFullBtn.addEventListener("click", () => {
+      if (_campName) keywordsPrefill = { campaign: _campName };
+      closeCampaignDrawer();
+      navigate("keywords");
+    });
+  }
+  const wasteFullBtn = container.querySelector(".drawer-waste-fullpage-btn");
+  if (wasteFullBtn) {
+    const _campName = _drawerOpenCampaign;
+    wasteFullBtn.addEventListener("click", () => {
+      if (_campName) wastePrefill = { campaign: _campName };
+      closeCampaignDrawer();
+      navigate("waste");
     });
   }
 }
