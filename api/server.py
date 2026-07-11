@@ -830,6 +830,32 @@ def _resolve_search_terms_window(window, days, *, legacy_max: int):
     return clamped, f"{clamped}d"
 
 
+def _round2(value):
+    """Round to 2 dp, passing None straight through (never fabricate a 0)."""
+    if value is None:
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _empty_campaign_summary() -> dict[str, Any]:
+    """Zeroed decision summary for the db-unavailable / empty campaign response."""
+    return {
+        "campaigns_with_evidence": 0,
+        "confirmed_sqls_total": 0,
+        "confirmed_junk_total": 0,
+        "verdict_counts": {"SCALE": 0, "HOLD": 0, "FIX": 0, "CUT": 0},
+        "spend_requiring_review": {
+            "status": "unavailable",
+            "value": None,
+            "reason": ("Spend aggregation requires contract verification — per-run "
+                       "snapshot spend cannot be summed into a selected-window total."),
+        },
+    }
+
+
 @app.get("/api/campaigns")
 def api_campaigns(
     user: dict = Depends(require_auth),
@@ -839,61 +865,67 @@ def api_campaigns(
         description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
     ),
 ) -> dict[str, Any]:
-    """Return aggregated campaign metrics for the evidence window. Requires auth."""
+    """Return decision-grade campaign evidence for the evidence window. Requires auth.
+
+    PR-ADS-142: each campaign is represented by its LATEST coherent snapshot (the
+    most recent stored run) — spend, confirmed SQLs, confirmed junk, junk rate and
+    CPQL all come from the SAME run, so the row is internally consistent and matches
+    the campaign-detail drawer (which also reads the latest snapshot). No verdict,
+    junk-rate or CPQL FORMULA is changed — the stored per-run values are surfaced.
+
+    Spend semantics are explicit and honest (Path B): ``spend_usd`` is a per-run
+    snapshot (each run's own analysis window), NOT the selected-window total — so
+    ``spend_semantics`` / ``spend_status`` disclose it and ``spend_requiring_review``
+    is Unavailable rather than a fabricated sum. Read-only.
+    """
     days, window_key = _resolve_evidence_window(window, days)
     date_clause, date_params = _evidence_date_clause("run_date", days)
+
+    def _empty():
+        resp = _db_empty_response(days, "campaigns", window_key)
+        resp.update({
+            "spend_semantics": "latest_run_snapshot",
+            "spend_status": "snapshot",
+            "spend_currency": "USD",
+            "summary": _empty_campaign_summary(),
+        })
+        return resp
 
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
             if conn is None:
-                return _db_empty_response(days, "campaigns", window_key)
+                return _empty()
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
                     WITH date_filtered AS (
                         SELECT
                             LOWER(campaign_name) AS campaign_name,
-                            verdict,
-                            spend_usd,
-                            confirmed_sqls,
-                            junk_rate_pct,
-                            cpql_usd,
-                            total_leads,
-                            run_date,
-                            created_at,
-                            id
+                            verdict, verdict_reason,
+                            spend_usd, clicks, impressions, conversions,
+                            total_leads, confirmed_sqls, junk_count,
+                            junk_rate_pct, cpql_usd,
+                            run_id, run_date, created_at, id
                         FROM campaigns
                         WHERE {date_clause}
                     ),
-                    latest_verdicts AS (
-                        SELECT DISTINCT ON (campaign_name)
-                            campaign_name,
-                            verdict AS latest_verdict
+                    run_stats AS (
+                        SELECT campaign_name,
+                               COUNT(DISTINCT run_id) AS run_count,
+                               MAX(run_date)          AS last_run_date
                         FROM date_filtered
-                        ORDER BY campaign_name, run_date DESC, created_at DESC, id DESC
-                    ),
-                    latest_leads AS (
-                        SELECT DISTINCT ON (campaign_name)
-                            campaign_name,
-                            total_leads
-                        FROM date_filtered
-                        ORDER BY campaign_name, run_date DESC, id DESC
+                        GROUP BY campaign_name
                     )
-                    SELECT
-                        agg.campaign_name,
-                        lv.latest_verdict,
-                        AVG(agg.spend_usd)            AS avg_spend_usd,
-                        SUM(agg.confirmed_sqls)       AS total_confirmed_sqls,
-                        AVG(agg.junk_rate_pct)        AS avg_junk_rate_pct,
-                        AVG(agg.cpql_usd)             AS avg_cpql_usd,
-                        COUNT(*)                      AS run_count,
-                        COALESCE(MAX(ll.total_leads), 0) AS total_leads
-                    FROM date_filtered agg
-                    JOIN latest_verdicts lv ON lv.campaign_name = agg.campaign_name
-                    LEFT JOIN latest_leads ll ON ll.campaign_name = agg.campaign_name
-                    GROUP BY agg.campaign_name, lv.latest_verdict
-                    ORDER BY avg_spend_usd DESC NULLS LAST
+                    SELECT DISTINCT ON (df.campaign_name)
+                        df.campaign_name, df.verdict, df.verdict_reason,
+                        df.spend_usd, df.clicks, df.impressions, df.conversions,
+                        df.total_leads, df.confirmed_sqls, df.junk_count,
+                        df.junk_rate_pct, df.cpql_usd,
+                        rs.run_count, rs.last_run_date
+                    FROM date_filtered df
+                    JOIN run_stats rs ON rs.campaign_name = df.campaign_name
+                    ORDER BY df.campaign_name, df.run_date DESC, df.created_at DESC, df.id DESC
                     """,
                     (*date_params,),
                 )
@@ -903,29 +935,65 @@ def api_campaigns(
                 for row in rows:
                     r = dict(zip(cols, row))
                     campaigns.append({
-                        "campaign_name": r["campaign_name"],
-                        "latest_verdict": r["latest_verdict"],
-                        "avg_spend_usd": round(float(r["avg_spend_usd"]), 2) if r["avg_spend_usd"] is not None else None,
-                        "total_confirmed_sqls": int(r["total_confirmed_sqls"] or 0),
-                        "avg_junk_rate_pct": round(float(r["avg_junk_rate_pct"]), 2) if r["avg_junk_rate_pct"] is not None else None,
-                        "avg_cpql_usd": round(float(r["avg_cpql_usd"]), 2) if r["avg_cpql_usd"] is not None else None,
-                        "run_count": int(r["run_count"]),
-                        "total_leads": int(r["total_leads"]) if r["total_leads"] is not None else 0,
-                        # TODO: Replace hardcoded "stable" with junk rate trend calculation
-                        # once 4+ weekly runs exist. Pattern: compare avg junk_rate of
-                        # older half vs newer half of the date window.
-                        # Tracked: PR-ADS-025B or standalone cleanup PR.
-                        "trend": "stable",
+                        "campaign_name":  r["campaign_name"],
+                        "verdict":        r["verdict"],
+                        "latest_verdict": r["verdict"],   # backward-compat alias
+                        "verdict_reason": r["verdict_reason"],
+                        "spend_usd":      _round2(r["spend_usd"]),
+                        "confirmed_sqls": int(r["confirmed_sqls"] or 0),
+                        "confirmed_junk": int(r["junk_count"] or 0),
+                        "junk_rate_pct":  _round2(r["junk_rate_pct"]),
+                        # CPQL stays None (renders N/A) when there are no confirmed
+                        # SQLs — never a fabricated 0.
+                        "cpql_usd":       (_round2(r["cpql_usd"])
+                                           if int(r["confirmed_sqls"] or 0) > 0 else None),
+                        "clicks":         int(r["clicks"] or 0),
+                        "impressions":    int(r["impressions"] or 0),
+                        "conversions":    _round2(r["conversions"]) or 0.0,
+                        "total_leads":    int(r["total_leads"] or 0),
+                        "run_count":      int(r["run_count"] or 0),
+                        "last_run_date":  str(r["last_run_date"]) if r["last_run_date"] else None,
                     })
     except Exception as exc:  # noqa: BLE001
         log.error("[api/campaigns] database error: %s", exc, exc_info=True)
-        return _db_empty_response(days, "campaigns", window_key)
+        return _empty()
+
+    # Decision aggregates for the KPI strip (from the same rows the table shows).
+    verdict_counts = {"SCALE": 0, "HOLD": 0, "FIX": 0, "CUT": 0}
+    sqls_total = 0
+    junk_total = 0
+    for c in campaigns:
+        v = (c["verdict"] or "").strip().upper()
+        if v in verdict_counts:
+            verdict_counts[v] += 1
+        sqls_total += c["confirmed_sqls"]
+        junk_total += c["confirmed_junk"]
+
+    summary = {
+        "campaigns_with_evidence": len(campaigns),
+        "confirmed_sqls_total": sqls_total,
+        "confirmed_junk_total": junk_total,
+        "verdict_counts": verdict_counts,
+        # Per-run snapshot spend cannot be summed into a trustworthy selected-window
+        # total (Path B/C) — disclosed as Unavailable, never a fabricated sum.
+        "spend_requiring_review": {
+            "status": "unavailable",
+            "value": None,
+            "reason": ("Spend aggregation requires contract verification — per-run "
+                       "snapshot spend cannot be summed into a selected-window total."),
+        },
+    }
 
     return {
         "days": days,
         "window": window_key,
         "generated_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "campaigns": campaigns,
+        # Honest spend contract (Path B): a per-run snapshot, not a window total.
+        "spend_semantics": "latest_run_snapshot",
+        "spend_status": "snapshot",
+        "spend_currency": "USD",
+        "summary": summary,
     }
 
 

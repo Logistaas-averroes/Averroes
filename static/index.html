@@ -458,36 +458,12 @@
 
       <!-- Campaigns -->
       <section id="page-campaigns" class="page" hidden>
-        <header class="page-header">
-          <h1 class="page-title">Campaigns</h1>
-          <p class="page-subtitle">Campaign truth table — spend, quality, and verdict</p>
-        </header>
+        <!-- PR-ADS-142: Campaign Evidence decision page. Command header, compact
+             KPI strip + verdict filter chips, and one decision table rendered by
+             loadCampaignEvidence(). The legacy oversized verdict cards are gone. -->
         <div id="page-explanation-campaigns" hidden></div>
         <p id="run-meta-campaigns" class="run-meta" data-section="campaigns"></p>
-        <div class="verdict-count-grid" id="camp-verdict-grid">
-          <div class="verdict-count-card verdict-count-card--scale">
-            <div class="verdict-count-card__num" id="vc-scale">—</div>
-            <div class="verdict-count-card__label">SCALE</div>
-          </div>
-          <div class="verdict-count-card verdict-count-card--fix">
-            <div class="verdict-count-card__num" id="vc-fix">—</div>
-            <div class="verdict-count-card__label">FIX</div>
-          </div>
-          <div class="verdict-count-card verdict-count-card--hold">
-            <div class="verdict-count-card__num" id="vc-hold">—</div>
-            <div class="verdict-count-card__label">HOLD</div>
-          </div>
-          <div class="verdict-count-card verdict-count-card--cut">
-            <div class="verdict-count-card__num" id="vc-cut">—</div>
-            <div class="verdict-count-card__label">CUT</div>
-          </div>
-        </div>
-        <div class="panel">
-          <div class="panel__header">Campaign Truth Table</div>
-          <div class="panel__body panel__body--flush" id="camp-table-body">
-            <p class="empty-state" style="padding: var(--space-5);">Loading campaigns…</p>
-          </div>
-        </div>
+        <div id="campaign-evidence-shell"></div>
       </section>
 
       <!-- Waste Terms -->

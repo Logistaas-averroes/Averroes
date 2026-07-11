@@ -2035,6 +2035,82 @@ body.is-revenue-page #monitoring-banner {
   padding: var(--space-4);
 }
 
+/* ── Campaign Evidence decision page (PR-ADS-142) ─────────────────────────── */
+.campaign-kpi-grid { margin-bottom: var(--space-3); }
+.campaign-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.campaign-verdict-chip { font-weight: 600; }
+.campaign-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+.campaign-controls .waste-search-input { min-width: 200px; flex: 1 1 200px; max-width: 320px; }
+.campaign-clear-btn { color: var(--text-muted); }
+.campaign-decision-table th { position: sticky; top: 0; background: var(--surface-card); z-index: 1; }
+.campaign-decision-row { cursor: pointer; }
+.campaign-decision-row:hover { background: rgba(18, 158, 245, 0.05); }
+.campaign-decision-row:focus-visible { outline: 2px solid var(--brand-sky-accent); outline-offset: -2px; }
+.campaign-ev-compact { display: block; font-weight: 600; }
+.campaign-ev-note { display: block; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.campaign-open-btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; }
+
+/* Tablet: hide lower-priority columns (keep Campaign, Decision, SQLs,
+   Junk Rate, CPQL, Open evidence). Confirmed Junk + Spend + Evidence hide. */
+@media (max-width: 1024px) {
+  .campaign-decision-table th:nth-child(3),
+  .campaign-decision-table td:nth-child(3),
+  .campaign-decision-table th:nth-child(5),
+  .campaign-decision-table td:nth-child(5),
+  .campaign-decision-table th:nth-child(8),
+  .campaign-decision-table td:nth-child(8) { display: none; }
+}
+
+/* Mobile: stacked decision cards instead of a wide table. Each cell shows its
+   label (from data-label) so no horizontal-scroll maze. */
+@media (max-width: 640px) {
+  .campaign-decision-table thead { display: none; }
+  .campaign-decision-table,
+  .campaign-decision-table tbody,
+  .campaign-decision-table tr,
+  .campaign-decision-table td { display: block; width: 100%; }
+  .campaign-decision-table tr {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+    margin-bottom: var(--space-3);
+    background: var(--surface-card);
+  }
+  .campaign-decision-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-3);
+    padding: 4px 0;
+    border: none;
+    text-align: right;
+  }
+  .campaign-decision-table td::before {
+    content: attr(data-label);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    text-align: left;
+  }
+  .campaign-decision-table td[data-label=""] { justify-content: stretch; }
+  .campaign-decision-table td[data-label=""]::before { content: none; }
+  .campaign-open-btn { width: 100%; }
+  .campaign-ev-compact, .campaign-ev-note { text-align: right; }
+}
+
 /* ── Waste Terms page ─────────────────────────────────────────────────────── */
 
 /* Controls bar (search + dropdowns + copy button) */
@@ -2599,6 +2675,21 @@ body.is-revenue-page #monitoring-banner {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-muted);
+}
+
+/* PR-ADS-142: sub-note under a drawer KPI (e.g. Google conversions caveat). */
+.drawer-kpi__note {
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+/* Read-only decision note in the drawer header. */
+.drawer-readonly-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: var(--space-2) 0 0;
+  font-style: italic;
 }
 
 .drawer-kpi__value {

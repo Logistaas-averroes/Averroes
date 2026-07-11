@@ -186,9 +186,11 @@ class TestBuildEmptyStateIntegration:
         )
 
     def test_build_empty_state_called_in_campaigns(self):
-        body = self._get_function_slice("async function loadCampaigns(")
+        # PR-ADS-142: the campaigns empty state is rendered by
+        # renderCampaignEvidencePage (loadCampaigns delegates to loadCampaignEvidence).
+        body = self._get_function_slice("function renderCampaignEvidencePage(")
         assert "buildEmptyState(" in body, (
-            "loadCampaigns must call buildEmptyState() for its empty state"
+            "renderCampaignEvidencePage must call buildEmptyState() for its empty state"
         )
 
     def test_build_empty_state_called_in_leads(self):
