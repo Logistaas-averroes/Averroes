@@ -1046,7 +1046,9 @@ function evidenceWindowQuery() {
 // true unbounded `window=all_time` instead.
 function evidenceWindowDays() {
   const def = evidenceWindowDef();
-  return def.days == null ? 365 : def.days;
+  // all_time maps to the widest legacy day ceiling (shared with VALID_DAY_WINDOWS
+  // so it can never diverge if that cap changes).
+  return def.days == null ? Math.max(...VALID_DAY_WINDOWS) : def.days;
 }
 
 function setEvidenceWindow(value) {
