@@ -19,9 +19,26 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC = os.path.join(ROOT, "static")
 FIXTURES = os.path.join(ROOT, "scripts", "campaign_evidence_fixtures.json")
-CHROME = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
 
 WIDTHS = [("desktop-1440", 1440, 900), ("tablet-1024", 1024, 800), ("mobile-390", 390, 844)]
+
+
+def _chrome_executable() -> str | None:
+    """Resolve a Chromium binary, preferring CHROME_BIN, then any pre-installed
+    Playwright Chromium under PLAYWRIGHT_BROWSERS_PATH, else None (let Playwright
+    use its own bundled browser). Never hardcodes a single version path."""
+    import glob
+
+    env = os.environ.get("CHROME_BIN")
+    if env and os.path.exists(env):
+        return env
+    base = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
+    for pat in ("chromium-*/chrome-linux/chrome",
+                "chromium_headless_shell-*/chrome-linux/headless_shell"):
+        matches = sorted(glob.glob(os.path.join(base, pat)))
+        if matches:
+            return matches[-1]
+    return None
 
 
 class _Handler(SimpleHTTPRequestHandler):
@@ -66,8 +83,12 @@ def main() -> int:
         route.fulfill(status=200, content_type="application/json", body="{}")
 
     written = []
+    chrome = _chrome_executable()
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
+        launch_kwargs = {"args": ["--no-sandbox"]}
+        if chrome:
+            launch_kwargs["executable_path"] = chrome
+        browser = pw.chromium.launch(**launch_kwargs)
         for name, w, h in WIDTHS:
             ctx = browser.new_context(viewport={"width": w, "height": h},
                                       device_scale_factor=2)

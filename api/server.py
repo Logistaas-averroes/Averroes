@@ -830,16 +830,6 @@ def _resolve_search_terms_window(window, days, *, legacy_max: int):
     return clamped, f"{clamped}d"
 
 
-def _round2(value):
-    """Round to 2 dp, passing None straight through (never fabricate a 0)."""
-    if value is None:
-        return None
-    try:
-        return round(float(value), 2)
-    except (TypeError, ValueError):
-        return None
-
-
 @app.get("/api/campaigns")
 def api_campaigns(
     user: dict = Depends(require_auth),
@@ -870,24 +860,20 @@ def api_campaigns(
         else _days_to_evidence_window(days)
 
     from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
-    from services.campaign_evidence_service import build_campaign_evidence  # noqa: PLC0415
+    from services.campaign_evidence_service import (  # noqa: PLC0415
+        build_campaign_evidence,
+        unavailable_response,
+    )
     try:
         return build_campaign_evidence(resolved_window)
     except EvidenceWindowError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
+        # Last-resort fallback: return the SAME consistent shape as a live response
+        # (window bounds, semantics, audit) with reconciliation statuses
+        # "unavailable" — never a fabricated 0, never a partial ad-hoc dict.
         log.error("[api/campaigns] error: %s", exc, exc_info=True)
-        return {
-            "window": resolved_window if isinstance(resolved_window, str) else "30d",
-            "db_unavailable": True,
-            "campaigns": [],
-            "spend_semantics": "selected_window_canonical_total",
-            "summary": {
-                "campaigns": 0, "spend_usd": None, "spend_native": None,
-                "spend_currency": "GBP", "confirmed_sqls_total": None,
-                "confirmed_junk_total": None, "overall_cpql_usd": None,
-            },
-        }
+        return unavailable_response(resolved_window)
 
 
 def _days_to_evidence_window(days: int) -> str:

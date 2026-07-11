@@ -2035,15 +2035,8 @@ body.is-revenue-page #monitoring-banner {
   padding: var(--space-4);
 }
 
-/* ── Campaign Evidence decision page (PR-ADS-142) ─────────────────────────── */
+/* ── Campaign Evidence page (PR-ADS-143) ──────────────────────────────────── */
 .campaign-kpi-grid { margin-bottom: var(--space-3); }
-.campaign-filter-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-bottom: var(--space-2);
-}
-.campaign-verdict-chip { font-weight: 600; }
 
 /* ── PR-ADS-143: full-width Campaign Evidence page ────────────────────────────
    The Campaign Evidence page fills the available application width (the .main-

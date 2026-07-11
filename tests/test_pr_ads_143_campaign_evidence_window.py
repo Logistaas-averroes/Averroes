@@ -32,6 +32,17 @@ SERVICE = open(os.path.join(ROOT, "services", "campaign_evidence_service.py"),
                encoding="utf-8").read()
 
 
+def _region(text, start_marker, end_marker):
+    """Slice text between two markers, asserting BOTH exist — so a missing marker
+    fails loudly instead of yielding an empty slice that false-passes 'not in'."""
+    i = text.find(start_marker)
+    assert i != -1, f"start marker not found: {start_marker!r}"
+    j = text.find(end_marker, i + len(start_marker))
+    assert j != -1, f"end marker not found: {end_marker!r}"
+    assert j > i
+    return text[i:j]
+
+
 # ── Durable-layer fixtures (monkeypatch the repo functions directly) ─────────
 
 
@@ -186,6 +197,37 @@ def test_lead_totals_reconcile_to_deduped_aggregate(monkeypatch):
     assert out["audit"]["lead_reconciliation_status"] == "pass"
 
 
+def test_unavailable_response_is_consistent_shape():
+    # The handler's last-resort fallback returns the SAME shape as a live response
+    # (window bounds, semantics, audit) — reconciliation statuses "unavailable",
+    # every metric null (never a partial ad-hoc dict / fabricated 0).
+    from services.campaign_evidence_service import unavailable_response
+    r = unavailable_response("all_time")
+    for key in ("window", "window_start", "window_end", "all_time", "generated_at",
+                "spend_semantics", "reporting_currency", "lead_semantics",
+                "campaigns", "summary", "audit", "db_unavailable"):
+        assert key in r, f"fallback missing {key}"
+    assert r["db_unavailable"] is True and r["campaigns"] == []
+    assert r["summary"]["spend_usd"] is None and r["summary"]["confirmed_sqls_total"] is None
+    assert r["audit"]["spend_reconciliation_status"] == "unavailable"
+    assert r["audit"]["lead_reconciliation_status"] == "unavailable"
+    assert r["audit"]["fx_status"] == "unavailable"
+
+
+def test_handler_fallback_uses_unavailable_response():
+    idx = SERVER.find("def api_campaigns(")
+    body = SERVER[idx:SERVER.find("\n@app.", idx + 1)]
+    assert "unavailable_response(resolved_window)" in body
+
+
+def test_evidence_row_return_type_is_dict_not_none():
+    # Return annotation + docstring match behaviour (always a dict, never None).
+    seg = SERVICE[SERVICE.find("def build_campaign_evidence_row("):
+                  SERVICE.find("def build_campaign_evidence_row(") + 400]
+    assert "-> dict[str, Any]:" in seg
+    assert "Always returns a dict (never None)" in seg
+
+
 def test_audit_block_has_all_required_fields(monkeypatch):
     _patch(monkeypatch, *_dataset())
     audit = _build("all_time")["audit"]
@@ -323,21 +365,21 @@ def test_service_is_read_only():
 
 
 def test_no_snapshot_language_on_campaign_page():
-    region = APP_JS[APP_JS.find("// ── Campaign Evidence page (PR-ADS-143)"):
-                    APP_JS.find("// ── Waste Terms page")]
+    region = _region(APP_JS, "// ── Campaign Evidence page (PR-ADS-143)",
+                     "// ── Waste Terms page")
     for banned in ("Latest Snapshot", "latest stored snapshot", "snapshot_metric_period",
                    "per-run snapshot", "Snapshot metrics"):
         assert banned not in region, f"snapshot copy leaked: {banned}"
     # PAGE_EXPLANATIONS.campaigns no longer PROMOTES snapshot semantics (the only
     # allowed mention is the honest "not a scheduler snapshot" clarification).
-    exp = APP_JS[APP_JS.find("campaigns: {"):APP_JS.find("campaigns: {") + 700]
+    exp = _region(APP_JS, "campaigns: {", "\n  },")
     assert "latest snapshot" not in exp.lower()
     assert "latest stored snapshot" not in exp.lower()
 
 
 def test_clean_table_headers():
-    region = APP_JS[APP_JS.find("function renderCampaignDecisionTable"):
-                    APP_JS.find("function renderCampaignDecisionTable") + 1400]
+    region = _region(APP_JS, "function renderCampaignDecisionTable",
+                     "function campaignSpendCell")
     for h in (">Campaign<", ">Status<", ">Spend<", ">Leads<", ">SQLs<",
               ">Junk<", ">Junk Rate<", ">CPQL<"):
         assert h in region, f"missing clean header {h}"
@@ -352,8 +394,8 @@ def test_full_width_page_class():
 
 
 def test_single_filter_row_no_verdict_chips():
-    region = APP_JS[APP_JS.find("function renderCampaignEvidenceFilters"):
-                    APP_JS.find("function filterCampaignEvidence")]
+    region = _region(APP_JS, "function renderCampaignEvidenceFilters",
+                     "function filterCampaignEvidence")
     assert 'id="campaign-search"' in region
     assert 'id="campaign-status"' in region and 'id="campaign-outcome"' in region
     assert 'id="campaign-sort"' in region and 'id="campaign-clear-filters"' in region
@@ -379,8 +421,8 @@ def test_no_duplicate_source_strip_inline():
 
 
 def test_kpi_cards_are_genuine_window_kpis():
-    region = APP_JS[APP_JS.find("function renderCampaignEvidenceKPIs"):
-                    APP_JS.find("function renderCampaignEvidenceKPIs") + 2000]
+    region = _region(APP_JS, "function renderCampaignEvidenceKPIs",
+                     "function renderCampaignEvidenceFilters")
     for label in (">Campaigns<", ">Spend<", ">Confirmed SQLs<", ">Confirmed Junk<",
                   ">Overall CPQL<"):
         assert label in region
@@ -391,8 +433,8 @@ def test_kpi_cards_are_genuine_window_kpis():
 
 
 def test_drawer_uses_window_card_no_snapshot():
-    dr = APP_JS[APP_JS.find("function renderCampaignDrawer"):
-                APP_JS.find("function _appendDrawerEvidenceSections")]
+    dr = _region(APP_JS, "function renderCampaignDrawer",
+                 "function _appendDrawerEvidenceSections")
     assert "snapshot" not in dr.lower()
     # No scheduler verdict in the drawer (camp.verdicted_leads is a lead COUNT, ok).
     assert "camp.verdict_reason" not in dr and "verdictBadge(" not in dr

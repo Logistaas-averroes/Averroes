@@ -344,15 +344,54 @@ def build_campaign_evidence(window: str, now: datetime | None = None) -> dict[st
     }
 
 
+def unavailable_response(window: str, now: datetime | None = None) -> dict[str, Any]:
+    """Consistent db-unavailable payload (same shape as a live response) for the
+    handler's last-resort error path — reconciliation statuses are 'unavailable',
+    every metric is null (never a fabricated 0). Falls back to a bare shape if the
+    window itself cannot be resolved."""
+    try:
+        start, end, resolved = _window_bounds(window, now)
+        window_key, is_all_time = resolved["key"], resolved["is_all_time"]
+        window_start = start.isoformat() if start else None
+        window_end = end.isoformat()
+    except Exception:  # noqa: BLE001 - unknown/unresolvable window
+        window_key = window if isinstance(window, str) else "30d"
+        window_start = window_end = None
+        is_all_time = window_key == "all_time"
+    base = {
+        "window": window_key, "window_start": window_start, "window_end": window_end,
+        "all_time": is_all_time,
+        "generated_at": (now or datetime.now(tz=timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "spend_semantics": "selected_window_canonical_total",
+        "spend_currency": "GBP", "reporting_currency": "USD",
+        "lead_semantics": "selected_window_deduplicated_event_date",
+    }
+    return {
+        **base, "db_unavailable": True, "campaigns": [], "summary": _empty_summary(),
+        "audit": {
+            "spend_source": "google_ads_campaign_daily_spend (canonical)",
+            "lead_source": "leads (durable · contact_created_at · deduped · paid_search)",
+            "window_start": window_start, "window_end": window_end,
+            "all_time": is_all_time, "fx_status": "unavailable",
+            "spend_reconciliation_status": "unavailable",
+            "lead_reconciliation_status": "unavailable",
+            "event_date_safe": None, "fx_missing_days": None,
+        },
+    }
+
+
 def build_campaign_evidence_row(window: str, campaign_name: str,
-                                now: datetime | None = None) -> dict | None:
+                                now: datetime | None = None) -> dict[str, Any]:
     """Single campaign's selected-window evidence row (for the drawer headline).
 
-    Returns the same row shape ``build_campaign_evidence`` emits so the drawer
-    headline matches the table exactly, or None when the campaign has no evidence
-    in the window. Read-only.
+    Always returns a dict (never None): the matched row (same shape
+    ``build_campaign_evidence`` emits, so the drawer headline matches the table
+    exactly), or a sentinel ``{"_not_found": True, ...}`` when the campaign has no
+    evidence in the window / ``{"db_unavailable": True, ...}`` when the source is
+    down. Callers branch on those flags. Read-only.
     """
     payload = build_campaign_evidence(window, now=now)
+    db_unavailable = payload.get("db_unavailable", False)
     key = _norm(campaign_name)
     for row in payload.get("campaigns", []):
         if _norm(row.get("campaign_name")) == key:
@@ -360,9 +399,9 @@ def build_campaign_evidence_row(window: str, campaign_name: str,
                     "window_start": payload.get("window_start"),
                     "window_end": payload.get("window_end"),
                     "all_time": payload.get("all_time"),
-                    "db_unavailable": payload.get("db_unavailable", False)}
+                    "db_unavailable": db_unavailable}
     return {"_not_found": True, "window": payload.get("window"),
-            "db_unavailable": payload.get("db_unavailable", False)}
+            "db_unavailable": db_unavailable}
 
 
 def _empty_summary() -> dict:
