@@ -840,41 +840,6 @@ def _round2(value):
         return None
 
 
-def _nullable_int(value):
-    """Coerce to int, preserving None (an unavailable metric is NOT a real 0).
-
-    Only a value the source positively records is converted; ``None`` (the
-    column was NULL / the metric was never captured) stays ``None`` so the UI
-    can render "—"/"Unavailable" instead of a fabricated zero.
-    """
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _empty_campaign_summary() -> dict[str, Any]:
-    """Zeroed decision summary for the db-unavailable / empty campaign response."""
-    return {
-        "campaigns_with_evidence": 0,
-        "confirmed_sqls_total": 0,
-        "confirmed_junk_total": 0,
-        "verdict_counts": {"SCALE": 0, "HOLD": 0, "FIX": 0, "CUT": 0},
-        "completeness": {
-            "confirmed_sqls": {"status": "complete", "available": 0, "missing": 0},
-            "confirmed_junk": {"status": "complete", "available": 0, "missing": 0},
-        },
-        "spend_requiring_review": {
-            "status": "unavailable",
-            "value": None,
-            "reason": ("Spend aggregation requires contract verification — per-run "
-                       "snapshot spend cannot be summed into a selected-window total."),
-        },
-    }
-
-
 @app.get("/api/campaigns")
 def api_campaigns(
     user: dict = Depends(require_auth),
@@ -884,201 +849,57 @@ def api_campaigns(
         description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
     ),
 ) -> dict[str, Any]:
-    """Return decision-grade campaign evidence for the evidence window. Requires auth.
+    """Return GENUINE selected-window campaign evidence. Requires auth. Read-only.
 
-    PR-ADS-142: each campaign is represented by its LATEST coherent snapshot (the
-    most recent stored run) — spend, confirmed SQLs, confirmed junk, junk rate and
-    CPQL all come from the SAME run, so the row is internally consistent and matches
-    the campaign-detail drawer (which also reads the latest snapshot). No verdict,
-    junk-rate or CPQL FORMULA is changed — the stored per-run values are surfaced.
+    PR-ADS-143: the selected Evidence Window controls the ACTUAL metrics. Spend is
+    the canonical google_ads_campaign_daily_spend total for the window (the SAME
+    source Revenue by Source / the Revenue Decision Mart use, so it reconciles) —
+    native GBP always, FX-safe USD (None when FX is incomplete). Lead outcomes come
+    from the durable `leads` table (event-date, deduplicated, paid-search) using the
+    APPROVED junk-rate denominator unchanged. ``all_time`` means NO lower date bound
+    → genuine cumulative totals, never the latest scheduler snapshot.
 
-    Spend semantics are explicit and honest (Path B): ``spend_usd`` is a per-run
-    snapshot (each run's own analysis window), NOT the selected-window total — so
-    ``spend_semantics`` / ``spend_status`` disclose it and ``spend_requiring_review``
-    is Unavailable rather than a fabricated sum. Read-only.
+    The SCALE/HOLD/FIX/CUT verdict doctrine is NOT valid for arbitrary windows (it
+    bakes a fixed 30-day design + a $200 dollar floor and emits action
+    recommendations), so each row carries a factual, window-safe ``outcome_status``
+    computed from the selected-window totals only — never a recomputed verdict.
     """
-    days, window_key = _resolve_evidence_window(window, days)
-    date_clause, date_params = _evidence_date_clause("run_date", days)
+    # Legacy ``days=`` maps onto the nearest evidence window for backward compat;
+    # ``window=`` (7d…180d/all_time) is authoritative. Unknown window → 400.
+    resolved_window = window if (isinstance(window, str) and window) \
+        else _days_to_evidence_window(days)
 
-    def _empty():
-        resp = _db_empty_response(days, "campaigns", window_key)
-        resp.update({
-            "spend_semantics": "latest_run_snapshot",
-            "spend_status": "snapshot",
-            "spend_currency": "USD",
-            "metric_semantics": "latest_stored_snapshot",
-            "snapshot_metric_period_days": None,
-            "snapshot_period_available": False,
-            "summary": _empty_campaign_summary(),
-        })
-        return resp
-
-    from db.connection import get_conn  # noqa: PLC0415
+    from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
+    from services.campaign_evidence_service import build_campaign_evidence  # noqa: PLC0415
     try:
-        with get_conn() as conn:
-            if conn is None:
-                return _empty()
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    WITH date_filtered AS (
-                        SELECT
-                            LOWER(campaign_name) AS campaign_name,
-                            verdict, verdict_reason,
-                            spend_usd, clicks, impressions, conversions,
-                            total_leads, confirmed_sqls, junk_count,
-                            junk_rate_pct, cpql_usd,
-                            run_id, run_date, created_at, id
-                        FROM campaigns
-                        WHERE {date_clause}
-                    ),
-                    run_stats AS (
-                        SELECT campaign_name,
-                               COUNT(DISTINCT run_id) AS run_count,
-                               MAX(run_date)          AS last_run_date
-                        FROM date_filtered
-                        GROUP BY campaign_name
-                    )
-                    SELECT DISTINCT ON (df.campaign_name)
-                        df.campaign_name, df.verdict, df.verdict_reason,
-                        df.spend_usd, df.clicks, df.impressions, df.conversions,
-                        df.total_leads, df.confirmed_sqls, df.junk_count,
-                        df.junk_rate_pct, df.cpql_usd,
-                        rs.run_count, rs.last_run_date
-                    FROM date_filtered df
-                    JOIN run_stats rs ON rs.campaign_name = df.campaign_name
-                    ORDER BY df.campaign_name, df.run_date DESC, df.created_at DESC, df.id DESC
-                    """,
-                    (*date_params,),
-                )
-                rows = cur.fetchall()
-                cols = [d[0] for d in cur.description]
-                campaigns = []
-                for row in rows:
-                    r = dict(zip(cols, row))
-                    # Preserve NULL for every metric — an unavailable value is NOT a
-                    # real 0. Only values the source positively records survive; a
-                    # NULL column stays None so the UI renders "—"/"Unavailable".
-                    confirmed_sqls = _nullable_int(r["confirmed_sqls"])
-                    snapshot_date = (str(r["last_run_date"])
-                                     if r["last_run_date"] else None)
-                    campaigns.append({
-                        "campaign_name":  r["campaign_name"],
-                        "verdict":        r["verdict"],
-                        "latest_verdict": r["verdict"],   # backward-compat alias
-                        "verdict_reason": r["verdict_reason"],
-                        "spend_usd":      _round2(r["spend_usd"]),
-                        "confirmed_sqls": confirmed_sqls,
-                        "confirmed_junk": _nullable_int(r["junk_count"]),
-                        "junk_rate_pct":  _round2(r["junk_rate_pct"]),
-                        # CPQL stays None (renders N/A) unless there is a genuine
-                        # positive SQL count — never a fabricated 0.
-                        "cpql_usd":       (_round2(r["cpql_usd"])
-                                           if (confirmed_sqls or 0) > 0 else None),
-                        "clicks":         _nullable_int(r["clicks"]),
-                        "impressions":    _nullable_int(r["impressions"]),
-                        # Missing conversions stay None (drawer renders "—") — never
-                        # a fabricated 0.0, per the no-fake-zero contract.
-                        "conversions":    _round2(r["conversions"]),
-                        "total_leads":    _nullable_int(r["total_leads"]),
-                        "run_count":      int(r["run_count"] or 0),
-                        "last_run_date":  snapshot_date,
-                        # ── Honest snapshot-vs-window metadata (PR-ADS-142 audit) ──
-                        # Every metric on this row is the campaign's LATEST STORED
-                        # SNAPSHOT (one coherent run), NOT a genuine selected-window
-                        # total. The Evidence Window only filters which stored
-                        # snapshot dates are eligible — it never rebuilds the metrics
-                        # into an all-time / window business total.
-                        "metric_semantics": "latest_stored_snapshot",
-                        "snapshot_date": snapshot_date,
-                        # The real per-snapshot metric period is NOT provable per-row:
-                        # it varies by run type (daily=2d, weekly/monthly=30d) and by
-                        # data source within one run (ads vs HubSpot use different
-                        # lookbacks), and the campaigns table stores no period column.
-                        # Per the contract, unprovable → null + explicit unavailable.
-                        "snapshot_metric_period_days": None,
-                        "snapshot_period_available": False,
-                    })
+        return build_campaign_evidence(resolved_window)
+    except EvidenceWindowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        log.error("[api/campaigns] database error: %s", exc, exc_info=True)
-        return _empty()
-
-    # Decision aggregates for the KPI strip (from the same rows the table shows).
-    # These are sums of LATEST-SNAPSHOT verdicts/counts across campaigns — they are
-    # NOT selected-window business totals. An unavailable (None) metric is NEVER
-    # coerced to 0 in the sum; it is counted as missing so completeness is explicit.
-    verdict_counts = {"SCALE": 0, "HOLD": 0, "FIX": 0, "CUT": 0}
-    sqls_total = 0
-    junk_total = 0
-    sqls_available = sqls_missing = 0
-    junk_available = junk_missing = 0
-    for c in campaigns:
-        v = (c["verdict"] or "").strip().upper()
-        if v in verdict_counts:
-            verdict_counts[v] += 1
-        if c["confirmed_sqls"] is None:
-            sqls_missing += 1
-        else:
-            sqls_total += c["confirmed_sqls"]
-            sqls_available += 1
-        if c["confirmed_junk"] is None:
-            junk_missing += 1
-        else:
-            junk_total += c["confirmed_junk"]
-            junk_available += 1
-
-    sqls_complete = sqls_missing == 0
-    junk_complete = junk_missing == 0
-
-    summary = {
-        "campaigns_with_evidence": len(campaigns),
-        # Latest-snapshot sums, with explicit completeness (never a silent 0-fill).
-        "confirmed_sqls_total": sqls_total,
-        "confirmed_junk_total": junk_total,
-        "verdict_counts": verdict_counts,
-        # Completeness disclosure: how many campaigns contributed a real value vs
-        # had the metric unavailable. "complete" iff nothing was missing.
-        "completeness": {
-            "confirmed_sqls": {
-                "status": "complete" if sqls_complete else "partial",
-                "available": sqls_available,
-                "missing": sqls_missing,
+        log.error("[api/campaigns] error: %s", exc, exc_info=True)
+        return {
+            "window": resolved_window if isinstance(resolved_window, str) else "30d",
+            "db_unavailable": True,
+            "campaigns": [],
+            "spend_semantics": "selected_window_canonical_total",
+            "summary": {
+                "campaigns": 0, "spend_usd": None, "spend_native": None,
+                "spend_currency": "GBP", "confirmed_sqls_total": None,
+                "confirmed_junk_total": None, "overall_cpql_usd": None,
             },
-            "confirmed_junk": {
-                "status": "complete" if junk_complete else "partial",
-                "available": junk_available,
-                "missing": junk_missing,
-            },
-        },
-        # Per-run snapshot spend cannot be summed into a trustworthy selected-window
-        # total (Path B/C) — disclosed as Unavailable, never a fabricated sum.
-        "spend_requiring_review": {
-            "status": "unavailable",
-            "value": None,
-            "reason": ("Spend aggregation requires contract verification — per-run "
-                       "snapshot spend cannot be summed into a selected-window total."),
-        },
-    }
+        }
 
-    return {
-        "days": days,
-        "window": window_key,
-        "generated_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "campaigns": campaigns,
-        # Honest spend contract (Path B): a per-run snapshot, not a window total.
-        "spend_semantics": "latest_run_snapshot",
-        "spend_status": "snapshot",
-        "spend_currency": "USD",
-        # Every per-campaign metric is the latest stored snapshot, NOT a genuine
-        # selected-window total. The Evidence Window only filters which snapshot
-        # dates are eligible; it never converts a snapshot into an all-time or
-        # selected-window business total. The metric period is unprovable per-row
-        # (varies by run type / data source, unstored) → reported as unavailable.
-        "metric_semantics": "latest_stored_snapshot",
-        "snapshot_metric_period_days": None,
-        "snapshot_period_available": False,
-        "summary": summary,
-    }
+
+def _days_to_evidence_window(days: int) -> str:
+    """Map a legacy ``days=`` value to the nearest supported evidence window."""
+    from analysis.evidence_windows import EVIDENCE_WINDOW_DAYS  # noqa: PLC0415
+    numeric = [(k, v) for k, v in EVIDENCE_WINDOW_DAYS.items() if v is not None]
+    try:
+        target = int(days)
+    except (TypeError, ValueError):
+        return "30d"
+    best = min(numeric, key=lambda kv: abs(kv[1] - target))
+    return best[0]
 
 
 # Lead dedup key: latest run per contact (rows with no contact_id stay individual,
@@ -1715,23 +1536,63 @@ def api_leads_country_summary(
 
 # ── Campaign detail — shared builder ───────────────────────────────────────────
 
-def _build_campaign_detail(campaign_name: str, days: int) -> dict:
+def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None = None) -> dict:
     """Assemble full campaign investigation payload for a given campaign.
 
-    Campaign names are already stored lowercase; normalize in Python before
-    querying so that direct equality (campaign_name = %s) can use existing
-    indexes instead of full-table LOWER() scans.
+    PR-ADS-143: the headline campaign card is GENUINE selected-window evidence —
+    canonical window spend (native GBP + FX-safe USD) reconciled with durable
+    deduplicated HubSpot lead outcomes for the SAME window (event-date grain) — so
+    the drawer headline matches the Campaign Evidence table row exactly. No
+    scheduler-snapshot verdict or snapshot-period language. The supplementary
+    country / keyword / waste / recent-leads sections stay windowed evidence.
 
-    Does NOT bail out when the campaigns table has no snapshot in the window —
-    lead, keyword, and waste evidence is still returned even when the campaign
-    summary is absent (e.g. a daily-pulse window that only wrote leads).
-
-    Returns a safe shape with db_unavailable=True when the database is down.
-    Phase 1 read-only — no writes to Google Ads or HubSpot.
+    Does NOT bail out when a campaign has no headline row — lead, keyword, and
+    waste evidence is still returned. Returns a safe shape with db_unavailable=True
+    when the database is down. Read-only — no writes to Google Ads or HubSpot.
     """
     # Normalize to lowercase/strip to match canonical stored values
     # (db/writers.py normalizes to lower+strip on every write).
     name_key = campaign_name.strip().lower()
+
+    # ── Headline card — GENUINE selected-window evidence (not a snapshot) ──────
+    # Built from the same service the Campaign Evidence table uses, so the card
+    # and the table row agree exactly. Computed before the DB block below (which
+    # gathers the supplementary lead/country/keyword/waste evidence sections).
+    campaign_card = None
+    if window_key:
+        try:
+            from services.campaign_evidence_service import (  # noqa: PLC0415
+                build_campaign_evidence_row,
+            )
+            row = build_campaign_evidence_row(window_key, campaign_name)
+            if row and not row.get("_not_found") and not row.get("db_unavailable"):
+                campaign_card = {
+                    "campaign_name":   row.get("campaign_name"),
+                    "campaign_id":     row.get("campaign_id"),
+                    # Selected-window canonical spend (native GBP + FX-safe USD).
+                    "spend_native":    row.get("spend_native"),
+                    "spend_usd":       row.get("spend_usd"),
+                    "spend_currency":  row.get("spend_currency"),
+                    "fx_complete":     row.get("fx_complete"),
+                    # Selected-window deduplicated lead outcomes (event-date grain).
+                    "total_leads":     row.get("total_leads"),
+                    "confirmed_sqls":  row.get("confirmed_sqls"),
+                    "confirmed_junk":  row.get("confirmed_junk"),
+                    "in_progress":     row.get("in_progress"),
+                    "wrong_fit":       row.get("wrong_fit"),
+                    "unknown":         row.get("unknown"),
+                    "verdicted_leads": row.get("verdicted_leads"),
+                    "junk_rate_pct":   row.get("junk_rate_pct"),
+                    "cpql_usd":        row.get("cpql_usd"),
+                    "outcome_status":  row.get("outcome_status"),
+                    "mapping_status":  row.get("mapping_status"),
+                    "window":          row.get("window"),
+                    "window_start":    row.get("window_start"),
+                    "window_end":      row.get("window_end"),
+                    "all_time":        row.get("all_time"),
+                }
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[campaign-detail] headline build failed: %s", exc)
 
     # PR-ADS-141: evidence-window date bound. `days is None` (all_time) omits the
     # lower date restriction from EVERY drawer query — never a hidden 365-day
@@ -1746,7 +1607,9 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
     _empty: dict = {
         "days":          days,
         "campaign_name": campaign_name,
-        "campaign":      None,
+        # Headline card is genuine selected-window evidence (durable source); it
+        # survives even when the supplementary-evidence connection is unavailable.
+        "campaign":      campaign_card,
         "lead_quality":  None,
         "countries":     [],
         "keywords":      [],
@@ -1762,83 +1625,10 @@ def _build_campaign_detail(campaign_name: str, days: int) -> dict:
                 return _db_empty
 
             with conn.cursor() as cur:
-                # ── Campaign summary — latest snapshot in window ──────────────
-                # Direct equality on campaign_name; index on campaigns(campaign_name) is usable.
-                cur.execute(
-                    f"""
-                    WITH date_filtered AS (
-                        SELECT
-                            id, run_id, run_date, campaign_name,
-                            spend_usd, clicks, impressions, conversions,
-                            total_leads, confirmed_sqls, junk_count,
-                            junk_rate_pct, cpql_usd, verdict, verdict_reason,
-                            created_at
-                        FROM campaigns
-                        WHERE {date_and}campaign_name = %s
-                    ),
-                    run_stats AS (
-                        SELECT
-                            COUNT(DISTINCT run_id) AS runs,
-                            MAX(run_date)          AS last_run_date
-                        FROM date_filtered
-                    )
-                    SELECT DISTINCT ON (df.campaign_name)
-                        df.campaign_name,
-                        df.spend_usd,
-                        df.clicks,
-                        df.impressions,
-                        df.conversions,
-                        df.total_leads,
-                        df.confirmed_sqls,
-                        df.junk_count,
-                        df.junk_rate_pct,
-                        df.cpql_usd,
-                        df.verdict,
-                        df.verdict_reason,
-                        rs.runs,
-                        rs.last_run_date
-                    FROM date_filtered df
-                    CROSS JOIN run_stats rs
-                    ORDER BY df.campaign_name, df.run_date DESC, df.created_at DESC, df.id DESC
-                    """,
-                    (*date_params, name_key),
-                )
-                camp_row = cur.fetchone()
-
-                campaign_out = None
-                if camp_row is not None:
-                    camp_cols = [d[0] for d in cur.description]
-                    camp_dict = dict(zip(camp_cols, camp_row))
-                    _snap_date = (str(camp_dict["last_run_date"])
-                                  if camp_dict["last_run_date"] else None)
-                    campaign_out = {
-                        "campaign_name":  camp_dict["campaign_name"],
-                        "spend_usd":      float(camp_dict["spend_usd"])      if camp_dict["spend_usd"]      is not None else None,
-                        "clicks":         int(camp_dict["clicks"])            if camp_dict["clicks"]          is not None else None,
-                        "impressions":    int(camp_dict["impressions"])       if camp_dict["impressions"]     is not None else None,
-                        "conversions":    float(camp_dict["conversions"])     if camp_dict["conversions"]     is not None else None,
-                        # Preserve NULL — an unavailable snapshot metric is never a real 0.
-                        "total_leads":    int(camp_dict["total_leads"])       if camp_dict["total_leads"]     is not None else None,
-                        "confirmed_sqls": int(camp_dict["confirmed_sqls"])    if camp_dict["confirmed_sqls"]  is not None else None,
-                        "junk_count":     int(camp_dict["junk_count"])        if camp_dict["junk_count"]      is not None else None,
-                        "junk_rate_pct":  float(camp_dict["junk_rate_pct"])   if camp_dict["junk_rate_pct"]   is not None else None,
-                        "cpql_usd":       float(camp_dict["cpql_usd"])        if camp_dict["cpql_usd"]        is not None else None,
-                        "verdict":        camp_dict["verdict"],
-                        "verdict_reason": camp_dict["verdict_reason"],
-                        "runs":           int(camp_dict["runs"])              if camp_dict["runs"]            is not None else 0,
-                        "last_run_date":  _snap_date,
-                        # Honest snapshot-vs-window metadata (PR-ADS-142 audit): this
-                        # card is the campaign's LATEST STORED SNAPSHOT, not a window
-                        # total. Surface the snapshot date + (unprovable) analysis
-                        # period so the drawer can disclose it.
-                        "metric_semantics": "latest_stored_snapshot",
-                        "snapshot_date": _snap_date,
-                        "snapshot_metric_period_days": None,
-                        "snapshot_period_available": False,
-                    }
-                # Note: do NOT return early here. Even when campaign_out is None
-                # (no snapshot in this window, e.g. a daily-pulse-only window),
-                # we continue to query and return leads, keyword, and waste evidence.
+                # Headline card comes from the selected-window service (above), not
+                # the scheduler snapshot. Even when it is None (no evidence in the
+                # window), we continue to return lead/keyword/waste evidence below.
+                campaign_out = campaign_card
 
                 # ── Lead quality — deduped by contact_id, campaign-scoped ─────
                 # Direct equality on campaign_name (already normalized).
@@ -2130,7 +1920,7 @@ def api_campaign_detail_query(
     Phase 1 read-only — no writes to Google Ads or HubSpot.
     """
     days_val, window_key = _resolve_evidence_window(window, days)
-    result = _build_campaign_detail(campaign_name, days_val)
+    result = _build_campaign_detail(campaign_name, days_val, window_key=window_key)
     result["window"] = window_key
     return result
 
@@ -2152,7 +1942,7 @@ def api_campaign_detail_path(
     Phase 1 read-only — no writes to Google Ads or HubSpot.
     """
     days_val, window_key = _resolve_evidence_window(window, days)
-    result = _build_campaign_detail(campaign_name, days_val)
+    result = _build_campaign_detail(campaign_name, days_val, window_key=window_key)
     result["window"] = window_key
     return result
 
