@@ -855,26 +855,6 @@ def _nullable_int(value):
         return None
 
 
-def _empty_campaign_summary() -> dict[str, Any]:
-    """Zeroed decision summary for the db-unavailable / empty campaign response."""
-    return {
-        "campaigns_with_evidence": 0,
-        "confirmed_sqls_total": 0,
-        "confirmed_junk_total": 0,
-        "verdict_counts": {"SCALE": 0, "HOLD": 0, "FIX": 0, "CUT": 0},
-        "completeness": {
-            "confirmed_sqls": {"status": "complete", "available": 0, "missing": 0},
-            "confirmed_junk": {"status": "complete", "available": 0, "missing": 0},
-        },
-        "spend_requiring_review": {
-            "status": "unavailable",
-            "value": None,
-            "reason": ("Spend aggregation requires contract verification — per-run "
-                       "snapshot spend cannot be summed into a selected-window total."),
-        },
-    }
-
-
 @app.get("/api/campaigns")
 def api_campaigns(
     user: dict = Depends(require_auth),
