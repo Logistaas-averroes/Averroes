@@ -168,7 +168,7 @@ def _assess_currency_provenance(group: dict) -> dict:
         }
     if len(codes) > 1:
         return {
-            "proven": False, "native_currency": None, "spend_native": None,
+            "proven": False, "native_currency": "mixed", "spend_native": None,
             "cost_micros": micros,
             "quarantine_reason": f"mixed currencies: {codes}",
         }
@@ -203,6 +203,9 @@ def _fx_convert_population(units: list, start, end) -> dict:
             currencies.add(nc)
 
     if not currencies:
+        # No currency lineage at all — withhold monetary metrics.
+        for u in units:
+            u["spend_usd"] = None
         return {
             "fx_complete": False,
             "native_currency": None,
@@ -214,6 +217,9 @@ def _fx_convert_population(units: list, start, end) -> dict:
 
     native_currency = currencies.pop() if len(currencies) == 1 else None
     if native_currency is None or not all_proven:
+        # Mixed currencies or unproven provenance — withhold monetary metrics.
+        for u in units:
+            u["spend_usd"] = None
         return {
             "fx_complete": False,
             "native_currency": None if len(currencies) > 0 else native_currency,
@@ -393,6 +399,7 @@ def _sum_opt(a, b):
 
 def _merge_group(unit: dict, g: dict) -> None:
     unit["spend_usd"] = _sum_opt(unit["spend_usd"], g.get("spend_usd"))
+    unit["spend_raw"] = _sum_opt(unit.get("spend_raw"), g.get("spend_usd"))
     unit["clicks"] += int(g.get("clicks") or 0)
     unit["impressions"] += int(g.get("impressions") or 0)
     unit["conversions"] = _sum_opt(unit["conversions"], g.get("conversions"))
@@ -471,7 +478,8 @@ def _build_population(start, end) -> dict:
                 "campaign_key": key,
                 "campaign_name": display,
                 "mapping_status": status,
-                "spend_usd": None, "clicks": 0, "impressions": 0,
+                "spend_usd": None, "spend_raw": None,
+                "clicks": 0, "impressions": 0,
                 "conversions": None, "row_count": 0,
                 "cost_micros": None,
                 "currency_codes": set(), "source_systems": set(),
@@ -693,10 +701,11 @@ def _audit_block(base, pop, *, coverage_status, pagination_complete=True,
         unit_row_sum = sum(u["row_count"] for u in units)
         row_recon = "pass" if unit_row_sum == int(source.get("row_count") or 0) \
             else "variance"
-        # Spend reconciliation: unit spend sum == deduplicated raw source total.
+        # Spend reconciliation: unit RAW spend sum (pre-FX) == deduplicated
+        # raw source total. Uses spend_raw to avoid FX-conversion variance.
         unit_spend = None
         for u in units:
-            unit_spend = _sum_opt(unit_spend, u["spend_usd"])
+            unit_spend = _sum_opt(unit_spend, u.get("spend_raw", u.get("spend_usd")))
         src_spend = source.get("spend_usd_total")
         if unit_spend is None and int(source.get("row_count") or 0) == 0:
             spend_recon = "pass"  # genuinely empty window
@@ -1025,7 +1034,8 @@ def build_search_term_drawer(window: str, term: str,
         unit = {
             "search_term": term, "campaign_key": None,
             "campaign_name": None, "mapping_status": "multiple",
-            "spend_usd": None, "clicks": 0, "impressions": 0,
+            "spend_usd": None, "spend_raw": None,
+            "clicks": 0, "impressions": 0,
             "conversions": None, "row_count": 0,
             "cost_micros": None, "currency_codes": set(), "source_systems": set(),
             "first_seen": None, "last_seen": None,

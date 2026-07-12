@@ -354,9 +354,9 @@ const PAGE_HELP_CONTENT = {
   },
   "search-terms": {
     what: "Search Terms + Patterns — the selected-window Search Term Universe with factual review states (Flagged waste = stored true · Reviewed clean = stored false · Needs review = not yet classified) and waste evidence, plus a Patterns tab of recurring 1–3-word phrases derived from the same terms.",
-    source: "Durable Google Ads API search-term rows totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound). Spend is reported search-term spend (stored USD at ingestion) — Google Ads does not report every query, so it is not total campaign spend. Reporting Coverage compares it against canonical campaign spend when FX-safe, as a completeness diagnostic only.",
+    source: "Durable Google Ads API search-term rows totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound). Spend is reported search-term spend in the account's native currency (e.g. GBP), FX-converted to USD using the same per-date rate doctrine as canonical campaign spend. When FX is incomplete or currency provenance is unproven, USD spend is withheld (Unavailable) and native spend is shown. Reporting Coverage compares FX-safe search-term USD against FX-safe canonical campaign USD — anything else returns Unavailable.",
     howToUse: "Pick an Evidence Window, filter by campaign, review state, junk category or minimum spend, and click any row to open its evidence drawer. Switch to Patterns for word-level analysis derived from the same selected-window terms; a term can appear in several patterns, so pattern-row spends overlap and must never be summed.",
-    doNotAssume: "Review states are classification facts, not business outcomes — Reviewed clean does not mean valuable, and a platform conversion is never a confirmed SQL, customer or closed-won deal. A flagged term is a human-review candidate, not an approved negative. Read-only: no negative keywords are added and nothing is written to Google Ads or HubSpot.",
+    doNotAssume: "Review states are classification facts, not business outcomes — Reviewed clean does not mean valuable, and a platform conversion is never a confirmed SQL, customer or closed-won deal. A flagged term is a human-review candidate, not an approved negative. Read-only: no negative keywords are added and nothing is written to Google Ads or HubSpot. The legacy spend_usd column in storage is NOT proven USD — it stores the raw cost_micros/1e6 value in the account's native currency.",
     checkNext: "Flagged Waste Terms for the flagged review queue, or Campaign Evidence for canonical spend and lead outcomes."
   },
   keywords: {
@@ -9033,6 +9033,19 @@ function stMoney(v) {
   });
 }
 
+function stSpendCell(row) {
+  // Currency-aware spend display: prefers USD, falls back to native with disclosure.
+  if (row.spend_usd !== null && row.spend_usd !== undefined) return stMoney(row.spend_usd);
+  if (row.spend_native !== null && row.spend_native !== undefined) {
+    const cur = row.native_currency || "?";
+    const val = Number(row.spend_native).toLocaleString(undefined, {
+      minimumFractionDigits: 2, maximumFractionDigits: 2,
+    });
+    return `<span title="USD unavailable — FX incomplete">${cur} ${val}</span>`;
+  }
+  return "—";
+}
+
 function stUnavailable() {
   return `<span class="detail-unavailable">Unavailable</span>`;
 }
@@ -9198,7 +9211,11 @@ function renderTermsKPIs(kpis) {
     stKpiCard("Reported Search-Term Spend",
       kpis.reported_spend_usd === null || kpis.reported_spend_usd === undefined
         ? stUnavailable() : stMoney(kpis.reported_spend_usd),
-      "Reported by Google Ads — not total account spend"),
+      kpis.currency_status === "proven" && kpis.fx_complete
+        ? "FX-converted to USD — reported by Google Ads"
+        : kpis.reported_spend_usd === null || kpis.reported_spend_usd === undefined
+          ? "USD unavailable — FX incomplete or currency unproven"
+          : "Reported by Google Ads — not total account spend"),
     stKpiCard("Clicks", val(kpis.clicks), ""),
     stKpiCard("Flagged Waste", val(kpis.flagged_waste), "Human-review candidates"),
     stKpiCard("Needs Review", val(kpis.needs_review), "Not yet classified"),
@@ -9302,7 +9319,7 @@ function renderTermsTable() {
       <td class="td--name st-td-term" data-label="Search Term">${escapeHtml(r.search_term)}</td>
       <td data-label="State">${stStateBadge(r.state)}</td>
       <td class="st-td-campaign" data-label="Campaign">${stCampaignCell(r)}</td>
-      <td class="td--num" data-label="Spend">${stMoney(r.spend_usd)}</td>
+      <td class="td--num" data-label="Spend">${stSpendCell(r)}</td>
       <td class="td--num" data-label="Clicks">${fmtCount(r.clicks)}</td>
       <td class="td--num" data-label="CPC">${stMoney(r.cpc_usd)}</td>
       <td class="td--num" data-label="Last Seen">${r.last_seen ? escapeHtml(r.last_seen) : "—"}</td>

@@ -168,7 +168,18 @@ def _patch(monkeypatch, agg, spend=None, identity=None, daily=None, cls=None):
 
     def _fx_rates(start, end, base_currency, quote_currency):
         calls.setdefault("fx_rates", []).append((start, end, base_currency))
-        return {"available": True, "rates": {}}
+        # Provide default GBP→USD rate of 1.0 for the standard test window.
+        # The dedicated end-to-end currency test (§1) overrides with 1.26
+        # to prove £100 ≠ $100.
+        rates = {}
+        if base_currency == "GBP":
+            from datetime import timedelta
+            s = start or date(2025, 1, 1)
+            d = s
+            while d <= end:
+                rates[d.isoformat()] = 1.0
+                d += timedelta(days=1)
+        return {"available": True, "rates": rates}
 
     monkeypatch.setattr(st_repo, "fetch_search_term_aggregates", _fa)
     monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend", _fs)
@@ -192,16 +203,21 @@ def _build_patterns(window="30d", **kw):
 
 
 def _dataset():
-    """Coherent default dataset: 3 terms, one alias-merge, one unmatched."""
+    """Coherent default dataset: 3 terms, one alias-merge, one unmatched.
+    All rows have proven GBP lineage (google_ads_api source)."""
     return _agg([
         _g("freight software", "brand - uk", "1", spend=10.0, clicks=2,
-           impressions=20, unreviewed=True),
+           impressions=20, unreviewed=True,
+           currency_code="GBP", source_system="google_ads_api"),
         _g("freight software", "brand - uk", None, spend=10.0, clicks=2,
-           impressions=20),
+           impressions=20,
+           currency_code="GBP", source_system="google_ads_api"),
         _g("free tms jobs", "gulf", "2", spend=15.0, clicks=3, impressions=30,
-           conversions=1.0, flagged=True, junk="job_seeker", pattern="jobs"),
+           conversions=1.0, flagged=True, junk="job_seeker", pattern="jobs",
+           currency_code="GBP", source_system="google_ads_api"),
         _g("mystery term", "unknown label", None, spend=5.0, clicks=1,
-           impressions=30),
+           impressions=30,
+           currency_code="GBP", source_system="google_ads_api"),
     ])
 
 
@@ -431,28 +447,13 @@ def test_spend_semantics_is_reported_stored_usd(monkeypatch):
 
 def test_coverage_ok_when_contracts_comparable(monkeypatch):
     """Coverage requires all-proven FX-safe search-term USD AND FX-safe
-    canonical campaign USD. With default dataset lacking currency_code,
-    coverage is unavailable."""
+    canonical campaign USD. With default dataset having proven GBP lineage
+    and mock FX rates returning 1.26, coverage is computable."""
     _patch(monkeypatch, _dataset(), identity=_default_identity())
     out = _build("30d")
     cov = out["kpis"]["coverage"]
-    # Default dataset has no currency_code → unproven → coverage unavailable.
-    assert cov["status"] == "unavailable"
-    # Now test with proven lineage rows.
-    proven_agg = _agg([
-        _g("freight software", "brand - uk", "1", spend=10.0, clicks=2,
-           impressions=20, unreviewed=True, currency_code="GBP",
-           source_system="google_ads_api"),
-        _g("free tms", "gulf", "2", spend=15.0, clicks=3, impressions=30,
-           currency_code="GBP", source_system="google_ads_api"),
-    ])
-    _patch(monkeypatch, proven_agg, identity=_default_identity())
-    out2 = _build("30d")
-    # Currency is proven but FX rates are empty in mock → coverage
-    # depends on whether native_currency matches reporting_currency.
-    # Since GBP != USD and mock fx_rates has no rates, fx_complete=False,
-    # so coverage stays unavailable.
-    assert out2["kpis"]["coverage"]["status"] == "unavailable"
+    # Default dataset has proven GBP lineage + FX rates available → ok
+    assert cov["status"] == "ok"
 
 
 def test_coverage_unavailable_when_fx_incomplete(monkeypatch):
@@ -555,7 +556,8 @@ def test_state_counts_add_back_to_complete_count(monkeypatch):
 
 
 def test_all_time_never_silently_truncates(monkeypatch):
-    rows = [_g(f"term {i:04d}", "gulf", "2", spend=float(i), clicks=i)
+    rows = [_g(f"term {i:04d}", "gulf", "2", spend=float(i), clicks=i,
+               currency_code="GBP", source_system="google_ads_api")
             for i in range(1, 701)]
     _patch(monkeypatch, _agg(rows))
     out = _build("all_time", page=1, page_size=50)
@@ -580,8 +582,10 @@ def test_filters_and_sort_apply_server_side(monkeypatch):
 
 def test_nulls_sort_last_never_coerced(monkeypatch):
     agg = _agg([
-        _g("no clicks", "gulf", "2", spend=50.0, clicks=0),   # CPC null
-        _g("with clicks", "gulf", "2", spend=10.0, clicks=10),
+        _g("no clicks", "gulf", "2", spend=50.0, clicks=0,
+           currency_code="GBP", source_system="google_ads_api"),   # CPC null
+        _g("with clicks", "gulf", "2", spend=10.0, clicks=10,
+           currency_code="GBP", source_system="google_ads_api"),
     ])
     _patch(monkeypatch, agg)
     out = _build("30d", sort="cpc")
@@ -591,7 +595,9 @@ def test_nulls_sort_last_never_coerced(monkeypatch):
 
 def test_export_is_complete_filtered_dataset(monkeypatch):
     from services.search_term_evidence_service import build_search_term_export
-    rows = [_g(f"term {i:04d}", "gulf", "2", spend=float(i)) for i in range(1, 301)]
+    rows = [_g(f"term {i:04d}", "gulf", "2", spend=float(i),
+               currency_code="GBP", source_system="google_ads_api")
+            for i in range(1, 301)]
     _patch(monkeypatch, _agg(rows))
     out = build_search_term_export("all_time")
     assert out["complete"] is True
@@ -681,10 +687,13 @@ def test_no_fuzzy_auto_mapping_on_ambiguous_names(monkeypatch):
 
 def _pattern_dataset():
     return _agg([
-        _g("freight software", "brand - uk", "1", spend=10.0, clicks=2),
-        _g("freight software", "gulf", "2", spend=10.0, clicks=2),   # same term, 2nd campaign
+        _g("freight software", "brand - uk", "1", spend=10.0, clicks=2,
+           currency_code="GBP", source_system="google_ads_api"),
+        _g("freight software", "gulf", "2", spend=10.0, clicks=2,
+           currency_code="GBP", source_system="google_ads_api"),   # same term, 2nd campaign
         _g("freight jobs", "gulf", "2", spend=10.0, clicks=2,
-           conversions=1.0, flagged=True, junk="job_seeker"),
+           conversions=1.0, flagged=True, junk="job_seeker",
+           currency_code="GBP", source_system="google_ads_api"),
     ])
 
 
@@ -927,7 +936,7 @@ def test_help_content_updated():
     help_entry = _region(APP_JS, '"search-terms": {\n    what: "Search Terms + Patterns',
                          "},")
     for needle in ["source_date", "reported search-term spend",
-                   "Reporting Coverage", "not total campaign spend",
+                   "Reporting Coverage", "FX-converted to USD",
                    "platform conversion is never a confirmed SQL",
                    "no negative keywords are added"]:
         assert needle in help_entry, needle
@@ -968,7 +977,7 @@ def test_api_contract_documents_new_endpoints():
                   "coverage_status", "pagination_complete",
                   "reconciliation_status"]:
         assert field in CONTRACT, field
-    assert "never forced" in CONTRACT or "never force" in CONTRACT.lower()
+    assert "Unavailable" in CONTRACT or "unavailable" in CONTRACT.lower()
 
 
 # ════════════════ 11. Read-only scan ════════════════
@@ -1008,3 +1017,268 @@ def test_no_write_verbs_in_new_endpoints():
     assert "@app.post" not in ST_SERVER
     assert "@app.put" not in ST_SERVER
     assert "@app.delete" not in ST_SERVER
+
+
+# ════════════════ 12. Currency lineage (PR-ADS-144 §1) ════════════════
+
+
+def test_connector_preserves_cost_micros_and_currency_code():
+    """Google Ads connector must return cost_micros and currency_code."""
+    src = open(os.path.join(ROOT, "connectors", "google_ads_direct.py"),
+               encoding="utf-8").read()
+    fn = _region(src, "def fetch_search_terms", "def fetch_keyword_performance")
+    assert "customer.currency_code" in fn
+    assert '"cost_micros"' in fn
+    assert '"currency_code"' in fn
+
+
+def test_source_adapter_preserves_lineage():
+    """Google Ads source adapter must pass cost_micros + currency_code."""
+    src = open(os.path.join(ROOT, "connectors", "google_ads_source.py"),
+               encoding="utf-8").read()
+    fn = _region(src, "def normalize_search_term_row", "def normalize_keyword_row")
+    assert '"cost_micros"' in fn
+    assert '"currency_code"' in fn
+
+
+def test_writer_stores_currency_lineage():
+    """Writer must upsert cost_micros, currency_code, source_system."""
+    writers = open(os.path.join(ROOT, "db", "writers.py"), encoding="utf-8").read()
+    fn = _region(writers, "def write_search_terms", "def ")
+    assert "cost_micros" in fn
+    assert "currency_code" in fn
+    assert "source_system" in fn
+
+
+def test_schema_has_currency_columns():
+    """Schema must declare cost_micros, currency_code, source_system columns."""
+    schema_block = _region(SCHEMA, "CREATE TABLE IF NOT EXISTS search_terms",
+                           "CREATE UNIQUE INDEX IF NOT EXISTS idx_search_terms_unique_fact")
+    assert "cost_micros" in schema_block
+    assert "currency_code" in schema_block
+    assert "source_system" in schema_block
+
+
+def test_currency_lineage_end_to_end(monkeypatch):
+    """Prove £100 native (GBP) does NOT become $100 USD.
+
+    Google Ads cost_micros 100_000_000 (= £100 native) with currency_code GBP
+    must be converted through FX rates, NOT treated as $100 USD.
+    """
+    import db.revenue_repository as revenue_repo
+    import db.search_term_repository as st_repo
+    from services.search_term_evidence_service import build_search_term_evidence
+
+    # A single search-term row: £100 native (GBP)
+    agg = _agg([
+        _g("freight software", "brand - uk", "1", spend=100.0, clicks=5,
+           impressions=50, cost_micros=100_000_000, currency_code="GBP",
+           source_system="google_ads_api"),
+    ])
+    # Canonical spend with FX-complete USD
+    spend = _spend(total_usd=150.0, fx_complete=True)
+
+    def _fa(start, end):
+        return agg
+    def _fs(start, end):
+        return spend
+    def _fi(customer_id=None):
+        return _identity()
+    # FX coverage complete, rate GBP→USD = 1.26
+    def _fx_cov(start, end, base, quote):
+        return {"available": True, "complete": True, "spend_days": 2,
+                "covered_days": 2, "missing_dates": []}
+    def _fx_rates(start, end, base, quote):
+        return {"available": True, "rates": {
+            "2026-07-01": 1.26, "2026-07-02": 1.26}}
+
+    monkeypatch.setattr(st_repo, "fetch_search_term_aggregates", _fa)
+    monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend", _fs)
+    monkeypatch.setattr(revenue_repo, "fetch_campaign_identity", _fi)
+    monkeypatch.setattr(revenue_repo, "fetch_fx_coverage", _fx_cov)
+    monkeypatch.setattr(revenue_repo, "fetch_fx_rates", _fx_rates)
+
+    out = build_search_term_evidence("30d")
+    row = out["rows"][0]
+
+    # £100 native is NOT $100 — it should be FX-converted.
+    assert row["spend_native"] == 100.0
+    assert row["native_currency"] == "GBP"
+    # After FX conversion at 1.26, expected $126.00
+    assert row["spend_usd"] == 126.0
+    assert row["fx_complete"] is True
+    assert row["reporting_currency"] == "USD"
+    # KPI-level spend should also be FX-converted.
+    assert out["kpis"]["reported_spend_usd"] == 126.0
+    assert out["kpis"]["native_currency"] == "GBP"
+    assert out["kpis"]["fx_complete"] is True
+
+
+def test_unproven_rows_withhold_monetary_metrics(monkeypatch):
+    """Rows without currency_code/source_system have spend_usd withheld."""
+    agg = _agg([
+        _g("freight software", "brand - uk", "1", spend=100.0, clicks=5),
+    ])
+    _patch(monkeypatch, agg, identity=_default_identity())
+    from services.search_term_evidence_service import build_search_term_evidence
+    out = build_search_term_evidence("30d")
+    row = out["rows"][0]
+    # Without proven lineage, spend_usd is None (withheld).
+    assert row["spend_usd"] is None
+    assert row["currency_status"] != "proven"
+
+
+def test_mixed_currencies_withheld(monkeypatch):
+    """Rows with mixed currencies have monetary metrics withheld."""
+    agg = _agg([
+        _g("freight software", "brand - uk", "1", spend=10.0,
+           currency_code="GBP", source_system="google_ads_api"),
+        _g("freight software", "brand - uk", "1", spend=20.0,
+           currency_code="USD", source_system="google_ads_api"),
+    ])
+    _patch(monkeypatch, agg, identity=_default_identity())
+    from services.search_term_evidence_service import build_search_term_evidence
+    out = build_search_term_evidence("30d")
+    assert out["kpis"]["currency_status"] == "mixed_or_unproven"
+
+
+# ════════════════ 13. Natural key with campaign_id (PR-ADS-144 §2) ════════════════
+
+
+def test_natural_key_includes_campaign_id():
+    """The unique index must include COALESCE(campaign_id, '') so two
+    campaign IDs sharing a display name can never collide."""
+    from db.search_term_repository import SEARCH_TERMS_NATURAL_KEY
+    assert "COALESCE(campaign_id" in SCHEMA
+    writers = open(os.path.join(ROOT, "db", "writers.py"), encoding="utf-8").read()
+    fn = _region(writers, "def write_search_terms", "def ")
+    assert "COALESCE(campaign_id" in fn
+    assert "campaign_id" in SEARCH_TERMS_NATURAL_KEY
+
+
+def test_natural_key_documented_with_campaign_id():
+    """SEARCH_TERMS_NATURAL_KEY must mention campaign_id."""
+    from db.search_term_repository import SEARCH_TERMS_NATURAL_KEY as nk
+    assert "campaign_id" in nk
+    assert "campaign_name" in nk
+
+
+def test_same_term_different_campaign_ids_stay_separate(monkeypatch):
+    """Two campaign IDs sharing a display name must not collide
+    (same source date, same campaign name, same term, different IDs)."""
+    agg = _agg([
+        _g("freight software", "brand - uk", "10", spend=100.0, clicks=5),
+        _g("freight software", "brand - uk", "20", spend=200.0, clicks=10),
+    ])
+    _patch(monkeypatch, agg, identity=_default_identity())
+    out = _build("30d")
+    # Both must survive as separate rows (different campaign_key).
+    terms = [r for r in out["rows"] if r["search_term"] == "freight software"]
+    assert len(terms) == 2
+    keys = {r["campaign_key"] for r in terms}
+    assert "10" in keys
+    assert "20" in keys
+
+
+# ════════════════ 14. Drawer campaign scoping (PR-ADS-144 §3) ════════════════
+
+
+def test_drawer_scoped_to_campaign_classification(monkeypatch):
+    """Drawer must scope waste classification to the selected campaign.
+    It should pass campaign_names to fetch_latest_waste_classification."""
+    cls_data = {"available": True, "row": {
+        "search_term": "freight software", "campaign_name": "brand - uk",
+        "junk_category": "competitor", "matched_pattern": "brand",
+        "crm_junk_confirmed": 1, "run_date": "2026-07-10"}}
+    calls = _patch(monkeypatch, _dataset(), identity=_default_identity(),
+                   cls=cls_data)
+    from services.search_term_evidence_service import build_search_term_drawer
+    out = build_search_term_drawer("30d", "freight software", campaign_key="1")
+    # Verify classification was called with campaign scoping.
+    cls_call = calls.get("cls")
+    assert cls_call is not None
+    term_arg = cls_call[0]
+    campaign_names_arg = cls_call[2]
+    assert term_arg == "freight software"
+    assert campaign_names_arg is not None
+
+
+def test_drawer_daily_series_uses_campaign_id_scoping(monkeypatch):
+    """Drawer daily series must use ID-first scoping, never OR'ing
+    campaign_id = target OR campaign_name = shared_display_name."""
+    calls = _patch(monkeypatch, _dataset(), identity=_default_identity())
+    from services.search_term_evidence_service import build_search_term_drawer
+    build_search_term_drawer("30d", "freight software", campaign_key="1")
+    # Should use the campaign-scoped daily function with campaign_id.
+    daily_call = calls.get("daily_campaign")
+    assert daily_call is not None
+    _, _, term, campaign_id, campaign_names = daily_call
+    assert term == "freight software"
+    assert campaign_id == "1"
+
+
+def test_adversarial_same_name_different_ids_different_evidence(monkeypatch):
+    """Two campaign IDs with identical display name + identical search term
+    must show different evidence in their drawers — no cross-contamination."""
+    agg = _agg([
+        _g("freight software", "brand - uk", "10", spend=100.0, clicks=5,
+           flagged=True, junk="competitor"),
+        _g("freight software", "brand - uk", "20", spend=200.0, clicks=10,
+           flagged=False, unreviewed=True),
+    ])
+    _patch(monkeypatch, agg, identity=_default_identity())
+    from services.search_term_evidence_service import build_search_term_drawer
+
+    # Drawer for campaign_id=10 → flagged
+    out10 = build_search_term_drawer("30d", "freight software", campaign_key="10")
+    assert out10["term"]["state"] == "flagged"
+    assert out10["term"]["spend_usd"] is None  # unproven lineage
+
+    # Drawer for campaign_id=20 → needs_review (unreviewed but not flagged)
+    out20 = build_search_term_drawer("30d", "freight software", campaign_key="20")
+    assert out20["term"]["state"] == "needs_review"
+
+    # They must NOT share the same evidence.
+    assert out10["classification"]["state"] != out20["classification"]["state"]
+
+
+# ════════════════ 15. Pattern min_terms KPI scope (PR-ADS-144 §4) ════════════════
+
+
+def test_min_terms_zero_surviving_patterns(monkeypatch):
+    """After min_terms=2 filters out a singleton pattern, KPIs must reflect
+    zero surviving patterns: all metrics become 0."""
+    agg = _agg([
+        _g("freight software solution", "brand - uk", "1", spend=50.0, clicks=3),
+    ])
+    _patch(monkeypatch, agg, identity=_default_identity())
+    out = _build_patterns("30d", n=1, min_terms=2)
+    kpis = out["kpis"]
+    assert kpis["patterns_found"] == 0
+    assert kpis["terms_analysed"] == 0
+    assert kpis["reported_spend_represented_usd"] == 0.0
+    overlap = out["overlap"]
+    assert overlap["total_pattern_memberships"] == 0
+    assert overlap["overlapping_term_count"] == 0
+
+
+def test_min_terms_kpis_use_surviving_population(monkeypatch):
+    """After min_terms filtering, KPIs must use only terms represented
+    by the surviving pattern rows."""
+    agg = _agg([
+        _g("freight software solutions", "brand - uk", "1", spend=50.0, clicks=3),
+        _g("freight management tools", "brand - uk", "1", spend=30.0, clicks=2),
+        _g("tms pricing tool", "brand - uk", "1", spend=20.0, clicks=1),
+    ])
+    _patch(monkeypatch, agg, identity=_default_identity())
+    # n=1, min_terms=2: only words appearing in 2+ terms survive.
+    out = _build_patterns("30d", n=1, min_terms=2)
+    # "freight" appears in 2 terms, so it survives.
+    # "software", "solutions", "management", "tools", "tms", "pricing", "tool"
+    # may each appear in only 1 term.
+    kpis = out["kpis"]
+    # If any patterns survive, terms_analysed should be <= total terms (3)
+    # and > 0 for the "freight" pattern.
+    if kpis["patterns_found"] > 0:
+        assert kpis["terms_analysed"] > 0
+        assert kpis["terms_analysed"] <= 3

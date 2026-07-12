@@ -1543,7 +1543,9 @@ server-side filtering / sorting / pagination and complete-population KPIs.
     "campaign_name": "Brand - UK", "mapping_status": "mapped|unmatched|not_google_ads",
     "aliases": ["brand - uk"],
     "state": "flagged|clean|needs_review",   // tri-state is_flagged_waste truth
-    "spend_usd": 20.0, "clicks": 4, "impressions": 40,
+    "spend_usd": 20.0, "spend_native": 15.87, "native_currency": "GBP",
+    "fx_complete": true, "currency_status": "proven",
+    "clicks": 4, "impressions": 40,
     "conversions": 0.0,                      // platform evidence only — not an SQL
     "cpc_usd": 5.0, "first_seen": "2026-07-01", "last_seen": "2026-07-02",
     "junk_categories": [], "matched_patterns": [], "source_rows": 2
@@ -1560,12 +1562,12 @@ server-side filtering / sorting / pagination and complete-population KPIs.
     "date_field": "source_date",
     "window_start": "2026-06-13", "window_end": "2026-07-12", "all_time": false,
     "account_timezone": "Europe/London",
-    "currency_semantics": "stored_usd_reported: …",   // spend_usd only; no FX reconstruction
-    "deduplication_key": "source_date + COALESCE(campaign_name,'') + COALESCE(ad_group,'') + COALESCE(keyword,'') + COALESCE(match_type,'') + search_term (UNIQUE index idx_search_terms_unique_fact; writer upserts ON CONFLICT)",
+    "currency_semantics": "fx_converted: search_terms stores cost_micros (native account currency) + currency_code + source_system; FX-converted to USD per-row using the same per-date FX doctrine as canonical campaign spend",
+    "deduplication_key": "source_date + COALESCE(campaign_name,'') + COALESCE(campaign_id,'') + COALESCE(ad_group,'') + COALESCE(keyword,'') + COALESCE(match_type,'') + search_term (UNIQUE index idx_search_terms_unique_fact; writer upserts ON CONFLICT)",
     "classification_semantics": "is_flagged_waste tri-state: …",
     "campaign_identity_status": "available|unavailable",
     "canonical_spend_source": "google_ads_campaign_daily_spend (canonical)",
-    "search_term_spend_source": "search_terms.spend_usd (reported, stored USD)",
+    "search_term_spend_source": "search_terms.cost_micros (native account currency, FX-converted to USD)",
     "coverage_status": "ok|unavailable",
     "pagination_complete": true,               // KPIs use the complete population
     "reconciliation_status": "pass|variance|unavailable",
@@ -1581,16 +1583,22 @@ server-side filtering / sorting / pagination and complete-population KPIs.
 **Truth contract**
 
 - **Duplication:** the `search_terms` table enforces a UNIQUE natural key
-  (`source_date`, `campaign_name`, `ad_group`, `keyword`, `match_type`,
-  `search_term`) and the writer upserts ON CONFLICT on that key, so a repeated
-  scheduler run can never multiply a term/day/campaign fact. The audit block
-  re-proves this per request (`source_row_reconciliation`,
+  (`source_date`, `campaign_name`, `campaign_id`, `ad_group`, `keyword`,
+  `match_type`, `search_term`) and the writer upserts ON CONFLICT on that key,
+  so a repeated scheduler run can never multiply a term/day/campaign fact. The
+  audit block re-proves this per request (`source_row_reconciliation`,
   `spend_reconciliation`).
-- **Currency:** the table durably stores `spend_usd` only. Spend is *reported
-  search-term spend in stored USD* — never re-derived through spot FX, never
-  presented as canonical account spend, and coverage is `unavailable` whenever
-  the canonical USD total is not FX-safe. Coverage is a completeness
-  diagnostic; the two contracts are never forced to reconcile.
+- **Currency:** the table durably stores `cost_micros` (native account currency
+  from Google Ads `metrics.cost_micros`) plus `currency_code` and
+  `source_system` provenance. The evidence service converts to USD using the
+  per-date FX rate (same doctrine as canonical campaign spend). The legacy
+  `spend_usd` column contains `cost_micros / 1_000_000` — this is the native
+  account currency value, NOT proven USD. When FX is incomplete or currency
+  provenance is unproven, `spend_usd`, `cpc_usd`, and coverage are withheld
+  (`null` / `Unavailable`) — native spend (`spend_native`, `native_currency`)
+  is still returned. Coverage compares only FX-safe selected-window
+  search-term USD against FX-safe canonical USD; anything else returns
+  `Unavailable`.
 - **Classification:** `is_flagged_waste` true → `flagged` (Flagged waste,
   human-review candidate), false → `clean` (Reviewed clean — never renamed
   "valuable"), NULL → `needs_review`. Platform conversions never change the
