@@ -9203,10 +9203,14 @@ function renderTermsKPIs(kpis) {
     stKpiCard("Flagged Waste", val(kpis.flagged_waste), "Human-review candidates"),
     stKpiCard("Needs Review", val(kpis.needs_review), "Not yet classified"),
   ];
-  if (coverage.status === "ok" && coverage.coverage_pct !== null && coverage.coverage_pct !== undefined) {
+  // Coverage is a WINDOW-LEVEL source-completeness diagnostic — it does not
+  // narrow with the row filters, so showing it next to filtered KPIs would be
+  // internally inconsistent. Hide the card whenever filters are active.
+  if (coverage.status === "ok" && coverage.coverage_pct !== null &&
+      coverage.coverage_pct !== undefined && !stHasActiveFilters()) {
     cards.push(stKpiCard("Reporting Coverage",
       `${Number(coverage.coverage_pct).toFixed(1)}%`,
-      `Search-term reporting coverage of ${stMoney(coverage.canonical_spend_usd)} canonical spend`));
+      `Search-term reporting coverage of ${stMoney(coverage.canonical_spend_usd)} canonical spend (whole window)`));
   }
   return `<div class="evidence-kpi-grid st-kpi-grid">${cards.join("")}</div>`;
 }

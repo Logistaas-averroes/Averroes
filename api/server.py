@@ -4223,9 +4223,11 @@ def api_search_terms_ngrams(
 # ---------------------------------------------------------------------------
 
 
-def _search_term_evidence_call(window: str, builder, *args, **kwargs):
-    """Shared error contract: 400 for unknown window / invalid params, a
-    consistent db-unavailable shape (never a raw 500) for anything else."""
+def _search_term_evidence_call(window: str, builder, *args, fallback=None, **kwargs):
+    """Shared error contract: 400 for unknown window / invalid params, an
+    ENDPOINT-APPROPRIATE db-unavailable shape (never a raw 500) for anything
+    else. ``fallback`` is the unavailable_* builder matching the endpoint's
+    documented response shape (defaults to the Terms shape)."""
     from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
     from services.search_term_evidence_service import (  # noqa: PLC0415
         SearchTermQueryError, unavailable_terms_response,
@@ -4236,7 +4238,7 @@ def _search_term_evidence_call(window: str, builder, *args, **kwargs):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         log.error("[api/search-term-evidence] error: %s", exc, exc_info=True)
-        return unavailable_terms_response(window)
+        return (fallback or unavailable_terms_response)(window)
 
 
 @app.get("/api/search-term-evidence")
@@ -4283,9 +4285,12 @@ def api_search_term_evidence_term(
     campaign/matching context, classification proof, platform conversions as
     secondary evidence and a source-date daily series (reported dates only —
     missing dates are never fabricated as zero). Requires auth. Read-only."""
-    from services.search_term_evidence_service import build_search_term_drawer  # noqa: PLC0415
+    from services.search_term_evidence_service import (  # noqa: PLC0415
+        build_search_term_drawer, unavailable_term_drawer_response,
+    )
     return _search_term_evidence_call(
-        window, build_search_term_drawer, window, term, campaign_key=campaign_key)
+        window, build_search_term_drawer, window, term, campaign_key=campaign_key,
+        fallback=unavailable_term_drawer_response)
 
 
 @app.get("/api/search-term-evidence/patterns")
@@ -4306,11 +4311,14 @@ def api_search_term_evidence_patterns(
     deduplicated Search Term Universe (PR-ADS-144). Pattern KPI totals use
     UNIQUE underlying terms; overlapping pattern rows are disclosed and never
     summed into an account total. Requires auth. Read-only."""
-    from services.search_term_evidence_service import build_search_pattern_evidence  # noqa: PLC0415
+    from services.search_term_evidence_service import (  # noqa: PLC0415
+        build_search_pattern_evidence, unavailable_patterns_response,
+    )
     return _search_term_evidence_call(
         window, build_search_pattern_evidence, window, n=n, q=q,
         campaign=campaign, state=state, min_spend=min_spend,
-        min_terms=min_terms, sort=sort, limit=limit)
+        min_terms=min_terms, sort=sort, limit=limit,
+        fallback=unavailable_patterns_response)
 
 
 @app.get("/api/search-term-evidence/patterns/detail")
@@ -4329,10 +4337,13 @@ def api_search_term_evidence_pattern_detail(
     flagged/clean/needs-review split and unique-term totals (a term is never
     totalled twice for appearing in multiple campaigns or positions).
     Requires auth. Read-only."""
-    from services.search_term_evidence_service import build_search_pattern_drawer  # noqa: PLC0415
+    from services.search_term_evidence_service import (  # noqa: PLC0415
+        build_search_pattern_drawer, unavailable_pattern_drawer_response,
+    )
     return _search_term_evidence_call(
         window, build_search_pattern_drawer, window, pattern, n, q=q,
-        campaign=campaign, state=state, min_spend=min_spend)
+        campaign=campaign, state=state, min_spend=min_spend,
+        fallback=unavailable_pattern_drawer_response)
 
 
 @app.get("/api/search-term-evidence/export")

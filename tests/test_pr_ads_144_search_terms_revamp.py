@@ -438,6 +438,35 @@ def test_ui_never_labels_search_term_spend_as_account_spend():
     assert "Search-term reporting coverage" in ST_MODULE
 
 
+def test_coverage_card_hidden_when_filters_active():
+    # Coverage is a window-level source diagnostic — it must not sit beside
+    # filtered KPIs as if it narrowed with them (Copilot review, PR #144).
+    kpi_fn = _region(ST_MODULE, "function renderTermsKPIs", "function stCampaignOptions")
+    assert "!stHasActiveFilters()" in kpi_fn
+
+
+def test_last_resort_fallbacks_match_endpoint_shapes():
+    # Each endpoint's generic-exception fallback must return ITS documented
+    # shape, not the Terms shape (Copilot review, PR #144).
+    from services.search_term_evidence_service import (
+        unavailable_pattern_drawer_response, unavailable_patterns_response,
+        unavailable_term_drawer_response, unavailable_terms_response)
+    terms = unavailable_terms_response("30d")
+    assert terms["db_unavailable"] is True and "rows" in terms and "kpis" in terms
+    drawer = unavailable_term_drawer_response("30d")
+    assert drawer["db_unavailable"] is True and drawer["term"] is None
+    pats = unavailable_patterns_response("30d")
+    assert pats["db_unavailable"] is True
+    assert pats["kpis"]["patterns_found"] is None and pats["rows"] == []
+    assert "overlap" in pats and "audit" in pats
+    pd = unavailable_pattern_drawer_response("30d")
+    assert pd["db_unavailable"] is True and pd["pattern"] is None and pd["terms"] == []
+    # The server wires each endpoint to its own fallback.
+    for name in ["unavailable_term_drawer_response", "unavailable_patterns_response",
+                 "unavailable_pattern_drawer_response"]:
+        assert f"fallback={name}" in ST_SERVER, name
+
+
 def test_db_unavailable_stays_unavailable_not_zero(monkeypatch):
     _patch(monkeypatch, _agg([], available=False))
     out = _build("30d")

@@ -630,30 +630,69 @@ def build_search_term_evidence(window: str, *, page: int = 1,
     }
 
 
-def unavailable_terms_response(window: str, now: datetime | None = None) -> dict:
-    """Last-resort consistent db-unavailable payload for the HTTP handler —
-    same shape as a live response, every metric None (never a fabricated 0)."""
+def _safe_base(window: str, now: datetime | None = None) -> dict:
+    """Base fields for a last-resort unavailable payload — tolerates an
+    unknown/unresolvable window (the handler only reaches this on unexpected
+    errors, never as a substitute for the 400 path)."""
     try:
         _, _, base = _base(window, now)
+        return base
     except Exception:  # noqa: BLE001 - unknown/unresolvable window
-        base = {"window": window if isinstance(window, str) else "30d",
+        return {"window": window if isinstance(window, str) else "30d",
                 "window_start": None, "window_end": None,
                 "all_time": window == "all_time",
                 "generated_at": (now or datetime.now(tz=timezone.utc))
                 .strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "spend_semantics": SPEND_SEMANTICS, "reporting_currency": "USD"}
-    unavailable_pop = {"available": False, "units": [], "source": {},
-                       "identity_available": False,
-                       "canonical": {"available": False}, "aliases_by_id": {}}
+
+
+_UNAVAILABLE_POP = {"available": False, "units": [], "source": {},
+                    "identity_available": False,
+                    "canonical": {"available": False}, "aliases_by_id": {}}
+
+
+def unavailable_terms_response(window: str, now: datetime | None = None) -> dict:
+    """Last-resort consistent db-unavailable payload for the Terms endpoint —
+    same shape as a live response, every metric None (never a fabricated 0)."""
+    base = _safe_base(window, now)
     return {
         **base, "db_unavailable": True, "kpis": _empty_kpis(), "rows": [],
         "pagination": {"total_count": None, "returned_count": 0, "page": 1,
                        "page_size": DEFAULT_PAGE_SIZE, "has_more": False},
         "facets": {"campaigns": [], "junk_categories": []},
         "filters": _echo_filters(None, None, None, None, None, "spend"),
-        "audit": _audit_block(base, unavailable_pop,
+        "audit": _audit_block(base, _UNAVAILABLE_POP,
                               coverage_status="unavailable"),
     }
+
+
+def unavailable_term_drawer_response(window: str, now: datetime | None = None) -> dict:
+    """Last-resort db-unavailable payload matching the term-drawer shape."""
+    return {**_safe_base(window, now), "db_unavailable": True, "term": None}
+
+
+def unavailable_patterns_response(window: str, now: datetime | None = None) -> dict:
+    """Last-resort db-unavailable payload matching the Patterns endpoint shape."""
+    base = _safe_base(window, now)
+    return {
+        **base, "db_unavailable": True, "rows": [],
+        "kpis": {"patterns_found": None, "terms_analysed": None,
+                 "patterns_with_flagged": None, "patterns_needing_review": None,
+                 "reported_spend_represented_usd": None},
+        "overlap": _overlap_meta(None, None, None),
+        "pagination": {"total_count": None, "returned_count": 0,
+                       "limit": DEFAULT_PATTERN_LIMIT, "has_more": False},
+        "filters": _echo_pattern_filters(1, None, None, None, None, None, "spend"),
+        "facets": {"campaigns": []},
+        "audit": _audit_block(base, _UNAVAILABLE_POP,
+                              coverage_status="unavailable"),
+    }
+
+
+def unavailable_pattern_drawer_response(window: str, now: datetime | None = None) -> dict:
+    """Last-resort db-unavailable payload matching the pattern-drawer shape."""
+    return {**_safe_base(window, now), "db_unavailable": True,
+            "pattern": None, "terms": []}
 
 
 def _empty_kpis() -> dict:

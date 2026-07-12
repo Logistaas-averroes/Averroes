@@ -153,8 +153,11 @@ def test_search_terms_has_tabs():
     assert page_match, "Could not find page-search-terms section"
     assert 'id="search-terms-shell"' in page_match.group(0)
     js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
-    shell = js[js.find("function renderSearchTermsShell"):]
-    shell = shell[:shell.find("function stActivateTab")]
+    start = js.find("function renderSearchTermsShell")
+    assert start != -1, "renderSearchTermsShell not found in app.js"
+    end = js.find("function stActivateTab", start)
+    assert end != -1, "stActivateTab not found after renderSearchTermsShell"
+    shell = js[start:end]
     assert 'id="tab-btn-terms"' in shell, "Missing Terms tab button"
     assert 'id="tab-btn-patterns"' in shell, "Missing Patterns tab button"
     assert 'data-tab="patterns"' in shell
