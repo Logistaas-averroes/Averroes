@@ -649,9 +649,16 @@ def write_search_terms(
 ) -> int:
     """Upsert raw search-term fact rows into the search_terms table.
 
-    Accepts rows from pull_search_terms() (windsor connector format).
+    Accepts rows from pull_search_terms() (windsor connector format) or from
+    the Google Ads direct connector (with cost_micros + currency_code).
     Preserves existing is_flagged_waste / junk_category / matched_pattern on
     conflict — raw write is NOT allowed to override waste classifications.
+
+    Currency lineage (PR-ADS-144):
+      When cost_micros and currency_code are present in the input row, they are
+      stored durably so the evidence service can perform per-date FX conversion.
+      source_system is inferred from the input row (``source`` field) and
+      defaults to ``"unknown"`` for legacy rows.
 
     Returns count of inserted/updated rows.
     Returns 0 safely for empty input or DB unavailable.
@@ -716,6 +723,12 @@ def write_search_terms(
         impressions = int(_int_or_none(raw.get("impressions")) or 0)
         conversions = float(_float_or_none(raw.get("conversions")) or 0)
 
+        # ── Currency lineage (PR-ADS-144) ────────────────────────────────
+        cost_micros_raw = raw.get("cost_micros")
+        cost_micros = int(cost_micros_raw) if cost_micros_raw is not None else None
+        currency_code = raw.get("currency_code") or None
+        source_system = raw.get("source") or None
+
         rows.append((
             run_id,
             source_date,
@@ -729,6 +742,9 @@ def write_search_terms(
             clicks,
             impressions,
             conversions,
+            cost_micros,
+            currency_code,
+            source_system,
             sync_batch_id,
         ))
 
@@ -754,11 +770,13 @@ def write_search_terms(
             run_id, source_date, campaign_name, campaign_id,
             ad_group, keyword, match_type, search_term,
             spend_usd, clicks, impressions, conversions,
+            cost_micros, currency_code, source_system,
             sync_batch_id
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (
             source_date,
             COALESCE(campaign_name, ''),
+            COALESCE(campaign_id,   ''),
             COALESCE(ad_group,      ''),
             COALESCE(keyword,       ''),
             COALESCE(match_type,    ''),
@@ -771,6 +789,12 @@ def write_search_terms(
             clicks        = EXCLUDED.clicks,
             impressions   = EXCLUDED.impressions,
             conversions   = EXCLUDED.conversions,
+            cost_micros   = COALESCE(EXCLUDED.cost_micros,
+                                     search_terms.cost_micros),
+            currency_code = COALESCE(EXCLUDED.currency_code,
+                                     search_terms.currency_code),
+            source_system = COALESCE(EXCLUDED.source_system,
+                                     search_terms.source_system),
             campaign_id   = COALESCE(EXCLUDED.campaign_id,
                                      search_terms.campaign_id),
             updated_at    = NOW()

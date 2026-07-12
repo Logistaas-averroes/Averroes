@@ -138,17 +138,24 @@ def normalize_search_term_row(row: dict) -> dict | None:
 
     Input fields (from fetch_search_terms):
         date, campaign_id, campaign_name, ad_group_id, ad_group_name,
-        search_term, impressions, clicks, spend, conversions
+        search_term, impressions, clicks, cost_micros, spend,
+        currency_code, conversions
 
     Output fields:
         date, search_term, campaign, campaign_id (str), ad_group,
-        ad_group_id (str), impressions, clicks, spend, conversions,
-        source="google_ads_api"
+        ad_group_id (str), impressions, clicks, cost_micros, spend,
+        currency_code, conversions, source="google_ads_api"
 
     Field discipline:
         The internal contract requires the field to be named exactly
         ``search_term``.  Do NOT rename to query / search_query /
         search_term_text.
+
+    Currency lineage (PR-ADS-144):
+        ``cost_micros`` and ``currency_code`` are preserved from the Google
+        Ads response so the writer can store durable native-currency
+        provenance. ``spend`` remains the legacy cost_micros/1e6 value; the
+        writer stores it alongside cost_micros for backward compatibility.
     """
     search_term = row.get("search_term") or ""
     if not search_term.strip():
@@ -163,7 +170,9 @@ def normalize_search_term_row(row: dict) -> dict | None:
         "ad_group_id": normalize_id(row.get("ad_group_id")),
         "impressions": row.get("impressions", 0) or 0,
         "clicks": row.get("clicks", 0) or 0,
+        "cost_micros": row.get("cost_micros"),
         "spend": row.get("spend", 0.0) or 0.0,
+        "currency_code": row.get("currency_code"),
         "conversions": row.get("conversions", 0.0) or 0.0,
         "source": _SOURCE,
     }

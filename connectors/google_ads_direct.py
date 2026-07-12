@@ -219,7 +219,7 @@ def fetch_campaign_performance(start_date: str, end_date: str) -> list:
 
 
 def fetch_search_terms(start_date: str, end_date: str) -> list:
-    """Fetch search term view performance.
+    """Fetch search term view performance with raw currency lineage.
 
     Args:
         start_date: ISO date string (YYYY-MM-DD), inclusive.
@@ -227,6 +227,9 @@ def fetch_search_terms(start_date: str, end_date: str) -> list:
 
     Returns:
         List of dicts with search term performance data.
+        Each row includes raw ``cost_micros`` and ``currency_code`` from
+        ``customer.currency_code`` so the downstream writer can persist
+        the durable native-currency lineage required by PR-ADS-144.
         Read-only. Does not mutate any Google Ads resource.
     """
     client = build_google_ads_client()
@@ -243,7 +246,8 @@ def fetch_search_terms(start_date: str, end_date: str) -> list:
           metrics.impressions,
           metrics.clicks,
           metrics.cost_micros,
-          metrics.conversions
+          metrics.conversions,
+          customer.currency_code
         FROM search_term_view
         WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
         ORDER BY segments.date DESC
@@ -252,6 +256,7 @@ def fetch_search_terms(start_date: str, end_date: str) -> list:
     rows = _run_search_stream(client, customer_id, query)
     result = []
     for row in rows:
+        cost_micros = row.metrics.cost_micros
         result.append({
             "date": row.segments.date,
             "campaign_id": row.campaign.id,
@@ -261,8 +266,9 @@ def fetch_search_terms(start_date: str, end_date: str) -> list:
             "search_term": row.search_term_view.search_term,
             "impressions": row.metrics.impressions,
             "clicks": row.metrics.clicks,
-            "cost_micros": row.metrics.cost_micros,
-            "spend": round(row.metrics.cost_micros / 1_000_000, 6),
+            "cost_micros": cost_micros,
+            "spend": round(cost_micros / 1_000_000, 6),
+            "currency_code": row.customer.currency_code,
             "conversions": row.metrics.conversions,
         })
     logger.info(

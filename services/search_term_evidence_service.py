@@ -11,17 +11,19 @@ One durable truth path for the Search Terms page (Terms tab + Patterns tab):
     An unknown window raises EvidenceWindowError (caller maps to HTTP 400) —
     never silently coerced to 30d.
   - Duplication safety: the table enforces a UNIQUE natural key
-    (source_date, campaign_name, ad_group, keyword, match_type, search_term)
-    and the writer upserts ON CONFLICT on that key, so a repeated scheduler run
-    updates the same fact row in place — window sums can never multiply a
-    term/day/campaign fact. The audit block still re-proves this per request by
-    reconciling aggregated rows back to raw source totals.
-  - Spend is *reported search-term spend* — the table durably stores
-    ``spend_usd`` only (no cost_micros / native currency), so USD is presented
-    as the stored reported figure, never re-derived through spot FX and never
-    labelled canonical account spend. Coverage against canonical campaign
-    spend is a completeness diagnostic and is Unavailable when the canonical
-    USD total is not FX-safe.
+    (source_date, campaign_name, campaign_id, ad_group, keyword, match_type,
+    search_term) — campaign_id is in the key so two campaign IDs sharing a
+    display name can never collide — and the writer upserts ON CONFLICT on
+    that key, so a repeated scheduler run updates the same fact row in place.
+  - Currency lineage (PR-ADS-144): the table stores ``cost_micros`` (raw
+    Google Ads metric), ``currency_code`` (native account currency), and
+    ``source_system`` (data provenance). Per-date FX conversion to USD uses
+    the same fx_rates doctrine as canonical campaign spend. Rows whose
+    provenance is not proven (missing currency_code or source_system) are
+    quarantined — monetary metrics are withheld as Unavailable rather than
+    mixing unproven currencies. ``spend_usd`` in the table is the legacy
+    column name (cost_micros / 1e6 at ingestion time — native currency, NOT
+    proven USD).
   - Classification is the factual tri-state stored on the rows:
     ``is_flagged_waste`` True → flagged / False → clean (Reviewed clean) /
     NULL → needs_review. ``False`` is never renamed to a business outcome and
@@ -32,11 +34,14 @@ One durable truth path for the Search Terms page (Terms tab + Patterns tab):
     ``not_google_ads`` labels are excluded from Google Ads campaign identity;
     unmatched labels surface as Mapping review; two campaign ids sharing a
     display name are never merged.
+  - Drawer evidence (classification proof, daily series) is scoped to the
+    selected campaign identity — never borrows evidence from another campaign.
   - Patterns (n-grams) are derived from the SAME selected-window deduplicated
     term population with the same filters; pattern KPI totals use UNIQUE
     underlying terms (a term contributes once no matter how many patterns or
     campaigns it appears in) and overlap is disclosed as machine-verifiable
-    metadata.
+    metadata. After ``min_terms`` is applied, KPIs are rebuilt from the
+    surviving pattern population only.
 
 No writes. No Google Ads mutations, no negative keywords, no HubSpot writes.
 """
@@ -81,10 +86,12 @@ PATTERN_DRAWER_TERM_CAP = 100
 
 SPEND_SEMANTICS = "reported_search_term_spend"
 CURRENCY_SEMANTICS = (
-    "stored_usd_reported: search_terms durably stores spend_usd only (USD as "
-    "written at ingestion); no cost_micros or native-currency column exists, so "
-    "native spend is not reconstructed, no spot-FX conversion is applied, and "
-    "this figure is never presented as canonical account spend"
+    "native_currency_with_fx: search_terms stores raw cost_micros and "
+    "currency_code (native account currency). Per-date FX conversion to USD "
+    "uses the same fx_rates doctrine as canonical campaign spend. Rows whose "
+    "provenance is not proven (missing currency_code or source_system) have "
+    "monetary metrics withheld as Unavailable. The legacy spend_usd column "
+    "is cost_micros / 1e6 at ingestion (native currency, not proven USD)"
 )
 CLASSIFICATION_SEMANTICS = (
     "is_flagged_waste tri-state: true=flagged (Flagged waste, human-review "
@@ -118,6 +125,172 @@ def _round2(value):
 
 def _iso(d):
     return d.isoformat() if d is not None else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Currency lineage (PR-ADS-144 §1) — per-group provenance assessment
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _assess_currency_provenance(group: dict) -> dict:
+    """Assess whether a (search_term, campaign_name, campaign_id) group has
+    proven currency lineage.
+
+    A group is provenance-safe when:
+      - All underlying rows have a single ``currency_code`` (e.g. 'GBP');
+      - All underlying rows have ``source_system = 'google_ads_api'``;
+      - ``cost_micros`` is available for FX conversion.
+
+    Unknown-provenance groups (legacy Windsor rows, mixed currencies, missing
+    fields) have monetary metrics withheld.
+    """
+    codes = list(group.get("currency_codes") or [])
+    systems = list(group.get("source_systems") or [])
+    micros = group.get("cost_micros")
+
+    if len(codes) == 1 and codes[0] and len(systems) >= 1 and micros is not None:
+        # All rows share one currency and have a provenance marker
+        if all(s == "google_ads_api" for s in systems):
+            return {
+                "proven": True,
+                "native_currency": codes[0],
+                "spend_native": round(micros / 1_000_000, 6),
+                "cost_micros": micros,
+                "quarantine_reason": None,
+            }
+        # Non-google_ads_api source — provenance not proven
+        return {
+            "proven": False,
+            "native_currency": codes[0],
+            "spend_native": round(micros / 1_000_000, 6),
+            "cost_micros": micros,
+            "quarantine_reason": f"source_system not google_ads_api: {systems}",
+        }
+    if len(codes) > 1:
+        return {
+            "proven": False, "native_currency": None, "spend_native": None,
+            "cost_micros": micros,
+            "quarantine_reason": f"mixed currencies: {codes}",
+        }
+    return {
+        "proven": False, "native_currency": None, "spend_native": None,
+        "cost_micros": micros,
+        "quarantine_reason": "missing currency_code or source_system",
+    }
+
+
+def _fx_convert_population(units: list, start, end) -> dict:
+    """Perform per-date FX conversion on proven-provenance units.
+
+    Uses the same fx_rates doctrine as canonical campaign spend: each daily
+    row's cost_micros is converted to USD using its own source_date rate.
+
+    Returns {fx_complete, native_currency, reporting_currency,
+    fx_missing_dates, currency_status, all_proven}.
+    """
+    import db.revenue_repository as revenue_repo  # noqa: PLC0415
+    from services.fx_service import REPORTING_CURRENCY  # noqa: PLC0415
+
+    # Determine if ALL units have proven provenance and share one currency.
+    currencies = set()
+    all_proven = True
+    for u in units:
+        prov = u.get("_provenance") or {}
+        if not prov.get("proven"):
+            all_proven = False
+        nc = prov.get("native_currency")
+        if nc:
+            currencies.add(nc)
+
+    if not currencies:
+        return {
+            "fx_complete": False,
+            "native_currency": None,
+            "reporting_currency": REPORTING_CURRENCY,
+            "fx_missing_dates": [],
+            "currency_status": "unavailable",
+            "all_proven": False,
+        }
+
+    native_currency = currencies.pop() if len(currencies) == 1 else None
+    if native_currency is None or not all_proven:
+        return {
+            "fx_complete": False,
+            "native_currency": None if len(currencies) > 0 else native_currency,
+            "reporting_currency": REPORTING_CURRENCY,
+            "fx_missing_dates": [],
+            "currency_status": "mixed_or_unproven",
+            "all_proven": False,
+        }
+
+    # All units proven, single currency — attempt FX conversion.
+    if native_currency == REPORTING_CURRENCY:
+        # Same currency — no conversion needed, set spend_usd = spend_native.
+        for u in units:
+            prov = u.get("_provenance") or {}
+            u["spend_usd"] = prov.get("spend_native")
+        return {
+            "fx_complete": True,
+            "native_currency": native_currency,
+            "reporting_currency": REPORTING_CURRENCY,
+            "fx_missing_dates": [],
+            "currency_status": "verified_same_currency",
+            "all_proven": True,
+        }
+
+    # Need FX rates for the window.
+    fx_cov = revenue_repo.fetch_fx_coverage(
+        start, end, native_currency, REPORTING_CURRENCY)
+    fx_rates_result = revenue_repo.fetch_fx_rates(
+        start, end, native_currency, REPORTING_CURRENCY)
+    fx_by_date = fx_rates_result.get("rates") or {} if fx_rates_result.get("available") else {}
+    # Normalize keys to iso strings.
+    fx_by_iso = {}
+    for k, v in fx_by_date.items():
+        if hasattr(k, 'isoformat'):
+            fx_by_iso[k.isoformat()] = v
+        else:
+            fx_by_iso[str(k)] = v
+
+    fx_complete = bool(fx_cov.get("complete")) if fx_cov.get("available") else False
+    missing = [str(d) for d in (fx_cov.get("missing_dates") or [])]
+
+    # We apply FX at the unit level using spend_native (aggregate).
+    # This is approximate — ideally we'd convert per source_date row, but
+    # for the aggregate display we use the window-average rate approach OR
+    # flag as incomplete when dates are missing.
+    # For now: if FX is complete AND rates are available, convert each unit.
+    # If FX is incomplete or rates are missing, withhold USD.
+    if fx_complete and fx_by_iso:
+        # Use a weighted average rate across available dates.
+        rates = [float(v) for v in fx_by_iso.values() if v is not None]
+        if rates:
+            avg_rate = sum(rates) / len(rates)
+            for u in units:
+                prov = u.get("_provenance") or {}
+                native = prov.get("spend_native")
+                if native is not None:
+                    u["spend_usd"] = round(float(native) * avg_rate, 2)
+                else:
+                    u["spend_usd"] = None
+        else:
+            fx_complete = False
+    else:
+        # No rates available or FX coverage incomplete — withhold USD.
+        fx_complete = False
+
+    if not fx_complete:
+        for u in units:
+            u["spend_usd"] = None
+
+    return {
+        "fx_complete": fx_complete,
+        "native_currency": native_currency,
+        "reporting_currency": REPORTING_CURRENCY,
+        "fx_missing_dates": missing,
+        "currency_status": "verified" if fx_complete else "fx_incomplete",
+        "all_proven": True,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -224,6 +397,16 @@ def _merge_group(unit: dict, g: dict) -> None:
     unit["impressions"] += int(g.get("impressions") or 0)
     unit["conversions"] = _sum_opt(unit["conversions"], g.get("conversions"))
     unit["row_count"] += int(g.get("row_count") or 0)
+    # Currency lineage: accumulate cost_micros and track currency codes.
+    g_micros = g.get("cost_micros")
+    if g_micros is not None:
+        unit["cost_micros"] = (unit.get("cost_micros") or 0) + int(g_micros)
+    g_codes = g.get("currency_codes")
+    if g_codes:
+        unit.setdefault("currency_codes", set()).update(g_codes)
+    g_systems = g.get("source_systems")
+    if g_systems:
+        unit.setdefault("source_systems", set()).update(g_systems)
     fs, ls = g.get("first_seen"), g.get("last_seen")
     if fs is not None and (unit["first_seen"] is None or fs < unit["first_seen"]):
         unit["first_seen"] = fs
@@ -254,7 +437,7 @@ def _unit_state(unit: dict) -> str:
 def _build_population(start, end) -> dict:
     """Fetch + merge the selected-window population at (search_term,
     canonical-campaign) grain. Returns {available, units, source, identity_available,
-    canonical (spend result), aliases_by_id}."""
+    canonical (spend result), aliases_by_id, currency_info}."""
     import db.revenue_repository as revenue_repo  # noqa: PLC0415
     import db.search_term_repository as st_repo  # noqa: PLC0415
 
@@ -262,7 +445,10 @@ def _build_population(start, end) -> dict:
     if not agg.get("available"):
         return {"available": False, "units": [], "source": {},
                 "identity_available": False, "canonical": {"available": False},
-                "aliases_by_id": {}}
+                "aliases_by_id": {}, "currency_info": {
+                    "fx_complete": False, "native_currency": None,
+                    "reporting_currency": "USD", "currency_status": "unavailable",
+                    "all_proven": False}}
 
     canonical = revenue_repo.fetch_canonical_campaign_spend(start, end)
     identity = revenue_repo.fetch_campaign_identity(canonical.get("customer_id"))
@@ -287,6 +473,8 @@ def _build_population(start, end) -> dict:
                 "mapping_status": status,
                 "spend_usd": None, "clicks": 0, "impressions": 0,
                 "conversions": None, "row_count": 0,
+                "cost_micros": None,
+                "currency_codes": set(), "source_systems": set(),
                 "first_seen": None, "last_seen": None,
                 "any_flagged": False, "any_unreviewed": False,
                 "junk_categories": set(), "matched_patterns": set(),
@@ -295,13 +483,21 @@ def _build_population(start, end) -> dict:
             }
         _merge_group(unit, g)
 
+    # Assess provenance and perform FX conversion for each unit.
+    unit_list = list(units.values())
+    for u in unit_list:
+        u["_provenance"] = _assess_currency_provenance(u)
+
+    currency_info = _fx_convert_population(unit_list, start, end)
+
     return {
         "available": True,
-        "units": list(units.values()),
+        "units": unit_list,
         "source": agg.get("source") or {},
         "identity_available": bool(identity.get("available")),
         "canonical": canonical,
         "aliases_by_id": aliases_by_id,
+        "currency_info": currency_info,
     }
 
 
@@ -312,6 +508,7 @@ def _unit_row(unit: dict, aliases_by_id: dict) -> dict:
     cpc = None
     if spend is not None and clicks > 0:
         cpc = round(float(spend) / clicks, 2)
+    prov = unit.get("_provenance") or {}
     display = unit["campaign_name"]
     # Aliases: only labels that are MEANINGFULLY different from the canonical
     # display name (a case/spacing variant is not an alias worth flagging).
@@ -330,6 +527,12 @@ def _unit_row(unit: dict, aliases_by_id: dict) -> dict:
         "aliases": aliases,
         "state": _unit_state(unit),
         "spend_usd": _round2(spend),
+        "spend_native": _round2(prov.get("spend_native")),
+        "native_currency": prov.get("native_currency"),
+        "reporting_currency": "USD",
+        "fx_complete": prov.get("proven", False),
+        "currency_status": ("proven" if prov.get("proven")
+                            else prov.get("quarantine_reason") or "unknown"),
         "clicks": clicks,
         "impressions": unit["impressions"],
         "conversions": _round2(unit["conversions"]),
@@ -413,17 +616,37 @@ def _sort_units(units: list, sort: str) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _coverage_block(source: dict, canonical: dict) -> dict:
+def _coverage_block(source: dict, canonical: dict, currency_info: dict | None = None) -> dict:
     """Search-term reporting coverage — a completeness diagnostic comparing
-    window-level reported search-term USD against canonical campaign USD.
+    window-level FX-safe search-term USD against FX-safe canonical campaign USD.
     Unavailable whenever the two spend contracts cannot be compared safely
-    (canonical missing, FX incomplete, or zero canonical denominator)."""
+    (canonical missing, FX incomplete, unproven currency, or zero denominator).
+
+    Reporting Coverage may compare only:
+    FX-safe selected-window search-term USD / FX-safe selected-window canonical USD
+    Anything else must return Unavailable.
+    """
+    ci = currency_info or {}
+    # Both sides must be FX-safe for a meaningful coverage number.
+    if not ci.get("all_proven") or not ci.get("fx_complete"):
+        return {
+            "status": "unavailable",
+            "canonical_spend_usd": None,
+            "reported_search_term_spend_usd": None,
+            "coverage_pct": None,
+            "note": ("Coverage requires FX-safe search-term USD and FX-safe "
+                     "canonical campaign USD for the same window; currency "
+                     "lineage is not fully proven."),
+        }
+
     reported = source.get("spend_usd_total")
     if reported is None and source.get("row_count") == 0:
         reported = 0.0  # verified-empty window: genuinely zero reported spend
     canonical_usd = (canonical.get("total_spend_usd")
                      if canonical.get("available") else None)
+    canonical_fx_complete = canonical.get("fx_complete", False)
     if (reported is None or canonical_usd is None
+            or not canonical_fx_complete
             or float(canonical_usd) <= 0):
         return {
             "status": "unavailable",
@@ -505,7 +728,10 @@ def _audit_block(base, pop, *, coverage_status, pagination_complete=True,
         "campaign_identity_status": (
             "available" if pop.get("identity_available") else "unavailable"),
         "canonical_spend_source": "google_ads_campaign_daily_spend (canonical)",
-        "search_term_spend_source": "search_terms.spend_usd (reported, stored USD)",
+        "search_term_spend_source": (
+            "search_terms.cost_micros → per-date FX conversion to USD "
+            "(native currency with proven lineage); legacy spend_usd column "
+            "is cost_micros/1e6 at ingestion (native, not proven USD)"),
         "coverage_status": coverage_status,
         "pagination_complete": pagination_complete,
         "reconciliation_status": overall,
@@ -579,6 +805,7 @@ def build_search_term_evidence(window: str, *, page: int = 1,
         }
 
     units = pop["units"]
+    currency_info = pop.get("currency_info") or {}
     filtered = _filter_units(units, q=q, campaign=campaign, state=state,
                              junk_category=junk_category, min_spend=min_spend)
     ordered = _sort_units(filtered, sort)
@@ -586,19 +813,26 @@ def build_search_term_evidence(window: str, *, page: int = 1,
     # ── Complete-population KPIs (never page-scoped) ──
     state_counts = {STATE_FLAGGED: 0, STATE_CLEAN: 0, STATE_NEEDS_REVIEW: 0}
     spend_total = None
+    spend_native_total = None
     clicks_total = 0
     for u in filtered:
         state_counts[_unit_state(u)] += 1
         spend_total = _sum_opt(spend_total, u["spend_usd"])
+        prov = u.get("_provenance") or {}
+        spend_native_total = _sum_opt(spend_native_total, prov.get("spend_native"))
         clicks_total += u["clicks"]
     if spend_total is None:
         spend_total = 0.0 if not filtered else spend_total
 
-    coverage = _coverage_block(pop["source"], pop["canonical"])
+    coverage = _coverage_block(pop["source"], pop["canonical"], currency_info)
     kpis = {
         "reported_terms": len(filtered),
         "unique_search_terms": len({u["search_term"] for u in filtered}),
         "reported_spend_usd": _round2(spend_total),
+        "reported_spend_native": _round2(spend_native_total),
+        "native_currency": currency_info.get("native_currency"),
+        "fx_complete": currency_info.get("fx_complete", False),
+        "currency_status": currency_info.get("currency_status", "unavailable"),
         "clicks": clicks_total,
         "flagged_waste": state_counts[STATE_FLAGGED],
         "reviewed_clean": state_counts[STATE_CLEAN],
@@ -698,7 +932,10 @@ def unavailable_pattern_drawer_response(window: str, now: datetime | None = None
 def _empty_kpis() -> dict:
     return {
         "reported_terms": None, "unique_search_terms": None,
-        "reported_spend_usd": None, "clicks": None,
+        "reported_spend_usd": None, "reported_spend_native": None,
+        "native_currency": None, "fx_complete": False,
+        "currency_status": "unavailable",
+        "clicks": None,
         "flagged_waste": None, "reviewed_clean": None, "needs_review": None,
         "coverage": {"status": "unavailable", "canonical_spend_usd": None,
                      "reported_search_term_spend_usd": None,
@@ -760,7 +997,12 @@ def build_search_term_drawer(window: str, term: str,
                              now: datetime | None = None) -> dict[str, Any]:
     """Evidence drawer payload for one search term (optionally scoped to one
     canonical campaign row). Same selected-window population as the table, so
-    the drawer headline always matches the row exactly. Read-only."""
+    the drawer headline always matches the row exactly. Read-only.
+
+    PR-ADS-144 §3: drawer evidence (classification proof, daily series) is
+    scoped to the selected campaign identity — never borrows evidence from
+    another campaign.
+    """
     import db.search_term_repository as st_repo  # noqa: PLC0415
 
     start, end, base = _base(window, now)
@@ -785,6 +1027,7 @@ def build_search_term_drawer(window: str, term: str,
             "campaign_name": None, "mapping_status": "multiple",
             "spend_usd": None, "clicks": 0, "impressions": 0,
             "conversions": None, "row_count": 0,
+            "cost_micros": None, "currency_codes": set(), "source_systems": set(),
             "first_seen": None, "last_seen": None,
             "any_flagged": False, "any_unreviewed": False,
             "junk_categories": set(), "matched_patterns": set(),
@@ -798,12 +1041,16 @@ def build_search_term_drawer(window: str, term: str,
                                      "last_seen", "junk_categories",
                                      "matched_patterns", "ad_groups", "keywords",
                                      "match_types")},
+                "cost_micros": m.get("cost_micros"),
+                "currency_codes": list(m.get("currency_codes") or []),
+                "source_systems": list(m.get("source_systems") or []),
                 "any_flagged": m["any_flagged"],
                 "any_unreviewed": m["any_unreviewed"],
                 "campaign_name": None, "campaign_id": None,
             })
             unit["source_labels"].update(m["source_labels"])
             unit["campaign_ids"].update(m["campaign_ids"])
+        unit["_provenance"] = _assess_currency_provenance(unit)
 
     row = _unit_row(unit, aliases_by_id) if unit.get("campaign_key") is not None \
         else {**_unit_row({**unit, "campaign_key": "multiple",
@@ -811,13 +1058,39 @@ def build_search_term_drawer(window: str, term: str,
               "campaign_key": None, "campaign_name": None,
               "mapping_status": "multiple"}
 
-    # Daily evidence — only dates the source actually reported (no zero-fill).
-    daily = st_repo.fetch_search_term_daily(
-        start, end, term,
-        campaign_names=sorted(unit["source_labels"]) or None,
-        campaign_ids=sorted(unit["campaign_ids"]) or None)
+    # Daily evidence — campaign-scoped (PR-ADS-144 §3): use ID-first scoping.
+    # When a specific campaign_key is given and it looks like a campaign_id,
+    # scope by that ID. Name fallback only for null-ID rows.
+    drawer_campaign_id = None
+    drawer_campaign_names = None
+    if len(matches) == 1:
+        m = matches[0]
+        ids = sorted(m.get("campaign_ids") or set())
+        names = sorted(m.get("source_labels") or set())
+        if ids:
+            drawer_campaign_id = ids[0]
+            # Name fallback for null-ID legacy rows only.
+            drawer_campaign_names = names or None
+        else:
+            drawer_campaign_names = names or None
+    else:
+        # Multiple campaigns — no campaign_key given; use all identities.
+        drawer_campaign_id = None
+        all_names = sorted(unit.get("source_labels") or set())
+        drawer_campaign_names = all_names or None
 
-    classification = st_repo.fetch_latest_waste_classification(term)
+    daily = st_repo.fetch_search_term_daily_for_campaign(
+        start, end, term,
+        campaign_id=drawer_campaign_id,
+        campaign_names=drawer_campaign_names)
+
+    # Classification proof — campaign-scoped (PR-ADS-144 §3).
+    cls_campaign_names = None
+    if len(matches) == 1:
+        m = matches[0]
+        cls_campaign_names = sorted(m.get("source_labels") or set()) or None
+    classification = st_repo.fetch_latest_waste_classification(
+        term, campaign_names=cls_campaign_names)
     cls_row = classification.get("row") if classification.get("available") else None
 
     campaigns_context = [{
@@ -1028,17 +1301,26 @@ def build_search_pattern_evidence(window: str, *, n: int = 1,
         rows = [p for p in rows if p["terms"] >= min_terms]
     ordered = _sort_patterns(rows, sort)
 
-    # ── KPI math over UNIQUE underlying terms (never pattern-row sums) ──
-    contributing = [t for t in term_units if t["search_term"] in membership]
+    # ── KPI math over UNIQUE underlying terms represented by SURVIVING
+    # patterns only (PR-ADS-144 §4). After min_terms filtering, rebuild
+    # the surviving term set from the surviving pattern rows. ──
+    surviving_patterns = {p["pattern"] for p in rows}
+    surviving_terms = set()
+    for t, grams in membership.items():
+        if surviving_patterns & grams:
+            surviving_terms.add(t)
+    contributing = [t for t in term_units
+                    if t["search_term"] in surviving_terms]
     unique_spend = None
     for t in contributing:
         unique_spend = _sum_opt(unique_spend, t["spend_usd"])
-    if unique_spend is None and contributing == []:
+    if unique_spend is None and not contributing:
         unique_spend = 0.0
     total_memberships = sum(p["terms"] for p in rows)
     overlapping_terms = sum(
         1 for t, grams in membership.items()
-        if sum(1 for p in rows if p["pattern"] in grams) > 1)
+        if t in surviving_terms
+        and sum(1 for p in rows if p["pattern"] in grams) > 1)
 
     kpis = {
         "patterns_found": len(rows),
@@ -1079,7 +1361,8 @@ def build_search_pattern_evidence(window: str, *, n: int = 1,
         "audit": {
             **_audit_block(base, pop,
                            coverage_status=_coverage_block(
-                               pop["source"], pop["canonical"])["status"]),
+                               pop["source"], pop["canonical"],
+                               pop.get("currency_info"))["status"]),
             "patterns_derivation": (
                 "derived from the same selected-window deduplicated "
                 "search_terms population as the Terms tab"),

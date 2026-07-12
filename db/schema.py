@@ -272,6 +272,14 @@ CREATE TABLE IF NOT EXISTS search_terms (
   impressions      INTEGER       DEFAULT 0,
   conversions      NUMERIC(8,2)  DEFAULT 0,
 
+  -- Currency lineage (PR-ADS-144): durable raw cost from Google Ads.
+  -- cost_micros is the raw metrics.cost_micros from the API;
+  -- currency_code is the account native currency (e.g. GBP);
+  -- source_system identifies the data origin for provenance auditing.
+  cost_micros      BIGINT,
+  currency_code    TEXT,
+  source_system    TEXT,
+
   -- Tri-state analysis flag:
   -- NULL  = not analysed yet
   -- TRUE  = analysed and flagged as waste
@@ -286,12 +294,14 @@ CREATE TABLE IF NOT EXISTS search_terms (
   updated_at       TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Unique natural key: prevents duplicate fact rows for the same search term event
--- COALESCE handles nullable columns; search_term is NOT NULL so listed directly.
+-- Unique natural key: prevents duplicate fact rows for the same search term event.
+-- Includes campaign_id (PR-ADS-144) so two campaign IDs sharing a display name
+-- can never collide. COALESCE handles nullable columns; search_term is NOT NULL.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_search_terms_unique_fact
   ON search_terms (
     source_date,
     COALESCE(campaign_name,  ''),
+    COALESCE(campaign_id,    ''),
     COALESCE(ad_group,       ''),
     COALESCE(keyword,        ''),
     COALESCE(match_type,     ''),

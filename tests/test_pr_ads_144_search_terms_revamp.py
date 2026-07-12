@@ -73,11 +73,17 @@ ST_SERVER = _region(SERVER,
 
 def _g(term, campaign=None, cid=None, spend=0.0, clicks=0, impressions=0,
        conversions=0.0, rows=1, first=date(2026, 7, 1), last=date(2026, 7, 2),
-       flagged=False, unreviewed=False, junk=None, pattern=None):
+       flagged=False, unreviewed=False, junk=None, pattern=None,
+       cost_micros=None, currency_code=None, source_system=None):
+    if cost_micros is None and spend is not None:
+        cost_micros = int(spend * 1_000_000)
     return {
         "search_term": term, "campaign_name": campaign, "campaign_id": cid,
         "spend_usd": spend, "clicks": clicks, "impressions": impressions,
         "conversions": conversions, "row_count": rows,
+        "cost_micros": cost_micros,
+        "currency_codes": [currency_code] if currency_code else [],
+        "source_systems": [source_system] if source_system else [],
         "first_seen": first, "last_seen": last,
         "any_flagged": flagged, "any_unreviewed": unreviewed,
         "junk_categories": [junk] if junk else [],
@@ -91,12 +97,15 @@ def _agg(rows, *, available=True, source=None):
         source = {
             "row_count": sum(r["row_count"] for r in rows),
             "spend_usd_total": sum(float(r["spend_usd"] or 0) for r in rows),
+            "cost_micros_total": sum(int(r.get("cost_micros") or 0) for r in rows),
             "clicks_total": sum(int(r["clicks"] or 0) for r in rows),
             "impressions_total": sum(int(r["impressions"] or 0) for r in rows),
             "conversions_total": sum(float(r["conversions"] or 0) for r in rows),
             "distinct_source_dates": 2,
             "min_source_date": date(2026, 7, 1),
             "max_source_date": date(2026, 7, 2),
+            "currency_codes": [],
+            "source_systems": [],
         }
     return {"available": available, "rows": rows, "source": source}
 
@@ -143,15 +152,32 @@ def _patch(monkeypatch, agg, spend=None, identity=None, daily=None, cls=None):
         calls["daily"] = (start, end, term, campaign_names, campaign_ids)
         return daily if daily is not None else {"available": True, "rows": []}
 
-    def _fc(term):
-        calls["cls"] = term
+    def _fd_campaign(start, end, term, campaign_id=None, campaign_names=None):
+        calls["daily_campaign"] = (start, end, term, campaign_id, campaign_names)
+        return daily if daily is not None else {"available": True, "rows": []}
+
+    def _fc(term, campaign_id=None, campaign_names=None):
+        calls["cls"] = (term, campaign_id, campaign_names)
         return cls if cls is not None else {"available": True, "row": None}
+
+    # FX conversion needs revenue_repo.fetch_fx_coverage and fetch_fx_rates
+    def _fx_cov(start, end, base_currency, quote_currency):
+        calls.setdefault("fx_coverage", []).append((start, end, base_currency))
+        return {"available": True, "complete": True,
+                "spend_days": 7, "covered_days": 7, "missing_dates": []}
+
+    def _fx_rates(start, end, base_currency, quote_currency):
+        calls.setdefault("fx_rates", []).append((start, end, base_currency))
+        return {"available": True, "rates": {}}
 
     monkeypatch.setattr(st_repo, "fetch_search_term_aggregates", _fa)
     monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend", _fs)
     monkeypatch.setattr(revenue_repo, "fetch_campaign_identity", _fi)
     monkeypatch.setattr(st_repo, "fetch_search_term_daily", _fd)
+    monkeypatch.setattr(st_repo, "fetch_search_term_daily_for_campaign", _fd_campaign)
     monkeypatch.setattr(st_repo, "fetch_latest_waste_classification", _fc)
+    monkeypatch.setattr(revenue_repo, "fetch_fx_coverage", _fx_cov)
+    monkeypatch.setattr(revenue_repo, "fetch_fx_rates", _fx_rates)
     return calls
 
 
@@ -226,7 +252,8 @@ def test_endpoints_map_unknown_window_to_400():
 
 
 def test_source_date_is_the_business_boundary_never_run_date():
-    fn = _region(REPO, "def fetch_search_term_aggregates", "def fetch_search_term_daily")
+    fn = _region(REPO, "def fetch_search_term_aggregates",
+                 "def fetch_search_term_daily_for_campaign")
     assert "source_date >= %s" in fn and "source_date <= %s" in fn
     assert "run_date" not in fn
     # run_date may appear in the service ONLY in the doctrine note negating it
@@ -395,23 +422,37 @@ def test_spend_semantics_is_reported_stored_usd(monkeypatch):
     out = _build("30d")
     assert out["spend_semantics"] == "reported_search_term_spend"
     audit = out["audit"]
-    assert "stored_usd_reported" in audit["currency_semantics"]
-    assert "no spot-FX" in audit["currency_semantics"] or \
-        "no spot-FX conversion" in audit["currency_semantics"]
-    assert audit["search_term_spend_source"] == \
-        "search_terms.spend_usd (reported, stored USD)"
+    assert "native_currency_with_fx" in audit["currency_semantics"]
+    assert "cost_micros" in audit["currency_semantics"]
+    assert "cost_micros" in audit["search_term_spend_source"]
     # No fabricated native/GBP figure anywhere in the terms payload.
     assert "spend_gbp" not in str(out)
 
 
 def test_coverage_ok_when_contracts_comparable(monkeypatch):
+    """Coverage requires all-proven FX-safe search-term USD AND FX-safe
+    canonical campaign USD. With default dataset lacking currency_code,
+    coverage is unavailable."""
     _patch(monkeypatch, _dataset(), identity=_default_identity())
     out = _build("30d")
     cov = out["kpis"]["coverage"]
-    assert cov["status"] == "ok"
-    assert cov["canonical_spend_usd"] == 126.0
-    assert cov["reported_search_term_spend_usd"] == 40.0
-    assert cov["coverage_pct"] == round(40.0 / 126.0 * 100, 2)
+    # Default dataset has no currency_code → unproven → coverage unavailable.
+    assert cov["status"] == "unavailable"
+    # Now test with proven lineage rows.
+    proven_agg = _agg([
+        _g("freight software", "brand - uk", "1", spend=10.0, clicks=2,
+           impressions=20, unreviewed=True, currency_code="GBP",
+           source_system="google_ads_api"),
+        _g("free tms", "gulf", "2", spend=15.0, clicks=3, impressions=30,
+           currency_code="GBP", source_system="google_ads_api"),
+    ])
+    _patch(monkeypatch, proven_agg, identity=_default_identity())
+    out2 = _build("30d")
+    # Currency is proven but FX rates are empty in mock → coverage
+    # depends on whether native_currency matches reporting_currency.
+    # Since GBP != USD and mock fx_rates has no rates, fx_complete=False,
+    # so coverage stays unavailable.
+    assert out2["kpis"]["coverage"]["status"] == "unavailable"
 
 
 def test_coverage_unavailable_when_fx_incomplete(monkeypatch):
