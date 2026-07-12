@@ -44,6 +44,15 @@ _TERMS = [
 ]
 
 
+# Two preserved LEGACY rows with no provable currency lineage (PR-ADS-145 §3) —
+# they stay visible with monetary fields unavailable and make the population
+# Partial so the "Verified Search-Term Spend · Partial" disclosure is shown.
+_LEGACY = [
+    ("freight software legacy import", "old windsor camp", None),
+    ("cargo forwarding legacy", "old windsor camp", None),
+]
+
+
 def _agg_rows():
     rows = []
     for (term, camp, cid, gbp, clicks, impr, conv, flagged, unrev, junk, pat) in _TERMS:
@@ -59,6 +68,17 @@ def _agg_rows():
             "matched_patterns": [pat] if pat else [],
             "ad_groups": ["Core"], "keywords": [term], "match_types": ["broad"],
         })
+    for (term, camp, cid) in _LEGACY:
+        rows.append({
+            "search_term": term, "campaign_name": camp, "campaign_id": cid,
+            "spend_usd": 7.5, "cost_micros": None,   # no provable lineage
+            "currency_codes": [], "source_systems": [],
+            "clicks": 4, "impressions": 120, "conversions": 0.0,
+            "row_count": 2, "first_seen": WINDOW_START, "last_seen": date(2026, 7, 9),
+            "any_flagged": False, "any_unreviewed": True,
+            "junk_categories": [], "matched_patterns": [],
+            "ad_groups": ["Core"], "keywords": [term], "match_types": ["broad"],
+        })
     return rows
 
 
@@ -66,8 +86,8 @@ def _agg():
     rows = _agg_rows()
     return {"available": True, "rows": rows, "source": {
         "row_count": sum(r["row_count"] for r in rows),
-        "spend_usd_total": round(sum(r["spend_usd"] for r in rows), 2),
-        "cost_micros_total": sum(r["cost_micros"] for r in rows),
+        "spend_usd_total": round(sum(r["spend_usd"] or 0 for r in rows), 2),
+        "cost_micros_total": sum(r["cost_micros"] or 0 for r in rows),
         "clicks_total": sum(r["clicks"] for r in rows),
         "impressions_total": sum(r["impressions"] for r in rows),
         "conversions_total": sum(r["conversions"] for r in rows),
@@ -147,6 +167,16 @@ def _classification(term, campaign_id=None, campaign_names=None):
     return {"available": True, "row": None}
 
 
+def _waste_evidence(terms):
+    # Weekly-pipeline confirmed waste bridged into Search Terms (PR-ADS-145 §4):
+    # this term had is_flagged_waste NULL but is safely confirmed → Flagged waste.
+    return {"available": True, "rows": [{
+        "search_term": "best tms for freight forwarders 2026",
+        "campaign_name": "brand - uk", "junk_category": "irrelevant_intent",
+        "matched_pattern": "best tms", "crm_junk_confirmed": 2,
+        "run_date": "2026-07-09"}]}
+
+
 def main() -> int:
     import db.revenue_repository as rr
     import db.search_term_repository as st_repo
@@ -156,6 +186,7 @@ def main() -> int:
          patch.object(st_repo, "fetch_search_term_daily_costs", _daily_costs), \
          patch.object(st_repo, "fetch_search_term_daily_for_campaign", _daily_for_campaign), \
          patch.object(st_repo, "fetch_latest_waste_classification", _classification), \
+         patch.object(st_repo, "fetch_waste_evidence_for_terms", _waste_evidence), \
          patch.object(rr, "fetch_canonical_campaign_spend", _canonical), \
          patch.object(rr, "fetch_campaign_identity", _identity), \
          patch.object(rr, "fetch_fx_rates", _fx_rates):

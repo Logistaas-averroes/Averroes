@@ -7399,3 +7399,12 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
   .st-table .st-td-term { width: 100%; min-width: 0; }
   .st-pagination { justify-content: center; }
 }
+
+/* PR-ADS-145 — compact monetary completeness badge on the Verified Spend KPI */
+.st-mon-badge {
+  display: inline-block; font-size: 10px; font-weight: 700; vertical-align: middle;
+  padding: 1px 6px; border-radius: 999px; margin-left: 6px; letter-spacing: 0.02em;
+}
+.st-mon-badge--partial { color: #b45309; background: rgba(245, 158, 11, 0.14); border: 1px solid rgba(245,158,11,0.32); }
+.st-mon-badge--complete { color: #047857; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16,185,129,0.30); }
+.st-legacy-marker { display: inline-block; margin-left: 8px; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 999px; color: var(--text-muted); background: var(--surface-alt); border: 1px solid var(--border); }
