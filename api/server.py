@@ -4212,6 +4212,197 @@ def api_search_terms_ngrams(
 
 
 # ---------------------------------------------------------------------------
+# PR-ADS-144 — Search Terms + Patterns evidence page endpoints. Read-only.
+#
+# One durable truth path (services/search_term_evidence_service.py):
+# source_date-bounded selected-window aggregation over the deduplicated
+# search_terms fact table, PR-ADS-143 campaign identity, tri-state review
+# states, reported-search-term-spend semantics, complete-population KPIs and
+# server-side pagination. Unknown windows / invalid filters → HTTP 400, never
+# silently coerced. The legacy /api/search-terms family above is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _search_term_evidence_call(window: str, builder, *args, **kwargs):
+    """Shared error contract: 400 for unknown window / invalid params, a
+    consistent db-unavailable shape (never a raw 500) for anything else."""
+    from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
+    from services.search_term_evidence_service import (  # noqa: PLC0415
+        SearchTermQueryError, unavailable_terms_response,
+    )
+    try:
+        return builder(*args, **kwargs)
+    except (EvidenceWindowError, SearchTermQueryError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/search-term-evidence] error: %s", exc, exc_info=True)
+        return unavailable_terms_response(window)
+
+
+@app.get("/api/search-term-evidence")
+def api_search_term_evidence(
+    user: dict = Depends(require_auth),
+    window: str = Query(default="30d",
+                        description="Evidence window: 7d|14d|30d|60d|180d|all_time"),
+    page: int = Query(default=1, description="1-based page number"),
+    page_size: int = Query(default=50, description="Rows per page (1–200)"),
+    q: str = Query(default=None, description="Case-insensitive contains filter on search_term"),
+    campaign: str = Query(default=None, description="Canonical campaign_key filter (from facets)"),
+    state: str = Query(default=None, description="Review state: flagged|clean|needs_review"),
+    junk_category: str = Query(default=None, description="Junk category filter (from facets)"),
+    min_spend: float = Query(default=None, description="Minimum reported search-term spend (USD)"),
+    sort: str = Query(default="spend",
+                      description="spend|clicks|cpc|conversions|last_seen|term"),
+) -> dict[str, Any]:
+    """Search Term Universe — complete selected-window evidence (PR-ADS-144).
+
+    Durable ``search_terms`` rows bounded by ``source_date`` (never run_date),
+    deduplicated by the table's natural key, aggregated per term × canonical
+    campaign. KPI values are computed from the COMPLETE filtered population —
+    never the returned page. Spend is *reported search-term spend* (stored
+    USD), never canonical account spend. Requires auth. Read-only.
+    """
+    from services.search_term_evidence_service import build_search_term_evidence  # noqa: PLC0415
+    return _search_term_evidence_call(
+        window, build_search_term_evidence, window,
+        page=page, page_size=page_size, q=q, campaign=campaign, state=state,
+        junk_category=junk_category, min_spend=min_spend, sort=sort)
+
+
+@app.get("/api/search-term-evidence/term")
+def api_search_term_evidence_term(
+    user: dict = Depends(require_auth),
+    term: str = Query(..., description="Exact search term"),
+    campaign_key: str = Query(default=None,
+                              description="Canonical campaign_key of the table row"),
+    window: str = Query(default="30d",
+                        description="Evidence window: 7d|14d|30d|60d|180d|all_time"),
+) -> dict[str, Any]:
+    """Search-term evidence drawer payload (PR-ADS-144). Same selected-window
+    population as the table so the headline matches the row exactly. Includes
+    campaign/matching context, classification proof, platform conversions as
+    secondary evidence and a source-date daily series (reported dates only —
+    missing dates are never fabricated as zero). Requires auth. Read-only."""
+    from services.search_term_evidence_service import build_search_term_drawer  # noqa: PLC0415
+    return _search_term_evidence_call(
+        window, build_search_term_drawer, window, term, campaign_key=campaign_key)
+
+
+@app.get("/api/search-term-evidence/patterns")
+def api_search_term_evidence_patterns(
+    user: dict = Depends(require_auth),
+    window: str = Query(default="30d",
+                        description="Evidence window: 7d|14d|30d|60d|180d|all_time"),
+    n: int = Query(default=1, description="Pattern word length: 1|2|3"),
+    q: str = Query(default=None, description="Case-insensitive contains filter on underlying terms"),
+    campaign: str = Query(default=None, description="Canonical campaign_key filter"),
+    state: str = Query(default=None, description="Review state: flagged|clean|needs_review"),
+    min_spend: float = Query(default=None, description="Minimum reported term spend (USD)"),
+    min_terms: int = Query(default=None, description="Minimum unique terms per pattern"),
+    sort: str = Query(default="spend", description="spend|terms|flagged|pattern"),
+    limit: int = Query(default=100, description="Max pattern rows to return (1–500)"),
+) -> dict[str, Any]:
+    """Patterns (n-gram) evidence derived from the SAME selected-window
+    deduplicated Search Term Universe (PR-ADS-144). Pattern KPI totals use
+    UNIQUE underlying terms; overlapping pattern rows are disclosed and never
+    summed into an account total. Requires auth. Read-only."""
+    from services.search_term_evidence_service import build_search_pattern_evidence  # noqa: PLC0415
+    return _search_term_evidence_call(
+        window, build_search_pattern_evidence, window, n=n, q=q,
+        campaign=campaign, state=state, min_spend=min_spend,
+        min_terms=min_terms, sort=sort, limit=limit)
+
+
+@app.get("/api/search-term-evidence/patterns/detail")
+def api_search_term_evidence_pattern_detail(
+    user: dict = Depends(require_auth),
+    pattern: str = Query(..., description="Exact pattern text"),
+    n: int = Query(default=1, description="Pattern word length: 1|2|3"),
+    window: str = Query(default="30d",
+                        description="Evidence window: 7d|14d|30d|60d|180d|all_time"),
+    q: str = Query(default=None, description="Case-insensitive contains filter on underlying terms"),
+    campaign: str = Query(default=None, description="Canonical campaign_key filter"),
+    state: str = Query(default=None, description="Review state: flagged|clean|needs_review"),
+    min_spend: float = Query(default=None, description="Minimum reported term spend (USD)"),
+) -> dict[str, Any]:
+    """Pattern drawer payload (PR-ADS-144): unique underlying terms, factual
+    flagged/clean/needs-review split and unique-term totals (a term is never
+    totalled twice for appearing in multiple campaigns or positions).
+    Requires auth. Read-only."""
+    from services.search_term_evidence_service import build_search_pattern_drawer  # noqa: PLC0415
+    return _search_term_evidence_call(
+        window, build_search_pattern_drawer, window, pattern, n, q=q,
+        campaign=campaign, state=state, min_spend=min_spend)
+
+
+@app.get("/api/search-term-evidence/export")
+def api_search_term_evidence_export(
+    user: dict = Depends(require_auth),
+    window: str = Query(default="30d",
+                        description="Evidence window: 7d|14d|30d|60d|180d|all_time"),
+    q: str = Query(default=None, description="Case-insensitive contains filter on search_term"),
+    campaign: str = Query(default=None, description="Canonical campaign_key filter"),
+    state: str = Query(default=None, description="Review state: flagged|clean|needs_review"),
+    junk_category: str = Query(default=None, description="Junk category filter"),
+    min_spend: float = Query(default=None, description="Minimum reported spend (USD)"),
+    sort: str = Query(default="spend",
+                      description="spend|clicks|cpc|conversions|last_seen|term"),
+):
+    """CSV export of the COMPLETE server-filtered Search Term Universe for the
+    selected window (never a silently truncated page). 503 when the source is
+    unavailable — an empty file is never presented as a complete export.
+    Requires auth. Read-only."""
+    import csv  # noqa: PLC0415
+    import io  # noqa: PLC0415
+
+    from fastapi.responses import Response as FastAPIResponse  # noqa: PLC0415
+
+    from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
+    from services.search_term_evidence_service import (  # noqa: PLC0415
+        SearchTermQueryError, build_search_term_export,
+    )
+    try:
+        payload = build_search_term_export(
+            window, q=q, campaign=campaign, state=state,
+            junk_category=junk_category, min_spend=min_spend, sort=sort)
+    except (EvidenceWindowError, SearchTermQueryError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/search-term-evidence/export] error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503,
+                            detail="Search terms source unavailable.") from exc
+    if payload.get("db_unavailable"):
+        raise HTTPException(status_code=503,
+                            detail="Search terms source unavailable.")
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "search_term", "review_state", "campaign", "mapping_status",
+        "reported_spend_usd", "clicks", "impressions", "cpc_usd",
+        "platform_conversions", "junk_categories", "matched_patterns",
+        "first_seen", "last_seen", "window", "window_start", "window_end",
+    ])
+    for r in payload["rows"]:
+        writer.writerow([
+            r["search_term"], r["state"], r["campaign_name"],
+            r["mapping_status"],
+            "" if r["spend_usd"] is None else r["spend_usd"],
+            r["clicks"], r["impressions"],
+            "" if r["cpc_usd"] is None else r["cpc_usd"],
+            "" if r["conversions"] is None else r["conversions"],
+            "; ".join(r["junk_categories"]), "; ".join(r["matched_patterns"]),
+            r["first_seen"] or "", r["last_seen"] or "",
+            payload["window"], payload["window_start"] or "",
+            payload["window_end"] or "",
+        ])
+    filename = f"search_terms_{payload['window']}_complete.csv"
+    return FastAPIResponse(
+        content=buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ---------------------------------------------------------------------------
 # GCLID Attribution endpoint — cursor-paginated, read-only, auth required. (PR-ADS-044)
 # ---------------------------------------------------------------------------
 

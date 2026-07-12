@@ -141,15 +141,23 @@ def test_churn_input_page_exists():
 
 
 def test_search_terms_has_tabs():
-    """Search Terms page must have tab buttons for search terms and patterns."""
+    """Search Terms page must offer Terms + Patterns tabs.
+
+    PR-ADS-144: the page is rendered entirely by JS into #search-terms-shell,
+    so the tab buttons live in the renderSearchTermsShell template in app.js
+    rather than static HTML.
+    """
     page_match = re.search(
         r'id="page-search-terms".*?</section>', HTML, re.DOTALL
     )
     assert page_match, "Could not find page-search-terms section"
-    page = page_match.group(0)
-    assert "search-terms-tab" in page, "Missing tab buttons in Search Terms page"
-    assert 'data-tab="search-terms"' in page or "Search Terms" in page
-    assert 'data-tab="patterns"' in page or "Patterns" in page
+    assert 'id="search-terms-shell"' in page_match.group(0)
+    js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    shell = js[js.find("function renderSearchTermsShell"):]
+    shell = shell[:shell.find("function stActivateTab")]
+    assert 'id="tab-btn-terms"' in shell, "Missing Terms tab button"
+    assert 'id="tab-btn-patterns"' in shell, "Missing Patterns tab button"
+    assert 'data-tab="patterns"' in shell
 
 
 def test_frontend_uses_api_reports_routes():

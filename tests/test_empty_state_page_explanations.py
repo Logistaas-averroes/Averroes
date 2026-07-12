@@ -168,9 +168,10 @@ class TestBuildEmptyStateIntegration:
         assert "function getPageCanonicalStatus" in APP_JS
 
     def test_build_empty_state_called_in_search_terms(self):
-        body = self._get_function_slice("function renderSearchTermsTable(")
+        # PR-ADS-144: the Search Terms table is rendered by renderTermsTable.
+        body = self._get_function_slice("function renderTermsTable(")
         assert "buildEmptyState(" in body, (
-            "renderSearchTermsTable must call buildEmptyState() for its empty state"
+            "renderTermsTable must call buildEmptyState() for its empty state"
         )
 
     def test_build_empty_state_called_in_waste(self):
@@ -180,9 +181,10 @@ class TestBuildEmptyStateIntegration:
         )
 
     def test_build_empty_state_called_in_ngrams(self):
-        body = self._get_function_slice("function renderNgramsTable(")
+        # PR-ADS-144: the Patterns table is rendered by renderPatternsTable.
+        body = self._get_function_slice("function renderPatternsTable(")
         assert "buildEmptyState(" in body, (
-            "renderNgramsTable must call buildEmptyState() for its empty state"
+            "renderPatternsTable must call buildEmptyState() for its empty state"
         )
 
     def test_build_empty_state_called_in_campaigns(self):
@@ -339,9 +341,13 @@ class TestPageExplanationContainers:
         # "deals" was rebuilt into the Closed-Won revenue ledger in PR-ADS-113
         # and is now a clean revenue page without a page-explanation container
         # (same precedent as the ROAS pages in PR-ADS-110).
+        # "search-terms"/"ngrams" were rebuilt into the single Search Terms
+        # evidence page in PR-ADS-144 — methodology moved into the Help drawer,
+        # so the page carries no inline explanation container (same precedent
+        # as "deals" above and the ROAS pages in PR-ADS-110).
         key_pages = [
             "dashboard", "action-queue", "reports", "campaigns",
-            "waste", "search-terms", "ngrams", "geo", "keywords",
+            "waste", "geo", "keywords",
             "leads", "gclid-attribution", "opportunities",
             "scheduler", "health", "backfill", "historical-intelligence",
         ]

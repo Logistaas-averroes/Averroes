@@ -533,150 +533,12 @@
         </p>
       </section>
 
-      <!-- Search Terms (Merged: Search Terms + Patterns) -->
-      <section id="page-search-terms" class="page" hidden>
-        <header class="page-header">
-          <h1 class="page-title">Search Terms</h1>
-          <p class="page-subtitle">Search term evidence and pattern analysis. Read-only view.</p>
-        </header>
-        <div id="page-explanation-search-terms" hidden></div>
+      <!-- Search Terms + Patterns evidence page (PR-ADS-144) -->
+      <section id="page-search-terms" class="page page--wide" hidden>
         <p id="run-meta-search_terms" class="run-meta" data-section="search_terms"></p>
-
-        <!-- Tabs -->
-        <div class="search-terms-tabs" role="tablist" aria-label="Search Terms tabs">
-          <button class="search-terms-tab active" role="tab" aria-selected="true" aria-controls="search-terms-tab-terms" id="tab-btn-terms" data-tab="terms" type="button">Search Terms</button>
-          <button class="search-terms-tab" role="tab" aria-selected="false" aria-controls="search-terms-tab-patterns" id="tab-btn-patterns" data-tab="patterns" type="button">Patterns</button>
-        </div>
-
-        <!-- Tab: Search Terms -->
-        <div id="search-terms-tab-terms" class="search-terms-tab-pane" role="tabpanel" aria-labelledby="tab-btn-terms">
-
-        <div id="search-terms-kpis" class="kpi-grid"></div>
-
-        <div class="panel">
-          <div class="panel__header search-terms-panel-header">
-            <div>
-              <span>Search-Term Universe</span>
-            </div>
-            <div class="search-terms-actions">
-              <button id="search-terms-refresh-btn" type="button" class="btn btn--secondary waste-copy-btn">Refresh</button>
-              <button id="search-terms-export-csv-btn" type="button" class="btn btn--secondary waste-copy-btn" aria-label="Download loaded search terms as CSV">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Download CSV
-              </button>
-            </div>
-          </div>
-          <div class="panel__body">
-            <p class="page-subtitle" style="margin-bottom: var(--space-3);">Browse stored search terms by campaign, match type, spend, and waste status.</p>
-            <div class="search-terms-controls">
-              <input id="search-terms-query" type="search" class="waste-search-input" placeholder="Search terms…" aria-label="Search by term" />
-              <input id="search-terms-campaign" type="search" class="waste-search-input" placeholder="Campaign…" aria-label="Filter by campaign" style="min-width:160px;flex:0 1 200px;" />
-              <select id="search-terms-match-type" class="waste-filter-select" aria-label="Filter by match type">
-                <option value="">All match types</option>
-                <option value="broad">Broad</option>
-                <option value="phrase">Phrase</option>
-                <option value="exact">Exact</option>
-              </select>
-              <select id="search-terms-waste-filter" class="waste-filter-select" aria-label="Filter by analysis state">
-                <option value="">All analysis states</option>
-                <option value="waste">Flagged waste only</option>
-                <option value="clean">Analyzed clean only</option>
-                <option value="unanalyzed">Unanalyzed only</option>
-              </select>
-              <input id="search-terms-min-spend" type="number" min="0" step="1" class="waste-search-input" placeholder="Min spend" aria-label="Minimum spend in USD" style="min-width:120px;flex:0 1 140px;" />
-              <button id="search-terms-apply-btn" type="button" class="btn btn--secondary waste-copy-btn">Apply filters</button>
-              <button id="search-terms-clear-btn" type="button" class="btn btn--secondary waste-copy-btn">Clear</button>
-            </div>
-            <p id="search-terms-filter-note" class="search-terms-filter-note" hidden>
-              KPI cards summarize the selected filter/window. The table below is cursor-paginated.
-            </p>
-          </div>
-
-          <div class="panel__body panel__body--flush" id="search-terms-table">
-            <p class="empty-state" style="padding: var(--space-5);">Loading search terms…</p>
-          </div>
-
-          <div class="pagination-actions">
-            <button id="search-terms-load-more-btn" type="button" class="btn btn--secondary" hidden>
-              Load more
-            </button>
-          </div>
-        </div>
-
-        <p class="grace-note">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          This page is read-only. It does not add negatives, push changes, pause campaigns, or modify bids/budgets.
-        </p>
-        </div><!-- /search-terms-tab-terms -->
-
-        <!-- Tab: Patterns (N-Gram) -->
-        <div id="search-terms-tab-patterns" class="search-terms-tab-pane" role="tabpanel" aria-labelledby="tab-btn-patterns" hidden>
-
-        <div id="page-explanation-ngrams" hidden></div>
-        <p id="run-meta-ngrams" class="run-meta" data-section="ngrams"></p>
-
-        <div class="read-only-notice" role="note">
-          Read-only analysis. These are candidate patterns for human review only. The system does not push negative keywords or modify Google Ads.
-        </div>
-
-        <div id="ngrams-kpis" class="kpi-grid"></div>
-
-        <div class="panel">
-          <div class="panel__header search-terms-panel-header">
-            <div>
-              <span>Candidate Terms for Manual Review</span>
-            </div>
-            <div class="ngrams-actions">
-              <button id="ngrams-refresh-btn" type="button" class="btn btn--secondary waste-copy-btn">Refresh</button>
-              <button id="ngrams-export-csv-btn" type="button" class="btn btn--secondary waste-copy-btn" aria-label="Download current n-gram results as CSV">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Download CSV
-              </button>
-            </div>
-          </div>
-          <div class="panel__body">
-            <p class="page-subtitle" style="margin-bottom: var(--space-3);">Filter recurring search-term patterns by campaign, match type, waste state, n-gram length, and minimum spend.</p>
-            <div class="ngrams-controls">
-              <input id="ngrams-query" type="search" class="waste-search-input" placeholder="Search n-grams…" aria-label="Search by n-gram phrase" />
-              <input id="ngrams-campaign" type="search" class="waste-search-input" placeholder="Campaign…" aria-label="Filter by campaign" style="min-width:160px;flex:0 1 200px;" />
-              <select id="ngrams-match-type" class="waste-filter-select" aria-label="Filter by match type">
-                <option value="">All match types</option>
-                <option value="broad">Broad</option>
-                <option value="phrase">Phrase</option>
-                <option value="exact">Exact</option>
-              </select>
-              <select id="ngrams-waste-state" class="waste-filter-select" aria-label="Filter by waste state">
-                <option value="">All waste states</option>
-                <option value="flagged">Flagged waste only</option>
-                <option value="clean">Analyzed clean only</option>
-                <option value="unanalyzed">Unanalyzed only</option>
-              </select>
-              <select id="ngrams-length" class="waste-filter-select" aria-label="Filter by n-gram length">
-                <option value="1,2,3">All lengths (1–3)</option>
-                <option value="1">Unigrams (1)</option>
-                <option value="2">Bigrams (2)</option>
-                <option value="3">Trigrams (3)</option>
-                <option value="1,2">1–2</option>
-                <option value="2,3">2–3</option>
-              </select>
-              <input id="ngrams-min-spend" type="number" min="0" step="1" class="waste-search-input" placeholder="Min spend" aria-label="Minimum spend in USD" style="min-width:120px;flex:0 1 140px;" />
-              <button id="ngrams-apply-btn" type="button" class="btn btn--secondary waste-copy-btn">Apply filters</button>
-              <button id="ngrams-clear-btn" type="button" class="btn btn--secondary waste-copy-btn">Clear</button>
-            </div>
-          </div>
-
-          <div class="panel__body panel__body--flush" id="ngrams-table">
-            <p class="empty-state" style="padding: var(--space-5);">Loading n-gram patterns…</p>
-          </div>
-        </div>
-
-        <p class="grace-note">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Read-only analysis. These are candidate terms for manual review only. The system does not push negative keywords, modify Google Ads, pause campaigns, or change bids/budgets.
-        </p>
-        </div><!-- /search-terms-tab-patterns -->
-
+        <div id="search-terms-shell"></div>
       </section>
+
 
       <!-- N-Gram Intelligence (kept as hidden route alias for backward compatibility) -->
       <section id="page-ngrams" class="page" hidden></section>
@@ -1412,6 +1274,20 @@
       </button>
     </div>
     <div class="campaign-drawer__body" id="campaign-drawer-body">
+      <p class="empty-state">Loading…</p>
+    </div>
+  </aside>
+
+  <!-- ── Search Term / Pattern Evidence Drawer (PR-ADS-144) ── -->
+  <div id="st-drawer-overlay" class="drawer-overlay" hidden aria-hidden="true"></div>
+  <aside id="st-drawer" class="campaign-drawer" hidden aria-label="Search term evidence" role="dialog" aria-modal="true">
+    <div class="campaign-drawer__header">
+      <div id="st-drawer-title" class="campaign-drawer__title"></div>
+      <button id="st-drawer-close-btn" class="drawer-close" type="button" aria-label="Close evidence drawer">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="campaign-drawer__body" id="st-drawer-body">
       <p class="empty-state">Loading…</p>
     </div>
   </aside>

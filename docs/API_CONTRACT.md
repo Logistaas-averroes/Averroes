@@ -1485,6 +1485,207 @@ As of PR-ADS-056, this endpoint is rendered by the N-Grams page in the SPA.
 The page is read-only and displays factual n-gram metrics only.
 It does not create negative keyword candidates, push changes, or provide recommendations.
 
+> **PR-ADS-144:** the Search Terms + Patterns page now uses the
+> `/api/search-term-evidence` family below. The three legacy endpoints above
+> remain live (the Campaign Evidence drawer's N-Gram drilldown still uses
+> `/api/search-terms/ngrams`) but are no longer the page's primary source.
+
+---
+
+#### `GET /api/search-term-evidence` *(PR-ADS-144 — Search Terms page, Terms tab)*
+
+Complete selected-window Search Term Universe: durable `search_terms` rows
+bounded by **`source_date`** (never `run_date`), deduplicated by the table's
+natural key, aggregated per **search term × canonical campaign**, with
+server-side filtering / sorting / pagination and complete-population KPIs.
+
+**Auth:** Auth
+**Read-only:** Yes — no negative keywords, no Google Ads / HubSpot writes
+
+**Query Parameters**
+
+| Param | Default | Notes |
+|---|---|---|
+| `window` | `30d` | `7d\|14d\|30d\|60d\|180d\|all_time`. Rolling windows cover exactly N account-local dates (Europe/London — same boundary as Campaign Evidence); `all_time` has **no lower bound**. Unknown window → **HTTP 400**, never silently coerced. |
+| `page` | `1` | 1-based page number. |
+| `page_size` | `50` | 1–200. |
+| `q` | — | Case-insensitive contains filter on `search_term`. |
+| `campaign` | — | Canonical `campaign_key` (from `facets.campaigns`). |
+| `state` | — | `flagged\|clean\|needs_review` (invalid → 400). |
+| `junk_category` | — | From `facets.junk_categories`. |
+| `min_spend` | — | Minimum reported search-term spend (USD). Null spend never passes a floor. |
+| `sort` | `spend` | `spend\|clicks\|cpc\|conversions\|last_seen\|term` (invalid → 400). Nulls always sort last — never coerced to 0. |
+
+**Response (200)**
+
+```jsonc
+{
+  "window": "30d", "window_start": "2026-06-13", "window_end": "2026-07-12",
+  "all_time": false, "generated_at": "…",
+  "spend_semantics": "reported_search_term_spend",
+  "reporting_currency": "USD",
+  "kpis": {
+    "reported_terms": 412,            // COMPLETE filtered population, never the page
+    "unique_search_terms": 388,
+    "reported_spend_usd": 1234.56,    // reported search-term spend — NOT account spend
+    "clicks": 2210,
+    "flagged_waste": 61, "reviewed_clean": 214, "needs_review": 137,
+    "coverage": {                     // Search-term reporting coverage (diagnostic)
+      "status": "ok|unavailable",
+      "canonical_spend_usd": 1890.0,  // canonical campaign spend, FX-safe USD
+      "reported_search_term_spend_usd": 1234.56,
+      "coverage_pct": 65.32,          // null when contracts are not comparable
+      "note": "…"
+    }
+  },
+  "rows": [{
+    "search_term": "freight software", "campaign_key": "123",
+    "campaign_name": "Brand - UK", "mapping_status": "mapped|unmatched|not_google_ads",
+    "aliases": ["brand - uk"],
+    "state": "flagged|clean|needs_review",   // tri-state is_flagged_waste truth
+    "spend_usd": 20.0, "clicks": 4, "impressions": 40,
+    "conversions": 0.0,                      // platform evidence only — not an SQL
+    "cpc_usd": 5.0, "first_seen": "2026-07-01", "last_seen": "2026-07-02",
+    "junk_categories": [], "matched_patterns": [], "source_rows": 2
+  }],
+  "pagination": { "total_count": 412, "returned_count": 50, "page": 1,
+                  "page_size": 50, "has_more": true },
+  "facets": { "campaigns": [{ "campaign_key": "…", "campaign_name": "…",
+                              "mapping_status": "…" }],
+              "junk_categories": ["job_seeker"] },
+  "filters": { "q": null, "campaign": null, "state": null,
+               "junk_category": null, "min_spend": null, "sort": "spend" },
+  "audit": {
+    "source_table": "search_terms",
+    "date_field": "source_date",
+    "window_start": "2026-06-13", "window_end": "2026-07-12", "all_time": false,
+    "account_timezone": "Europe/London",
+    "currency_semantics": "stored_usd_reported: …",   // spend_usd only; no FX reconstruction
+    "deduplication_key": "source_date + COALESCE(campaign_name,'') + COALESCE(ad_group,'') + COALESCE(keyword,'') + COALESCE(match_type,'') + search_term (UNIQUE index idx_search_terms_unique_fact; writer upserts ON CONFLICT)",
+    "classification_semantics": "is_flagged_waste tri-state: …",
+    "campaign_identity_status": "available|unavailable",
+    "canonical_spend_source": "google_ads_campaign_daily_spend (canonical)",
+    "search_term_spend_source": "search_terms.spend_usd (reported, stored USD)",
+    "coverage_status": "ok|unavailable",
+    "pagination_complete": true,               // KPIs use the complete population
+    "reconciliation_status": "pass|variance|unavailable",
+    "reconciliation_detail": {
+      "source_row_reconciliation": "pass",     // merged units == raw source row count
+      "spend_reconciliation": "pass",          // unit spend sum == deduped source total
+      "state_count_reconciliation": "pass"     // state counts add back to total_count
+    }
+  }
+}
+```
+
+**Truth contract**
+
+- **Duplication:** the `search_terms` table enforces a UNIQUE natural key
+  (`source_date`, `campaign_name`, `ad_group`, `keyword`, `match_type`,
+  `search_term`) and the writer upserts ON CONFLICT on that key, so a repeated
+  scheduler run can never multiply a term/day/campaign fact. The audit block
+  re-proves this per request (`source_row_reconciliation`,
+  `spend_reconciliation`).
+- **Currency:** the table durably stores `spend_usd` only. Spend is *reported
+  search-term spend in stored USD* — never re-derived through spot FX, never
+  presented as canonical account spend, and coverage is `unavailable` whenever
+  the canonical USD total is not FX-safe. Coverage is a completeness
+  diagnostic; the two contracts are never forced to reconcile.
+- **Classification:** `is_flagged_waste` true → `flagged` (Flagged waste,
+  human-review candidate), false → `clean` (Reviewed clean — never renamed
+  "valuable"), NULL → `needs_review`. Platform conversions never change the
+  state.
+- **Campaign identity (PR-ADS-143 rules):** stored `campaign_id` first, then
+  the approved durable mapping, then the exact-normalized fallback against
+  canonical spend names (single id only) — never fuzzy. `not_google_ads`
+  labels are excluded from Google Ads campaign identity; unmatched labels are
+  `mapping_status: "unmatched"` (Mapping review). Two campaign ids sharing a
+  display name are never merged.
+- **DB unavailable:** same shape with `"db_unavailable": true`, null KPIs
+  (never fabricated zeros) and `reconciliation_status: "unavailable"`.
+
+---
+
+#### `GET /api/search-term-evidence/term` *(PR-ADS-144 — term drawer)*
+
+**Auth:** Auth · **Read-only:** Yes
+
+| Param | Notes |
+|---|---|
+| `term` | Required — exact search term. |
+| `campaign_key` | Optional — the table row's canonical campaign key. Omitted → combined view across campaigns. |
+| `window` | Same contract as above (400 on unknown). |
+
+Returns `{term (same row shape as the table), campaigns (per-campaign
+context incl. mapping_status/aliases/source_labels), matching_context
+(ad_groups/keywords/match_types), classification (state, junk_categories,
+matched_patterns, crm_junk_confirmed, classification_date/source from the
+latest waste_terms analysis row — `null`/Unavailable when not stored),
+platform_activity (conversions + disclosure that a platform event is not a
+confirmed SQL/customer/closed-won outcome), daily {rows per source_date —
+only dates the source actually reported; missing dates are never fabricated
+as zero}}`. Unknown term → `{"_not_found": true}`.
+
+---
+
+#### `GET /api/search-term-evidence/patterns` *(PR-ADS-144 — Patterns tab)*
+
+Patterns (n-grams) derived from the **same** selected-window deduplicated
+Search Term Universe with the same filters, window, source-date boundary,
+currency contract and classification states.
+
+**Auth:** Auth · **Read-only:** Yes
+
+| Param | Default | Notes |
+|---|---|---|
+| `window` | `30d` | Same contract as the Terms endpoint (400 on unknown). |
+| `n` | `1` | Pattern word length `1\|2\|3` (invalid → 400). |
+| `q` / `campaign` / `state` / `min_spend` | — | Same semantics as Terms (applied to underlying term rows before unification). |
+| `min_terms` | — | Minimum unique terms per pattern. |
+| `sort` | `spend` | `spend\|terms\|flagged\|pattern` (invalid → 400). |
+| `limit` | `100` | 1–500 pattern rows; `pagination.total_count`/`has_more` disclose truncation. |
+
+Response: `kpis {patterns_found, terms_analysed, patterns_with_flagged,
+patterns_needing_review, reported_spend_represented_usd}`, `rows [{pattern, n,
+signal (flagged_present|needs_review|mixed|reviewed_clean_only), terms,
+flagged_terms, clean_terms, needs_review_terms, reported_spend_usd, clicks,
+conversions, campaigns_count}]`, plus the same `audit` block extended with
+`patterns_derivation` and `pattern_kpi_spend_semantics:
+"unique_underlying_terms"`.
+
+**N-gram overlap contract:** the same search term contributes to multiple
+patterns, so pattern-row spend is NEVER additive and is never summed into an
+account total. KPI spend is computed once per unique underlying term. The
+machine-verifiable `overlap` block discloses `unique_terms_analysed`,
+`total_pattern_memberships`, `overlapping_term_count` and `spend_semantics`.
+
+---
+
+#### `GET /api/search-term-evidence/patterns/detail` *(PR-ADS-144 — pattern drawer)*
+
+**Auth:** Auth · **Read-only:** Yes
+
+Params: `pattern` (required), `n` (1|2|3), `window`, plus the shared
+`q`/`campaign`/`state`/`min_spend` filters. Returns `{pattern {…factual
+split + unique-term totals + campaigns}, platform_activity, terms [{search_term,
+state, campaigns, spend_usd, clicks, last_seen}] (top by spend, truncation
+disclosed via terms_truncated), overlap_note}`. Totals use unique term
+identities — a term is never totalled twice for appearing in multiple
+campaigns, dates or pattern positions.
+
+---
+
+#### `GET /api/search-term-evidence/export` *(PR-ADS-144 — CSV export)*
+
+**Auth:** Auth · **Read-only:** Yes
+
+Same filter params as `GET /api/search-term-evidence` (no `page`/`page_size`).
+Streams a `text/csv` attachment containing the **complete server-filtered
+dataset** at term × campaign grain — never a silently truncated page — named
+`search_terms_{window}_complete.csv`. When the source is unavailable the
+endpoint returns **503** (an empty file is never presented as a complete
+export). Invalid window/filters → 400.
+
 ---
 
 #### `GET /api/gclid-attribution`
@@ -1927,6 +2128,11 @@ One GCLID coverage snapshot per run, capturing aggregate coverage statistics.
 | GET | `/api/search-terms` | Auth | Paginated search-term fact rows (search_terms table, cursor pagination) |
 | GET | `/api/search-terms/summary` | Auth | Aggregate summary counts for selected filter/window (search_terms table, no pagination) |
 | GET | `/api/search-terms/ngrams` | Auth | Read-only n-gram analysis over stored search_terms (aggregated, no pagination) |
+| GET | `/api/search-term-evidence` | Auth | PR-ADS-144 Search Term Universe — selected-window source_date aggregates, complete-population KPIs, server-side pagination + audit block |
+| GET | `/api/search-term-evidence/term` | Auth | PR-ADS-144 search-term evidence drawer (campaign context, classification proof, daily source-date series) |
+| GET | `/api/search-term-evidence/patterns` | Auth | PR-ADS-144 Patterns (n-grams) derived from the same term population; unique-term KPI math + overlap disclosure |
+| GET | `/api/search-term-evidence/patterns/detail` | Auth | PR-ADS-144 pattern drawer — unique underlying terms + factual split |
+| GET | `/api/search-term-evidence/export` | Auth | PR-ADS-144 complete server-filtered CSV export (503 when source unavailable) |
 | GET | `/api/gclid-attribution` | Auth | Paginated GCLID attribution rows (gclid_attribution table, cursor pagination) |
 | GET | `/api/gclid-coverage` | Auth | GCLID coverage snapshots (gclid_coverage_snapshots table) |
 | GET | `/api/attribution/quality` | Auth | Read-only attribution quality signals (gclid_attribution + sync_state + gclid_coverage_snapshots) |
