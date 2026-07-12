@@ -649,9 +649,16 @@ def write_search_terms(
 ) -> int:
     """Upsert raw search-term fact rows into the search_terms table.
 
-    Accepts rows from pull_search_terms() (windsor connector format).
+    Accepts rows from pull_search_terms() (windsor connector format) or from
+    the Google Ads direct connector (with cost_micros + currency_code).
     Preserves existing is_flagged_waste / junk_category / matched_pattern on
     conflict — raw write is NOT allowed to override waste classifications.
+
+    Currency lineage (PR-ADS-144):
+      When cost_micros and currency_code are present in the input row, they are
+      stored durably so the evidence service can perform per-date FX conversion.
+      source_system is inferred from the input row (``source`` field) and
+      defaults to ``"unknown"`` for legacy rows.
 
     Returns count of inserted/updated rows.
     Returns 0 safely for empty input or DB unavailable.
@@ -716,6 +723,12 @@ def write_search_terms(
         impressions = int(_int_or_none(raw.get("impressions")) or 0)
         conversions = float(_float_or_none(raw.get("conversions")) or 0)
 
+        # ── Currency lineage (PR-ADS-144) ────────────────────────────────
+        cost_micros_raw = raw.get("cost_micros")
+        cost_micros = int(cost_micros_raw) if cost_micros_raw is not None else None
+        currency_code = raw.get("currency_code") or None
+        source_system = raw.get("source") or None
+
         rows.append((
             run_id,
             source_date,
@@ -729,6 +742,9 @@ def write_search_terms(
             clicks,
             impressions,
             conversions,
+            cost_micros,
+            currency_code,
+            source_system,
             sync_batch_id,
         ))
 
@@ -754,11 +770,13 @@ def write_search_terms(
             run_id, source_date, campaign_name, campaign_id,
             ad_group, keyword, match_type, search_term,
             spend_usd, clicks, impressions, conversions,
+            cost_micros, currency_code, source_system,
             sync_batch_id
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (
             source_date,
             COALESCE(campaign_name, ''),
+            COALESCE(campaign_id,   ''),
             COALESCE(ad_group,      ''),
             COALESCE(keyword,       ''),
             COALESCE(match_type,    ''),
@@ -771,9 +789,38 @@ def write_search_terms(
             clicks        = EXCLUDED.clicks,
             impressions   = EXCLUDED.impressions,
             conversions   = EXCLUDED.conversions,
+            cost_micros   = COALESCE(EXCLUDED.cost_micros,
+                                     search_terms.cost_micros),
+            currency_code = COALESCE(EXCLUDED.currency_code,
+                                     search_terms.currency_code),
+            source_system = COALESCE(EXCLUDED.source_system,
+                                     search_terms.source_system),
             campaign_id   = COALESCE(EXCLUDED.campaign_id,
                                      search_terms.campaign_id),
             updated_at    = NOW()
+    """
+
+    # PR-ADS-144: deterministic null-id supersession. campaign_id is part of the
+    # natural key, so a legacy row with campaign_id NULL and a later Google Ads
+    # row bearing an id for the SAME
+    # (source_date, campaign_name, ad_group, keyword, match_type, search_term)
+    # fact would otherwise become two rows and double-count. When we write an
+    # id-bearing row, the ambiguous NULL-campaign_id twin is superseded and
+    # removed (the precise id-bearing identity wins). Two DISTINCT ids (10, 20)
+    # sharing a display name are untouched — both are real, distinct facts.
+    _null_twin_keys = [
+        (r[1], r[2], r[4], r[5], r[6], r[7])   # (date, name, ad_group, kw, mt, term)
+        for r in rows if r[3] is not None and str(r[3]).strip()
+    ]
+    _null_twin_delete = """
+        DELETE FROM search_terms
+        WHERE campaign_id IS NULL
+          AND source_date = %s
+          AND COALESCE(campaign_name, '') = COALESCE(%s, '')
+          AND COALESCE(ad_group,      '') = COALESCE(%s, '')
+          AND COALESCE(keyword,       '') = COALESCE(%s, '')
+          AND COALESCE(match_type,    '') = COALESCE(%s, '')
+          AND search_term = %s
     """
 
     try:
@@ -782,6 +829,8 @@ def write_search_terms(
                 return 0
             with conn.cursor() as cur:
                 cur.executemany(_upsert_sql, rows)
+                if _null_twin_keys:
+                    cur.executemany(_null_twin_delete, _null_twin_keys)
                 # executemany with ON CONFLICT makes rowcount unreliable for
                 # determining actual inserts vs updates; use len(rows) as the
                 # attempted-upsert count.

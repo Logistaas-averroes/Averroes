@@ -272,6 +272,14 @@ CREATE TABLE IF NOT EXISTS search_terms (
   impressions      INTEGER       DEFAULT 0,
   conversions      NUMERIC(8,2)  DEFAULT 0,
 
+  -- Currency lineage (PR-ADS-144): durable raw cost from Google Ads.
+  -- cost_micros is the raw metrics.cost_micros from the API;
+  -- currency_code is the account native currency (e.g. GBP);
+  -- source_system identifies the data origin for provenance auditing.
+  cost_micros      BIGINT,
+  currency_code    TEXT,
+  source_system    TEXT,
+
   -- Tri-state analysis flag:
   -- NULL  = not analysed yet
   -- TRUE  = analysed and flagged as waste
@@ -286,17 +294,87 @@ CREATE TABLE IF NOT EXISTS search_terms (
   updated_at       TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Unique natural key: prevents duplicate fact rows for the same search term event
--- COALESCE handles nullable columns; search_term is NOT NULL so listed directly.
+-- Unique natural key: prevents duplicate fact rows for the same search term event.
+-- Includes campaign_id (PR-ADS-144) so two campaign IDs sharing a display name
+-- can never collide. COALESCE handles nullable columns; search_term is NOT NULL.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_search_terms_unique_fact
   ON search_terms (
     source_date,
     COALESCE(campaign_name,  ''),
+    COALESCE(campaign_id,    ''),
     COALESCE(ad_group,       ''),
     COALESCE(keyword,        ''),
     COALESCE(match_type,     ''),
     search_term
   );
+
+-- PR-ADS-144: real idempotent production migration for pre-PR-144 databases.
+--
+-- A database that predates PR-ADS-144 already has the search_terms table, so the
+-- CREATE TABLE IF NOT EXISTS above is a no-op there: the cost_micros /
+-- currency_code / source_system columns are NEVER added, and the old
+-- idx_search_terms_unique_fact (WITHOUT campaign_id) still exists, so the
+-- campaign_id-aware CREATE UNIQUE INDEX IF NOT EXISTS above is ALSO a no-op.
+-- This block performs the actual upgrade.
+--
+-- 1. Add the three lineage columns (ADD COLUMN IF NOT EXISTS is idempotent).
+ALTER TABLE search_terms ADD COLUMN IF NOT EXISTS cost_micros   BIGINT;
+ALTER TABLE search_terms ADD COLUMN IF NOT EXISTS currency_code TEXT;
+ALTER TABLE search_terms ADD COLUMN IF NOT EXISTS source_system TEXT;
+
+-- 2. Deterministically resolve legacy null-campaign_id collisions and swap the
+--    unique index to the campaign_id-aware definition. Runs exactly once, guarded
+--    by the migrations table.
+--
+--    Adding campaign_id to the key can only SPLIT groups, never merge them, so the
+--    new index can never introduce a NEW collision versus the old key. The ONE
+--    real hazard is double-counting: a legacy row with campaign_id NULL and a
+--    later Google Ads row bearing an id for the SAME
+--    (source_date, campaign_name, ad_group, keyword, match_type, search_term)
+--    fact would become two distinct keys. We resolve this deterministically:
+--    within each such group, when at least one id-bearing row exists, the
+--    NULL-campaign_id row(s) are the ambiguous legacy duplicate of the same fact
+--    and are deleted — the precise id-bearing identity wins. Two DISTINCT ids
+--    (10 and 20) sharing a display name are NOT touched: both are real, distinct
+--    facts and both survive.
+DO $$
+BEGIN
+    INSERT INTO migrations (migration_id)
+    VALUES ('PR-ADS-144-currency-and-id-key')
+    ON CONFLICT (migration_id) DO NOTHING;
+
+    IF FOUND THEN
+        -- Delete ambiguous NULL-campaign_id rows that collide with an id-bearing
+        -- row for the same fact (prevents null-id ↔ id-bearing double counting).
+        DELETE FROM search_terms st
+        WHERE st.campaign_id IS NULL
+          AND EXISTS (
+              SELECT 1 FROM search_terms other
+              WHERE other.campaign_id IS NOT NULL
+                AND other.source_date = st.source_date
+                AND COALESCE(other.campaign_name, '') = COALESCE(st.campaign_name, '')
+                AND COALESCE(other.ad_group,      '') = COALESCE(st.ad_group,      '')
+                AND COALESCE(other.keyword,       '') = COALESCE(st.keyword,       '')
+                AND COALESCE(other.match_type,    '') = COALESCE(st.match_type,    '')
+                AND other.search_term = st.search_term
+          );
+
+        -- Swap the index: drop the legacy definition (no campaign_id) and
+        -- recreate it with campaign_id included. The recreate cannot fail on a
+        -- collision because adding a key column only ever splits groups.
+        DROP INDEX IF EXISTS idx_search_terms_unique_fact;
+        CREATE UNIQUE INDEX idx_search_terms_unique_fact
+          ON search_terms (
+            source_date,
+            COALESCE(campaign_name, ''),
+            COALESCE(campaign_id,   ''),
+            COALESCE(ad_group,      ''),
+            COALESCE(keyword,       ''),
+            COALESCE(match_type,    ''),
+            search_term
+          );
+    END IF;
+END $$;
 
 -- Cursor/keyset pagination index (source_date DESC, id DESC)
 CREATE INDEX IF NOT EXISTS idx_search_terms_cursor

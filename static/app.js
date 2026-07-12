@@ -181,17 +181,17 @@ const PAGE_EXPLANATIONS = {
     nextAction: "Check System Status → Google Ads API / Campaigns."
   },
   "search-terms": {
-    title: "Search Term Universe",
-    purpose: "Raw Google Ads search terms sourced directly from the Google Ads API.",
-    source: "Google Ads API search-term data.",
+    title: "Search Terms",
+    purpose: "Selected-window Search Term Universe — queries reported by Google Ads, with factual tri-state review states, waste evidence and pattern analysis.",
+    source: "Durable Google Ads API search-term rows bounded by source_date; spend is reported search-term spend (stored USD), never canonical account spend.",
     dependsOn: ["search_terms"],
     emptyMeans: "This does not mean the account is clean. It means no Google Ads API search-term rows are currently available for this window.",
     nextAction: "Check System Status → Search Terms Pipeline."
   },
   ngrams: {
-    title: "Search Pattern Analysis",
-    purpose: "Recurring words and phrases extracted from stored search terms.",
-    source: "Patterns are calculated from Google Ads API search-term evidence.",
+    title: "Patterns",
+    purpose: "Recurring 1–3-word patterns derived from the same selected-window Search Term Universe.",
+    source: "Derived from Google Ads API search-term evidence — it cannot produce evidence when Search Terms is unavailable.",
     dependsOn: ["search_terms"],
     emptyMeans: "If Search Term Universe is empty or blocked, pattern analysis cannot run.",
     nextAction: "Fix Search Term Universe first."
@@ -353,11 +353,11 @@ const PAGE_HELP_CONTENT = {
     checkNext: "Campaign detail drawer for drill-down, or ROAS by Campaign for revenue attribution."
   },
   "search-terms": {
-    what: "Raw Google Ads search terms sourced directly from the Google Ads API. Browse, filter, and export the full search-term universe.",
-    source: "Google Ads API search-term reports.",
-    howToUse: "Use filters to narrow by campaign, match type, waste state, or minimum spend. Switch to the Patterns tab for n-gram analysis.",
-    doNotAssume: "This page does not add negative keywords or modify Google Ads. It is read-only evidence.",
-    checkNext: "Flagged Waste Terms for terms already flagged, or Patterns tab for recurring word analysis."
+    what: "Search Terms + Patterns — the selected-window Search Term Universe with factual review states (Flagged waste = stored true · Reviewed clean = stored false · Needs review = not yet classified) and waste evidence, plus a Patterns tab of recurring 1–3-word phrases derived from the same terms.",
+    source: "Durable Google Ads API search-term rows totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound). Spend is reported search-term spend in the account's native currency (e.g. GBP), FX-converted to USD using the same per-date rate doctrine as canonical campaign spend. When FX is incomplete or currency provenance is unproven, USD spend is withheld (Unavailable) and native spend is shown. Reporting Coverage compares FX-safe search-term USD against FX-safe canonical campaign USD — anything else returns Unavailable.",
+    howToUse: "Pick an Evidence Window, filter by campaign, review state, junk category or minimum spend, and click any row to open its evidence drawer. Switch to Patterns for word-level analysis derived from the same selected-window terms; a term can appear in several patterns, so pattern-row spends overlap and must never be summed.",
+    doNotAssume: "Review states are classification facts, not business outcomes — Reviewed clean does not mean valuable, and a platform conversion is never a confirmed SQL, customer or closed-won deal. A flagged term is a human-review candidate, not an approved negative. Read-only: no negative keywords are added and nothing is written to Google Ads or HubSpot. The legacy spend_usd column in storage is NOT proven USD — it stores the raw cost_micros/1e6 value in the account's native currency.",
+    checkNext: "Flagged Waste Terms for the flagged review queue, or Campaign Evidence for canonical spend and lead outcomes."
   },
   keywords: {
     what: "Keyword-level performance metrics — impressions, clicks, spend, conversions, and quality signals per keyword.",
@@ -547,11 +547,8 @@ let keywordLoadStatus = "idle"; // idle | loading | ok | empty | db_unavailable 
 let actionQueueItems = [];
 let actionQueueStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
 
-// Search Terms page state
-let searchTermRows = [];
-let searchTermsNextCursor = null;
-let searchTermsHasMore = false;
-let searchTermsStatus = "idle"; // idle | loading | ok | empty | db_unavailable | cursor_error | error
+// Search Terms page state lives with the PR-ADS-144 module (see
+// "Search Terms + Patterns evidence page" section).
 
 // GCLID Attribution page state
 let gclidRows = [];
@@ -1368,6 +1365,15 @@ function navigateToHash(page, options) {
     const tab = hashToDashTab(window.location.hash);
     if (tab !== "overview") hash = `${hash}?tab=${tab}`;
   }
+  // Same for the Search Terms Patterns deep link (#/search-terms?tab=patterns).
+  // The legacy #/ngrams route also lands on the Patterns tab (PR-ADS-144).
+  if (page === "search-terms") {
+    const raw = window.location.hash || "";
+    const q = raw.split("?")[1] || "";
+    if (raw.startsWith("#/ngrams") || new URLSearchParams(q).get("tab") === "patterns") {
+      hash = `${hash}?tab=patterns`;
+    }
+  }
   if (window.location.hash !== hash) {
     if (options.replace) {
       history.replaceState(null, "", hash);
@@ -1493,15 +1499,7 @@ function loadPage(page) {
     case "reports":       loadReports(); loadRevenueSnapshotHistory(); break;
     case "campaigns":     loadCampaigns();                          break;
     case "waste":         loadWaste();                              break;
-    case "search-terms":  loadSearchTerms({ reset: true });         break;
-    case "ngrams":
-      if (ngramsPrefill) {
-        const ngramCampaignInput = document.getElementById("ngrams-campaign");
-        if (ngramCampaignInput) ngramCampaignInput.value = ngramsPrefill.campaign || "";
-        ngramsPrefill = null;
-      }
-      loadNgrams();
-      break;
+    case "search-terms":  loadSearchTermsEvidence();                break;
     case "geo":           loadGeo();                                break;
     case "keywords":      loadKeywords();      break;
     case "leads":         loadLeads();         break;
@@ -8961,753 +8959,922 @@ function qualityScoreBadge(qs) {
   return `<span class="quality-score-badge ${cls}">${n.toFixed(1)}</span>`;
 }
 
-// ── Search Terms Forensics page ────────────────────────────────────────────
+// ── Search Terms + Patterns evidence page (PR-ADS-144) ──────────────────────
+// One full-width decision-support page with two tabs (Terms | Patterns),
+// aligned with the Campaign Evidence design. Data comes from the
+// /api/search-term-evidence family: durable source_date-bounded selected-window
+// aggregates, tri-state review states, reported-search-term-spend semantics,
+// complete-population KPIs and server-side pagination. Strictly read-only —
+// nothing here adds negatives or writes to Google Ads / HubSpot.
 
-let searchTermsSummary = null;
-let searchTermsSummaryStatus = "idle"; // idle | loading | ok | db_unavailable | error
-let _searchTermsSummaryReqId = 0;
+let _stTab = "terms";               // terms | patterns
+let _stData = null;                  // /api/search-term-evidence payload
+let _stLoadState = "idle";           // idle | loading | ok | db_unavailable | error
+let _stFilters = { q: "", campaign: "", state: "", junk: "", minSpend: "", sort: "spend", page: 1 };
+let _stReqId = 0;
+let _stDebounceTimer = null;
 
-function buildSearchTermsParams({ cursor = null } = {}) {
-  const params = new URLSearchParams();
-  params.set("window", getEvidenceWindow());
-  params.set("limit", "100");
+let _patData = null;                 // /api/search-term-evidence/patterns payload
+let _patLoadState = "idle";
+let _patFilters = { n: "1", q: "", campaign: "", state: "", minSpend: "", minTerms: "", sort: "spend" };
+let _patReqId = 0;
+let _patDebounceTimer = null;
+let _patPendingCampaignName = null;  // campaign-drawer prefill (by display name)
 
-  const q         = document.getElementById("search-terms-query")?.value.trim();
-  const campaign  = document.getElementById("search-terms-campaign")?.value.trim();
-  const matchType = document.getElementById("search-terms-match-type")?.value;
-  const minSpend  = document.getElementById("search-terms-min-spend")?.value;
-  const wasteFilter = document.getElementById("search-terms-waste-filter")?.value;
+let _stDrawerKeyHandler = null;
 
-  if (q)         params.set("q", q);
-  if (campaign)  params.set("campaign", campaign);
-  if (matchType) params.set("match_type", matchType);
-  if (minSpend)  params.set("min_spend", minSpend);
+const ST_STATE_LABELS = {
+  flagged: "Flagged waste",
+  clean: "Reviewed clean",
+  needs_review: "Needs review",
+};
+const ST_STATE_TONE = { flagged: "bad", clean: "good", needs_review: "warn" };
 
-  if (wasteFilter === "waste") {
-    params.set("waste_state", "flagged");
-  } else if (wasteFilter === "clean") {
-    params.set("waste_state", "clean");
-  } else if (wasteFilter === "unanalyzed") {
-    params.set("waste_state", "unanalyzed");
-  }
+const ST_SIGNAL_LABELS = {
+  flagged_present: "Flagged present",
+  needs_review: "Needs review",
+  mixed: "Mixed",
+  reviewed_clean_only: "Reviewed clean only",
+};
+const ST_SIGNAL_TONE = {
+  flagged_present: "bad",
+  needs_review: "warn",
+  mixed: "warn",
+  reviewed_clean_only: "good",
+};
 
-  if (cursor) params.set("cursor", cursor);
-
-  return params;
+function stStateBadge(state) {
+  const tone = ST_STATE_TONE[state] || "muted";
+  const label = ST_STATE_LABELS[state] || fmt(state);
+  return `<span class="campaign-status-badge campaign-status-badge--${tone}">${label}</span>`;
 }
 
-function buildSearchTermsSummaryParams() {
-  const params = buildSearchTermsParams({ cursor: null });
-  params.delete("limit");
-  params.delete("cursor");
-  return params;
+// Compact tri-state mix pills (still used by the Campaign Evidence drawer's
+// N-Gram drilldown section — Campaign Evidence layout is unchanged).
+function ngramWasteStateMix(flagged, clean, unanalyzed) {
+  const parts = [];
+  if (flagged)    parts.push(`<span class="ngram-state-flagged" title="Flagged waste rows">${flagged}F</span>`);
+  if (clean)      parts.push(`<span class="ngram-state-clean" title="Reviewed clean rows">${clean}C</span>`);
+  if (unanalyzed) parts.push(`<span class="ngram-state-unanalyzed" title="Needs-review rows">${unanalyzed}U</span>`);
+  return parts.length ? `<span class="ngram-state-mix">${parts.join(" ")}</span>` : "—";
 }
 
-async function loadSearchTermsSummary() {
-  _searchTermsSummaryReqId += 1;
-  const reqId = _searchTermsSummaryReqId;
-
-  searchTermsSummaryStatus = "loading";
-  renderSearchTermsKPIs();
-
-  try {
-    const params = buildSearchTermsSummaryParams();
-    const data = await fetchJSON(`/api/search-terms/summary?${params.toString()}`);
-
-    // Discard response if a newer request has already been dispatched.
-    if (reqId !== _searchTermsSummaryReqId) return;
-
-    if (data.db_unavailable) {
-      searchTermsSummaryStatus = "db_unavailable";
-      searchTermsSummary = data;
-    } else {
-      searchTermsSummaryStatus = "ok";
-      searchTermsSummary = data;
-    }
-
-    renderSearchTermsKPIs();
-  } catch (err) {
-    if (reqId !== _searchTermsSummaryReqId) return;
-    searchTermsSummaryStatus = "error";
-    searchTermsSummary = null;
-    renderSearchTermsKPIs();
-  }
+function stSignalBadge(signal) {
+  const tone = ST_SIGNAL_TONE[signal] || "muted";
+  const label = ST_SIGNAL_LABELS[signal] || fmt(signal);
+  return `<span class="campaign-status-badge campaign-status-badge--${tone}">${label}</span>`;
 }
 
-function getVisibleSearchTermRows() {
-  // Analysis-state filtering is backend-owned (PR-ADS-052).
-  // This helper filters only client-side visibility flags (hidden/visible) so
-  // downstream "no results match filter" branches stay reachable for future
-  // client-side visibility features without reintroducing waste-state filtering.
-  return (Array.isArray(searchTermRows) ? searchTermRows : []).filter((row) => {
-    if (!row || typeof row !== "object") return true;
-    if (row.hidden === true) return false;
-    if (row._hidden === true) return false;
-    if (row.visible === false) return false;
-    return true;
+// Exact reported money — never a fabricated $0 for a null.
+function stMoney(v) {
+  if (v === null || v === undefined) return "—";
+  return "$" + Number(v).toLocaleString(undefined, {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
   });
 }
 
-function _updateSearchTermsFilterNote() {
-  // As of PR-ADS-052, analysis-state filters are backend-applied, so no client-side caveat
-  // is needed. The note element is kept in the DOM but permanently hidden so it can be
-  // repurposed for future informational messages without an HTML change.
-  const noteEl = document.getElementById("search-terms-filter-note");
-  if (!noteEl) return;
-  noteEl.hidden = true;
+function stSpendCell(row) {
+  // Currency-aware spend display: prefers USD, falls back to native with disclosure.
+  if (row.spend_usd !== null && row.spend_usd !== undefined) return stMoney(row.spend_usd);
+  if (row.spend_native !== null && row.spend_native !== undefined) {
+    const cur = row.native_currency || "?";
+    const val = Number(row.spend_native).toLocaleString(undefined, {
+      minimumFractionDigits: 2, maximumFractionDigits: 2,
+    });
+    return `<span title="USD unavailable — FX incomplete">${cur} ${val}</span>`;
+  }
+  return "—";
 }
 
-function _updateSearchTermsPaginationVisibility() {
-  const container = document.querySelector("#page-search-terms .pagination-actions");
-  const btn       = document.getElementById("search-terms-load-more-btn");
-  if (!container || !btn) return;
-  container.hidden = btn.hidden;
+function stUnavailable() {
+  return `<span class="detail-unavailable">Unavailable</span>`;
 }
 
-async function loadSearchTerms({ reset = false, cursor = null } = {}) {
-  if (searchTermsStatus === "loading") return;
+function stKpiCard(label, valueHtml, sub) {
+  return `<div class="dash-kpi-card">
+    <div class="dash-kpi-card__label">${label}</div>
+    <div class="dash-kpi-card__value">${valueHtml}</div>
+    ${sub ? `<div class="dash-kpi-card__sub">${sub}</div>` : ""}
+  </div>`;
+}
 
-  if (reset) renderPageDatasetFreshness("search_terms");
+function stWindowLabel() {
+  const w = getEvidenceWindow();
+  return (typeof CAMPAIGN_WINDOW_LABELS !== "undefined" && CAMPAIGN_WINDOW_LABELS[w]) || w;
+}
 
-  searchTermsStatus = "loading";
+// ── Page entry point ─────────────────────────────────────────────────────────
 
-  const tableEl   = document.getElementById("search-terms-table");
-  const loadMoreBtn = document.getElementById("search-terms-load-more-btn");
+function loadSearchTermsEvidence() {
+  renderPageDatasetFreshness("search_terms");
+  _stFilters.page = 1; // fresh page entry / window change → restart pagination
+  // Deep link: #/search-terms?tab=patterns (also produced by the #/ngrams alias).
+  const rawHash = window.location.hash || "";
+  const hashQuery = (rawHash.split("?")[1] || "");
+  if (rawHash.startsWith("#/ngrams") ||
+      new URLSearchParams(hashQuery).get("tab") === "patterns") {
+    _stTab = "patterns";
+  }
+  // Campaign-drawer prefill (navigate("ngrams") with a campaign context).
+  if (ngramsPrefill && ngramsPrefill.campaign) {
+    _patPendingCampaignName = ngramsPrefill.campaign;
+    _stTab = "patterns";
+    ngramsPrefill = null;
+  }
+  renderSearchTermsShell();
+  if (_stTab === "patterns") loadPatternsTab();
+  else loadTermsTab();
+}
 
-  if (reset) {
-    searchTermRows = [];
-    searchTermsNextCursor = null;
-    searchTermsHasMore = false;
-    // Reset summary state and fire summary loader in parallel with the table load.
-    searchTermsSummary = null;
-    searchTermsSummaryStatus = "idle";
-    renderSearchTermsKPIs();
-    loadSearchTermsSummary();
-    if (tableEl) tableEl.innerHTML =
-      `<p class="empty-state" style="padding:var(--space-5)">Loading search terms…</p>`;
-    if (loadMoreBtn) loadMoreBtn.hidden = true;
-    _updateSearchTermsPaginationVisibility();
-  } else {
-    if (loadMoreBtn) {
-      loadMoreBtn.disabled = true;
-      loadMoreBtn.textContent = "Loading…";
-    }
+// Back-compat entry point (older callers/tests referenced loadSearchTerms).
+function loadSearchTerms() { loadSearchTermsEvidence(); }
+
+function renderSearchTermsShell() {
+  const shell = document.getElementById("search-terms-shell");
+  if (!shell) return;
+  shell.innerHTML = `
+    <header class="campaign-evidence-head">
+      <div class="campaign-evidence-head__text">
+        <h2 class="campaign-evidence-title">Search Terms</h2>
+        <p class="campaign-evidence-sub">Queries reported by Google Ads, with review state and waste evidence.</p>
+      </div>
+      <span class="campaign-evidence-window" title="Selected evidence window">${escapeHtml(stWindowLabel())}</span>
+    </header>
+    <div class="search-terms-tabs" role="tablist" aria-label="Search Terms tabs">
+      <button id="tab-btn-terms" class="search-terms-tab${_stTab === "terms" ? " active" : ""}"
+        role="tab" aria-selected="${_stTab === "terms"}" data-tab="terms" type="button">Terms</button>
+      <button id="tab-btn-patterns" class="search-terms-tab${_stTab === "patterns" ? " active" : ""}"
+        role="tab" aria-selected="${_stTab === "patterns"}" data-tab="patterns" type="button">Patterns</button>
+    </div>
+    <div id="st-tab-body"></div>`;
+  shell.querySelectorAll(".search-terms-tab").forEach((tab) => {
+    tab.addEventListener("click", () => stActivateTab(tab.dataset.tab));
+  });
+}
+
+function stActivateTab(tab) {
+  if (tab !== "terms" && tab !== "patterns") return;
+  _stTab = tab;
+  document.querySelectorAll(".search-terms-tab").forEach((t) => {
+    const active = t.dataset.tab === tab;
+    t.classList.toggle("active", active);
+    t.setAttribute("aria-selected", String(active));
+  });
+  // Keep the deep link honest without triggering the router.
+  const newHash = tab === "patterns" ? "#/search-terms?tab=patterns" : "#/search-terms";
+  if (window.location.hash !== newHash) {
+    history.replaceState(history.state, "", newHash);
+  }
+  if (tab === "patterns") loadPatternsTab();
+  else loadTermsTab();
+}
+
+// ── Terms tab ────────────────────────────────────────────────────────────────
+
+function stBuildTermsParams() {
+  const p = new URLSearchParams();
+  p.set("window", getEvidenceWindow());
+  p.set("page", String(_stFilters.page));
+  p.set("page_size", "50");
+  p.set("sort", _stFilters.sort || "spend");
+  if (_stFilters.q) p.set("q", _stFilters.q);
+  if (_stFilters.campaign) p.set("campaign", _stFilters.campaign);
+  if (_stFilters.state) p.set("state", _stFilters.state);
+  if (_stFilters.junk) p.set("junk_category", _stFilters.junk);
+  if (_stFilters.minSpend !== "" && _stFilters.minSpend !== null) {
+    p.set("min_spend", String(_stFilters.minSpend));
+  }
+  return p;
+}
+
+async function loadTermsTab() {
+  const reqId = ++_stReqId;
+  _stLoadState = "loading";
+  renderTermsTab();
+  try {
+    const data = await fetchJSON(`/api/search-term-evidence?${stBuildTermsParams().toString()}`);
+    if (reqId !== _stReqId || _stTab !== "terms") return;
+    _stData = data;
+    _stLoadState = data.db_unavailable ? "db_unavailable" : "ok";
+  } catch (err) {
+    if (reqId !== _stReqId || _stTab !== "terms") return;
+    console.error("search-term-evidence load failed", err);
+    _stLoadState = "error";
+  }
+  renderTermsTab();
+}
+
+function stHasActiveFilters() {
+  return Boolean(_stFilters.q || _stFilters.campaign || _stFilters.state ||
+    _stFilters.junk || _stFilters.minSpend !== "");
+}
+
+function renderTermsTab() {
+  const body = document.getElementById("st-tab-body");
+  if (!body || _stTab !== "terms") return;
+
+  if (_stLoadState === "loading" && !_stData) {
+    body.innerHTML = `<div class="evidence-empty-state">Loading search terms…</div>`;
+    return;
+  }
+  if (_stLoadState === "db_unavailable") {
+    body.innerHTML = `<div class="evidence-empty-state">
+      Data unavailable — the search_terms source cannot be reached right now.
+      No metrics are shown because none can be verified.
+      <a href="#/health">Check System Status</a>.</div>`;
+    return;
+  }
+  if (_stLoadState === "error") {
+    body.innerHTML = `<div class="evidence-empty-state">
+      Search terms could not be loaded. Retry, or check System Status.</div>`;
+    return;
+  }
+  if (!_stData) return;
+
+  body.innerHTML = `
+    ${renderTermsKPIs(_stData.kpis)}
+    ${renderTermsFilters(_stData.facets)}
+    <div class="evidence-table-shell">
+      <div class="evidence-table-scroll" id="st-terms-table"></div>
+      <div class="st-pagination" id="st-terms-pagination"></div>
+    </div>`;
+  renderTermsTable();
+  wireTermsControls();
+}
+
+function renderTermsKPIs(kpis) {
+  if (!kpis) return "";
+  const coverage = kpis.coverage || {};
+  const val = (v) => (v === null || v === undefined) ? stUnavailable() : fmtCount(v);
+  const cards = [
+    stKpiCard("Reported Terms", val(kpis.reported_terms), "Term × campaign rows in window"),
+    stKpiCard("Reported Search-Term Spend",
+      kpis.reported_spend_usd === null || kpis.reported_spend_usd === undefined
+        ? stUnavailable() : stMoney(kpis.reported_spend_usd),
+      kpis.currency_status === "proven" && kpis.fx_complete
+        ? "FX-converted to USD — reported by Google Ads"
+        : kpis.reported_spend_usd === null || kpis.reported_spend_usd === undefined
+          ? "USD unavailable — FX incomplete or currency unproven"
+          : "Reported by Google Ads — not total account spend"),
+    stKpiCard("Clicks", val(kpis.clicks), ""),
+    stKpiCard("Flagged Waste", val(kpis.flagged_waste), "Human-review candidates"),
+    stKpiCard("Needs Review", val(kpis.needs_review), "Not yet classified"),
+  ];
+  // Coverage is a WINDOW-LEVEL source-completeness diagnostic — it does not
+  // narrow with the row filters, so showing it next to filtered KPIs would be
+  // internally inconsistent. Hide the card whenever filters are active.
+  if (coverage.status === "ok" && coverage.coverage_pct !== null &&
+      coverage.coverage_pct !== undefined && !stHasActiveFilters()) {
+    cards.push(stKpiCard("Reporting Coverage",
+      `${Number(coverage.coverage_pct).toFixed(1)}%`,
+      `Search-term reporting coverage of ${stMoney(coverage.canonical_spend_usd)} canonical spend (whole window)`));
+  }
+  return `<div class="evidence-kpi-grid st-kpi-grid">${cards.join("")}</div>`;
+}
+
+function stCampaignOptions(facets, selected) {
+  const opts = [`<option value="">All campaigns</option>`];
+  (facets && facets.campaigns ? facets.campaigns : []).forEach((c) => {
+    const marker = c.mapping_status === "unmatched" ? " (mapping review)"
+      : c.mapping_status === "not_google_ads" ? " (not Google Ads)" : "";
+    opts.push(`<option value="${escapeHtml(c.campaign_key)}"${c.campaign_key === selected ? " selected" : ""}>` +
+      `${escapeHtml(c.campaign_name || c.campaign_key)}${marker}</option>`);
+  });
+  return opts.join("");
+}
+
+function stStateOptions(selected) {
+  return `<option value="">All review states</option>
+    <option value="flagged"${selected === "flagged" ? " selected" : ""}>Flagged waste</option>
+    <option value="clean"${selected === "clean" ? " selected" : ""}>Reviewed clean</option>
+    <option value="needs_review"${selected === "needs_review" ? " selected" : ""}>Needs review</option>`;
+}
+
+function renderTermsFilters(facets) {
+  const junkOpts = [`<option value="">All junk categories</option>`];
+  (facets && facets.junk_categories ? facets.junk_categories : []).forEach((j) => {
+    junkOpts.push(`<option value="${escapeHtml(j)}"${j === _stFilters.junk ? " selected" : ""}>${escapeHtml(j)}</option>`);
+  });
+  return `<div class="campaign-controls st-controls">
+    <input type="search" id="st-q" class="waste-search-input" placeholder="Search terms…"
+      value="${escapeHtml(_stFilters.q)}" aria-label="Search by term" />
+    <select id="st-campaign" class="waste-filter-select" aria-label="Filter by canonical campaign">
+      ${stCampaignOptions(facets, _stFilters.campaign)}</select>
+    <select id="st-state" class="waste-filter-select" aria-label="Filter by review state">
+      ${stStateOptions(_stFilters.state)}</select>
+    <select id="st-junk" class="waste-filter-select" aria-label="Filter by junk category">
+      ${junkOpts.join("")}</select>
+    <input type="number" id="st-min-spend" min="0" step="1" class="waste-search-input st-min-spend"
+      placeholder="Min spend $" value="${escapeHtml(String(_stFilters.minSpend))}"
+      aria-label="Minimum reported spend in USD" />
+    <select id="st-sort" class="waste-filter-select" aria-label="Sort">
+      <option value="spend"${_stFilters.sort === "spend" ? " selected" : ""}>Highest spend</option>
+      <option value="clicks"${_stFilters.sort === "clicks" ? " selected" : ""}>Most clicks</option>
+      <option value="cpc"${_stFilters.sort === "cpc" ? " selected" : ""}>Highest CPC</option>
+      <option value="conversions"${_stFilters.sort === "conversions" ? " selected" : ""}>Most platform conversions</option>
+      <option value="last_seen"${_stFilters.sort === "last_seen" ? " selected" : ""}>Newest seen</option>
+      <option value="term"${_stFilters.sort === "term" ? " selected" : ""}>Search term</option>
+    </select>
+    <button id="st-reset" type="button" class="revenue-filter-chip campaign-clear-btn">Reset</button>
+    <button id="st-export" type="button" class="revenue-filter-chip campaign-clear-btn"
+      title="Export the complete server-filtered dataset for this window">Export CSV</button>
+  </div>`;
+}
+
+function stCampaignCell(r) {
+  let html = escapeHtml(r.campaign_name || "(no campaign)");
+  if (r.mapping_status === "unmatched") {
+    html += ` <span class="campaign-map-note">Mapping review</span>`;
+  } else if (r.mapping_status === "not_google_ads") {
+    html += ` <span class="campaign-map-note">Not Google Ads</span>`;
+  } else if (r.aliases && r.aliases.length) {
+    html += ` <span class="campaign-alias-hint" title="Also reported as: ${escapeHtml(r.aliases.join(", "))}">alias</span>`;
+  }
+  return html;
+}
+
+function renderTermsTable() {
+  const host = document.getElementById("st-terms-table");
+  const pager = document.getElementById("st-terms-pagination");
+  if (!host) return;
+  const rows = (_stData && _stData.rows) || [];
+  const pg = (_stData && _stData.pagination) || {};
+
+  if (!rows.length) {
+    host.innerHTML = buildEmptyState({
+      pageKey: "search-terms",
+      canonicalStatus: getPageCanonicalStatus("search-terms"),
+      rowsInWindow: 0,
+      filtersActive: stHasActiveFilters(),
+    }) + `<p class="st-overlap-note" style="padding: 0 var(--space-4) var(--space-3);">A verified empty window is not proof the account has no waste.</p>`;
+    if (pager) pager.innerHTML = "";
+    return;
   }
 
+  const body = rows.map((r) => `
+    <tr class="campaign-decision-row st-row" tabindex="0" role="button"
+        data-st-term="${encodeURIComponent(r.search_term)}"
+        data-st-key="${encodeURIComponent(r.campaign_key)}"
+        aria-label="Open evidence for ${escapeHtml(r.search_term)}">
+      <td class="td--name st-td-term" data-label="Search Term">${escapeHtml(r.search_term)}</td>
+      <td data-label="State">${stStateBadge(r.state)}</td>
+      <td class="st-td-campaign" data-label="Campaign">${stCampaignCell(r)}</td>
+      <td class="td--num" data-label="Spend">${stSpendCell(r)}</td>
+      <td class="td--num" data-label="Clicks">${fmtCount(r.clicks)}</td>
+      <td class="td--num" data-label="CPC">${stMoney(r.cpc_usd)}</td>
+      <td class="td--num" data-label="Last Seen">${r.last_seen ? escapeHtml(r.last_seen) : "—"}</td>
+      <td class="td--action" data-label=""><span class="campaign-open-icon" aria-hidden="true" title="Open evidence">›</span></td>
+    </tr>`).join("");
+
+  host.innerHTML = `<table class="data-table campaign-decision-table st-table">
+    <thead><tr>
+      <th class="td--name">Search Term</th><th>State</th><th>Campaign</th>
+      <th class="td--num">Spend</th><th class="td--num">Clicks</th>
+      <th class="td--num">CPC</th><th class="td--num">Last Seen</th>
+      <th class="td--action"><span class="sr-only">Open evidence</span></th>
+    </tr></thead><tbody>${body}</tbody></table>`;
+
+  host.querySelectorAll("[data-st-term]").forEach((tr) => {
+    const open = () => openStTermDrawer(
+      decodeURIComponent(tr.dataset.stTerm), decodeURIComponent(tr.dataset.stKey));
+    tr.addEventListener("click", (e) => { if (!e.target.closest("a")) open(); });
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
+  });
+
+  if (pager) {
+    const total = pg.total_count || 0;
+    const from = total === 0 ? 0 : ((pg.page - 1) * pg.page_size) + 1;
+    const to = total === 0 ? 0 : Math.min(total, from + (pg.returned_count || 0) - 1);
+    pager.innerHTML = `
+      <span class="st-pagination__info">Showing ${fmtCount(from)}–${fmtCount(to)} of ${fmtCount(total)} reported terms</span>
+      <span class="st-pagination__btns">
+        <button id="st-prev" type="button" class="revenue-filter-chip" ${pg.page > 1 ? "" : "disabled"}>‹ Prev</button>
+        <button id="st-next" type="button" class="revenue-filter-chip" ${pg.has_more ? "" : "disabled"}>Next ›</button>
+      </span>`;
+    const prev = document.getElementById("st-prev");
+    const next = document.getElementById("st-next");
+    if (prev) prev.addEventListener("click", () => { _stFilters.page = Math.max(1, _stFilters.page - 1); loadTermsTab(); });
+    if (next) next.addEventListener("click", () => { _stFilters.page += 1; loadTermsTab(); });
+  }
+}
+
+function wireTermsControls() {
+  const q = document.getElementById("st-q");
+  const minSpend = document.getElementById("st-min-spend");
+  const debounced = () => {
+    clearTimeout(_stDebounceTimer);
+    _stDebounceTimer = setTimeout(() => {
+      _stFilters.q = q ? q.value.trim() : "";
+      _stFilters.minSpend = minSpend && minSpend.value !== "" ? minSpend.value : "";
+      _stFilters.page = 1;
+      loadTermsTab();
+    }, 350);
+  };
+  if (q) q.addEventListener("input", debounced);
+  if (minSpend) minSpend.addEventListener("input", debounced);
+  [["st-campaign", "campaign"], ["st-state", "state"], ["st-junk", "junk"], ["st-sort", "sort"]]
+    .forEach(([id, key]) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("change", () => {
+        _stFilters[key] = el.value;
+        _stFilters.page = 1;
+        loadTermsTab();
+      });
+    });
+  const reset = document.getElementById("st-reset");
+  if (reset) reset.addEventListener("click", () => {
+    _stFilters = { q: "", campaign: "", state: "", junk: "", minSpend: "", sort: "spend", page: 1 };
+    loadTermsTab();
+  });
+  const exportBtn = document.getElementById("st-export");
+  if (exportBtn) exportBtn.addEventListener("click", () => {
+    // Complete server-filtered export (never a truncated page).
+    const p = stBuildTermsParams();
+    p.delete("page"); p.delete("page_size");
+    const a = document.createElement("a");
+    a.href = `/api/search-term-evidence/export?${p.toString()}`;
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+}
+
+// ── Patterns tab ─────────────────────────────────────────────────────────────
+
+function stBuildPatternParams() {
+  const p = new URLSearchParams();
+  p.set("window", getEvidenceWindow());
+  p.set("n", String(_patFilters.n || "1"));
+  p.set("sort", _patFilters.sort || "spend");
+  p.set("limit", "100");
+  if (_patFilters.q) p.set("q", _patFilters.q);
+  if (_patFilters.campaign) p.set("campaign", _patFilters.campaign);
+  if (_patFilters.state) p.set("state", _patFilters.state);
+  if (_patFilters.minSpend !== "" && _patFilters.minSpend !== null) p.set("min_spend", String(_patFilters.minSpend));
+  if (_patFilters.minTerms !== "" && _patFilters.minTerms !== null) p.set("min_terms", String(_patFilters.minTerms));
+  return p;
+}
+
+async function loadPatternsTab() {
+  const reqId = ++_patReqId;
+  _patLoadState = "loading";
+  renderPatternsTab();
   try {
-    const params = buildSearchTermsParams({ cursor });
-    const data   = await fetchJSON(`/api/search-terms?${params.toString()}`);
-
-    if (data.db_unavailable) {
-      searchTermsStatus = "db_unavailable";
-      searchTermRows = [];
-      renderSearchTermsTable();
-      if (loadMoreBtn) loadMoreBtn.hidden = true;
-      _updateSearchTermsPaginationVisibility();
-      return;
-    }
-
-    const newRows = data.rows || [];
-    const pagination = data.pagination || {};
-
-    if (reset) {
-      searchTermRows = newRows;
-    } else {
-      searchTermRows = searchTermRows.concat(newRows);
-    }
-
-    searchTermsNextCursor = pagination.next_cursor || null;
-    searchTermsHasMore    = pagination.has_more || false;
-
-    if (searchTermRows.length === 0) {
-      searchTermsStatus = "empty";
-    } else {
-      searchTermsStatus = "ok";
-    }
-
-    renderSearchTermsTable();
-
-    if (loadMoreBtn) {
-      if (searchTermsHasMore) {
-        loadMoreBtn.hidden   = false;
-        loadMoreBtn.disabled = false;
-        loadMoreBtn.textContent = "Load more";
-      } else {
-        loadMoreBtn.hidden = true;
+    const data = await fetchJSON(`/api/search-term-evidence/patterns?${stBuildPatternParams().toString()}`);
+    if (reqId !== _patReqId || _stTab !== "patterns") return;
+    _patData = data;
+    _patLoadState = data.db_unavailable ? "db_unavailable" : "ok";
+    // Campaign-drawer prefill by display name → resolve to a facet key once.
+    if (_patPendingCampaignName && _patLoadState === "ok") {
+      const want = _patPendingCampaignName.trim().toLowerCase();
+      _patPendingCampaignName = null;
+      const match = ((data.facets || {}).campaigns || []).find(
+        (c) => (c.campaign_name || "").trim().toLowerCase() === want);
+      if (match && _patFilters.campaign !== match.campaign_key) {
+        _patFilters.campaign = match.campaign_key;
+        loadPatternsTab();
+        return;
       }
     }
-    _updateSearchTermsPaginationVisibility();
-
   } catch (err) {
-    // Distinguish invalid cursor (HTTP 400) from generic error
-    const isCursorError = err && err.message && err.message.includes("Invalid cursor");
-    searchTermsStatus = isCursorError ? "cursor_error" : "error";
-    renderSearchTermsTable();
-    // On cursor errors: hide Load More — retrying with the same broken cursor won't help.
-    // On generic errors with no valid next cursor: also hide.
-    if (loadMoreBtn) {
-      const canLoadMore = searchTermsStatus !== "cursor_error" && !!searchTermsNextCursor;
-      loadMoreBtn.hidden   = !canLoadMore;
-      loadMoreBtn.disabled = false;
-      loadMoreBtn.textContent = "Load more";
-    }
-    _updateSearchTermsPaginationVisibility();
+    if (reqId !== _patReqId || _stTab !== "patterns") return;
+    console.error("search-term patterns load failed", err);
+    _patLoadState = "error";
   }
+  renderPatternsTab();
 }
 
-function renderSearchTermsKPIs() {
-  const kpiGrid = document.getElementById("search-terms-kpis");
-  if (!kpiGrid) return;
+function renderPatternsTab() {
+  const body = document.getElementById("st-tab-body");
+  if (!body || _stTab !== "patterns") return;
 
-  // Loading state — show skeleton cards
-  if (searchTermsSummaryStatus === "loading" || searchTermsSummaryStatus === "idle") {
-    kpiGrid.innerHTML = `
-      <div class="kpi-card">
-        <div class="kpi-card__label">Matching Terms</div>
-        <div class="kpi-card__value">…</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Matching Spend</div>
-        <div class="kpi-card__value">…</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Flagged Waste</div>
-        <div class="kpi-card__value">…</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Unanalyzed</div>
-        <div class="kpi-card__value">…</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Avg CPC</div>
-        <div class="kpi-card__value">…</div>
-      </div>`;
+  if (_patLoadState === "loading" && !_patData) {
+    body.innerHTML = `<div class="evidence-empty-state">Analysing patterns…</div>`;
     return;
   }
-
-  // DB unavailable state
-  if (searchTermsSummaryStatus === "db_unavailable") {
-    kpiGrid.innerHTML = `
-      <div class="kpi-card">
-        <div class="kpi-card__label">Matching Terms</div>
-        <div class="kpi-card__value">—</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Matching Spend</div>
-        <div class="kpi-card__value">—</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Flagged Waste</div>
-        <div class="kpi-card__value">—</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Unanalyzed</div>
-        <div class="kpi-card__value">—</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Avg CPC</div>
-        <div class="kpi-card__value">—</div>
-        <div class="kpi-subtext">Search-term summary unavailable — database offline.</div>
-      </div>`;
+  if (_patLoadState === "db_unavailable") {
+    body.innerHTML = `<div class="evidence-empty-state">
+      Patterns are derived from the Search Terms source, which is unavailable right now —
+      no pattern evidence can be produced. <a href="#/health">Check System Status</a>.</div>`;
     return;
   }
-
-  // Error state
-  if (searchTermsSummaryStatus === "error") {
-    kpiGrid.innerHTML = `
-      <div class="kpi-card">
-        <div class="kpi-card__label">Matching Terms</div>
-        <div class="kpi-card__value">—</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Matching Spend</div>
-        <div class="kpi-card__value">—</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Flagged Waste</div>
-        <div class="kpi-card__value">—</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Unanalyzed</div>
-        <div class="kpi-card__value">—</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-card__label">Avg CPC</div>
-        <div class="kpi-card__value">—</div>
-        <div class="kpi-subtext">Could not load search-term summary.</div>
-      </div>`;
+  if (_patLoadState === "error") {
+    body.innerHTML = `<div class="evidence-empty-state">Patterns could not be loaded. Retry, or check System Status.</div>`;
     return;
   }
+  if (!_patData) return;
 
-  // Success — render from backend summary
-  const s     = searchTermsSummary?.summary     || {};
-  const state = searchTermsSummary?.analysis_state || {};
-
-  const flaggedRows    = state.flagged?.rows    ?? 0;
-  const flaggedSpend   = state.flagged?.spend_usd ?? 0;
-  const unanalyzedRows  = state.unanalyzed?.rows  ?? 0;
-  const unanalyzedSpend = state.unanalyzed?.spend_usd ?? 0;
-  const avgCPC         = s.avg_cpc_usd ?? null;
-
-  kpiGrid.innerHTML = `
-    <div class="kpi-card">
-      <div class="kpi-card__label">Matching Terms</div>
-      <div class="kpi-card__value">${s.total_terms ?? 0}</div>
-      <div class="kpi-subtext">${s.unique_search_terms ?? 0} unique</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-card__label">Matching Spend</div>
-      <div class="kpi-card__value">${fmtDollar(s.total_spend_usd ?? 0)}</div>
-      <div class="kpi-subtext">${s.total_clicks ?? 0} clicks</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-card__label">Flagged Waste</div>
-      <div class="kpi-card__value">${flaggedRows}</div>
-      <div class="kpi-subtext">${fmtDollar(flaggedSpend)}</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-card__label">Unanalyzed</div>
-      <div class="kpi-card__value">${unanalyzedRows}</div>
-      <div class="kpi-subtext">${fmtDollar(unanalyzedSpend)}</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-card__label">Avg CPC</div>
-      <div class="kpi-card__value">${avgCPC !== null ? "$" + Number(avgCPC).toFixed(2) : "—"}</div>
-      <div class="kpi-subtext">${s.total_clicks ?? 0} clicks</div>
+  body.innerHTML = `
+    ${renderPatternKPIs(_patData.kpis)}
+    ${renderPatternFilters(_patData.facets)}
+    <p class="st-overlap-note">${escapeHtml((_patData.overlap || {}).disclosure ||
+      "Pattern rows overlap — the same term can appear in several patterns, so pattern spends are not additive.")}</p>
+    <div class="evidence-table-shell">
+      <div class="evidence-table-scroll" id="st-patterns-table"></div>
+      <div class="st-pagination" id="st-patterns-pagination"></div>
     </div>`;
+  renderPatternsTable();
+  wirePatternControls();
 }
 
-function searchTermStateBadge(isFlaggedWaste) {
-  if (isFlaggedWaste === true) {
-    return `<span class="search-term-state-badge search-term-state-waste">Flagged Waste</span>`;
-  }
-  if (isFlaggedWaste === false) {
-    return `<span class="search-term-state-badge search-term-state-clean">Analyzed Clean</span>`;
-  }
-  return `<span class="search-term-state-badge search-term-state-unanalyzed">Unanalyzed</span>`;
+function renderPatternKPIs(kpis) {
+  if (!kpis) return "";
+  const val = (v) => (v === null || v === undefined) ? stUnavailable() : fmtCount(v);
+  const cards = [
+    stKpiCard("Patterns Found", val(kpis.patterns_found), ""),
+    stKpiCard("Terms Analysed", val(kpis.terms_analysed), "Unique terms in selected window"),
+    stKpiCard("Patterns with Flagged Terms", val(kpis.patterns_with_flagged), ""),
+    stKpiCard("Patterns Needing Review", val(kpis.patterns_needing_review), ""),
+    stKpiCard("Reported Spend Represented",
+      kpis.reported_spend_represented_usd === null || kpis.reported_spend_represented_usd === undefined
+        ? stUnavailable() : stMoney(kpis.reported_spend_represented_usd),
+      "Unique underlying terms — not additive across pattern rows"),
+  ];
+  return `<div class="evidence-kpi-grid st-kpi-grid">${cards.join("")}</div>`;
 }
 
-function renderSearchTermsTable() {
-  const tableEl = document.getElementById("search-terms-table");
-  if (!tableEl) return;
-
-  if (searchTermsStatus === "db_unavailable") {
-    tableEl.innerHTML = `
-      <div class="waste-empty-state">
-        <p class="empty-state">Search terms temporarily unavailable — database offline.</p>
-      </div>`;
-    return;
-  }
-
-  if (searchTermsStatus === "cursor_error") {
-    tableEl.innerHTML = `
-      <div class="waste-empty-state">
-        <p class="empty-state">Could not load the next page. Refresh and try again.</p>
-      </div>`;
-    return;
-  }
-
-  if (searchTermsStatus === "error") {
-    tableEl.innerHTML = `
-      <div class="waste-empty-state">
-        <p class="empty-state">Could not load search terms. Check API health or run status.</p>
-      </div>`;
-    return;
-  }
-
-  const visible = getVisibleSearchTermRows();
-
-  if (visible.length === 0) {
-    if (searchTermsStatus === "empty" || searchTermRows.length === 0) {
-      tableEl.innerHTML = buildEmptyState({
-        pageKey: "search-terms",
-        canonicalStatus: getPageCanonicalStatus("search-terms"),
-        rowsInWindow: 0,
-      });
-    } else {
-      tableEl.innerHTML = buildEmptyState({
-        pageKey: "search-terms",
-        filtersActive: true,
-      });
-    }
-    return;
-  }
-
-  const thead = `
-    <thead>
-      <tr>
-        <th>Source Date</th>
-        <th>Search Term</th>
-        <th>Waste State</th>
-        <th>Campaign</th>
-        <th>Ad Group</th>
-        <th>Keyword</th>
-        <th>Match Type</th>
-        <th class="td--num">Spend</th>
-        <th class="td--num">Clicks</th>
-        <th class="td--num">Impr.</th>
-        <th class="td--num">Google Conv.</th>
-        <th>Junk Category</th>
-        <th>Pattern</th>
-      </tr>
-    </thead>`;
-
-  const tbody = visible.map((r) => {
-    const highSpend = (r.spend_usd || 0) >= uiThresholds.spend.high_spend_usd;
-    return `
-      <tr${highSpend ? ' class="row--high-spend"' : ""}>
-        <td>${escapeHtml(r.source_date || "—")}</td>
-        <td class="td--name">${escapeHtml(r.search_term || "—")}</td>
-        <td>${searchTermStateBadge(r.is_flagged_waste)}</td>
-        <td>${escapeHtml(r.campaign_name || "—")}</td>
-        <td>${escapeHtml(r.ad_group || "—")}</td>
-        <td>${escapeHtml(r.keyword || "—")}</td>
-        <td>${matchTypeBadge(r.match_type)}</td>
-        <td class="td--num${highSpend ? " waste-spend--high" : ""}">${r.spend_usd != null ? fmtDollar(r.spend_usd) : "—"}</td>
-        <td class="td--num">${r.clicks != null ? r.clicks : "—"}</td>
-        <td class="td--num">${r.impressions != null ? r.impressions : "—"}</td>
-        <td class="td--num">${r.conversions != null ? r.conversions.toFixed(1) : "—"}</td>
-        <td>${r.junk_category ? junkCategoryBadge(r.junk_category) : `<span class="td--na">—</span>`}</td>
-        <td class="waste-pattern">${escapeHtml(r.matched_pattern || "—")}</td>
-      </tr>`;
-  }).join("");
-
-  tableEl.innerHTML = `<div class="search-terms-table-scroll"><table class="data-table">${thead}<tbody>${tbody}</tbody></table></div>`;
+function renderPatternFilters(facets) {
+  return `<div class="campaign-controls st-controls">
+    <select id="pat-n" class="waste-filter-select" aria-label="Pattern word length">
+      <option value="1"${_patFilters.n === "1" ? " selected" : ""}>1 word</option>
+      <option value="2"${_patFilters.n === "2" ? " selected" : ""}>2 words</option>
+      <option value="3"${_patFilters.n === "3" ? " selected" : ""}>3 words</option>
+    </select>
+    <input type="search" id="pat-q" class="waste-search-input" placeholder="Filter underlying terms…"
+      value="${escapeHtml(_patFilters.q)}" aria-label="Filter underlying search terms" />
+    <select id="pat-campaign" class="waste-filter-select" aria-label="Filter by canonical campaign">
+      ${stCampaignOptions(facets, _patFilters.campaign)}</select>
+    <select id="pat-state" class="waste-filter-select" aria-label="Filter by review state">
+      ${stStateOptions(_patFilters.state)}</select>
+    <input type="number" id="pat-min-spend" min="0" step="1" class="waste-search-input st-min-spend"
+      placeholder="Min spend $" value="${escapeHtml(String(_patFilters.minSpend))}"
+      aria-label="Minimum reported term spend in USD" />
+    <input type="number" id="pat-min-terms" min="1" step="1" class="waste-search-input st-min-terms"
+      placeholder="Min terms" value="${escapeHtml(String(_patFilters.minTerms))}"
+      aria-label="Minimum unique terms per pattern" />
+    <select id="pat-sort" class="waste-filter-select" aria-label="Sort patterns">
+      <option value="spend"${_patFilters.sort === "spend" ? " selected" : ""}>Highest spend</option>
+      <option value="terms"${_patFilters.sort === "terms" ? " selected" : ""}>Most terms</option>
+      <option value="flagged"${_patFilters.sort === "flagged" ? " selected" : ""}>Most flagged</option>
+      <option value="pattern"${_patFilters.sort === "pattern" ? " selected" : ""}>Pattern</option>
+    </select>
+    <button id="pat-reset" type="button" class="revenue-filter-chip campaign-clear-btn">Reset</button>
+  </div>`;
 }
 
-// ── N-Gram Intelligence page ───────────────────────────────────────────────
+function renderPatternsTable() {
+  const host = document.getElementById("st-patterns-table");
+  const pager = document.getElementById("st-patterns-pagination");
+  if (!host) return;
+  const rows = (_patData && _patData.rows) || [];
+  const pg = (_patData && _patData.pagination) || {};
 
-let ngramRows = [];
-let ngramSummary = null;
-let ngramStatus = "idle"; // idle | loading | ok | empty | db_unavailable | error
-let ngramRequestId = 0;
-let ngramIsLoading = false;
-
-function buildNgramParams() {
-  const params = new URLSearchParams();
-  params.set("window", getEvidenceWindow());
-  params.set("limit", "100");
-
-  const q         = document.getElementById("ngrams-query")?.value.trim();
-  const campaign  = document.getElementById("ngrams-campaign")?.value.trim();
-  const matchType = document.getElementById("ngrams-match-type")?.value;
-  const wasteState = document.getElementById("ngrams-waste-state")?.value;
-  const n         = document.getElementById("ngrams-length")?.value;
-  const minSpend  = document.getElementById("ngrams-min-spend")?.value;
-
-  if (q)          params.set("q", q);
-  if (campaign)   params.set("campaign", campaign);
-  if (matchType)  params.set("match_type", matchType);
-  if (wasteState) params.set("waste_state", wasteState);
-  if (n)          params.set("n", n);
-  if (minSpend)   params.set("min_spend", minSpend);
-
-  return params;
-}
-
-async function loadNgrams() {
-  if (ngramIsLoading) return;
-  renderPageDatasetFreshness("ngrams");
-  ngramIsLoading = true;
-  const requestId = ++ngramRequestId;
-  ngramStatus = "loading";
-  setNgramControlsDisabled(true);
-  renderNgramsKPIs();
-  renderNgramsTable();
-
-  try {
-    const params = buildNgramParams();
-    const data = await fetchJSON(`/api/search-terms/ngrams?${params.toString()}`);
-
-    if (requestId !== ngramRequestId) return;
-
-    if (data.db_unavailable) {
-      ngramStatus = "db_unavailable";
-      ngramRows = [];
-      ngramSummary = data.summary || null;
-      renderNgramsKPIs(data);
-      renderNgramsTable();
-      return;
-    }
-
-    ngramRows   = data.rows    || [];
-    ngramSummary = data.summary || null;
-    ngramStatus = ngramRows.length ? "ok" : "empty";
-
-    renderNgramsKPIs(data);
-    renderNgramsTable(data);
-  } catch (err) {
-    if (requestId !== ngramRequestId) return;
-    ngramStatus  = "error";
-    ngramRows    = [];
-    ngramSummary = null;
-    renderNgramsKPIs();
-    renderNgramsTable();
-  } finally {
-    if (requestId === ngramRequestId) {
-      ngramIsLoading = false;
-      setNgramControlsDisabled(false);
-    }
-  }
-}
-
-function setNgramControlsDisabled(disabled) {
-  const applyBtn = document.getElementById("ngrams-apply-btn");
-  if (applyBtn) {
-    applyBtn.disabled = disabled;
-    applyBtn.textContent = disabled ? "Loading…" : "Apply filters";
-  }
-
-  [
-    "ngrams-refresh-btn",
-    "ngrams-clear-btn",
-    "ngrams-query",
-    "ngrams-campaign",
-    "ngrams-match-type",
-    "ngrams-waste-state",
-    "ngrams-length",
-    "ngrams-min-spend",
-  ].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.disabled = disabled;
-  });
-}
-
-function clearNgramFilters() {
-  ["ngrams-query", "ngrams-campaign", "ngrams-min-spend"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.value = "";
-  });
-
-  const matchType = document.getElementById("ngrams-match-type");
-  if (matchType) matchType.value = "";
-
-  const wasteState = document.getElementById("ngrams-waste-state");
-  if (wasteState) wasteState.value = "";
-
-  const n = document.getElementById("ngrams-length");
-  if (n) n.value = "1,2,3";
-
-  loadNgrams();
-}
-
-function renderNgramDataQualityNote(data) {
-  const dq = (data && data.data_quality) || {};
-  if (dq.row_cap_applied) {
-    return `
-      <div class="ngram-data-quality-warning">
-        Row cap applied: analysis used the top ${escapeHtml(String(dq.row_cap || "configured"))}
-        source rows by spend/date. Treat results as directional. Narrow filters or date range for a more complete view.
-      </div>
-    `;
-  }
-
-  return `
-    <div class="ngram-data-quality-note">
-      These are candidate patterns for human review only. N-gram results are factual pattern metrics from stored search terms. No negative keywords are pushed and no changes are made to Google Ads.
-    </div>
-  `;
-}
-
-function ngramLanguageBadge(language) {
-  const map = {
-    arabic:           { label: "Arabic",     cls: "ngram-language-badge--arabic" },
-    spanish:          { label: "Spanish",    cls: "ngram-language-badge--spanish" },
-    english_or_latin: { label: "EN / Latin", cls: "ngram-language-badge--english" },
-  };
-  const entry = map[(language || "").toLowerCase()] || { label: escapeHtml(language || "—"), cls: "" };
-  return `<span class="ngram-language-badge ${entry.cls}">${entry.label}</span>`;
-}
-
-function ngramWasteStateMix(flagged, clean, unanalyzed) {
-  const hasValue = (v) => v !== null && v !== undefined && Number.isFinite(Number(v));
-
-  const parts = [];
-  if (hasValue(flagged))    parts.push(`<span class="ngram-state-flagged">${escapeHtml(String(Number(flagged)))}F</span>`);
-  if (hasValue(clean))      parts.push(`<span class="ngram-state-clean">${escapeHtml(String(Number(clean)))}C</span>`);
-  if (hasValue(unanalyzed)) parts.push(`<span class="ngram-state-unanalyzed">${escapeHtml(String(Number(unanalyzed)))}U</span>`);
-
-  return parts.length
-    ? `<span class="ngram-state-mix">${parts.join(" / ")}</span>`
-    : `<span class="td--na">—</span>`;
-}
-
-function renderNgramsKPIs(data) {
-  const kpiGrid = document.getElementById("ngrams-kpis");
-  if (!kpiGrid) return;
-
-  if (ngramStatus === "loading" || ngramStatus === "idle") {
-    kpiGrid.innerHTML = `
-      <div class="kpi-card"><div class="kpi-card__label">N-Grams Returned</div><div class="kpi-card__value">…</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Source Rows Analyzed</div><div class="kpi-card__value">…</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Unique Search Terms</div><div class="kpi-card__value">…</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Highest N-Gram Spend</div><div class="kpi-card__value">…</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Row Cap</div><div class="kpi-card__value">…</div></div>`;
-    return;
-  }
-
-  if (ngramStatus === "db_unavailable") {
-    kpiGrid.innerHTML = `
-      <div class="kpi-card"><div class="kpi-card__label">N-Grams Returned</div><div class="kpi-card__value">—</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Source Rows Analyzed</div><div class="kpi-card__value">—</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Unique Search Terms</div><div class="kpi-card__value">—</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Highest N-Gram Spend</div><div class="kpi-card__value">—</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Row Cap</div><div class="kpi-card__value">—</div><div class="kpi-subtext">N-gram analysis temporarily unavailable — database offline.</div></div>`;
-    return;
-  }
-
-  if (ngramStatus === "error") {
-    kpiGrid.innerHTML = `
-      <div class="kpi-card"><div class="kpi-card__label">N-Grams Returned</div><div class="kpi-card__value">—</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Source Rows Analyzed</div><div class="kpi-card__value">—</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Unique Search Terms</div><div class="kpi-card__value">—</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Highest N-Gram Spend</div><div class="kpi-card__value">—</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Row Cap</div><div class="kpi-card__value">—</div><div class="kpi-subtext">Could not load n-gram analysis.</div></div>`;
-    return;
-  }
-
-  const s  = ngramSummary || {};
-  const dq = (data && data.data_quality) || {};
-  const maxNgramSpend = ngramRows.reduce((max, r) => Math.max(max, Number(r.total_spend_usd || 0)), 0);
-  const rowCapLabel = dq.row_cap_applied ? "Applied" : "Not applied";
-
-  kpiGrid.innerHTML = `
-    <div class="kpi-card">
-      <div class="kpi-card__label">N-Grams Returned</div>
-      <div class="kpi-card__value">${s.ngrams_returned ?? ngramRows.length}</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-card__label">Source Rows Analyzed</div>
-      <div class="kpi-card__value">${s.source_rows_analyzed != null ? s.source_rows_analyzed.toLocaleString() : "—"}</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-card__label">Unique Search Terms</div>
-      <div class="kpi-card__value">${s.unique_search_terms_analyzed != null ? s.unique_search_terms_analyzed.toLocaleString() : "—"}</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-card__label">Highest N-Gram Spend</div>
-      <div class="kpi-card__value">${fmtDollar(maxNgramSpend)}</div>
-      <div class="kpi-subtext">Top returned n-gram</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-card__label">Row Cap</div>
-      <div class="kpi-card__value">${escapeHtml(rowCapLabel)}</div>
-      ${dq.row_cap_applied && dq.row_cap ? `<div class="kpi-subtext">Cap: ${dq.row_cap.toLocaleString()} rows</div>` : ""}
-    </div>`;
-}
-
-function renderNgramsTable(data) {
-  const tableEl = document.getElementById("ngrams-table");
-  if (!tableEl) return;
-
-  if (ngramStatus === "loading" || ngramStatus === "idle") {
-    tableEl.innerHTML = `<p class="empty-state" style="padding:var(--space-5)">Loading n-gram patterns…</p>`;
-    return;
-  }
-
-  if (ngramStatus === "db_unavailable") {
-    tableEl.innerHTML = `<div class="waste-empty-state"><p class="empty-state">N-gram analysis temporarily unavailable — database offline.</p></div>`;
-    return;
-  }
-
-  if (ngramStatus === "error") {
-    tableEl.innerHTML = `<div class="waste-empty-state"><p class="empty-state">Could not load n-gram analysis. Check API health or filters.</p></div>`;
-    return;
-  }
-
-  if (ngramRows.length === 0) {
-    tableEl.innerHTML = buildEmptyState({
+  if (!rows.length) {
+    const filtersActive = Boolean(_patFilters.q || _patFilters.campaign ||
+      _patFilters.state || _patFilters.minSpend !== "" || _patFilters.minTerms !== "");
+    host.innerHTML = buildEmptyState({
       pageKey: "ngrams",
       canonicalStatus: getPageCanonicalStatus("ngrams"),
       rowsInWindow: 0,
-    });
+      filtersActive,
+    }) + `<p class="st-overlap-note" style="padding: 0 var(--space-4) var(--space-3);">Patterns depend on the Search Terms source — an empty result is not proof the account has no waste.</p>`;
+    if (pager) pager.innerHTML = "";
     return;
   }
 
-  const thead = `
-    <thead>
-      <tr>
-        <th>N-Gram</th>
-        <th class="td--num">N</th>
-        <th>Language</th>
-        <th class="td--num">Row Count</th>
-        <th class="td--num">Unique Terms</th>
-        <th class="td--num">Campaigns</th>
-        <th class="td--num">Spend</th>
-        <th class="td--num">Clicks</th>
-        <th class="td--num">Impressions</th>
-        <th class="td--num">Google Conv.</th>
-        <th>Flagged / Clean / Unanalyzed</th>
-        <th class="td--num">Flagged Spend</th>
-        <th>Campaign Samples</th>
-        <th>Search-Term Samples</th>
-      </tr>
-    </thead>`;
+  const body = rows.map((r) => `
+    <tr class="campaign-decision-row st-row" tabindex="0" role="button"
+        data-pat="${encodeURIComponent(r.pattern)}" data-pat-n="${r.n}"
+        aria-label="Open evidence for pattern ${escapeHtml(r.pattern)}">
+      <td class="td--name st-td-term" data-label="Pattern">${escapeHtml(r.pattern)}</td>
+      <td data-label="Signal">${stSignalBadge(r.signal)}</td>
+      <td class="td--num" data-label="Terms">${fmtCount(r.terms)}</td>
+      <td class="td--num" data-label="Flagged">${fmtCount(r.flagged_terms)}</td>
+      <td class="td--num" data-label="Clean">${fmtCount(r.clean_terms)}</td>
+      <td class="td--num" data-label="Needs Review">${fmtCount(r.needs_review_terms)}</td>
+      <td class="td--num" data-label="Reported Spend">${stMoney(r.reported_spend_usd)}</td>
+      <td class="td--action" data-label=""><span class="campaign-open-icon" aria-hidden="true" title="Open evidence">›</span></td>
+    </tr>`).join("");
 
-  const tbody = ngramRows.map((r) => {
-    const campaignSamples = (r.campaigns_sample || []).slice(0, 5);
-    const termSamples     = (r.search_terms_sample || []).slice(0, 3);
+  host.innerHTML = `<table class="data-table campaign-decision-table st-table st-patterns-table">
+    <thead><tr>
+      <th class="td--name">Pattern</th><th>Signal</th>
+      <th class="td--num">Terms</th><th class="td--num">Flagged</th>
+      <th class="td--num">Clean</th><th class="td--num">Needs Review</th>
+      <th class="td--num">Reported Spend</th>
+      <th class="td--action"><span class="sr-only">Open evidence</span></th>
+    </tr></thead><tbody>${body}</tbody></table>`;
 
-    const campaignChips = campaignSamples.length
-      ? campaignSamples.map((c) => `<span class="ngram-chip">${escapeHtml(c)}</span>`).join("")
-      : `<span class="td--na">—</span>`;
+  host.querySelectorAll("[data-pat]").forEach((tr) => {
+    const open = () => openStPatternDrawer(decodeURIComponent(tr.dataset.pat), tr.dataset.patN);
+    tr.addEventListener("click", (e) => { if (!e.target.closest("a")) open(); });
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
+  });
 
-    const termList = termSamples.length
-      ? `<ul class="ngram-sample-list">${termSamples.map((t) => `<li>"${escapeHtml(t)}"</li>`).join("")}</ul>`
-      : `<span class="td--na">—</span>`;
-
-    return `
-      <tr>
-        <td class="td--name">${escapeHtml(r.ngram || "—")}</td>
-        <td class="td--num">${r.n != null ? r.n : "—"}</td>
-        <td>${ngramLanguageBadge(r.language)}</td>
-        <td class="td--num">${r.row_count != null ? r.row_count : "—"}</td>
-        <td class="td--num">${r.unique_search_terms != null ? r.unique_search_terms : "—"}</td>
-        <td class="td--num">${r.campaigns_count != null ? r.campaigns_count : "—"}</td>
-        <td class="td--num">${r.total_spend_usd != null ? fmtDollar(r.total_spend_usd) : "—"}</td>
-        <td class="td--num">${r.total_clicks != null ? r.total_clicks : "—"}</td>
-        <td class="td--num">${r.total_impressions != null ? r.total_impressions.toLocaleString() : "—"}</td>
-        <td class="td--num">${r.google_conversions != null ? r.google_conversions.toFixed(1) : "—"}</td>
-        <td>${ngramWasteStateMix(r.flagged_waste_rows, r.clean_rows, r.unanalyzed_rows)}</td>
-        <td class="td--num">${r.flagged_waste_spend_usd != null ? fmtDollar(r.flagged_waste_spend_usd) : "—"}</td>
-        <td><div class="ngram-chips-wrap">${campaignChips}</div></td>
-        <td>${termList}</td>
-      </tr>`;
-  }).join("");
-
-  tableEl.innerHTML = renderNgramDataQualityNote(data) + `<div class="ngrams-table-scroll"><table class="data-table">${thead}<tbody>${tbody}</tbody></table></div>`;
+  if (pager) {
+    pager.innerHTML = `<span class="st-pagination__info">Showing ${fmtCount(pg.returned_count || 0)} of ${fmtCount(pg.total_count || 0)} patterns${pg.has_more ? " — refine filters or raise Min terms to narrow" : ""}</span>`;
+  }
 }
 
-function downloadNgramsCSV() {
-  if (!ngramRows.length) return;
-  const headers = [
-    "N-Gram", "N", "Language", "Row Count", "Unique Search Terms", "Campaigns",
-    "Spend USD", "Clicks", "Impressions", "Google Conv.", "Flagged Rows", "Clean Rows",
-    "Unanalyzed Rows", "Flagged Spend USD",
-  ];
-  const rows = ngramRows.map((r) => [
-    r.ngram, r.n, r.language, r.row_count, r.unique_search_terms, r.campaigns_count,
-    r.total_spend_usd, r.total_clicks, r.total_impressions, r.google_conversions,
-    r.flagged_waste_rows, r.clean_rows, r.unanalyzed_rows, r.flagged_waste_spend_usd,
-  ]);
-  downloadCSV(`ngrams_${getEvidenceWindow()}.csv`, headers, rows);
+function wirePatternControls() {
+  const q = document.getElementById("pat-q");
+  const minSpend = document.getElementById("pat-min-spend");
+  const minTerms = document.getElementById("pat-min-terms");
+  const debounced = () => {
+    clearTimeout(_patDebounceTimer);
+    _patDebounceTimer = setTimeout(() => {
+      _patFilters.q = q ? q.value.trim() : "";
+      _patFilters.minSpend = minSpend && minSpend.value !== "" ? minSpend.value : "";
+      _patFilters.minTerms = minTerms && minTerms.value !== "" ? minTerms.value : "";
+      loadPatternsTab();
+    }, 350);
+  };
+  [q, minSpend, minTerms].forEach((el) => { if (el) el.addEventListener("input", debounced); });
+  [["pat-n", "n"], ["pat-campaign", "campaign"], ["pat-state", "state"], ["pat-sort", "sort"]]
+    .forEach(([id, key]) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("change", () => {
+        _patFilters[key] = el.value;
+        loadPatternsTab();
+      });
+    });
+  const reset = document.getElementById("pat-reset");
+  if (reset) reset.addEventListener("click", () => {
+    _patFilters = { n: "1", q: "", campaign: "", state: "", minSpend: "", minTerms: "", sort: "spend" };
+    loadPatternsTab();
+  });
 }
 
-function downloadSearchTermsCSV() {
-  if (!searchTermRows.length) return;
-  const headers = [
-    "Source Date", "Search Term", "Waste State", "Campaign", "Ad Group",
-    "Keyword", "Match Type", "Spend USD", "Clicks", "Impressions",
-    "Google Conv.", "Junk Category", "Matched Pattern",
-  ];
-  const stateLabel = (v) => v === true ? "flagged" : v === false ? "clean" : "unanalyzed";
-  const rows = searchTermRows.map((r) => [
-    r.source_date, r.search_term, stateLabel(r.is_flagged_waste),
-    r.campaign_name, r.ad_group, r.keyword, r.match_type,
-    r.spend_usd, r.clicks, r.impressions, r.conversions,
-    r.junk_category || "", r.matched_pattern || "",
-  ]);
-  downloadCSV(`search_terms_${getEvidenceWindow()}.csv`, headers, rows);
+// ── Evidence drawer (terms + patterns share the aside) ───────────────────────
+
+function openStDrawerShell(titleHtml) {
+  const overlay = document.getElementById("st-drawer-overlay");
+  const drawer = document.getElementById("st-drawer");
+  const title = document.getElementById("st-drawer-title");
+  const body = document.getElementById("st-drawer-body");
+  if (!overlay || !drawer || !title || !body) return null;
+  title.innerHTML = titleHtml;
+  body.innerHTML = `<p class="empty-state">Loading evidence…</p>`;
+  overlay.hidden = false;
+  overlay.setAttribute("aria-hidden", "false");
+  drawer.hidden = false;
+  const closeBtn = document.getElementById("st-drawer-close-btn");
+  if (closeBtn) { closeBtn.onclick = closeStDrawer; closeBtn.focus(); }
+  overlay.onclick = closeStDrawer;
+  _stDrawerKeyHandler = (e) => { if (e.key === "Escape") closeStDrawer(); };
+  document.addEventListener("keydown", _stDrawerKeyHandler);
+  return body;
+}
+
+function closeStDrawer() {
+  const overlay = document.getElementById("st-drawer-overlay");
+  const drawer = document.getElementById("st-drawer");
+  if (overlay) { overlay.hidden = true; overlay.setAttribute("aria-hidden", "true"); }
+  if (drawer) drawer.hidden = true;
+  if (_stDrawerKeyHandler) {
+    document.removeEventListener("keydown", _stDrawerKeyHandler);
+    _stDrawerKeyHandler = null;
+  }
+}
+
+function stDrawerKpi(label, valueHtml) {
+  return `<div class="drawer-kpi"><div class="drawer-kpi__label">${label}</div>
+    <div class="drawer-kpi__value">${valueHtml}</div></div>`;
+}
+
+async function openStTermDrawer(term, campaignKey) {
+  const body = openStDrawerShell(escapeHtml(term));
+  if (!body) return;
+  try {
+    const p = new URLSearchParams();
+    p.set("term", term);
+    p.set("window", getEvidenceWindow());
+    if (campaignKey) p.set("campaign_key", campaignKey);
+    const data = await fetchJSON(`/api/search-term-evidence/term?${p.toString()}`);
+    renderStTermDrawer(body, data);
+  } catch (err) {
+    console.error("term drawer load failed", err);
+    body.innerHTML = `<p class="drawer-empty">Evidence could not be loaded for this term.</p>`;
+  }
+}
+
+function renderStTermDrawer(body, data) {
+  if (data.db_unavailable) {
+    body.innerHTML = `<p class="drawer-empty">Data unavailable — the search_terms source cannot be reached.</p>`;
+    return;
+  }
+  if (data._not_found || !data.term) {
+    body.innerHTML = `<p class="drawer-empty">This term has no reported rows in the selected window.</p>`;
+    return;
+  }
+  const t = data.term;
+  const cls = data.classification || {};
+  const plat = data.platform_activity || {};
+  const match = data.matching_context || {};
+  const daily = data.daily || {};
+  const campaigns = data.campaigns || [];
+
+  const windowLabel = escapeHtml(stWindowLabel());
+  const factRow = (label, valueHtml) =>
+    `<tr><td>${label}</td><td>${valueHtml}</td></tr>`;
+
+  const campaignRows = campaigns.map((c) => `
+    <tr>
+      <td>${escapeHtml(c.campaign_name || "(no campaign)")}${
+        c.mapping_status === "unmatched" ? ` <span class="campaign-map-note">Mapping review</span>`
+        : c.mapping_status === "not_google_ads" ? ` <span class="campaign-map-note">Not Google Ads</span>` : ""}</td>
+      <td class="td--num">${stMoney(c.spend_usd)}</td>
+      <td class="td--num">${fmtCount(c.clicks)}</td>
+    </tr>`).join("");
+
+  // Per-date currency truth (PR-ADS-144 §4): each day shows its native cost
+  // and its own-date FX-converted USD. A day without an FX rate shows native
+  // only (USD "—") — the legacy raw column is never rendered with "$".
+  const dailyRows = (daily.rows || []).map((d) => `
+    <tr><td>${escapeHtml(d.source_date || "")}</td>
+      <td class="td--num">${stSpendCell(d)}</td>
+      <td class="td--num">${d.spend_usd !== null && d.spend_usd !== undefined ? stMoney(d.spend_usd) : stUnavailable()}</td>
+      <td class="td--num">${fmtCount(d.clicks)}</td>
+      <td class="td--num">${fmtCount(d.impressions)}</td></tr>`).join("");
+
+  const mapped = campaigns.length === 1 && campaigns[0].mapping_status === "mapped";
+
+  body.innerHTML = `
+    <div class="drawer-section drawer-section--header">
+      <div class="drawer-header-meta">${stStateBadge(t.state)}
+        <span class="drawer-verdict-reason">Evidence window: ${windowLabel}</span></div>
+      <p class="drawer-readonly-note">Read-only evidence — no negative keyword is applied and nothing is written to Google Ads.</p>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-kpi-grid">
+        ${stDrawerKpi("Reported Spend", stMoney(t.spend_usd))}
+        ${stDrawerKpi("Clicks", fmtCount(t.clicks))}
+        ${stDrawerKpi("Impressions", fmtCount(t.impressions))}
+        ${stDrawerKpi("CPC", stMoney(t.cpc_usd))}
+        ${stDrawerKpi("First Seen", t.first_seen ? escapeHtml(t.first_seen) : "—")}
+        ${stDrawerKpi("Last Seen", t.last_seen ? escapeHtml(t.last_seen) : "—")}
+      </div>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-section__title">Campaign & Matching Context</div>
+      <table class="drawer-table"><thead><tr><th>Campaign</th><th class="td--num">Spend</th><th class="td--num">Clicks</th></tr></thead>
+      <tbody>${campaignRows || `<tr><td colspan="3">—</td></tr>`}</tbody></table>
+      <table class="drawer-table st-fact-table"><tbody>
+        ${factRow("Ad groups", match.ad_groups && match.ad_groups.length ? escapeHtml(match.ad_groups.join(", ")) : "—")}
+        ${factRow("Matched keywords", match.keywords && match.keywords.length ? escapeHtml(match.keywords.join(", ")) : "—")}
+        ${factRow("Match types", match.match_types && match.match_types.length ? escapeHtml(match.match_types.join(", ")) : "—")}
+        ${factRow("Approved aliases", t.aliases && t.aliases.length ? escapeHtml(t.aliases.join(", ")) : "—")}
+      </tbody></table>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-section__title">Classification Proof</div>
+      <table class="drawer-table st-fact-table"><tbody>
+        ${factRow("Review state", stStateBadge(cls.state))}
+        ${factRow("Junk category", cls.junk_categories && cls.junk_categories.length ? escapeHtml(cls.junk_categories.join(", ")) : "—")}
+        ${factRow("Matched rule / pattern", cls.matched_patterns && cls.matched_patterns.length ? escapeHtml(cls.matched_patterns.join(", ")) : "—")}
+        ${factRow("CRM-junk confirmations", cls.crm_junk_confirmed !== null && cls.crm_junk_confirmed !== undefined ? fmtCount(cls.crm_junk_confirmed) : stUnavailable())}
+        ${factRow("Classified on", cls.classification_date ? escapeHtml(cls.classification_date) : stUnavailable())}
+        ${factRow("Classification source", cls.classification_source ? escapeHtml(cls.classification_source) : stUnavailable())}
+      </tbody></table>
+      ${cls.proof_status === "unavailable"
+        ? `<p class="drawer-source-note">CRM-junk confirmations, classification date and source are withheld here: waste_terms records only the campaign name, which does not uniquely identify this campaign for this term, so borrowing another campaign's proof is not safe. The review state above still comes from this campaign's own stored evidence.</p>`
+        : ""}
+      <p class="drawer-source-note">Flagged waste = stored is_flagged_waste true (a human-review candidate, not an approved negative). Reviewed clean = stored false. Needs review = not yet classified.</p>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-section__title">Platform Conversions</div>
+      <table class="drawer-table st-fact-table"><tbody>
+        ${factRow("Platform conversions", plat.conversions !== null && plat.conversions !== undefined ? fmtCount(plat.conversions) : "—")}
+      </tbody></table>
+      <p class="drawer-source-note">${escapeHtml(plat.disclosure || "Platform event — not a confirmed SQL, customer or closed-won outcome.")}</p>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-section__title">Daily Evidence (source dates)</div>
+      ${dailyRows
+        ? `<table class="drawer-table"><thead><tr><th>Date</th><th class="td--num">Native</th><th class="td--num">USD</th><th class="td--num">Clicks</th><th class="td--num">Impr.</th></tr></thead><tbody>${dailyRows}</tbody></table>`
+        : `<p class="drawer-empty">No per-day rows reported in this window.</p>`}
+      <p class="drawer-source-note">Only dates the source actually reported are shown — missing dates are never fabricated as zero. Each day's USD is converted at that day's own FX rate; a day without a rate shows native only.</p>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-section__title">Links</div>
+      <div class="st-drawer-links">
+        ${mapped ? `<button type="button" class="revenue-filter-chip" id="st-link-campaign">Open Campaign Evidence</button>` : ""}
+        <button type="button" class="revenue-filter-chip" id="st-link-waste">Open Flagged Waste Terms</button>
+        <button type="button" class="revenue-filter-chip" id="st-link-patterns">Patterns with these words</button>
+        <button type="button" class="revenue-filter-chip" id="st-link-copy">Copy term</button>
+      </div>
+    </div>`;
+
+  const linkCampaign = document.getElementById("st-link-campaign");
+  if (linkCampaign && mapped) {
+    linkCampaign.addEventListener("click", () => {
+      const c = campaigns[0];
+      closeStDrawer();
+      navigate("campaigns", { updateHash: true });
+      setTimeout(() => {
+        if (typeof openCampaignDrawer === "function") {
+          openCampaignDrawer(c.campaign_name, c.campaign_key);
+        }
+      }, 250);
+    });
+  }
+  const linkWaste = document.getElementById("st-link-waste");
+  if (linkWaste) linkWaste.addEventListener("click", () => {
+    closeStDrawer();
+    navigate("waste", { updateHash: true });
+  });
+  const linkPatterns = document.getElementById("st-link-patterns");
+  if (linkPatterns) linkPatterns.addEventListener("click", () => {
+    closeStDrawer();
+    _patFilters.q = t.search_term;
+    stActivateTab("patterns");
+  });
+  const linkCopy = document.getElementById("st-link-copy");
+  if (linkCopy) linkCopy.addEventListener("click", () => {
+    if (navigator.clipboard) navigator.clipboard.writeText(t.search_term);
+    linkCopy.textContent = "Copied";
+    setTimeout(() => { linkCopy.textContent = "Copy term"; }, 1200);
+  });
+}
+
+async function openStPatternDrawer(pattern, n) {
+  const body = openStDrawerShell(`${escapeHtml(pattern)} <span class="drawer-verdict-reason">${escapeHtml(String(n))}-word pattern</span>`);
+  if (!body) return;
+  try {
+    const p = stBuildPatternParams();
+    p.delete("sort"); p.delete("limit"); p.delete("min_terms");
+    p.set("pattern", pattern);
+    p.set("n", String(n));
+    const data = await fetchJSON(`/api/search-term-evidence/patterns/detail?${p.toString()}`);
+    renderStPatternDrawer(body, data);
+  } catch (err) {
+    console.error("pattern drawer load failed", err);
+    body.innerHTML = `<p class="drawer-empty">Evidence could not be loaded for this pattern.</p>`;
+  }
+}
+
+function renderStPatternDrawer(body, data) {
+  if (data.db_unavailable) {
+    body.innerHTML = `<p class="drawer-empty">Data unavailable — the search_terms source cannot be reached.</p>`;
+    return;
+  }
+  if (data._not_found || !data.pattern) {
+    body.innerHTML = `<p class="drawer-empty">This pattern has no underlying terms in the selected window.</p>`;
+    return;
+  }
+  const pat = data.pattern;
+  const plat = data.platform_activity || {};
+  const termRows = (data.terms || []).map((t) => `
+    <tr>
+      <td>${escapeHtml(t.search_term)}</td>
+      <td>${stStateBadge(t.state)}</td>
+      <td>${escapeHtml((t.campaigns || []).join(", ") || "—")}</td>
+      <td class="td--num">${stMoney(t.spend_usd)}</td>
+      <td class="td--num">${fmtCount(t.clicks)}</td>
+      <td class="td--num">${t.last_seen ? escapeHtml(t.last_seen) : "—"}</td>
+    </tr>`).join("");
+
+  body.innerHTML = `
+    <div class="drawer-section drawer-section--header">
+      <div class="drawer-header-meta">${stSignalBadge(pat.signal)}
+        <span class="drawer-verdict-reason">Evidence window: ${escapeHtml(stWindowLabel())}</span></div>
+      <p class="drawer-readonly-note">Read-only evidence — patterns are review candidates, never negative-keyword recommendations.</p>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-kpi-grid">
+        ${stDrawerKpi("Unique Terms", fmtCount(pat.terms))}
+        ${stDrawerKpi("Flagged", fmtCount(pat.flagged_terms))}
+        ${stDrawerKpi("Clean", fmtCount(pat.clean_terms))}
+        ${stDrawerKpi("Needs Review", fmtCount(pat.needs_review_terms))}
+        ${stDrawerKpi("Reported Spend", stMoney(pat.reported_spend_usd))}
+        ${stDrawerKpi("Clicks", fmtCount(pat.clicks))}
+      </div>
+      <p class="drawer-source-note">${escapeHtml(data.overlap_note || "Totals use unique underlying terms; pattern rows overlap and are not additive.")}</p>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-section__title">Platform Conversions</div>
+      <table class="drawer-table st-fact-table"><tbody>
+        <tr><td>Platform conversions</td><td>${plat.conversions !== null && plat.conversions !== undefined ? fmtCount(plat.conversions) : "—"}</td></tr>
+      </tbody></table>
+      <p class="drawer-source-note">${escapeHtml(plat.disclosure || "Platform event — not a confirmed SQL, customer or closed-won outcome.")}</p>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-section__title">Campaigns Represented</div>
+      <p>${(pat.campaigns || []).length ? escapeHtml(pat.campaigns.join(", ")) : "—"}</p>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-section__title">Top Underlying Search Terms</div>
+      <table class="drawer-table"><thead><tr>
+        <th>Term</th><th>State</th><th>Campaign</th>
+        <th class="td--num">Spend</th><th class="td--num">Clicks</th><th class="td--num">Last Seen</th>
+      </tr></thead><tbody>${termRows || `<tr><td colspan="6">—</td></tr>`}</tbody></table>
+      ${data.terms_truncated ? `<p class="drawer-source-note">Showing the top underlying terms by spend — the pattern has more terms than are listed here.</p>` : ""}
+    </div>`;
 }
 
 function downloadWasteCSV() {
@@ -12915,62 +13082,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const geoSearch = document.getElementById("geo-search");
   if (geoSearch) geoSearch.addEventListener("input", applyGeoSearch);
 
-  // Wire up search terms controls
-  const stQueryInput    = document.getElementById("search-terms-query");
-  const stCampaignInput = document.getElementById("search-terms-campaign");
-  const stApplyBtn      = document.getElementById("search-terms-apply-btn");
-  const stClearBtn      = document.getElementById("search-terms-clear-btn");
-  const stRefreshBtn    = document.getElementById("search-terms-refresh-btn");
-  const stLoadMoreBtn   = document.getElementById("search-terms-load-more-btn");
-  const stWasteFilter   = document.getElementById("search-terms-waste-filter");
-  const stExportBtn     = document.getElementById("search-terms-export-csv-btn");
-
-  if (stApplyBtn) stApplyBtn.addEventListener("click", () => loadSearchTerms({ reset: true }));
-  if (stClearBtn) stClearBtn.addEventListener("click", () => {
-    if (stQueryInput)    stQueryInput.value    = "";
-    if (stCampaignInput) stCampaignInput.value = "";
-    const stMatchType = document.getElementById("search-terms-match-type");
-    if (stMatchType) stMatchType.value = "";
-    if (stWasteFilter) stWasteFilter.value = "";
-    const stMinSpend = document.getElementById("search-terms-min-spend");
-    if (stMinSpend) stMinSpend.value = "";
-    _updateSearchTermsFilterNote();
-    loadSearchTerms({ reset: true });
-  });
-  if (stRefreshBtn)  stRefreshBtn.addEventListener("click",  () => loadSearchTerms({ reset: true }));
-  if (stLoadMoreBtn) stLoadMoreBtn.addEventListener("click", () => loadSearchTerms({ reset: false, cursor: searchTermsNextCursor }));
-
-  if (stWasteFilter) stWasteFilter.addEventListener("change", () => {
-    _updateSearchTermsFilterNote();
-    // Always refetch — backend applies waste_state filter server-side.
-    loadSearchTerms({ reset: true });
-  });
-  if (stExportBtn) stExportBtn.addEventListener("click", downloadSearchTermsCSV);
-
-  // Enter key in query/campaign inputs triggers apply
-  [stQueryInput, stCampaignInput].forEach((el) => {
-    if (el) el.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") loadSearchTerms({ reset: true });
-    });
-  });
-
-  // Wire up n-gram controls
-  const ngramRefreshBtn = document.getElementById("ngrams-refresh-btn");
-  const ngramApplyBtn   = document.getElementById("ngrams-apply-btn");
-  const ngramClearBtn   = document.getElementById("ngrams-clear-btn");
-  const ngramExportBtn  = document.getElementById("ngrams-export-csv-btn");
-
-  if (ngramRefreshBtn) ngramRefreshBtn.addEventListener("click", loadNgrams);
-  if (ngramApplyBtn)   ngramApplyBtn.addEventListener("click",   loadNgrams);
-  if (ngramClearBtn)   ngramClearBtn.addEventListener("click",   clearNgramFilters);
-  if (ngramExportBtn)  ngramExportBtn.addEventListener("click",  downloadNgramsCSV);
-
-  ["ngrams-query", "ngrams-campaign", "ngrams-min-spend"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") loadNgrams();
-    });
-  });
+  // Search Terms + Patterns (PR-ADS-144) controls are wired per-render
+  // inside the page module — nothing to bind at startup.
 
   // Wire up GCLID attribution controls
   const gclidInput      = document.getElementById("gclid-filter-gclid");
@@ -13056,25 +13169,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (hiCurSel)     hiCurSel.addEventListener("change",    loadHistoricalIntelligence);
   if (hiPrevSel)    hiPrevSel.addEventListener("change",   loadHistoricalIntelligence);
 
-  // Wire up Search Terms tabs
-  document.querySelectorAll(".search-terms-tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      document.querySelectorAll(".search-terms-tab").forEach((t) => {
-        t.classList.remove("active");
-        t.setAttribute("aria-selected", "false");
-      });
-      tab.classList.add("active");
-      tab.setAttribute("aria-selected", "true");
-      const targetTab = tab.dataset.tab;
-      document.querySelectorAll(".search-terms-tab-pane").forEach((pane) => {
-        pane.hidden = pane.id !== `search-terms-tab-${targetTab}`;
-      });
-      // Load patterns data when switching to patterns tab
-      if (targetTab === "patterns") {
-        loadNgrams();
-      }
-    });
-  });
+  // Search Terms tabs (PR-ADS-144) are rendered + wired by the page module.
 
   // Wire up Executive Overview controls (business windows — PR-ADS-134)
   const dashRefresh = document.getElementById("dashboard-refresh-btn");
