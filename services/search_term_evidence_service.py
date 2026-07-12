@@ -1,5 +1,6 @@
 """
-Search Terms + Patterns evidence (PR-ADS-144). Read-only.
+Search Terms + Patterns evidence (PR-ADS-144, completed by PR-ADS-145).
+Read-only.
 
 One durable truth path for the Search Terms page (Terms tab + Patterns tab):
 
@@ -15,19 +16,39 @@ One durable truth path for the Search Terms page (Terms tab + Patterns tab):
     search_term) — campaign_id is in the key so two campaign IDs sharing a
     display name can never collide — and the writer upserts ON CONFLICT on
     that key, so a repeated scheduler run updates the same fact row in place.
-  - Currency lineage (PR-ADS-144): the table stores ``cost_micros`` (raw
-    Google Ads metric), ``currency_code`` (native account currency), and
-    ``source_system`` (data provenance). Per-date FX conversion to USD uses
-    the same fx_rates doctrine as canonical campaign spend. Rows whose
-    provenance is not proven (missing currency_code or source_system) are
-    quarantined — monetary metrics are withheld as Unavailable rather than
-    mixing unproven currencies. ``spend_usd`` in the table is the legacy
-    column name (cost_micros / 1e6 at ingestion time — native currency, NOT
-    proven USD).
-  - Classification is the factual tri-state stored on the rows:
-    ``is_flagged_waste`` True → flagged / False → clean (Reviewed clean) /
-    NULL → needs_review. ``False`` is never renamed to a business outcome and
-    a Google Ads conversion never upgrades or downgrades the state.
+  - Currency lineage (PR-ADS-144) + per-unit monetary completeness
+    (PR-ADS-145): the table stores ``cost_micros`` (raw Google Ads metric),
+    ``currency_code`` (native account currency), and ``source_system`` (data
+    provenance). Each durable term × campaign unit is assessed and per-date
+    FX-converted to USD INDEPENDENTLY, using the same fx_rates doctrine as
+    canonical campaign spend. A unit contributes to verified monetary KPIs
+    only when its currency is proven AND every source_date has an FX rate
+    (fx_complete); an unproven/legacy or FX-incomplete unit never suppresses
+    or poisons a verified unit's USD. Monetary KPIs therefore carry a
+    three-state completeness — complete / partial / unavailable — and, when
+    partial, a verified-only subtotal plus a count of the excluded units.
+    Legacy rows with no provable currency stay visible with monetary fields
+    null and ``legacy_currency_unverified: true`` — never assigned a currency,
+    never a fabricated zero. ``spend_usd`` in the table is the legacy column
+    name (cost_micros / 1e6 at ingestion time — native currency, NOT proven
+    USD).
+  - Classification (PR-ADS-145 precedence) resolves per unit, highest first:
+      1. durable ``search_terms.is_flagged_waste = true`` → Flagged waste;
+      2. safely campaign-scoped confirmed ``waste_terms`` evidence (the weekly
+         waste-detection pipeline) → Flagged waste;
+      3. durable ``is_flagged_waste = false`` on every underlying row →
+         Reviewed clean;
+      4. otherwise (any unreviewed row, or no evidence at all) → Needs review.
+    ``waste_terms`` evidence is bridged in only when the (term, campaign
+    name/alias) UNIQUELY and safely identifies one campaign identity — no
+    fuzzy matching, no cross-campaign borrowing; a display name shared by two
+    campaign ids for the same term is ambiguous and attaches to neither;
+    ``not_google_ads`` labels are excluded. Absence from ``waste_terms`` NEVER
+    means clean — only an explicit durable ``false`` does. ``False`` is never
+    renamed to a business outcome and a Google Ads conversion never upgrades
+    or downgrades the state. Table rows, the drawer and Patterns all derive
+    from this same resolved state; ``classification_source`` discloses which
+    durable evidence drove it.
   - Campaign identity follows PR-ADS-143 exactly: stored campaign_id first,
     then the approved durable mapping, then the exact-normalized fallback
     against canonical spend names (single id only) — never fuzzy;
