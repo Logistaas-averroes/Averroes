@@ -353,10 +353,10 @@ const PAGE_HELP_CONTENT = {
     checkNext: "Campaign detail drawer for drill-down, or ROAS by Campaign for revenue attribution."
   },
   "search-terms": {
-    what: "Search Terms + Patterns — the selected-window Search Term Universe with factual review states (Flagged waste = stored true · Reviewed clean = stored false · Needs review = not yet classified) and waste evidence, plus a Patterns tab of recurring 1–3-word phrases derived from the same terms.",
-    source: "Durable Google Ads API search-term rows totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound). Spend is reported search-term spend in the account's native currency (e.g. GBP), FX-converted to USD using the same per-date rate doctrine as canonical campaign spend. When FX is incomplete or currency provenance is unproven, USD spend is withheld (Unavailable) and native spend is shown. Reporting Coverage compares FX-safe search-term USD against FX-safe canonical campaign USD — anything else returns Unavailable.",
+    what: "Search Terms + Patterns — the selected-window Search Term Universe with factual review states (Flagged waste = durable flag OR safely-confirmed waste evidence · Reviewed clean = every row stored false · Needs review = not yet classified) and waste evidence, plus a Patterns tab of recurring 1–3-word phrases derived from the same terms.",
+    source: "Durable Google Ads API search-term rows totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound). Currency is assessed independently per term × campaign: verified Google Ads GBP rows are FX-converted to USD per source-date; unverified legacy rows keep their monetary value withheld (never assumed GBP/USD) and stay visible. Verified Search-Term Spend is therefore a verified subtotal shown as Complete, Partial (excludes N legacy rows) or Unavailable. Reporting Coverage compares FX-safe VERIFIED search-term USD against FX-safe canonical campaign USD; when partial it is verified-row-only.",
     howToUse: "Pick an Evidence Window, filter by campaign, review state, junk category or minimum spend, and click any row to open its evidence drawer. Switch to Patterns for word-level analysis derived from the same selected-window terms; a term can appear in several patterns, so pattern-row spends overlap and must never be summed.",
-    doNotAssume: "Review states are classification facts, not business outcomes — Reviewed clean does not mean valuable, and a platform conversion is never a confirmed SQL, customer or closed-won deal. A flagged term is a human-review candidate, not an approved negative. Read-only: no negative keywords are added and nothing is written to Google Ads or HubSpot. The legacy spend_usd column in storage is NOT proven USD — it stores the raw cost_micros/1e6 value in the account's native currency.",
+    doNotAssume: "Review states are classification facts, not business outcomes — Reviewed clean does not mean valuable, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Absence of waste evidence is NOT clean — only an explicit stored false is. A flagged term is a human-review candidate, not an approved negative. Read-only: no negative keywords are added and nothing is written to Google Ads or HubSpot. The legacy spend_usd column in storage is NOT proven USD — it stores the raw cost_micros/1e6 value in the account's native currency, and the 78 unverified legacy rows are preserved, never relabelled.",
     checkNext: "Flagged Waste Terms for the flagged review queue, or Campaign Evidence for canonical spend and lead outcomes."
   },
   keywords: {
@@ -9034,8 +9034,13 @@ function stMoney(v) {
 }
 
 function stSpendCell(row) {
-  // Currency-aware spend display: prefers USD, falls back to native with disclosure.
+  // Currency-aware spend display: prefers verified USD, falls back to native
+  // with disclosure. The 78 legacy rows (unverified currency) stay visible with
+  // an explicit marker and never a fabricated $0 (PR-ADS-145 §3).
   if (row.spend_usd !== null && row.spend_usd !== undefined) return stMoney(row.spend_usd);
+  if (row.legacy_currency_unverified) {
+    return `<span class="st-legacy-marker" title="Legacy row — currency lineage unverified; monetary value withheld, never assumed GBP/USD">Unverified</span>`;
+  }
   if (row.spend_native !== null && row.spend_native !== undefined) {
     const cur = row.native_currency || "?";
     const val = Number(row.spend_native).toLocaleString(undefined, {
@@ -9202,32 +9207,60 @@ function renderTermsTab() {
   wireTermsControls();
 }
 
+// Compact Complete / Partial / Unavailable disclosure for the Verified
+// Search-Term Spend KPI (PR-ADS-145 §5/§7). No extra banner or pill row —
+// just a subline on the card.
+function stVerifiedSpendCard(kpis) {
+  const mon = kpis.monetary || {};
+  const status = kpis.monetary_status || mon.monetary_completeness_status || "unavailable";
+  const usd = kpis.verified_spend_usd;
+  if (status === "unavailable" || usd === null || usd === undefined) {
+    return stKpiCard("Verified Search-Term Spend", stUnavailable(),
+      "No verified currency lineage for this window");
+  }
+  const nativeSub = (mon.verified_native_spend !== null && mon.verified_native_spend !== undefined)
+    ? `${escapeHtml(mon.native_currency || "GBP")} ${Number(mon.verified_native_spend).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} native`
+    : "";
+  // The Complete/Partial badge lives in the subline (never inline with the big
+  // value, which would clip) — PR-ADS-145 §7 compact disclosure.
+  const badge = status === "partial"
+    ? `<span class="st-mon-badge st-mon-badge--partial" title="Verified subtotal — some legacy rows have unverified currency">Partial</span>`
+    : `<span class="st-mon-badge st-mon-badge--complete" title="All rows verified and FX-complete">Complete</span>`;
+  let sub;
+  if (status === "partial") {
+    const excluded = mon.unverified_currency_units || 0;
+    sub = `${badge} excludes ${fmtCount(excluded)} legacy row${excluded === 1 ? "" : "s"} with unverified currency` +
+      (nativeSub ? ` · ${nativeSub}` : "");
+  } else {
+    sub = `${badge} ${nativeSub ? `${nativeSub} · FX-converted USD` : "FX-converted USD"}`;
+  }
+  return stKpiCard("Verified Search-Term Spend", stMoney(usd), sub);
+}
+
 function renderTermsKPIs(kpis) {
   if (!kpis) return "";
   const coverage = kpis.coverage || {};
   const val = (v) => (v === null || v === undefined) ? stUnavailable() : fmtCount(v);
   const cards = [
     stKpiCard("Reported Terms", val(kpis.reported_terms), "Term × campaign rows in window"),
-    stKpiCard("Reported Search-Term Spend",
-      kpis.reported_spend_usd === null || kpis.reported_spend_usd === undefined
-        ? stUnavailable() : stMoney(kpis.reported_spend_usd),
-      kpis.currency_status === "proven" && kpis.fx_complete
-        ? "FX-converted to USD — reported by Google Ads"
-        : kpis.reported_spend_usd === null || kpis.reported_spend_usd === undefined
-          ? "USD unavailable — FX incomplete or currency unproven"
-          : "Reported by Google Ads — not total account spend"),
+    stVerifiedSpendCard(kpis),
     stKpiCard("Clicks", val(kpis.clicks), ""),
-    stKpiCard("Flagged Waste", val(kpis.flagged_waste), "Human-review candidates"),
-    stKpiCard("Needs Review", val(kpis.needs_review), "Not yet classified"),
+    stKpiCard("Flagged Waste", val(kpis.flagged_waste), "Durable flag or confirmed waste evidence"),
+    stKpiCard("Needs Review", val(kpis.needs_review), "Not yet classified — absence of evidence is not clean"),
   ];
   // Coverage is a WINDOW-LEVEL source-completeness diagnostic — it does not
   // narrow with the row filters, so showing it next to filtered KPIs would be
   // internally inconsistent. Hide the card whenever filters are active.
   if (coverage.status === "ok" && coverage.coverage_pct !== null &&
       coverage.coverage_pct !== undefined && !stHasActiveFilters()) {
-    cards.push(stKpiCard("Reporting Coverage",
+    const verifiedOnly = coverage.scope === "verified_only";
+    cards.push(stKpiCard(
+      verifiedOnly ? "Verified-row Coverage" : "Reporting Coverage",
       `${Number(coverage.coverage_pct).toFixed(1)}%`,
-      `Search-term reporting coverage of ${stMoney(coverage.canonical_spend_usd)} canonical spend (whole window)`));
+      (verifiedOnly
+        ? `Verified rows only — excludes ${fmtCount(coverage.excluded_unverified_units || 0)} legacy · of `
+        : "Search-term reporting coverage of ") +
+      `${stMoney(coverage.canonical_spend_usd)} canonical spend`));
   }
   return `<div class="evidence-kpi-grid st-kpi-grid">${cards.join("")}</div>`;
 }
@@ -9489,9 +9522,14 @@ function renderPatternKPIs(kpis) {
     stKpiCard("Patterns with Flagged Terms", val(kpis.patterns_with_flagged), ""),
     stKpiCard("Patterns Needing Review", val(kpis.patterns_needing_review), ""),
     stKpiCard("Reported Spend Represented",
-      kpis.reported_spend_represented_usd === null || kpis.reported_spend_represented_usd === undefined
-        ? stUnavailable() : stMoney(kpis.reported_spend_represented_usd),
-      "Unique underlying terms — not additive across pattern rows"),
+      (kpis.reported_spend_represented_usd === null || kpis.reported_spend_represented_usd === undefined
+        ? stUnavailable() : stMoney(kpis.reported_spend_represented_usd)) +
+        (kpis.spend_status === "partial"
+          ? ` <span class="st-mon-badge st-mon-badge--partial" title="Verified subtotal — some underlying terms have unverified currency">Partial</span>`
+          : ""),
+      kpis.spend_status === "partial"
+        ? "Verified unique underlying terms only — excludes unverified-currency terms"
+        : "Unique underlying terms — not additive across pattern rows"),
   ];
   return `<div class="evidence-kpi-grid st-kpi-grid">${cards.join("")}</div>`;
 }
@@ -9712,13 +9750,14 @@ function renderStTermDrawer(body, data) {
     </div>
     <div class="drawer-section">
       <div class="drawer-kpi-grid">
-        ${stDrawerKpi("Reported Spend", stMoney(t.spend_usd))}
+        ${stDrawerKpi("Verified USD", t.spend_usd !== null && t.spend_usd !== undefined ? stMoney(t.spend_usd) : stUnavailable())}
+        ${stDrawerKpi("Native", t.spend_native !== null && t.spend_native !== undefined ? `${escapeHtml(t.native_currency || "?")} ${Number(t.spend_native).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}` : (t.legacy_currency_unverified ? `<span class="st-legacy-marker">Unverified</span>` : "—"))}
         ${stDrawerKpi("Clicks", fmtCount(t.clicks))}
-        ${stDrawerKpi("Impressions", fmtCount(t.impressions))}
-        ${stDrawerKpi("CPC", stMoney(t.cpc_usd))}
+        ${stDrawerKpi("CPC (USD)", t.cpc_usd !== null && t.cpc_usd !== undefined ? stMoney(t.cpc_usd) : stUnavailable())}
         ${stDrawerKpi("First Seen", t.first_seen ? escapeHtml(t.first_seen) : "—")}
         ${stDrawerKpi("Last Seen", t.last_seen ? escapeHtml(t.last_seen) : "—")}
       </div>
+      <p class="drawer-source-note">Currency status: ${escapeHtml(({verified: "Verified — FX-complete USD", verified_same_currency: "Verified (USD native)", fx_incomplete: "FX incomplete — USD withheld", legacy_currency_unverified: "Legacy — currency lineage unverified", mixed_currency: "Mixed currency — USD withheld", unproven_source: "Unproven source — USD withheld"})[t.currency_status] || t.currency_status || "unknown")}. Native spend is never relabelled as USD.</p>
     </div>
     <div class="drawer-section">
       <div class="drawer-section__title">Campaign & Matching Context</div>
@@ -9735,6 +9774,7 @@ function renderStTermDrawer(body, data) {
       <div class="drawer-section__title">Classification Proof</div>
       <table class="drawer-table st-fact-table"><tbody>
         ${factRow("Review state", stStateBadge(cls.state))}
+        ${factRow("State source", cls.state_source ? escapeHtml(({durable_flag: "Durable flag (search_terms)", waste_terms: "Confirmed waste evidence (weekly detection)", durable_reviewed_clean: "Durable reviewed clean", unclassified: "Unclassified — needs review"})[cls.state_source] || cls.state_source) : "—")}
         ${factRow("Junk category", cls.junk_categories && cls.junk_categories.length ? escapeHtml(cls.junk_categories.join(", ")) : "—")}
         ${factRow("Matched rule / pattern", cls.matched_patterns && cls.matched_patterns.length ? escapeHtml(cls.matched_patterns.join(", ")) : "—")}
         ${factRow("CRM-junk confirmations", cls.crm_junk_confirmed !== null && cls.crm_junk_confirmed !== undefined ? fmtCount(cls.crm_junk_confirmed) : stUnavailable())}

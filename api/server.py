@@ -4346,6 +4346,26 @@ def api_search_term_evidence_pattern_detail(
         fallback=unavailable_pattern_drawer_response)
 
 
+@app.get("/api/search-term-evidence/currency-audit")
+def api_search_term_currency_audit(
+    user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Operator audit of legacy search_terms rows with unverified currency
+    lineage (PR-ADS-145 §3): count, date range, campaigns/terms represented, and
+    whether each legacy row later gained an EXACT verified Google Ads
+    replacement. Strictly READ-ONLY — no rows are deleted, relabelled or
+    assigned a currency. Requires auth."""
+    import db.search_term_repository as st_repo  # noqa: PLC0415
+    try:
+        audit = st_repo.fetch_legacy_currency_audit()
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/search-term-evidence/currency-audit] error: %s", exc,
+                  exc_info=True)
+        return {"available": False, "summary": {}, "rows": [],
+                "read_only": True, "marker": "legacy_currency_unverified"}
+    return {**audit, "read_only": True, "marker": "legacy_currency_unverified"}
+
+
 @app.get("/api/search-term-evidence/export")
 def api_search_term_evidence_export(
     user: dict = Depends(require_auth),

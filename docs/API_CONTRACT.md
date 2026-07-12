@@ -1626,6 +1626,54 @@ server-side filtering / sorting / pagination and complete-population KPIs.
   human-review candidate), false → `clean` (Reviewed clean — never renamed
   "valuable"), NULL → `needs_review`. Platform conversions never change the
   state.
+
+- **Partial verified monetary totals (PR-ADS-145).** Currency is assessed
+  INDEPENDENTLY per durable term × campaign unit — an unverified legacy unit
+  never withholds an unrelated verified unit's USD. The KPI carries a
+  `monetary` completeness block and a `monetary_status` of `complete` /
+  `partial` / `unavailable`:
+  - `complete` — every window row is verified GBP lineage AND FX-complete →
+    `verified_spend_usd` (with `verified_spend_native`) is the full reported
+    spend, and Reporting Coverage is available.
+  - `partial` — at least one verified FX-complete row plus one or more
+    legacy/unverified rows → `verified_spend_usd` is a VERIFIED SUBTOTAL
+    (labelled "Partial · excludes N legacy rows"), never the complete reported
+    spend. Coverage becomes `scope: "verified_only"` (verified-row reporting
+    coverage; unverified rows excluded).
+    `monetary` fields: `total_units`, `verified_currency_units`,
+    `unverified_currency_units`, `fx_complete_units`, `fx_incomplete_units`,
+    `verified_native_spend`, `verified_usd_spend`, `native_currency`,
+    `monetary_completeness_status`, `monetary_population_pct`.
+  - `unavailable` — no verified FX-complete monetary rows → `Unavailable`.
+  Population KPIs aggregate ONLY verified FX-complete rows; unverified rows stay
+  visible in the table with `spend_usd`/`cpc_usd` `null`, `currency_status`
+  disclosing the reason (`legacy_currency_unverified` for the preserved legacy
+  rows), and `legacy_currency_unverified: true`. A verified value is never
+  fabricated as zero, and native GBP is never labelled USD.
+
+- **Waste classification bridge + precedence (PR-ADS-145 §4).** For each unit
+  the state resolves by precedence: (1) durable `is_flagged_waste = true` →
+  Flagged waste; (2) safely campaign-scoped confirmed `waste_terms` evidence →
+  Flagged waste; (3) durable `is_flagged_waste = false` (every row reviewed) →
+  Reviewed clean; (4) otherwise → Needs review. **Absence from `waste_terms`
+  never means clean** — only an explicit durable `false` does. `waste_terms`
+  lacks immutable campaign IDs, so its evidence is attached ONLY when the
+  (term, campaign_name/alias) uniquely and safely identifies one canonical
+  campaign — no fuzzy matching, no cross-campaign borrowing, same-name
+  ambiguous campaigns stay Needs review, and `not_google_ads` evidence is never
+  attached to a Google Ads campaign. Each row exposes `classification_source`
+  (`durable_flag` | `waste_terms` | `durable_reviewed_clean` | `unclassified`)
+  and `crm_junk_confirmed`; the drawer adds `state_source`, `confidence`,
+  junk category, matched pattern and classification date. State counts
+  (`flagged_waste` + `reviewed_clean` + `needs_review`) reconcile exactly to
+  `reported_terms`; no false Reviewed Clean is created from absence of evidence.
+
+- **Legacy rows preserved (PR-ADS-145 §3).** The unverified legacy rows are
+  never deleted, overwritten or relabelled and are never assigned a currency
+  from account defaults. `GET /api/search-term-evidence/currency-audit`
+  (auth, read-only) reports their count, source-date range, campaigns/terms
+  represented and whether each later gained an EXACT verified replacement.
+
 - **Campaign identity (PR-ADS-143 rules):** stored `campaign_id` first, then
   the approved durable mapping, then the exact-normalized fallback against
   canonical spend names (single id only) — never fuzzy. `not_google_ads`
@@ -2180,6 +2228,7 @@ One GCLID coverage snapshot per run, capturing aggregate coverage statistics.
 | GET | `/api/search-term-evidence/patterns` | Auth | PR-ADS-144 Patterns (n-grams) derived from the same term population; unique-term KPI math + overlap disclosure |
 | GET | `/api/search-term-evidence/patterns/detail` | Auth | PR-ADS-144 pattern drawer — unique underlying terms + factual split |
 | GET | `/api/search-term-evidence/export` | Auth | PR-ADS-144 complete server-filtered CSV export (503 when source unavailable) |
+| GET | `/api/search-term-evidence/currency-audit` | Auth | PR-ADS-145 read-only operator audit of legacy unverified-currency rows (count, date range, campaigns/terms, verified-replacement flag) |
 | GET | `/api/gclid-attribution` | Auth | Paginated GCLID attribution rows (gclid_attribution table, cursor pagination) |
 | GET | `/api/gclid-coverage` | Auth | GCLID coverage snapshots (gclid_coverage_snapshots table) |
 | GET | `/api/attribution/quality` | Auth | Read-only attribution quality signals (gclid_attribution + sync_state + gclid_coverage_snapshots) |
