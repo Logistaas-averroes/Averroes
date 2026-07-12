@@ -9210,6 +9210,25 @@ function renderTermsTab() {
 // Compact Complete / Partial / Unavailable disclosure for the Verified
 // Search-Term Spend KPI (PR-ADS-145 §5/§7). No extra banner or pill row —
 // just a subline on the card.
+// Accurate exclusion phrase for a verified subtotal. A Partial status can come
+// from legacy rows with unverified currency AND/OR rows whose FX is incomplete
+// for a source_date — never conflate the two (a partial-by-FX window would
+// otherwise read "excludes 0 legacy rows"). PR-ADS-145 §7.
+function stExclusionPhrase(legacy, fxIncomplete) {
+  legacy = legacy || 0;
+  fxIncomplete = fxIncomplete || 0;
+  const total = legacy + fxIncomplete;
+  if (!total) return "excludes unverified rows";
+  if (legacy && fxIncomplete) {
+    return `excludes ${fmtCount(total)} unverified rows ` +
+      `(${fmtCount(legacy)} legacy · ${fmtCount(fxIncomplete)} FX-incomplete)`;
+  }
+  if (fxIncomplete) {
+    return `excludes ${fmtCount(fxIncomplete)} FX-incomplete row${fxIncomplete === 1 ? "" : "s"}`;
+  }
+  return `excludes ${fmtCount(legacy)} legacy row${legacy === 1 ? "" : "s"}`;
+}
+
 function stVerifiedSpendCard(kpis) {
   const mon = kpis.monetary || {};
   const status = kpis.monetary_status || mon.monetary_completeness_status || "unavailable";
@@ -9224,12 +9243,11 @@ function stVerifiedSpendCard(kpis) {
   // The Complete/Partial badge lives in the subline (never inline with the big
   // value, which would clip) — PR-ADS-145 §7 compact disclosure.
   const badge = status === "partial"
-    ? `<span class="st-mon-badge st-mon-badge--partial" title="Verified subtotal — some legacy rows have unverified currency">Partial</span>`
+    ? `<span class="st-mon-badge st-mon-badge--partial" title="Verified subtotal — excludes rows with unverified currency or incomplete FX">Partial</span>`
     : `<span class="st-mon-badge st-mon-badge--complete" title="All rows verified and FX-complete">Complete</span>`;
   let sub;
   if (status === "partial") {
-    const excluded = mon.unverified_currency_units || 0;
-    sub = `${badge} excludes ${fmtCount(excluded)} legacy row${excluded === 1 ? "" : "s"} with unverified currency` +
+    sub = `${badge} ${stExclusionPhrase(mon.unverified_currency_units, mon.fx_incomplete_units)}` +
       (nativeSub ? ` · ${nativeSub}` : "");
   } else {
     sub = `${badge} ${nativeSub ? `${nativeSub} · FX-converted USD` : "FX-converted USD"}`;
@@ -9258,7 +9276,7 @@ function renderTermsKPIs(kpis) {
       verifiedOnly ? "Verified-row Coverage" : "Reporting Coverage",
       `${Number(coverage.coverage_pct).toFixed(1)}%`,
       (verifiedOnly
-        ? `Verified rows only — excludes ${fmtCount(coverage.excluded_unverified_units || 0)} legacy · of `
+        ? `Verified rows only — ${stExclusionPhrase(coverage.excluded_unverified_units, coverage.excluded_fx_incomplete_units)} · of `
         : "Search-term reporting coverage of ") +
       `${stMoney(coverage.canonical_spend_usd)} canonical spend`));
   }

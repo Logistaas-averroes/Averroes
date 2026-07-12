@@ -1546,7 +1546,8 @@ server-side filtering / sorting / pagination and complete-population KPIs.
       "scope": "complete|verified_only|unavailable",
       "canonical_spend_usd": 1890.0,  // canonical campaign spend, FX-safe USD
       "verified_search_term_spend_usd": 1234.56,   // FX-converted verified numerator
-      "excluded_unverified_units": 78,
+      "excluded_unverified_units": 78,       // legacy rows with unprovable currency
+      "excluded_fx_incomplete_units": 3,     // proven currency but a source_date lacked an FX rate
       "coverage_pct": 65.32,          // null when contracts are not comparable
       "note": "…"
     }
@@ -1653,11 +1654,16 @@ server-side filtering / sorting / pagination and complete-population KPIs.
   - `complete` — every window row is verified GBP lineage AND FX-complete →
     `verified_spend_usd` (with `verified_spend_native`) is the full reported
     spend, and Reporting Coverage is available.
-  - `partial` — at least one verified FX-complete row plus one or more
-    legacy/unverified rows → `verified_spend_usd` is a VERIFIED SUBTOTAL
-    (labelled "Partial · excludes N legacy rows"), never the complete reported
-    spend. Coverage becomes `scope: "verified_only"` (verified-row reporting
-    coverage; unverified rows excluded).
+  - `partial` — at least one verified FX-complete row plus one or more rows the
+    subtotal cannot include: legacy rows with **unprovable currency**
+    (`unverified_currency_units`) and/or rows with proven currency but an
+    **FX-incomplete** source date (`fx_incomplete_units`). `verified_spend_usd`
+    is then a VERIFIED SUBTOTAL, never the complete reported spend, and the UI
+    discloses the actual exclusion reason ("excludes N unverified rows (L legacy
+    · F FX-incomplete)") — it never mislabels an FX-incompleteness exclusion as
+    "0 legacy rows". Coverage becomes `scope: "verified_only"` (verified-row
+    reporting coverage) and reports BOTH `excluded_unverified_units` and
+    `excluded_fx_incomplete_units`.
     `monetary` fields: `total_units`, `verified_currency_units`,
     `unverified_currency_units`, `fx_complete_units`, `fx_incomplete_units`,
     `verified_native_spend`, `verified_usd_spend`, `native_currency`,
@@ -1759,9 +1765,10 @@ currency contract and classification states.
 | `limit` | `100` | 1–500 pattern rows; `pagination.total_count`/`has_more` disclose truncation. |
 
 Response: `kpis {patterns_found, terms_analysed, patterns_with_flagged,
-patterns_needing_review, reported_spend_represented_usd}`, `rows [{pattern, n,
-signal (flagged_present|needs_review|mixed|reviewed_clean_only), terms,
-flagged_terms, clean_terms, needs_review_terms, reported_spend_usd, clicks,
+patterns_needing_review, reported_spend_represented_usd, spend_status}`, `rows
+[{pattern, n, signal (flagged_present|needs_review|mixed|reviewed_clean_only),
+terms, flagged_terms, clean_terms, needs_review_terms, reported_spend_usd,
+spend_partial, verified_spend_terms, unverified_spend_terms, clicks,
 conversions, campaigns_count}]`, plus the same `audit` block extended with
 `patterns_derivation` and `pattern_kpi_spend_semantics:
 "unique_underlying_terms"`.
@@ -1771,6 +1778,15 @@ patterns, so pattern-row spend is NEVER additive and is never summed into an
 account total. KPI spend is computed once per unique underlying term. The
 machine-verifiable `overlap` block discloses `unique_terms_analysed`,
 `total_pattern_memberships`, `overlapping_term_count` and `spend_semantics`.
+
+**Pattern spend completeness (PR-ADS-145).** `reported_spend_represented_usd`
+aggregates only verified FX-complete underlying-term spend. `spend_status` is
+`complete` when every contributing term is verified, `partial` when a verified
+subtotal exists alongside unverified terms, and `unavailable` (with
+`reported_spend_represented_usd: null`) when NO contributing term is verified —
+a null verified subtotal is never presented as merely "partial". Per row,
+`spend_partial` flags a verified subtotal and `verified_spend_terms` /
+`unverified_spend_terms` disclose the split.
 
 ---
 

@@ -603,17 +603,43 @@ def _unit_safe_labels(unit: dict, aliases_by_id: dict) -> set:
     return {normalize_campaign_name(x) for x in labels if x}
 
 
+def _globally_ambiguous_norms(norm_to_ids: dict, aliases_by_id: dict) -> set:
+    """Normalized campaign names/aliases that resolve to MORE THAN ONE canonical
+    campaign identity. ``waste_terms`` rows carry only a campaign_name (no
+    campaign_id), so such a name can never be attributed to a single campaign —
+    evidence bearing it must never be bridged (PR-ADS-145 §4 identity safety)."""
+    norm_ids: dict = {}
+    for norm, ids in (norm_to_ids or {}).items():
+        if norm:
+            norm_ids.setdefault(norm, set()).update(str(i) for i in ids)
+    for cid, labels in (aliases_by_id or {}).items():
+        for lbl in labels:
+            n = normalize_campaign_name(lbl)
+            if n:
+                norm_ids.setdefault(n, set()).add(str(cid))
+    return {n for n, ids in norm_ids.items() if len(ids) > 1}
+
+
 def _attach_waste_evidence(units: list, start, end, identity_by_label,
-                           aliases_by_id) -> None:
+                           aliases_by_id, norm_to_ids) -> None:
     """Attach safely campaign-scoped ``waste_terms`` evidence to units so a term
     the weekly pipeline already confirmed shows as Flagged waste rather than
     Needs review (PR-ADS-145 §4). Mutates units in place.
 
-    Safety (no fuzzy, no cross-campaign borrowing): evidence is attached only
-    when the (term, campaign_name) resolves to a label that UNIQUELY identifies
-    this unit among all units for the same term — a display name shared by two
-    campaign identities for the term is ambiguous and attaches to NEITHER (they
-    stay Needs review). ``not_google_ads`` units are never enriched.
+    Safety (no fuzzy, no cross-campaign borrowing). ``waste_terms`` rows key on
+    (search_term, campaign_name) — they carry NO campaign_id — so evidence is
+    bridged onto a unit only when its campaign name/alias identifies exactly one
+    campaign, both locally and globally:
+      * only ``mapped`` units are enriched — an ``unmatched`` (Mapping review) or
+        ``not_google_ads`` unit has no confirmed Google Ads identity to bind to;
+      * the label must UNIQUELY identify this unit among all units for the same
+        term (a display name shared by two units for the term is ambiguous and
+        attaches to NEITHER); and
+      * the label must not be GLOBALLY ambiguous — a normalized name shared by
+        more than one canonical campaign id can never be attributed to one
+        campaign from the name alone, even if only one such campaign happens to
+        have the term in the selected window.
+    Ambiguous either way ⇒ the unit stays Needs review.
     """
     import db.search_term_repository as st_repo  # noqa: PLC0415
 
@@ -630,22 +656,30 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
         if norm:
             ev_by_key[(r.get("search_term"), norm)] = r
 
+    ambiguous_norms = _globally_ambiguous_norms(norm_to_ids, aliases_by_id)
+
     # Group units by term so we can detect same-name ambiguity within a term.
+    # ``_unit_safe_labels`` for EVERY unit (mapped + unmatched) feeds the local
+    # ambiguity denominator, but only mapped units are eligible for attachment.
     by_term: dict = {}
     for u in units:
         by_term.setdefault(u["search_term"], []).append(u)
 
     for term, term_units in by_term.items():
         for u in term_units:
+            if u.get("mapping_status") != "mapped":
+                continue
             safe_labels = _unit_safe_labels(u, aliases_by_id)
             if not safe_labels:
                 continue
             others = [o for o in term_units if o is not u]
-            # A label shared with another unit for this term is ambiguous.
+            # A label shared with another unit for this term, OR globally shared
+            # by more than one canonical campaign id, is ambiguous.
             unique_labels = {
                 lbl for lbl in safe_labels
-                if not any(lbl in _unit_safe_labels(o, aliases_by_id)
-                           for o in others)
+                if lbl not in ambiguous_norms
+                and not any(lbl in _unit_safe_labels(o, aliases_by_id)
+                            for o in others)
             }
             if not unique_labels:
                 continue
@@ -744,7 +778,8 @@ def _build_population(start, end) -> dict:
     # Attach safely campaign-scoped waste_terms classification evidence so a
     # newly imported term that the weekly pipeline already confirmed shows as
     # Flagged waste rather than Needs review (PR-ADS-145 §4).
-    _attach_waste_evidence(unit_list, start, end, identity_by_label, aliases_by_id)
+    _attach_waste_evidence(unit_list, start, end, identity_by_label,
+                           aliases_by_id, norm_to_ids)
 
     return {
         "available": True,
@@ -944,6 +979,7 @@ def _coverage_block(mon: dict, canonical: dict) -> dict:
             "verified_search_term_spend_usd": _round2(verified_usd),
             "coverage_pct": None,
             "excluded_unverified_units": mon.get("unverified_currency_units"),
+            "excluded_fx_incomplete_units": mon.get("fx_incomplete_units"),
             "note": ("Coverage requires at least one verified FX-complete "
                      "search-term row and an FX-complete canonical campaign USD "
                      "total for the same window."),
@@ -952,8 +988,12 @@ def _coverage_block(mon: dict, canonical: dict) -> dict:
     note = ("Completeness diagnostic only — verified search-term spend is not "
             "expected to reconcile exactly with canonical spend.")
     if scope == "verified_only":
+        # The verified numerator excludes BOTH legacy (unverified-currency) rows
+        # and FX-incomplete rows — disclose each so "excludes 0 legacy" can never
+        # misrepresent an FX-incompleteness exclusion.
         note = ("Verified-row reporting coverage — EXCLUDES "
-                f"{mon.get('unverified_currency_units')} unverified legacy row(s). "
+                f"{mon.get('unverified_currency_units')} unverified legacy row(s) "
+                f"and {mon.get('fx_incomplete_units')} FX-incomplete row(s). "
                 + note)
     return {
         "status": "ok",
@@ -962,6 +1002,7 @@ def _coverage_block(mon: dict, canonical: dict) -> dict:
         "verified_search_term_spend_usd": _round2(verified_usd),
         "coverage_pct": round(float(verified_usd) / float(canonical_usd) * 100.0, 2),
         "excluded_unverified_units": mon.get("unverified_currency_units"),
+        "excluded_fx_incomplete_units": mon.get("fx_incomplete_units"),
         "note": note,
     }
 
@@ -1685,6 +1726,15 @@ def build_search_pattern_evidence(window: str, *, n: int = 1,
     # Whether the surviving pattern population has any unverified underlying
     # spend → the represented-spend KPI is a verified subtotal, not complete.
     kpi_partial = any(t.get("has_unverified_spend") for t in contributing)
+    # When there is NO verified FX-complete spend at all (every contributing
+    # term is unverified, so unique_spend stayed None), the represented-spend
+    # KPI is Unavailable — never a null presented as merely "partial".
+    if unique_spend is None:
+        spend_status = MON_UNAVAILABLE
+    elif kpi_partial:
+        spend_status = MON_PARTIAL
+    else:
+        spend_status = MON_COMPLETE
     kpis = {
         "patterns_found": len(rows),
         "terms_analysed": len(contributing),
@@ -1693,7 +1743,7 @@ def build_search_pattern_evidence(window: str, *, n: int = 1,
                                        if p["needs_review_terms"] > 0),
         # Verified FX-complete unique-underlying-term spend only.
         "reported_spend_represented_usd": _round2(unique_spend),
-        "spend_status": (MON_PARTIAL if kpi_partial else MON_COMPLETE),
+        "spend_status": spend_status,
     }
 
     returned = ordered[:limit]

@@ -87,7 +87,8 @@
     "verified_search_term_spend_usd": 1635.28,
     "coverage_pct": 47.47,
     "excluded_unverified_units": 2,
-    "note": "Verified-row reporting coverage \u2014 EXCLUDES 2 unverified legacy row(s). Completeness diagnostic only \u2014 verified search-term spend is not expected to reconcile exactly with canonical spend."
+    "excluded_fx_incomplete_units": 0,
+    "note": "Verified-row reporting coverage \u2014 EXCLUDES 2 unverified legacy row(s) and 0 FX-incomplete row(s). Completeness diagnostic only \u2014 verified search-term spend is not expected to reconcile exactly with canonical spend."
    }
   },
   "rows": [

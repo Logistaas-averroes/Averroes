@@ -164,8 +164,17 @@ def test_partial_kpi_discloses_excluded_count(monkeypatch):
     _patch(monkeypatch, rows)
     out = _build()
     assert out["kpis"]["monetary"]["unverified_currency_units"] == 2
-    # The frontend renders "Partial · excludes N legacy rows".
-    assert "excludes ${fmtCount(excluded)} legacy row" in ST_MODULE
+    # The frontend renders an accurate exclusion phrase that distinguishes legacy
+    # (unverified-currency) rows from FX-incomplete rows — never "excludes 0
+    # legacy rows" when the partiality is actually FX-incompleteness.
+    assert "function stExclusionPhrase" in ST_MODULE
+    assert "stExclusionPhrase(mon.unverified_currency_units, mon.fx_incomplete_units)" in ST_MODULE
+    assert "FX-incomplete" in ST_MODULE
+    # The coverage subline also discloses both exclusion reasons via the helper.
+    assert "stExclusionPhrase(coverage.excluded_unverified_units, coverage.excluded_fx_incomplete_units)" in ST_MODULE
+    # Coverage metadata now carries the FX-incomplete exclusion count too.
+    cov = out["kpis"]["coverage"]
+    assert "excluded_fx_incomplete_units" in cov
 
 
 def test_complete_population_returns_complete(monkeypatch):
@@ -315,6 +324,36 @@ def test_same_name_ambiguous_campaigns_cannot_borrow_waste(monkeypatch):
         assert r["crm_junk_confirmed"] is None         # evidence not borrowed
 
 
+def test_globally_ambiguous_name_cannot_borrow_waste_even_when_alone_in_window(monkeypatch):
+    # A display name shared by TWO canonical campaign ids is globally ambiguous.
+    # waste_terms carries only the name, so even when only ONE of those campaigns
+    # has the term in the selected window it must NOT borrow the evidence — the
+    # name cannot be attributed to a single campaign id.
+    rows = [_g("freight software", "gulf", "2", 20.0, unrev=True)]
+    canonical = {"available": True, "customer_id": "c1", "total_spend_usd": None,
+                 "fx_complete": False, "rows": [
+                     {"campaign_id": "2", "campaign_name": "gulf"},
+                     {"campaign_id": "3", "campaign_name": "gulf"}]}
+    _patch(monkeypatch, rows, waste=_waste("freight software", "gulf"),
+           canonical=canonical)
+    out = _build()
+    r = _row(out, "freight software")
+    assert r["state"] == "needs_review"        # not flagged from an ambiguous name
+    assert r["crm_junk_confirmed"] is None      # evidence not borrowed
+
+
+def test_unmatched_unit_never_borrows_waste(monkeypatch):
+    # An unmatched (Mapping review) unit has no confirmed Google Ads identity, so
+    # even an exact (term, campaign_name) waste_terms match must not flag it.
+    rows = [_g("freight jobs", "mystery co", None, 20.0, unrev=True)]
+    _patch(monkeypatch, rows, waste=_waste("freight jobs", "mystery co"))
+    out = _build()
+    r = _row(out, "freight jobs")
+    assert r["mapping_status"] == "unmatched"
+    assert r["state"] == "needs_review"
+    assert r["crm_junk_confirmed"] is None
+
+
 def test_durable_flag_beats_everything(monkeypatch):
     rows = [_g("junk term", "gulf", "2", 20.0, flagged=True)]
     _patch(monkeypatch, rows, waste=_waste("junk term", "gulf"))
@@ -361,6 +400,20 @@ def test_pattern_spend_partial_when_underlying_unverified(monkeypatch):
     assert freight["spend_partial"] is True         # one underlying term unverified
     assert freight["reported_spend_usd"] == 125.0   # verified subtotal only
     assert out["kpis"]["spend_status"] == "partial"
+
+
+def test_pattern_spend_unavailable_when_all_underlying_unverified(monkeypatch):
+    # Every contributing term is legacy/unverified → there is NO verified
+    # FX-complete spend at all. The represented-spend KPI must be Unavailable
+    # (null + "unavailable"), never a null presented as merely "partial".
+    from services.search_term_evidence_service import build_search_pattern_evidence
+    rows = [_g("freight legacy one", "old", None, 5.0, ccy=None, src=None),
+            _g("freight legacy two", "old", None, 7.0, ccy=None, src=None)]
+    _patch(monkeypatch, rows)
+    out = build_search_pattern_evidence(
+        "30d", n=1, now=datetime(2026, 7, 3, 9, 0, tzinfo=timezone.utc))
+    assert out["kpis"]["reported_spend_represented_usd"] is None
+    assert out["kpis"]["spend_status"] == "unavailable"
 
 
 # ════════════════ 3. Regression / read-only ════════════════
