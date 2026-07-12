@@ -178,8 +178,10 @@ def _patch(monkeypatch, agg, spend=None, identity=None, daily=None, cls=None,
         calls["daily"] = (start, end, term, campaign_names, campaign_ids)
         return daily if daily is not None else {"available": True, "rows": []}
 
-    def _fd_campaign(start, end, term, campaign_id=None, campaign_names=None):
-        calls["daily_campaign"] = (start, end, term, campaign_id, campaign_names)
+    def _fd_campaign(start, end, term, campaign_id=None, campaign_names=None,
+                    null_id_only=False):
+        calls["daily_campaign"] = (start, end, term, campaign_id, campaign_names,
+                                   null_id_only)
         return daily if daily is not None else {"available": True, "rows": []}
 
     def _fc(term, campaign_id=None, campaign_names=None):
@@ -1293,34 +1295,64 @@ def test_drawer_daily_series_uses_campaign_id_scoping(monkeypatch):
     # Should use the campaign-scoped daily function with campaign_id.
     daily_call = calls.get("daily_campaign")
     assert daily_call is not None
-    _, _, term, campaign_id, campaign_names = daily_call
+    _, _, term, campaign_id, campaign_names, _null_only = daily_call
     assert term == "freight software"
     assert campaign_id == "1"
 
 
 def test_adversarial_same_name_different_ids_different_evidence(monkeypatch):
     """Two campaign IDs with identical display name + identical search term
-    must show different evidence in their drawers — no cross-contamination."""
+    must show different evidence in their drawers — no cross-contamination.
+
+    Because the shared display label cannot distinguish the ids in the name-only
+    waste_terms table, the drawer scopes the daily series by campaign_id ALONE
+    (no null-id name fallback) and WITHHOLDS name-derived classification proof —
+    it never borrows another campaign's CRM-junk confirmations/date/source.
+    """
+    # A waste_terms proof row keyed only by the SHARED campaign name — it must
+    # NOT be attributed to either campaign_id drawer.
+    shared_cls = {"available": True, "row": {
+        "search_term": "freight software", "campaign_name": "brand - uk",
+        "junk_category": "competitor", "matched_pattern": "brand",
+        "crm_junk_confirmed": 7, "run_date": "2026-07-10"}}
     agg = _agg([
         _g("freight software", "brand - uk", "10", spend=100.0, clicks=5,
-           flagged=True, junk="competitor"),
+           flagged=True, junk="competitor",
+           currency_code="GBP", source_system="google_ads_api"),
         _g("freight software", "brand - uk", "20", spend=200.0, clicks=10,
-           flagged=False, unreviewed=True),
+           flagged=False, unreviewed=True,
+           currency_code="GBP", source_system="google_ads_api"),
     ])
-    _patch(monkeypatch, agg, identity=_default_identity())
+    # No approved identity mapping for "brand - uk" → each stored id keeps its
+    # own key; the shared label is ambiguous.
+    calls = _patch(monkeypatch, agg, identity=_identity([]), cls=shared_cls)
     from services.search_term_evidence_service import build_search_term_drawer
 
-    # Drawer for campaign_id=10 → flagged
     out10 = build_search_term_drawer("30d", "freight software", campaign_key="10")
-    assert out10["term"]["state"] == "flagged"
-    assert out10["term"]["spend_usd"] is None  # unproven lineage
-
-    # Drawer for campaign_id=20 → needs_review (unreviewed but not flagged)
+    daily10 = calls["daily_campaign"]
     out20 = build_search_term_drawer("30d", "freight software", campaign_key="20")
-    assert out20["term"]["state"] == "needs_review"
+    daily20 = calls["daily_campaign"]
 
-    # They must NOT share the same evidence.
-    assert out10["classification"]["state"] != out20["classification"]["state"]
+    # Classification STATE still comes correctly from each selected unit.
+    assert out10["term"]["state"] == "flagged"
+    assert out20["term"]["state"] == "needs_review"
+    assert out10["classification"]["state"] == "flagged"
+    assert out20["classification"]["state"] == "needs_review"
+
+    # Daily series is scoped by campaign_id ALONE — no null-id name fallback.
+    assert daily10[3] == "10" and daily10[4] is None
+    assert daily20[3] == "20" and daily20[4] is None
+
+    # CRM-junk confirmations / date / source are WITHHELD (never borrowed from
+    # the shared-name waste_terms row) in BOTH drawers.
+    for out in (out10, out20):
+        assert out["classification"]["crm_junk_confirmed"] is None
+        assert out["classification"]["classification_date"] is None
+        assert out["classification"]["classification_source"] is None
+        assert out["classification"]["proof_status"] == "unavailable"
+
+    # And the ambiguous fetch was never made by the shared name.
+    assert calls.get("cls") is None
 
 
 # ════════════════ 15. Pattern min_terms KPI scope (PR-ADS-144 §4) ════════════════

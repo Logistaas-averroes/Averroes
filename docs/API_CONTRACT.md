@@ -1650,12 +1650,28 @@ server-side filtering / sorting / pagination and complete-population KPIs.
 Returns `{term (same row shape as the table), campaigns (per-campaign
 context incl. mapping_status/aliases/source_labels), matching_context
 (ad_groups/keywords/match_types), classification (state, junk_categories,
-matched_patterns, crm_junk_confirmed, classification_date/source from the
-latest waste_terms analysis row — `null`/Unavailable when not stored),
-platform_activity (conversions + disclosure that a platform event is not a
-confirmed SQL/customer/closed-won outcome), daily {rows per source_date —
-only dates the source actually reported; missing dates are never fabricated
-as zero}}`. Unknown term → `{"_not_found": true}`.
+matched_patterns, crm_junk_confirmed, classification_date/source, `proof_status`,
+`proof_reason`), platform_activity (conversions + disclosure that a platform
+event is not a confirmed SQL/customer/closed-won outcome), daily {rows per
+source_date — only dates the source actually reported; missing dates are never
+fabricated as zero}}`. Unknown term → `{"_not_found": true}`.
+
+**Drawer identity safety (PR-ADS-144).** `waste_terms` stores `campaign_name`
+but NOT `campaign_id`, and a null-`campaign_id` daily row can be reached through
+a shared display name. So the drawer:
+
+- scopes the daily series by `campaign_id` alone when the selected campaign's
+  label is NOT unique for the term (no null-id name fallback), so two ids
+  sharing a display name never leak each other's — or the ambiguous null-id
+  row's — daily facts; a no-id (unmatched/legacy) unit is scoped to its own
+  null-id rows strictly;
+- surfaces name-derived classification proof (`crm_junk_confirmed`,
+  `classification_date`, `classification_source`) ONLY when the label uniquely
+  identifies one campaign for the term. Otherwise `proof_status` is
+  `"unavailable"` with a `proof_reason`, the three fields are `null`
+  (Unavailable), and NO search-term-only `waste_terms` query is made. The
+  review `state` / `junk_categories` / `matched_patterns` always come from the
+  campaign-id-safe `search_terms` unit itself, so they remain correct.
 
 ---
 

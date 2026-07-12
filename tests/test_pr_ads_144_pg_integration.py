@@ -513,3 +513,159 @@ def test_missing_fx_date_withholds_usd(pg, monkeypatch):
     assert row["fx_complete"] is False
     # Coverage must be Unavailable when the numerator is not FX-safe.
     assert out["kpis"]["coverage"]["status"] == "unavailable"
+
+
+# ════════════════ §6 Drawer identity safety — same name, two ids ════════════════
+
+
+def _stub_identity_and_spend(monkeypatch):
+    """No approved mapping (each stored id keeps its own key); canonical spend
+    present so ids resolve to display names. FX rate seeded by the caller."""
+    import db.revenue_repository as revenue_repo
+    monkeypatch.setattr(revenue_repo, "fetch_campaign_identity",
+                        lambda customer_id=None: {"available": True, "mappings": []})
+    monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend",
+                        lambda s, e: {"available": True, "customer_id": "c1",
+                                      "rows": [
+                                          {"campaign_id": "10", "campaign_name": "brand - uk",
+                                           "spend": 0.0, "spend_usd": None, "fx_complete": True},
+                                          {"campaign_id": "20", "campaign_name": "brand - uk",
+                                           "spend": 0.0, "spend_usd": None, "fx_complete": True}],
+                                      "total_spend_usd": None, "fx_complete": False})
+
+
+def test_drawer_identity_safety_same_name_two_ids(pg, monkeypatch):
+    """Adversarial: identical search term, identical campaign display name,
+    campaign IDs 10 and 20, one null-ID historical daily row, and a waste_terms
+    proof row keyed by the shared campaign name.
+
+    Proves: drawer 10 sees only ID-10 daily facts; drawer 20 only ID-20;
+    the ambiguous null-ID row is in NEITHER; CRM-junk confirmations/date/source
+    are unavailable in both (never borrowed); and classification state still
+    comes correctly from each selected search_terms unit."""
+    _init_writer_db(pg, monkeypatch)
+    import db.connection as connection
+
+    with connection.get_conn() as conn:
+        with conn.cursor() as cur:
+            # id 10 — flagged waste on 2026-07-01.
+            cur.execute(
+                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "ad_group, keyword, match_type, search_term, cost_micros, "
+                "currency_code, source_system, is_flagged_waste, junk_category) "
+                "VALUES ('2026-07-01','brand - uk','10','Core','kw','BROAD',"
+                "'freight software',50000000,'GBP','google_ads_api',TRUE,'competitor')")
+            # id 20 — needs review (is_flagged_waste NULL) on 2026-07-01.
+            cur.execute(
+                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "ad_group, keyword, match_type, search_term, cost_micros, "
+                "currency_code, source_system, is_flagged_waste) "
+                "VALUES ('2026-07-01','brand - uk','20','Core','kw','BROAD',"
+                "'freight software',80000000,'GBP','google_ads_api',NULL)")
+            # Ambiguous NULL-campaign_id historical daily row on a DIFFERENT date
+            # (so the writer's null-id supersession does not remove it) — it must
+            # surface in neither id-scoped drawer.
+            cur.execute(
+                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "ad_group, keyword, match_type, search_term, cost_micros, "
+                "currency_code, source_system, is_flagged_waste) "
+                "VALUES ('2026-06-20','brand - uk',NULL,'Core','kw','BROAD',"
+                "'freight software',30000000,'GBP','google_ads_api',NULL)")
+            # waste_terms proof keyed ONLY by the shared campaign name.
+            cur.execute("INSERT INTO runs(run_type, started_at, status) "
+                        "VALUES ('weekly', NOW(), 'success') RETURNING id")
+            run_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO waste_terms(run_id, run_date, search_term, "
+                "campaign_name, spend_usd, junk_category, matched_pattern, "
+                "crm_junk_confirmed) VALUES (%s,'2026-07-02','freight software',"
+                "'brand - uk',10.0,'competitor','brand',7)", (run_id,))
+            # FX so USD is present (not the focus, but avoids withholding noise).
+            cur.execute(
+                "INSERT INTO fx_rates(rate_date, base_currency, quote_currency, "
+                "rate, provider) VALUES "
+                "('2026-06-20','GBP','USD',1.20,'t'),"
+                "('2026-07-01','GBP','USD',1.20,'t')")
+
+    _stub_identity_and_spend(monkeypatch)
+
+    from datetime import datetime, timezone
+    from services.search_term_evidence_service import build_search_term_drawer
+    now = datetime(2026, 7, 3, 9, 0, tzinfo=timezone.utc)
+
+    d10 = build_search_term_drawer("30d", "freight software", campaign_key="10", now=now)
+    d20 = build_search_term_drawer("30d", "freight software", campaign_key="20", now=now)
+
+    dates10 = {r["source_date"] for r in d10["daily"]["rows"]}
+    dates20 = {r["source_date"] for r in d20["daily"]["rows"]}
+
+    # Drawer 10 sees only ID-10 facts; drawer 20 only ID-20 — each on 07-01.
+    assert dates10 == {"2026-07-01"}
+    assert dates20 == {"2026-07-01"}
+    # ID-10 daily native = £50, ID-20 = £80 — proving no cross-contamination.
+    assert d10["daily"]["rows"][0]["spend_native"] == 50.0
+    assert d20["daily"]["rows"][0]["spend_native"] == 80.0
+    # The ambiguous null-ID historical row (2026-06-20) is in NEITHER drawer.
+    assert "2026-06-20" not in dates10
+    assert "2026-06-20" not in dates20
+
+    # Classification STATE comes correctly from each selected unit.
+    assert d10["term"]["state"] == "flagged"
+    assert d10["classification"]["state"] == "flagged"
+    assert d20["term"]["state"] == "needs_review"
+    assert d20["classification"]["state"] == "needs_review"
+
+    # CRM-junk confirmations / date / source are WITHHELD in BOTH — never
+    # borrowed from the shared-name waste_terms row (crm_junk_confirmed=7).
+    for d in (d10, d20):
+        assert d["classification"]["crm_junk_confirmed"] is None
+        assert d["classification"]["classification_date"] is None
+        assert d["classification"]["classification_source"] is None
+        assert d["classification"]["proof_status"] == "unavailable"
+
+
+def test_drawer_unique_name_allows_classification_proof(pg, monkeypatch):
+    """Control: when the campaign label uniquely identifies ONE campaign for the
+    term, the scoped waste_terms proof IS surfaced (the safety gate is not
+    over-broad)."""
+    _init_writer_db(pg, monkeypatch)
+    import db.connection as connection
+
+    with connection.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "ad_group, keyword, match_type, search_term, cost_micros, "
+                "currency_code, source_system, is_flagged_waste, junk_category) "
+                "VALUES ('2026-07-01','gulf','2','Core','kw','BROAD',"
+                "'freight jobs',40000000,'GBP','google_ads_api',TRUE,'job_seeker')")
+            cur.execute("INSERT INTO runs(run_type, started_at, status) "
+                        "VALUES ('weekly', NOW(), 'success') RETURNING id")
+            run_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO waste_terms(run_id, run_date, search_term, "
+                "campaign_name, spend_usd, junk_category, matched_pattern, "
+                "crm_junk_confirmed) VALUES (%s,'2026-07-02','freight jobs',"
+                "'gulf',5.0,'job_seeker','jobs',4)", (run_id,))
+            cur.execute(
+                "INSERT INTO fx_rates(rate_date, base_currency, quote_currency, "
+                "rate, provider) VALUES ('2026-07-01','GBP','USD',1.20,'t')")
+
+    import db.revenue_repository as revenue_repo
+    monkeypatch.setattr(revenue_repo, "fetch_campaign_identity",
+                        lambda customer_id=None: {"available": True, "mappings": []})
+    monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend",
+                        lambda s, e: {"available": True, "customer_id": "c1",
+                                      "rows": [{"campaign_id": "2", "campaign_name": "gulf",
+                                                "spend": 0.0, "spend_usd": None,
+                                                "fx_complete": True}],
+                                      "total_spend_usd": None, "fx_complete": False})
+
+    from datetime import datetime, timezone
+    from services.search_term_evidence_service import build_search_term_drawer
+    out = build_search_term_drawer("30d", "freight jobs", campaign_key="2",
+                                   now=datetime(2026, 7, 3, 9, 0, tzinfo=timezone.utc))
+    assert out["classification"]["proof_status"] == "available"
+    assert out["classification"]["crm_junk_confirmed"] == 4
+    assert out["classification"]["classification_date"] == "2026-07-02"
+    assert out["classification"]["classification_source"] is not None

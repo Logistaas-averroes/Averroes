@@ -259,15 +259,22 @@ def fetch_search_term_daily_for_campaign(
     start: date | None, end: date, search_term: str,
     campaign_id: str | None = None,
     campaign_names: list | None = None,
+    null_id_only: bool = False,
 ) -> dict:
     """Per-source_date evidence series for ONE search term scoped to ONE
     campaign identity (drawer). Read-only.
 
     Campaign scoping (PR-ADS-144 §3):
-      When campaign_id is provided, only rows with that exact campaign_id are
-      included. Rows with campaign_id IS NULL use the name fallback ONLY when
-      ``campaign_names`` is provided and the row's campaign_name is in that set.
-      This prevents merging two campaign IDs that share a display name.
+      - ``campaign_id`` set → only rows with that exact campaign_id, plus (when
+        ``campaign_names`` is given) null-campaign_id rows whose name is in that
+        set. The name fallback is passed by the caller ONLY when the label set
+        uniquely identifies this campaign, so two ids sharing a display name
+        never merge.
+      - ``null_id_only=True`` → STRICTLY ``campaign_id IS NULL`` rows (matching
+        ``campaign_names`` when given, else null-name rows). Used for a no-id
+        (unmatched / legacy) unit so it can never pull an id-bearing campaign's
+        rows that happen to share its display name.
+      - neither → the term's full daily series (combined multi-campaign view).
 
     Only dates the source actually reported are returned — missing dates are
     NEVER fabricated as zero rows.
@@ -284,7 +291,15 @@ def fetch_search_term_daily_for_campaign(
             params: list = [start, start, end, search_term]
             # Campaign-scoped identity: ID-first, name fallback only for
             # null-ID rows (never OR'd together to avoid same-name merge).
-            if campaign_id is not None:
+            if null_id_only:
+                if campaign_names:
+                    conditions.append(
+                        "campaign_id IS NULL AND campaign_name = ANY(%s)")
+                    params.append(list(campaign_names))
+                else:
+                    conditions.append(
+                        "campaign_id IS NULL AND campaign_name IS NULL")
+            elif campaign_id is not None:
                 id_str = str(campaign_id).strip()
                 if id_str:
                     identity_parts = ["campaign_id = %s"]

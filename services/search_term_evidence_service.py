@@ -1192,40 +1192,59 @@ def build_search_term_drawer(window: str, term: str,
               "campaign_key": None, "campaign_name": None,
               "mapping_status": "multiple"}
 
-    # Daily evidence — campaign-scoped (PR-ADS-144 §3): use ID-first scoping.
-    # When a specific campaign_key is given and it looks like a campaign_id,
-    # scope by that ID. Name fallback only for null-ID rows.
-    drawer_campaign_id = None
-    drawer_campaign_names = None
-    if len(matches) == 1:
-        m = matches[0]
-        ids = sorted(m.get("campaign_ids") or set())
-        names = sorted(m.get("source_labels") or set())
+    # ── Identity-safety scoping (PR-ADS-144 §3, hardened) ──────────────────
+    # waste_terms stores campaign_name but NOT campaign_id, and a null-id daily
+    # row can be reached through a shared display name. So the drawer only uses
+    # a name fallback when the selected unit's labels UNIQUELY identify one
+    # campaign among all units for THIS search term; otherwise it scopes by
+    # campaign_id alone and withholds name-derived classification proof.
+    selected = matches[0] if len(matches) == 1 else None
+    labels_unique = False
+    if selected is not None:
+        sel_labels = set(selected.get("source_labels") or set())
+        others = [u for u in pop["units"]
+                  if u["search_term"] == term
+                  and u["campaign_key"] != selected["campaign_key"]]
+        shares_label = any(sel_labels & set(o.get("source_labels") or set())
+                           for o in others)
+        labels_unique = bool(sel_labels) and not shares_label
+
+    if selected is not None:
+        ids = sorted(selected.get("campaign_ids") or set())
+        names = sorted(selected.get("source_labels") or set())
         if ids:
-            drawer_campaign_id = ids[0]
-            # Name fallback for null-ID legacy rows only.
-            drawer_campaign_names = names or None
+            # id-first; null-id name fallback ONLY when the label uniquely
+            # identifies this campaign (else another id shares the name).
+            daily = st_repo.fetch_search_term_daily_for_campaign(
+                start, end, term, campaign_id=ids[0],
+                campaign_names=(names if labels_unique else None))
         else:
-            drawer_campaign_names = names or None
+            # No-id (unmatched / legacy) unit → STRICTLY its null-id rows, so it
+            # can never pull an id-bearing campaign that shares its display name.
+            daily = st_repo.fetch_search_term_daily_for_campaign(
+                start, end, term, campaign_id=None,
+                campaign_names=(names or None), null_id_only=True)
     else:
-        # Multiple campaigns — no campaign_key given; use all identities.
-        drawer_campaign_id = None
-        all_names = sorted(unit.get("source_labels") or set())
-        drawer_campaign_names = all_names or None
+        # Combined multi-campaign view (no campaign_key) → the term's full series.
+        daily = st_repo.fetch_search_term_daily_for_campaign(start, end, term)
 
-    daily = st_repo.fetch_search_term_daily_for_campaign(
-        start, end, term,
-        campaign_id=drawer_campaign_id,
-        campaign_names=drawer_campaign_names)
-
-    # Classification proof — campaign-scoped (PR-ADS-144 §3).
-    cls_campaign_names = None
-    if len(matches) == 1:
-        m = matches[0]
-        cls_campaign_names = sorted(m.get("source_labels") or set()) or None
-    classification = st_repo.fetch_latest_waste_classification(
-        term, campaign_names=cls_campaign_names)
+    # Classification proof — available ONLY for a single, unambiguously-named
+    # campaign. When the label is shared (or no single campaign is selected, or
+    # there is no safe label), the proof is withheld — NEVER borrowed from
+    # another campaign and NEVER a search-term-only waste_terms query.
+    classification_safe = selected is not None and labels_unique
+    if classification_safe:
+        classification = st_repo.fetch_latest_waste_classification(
+            term, campaign_names=sorted(selected["source_labels"]))
+    else:
+        classification = {"available": True, "row": None}
     cls_row = classification.get("row") if classification.get("available") else None
+    cls_proof_status = "available" if classification_safe else "unavailable"
+    cls_proof_reason = None if classification_safe else (
+        "campaign identity ambiguous in waste_terms (waste_terms stores "
+        "campaign_name but not campaign_id; the selected campaign's label is "
+        "not unique for this term)" if selected is not None
+        else "no single campaign selected")
 
     campaigns_context = [{
         "campaign_key": m["campaign_key"],
@@ -1248,6 +1267,11 @@ def build_search_term_drawer(window: str, term: str,
             "match_types": sorted(unit["match_types"]),
         },
         "classification": {
+            # state / junk / matched pattern come from the durable search_terms
+            # unit itself (campaign-id-safe), so they are always correct for the
+            # selected campaign. CRM-junk confirmations / date / source come from
+            # waste_terms (name-only) and are withheld unless the label is
+            # unambiguous for this campaign.
             "state": _unit_state(unit),
             "junk_categories": sorted(unit["junk_categories"]),
             "matched_patterns": sorted(unit["matched_patterns"]),
@@ -1255,6 +1279,8 @@ def build_search_term_drawer(window: str, term: str,
             "classification_date": (cls_row or {}).get("run_date"),
             "classification_source": ("waste_terms (latest analysis run)"
                                       if cls_row else None),
+            "proof_status": cls_proof_status,
+            "proof_reason": cls_proof_reason,
             "semantics": CLASSIFICATION_SEMANTICS,
         },
         "platform_activity": {

@@ -9741,6 +9741,9 @@ function renderStTermDrawer(body, data) {
         ${factRow("Classified on", cls.classification_date ? escapeHtml(cls.classification_date) : stUnavailable())}
         ${factRow("Classification source", cls.classification_source ? escapeHtml(cls.classification_source) : stUnavailable())}
       </tbody></table>
+      ${cls.proof_status === "unavailable"
+        ? `<p class="drawer-source-note">CRM-junk confirmations, classification date and source are withheld here: waste_terms records only the campaign name, which does not uniquely identify this campaign for this term, so borrowing another campaign's proof is not safe. The review state above still comes from this campaign's own stored evidence.</p>`
+        : ""}
       <p class="drawer-source-note">Flagged waste = stored is_flagged_waste true (a human-review candidate, not an approved negative). Reviewed clean = stored false. Needs review = not yet classified.</p>
     </div>
     <div class="drawer-section">
