@@ -431,3 +431,40 @@ def test_currency_audit_read_only_shape(monkeypatch):
     assert body["marker"] == "legacy_currency_unverified"
     assert body["summary"]["legacy_unverified_row_count"] == 78
     srv.app.dependency_overrides.clear()
+
+
+def test_writer_never_raises_on_bad_cost_micros_and_defaults_source(monkeypatch):
+    """PR-ADS-145 review: write_search_terms must not raise on a non-numeric
+    cost_micros (e.g. empty string) and must default source_system to 'unknown'
+    to match the documented lineage contract."""
+    import contextlib
+    import db.writers as w
+
+    captured = {}
+
+    class _Cur:
+        def executemany(self, sql, rows): captured["rows"] = rows
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield _Conn()
+
+    monkeypatch.setattr(w, "get_conn", _fake_conn)
+    n = w.write_search_terms(1, [
+        {"search_term": "x", "campaign": "c", "date": "2026-07-01",
+         "cost_micros": "", "currency_code": "GBP"},                 # stray empty
+        {"search_term": "y", "campaign": "c", "date": "2026-07-01",
+         "cost_micros": "50", "source": "google_ads_api"},
+    ])
+    assert n == 2                                    # did not raise / abort
+    # Tuple layout: (...,, cost_micros[12], currency_code[13], source_system[14], ...)
+    by_term = {r[7]: r for r in captured["rows"]}
+    assert by_term["x"][12] is None                  # empty string → None (not a crash)
+    assert by_term["x"][14] == "unknown"             # documented default
+    assert by_term["y"][12] == 50
+    assert by_term["y"][14] == "google_ads_api"
