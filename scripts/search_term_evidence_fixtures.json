@@ -54,23 +54,41 @@
   "spend_semantics": "reported_search_term_spend",
   "reporting_currency": "USD",
   "kpis": {
-   "reported_terms": 12,
-   "unique_search_terms": 12,
+   "reported_terms": 14,
+   "unique_search_terms": 14,
+   "verified_spend_usd": 1635.28,
+   "verified_spend_native": 1287.63,
    "reported_spend_usd": 1635.28,
    "reported_spend_native": 1287.63,
    "native_currency": "GBP",
-   "fx_complete": true,
-   "currency_status": "verified",
-   "clicks": 431,
-   "flagged_waste": 3,
+   "reporting_currency": "USD",
+   "monetary": {
+    "total_units": 14,
+    "verified_currency_units": 12,
+    "unverified_currency_units": 2,
+    "fx_complete_units": 12,
+    "fx_incomplete_units": 0,
+    "verified_native_spend": 1287.63,
+    "verified_usd_spend": 1635.28,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "monetary_completeness_status": "partial",
+    "monetary_population_pct": 85.71
+   },
+   "monetary_status": "partial",
+   "clicks": 439,
+   "flagged_waste": 4,
    "reviewed_clean": 5,
-   "needs_review": 4,
+   "needs_review": 5,
    "coverage": {
     "status": "ok",
+    "scope": "verified_only",
     "canonical_spend_usd": 3444.8,
-    "reported_search_term_spend_usd": 1635.28,
+    "verified_search_term_spend_usd": 1635.28,
     "coverage_pct": 47.47,
-    "note": "Completeness diagnostic only \u2014 reported search-term spend is not expected to reconcile exactly with canonical spend."
+    "excluded_unverified_units": 2,
+    "excluded_fx_incomplete_units": 0,
+    "note": "Verified-row reporting coverage \u2014 EXCLUDES 2 unverified legacy row(s) and 0 FX-incomplete row(s). Completeness diagnostic only \u2014 verified search-term spend is not expected to reconcile exactly with canonical spend."
    }
   },
   "rows": [
@@ -87,6 +105,7 @@
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 118,
     "impressions": 2140,
     "conversions": 6.0,
@@ -95,6 +114,8 @@
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
+    "classification_source": "durable_reviewed_clean",
+    "crm_junk_confirmed": null,
     "source_rows": 3
    },
    {
@@ -110,6 +131,7 @@
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 64,
     "impressions": 980,
     "conversions": 3.0,
@@ -118,6 +140,8 @@
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
+    "classification_source": "durable_reviewed_clean",
+    "crm_junk_confirmed": null,
     "source_rows": 3
    },
    {
@@ -133,6 +157,7 @@
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 37,
     "impressions": 610,
     "conversions": 2.0,
@@ -141,6 +166,8 @@
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
+    "classification_source": "durable_reviewed_clean",
+    "crm_junk_confirmed": null,
     "source_rows": 3
    },
    {
@@ -156,6 +183,7 @@
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 41,
     "impressions": 1230,
     "conversions": 1.0,
@@ -168,6 +196,8 @@
     "matched_patterns": [
      "free"
     ],
+    "classification_source": "durable_flag",
+    "crm_junk_confirmed": null,
     "source_rows": 3
    },
    {
@@ -183,6 +213,7 @@
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 52,
     "impressions": 1745,
     "conversions": 2.0,
@@ -195,6 +226,8 @@
     "matched_patterns": [
      "jobs"
     ],
+    "classification_source": "durable_flag",
+    "crm_junk_confirmed": null,
     "source_rows": 3
    },
    {
@@ -210,6 +243,7 @@
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 28,
     "impressions": 890,
     "conversions": 1.0,
@@ -222,6 +256,8 @@
     "matched_patterns": [
      "course"
     ],
+    "classification_source": "durable_flag",
+    "crm_junk_confirmed": null,
     "source_rows": 3
    },
    {
@@ -230,13 +266,14 @@
     "campaign_name": "Brand - UK",
     "mapping_status": "mapped",
     "aliases": [],
-    "state": "needs_review",
+    "state": "flagged",
     "spend_usd": 73.47,
     "spend_native": 57.85,
     "native_currency": "GBP",
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 19,
     "impressions": 402,
     "conversions": 1.0,
@@ -245,6 +282,8 @@
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
+    "classification_source": "waste_terms",
+    "crm_junk_confirmed": 2,
     "source_rows": 3
    },
    {
@@ -260,6 +299,7 @@
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 22,
     "impressions": 618,
     "conversions": 0.0,
@@ -268,6 +308,8 @@
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
+    "classification_source": "unclassified",
+    "crm_junk_confirmed": null,
     "source_rows": 3
    },
    {
@@ -283,6 +325,7 @@
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 12,
     "impressions": 240,
     "conversions": 1.0,
@@ -291,6 +334,8 @@
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
+    "classification_source": "durable_reviewed_clean",
+    "crm_junk_confirmed": null,
     "source_rows": 3
    },
    {
@@ -306,6 +351,7 @@
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 14,
     "impressions": 355,
     "conversions": 1.0,
@@ -314,6 +360,8 @@
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
+    "classification_source": "unclassified",
+    "crm_junk_confirmed": null,
     "source_rows": 3
    },
    {
@@ -329,6 +377,7 @@
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 9,
     "impressions": 502,
     "conversions": 0.0,
@@ -337,6 +386,8 @@
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
+    "classification_source": "unclassified",
+    "crm_junk_confirmed": null,
     "source_rows": 3
    },
    {
@@ -352,6 +403,7 @@
     "reporting_currency": "USD",
     "fx_complete": true,
     "currency_status": "verified",
+    "legacy_currency_unverified": false,
     "clicks": 15,
     "impressions": 96,
     "conversions": 0.0,
@@ -360,12 +412,66 @@
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
+    "classification_source": "durable_reviewed_clean",
+    "crm_junk_confirmed": null,
     "source_rows": 3
+   },
+   {
+    "search_term": "cargo forwarding legacy",
+    "campaign_key": "unmatched:old windsor camp",
+    "campaign_name": "old windsor camp",
+    "mapping_status": "unmatched",
+    "aliases": [],
+    "state": "needs_review",
+    "spend_usd": null,
+    "spend_native": null,
+    "native_currency": null,
+    "reporting_currency": "USD",
+    "fx_complete": false,
+    "currency_status": "legacy_currency_unverified",
+    "legacy_currency_unverified": true,
+    "clicks": 4,
+    "impressions": 120,
+    "conversions": 0.0,
+    "cpc_usd": null,
+    "first_seen": "2026-06-13",
+    "last_seen": "2026-07-09",
+    "junk_categories": [],
+    "matched_patterns": [],
+    "classification_source": "unclassified",
+    "crm_junk_confirmed": null,
+    "source_rows": 2
+   },
+   {
+    "search_term": "freight software legacy import",
+    "campaign_key": "unmatched:old windsor camp",
+    "campaign_name": "old windsor camp",
+    "mapping_status": "unmatched",
+    "aliases": [],
+    "state": "needs_review",
+    "spend_usd": null,
+    "spend_native": null,
+    "native_currency": null,
+    "reporting_currency": "USD",
+    "fx_complete": false,
+    "currency_status": "legacy_currency_unverified",
+    "legacy_currency_unverified": true,
+    "clicks": 4,
+    "impressions": 120,
+    "conversions": 0.0,
+    "cpc_usd": null,
+    "first_seen": "2026-06-13",
+    "last_seen": "2026-07-09",
+    "junk_categories": [],
+    "matched_patterns": [],
+    "classification_source": "unclassified",
+    "crm_junk_confirmed": null,
+    "source_rows": 2
    }
   ],
   "pagination": {
-   "total_count": 12,
-   "returned_count": 12,
+   "total_count": 14,
+   "returned_count": 14,
    "page": 1,
    "page_size": 50,
    "has_more": false
@@ -390,6 +496,11 @@
     {
      "campaign_key": "unmatched:mena expansion",
      "campaign_name": "mena expansion",
+     "mapping_status": "unmatched"
+    },
+    {
+     "campaign_key": "unmatched:old windsor camp",
+     "campaign_name": "old windsor camp",
      "mapping_status": "unmatched"
     }
    ],
@@ -452,6 +563,7 @@
    "reporting_currency": "USD",
    "fx_complete": true,
    "currency_status": "verified",
+   "legacy_currency_unverified": false,
    "clicks": 52,
    "impressions": 1745,
    "conversions": 2.0,
@@ -464,6 +576,8 @@
    "matched_patterns": [
     "jobs"
    ],
+   "classification_source": "durable_flag",
+   "crm_junk_confirmed": null,
    "source_rows": 3
   },
   "campaigns": [
@@ -501,6 +615,10 @@
    "crm_junk_confirmed": 3,
    "classification_date": "2026-07-10",
    "classification_source": "waste_terms (latest analysis run)",
+   "state_source": "durable_flag",
+   "confidence": "confirmed",
+   "proof_status": "available",
+   "proof_reason": null,
    "semantics": "is_flagged_waste tri-state: true=flagged (Flagged waste, human-review candidate \u2014 not an approved negative), false=clean (Reviewed clean \u2014 a factual review state, never a business-outcome claim), null=needs_review; platform conversions never change the state"
   },
   "platform_activity": {
@@ -597,61 +715,74 @@
   "reporting_currency": "USD",
   "db_unavailable": false,
   "kpis": {
-   "patterns_found": 24,
-   "terms_analysed": 12,
-   "patterns_with_flagged": 10,
+   "patterns_found": 27,
+   "terms_analysed": 14,
+   "patterns_with_flagged": 13,
    "patterns_needing_review": 11,
-   "reported_spend_represented_usd": 1635.28
+   "reported_spend_represented_usd": 1635.28,
+   "spend_status": "partial"
   },
   "rows": [
    {
     "pattern": "freight",
     "n": 1,
     "signal": "mixed",
-    "terms": 8,
-    "flagged_terms": 2,
+    "terms": 9,
+    "flagged_terms": 3,
     "clean_terms": 3,
     "needs_review_terms": 3,
     "reported_spend_usd": 1293.15,
-    "clicks": 329,
+    "spend_partial": true,
+    "verified_spend_terms": 8,
+    "unverified_spend_terms": 1,
+    "clicks": 333,
     "conversions": 15.0,
-    "campaigns_count": 4
+    "campaigns_count": 5
    },
    {
     "pattern": "software",
     "n": 1,
     "signal": "mixed",
-    "terms": 5,
+    "terms": 6,
     "flagged_terms": 1,
     "clean_terms": 2,
-    "needs_review_terms": 2,
+    "needs_review_terms": 3,
     "reported_spend_usd": 1098.14,
-    "clicks": 259,
+    "spend_partial": true,
+    "verified_spend_terms": 5,
+    "unverified_spend_terms": 1,
+    "clicks": 263,
     "conversions": 11.0,
-    "campaigns_count": 3
+    "campaigns_count": 4
    },
    {
     "pattern": "forwarding",
     "n": 1,
     "signal": "needs_review",
-    "terms": 4,
+    "terms": 5,
     "flagged_terms": 0,
     "clean_terms": 2,
-    "needs_review_terms": 2,
+    "needs_review_terms": 3,
     "reported_spend_usd": 644.03,
-    "clicks": 153,
+    "spend_partial": true,
+    "verified_spend_terms": 4,
+    "unverified_spend_terms": 1,
+    "clicks": 157,
     "conversions": 8.0,
-    "campaigns_count": 4
+    "campaigns_count": 5
    },
    {
     "pattern": "forwarders",
     "n": 1,
-    "signal": "needs_review",
+    "signal": "mixed",
     "terms": 2,
-    "flagged_terms": 0,
+    "flagged_terms": 1,
     "clean_terms": 1,
-    "needs_review_terms": 1,
+    "needs_review_terms": 0,
     "reported_spend_usd": 413.96,
+    "spend_partial": false,
+    "verified_spend_terms": 2,
+    "unverified_spend_terms": 0,
     "clicks": 83,
     "conversions": 4.0,
     "campaigns_count": 1
@@ -659,12 +790,15 @@
    {
     "pattern": "tms",
     "n": 1,
-    "signal": "needs_review",
+    "signal": "mixed",
     "terms": 2,
-    "flagged_terms": 0,
+    "flagged_terms": 1,
     "clean_terms": 1,
-    "needs_review_terms": 1,
+    "needs_review_terms": 0,
     "reported_spend_usd": 413.96,
+    "spend_partial": false,
+    "verified_spend_terms": 2,
+    "unverified_spend_terms": 0,
     "clicks": 83,
     "conversions": 4.0,
     "campaigns_count": 1
@@ -678,6 +812,9 @@
     "clean_terms": 1,
     "needs_review_terms": 0,
     "reported_spend_usd": 195.83,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 37,
     "conversions": 2.0,
     "campaigns_count": 1
@@ -691,6 +828,9 @@
     "clean_terms": 1,
     "needs_review_terms": 0,
     "reported_spend_usd": 195.83,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 37,
     "conversions": 2.0,
     "campaigns_count": 1
@@ -704,6 +844,9 @@
     "clean_terms": 0,
     "needs_review_terms": 0,
     "reported_spend_usd": 122.45,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 41,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -717,6 +860,9 @@
     "clean_terms": 0,
     "needs_review_terms": 0,
     "reported_spend_usd": 122.45,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 41,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -730,6 +876,9 @@
     "clean_terms": 0,
     "needs_review_terms": 0,
     "reported_spend_usd": 112.71,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 52,
     "conversions": 2.0,
     "campaigns_count": 1
@@ -743,6 +892,9 @@
     "clean_terms": 0,
     "needs_review_terms": 0,
     "reported_spend_usd": 112.71,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 52,
     "conversions": 2.0,
     "campaigns_count": 1
@@ -756,6 +908,9 @@
     "clean_terms": 0,
     "needs_review_terms": 0,
     "reported_spend_usd": 112.71,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 52,
     "conversions": 2.0,
     "campaigns_count": 1
@@ -769,6 +924,9 @@
     "clean_terms": 0,
     "needs_review_terms": 0,
     "reported_spend_usd": 77.85,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 28,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -782,6 +940,9 @@
     "clean_terms": 0,
     "needs_review_terms": 0,
     "reported_spend_usd": 77.85,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 28,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -795,6 +956,9 @@
     "clean_terms": 0,
     "needs_review_terms": 0,
     "reported_spend_usd": 77.85,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 28,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -802,12 +966,15 @@
    {
     "pattern": "best",
     "n": 1,
-    "signal": "needs_review",
+    "signal": "flagged_present",
     "terms": 1,
-    "flagged_terms": 0,
+    "flagged_terms": 1,
     "clean_terms": 0,
-    "needs_review_terms": 1,
+    "needs_review_terms": 0,
     "reported_spend_usd": 73.47,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 19,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -821,6 +988,9 @@
     "clean_terms": 0,
     "needs_review_terms": 1,
     "reported_spend_usd": 62.99,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 22,
     "conversions": 0.0,
     "campaigns_count": 1
@@ -834,6 +1004,9 @@
     "clean_terms": 0,
     "needs_review_terms": 1,
     "reported_spend_usd": 62.99,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 22,
     "conversions": 0.0,
     "campaigns_count": 1
@@ -847,6 +1020,9 @@
     "clean_terms": 0,
     "needs_review_terms": 1,
     "reported_spend_usd": 62.99,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 22,
     "conversions": 0.0,
     "campaigns_count": 1
@@ -860,6 +1036,9 @@
     "clean_terms": 1,
     "needs_review_terms": 0,
     "reported_spend_usd": 56.07,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 12,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -873,6 +1052,9 @@
     "clean_terms": 0,
     "needs_review_terms": 1,
     "reported_spend_usd": 48.51,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 14,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -886,6 +1068,9 @@
     "clean_terms": 0,
     "needs_review_terms": 1,
     "reported_spend_usd": 15.75,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 9,
     "conversions": 0.0,
     "campaigns_count": 1
@@ -899,6 +1084,9 @@
     "clean_terms": 1,
     "needs_review_terms": 0,
     "reported_spend_usd": 5.46,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 15,
     "conversions": 0.0,
     "campaigns_count": 1
@@ -912,21 +1100,72 @@
     "clean_terms": 1,
     "needs_review_terms": 0,
     "reported_spend_usd": 5.46,
+    "spend_partial": false,
+    "verified_spend_terms": 1,
+    "unverified_spend_terms": 0,
     "clicks": 15,
+    "conversions": 0.0,
+    "campaigns_count": 1
+   },
+   {
+    "pattern": "legacy",
+    "n": 1,
+    "signal": "needs_review",
+    "terms": 2,
+    "flagged_terms": 0,
+    "clean_terms": 0,
+    "needs_review_terms": 2,
+    "reported_spend_usd": null,
+    "spend_partial": true,
+    "verified_spend_terms": 0,
+    "unverified_spend_terms": 2,
+    "clicks": 8,
+    "conversions": 0.0,
+    "campaigns_count": 1
+   },
+   {
+    "pattern": "cargo",
+    "n": 1,
+    "signal": "needs_review",
+    "terms": 1,
+    "flagged_terms": 0,
+    "clean_terms": 0,
+    "needs_review_terms": 1,
+    "reported_spend_usd": null,
+    "spend_partial": true,
+    "verified_spend_terms": 0,
+    "unverified_spend_terms": 1,
+    "clicks": 4,
+    "conversions": 0.0,
+    "campaigns_count": 1
+   },
+   {
+    "pattern": "import",
+    "n": 1,
+    "signal": "needs_review",
+    "terms": 1,
+    "flagged_terms": 0,
+    "clean_terms": 0,
+    "needs_review_terms": 1,
+    "reported_spend_usd": null,
+    "spend_partial": true,
+    "verified_spend_terms": 0,
+    "unverified_spend_terms": 1,
+    "clicks": 4,
     "conversions": 0.0,
     "campaigns_count": 1
    }
   ],
   "overlap": {
-   "unique_terms_analysed": 12,
-   "total_pattern_memberships": 40,
-   "overlapping_term_count": 12,
+   "unique_terms_analysed": 14,
+   "total_pattern_memberships": 47,
+   "overlapping_term_count": 14,
    "spend_semantics": "unique_underlying_terms",
    "disclosure": "Individual pattern rows overlap \u2014 the same search term contributes to multiple patterns, so pattern-row spend must never be summed into an account total. KPI spend is computed once per unique underlying term."
   },
   "pagination": {
-   "total_count": 24,
-   "returned_count": 24,
+   "total_count": 27,
+   "returned_count": 27,
    "limit": 100,
    "has_more": false
   },
@@ -959,6 +1198,11 @@
     {
      "campaign_key": "unmatched:mena expansion",
      "campaign_name": "mena expansion",
+     "mapping_status": "unmatched"
+    },
+    {
+     "campaign_key": "unmatched:old windsor camp",
+     "campaign_name": "old windsor camp",
      "mapping_status": "unmatched"
     }
    ],
@@ -1006,18 +1250,19 @@
    "pattern": "freight",
    "n": 1,
    "signal": "mixed",
-   "terms": 8,
+   "terms": 9,
    "flagged_terms": 2,
    "clean_terms": 3,
-   "needs_review_terms": 3,
+   "needs_review_terms": 4,
    "reported_spend_usd": 1293.15,
-   "clicks": 329,
+   "clicks": 333,
    "conversions": 15.0,
    "campaigns": [
     "Brand - UK",
     "Competitor - Global",
     "Gulf",
-    "mena expansion"
+    "mena expansion",
+    "old windsor camp"
    ]
   },
   "platform_activity": {
@@ -1104,6 +1349,16 @@
     "spend_usd": 15.75,
     "clicks": 9,
     "last_seen": "2026-07-11"
+   },
+   {
+    "search_term": "freight software legacy import",
+    "state": "needs_review",
+    "campaigns": [
+     "old windsor camp"
+    ],
+    "spend_usd": null,
+    "clicks": 4,
+    "last_seen": "2026-07-09"
    }
   ],
   "terms_truncated": false,

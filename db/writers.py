@@ -724,10 +724,13 @@ def write_search_terms(
         conversions = float(_float_or_none(raw.get("conversions")) or 0)
 
         # ── Currency lineage (PR-ADS-144) ────────────────────────────────
-        cost_micros_raw = raw.get("cost_micros")
-        cost_micros = int(cost_micros_raw) if cost_micros_raw is not None else None
+        # Coerce defensively — write_search_terms must never raise on a stray
+        # non-numeric cost_micros (e.g. an empty string). source_system defaults
+        # to "unknown" so legacy rows match the documented lineage contract
+        # (still not 'google_ads_api', so they stay currency-unverified).
+        cost_micros = _int_or_none(raw.get("cost_micros"))
         currency_code = raw.get("currency_code") or None
-        source_system = raw.get("source") or None
+        source_system = raw.get("source") or "unknown"
 
         rows.append((
             run_id,

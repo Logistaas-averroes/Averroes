@@ -669,3 +669,107 @@ def test_drawer_unique_name_allows_classification_proof(pg, monkeypatch):
     assert out["classification"]["crm_junk_confirmed"] == 4
     assert out["classification"]["classification_date"] == "2026-07-02"
     assert out["classification"]["classification_source"] is not None
+
+
+# ════════════════ PR-ADS-145 — waste bridge + legacy audit (real DB) ════════════════
+
+
+def test_waste_bridge_and_legacy_audit_end_to_end(pg, monkeypatch):
+    """On a real DB: a confirmed waste_terms row flips a NULL-flag search term to
+    Flagged waste (safely scoped), a legacy no-currency row stays visible/
+    unverified with a preserved subtotal, and the currency audit reports it."""
+    _init_writer_db(pg, monkeypatch)
+    import db.connection as connection
+
+    with connection.get_conn() as conn:
+        with conn.cursor() as cur:
+            # Verified GBP term, not yet classified (is_flagged_waste NULL).
+            cur.execute(
+                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "ad_group, keyword, match_type, search_term, cost_micros, "
+                "currency_code, source_system, is_flagged_waste) VALUES "
+                "('2026-07-01','gulf','2','Core','kw','BROAD','freight jobs',"
+                "20000000,'GBP','google_ads_api',NULL)")
+            # Legacy row: NO currency lineage.
+            cur.execute(
+                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "ad_group, keyword, match_type, search_term, spend_usd) VALUES "
+                "('2026-02-01','old camp','9','Core','kw','BROAD','legacy term',3.00)")
+            # FX for the verified term's date.
+            cur.execute(
+                "INSERT INTO fx_rates(rate_date, base_currency, quote_currency, "
+                "rate, provider) VALUES ('2026-07-01','GBP','USD',1.25,'t')")
+            # Confirmed waste evidence from the weekly pipeline (name-scoped).
+            cur.execute("INSERT INTO runs(run_type, started_at, status) "
+                        "VALUES ('weekly', NOW(), 'success') RETURNING id")
+            run_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO waste_terms(run_id, run_date, search_term, "
+                "campaign_name, spend_usd, junk_category, matched_pattern, "
+                "crm_junk_confirmed) VALUES (%s,'2026-07-02','freight jobs','gulf',"
+                "5.0,'job_seeker','jobs',4)", (run_id,))
+
+    import db.revenue_repository as revenue_repo
+    monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend",
+                        lambda s, e: {"available": True, "customer_id": "c1",
+                                      "rows": [{"campaign_id": "2", "campaign_name": "gulf"}],
+                                      "total_spend_usd": 100.0, "fx_complete": True})
+    monkeypatch.setattr(revenue_repo, "fetch_campaign_identity",
+                        lambda customer_id=None: {"available": True, "mappings": []})
+
+    from datetime import datetime, timezone
+    from services.search_term_evidence_service import build_search_term_evidence
+    out = build_search_term_evidence(
+        "all_time", now=datetime(2026, 7, 3, 9, 0, tzinfo=timezone.utc))
+
+    fj = [r for r in out["rows"] if r["search_term"] == "freight jobs"][0]
+    lg = [r for r in out["rows"] if r["search_term"] == "legacy term"][0]
+    # Bridge: NULL-flag term becomes Flagged waste from safe waste_terms evidence.
+    assert fj["state"] == "flagged"
+    assert fj["classification_source"] == "waste_terms"
+    assert fj["spend_usd"] == 25.0                 # £20 × 1.25 verified
+    # Legacy row visible, unverified, never fabricated.
+    assert lg["legacy_currency_unverified"] is True
+    assert lg["spend_usd"] is None and lg["spend_native"] is None
+    # Partial monetary status; verified subtotal is the single verified row.
+    assert out["kpis"]["monetary_status"] == "partial"
+    assert out["kpis"]["verified_spend_usd"] == 25.0
+
+    # Read-only legacy audit reports the preserved row.
+    from db.search_term_repository import fetch_legacy_currency_audit
+    audit = fetch_legacy_currency_audit()
+    assert audit["available"] is True
+    assert audit["summary"]["legacy_unverified_row_count"] == 1
+    assert "old camp" in audit["summary"]["campaigns"]
+    assert audit["summary"]["rows_with_verified_replacement"] == 0
+    # And nothing was mutated — both rows still present.
+    with connection.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM search_terms")
+            assert cur.fetchone()[0] == 2
+
+
+def test_legacy_audit_flags_exact_verified_replacement(pg, monkeypatch):
+    """A legacy row that later gains an EXACT verified replacement (same natural
+    key, proven lineage) is reported as replaced."""
+    _init_writer_db(pg, monkeypatch)
+    import db.connection as connection
+    with connection.get_conn() as conn:
+        with conn.cursor() as cur:
+            # Legacy (no lineage) and a verified replacement for the SAME fact
+            # (different campaign_id keeps both rows under the PR-144 key).
+            cur.execute(
+                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "ad_group, keyword, match_type, search_term, spend_usd) VALUES "
+                "('2026-02-01','gulf',NULL,'Core','kw','BROAD','freight jobs',3.00)")
+            cur.execute(
+                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "ad_group, keyword, match_type, search_term, cost_micros, "
+                "currency_code, source_system) VALUES "
+                "('2026-02-01','gulf','2','Core','kw','BROAD','freight jobs',"
+                "5000000,'GBP','google_ads_api')")
+    from db.search_term_repository import fetch_legacy_currency_audit
+    audit = fetch_legacy_currency_audit()
+    legacy = [r for r in audit["rows"] if r["campaign_id"] is None][0]
+    assert legacy["has_verified_replacement"] is True
+    assert audit["summary"]["rows_with_verified_replacement"] == 1

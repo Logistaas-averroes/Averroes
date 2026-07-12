@@ -374,6 +374,132 @@ def fetch_search_term_daily(start: date | None, end: date, search_term: str,
     )
 
 
+def fetch_legacy_currency_audit() -> dict:
+    """Operator audit of legacy search_terms rows with unverified currency
+    lineage (PR-ADS-145 §3). Read-only — SELECT only, never deletes/relabels.
+
+    A row is legacy-unverified when it lacks provable Google Ads GBP lineage:
+    ``source_system`` is not 'google_ads_api', OR ``currency_code`` IS NULL, OR
+    ``cost_micros`` IS NULL. For each such row it reports whether an EXACT
+    verified replacement exists — a row sharing the durable natural key
+    (source_date, campaign_name, ad_group, keyword, match_type, search_term)
+    that DOES have proven lineage. Returns {available, summary, rows}.
+    """
+    legacy_pred = ("(COALESCE(source_system,'') <> 'google_ads_api' "
+                   "OR currency_code IS NULL OR cost_micros IS NULL)")
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "summary": {}, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)::bigint AS row_count,
+                           COUNT(DISTINCT search_term) AS terms,
+                           COUNT(DISTINCT COALESCE(campaign_name,'')) AS campaigns,
+                           MIN(source_date) AS min_date,
+                           MAX(source_date) AS max_date
+                    FROM search_terms
+                    WHERE """ + legacy_pred,
+                )
+                summ = _rows_as_dicts(cur)[0]
+                cur.execute(
+                    "SELECT DISTINCT campaign_name FROM search_terms WHERE "
+                    + legacy_pred + " ORDER BY campaign_name")
+                campaigns = [r[0] for r in cur.fetchall()]
+                # Per-row detail + whether an exact verified replacement exists.
+                cur.execute(
+                    """
+                    SELECT l.id, l.source_date, l.campaign_name, l.campaign_id,
+                           l.ad_group, l.keyword, l.match_type, l.search_term,
+                           l.currency_code, l.source_system,
+                           EXISTS (
+                               SELECT 1 FROM search_terms v
+                               WHERE v.source_date = l.source_date
+                                 AND COALESCE(v.campaign_name,'') = COALESCE(l.campaign_name,'')
+                                 AND COALESCE(v.ad_group,'')      = COALESCE(l.ad_group,'')
+                                 AND COALESCE(v.keyword,'')       = COALESCE(l.keyword,'')
+                                 AND COALESCE(v.match_type,'')    = COALESCE(l.match_type,'')
+                                 AND v.search_term = l.search_term
+                                 AND v.source_system = 'google_ads_api'
+                                 AND v.currency_code IS NOT NULL
+                                 AND v.cost_micros IS NOT NULL
+                           ) AS has_verified_replacement
+                    FROM search_terms l
+                    WHERE """ + legacy_pred + """
+                    ORDER BY l.source_date, l.search_term
+                    """,
+                )
+                rows = _rows_as_dicts(cur)
+            for r in rows:
+                r["source_date"] = (r["source_date"].isoformat()
+                                    if r.get("source_date") is not None else None)
+            return {
+                "available": True,
+                "summary": {
+                    "legacy_unverified_row_count": int(summ.get("row_count") or 0),
+                    "terms_represented": int(summ.get("terms") or 0),
+                    "campaigns_represented": int(summ.get("campaigns") or 0),
+                    "min_source_date": (summ["min_date"].isoformat()
+                                        if summ.get("min_date") else None),
+                    "max_source_date": (summ["max_date"].isoformat()
+                                        if summ.get("max_date") else None),
+                    "campaigns": [c for c in campaigns if c is not None],
+                    "rows_with_verified_replacement": sum(
+                        1 for r in rows if r.get("has_verified_replacement")),
+                },
+                "rows": rows,
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_legacy_currency_audit failed: %s", exc)
+        return {"available": False, "summary": {}, "rows": []}
+
+
+def fetch_waste_evidence_for_terms(search_terms: list) -> dict:
+    """Latest waste_terms evidence for a batch of search terms, keyed by
+    (search_term, campaign_name) (PR-ADS-145 §4). Read-only.
+
+    Bridges the weekly waste-detection pipeline's persisted evidence into the
+    Search Terms page. waste_terms stores ``campaign_name`` but NOT
+    ``campaign_id``, so the SERVICE is responsible for attaching a row only when
+    the (term, campaign_name) uniquely and safely identifies one canonical
+    campaign — this fetch merely returns the durable rows. Returns
+    {available, rows:[{search_term, campaign_name, junk_category,
+    matched_pattern, crm_junk_confirmed, run_date}]} with the latest row per
+    (search_term, campaign_name). Never raises.
+    """
+    if not search_terms:
+        return {"available": True, "rows": []}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (search_term, campaign_name)
+                           search_term, campaign_name, junk_category,
+                           matched_pattern, crm_junk_confirmed, run_date
+                    FROM waste_terms
+                    WHERE search_term = ANY(%s)
+                    ORDER BY search_term, campaign_name, run_date DESC, id DESC
+                    """,
+                    (list(search_terms),),
+                )
+                rows = _rows_as_dicts(cur)
+            for row in rows:
+                row["run_date"] = (
+                    row["run_date"].isoformat()
+                    if row.get("run_date") is not None else None)
+                row["crm_junk_confirmed"] = (
+                    int(row["crm_junk_confirmed"])
+                    if row.get("crm_junk_confirmed") is not None else None)
+            return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_waste_evidence_for_terms failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
 def fetch_latest_waste_classification(
     search_term: str,
     campaign_id: str | None = None,
@@ -394,6 +520,11 @@ def fetch_latest_waste_classification(
     rule, CRM-junk confirmation count, classification date), never as the
     selected-window business boundary. Returns {available, row|None}.
     """
+    # ``campaign_id`` is accepted for call-site symmetry with the other
+    # campaign-scoped fetchers, but waste_terms has NO campaign_id column, so
+    # scoping is by campaign_names only (the service supplies the safe,
+    # unambiguous label set). Explicitly unused here.
+    del campaign_id
     try:
         with get_conn() as conn:
             if conn is None:

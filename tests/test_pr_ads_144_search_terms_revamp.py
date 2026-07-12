@@ -504,9 +504,11 @@ def test_coverage_unavailable_when_canonical_missing(monkeypatch):
 
 
 def test_ui_never_labels_search_term_spend_as_account_spend():
-    assert "Reported Search-Term Spend" in ST_MODULE
-    assert "not total account spend" in ST_MODULE
-    assert "Search-term reporting coverage" in ST_MODULE
+    # PR-ADS-145: the KPI is "Verified Search-Term Spend" (a verified subtotal),
+    # never presented as complete account spend.
+    assert "Verified Search-Term Spend" in ST_MODULE
+    assert "canonical spend" in ST_MODULE
+    assert "reporting coverage" in ST_MODULE.lower()
 
 
 def test_coverage_card_hidden_when_filters_active():
@@ -517,13 +519,11 @@ def test_coverage_card_hidden_when_filters_active():
 
 
 def test_coverage_numerator_is_fx_converted_not_legacy_raw():
-    # The service's coverage numerator comes from _window_reported_usd (sum of
-    # per-date FX-converted unit USD), NEVER source.spend_usd_total.
-    assert "_window_reported_usd(pop)" in SERVICE
-    win_fn = _region(SERVICE, "def _window_reported_usd",
-                     "def _coverage_block")
-    assert "spend_usd" in win_fn                 # sums unit FX-converted USD
-    assert "spend_usd_total" not in win_fn       # never the legacy raw column
+    # PR-ADS-145: the coverage numerator is the VERIFIED FX-converted subtotal
+    # (verified_usd_spend from _monetary_summary), NEVER source.spend_usd_total.
+    cov_fn = _region(SERVICE, "def _coverage_block", "def _reconcile")
+    assert "verified_usd_spend" in cov_fn        # verified FX-converted numerator
+    assert "spend_usd_total" not in cov_fn       # never the legacy raw column
 
 
 def test_coverage_withheld_when_a_unit_usd_is_withheld(monkeypatch):
@@ -931,8 +931,10 @@ def test_header_is_concise_without_source_pill_clutter():
 
 
 def test_kpi_strip_has_required_cards():
-    for label in ["Reported Terms", "Reported Search-Term Spend", "Clicks",
-                  "Flagged Waste", "Needs Review", "Reporting Coverage"]:
+    # PR-ADS-145 KPI strip: Reported Terms · Verified Search-Term Spend ·
+    # Clicks · Flagged Waste · Needs Review (+ verified-row Coverage).
+    for label in ["Reported Terms", "Verified Search-Term Spend", "Clicks",
+                  "Flagged Waste", "Needs Review", "Coverage"]:
         assert label in ST_MODULE, label
 
 
@@ -1008,8 +1010,9 @@ def test_freshness_single_compact_state():
 def test_help_content_updated():
     help_entry = _region(APP_JS, '"search-terms": {\n    what: "Search Terms + Patterns',
                          "},")
-    for needle in ["source_date", "reported search-term spend",
+    for needle in ["source_date", "Verified Search-Term Spend",
                    "Reporting Coverage", "FX-converted to USD",
+                   "Absence of waste evidence is NOT clean",
                    "platform conversion is never a confirmed SQL",
                    "no negative keywords are added"]:
         assert needle in help_entry, needle
@@ -1191,10 +1194,10 @@ def test_currency_lineage_end_to_end(monkeypatch):
     assert row["spend_usd"] == 126.0
     assert row["fx_complete"] is True
     assert row["reporting_currency"] == "USD"
-    # KPI-level spend should also be FX-converted.
-    assert out["kpis"]["reported_spend_usd"] == 126.0
+    # KPI-level verified subtotal should also be FX-converted (PR-ADS-145).
+    assert out["kpis"]["verified_spend_usd"] == 126.0
     assert out["kpis"]["native_currency"] == "GBP"
-    assert out["kpis"]["fx_complete"] is True
+    assert out["kpis"]["monetary_status"] == "complete"
 
 
 def test_unproven_rows_withhold_monetary_metrics(monkeypatch):
@@ -1212,7 +1215,8 @@ def test_unproven_rows_withhold_monetary_metrics(monkeypatch):
 
 
 def test_mixed_currencies_withheld(monkeypatch):
-    """Rows with mixed currencies have monetary metrics withheld."""
+    """A unit with mixed currencies has its USD withheld; with no other verified
+    row the monetary status is unavailable (PR-ADS-145)."""
     agg = _agg([
         _g("freight software", "brand - uk", "1", spend=10.0,
            currency_code="GBP", source_system="google_ads_api"),
@@ -1222,7 +1226,9 @@ def test_mixed_currencies_withheld(monkeypatch):
     _patch(monkeypatch, agg, identity=_default_identity())
     from services.search_term_evidence_service import build_search_term_evidence
     out = build_search_term_evidence("30d")
-    assert out["kpis"]["currency_status"] == "mixed_or_unproven"
+    assert out["kpis"]["monetary_status"] == "unavailable"
+    assert out["rows"][0]["currency_status"] == "mixed_currency"
+    assert out["rows"][0]["spend_usd"] is None
 
 
 # ════════════════ 13. Natural key with campaign_id (PR-ADS-144 §2) ════════════════
