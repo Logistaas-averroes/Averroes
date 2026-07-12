@@ -1527,13 +1527,26 @@ server-side filtering / sorting / pagination and complete-population KPIs.
   "kpis": {
     "reported_terms": 412,            // COMPLETE filtered population, never the page
     "unique_search_terms": 388,
-    "reported_spend_usd": 1234.56,    // reported search-term spend — NOT account spend
+    "verified_spend_usd": 1234.56,    // VERIFIED FX-complete subtotal (PR-ADS-145)
+    "verified_spend_native": 987.65,  // verified native (e.g. GBP) subtotal
+    "reported_spend_usd": 1234.56,    // back-compat alias of verified_spend_usd
+    "native_currency": "GBP", "reporting_currency": "USD",
+    "monetary_status": "complete|partial|unavailable",
+    "monetary": {                     // per-filter three-state completeness block
+      "total_units": 412, "verified_currency_units": 334,
+      "unverified_currency_units": 78, "fx_complete_units": 334,
+      "fx_incomplete_units": 0, "verified_native_spend": 987.65,
+      "verified_usd_spend": 1234.56, "native_currency": "GBP",
+      "monetary_completeness_status": "partial", "monetary_population_pct": 81.07
+    },
     "clicks": 2210,
     "flagged_waste": 61, "reviewed_clean": 214, "needs_review": 137,
-    "coverage": {                     // Search-term reporting coverage (diagnostic)
+    "coverage": {                     // Verified-row reporting coverage (diagnostic)
       "status": "ok|unavailable",
+      "scope": "complete|verified_only|unavailable",
       "canonical_spend_usd": 1890.0,  // canonical campaign spend, FX-safe USD
-      "reported_search_term_spend_usd": 1234.56,
+      "verified_search_term_spend_usd": 1234.56,   // FX-converted verified numerator
+      "excluded_unverified_units": 78,
       "coverage_pct": 65.32,          // null when contracts are not comparable
       "note": "…"
     }
@@ -1549,6 +1562,11 @@ server-side filtering / sorting / pagination and complete-population KPIs.
     // date was missing (spend_usd then null), "mixed_or_unproven"/"unavailable"
     // when provenance is not proven. NOT merely provenance availability.
     "fx_complete": true, "currency_status": "verified",
+    // PR-ADS-145: legacy rows stay visible with monetary fields null and a
+    // marker; classification_source discloses which durable source set the state.
+    "legacy_currency_unverified": false,
+    "classification_source": "durable_flag|waste_terms|durable_reviewed_clean|unclassified",
+    "crm_junk_confirmed": null,
     "clicks": 4, "impressions": 40,
     "conversions": 0.0,                      // platform evidence only — not an SQL
     "cpc_usd": 5.0, "first_seen": "2026-07-01", "last_seen": "2026-07-02",

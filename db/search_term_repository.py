@@ -520,6 +520,11 @@ def fetch_latest_waste_classification(
     rule, CRM-junk confirmation count, classification date), never as the
     selected-window business boundary. Returns {available, row|None}.
     """
+    # ``campaign_id`` is accepted for call-site symmetry with the other
+    # campaign-scoped fetchers, but waste_terms has NO campaign_id column, so
+    # scoping is by campaign_names only (the service supplies the safe,
+    # unambiguous label set). Explicitly unused here.
+    del campaign_id
     try:
         with get_conn() as conn:
             if conn is None:
