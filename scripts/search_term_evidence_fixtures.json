@@ -56,15 +56,19 @@
   "kpis": {
    "reported_terms": 12,
    "unique_search_terms": 12,
-   "reported_spend_usd": 1287.63,
+   "reported_spend_usd": 1635.28,
+   "reported_spend_native": 1287.63,
+   "native_currency": "GBP",
+   "fx_complete": true,
+   "currency_status": "verified",
    "clicks": 431,
    "flagged_waste": 3,
    "reviewed_clean": 5,
    "needs_review": 4,
    "coverage": {
     "status": "ok",
-    "canonical_spend_usd": 2712.4,
-    "reported_search_term_spend_usd": 1287.63,
+    "canonical_spend_usd": 3444.8,
+    "reported_search_term_spend_usd": 1635.28,
     "coverage_pct": 47.47,
     "note": "Completeness diagnostic only \u2014 reported search-term spend is not expected to reconcile exactly with canonical spend."
    }
@@ -77,12 +81,17 @@
     "mapping_status": "mapped",
     "aliases": [],
     "state": "clean",
-    "spend_usd": 412.36,
+    "spend_usd": 523.7,
+    "spend_native": 412.36,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 118,
     "impressions": 2140,
     "conversions": 6.0,
-    "cpc_usd": 3.49,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 4.44,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
@@ -95,12 +104,17 @@
     "mapping_status": "mapped",
     "aliases": [],
     "state": "clean",
-    "spend_usd": 268.1,
+    "spend_usd": 340.49,
+    "spend_native": 268.1,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 64,
     "impressions": 980,
     "conversions": 3.0,
-    "cpc_usd": 4.19,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 5.32,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
@@ -113,12 +127,17 @@
     "mapping_status": "mapped",
     "aliases": [],
     "state": "clean",
-    "spend_usd": 154.2,
+    "spend_usd": 195.83,
+    "spend_native": 154.2,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 37,
     "impressions": 610,
     "conversions": 2.0,
-    "cpc_usd": 4.17,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 5.29,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
@@ -131,12 +150,17 @@
     "mapping_status": "mapped",
     "aliases": [],
     "state": "flagged",
-    "spend_usd": 96.42,
+    "spend_usd": 122.45,
+    "spend_native": 96.42,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 41,
     "impressions": 1230,
     "conversions": 1.0,
-    "cpc_usd": 2.35,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 2.99,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [
      "free_seeker"
@@ -153,12 +177,17 @@
     "mapping_status": "mapped",
     "aliases": [],
     "state": "flagged",
-    "spend_usd": 88.75,
+    "spend_usd": 112.71,
+    "spend_native": 88.75,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 52,
     "impressions": 1745,
     "conversions": 2.0,
-    "cpc_usd": 1.71,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 2.17,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [
      "job_seeker"
@@ -175,12 +204,17 @@
     "mapping_status": "mapped",
     "aliases": [],
     "state": "flagged",
-    "spend_usd": 61.3,
+    "spend_usd": 77.85,
+    "spend_native": 61.3,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 28,
     "impressions": 890,
     "conversions": 1.0,
-    "cpc_usd": 2.19,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 2.78,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [
      "student"
@@ -197,12 +231,17 @@
     "mapping_status": "mapped",
     "aliases": [],
     "state": "needs_review",
-    "spend_usd": 57.85,
+    "spend_usd": 73.47,
+    "spend_native": 57.85,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 19,
     "impressions": 402,
     "conversions": 1.0,
-    "cpc_usd": 3.04,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 3.87,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
@@ -215,12 +254,17 @@
     "mapping_status": "mapped",
     "aliases": [],
     "state": "needs_review",
-    "spend_usd": 49.6,
+    "spend_usd": 62.99,
+    "spend_native": 49.6,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 22,
     "impressions": 618,
     "conversions": 0.0,
-    "cpc_usd": 2.25,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 2.86,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
@@ -233,12 +277,17 @@
     "mapping_status": "mapped",
     "aliases": [],
     "state": "clean",
-    "spend_usd": 44.15,
+    "spend_usd": 56.07,
+    "spend_native": 44.15,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 12,
     "impressions": 240,
     "conversions": 1.0,
-    "cpc_usd": 3.68,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 4.67,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
@@ -251,12 +300,17 @@
     "mapping_status": "unmatched",
     "aliases": [],
     "state": "needs_review",
-    "spend_usd": 38.2,
+    "spend_usd": 48.51,
+    "spend_native": 38.2,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 14,
     "impressions": 355,
     "conversions": 1.0,
-    "cpc_usd": 2.73,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 3.46,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
@@ -269,12 +323,17 @@
     "mapping_status": "mapped",
     "aliases": [],
     "state": "needs_review",
-    "spend_usd": 12.4,
+    "spend_usd": 15.75,
+    "spend_native": 12.4,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 9,
     "impressions": 502,
     "conversions": 0.0,
-    "cpc_usd": 1.38,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 1.75,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
@@ -287,12 +346,17 @@
     "mapping_status": "mapped",
     "aliases": [],
     "state": "clean",
-    "spend_usd": 4.3,
+    "spend_usd": 5.46,
+    "spend_native": 4.3,
+    "native_currency": "GBP",
+    "reporting_currency": "USD",
+    "fx_complete": true,
+    "currency_status": "verified",
     "clicks": 15,
     "impressions": 96,
     "conversions": 0.0,
-    "cpc_usd": 0.29,
-    "first_seen": "2026-06-14",
+    "cpc_usd": 0.36,
+    "first_seen": "2026-06-13",
     "last_seen": "2026-07-11",
     "junk_categories": [],
     "matched_patterns": [],
@@ -350,12 +414,12 @@
    "window_end": "2026-07-12",
    "all_time": false,
    "account_timezone": "Europe/London",
-   "currency_semantics": "stored_usd_reported: search_terms durably stores spend_usd only (USD as written at ingestion); no cost_micros or native-currency column exists, so native spend is not reconstructed, no spot-FX conversion is applied, and this figure is never presented as canonical account spend",
-   "deduplication_key": "source_date + COALESCE(campaign_name,'') + COALESCE(ad_group,'') + COALESCE(keyword,'') + COALESCE(match_type,'') + search_term (UNIQUE index idx_search_terms_unique_fact; writer upserts ON CONFLICT)",
+   "currency_semantics": "native_currency_with_fx: search_terms stores raw cost_micros and currency_code (native account currency). Per-date FX conversion to USD uses the same fx_rates doctrine as canonical campaign spend. Rows whose provenance is not proven (missing currency_code or source_system) have monetary metrics withheld as Unavailable. The legacy spend_usd column is cost_micros / 1e6 at ingestion (native currency, not proven USD)",
+   "deduplication_key": "source_date + COALESCE(campaign_name,'') + COALESCE(campaign_id,'') + COALESCE(ad_group,'') + COALESCE(keyword,'') + COALESCE(match_type,'') + search_term (UNIQUE index idx_search_terms_unique_fact; writer upserts ON CONFLICT)",
    "classification_semantics": "is_flagged_waste tri-state: true=flagged (Flagged waste, human-review candidate \u2014 not an approved negative), false=clean (Reviewed clean \u2014 a factual review state, never a business-outcome claim), null=needs_review; platform conversions never change the state",
    "campaign_identity_status": "available",
    "canonical_spend_source": "google_ads_campaign_daily_spend (canonical)",
-   "search_term_spend_source": "search_terms.spend_usd (reported, stored USD)",
+   "search_term_spend_source": "search_terms.cost_micros \u2192 per-date FX conversion to USD (native currency with proven lineage); legacy spend_usd column is cost_micros/1e6 at ingestion (native, not proven USD)",
    "coverage_status": "ok",
    "pagination_complete": true,
    "reconciliation_status": "pass",
@@ -382,12 +446,17 @@
    "mapping_status": "mapped",
    "aliases": [],
    "state": "flagged",
-   "spend_usd": 88.75,
+   "spend_usd": 112.71,
+   "spend_native": 88.75,
+   "native_currency": "GBP",
+   "reporting_currency": "USD",
+   "fx_complete": true,
+   "currency_status": "verified",
    "clicks": 52,
    "impressions": 1745,
    "conversions": 2.0,
-   "cpc_usd": 1.71,
-   "first_seen": "2026-06-14",
+   "cpc_usd": 2.17,
+   "first_seen": "2026-06-13",
    "last_seen": "2026-07-11",
    "junk_categories": [
     "job_seeker"
@@ -406,7 +475,7 @@
     "source_labels": [
      "gulf"
     ],
-    "spend_usd": 88.75,
+    "spend_usd": 112.71,
     "clicks": 52
    }
   ],
@@ -415,7 +484,7 @@
     "Core"
    ],
    "keywords": [
-    "freight forwarding software"
+    "freight forwarder jobs dubai"
    ],
    "match_types": [
     "broad"
@@ -443,48 +512,79 @@
    "rows": [
     {
      "source_date": "2026-07-05",
-     "spend_usd": 12.4,
-     "clicks": 4,
-     "impressions": 88,
-     "conversions": 0.0
+     "cost_micros": 8875000,
+     "native_currency": "GBP",
+     "spend_native": 8.88,
+     "spend_usd": 11.27,
+     "reporting_currency": "USD",
+     "fx_complete": true,
+     "currency_status": "verified",
+     "clicks": 5,
+     "impressions": 174
     },
     {
      "source_date": "2026-07-06",
-     "spend_usd": 18.2,
-     "clicks": 5,
-     "impressions": 120,
-     "conversions": 1.0
+     "cost_micros": 19525000,
+     "native_currency": "GBP",
+     "spend_native": 19.52,
+     "spend_usd": 24.8,
+     "reporting_currency": "USD",
+     "fx_complete": true,
+     "currency_status": "verified",
+     "clicks": 11,
+     "impressions": 383
     },
     {
      "source_date": "2026-07-07",
-     "spend_usd": 9.8,
-     "clicks": 3,
-     "impressions": 64,
-     "conversions": 0.0
+     "cost_micros": 10650000,
+     "native_currency": "GBP",
+     "spend_native": 10.65,
+     "spend_usd": 13.53,
+     "reporting_currency": "USD",
+     "fx_complete": true,
+     "currency_status": "verified",
+     "clicks": 6,
+     "impressions": 209
     },
     {
      "source_date": "2026-07-09",
-     "spend_usd": 15.6,
-     "clicks": 4,
-     "impressions": 102,
-     "conversions": 0.0
+     "cost_micros": 16862500,
+     "native_currency": "GBP",
+     "spend_native": 16.86,
+     "spend_usd": 21.42,
+     "reporting_currency": "USD",
+     "fx_complete": true,
+     "currency_status": "verified",
+     "clicks": 9,
+     "impressions": 331
     },
     {
      "source_date": "2026-07-10",
-     "spend_usd": 22.1,
-     "clicks": 6,
-     "impressions": 148,
-     "conversions": 1.0
+     "cost_micros": 22187500,
+     "native_currency": "GBP",
+     "spend_native": 22.19,
+     "spend_usd": 28.18,
+     "reporting_currency": "USD",
+     "fx_complete": true,
+     "currency_status": "verified",
+     "clicks": 13,
+     "impressions": 436
     },
     {
      "source_date": "2026-07-11",
-     "spend_usd": 10.3,
-     "clicks": 3,
-     "impressions": 71,
-     "conversions": 0.0
+     "cost_micros": 10650000,
+     "native_currency": "GBP",
+     "spend_native": 10.65,
+     "spend_usd": 13.53,
+     "reporting_currency": "USD",
+     "fx_complete": true,
+     "currency_status": "verified",
+     "clicks": 6,
+     "impressions": 209
     }
    ],
-   "note": "Only dates the source actually reported are shown \u2014 missing dates are never fabricated as zero."
+   "reporting_currency": "USD",
+   "note": "Only dates the source actually reported are shown \u2014 missing dates are never fabricated as zero. Each day's USD is converted at that day's own FX rate; days without a rate show native only."
   }
  },
  "/api/search-term-evidence/patterns": {
@@ -501,7 +601,7 @@
    "terms_analysed": 12,
    "patterns_with_flagged": 10,
    "patterns_needing_review": 11,
-   "reported_spend_represented_usd": 1287.63
+   "reported_spend_represented_usd": 1635.28
   },
   "rows": [
    {
@@ -512,7 +612,7 @@
     "flagged_terms": 2,
     "clean_terms": 3,
     "needs_review_terms": 3,
-    "reported_spend_usd": 1018.23,
+    "reported_spend_usd": 1293.15,
     "clicks": 329,
     "conversions": 15.0,
     "campaigns_count": 4
@@ -525,7 +625,7 @@
     "flagged_terms": 1,
     "clean_terms": 2,
     "needs_review_terms": 2,
-    "reported_spend_usd": 864.68,
+    "reported_spend_usd": 1098.14,
     "clicks": 259,
     "conversions": 11.0,
     "campaigns_count": 3
@@ -538,7 +638,7 @@
     "flagged_terms": 0,
     "clean_terms": 2,
     "needs_review_terms": 2,
-    "reported_spend_usd": 507.11,
+    "reported_spend_usd": 644.03,
     "clicks": 153,
     "conversions": 8.0,
     "campaigns_count": 4
@@ -551,7 +651,7 @@
     "flagged_terms": 0,
     "clean_terms": 1,
     "needs_review_terms": 1,
-    "reported_spend_usd": 325.95,
+    "reported_spend_usd": 413.96,
     "clicks": 83,
     "conversions": 4.0,
     "campaigns_count": 1
@@ -564,7 +664,7 @@
     "flagged_terms": 0,
     "clean_terms": 1,
     "needs_review_terms": 1,
-    "reported_spend_usd": 325.95,
+    "reported_spend_usd": 413.96,
     "clicks": 83,
     "conversions": 4.0,
     "campaigns_count": 1
@@ -577,7 +677,7 @@
     "flagged_terms": 0,
     "clean_terms": 1,
     "needs_review_terms": 0,
-    "reported_spend_usd": 154.2,
+    "reported_spend_usd": 195.83,
     "clicks": 37,
     "conversions": 2.0,
     "campaigns_count": 1
@@ -590,7 +690,7 @@
     "flagged_terms": 0,
     "clean_terms": 1,
     "needs_review_terms": 0,
-    "reported_spend_usd": 154.2,
+    "reported_spend_usd": 195.83,
     "clicks": 37,
     "conversions": 2.0,
     "campaigns_count": 1
@@ -603,7 +703,7 @@
     "flagged_terms": 1,
     "clean_terms": 0,
     "needs_review_terms": 0,
-    "reported_spend_usd": 96.42,
+    "reported_spend_usd": 122.45,
     "clicks": 41,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -616,7 +716,7 @@
     "flagged_terms": 1,
     "clean_terms": 0,
     "needs_review_terms": 0,
-    "reported_spend_usd": 96.42,
+    "reported_spend_usd": 122.45,
     "clicks": 41,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -629,7 +729,7 @@
     "flagged_terms": 1,
     "clean_terms": 0,
     "needs_review_terms": 0,
-    "reported_spend_usd": 88.75,
+    "reported_spend_usd": 112.71,
     "clicks": 52,
     "conversions": 2.0,
     "campaigns_count": 1
@@ -642,7 +742,7 @@
     "flagged_terms": 1,
     "clean_terms": 0,
     "needs_review_terms": 0,
-    "reported_spend_usd": 88.75,
+    "reported_spend_usd": 112.71,
     "clicks": 52,
     "conversions": 2.0,
     "campaigns_count": 1
@@ -655,7 +755,7 @@
     "flagged_terms": 1,
     "clean_terms": 0,
     "needs_review_terms": 0,
-    "reported_spend_usd": 88.75,
+    "reported_spend_usd": 112.71,
     "clicks": 52,
     "conversions": 2.0,
     "campaigns_count": 1
@@ -668,7 +768,7 @@
     "flagged_terms": 1,
     "clean_terms": 0,
     "needs_review_terms": 0,
-    "reported_spend_usd": 61.3,
+    "reported_spend_usd": 77.85,
     "clicks": 28,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -681,7 +781,7 @@
     "flagged_terms": 1,
     "clean_terms": 0,
     "needs_review_terms": 0,
-    "reported_spend_usd": 61.3,
+    "reported_spend_usd": 77.85,
     "clicks": 28,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -694,7 +794,7 @@
     "flagged_terms": 1,
     "clean_terms": 0,
     "needs_review_terms": 0,
-    "reported_spend_usd": 61.3,
+    "reported_spend_usd": 77.85,
     "clicks": 28,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -707,7 +807,7 @@
     "flagged_terms": 0,
     "clean_terms": 0,
     "needs_review_terms": 1,
-    "reported_spend_usd": 57.85,
+    "reported_spend_usd": 73.47,
     "clicks": 19,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -720,7 +820,7 @@
     "flagged_terms": 0,
     "clean_terms": 0,
     "needs_review_terms": 1,
-    "reported_spend_usd": 49.6,
+    "reported_spend_usd": 62.99,
     "clicks": 22,
     "conversions": 0.0,
     "campaigns_count": 1
@@ -733,7 +833,7 @@
     "flagged_terms": 0,
     "clean_terms": 0,
     "needs_review_terms": 1,
-    "reported_spend_usd": 49.6,
+    "reported_spend_usd": 62.99,
     "clicks": 22,
     "conversions": 0.0,
     "campaigns_count": 1
@@ -746,7 +846,7 @@
     "flagged_terms": 0,
     "clean_terms": 0,
     "needs_review_terms": 1,
-    "reported_spend_usd": 49.6,
+    "reported_spend_usd": 62.99,
     "clicks": 22,
     "conversions": 0.0,
     "campaigns_count": 1
@@ -759,7 +859,7 @@
     "flagged_terms": 0,
     "clean_terms": 1,
     "needs_review_terms": 0,
-    "reported_spend_usd": 44.15,
+    "reported_spend_usd": 56.07,
     "clicks": 12,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -772,7 +872,7 @@
     "flagged_terms": 0,
     "clean_terms": 0,
     "needs_review_terms": 1,
-    "reported_spend_usd": 38.2,
+    "reported_spend_usd": 48.51,
     "clicks": 14,
     "conversions": 1.0,
     "campaigns_count": 1
@@ -785,7 +885,7 @@
     "flagged_terms": 0,
     "clean_terms": 0,
     "needs_review_terms": 1,
-    "reported_spend_usd": 12.4,
+    "reported_spend_usd": 15.75,
     "clicks": 9,
     "conversions": 0.0,
     "campaigns_count": 1
@@ -798,7 +898,7 @@
     "flagged_terms": 0,
     "clean_terms": 1,
     "needs_review_terms": 0,
-    "reported_spend_usd": 4.3,
+    "reported_spend_usd": 5.46,
     "clicks": 15,
     "conversions": 0.0,
     "campaigns_count": 1
@@ -811,7 +911,7 @@
     "flagged_terms": 0,
     "clean_terms": 1,
     "needs_review_terms": 0,
-    "reported_spend_usd": 4.3,
+    "reported_spend_usd": 5.46,
     "clicks": 15,
     "conversions": 0.0,
     "campaigns_count": 1
@@ -875,12 +975,12 @@
    "window_end": "2026-07-12",
    "all_time": false,
    "account_timezone": "Europe/London",
-   "currency_semantics": "stored_usd_reported: search_terms durably stores spend_usd only (USD as written at ingestion); no cost_micros or native-currency column exists, so native spend is not reconstructed, no spot-FX conversion is applied, and this figure is never presented as canonical account spend",
-   "deduplication_key": "source_date + COALESCE(campaign_name,'') + COALESCE(ad_group,'') + COALESCE(keyword,'') + COALESCE(match_type,'') + search_term (UNIQUE index idx_search_terms_unique_fact; writer upserts ON CONFLICT)",
+   "currency_semantics": "native_currency_with_fx: search_terms stores raw cost_micros and currency_code (native account currency). Per-date FX conversion to USD uses the same fx_rates doctrine as canonical campaign spend. Rows whose provenance is not proven (missing currency_code or source_system) have monetary metrics withheld as Unavailable. The legacy spend_usd column is cost_micros / 1e6 at ingestion (native currency, not proven USD)",
+   "deduplication_key": "source_date + COALESCE(campaign_name,'') + COALESCE(campaign_id,'') + COALESCE(ad_group,'') + COALESCE(keyword,'') + COALESCE(match_type,'') + search_term (UNIQUE index idx_search_terms_unique_fact; writer upserts ON CONFLICT)",
    "classification_semantics": "is_flagged_waste tri-state: true=flagged (Flagged waste, human-review candidate \u2014 not an approved negative), false=clean (Reviewed clean \u2014 a factual review state, never a business-outcome claim), null=needs_review; platform conversions never change the state",
    "campaign_identity_status": "available",
    "canonical_spend_source": "google_ads_campaign_daily_spend (canonical)",
-   "search_term_spend_source": "search_terms.spend_usd (reported, stored USD)",
+   "search_term_spend_source": "search_terms.cost_micros \u2192 per-date FX conversion to USD (native currency with proven lineage); legacy spend_usd column is cost_micros/1e6 at ingestion (native, not proven USD)",
    "coverage_status": "ok",
    "pagination_complete": true,
    "reconciliation_status": "pass",
@@ -910,7 +1010,7 @@
    "flagged_terms": 2,
    "clean_terms": 3,
    "needs_review_terms": 3,
-   "reported_spend_usd": 1018.23,
+   "reported_spend_usd": 1293.15,
    "clicks": 329,
    "conversions": 15.0,
    "campaigns": [
@@ -931,7 +1031,7 @@
     "campaigns": [
      "Brand - UK"
     ],
-    "spend_usd": 412.36,
+    "spend_usd": 523.7,
     "clicks": 118,
     "last_seen": "2026-07-11"
    },
@@ -941,7 +1041,7 @@
     "campaigns": [
      "Brand - UK"
     ],
-    "spend_usd": 268.1,
+    "spend_usd": 340.49,
     "clicks": 64,
     "last_seen": "2026-07-11"
    },
@@ -951,7 +1051,7 @@
     "campaigns": [
      "Gulf"
     ],
-    "spend_usd": 96.42,
+    "spend_usd": 122.45,
     "clicks": 41,
     "last_seen": "2026-07-11"
    },
@@ -961,7 +1061,7 @@
     "campaigns": [
      "Gulf"
     ],
-    "spend_usd": 88.75,
+    "spend_usd": 112.71,
     "clicks": 52,
     "last_seen": "2026-07-11"
    },
@@ -971,7 +1071,7 @@
     "campaigns": [
      "Brand - UK"
     ],
-    "spend_usd": 57.85,
+    "spend_usd": 73.47,
     "clicks": 19,
     "last_seen": "2026-07-11"
    },
@@ -981,7 +1081,7 @@
     "campaigns": [
      "Competitor - Global"
     ],
-    "spend_usd": 44.15,
+    "spend_usd": 56.07,
     "clicks": 12,
     "last_seen": "2026-07-11"
    },
@@ -991,7 +1091,7 @@
     "campaigns": [
      "mena expansion"
     ],
-    "spend_usd": 38.2,
+    "spend_usd": 48.51,
     "clicks": 14,
     "last_seen": "2026-07-11"
    },
@@ -1001,7 +1101,7 @@
     "campaigns": [
      "Gulf"
     ],
-    "spend_usd": 12.4,
+    "spend_usd": 15.75,
     "clicks": 9,
     "last_seen": "2026-07-11"
    }

@@ -9692,9 +9692,13 @@ function renderStTermDrawer(body, data) {
       <td class="td--num">${fmtCount(c.clicks)}</td>
     </tr>`).join("");
 
+  // Per-date currency truth (PR-ADS-144 §4): each day shows its native cost
+  // and its own-date FX-converted USD. A day without an FX rate shows native
+  // only (USD "—") — the legacy raw column is never rendered with "$".
   const dailyRows = (daily.rows || []).map((d) => `
     <tr><td>${escapeHtml(d.source_date || "")}</td>
-      <td class="td--num">${stMoney(d.spend_usd)}</td>
+      <td class="td--num">${stSpendCell(d)}</td>
+      <td class="td--num">${d.spend_usd !== null && d.spend_usd !== undefined ? stMoney(d.spend_usd) : stUnavailable()}</td>
       <td class="td--num">${fmtCount(d.clicks)}</td>
       <td class="td--num">${fmtCount(d.impressions)}</td></tr>`).join("");
 
@@ -9749,9 +9753,9 @@ function renderStTermDrawer(body, data) {
     <div class="drawer-section">
       <div class="drawer-section__title">Daily Evidence (source dates)</div>
       ${dailyRows
-        ? `<table class="drawer-table"><thead><tr><th>Date</th><th class="td--num">Spend</th><th class="td--num">Clicks</th><th class="td--num">Impr.</th></tr></thead><tbody>${dailyRows}</tbody></table>`
+        ? `<table class="drawer-table"><thead><tr><th>Date</th><th class="td--num">Native</th><th class="td--num">USD</th><th class="td--num">Clicks</th><th class="td--num">Impr.</th></tr></thead><tbody>${dailyRows}</tbody></table>`
         : `<p class="drawer-empty">No per-day rows reported in this window.</p>`}
-      <p class="drawer-source-note">Only dates the source actually reported are shown — missing dates are never fabricated as zero.</p>
+      <p class="drawer-source-note">Only dates the source actually reported are shown — missing dates are never fabricated as zero. Each day's USD is converted at that day's own FX rate; a day without a rate shows native only.</p>
     </div>
     <div class="drawer-section">
       <div class="drawer-section__title">Links</div>

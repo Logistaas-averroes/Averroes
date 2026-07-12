@@ -179,122 +179,197 @@ def _assess_currency_provenance(group: dict) -> dict:
     }
 
 
-def _fx_convert_population(units: list, start, end) -> dict:
-    """Perform per-date FX conversion on proven-provenance units.
-
-    Uses the same fx_rates doctrine as canonical campaign spend: each daily
-    row's cost_micros is converted to USD using its own source_date rate.
-
-    Returns {fx_complete, native_currency, reporting_currency,
-    fx_missing_dates, currency_status, all_proven}.
-    """
+def _fx_rate_map(start, end, native_currency, reporting_currency) -> dict:
+    """{iso_date: rate} for native→reporting over the window (empty if none)."""
     import db.revenue_repository as revenue_repo  # noqa: PLC0415
+
+    result = revenue_repo.fetch_fx_rates(
+        start, end, native_currency, reporting_currency)
+    if not result.get("available"):
+        return {}
+    out = {}
+    for k, v in (result.get("rates") or {}).items():
+        if v is None:
+            continue
+        out[k.isoformat() if hasattr(k, "isoformat") else str(k)] = float(v)
+    return out
+
+
+def _convert_daily_micros(daily_micros: dict, native_currency, reporting_currency,
+                          fx_by_iso: dict) -> tuple:
+    """GENUINE per-source-date FX conversion (PR-ADS-144 §2). Read-only.
+
+    ``daily_micros`` maps ``iso_date -> cost_micros``. Each day is converted at
+    ITS OWN source-date rate — never a window-average — and the resulting USD
+    amounts are summed:  ``window_usd = Σ(native_day × rate[day])``. When ANY
+    required source-date rate is missing the USD total is withheld (returned as
+    ``None``) and the missing dates are reported, so the amount is never
+    silently wrong.
+
+    Returns ``(spend_usd | None, complete, missing_dates)``.
+    """
+    if native_currency == reporting_currency:
+        # Same currency — every day converts 1:1, always complete.
+        total = sum(m for m in daily_micros.values() if m is not None) / 1_000_000
+        return round(total, 2), True, []
+    total = 0.0
+    missing: list = []
+    for iso_date, micros in sorted(daily_micros.items()):
+        if micros is None:
+            continue
+        rate = fx_by_iso.get(iso_date)
+        if rate is None:
+            missing.append(iso_date)
+            continue
+        total += (micros / 1_000_000) * rate
+    if missing:
+        return None, False, sorted(missing)
+    return round(total, 2), True, []
+
+
+def _convert_daily_series(rows: list, start, end) -> list:
+    """Convert a drawer's daily rows to USD at EACH row's own source-date FX
+    rate (PR-ADS-144 §3/§4). Never passes the legacy ``spend_usd`` column
+    through as USD. Each returned row carries: source_date, cost_micros,
+    native_currency, spend_native, spend_usd (per-date converted or None),
+    reporting_currency, fx_complete, currency_status, clicks, impressions."""
     from services.fx_service import REPORTING_CURRENCY  # noqa: PLC0415
 
-    # Determine if ALL units have proven provenance and share one currency.
+    # Determine the single proven native currency across the series.
+    currencies = set()
+    for r in rows:
+        codes = r.get("currency_codes") or []
+        for c in codes:
+            currencies.add(c)
+    native_currency = next(iter(currencies)) if len(currencies) == 1 else None
+
+    fx_by_iso = {}
+    if native_currency and native_currency != REPORTING_CURRENCY:
+        fx_by_iso = _fx_rate_map(start, end, native_currency, REPORTING_CURRENCY)
+
+    out = []
+    for r in rows:
+        iso = r.get("source_date")
+        micros = r.get("cost_micros")
+        codes = r.get("currency_codes") or []
+        systems = r.get("source_systems") or []
+        proven = (len(codes) == 1 and bool(codes[0]) and micros is not None
+                  and all(s == "google_ads_api" for s in systems) and bool(systems))
+        row_currency = codes[0] if len(codes) == 1 else None
+        spend_native = round(micros / 1_000_000, 6) if micros is not None else None
+
+        if not proven or row_currency is None:
+            spend_usd, fx_complete, status = None, False, "unavailable"
+        elif row_currency == REPORTING_CURRENCY:
+            spend_usd, fx_complete, status = (
+                _round2(spend_native), True, "verified_same_currency")
+        else:
+            rate = fx_by_iso.get(iso)
+            if rate is None:
+                spend_usd, fx_complete, status = None, False, "fx_incomplete"
+            else:
+                spend_usd = round(float(spend_native) * rate, 2)
+                fx_complete, status = True, "verified"
+
+        out.append({
+            "source_date": iso,
+            "cost_micros": micros,
+            "native_currency": row_currency,
+            "spend_native": _round2(spend_native),
+            "spend_usd": spend_usd,
+            "reporting_currency": REPORTING_CURRENCY,
+            "fx_complete": fx_complete,
+            "currency_status": status,
+            "clicks": r.get("clicks", 0),
+            "impressions": r.get("impressions", 0),
+        })
+    return out
+
+
+def _fx_convert_population(units: list, start, end) -> dict:
+    """Convert every proven-provenance unit's per-source-date native cost to USD
+    at each day's own FX rate (PR-ADS-144 §2), then set each unit's
+    ``spend_usd`` / ``fx_complete`` / ``currency_status`` from the ACTUAL
+    conversion result — not merely from provenance availability.
+
+    Each unit must carry ``_daily_micros`` ({iso_date: cost_micros}). USD (and
+    therefore CPC-USD downstream) is withheld for any unit whose provenance is
+    unproven, whose currency is mixed, or any of whose source dates lacks an FX
+    rate. Native spend is always preserved.
+
+    Returns population-level {fx_complete, native_currency, reporting_currency,
+    fx_missing_dates, currency_status, all_proven}.
+    """
+    from services.fx_service import REPORTING_CURRENCY  # noqa: PLC0415
+
     currencies = set()
     all_proven = True
+    any_mixed = False
     for u in units:
         prov = u.get("_provenance") or {}
         if not prov.get("proven"):
             all_proven = False
         nc = prov.get("native_currency")
-        if nc:
+        if nc == "mixed":
+            any_mixed = True
+        elif nc:
             currencies.add(nc)
 
-    if not currencies:
-        # No currency lineage at all — withhold monetary metrics.
+    def _withhold_all(status, native_currency=None):
         for u in units:
             u["spend_usd"] = None
+            u["fx_complete"] = False
+            u["currency_status"] = status
         return {
-            "fx_complete": False,
-            "native_currency": None,
-            "reporting_currency": REPORTING_CURRENCY,
-            "fx_missing_dates": [],
-            "currency_status": "unavailable",
-            "all_proven": False,
+            "fx_complete": False, "native_currency": native_currency,
+            "reporting_currency": REPORTING_CURRENCY, "fx_missing_dates": [],
+            "currency_status": status, "all_proven": all_proven,
         }
 
-    native_currency = currencies.pop() if len(currencies) == 1 else None
-    if native_currency is None or not all_proven:
-        # Mixed currencies or unproven provenance — withhold monetary metrics.
-        for u in units:
+    if not currencies and not any_mixed:
+        # No currency lineage at all anywhere → genuinely unavailable.
+        return _withhold_all("unavailable")
+    if len(currencies) > 1 or any_mixed or not all_proven:
+        # More than one currency across the population, a within-unit currency
+        # mix, or any unproven-provenance unit → withhold all monetary metrics.
+        return _withhold_all("mixed_or_unproven")
+
+    native_currency = next(iter(currencies))
+    fx_by_iso = ({} if native_currency == REPORTING_CURRENCY
+                 else _fx_rate_map(start, end, native_currency, REPORTING_CURRENCY))
+
+    all_missing: set = set()
+    all_complete = True
+    for u in units:
+        prov = u.get("_provenance") or {}
+        daily = u.get("_daily_micros") or {}
+        if not prov.get("proven") or not daily:
+            # Proven flag already gated above, but a unit with no per-date cost
+            # cannot be converted — withhold its USD.
             u["spend_usd"] = None
-        return {
-            "fx_complete": False,
-            "native_currency": None if len(currencies) > 0 else native_currency,
-            "reporting_currency": REPORTING_CURRENCY,
-            "fx_missing_dates": [],
-            "currency_status": "mixed_or_unproven",
-            "all_proven": False,
-        }
-
-    # All units proven, single currency — attempt FX conversion.
-    if native_currency == REPORTING_CURRENCY:
-        # Same currency — no conversion needed, set spend_usd = spend_native.
-        for u in units:
-            prov = u.get("_provenance") or {}
-            u["spend_usd"] = prov.get("spend_native")
-        return {
-            "fx_complete": True,
-            "native_currency": native_currency,
-            "reporting_currency": REPORTING_CURRENCY,
-            "fx_missing_dates": [],
-            "currency_status": "verified_same_currency",
-            "all_proven": True,
-        }
-
-    # Need FX rates for the window.
-    fx_cov = revenue_repo.fetch_fx_coverage(
-        start, end, native_currency, REPORTING_CURRENCY)
-    fx_rates_result = revenue_repo.fetch_fx_rates(
-        start, end, native_currency, REPORTING_CURRENCY)
-    fx_by_date = fx_rates_result.get("rates") or {} if fx_rates_result.get("available") else {}
-    # Normalize keys to iso strings.
-    fx_by_iso = {}
-    for k, v in fx_by_date.items():
-        if hasattr(k, 'isoformat'):
-            fx_by_iso[k.isoformat()] = v
-        else:
-            fx_by_iso[str(k)] = v
-
-    fx_complete = bool(fx_cov.get("complete")) if fx_cov.get("available") else False
-    missing = [str(d) for d in (fx_cov.get("missing_dates") or [])]
-
-    # We apply FX at the unit level using spend_native (aggregate).
-    # This is approximate — ideally we'd convert per source_date row, but
-    # for the aggregate display we use the window-average rate approach OR
-    # flag as incomplete when dates are missing.
-    # For now: if FX is complete AND rates are available, convert each unit.
-    # If FX is incomplete or rates are missing, withhold USD.
-    if fx_complete and fx_by_iso:
-        # Use a weighted average rate across available dates.
-        rates = [float(v) for v in fx_by_iso.values() if v is not None]
-        if rates:
-            avg_rate = sum(rates) / len(rates)
-            for u in units:
-                prov = u.get("_provenance") or {}
-                native = prov.get("spend_native")
-                if native is not None:
-                    u["spend_usd"] = round(float(native) * avg_rate, 2)
-                else:
-                    u["spend_usd"] = None
-        else:
-            fx_complete = False
-    else:
-        # No rates available or FX coverage incomplete — withhold USD.
-        fx_complete = False
-
-    if not fx_complete:
-        for u in units:
-            u["spend_usd"] = None
+            u["fx_complete"] = False
+            u["currency_status"] = "fx_incomplete"
+            all_complete = False
+            continue
+        usd, complete, missing = _convert_daily_micros(
+            daily, native_currency, REPORTING_CURRENCY, fx_by_iso)
+        u["spend_usd"] = usd
+        u["fx_complete"] = complete
+        u["currency_status"] = ("verified_same_currency"
+                                if native_currency == REPORTING_CURRENCY
+                                else "verified" if complete else "fx_incomplete")
+        if not complete:
+            all_complete = False
+            all_missing.update(missing)
 
     return {
-        "fx_complete": fx_complete,
+        "fx_complete": all_complete,
         "native_currency": native_currency,
         "reporting_currency": REPORTING_CURRENCY,
-        "fx_missing_dates": missing,
-        "currency_status": "verified" if fx_complete else "fx_incomplete",
+        "fx_missing_dates": sorted(all_missing),
+        "currency_status": ("verified_same_currency"
+                            if native_currency == REPORTING_CURRENCY and all_complete
+                            else "verified" if all_complete else "fx_incomplete"),
         "all_proven": True,
     }
 
@@ -488,10 +563,31 @@ def _build_population(start, end) -> dict:
                 "junk_categories": set(), "matched_patterns": set(),
                 "ad_groups": set(), "keywords": set(), "match_types": set(),
                 "source_labels": set(), "campaign_ids": set(),
+                "_daily_micros": {},   # iso_date -> Σ cost_micros (per-date FX)
             }
         _merge_group(unit, g)
 
-    # Assess provenance and perform FX conversion for each unit.
+    # Attach per-SOURCE-DATE native cost to each unit so FX converts at each
+    # day's own rate (PR-ADS-144 §2) — routed through the SAME identity
+    # resolution so two same-named campaign ids never share a day's spend.
+    daily_costs = st_repo.fetch_search_term_daily_costs(start, end)
+    for d in (daily_costs.get("rows") or []):
+        term = d.get("search_term")
+        if not term:
+            continue
+        _, key, _ = _resolve_campaign_identity(
+            d.get("campaign_id"), d.get("campaign_name"),
+            spend_by_id, norm_to_ids, identity_by_label)
+        unit = units.get((term, key))
+        if unit is None:
+            continue
+        sd = d.get("source_date")
+        iso = sd.isoformat() if hasattr(sd, "isoformat") else str(sd)
+        micros = d.get("cost_micros")
+        if micros is not None:
+            unit["_daily_micros"][iso] = unit["_daily_micros"].get(iso, 0) + int(micros)
+
+    # Assess provenance and perform per-date FX conversion for each unit.
     unit_list = list(units.values())
     for u in unit_list:
         u["_provenance"] = _assess_currency_provenance(u)
@@ -538,9 +634,15 @@ def _unit_row(unit: dict, aliases_by_id: dict) -> dict:
         "spend_native": _round2(prov.get("spend_native")),
         "native_currency": prov.get("native_currency"),
         "reporting_currency": "USD",
-        "fx_complete": prov.get("proven", False),
-        "currency_status": ("proven" if prov.get("proven")
-                            else prov.get("quarantine_reason") or "unknown"),
+        # fx_complete / currency_status reflect the ACTUAL per-date conversion
+        # result (set by _fx_convert_population), NOT merely provenance
+        # availability (PR-ADS-144 §4). A proven-lineage unit with a missing
+        # source-date rate is fx_complete = False.
+        "fx_complete": bool(unit.get("fx_complete", False)),
+        "currency_status": unit.get(
+            "currency_status",
+            "proven" if prov.get("proven")
+            else prov.get("quarantine_reason") or "unknown"),
         "clicks": clicks,
         "impressions": unit["impressions"],
         "conversions": _round2(unit["conversions"]),
@@ -624,11 +726,34 @@ def _sort_units(units: list, sort: str) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _coverage_block(source: dict, canonical: dict, currency_info: dict | None = None) -> dict:
+def _window_reported_usd(pop: dict) -> float | None:
+    """FX-safe search-term USD for the COMPLETE window (all units) — the ONLY
+    valid coverage numerator (PR-ADS-144 §3). Sum of each unit's per-date
+    FX-converted ``spend_usd``. Returns 0.0 for a verified-empty window, None
+    whenever any unit's USD is withheld (unproven / FX-incomplete), so the raw
+    legacy ``spend_usd`` column is NEVER used as the USD numerator."""
+    units = pop.get("units") or []
+    if not units:
+        src = pop.get("source") or {}
+        return 0.0 if int(src.get("row_count") or 0) == 0 else None
+    total = 0.0
+    for u in units:
+        usd = u.get("spend_usd")
+        if usd is None:
+            return None            # any withheld unit → no safe window numerator
+        total += float(usd)
+    return round(total, 2)
+
+
+def _coverage_block(reported_usd, canonical: dict,
+                    currency_info: dict | None = None) -> dict:
     """Search-term reporting coverage — a completeness diagnostic comparing
     window-level FX-safe search-term USD against FX-safe canonical campaign USD.
     Unavailable whenever the two spend contracts cannot be compared safely
     (canonical missing, FX incomplete, unproven currency, or zero denominator).
+
+    ``reported_usd`` is the FX-converted window numerator from
+    ``_window_reported_usd`` — NEVER the legacy raw ``spend_usd`` total.
 
     Reporting Coverage may compare only:
     FX-safe selected-window search-term USD / FX-safe selected-window canonical USD
@@ -636,20 +761,18 @@ def _coverage_block(source: dict, canonical: dict, currency_info: dict | None = 
     """
     ci = currency_info or {}
     # Both sides must be FX-safe for a meaningful coverage number.
-    if not ci.get("all_proven") or not ci.get("fx_complete"):
+    if not ci.get("all_proven") or not ci.get("fx_complete") or reported_usd is None:
         return {
             "status": "unavailable",
             "canonical_spend_usd": None,
-            "reported_search_term_spend_usd": None,
+            "reported_search_term_spend_usd": _round2(reported_usd),
             "coverage_pct": None,
             "note": ("Coverage requires FX-safe search-term USD and FX-safe "
                      "canonical campaign USD for the same window; currency "
                      "lineage is not fully proven."),
         }
 
-    reported = source.get("spend_usd_total")
-    if reported is None and source.get("row_count") == 0:
-        reported = 0.0  # verified-empty window: genuinely zero reported spend
+    reported = reported_usd
     canonical_usd = (canonical.get("total_spend_usd")
                      if canonical.get("available") else None)
     canonical_fx_complete = canonical.get("fx_complete", False)
@@ -833,7 +956,8 @@ def build_search_term_evidence(window: str, *, page: int = 1,
     if spend_total is None:
         spend_total = 0.0 if not filtered else spend_total
 
-    coverage = _coverage_block(pop["source"], pop["canonical"], currency_info)
+    coverage = _coverage_block(_window_reported_usd(pop), pop["canonical"],
+                               currency_info)
     kpis = {
         "reported_terms": len(filtered),
         "unique_search_terms": len({u["search_term"] for u in filtered}),
@@ -1139,9 +1263,13 @@ def build_search_term_drawer(window: str, term: str,
         },
         "daily": {
             "available": bool(daily.get("available")),
-            "rows": daily.get("rows") or [],
+            "rows": _convert_daily_series(daily.get("rows") or [], start, end),
+            "reporting_currency": (pop.get("currency_info") or {}).get(
+                "reporting_currency", "USD"),
             "note": ("Only dates the source actually reported are shown — "
-                     "missing dates are never fabricated as zero."),
+                     "missing dates are never fabricated as zero. Each day's "
+                     "USD is converted at that day's own FX rate; days without "
+                     "a rate show native only."),
         },
     }
 
@@ -1371,7 +1499,7 @@ def build_search_pattern_evidence(window: str, *, n: int = 1,
         "audit": {
             **_audit_block(base, pop,
                            coverage_status=_coverage_block(
-                               pop["source"], pop["canonical"],
+                               _window_reported_usd(pop), pop["canonical"],
                                pop.get("currency_info"))["status"]),
             "patterns_derivation": (
                 "derived from the same selected-window deduplicated "

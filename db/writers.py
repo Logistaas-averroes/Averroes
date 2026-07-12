@@ -800,12 +800,37 @@ def write_search_terms(
             updated_at    = NOW()
     """
 
+    # PR-ADS-144: deterministic null-id supersession. campaign_id is part of the
+    # natural key, so a legacy row with campaign_id NULL and a later Google Ads
+    # row bearing an id for the SAME
+    # (source_date, campaign_name, ad_group, keyword, match_type, search_term)
+    # fact would otherwise become two rows and double-count. When we write an
+    # id-bearing row, the ambiguous NULL-campaign_id twin is superseded and
+    # removed (the precise id-bearing identity wins). Two DISTINCT ids (10, 20)
+    # sharing a display name are untouched — both are real, distinct facts.
+    _null_twin_keys = [
+        (r[1], r[2], r[4], r[5], r[6], r[7])   # (date, name, ad_group, kw, mt, term)
+        for r in rows if r[3] is not None and str(r[3]).strip()
+    ]
+    _null_twin_delete = """
+        DELETE FROM search_terms
+        WHERE campaign_id IS NULL
+          AND source_date = %s
+          AND COALESCE(campaign_name, '') = COALESCE(%s, '')
+          AND COALESCE(ad_group,      '') = COALESCE(%s, '')
+          AND COALESCE(keyword,       '') = COALESCE(%s, '')
+          AND COALESCE(match_type,    '') = COALESCE(%s, '')
+          AND search_term = %s
+    """
+
     try:
         with get_conn() as conn:
             if conn is None:
                 return 0
             with conn.cursor() as cur:
                 cur.executemany(_upsert_sql, rows)
+                if _null_twin_keys:
+                    cur.executemany(_null_twin_delete, _null_twin_keys)
                 # executemany with ON CONFLICT makes rowcount unreliable for
                 # determining actual inserts vs updates; use len(rows) as the
                 # attempted-upsert count.

@@ -1544,7 +1544,11 @@ server-side filtering / sorting / pagination and complete-population KPIs.
     "aliases": ["brand - uk"],
     "state": "flagged|clean|needs_review",   // tri-state is_flagged_waste truth
     "spend_usd": 20.0, "spend_native": 15.87, "native_currency": "GBP",
-    "fx_complete": true, "currency_status": "proven",
+    // fx_complete / currency_status reflect the ACTUAL per-date conversion —
+    // "verified" when every source date had a rate, "fx_incomplete" when a
+    // date was missing (spend_usd then null), "mixed_or_unproven"/"unavailable"
+    // when provenance is not proven. NOT merely provenance availability.
+    "fx_complete": true, "currency_status": "verified",
     "clicks": 4, "impressions": 40,
     "conversions": 0.0,                      // platform evidence only — not an SQL
     "cpc_usd": 5.0, "first_seen": "2026-07-01", "last_seen": "2026-07-02",
@@ -1588,17 +1592,36 @@ server-side filtering / sorting / pagination and complete-population KPIs.
   so a repeated scheduler run can never multiply a term/day/campaign fact. The
   audit block re-proves this per request (`source_row_reconciliation`,
   `spend_reconciliation`).
-- **Currency:** the table durably stores `cost_micros` (native account currency
-  from Google Ads `metrics.cost_micros`) plus `currency_code` and
-  `source_system` provenance. The evidence service converts to USD using the
-  per-date FX rate (same doctrine as canonical campaign spend). The legacy
-  `spend_usd` column contains `cost_micros / 1_000_000` — this is the native
-  account currency value, NOT proven USD. When FX is incomplete or currency
-  provenance is unproven, `spend_usd`, `cpc_usd`, and coverage are withheld
-  (`null` / `Unavailable`) — native spend (`spend_native`, `native_currency`)
-  is still returned. Coverage compares only FX-safe selected-window
-  search-term USD against FX-safe canonical USD; anything else returns
-  `Unavailable`.
+- **Currency (genuine per-source-date FX):** the table durably stores
+  `cost_micros` (native account currency from Google Ads `metrics.cost_micros`)
+  plus `currency_code` and `source_system` provenance. USD is computed as
+  `Σ(native_day × rate[day])` — **each source date is converted at its own FX
+  rate**, never a window-average rate — using the same `fx_rates` doctrine as
+  canonical campaign spend. The legacy `spend_usd` column contains
+  `cost_micros / 1_000_000` (native account currency, **NOT** proven USD) and is
+  never surfaced to the UI as USD. When ANY required source-date rate is
+  missing, or currency provenance is unproven/mixed, `spend_usd`, `cpc_usd`, and
+  coverage are withheld (`null` / `Unavailable`) and `fx_complete` is `false` —
+  native spend (`spend_native`, `native_currency`) is still preserved.
+  Reporting **Coverage** uses the FX-converted window search-term USD as its
+  numerator (never the legacy `spend_usd` raw total), and is available only when
+  that numerator is fully FX-safe AND canonical campaign USD is FX-complete.
+- **Storage migration:** a database predating this contract is upgraded by a
+  guarded, idempotent migration (`db/schema.py`, migration id
+  `PR-ADS-144-currency-and-id-key`): it `ADD COLUMN IF NOT EXISTS` the three
+  lineage columns, deterministically removes any null-`campaign_id` legacy row
+  that collides with an id-bearing row for the same fact (the id-bearing
+  identity wins; two distinct ids sharing a name are untouched), and drops/
+  recreates `idx_search_terms_unique_fact` with `campaign_id` included. The
+  writer's `ON CONFLICT` target matches the live index and, going forward,
+  supersedes a null-id twin when an id-bearing row for the same fact is written
+  (no double-count). `docs`-level and PG-backed integration tests
+  (`tests/test_pr_ads_144_pg_integration.py`) prove the upgrade end-to-end.
+- **Daily drawer currency (`/term` → `daily.rows`):** each row carries
+  `source_date`, `cost_micros`, `native_currency`, `spend_native`, `spend_usd`
+  (converted at THAT day's rate, or `null`), `reporting_currency`,
+  `fx_complete`, `currency_status`, `clicks`, `impressions`. A day without a
+  rate shows native only.
 - **Classification:** `is_flagged_waste` true → `flagged` (Flagged waste,
   human-review candidate), false → `clean` (Reviewed clean — never renamed
   "valuable"), NULL → `needs_review`. Platform conversions never change the

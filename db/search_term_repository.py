@@ -205,6 +205,56 @@ def fetch_search_term_aggregates(start: date | None, end: date) -> dict:
         return {"available": False, "rows": []}
 
 
+def fetch_search_term_daily_costs(start: date | None, end: date) -> dict:
+    """Per-(search_term, campaign_name, campaign_id, source_date) native cost
+    for the whole selected window (PR-ADS-144 §2). Read-only.
+
+    Returns the monetary facts at SOURCE-DATE grain so the evidence service can
+    convert each day at its own FX rate (never a window-average rate) and then
+    aggregate the resulting USD up to the term / campaign / pattern / KPI
+    totals. Non-monetary aggregates still come from
+    ``fetch_search_term_aggregates`` — this fetch exists purely to preserve the
+    per-date native amounts that summing across the window would destroy.
+
+    Each row: {search_term, campaign_name, campaign_id, source_date (date),
+    cost_micros, currency_code, source_system}. currency_code / source_system
+    are the DISTINCT sets within that (unit, day) so the service can withhold
+    monetary metrics for mixed/unproven provenance. Never raises.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "rows": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT search_term, campaign_name, campaign_id, source_date,
+                           SUM(cost_micros)::bigint AS cost_micros,
+                           ARRAY_AGG(DISTINCT currency_code)
+                               FILTER (WHERE currency_code IS NOT NULL)
+                               AS currency_codes,
+                           ARRAY_AGG(DISTINCT source_system)
+                               FILTER (WHERE source_system IS NOT NULL)
+                               AS source_systems
+                    FROM search_terms
+                    WHERE (%s::date IS NULL OR source_date >= %s)
+                      AND source_date <= %s
+                    GROUP BY search_term, campaign_name, campaign_id, source_date
+                    """,
+                    (start, start, end),
+                )
+                rows = _rows_as_dicts(cur)
+            for row in rows:
+                row["cost_micros"] = (
+                    int(row["cost_micros"]) if row["cost_micros"] is not None else None)
+                row["currency_codes"] = sorted(row.get("currency_codes") or [])
+                row["source_systems"] = sorted(row.get("source_systems") or [])
+            return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_search_term_daily_costs failed: %s", exc)
+        return {"available": False, "rows": []}
+
+
 def fetch_search_term_daily_for_campaign(
     start: date | None, end: date, search_term: str,
     campaign_id: str | None = None,
@@ -253,6 +303,12 @@ def fetch_search_term_daily_for_campaign(
                     SELECT source_date,
                            SUM(spend_usd)           AS spend_usd,
                            SUM(cost_micros)::bigint  AS cost_micros,
+                           ARRAY_AGG(DISTINCT currency_code)
+                               FILTER (WHERE currency_code IS NOT NULL)
+                               AS currency_codes,
+                           ARRAY_AGG(DISTINCT source_system)
+                               FILTER (WHERE source_system IS NOT NULL)
+                               AS source_systems,
                            SUM(clicks)::bigint      AS clicks,
                            SUM(impressions)::bigint AS impressions,
                            SUM(conversions)         AS conversions
@@ -272,6 +328,8 @@ def fetch_search_term_daily_for_campaign(
                     float(row["spend_usd"]) if row["spend_usd"] is not None else None)
                 row["cost_micros"] = (
                     int(row["cost_micros"]) if row["cost_micros"] is not None else None)
+                row["currency_codes"] = sorted(row.get("currency_codes") or [])
+                row["source_systems"] = sorted(row.get("source_systems") or [])
                 row["conversions"] = (
                     float(row["conversions"]) if row["conversions"] is not None else None)
                 row["clicks"] = int(row["clicks"] or 0)

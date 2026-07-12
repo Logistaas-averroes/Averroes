@@ -131,7 +131,27 @@ def _identity(mappings=None, *, available=True):
     return {"available": available, "mappings": mappings or []}
 
 
-def _patch(monkeypatch, agg, spend=None, identity=None, daily=None, cls=None):
+def _daily_costs_from_agg(agg, end):
+    """Synthesize per-source-date native cost rows from an aggregate fixture —
+    one row per group on the window-end date, carrying the group's cost_micros
+    and provenance. Mirrors fetch_search_term_daily_costs so per-date FX
+    conversion has the native amounts it needs."""
+    rows = []
+    for g in (agg.get("rows") or []):
+        rows.append({
+            "search_term": g["search_term"],
+            "campaign_name": g.get("campaign_name"),
+            "campaign_id": g.get("campaign_id"),
+            "source_date": end,
+            "cost_micros": g.get("cost_micros"),
+            "currency_codes": list(g.get("currency_codes") or []),
+            "source_systems": list(g.get("source_systems") or []),
+        })
+    return rows
+
+
+def _patch(monkeypatch, agg, spend=None, identity=None, daily=None, cls=None,
+           daily_costs=None):
     import db.revenue_repository as revenue_repo
     import db.search_term_repository as st_repo
     calls = {}
@@ -139,6 +159,12 @@ def _patch(monkeypatch, agg, spend=None, identity=None, daily=None, cls=None):
     def _fa(start, end):
         calls["agg"] = (start, end)
         return agg
+
+    def _fdc(start, end):
+        calls["daily_costs"] = (start, end)
+        rows = (daily_costs if daily_costs is not None
+                else _daily_costs_from_agg(agg, end))
+        return {"available": True, "rows": rows}
 
     def _fs(start, end):
         calls["spend"] = (start, end)
@@ -182,6 +208,7 @@ def _patch(monkeypatch, agg, spend=None, identity=None, daily=None, cls=None):
         return {"available": True, "rates": rates}
 
     monkeypatch.setattr(st_repo, "fetch_search_term_aggregates", _fa)
+    monkeypatch.setattr(st_repo, "fetch_search_term_daily_costs", _fdc)
     monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend", _fs)
     monkeypatch.setattr(revenue_repo, "fetch_campaign_identity", _fi)
     monkeypatch.setattr(st_repo, "fetch_search_term_daily", _fd)
@@ -485,6 +512,50 @@ def test_coverage_card_hidden_when_filters_active():
     # filtered KPIs as if it narrowed with them (Copilot review, PR #144).
     kpi_fn = _region(ST_MODULE, "function renderTermsKPIs", "function stCampaignOptions")
     assert "!stHasActiveFilters()" in kpi_fn
+
+
+def test_coverage_numerator_is_fx_converted_not_legacy_raw():
+    # The service's coverage numerator comes from _window_reported_usd (sum of
+    # per-date FX-converted unit USD), NEVER source.spend_usd_total.
+    assert "_window_reported_usd(pop)" in SERVICE
+    win_fn = _region(SERVICE, "def _window_reported_usd",
+                     "def _coverage_block")
+    assert "spend_usd" in win_fn                 # sums unit FX-converted USD
+    assert "spend_usd_total" not in win_fn       # never the legacy raw column
+
+
+def test_coverage_withheld_when_a_unit_usd_is_withheld(monkeypatch):
+    # A window where any unit's USD is withheld (missing FX) has no safe
+    # numerator → coverage Unavailable even with canonical present.
+    agg = _agg([_g("x", "gulf", "2", spend=10.0,
+                   currency_code="GBP", source_system="google_ads_api")])
+    # Provide daily costs on a date the FX map will NOT cover.
+    daily_costs = [{"search_term": "x", "campaign_name": "gulf",
+                    "campaign_id": "2", "source_date": date(2020, 1, 1),
+                    "cost_micros": 10_000_000, "currency_codes": ["GBP"],
+                    "source_systems": ["google_ads_api"]}]
+    _patch(monkeypatch, agg, identity=_default_identity(), daily_costs=daily_costs)
+    out = _build("30d")
+    assert out["rows"][0]["spend_usd"] is None
+    assert out["rows"][0]["fx_complete"] is False
+    assert out["kpis"]["coverage"]["status"] == "unavailable"
+
+
+def test_daily_drawer_renders_native_and_usd_columns():
+    # PR-ADS-144 §4: the daily table shows Native + USD (per-date), not a single
+    # ambiguous Spend column, and uses the currency-aware cell.
+    drawer = _region(ST_MODULE, "function renderStTermDrawer",
+                     "async function openStPatternDrawer")
+    assert ">Native<" in drawer and ">USD<" in drawer
+    assert "stSpendCell(d)" in drawer            # native cell is currency-aware
+    assert "each day's own FX rate" in drawer.lower() or \
+        "day's own FX rate" in drawer
+
+
+def test_frontend_spend_cell_is_currency_aware():
+    cell = _region(ST_MODULE, "function stSpendCell", "function stUnavailable")
+    assert "spend_usd" in cell and "spend_native" in cell
+    assert "native_currency" in cell             # native shown when USD withheld
 
 
 def test_last_resort_fallbacks_match_endpoint_shapes():
@@ -1069,6 +1140,8 @@ def test_currency_lineage_end_to_end(monkeypatch):
     import db.search_term_repository as st_repo
     from services.search_term_evidence_service import build_search_term_evidence
 
+    from datetime import timedelta
+
     # A single search-term row: £100 native (GBP)
     agg = _agg([
         _g("freight software", "brand - uk", "1", spend=100.0, clicks=5,
@@ -1084,18 +1157,26 @@ def test_currency_lineage_end_to_end(monkeypatch):
         return spend
     def _fi(customer_id=None):
         return _identity()
-    # FX coverage complete, rate GBP→USD = 1.26
-    def _fx_cov(start, end, base, quote):
-        return {"available": True, "complete": True, "spend_days": 2,
-                "covered_days": 2, "missing_dates": []}
+    # Per-source-date native cost — the £100 lands on the window-end date so it
+    # aligns with the FX rate provided below.
+    def _fdc(start, end):
+        return {"available": True, "rows": [{
+            "search_term": "freight software", "campaign_name": "brand - uk",
+            "campaign_id": "1", "source_date": end, "cost_micros": 100_000_000,
+            "currency_codes": ["GBP"], "source_systems": ["google_ads_api"]}]}
+    # FX rate GBP→USD = 1.26 for every date in the window.
     def _fx_rates(start, end, base, quote):
-        return {"available": True, "rates": {
-            "2026-07-01": 1.26, "2026-07-02": 1.26}}
+        rates = {}
+        d = start or end
+        while d <= end:
+            rates[d.isoformat()] = 1.26
+            d += timedelta(days=1)
+        return {"available": True, "rates": rates}
 
     monkeypatch.setattr(st_repo, "fetch_search_term_aggregates", _fa)
+    monkeypatch.setattr(st_repo, "fetch_search_term_daily_costs", _fdc)
     monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend", _fs)
     monkeypatch.setattr(revenue_repo, "fetch_campaign_identity", _fi)
-    monkeypatch.setattr(revenue_repo, "fetch_fx_coverage", _fx_cov)
     monkeypatch.setattr(revenue_repo, "fetch_fx_rates", _fx_rates)
 
     out = build_search_term_evidence("30d")
