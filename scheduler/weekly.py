@@ -171,35 +171,15 @@ def run_weekly_report():
                         ),
                     )
 
-                # PR-ADS-146: also persist DURABLE keyword daily facts (source_date
-                # grain, natural-key upsert) that back the Keyword Evidence page.
-                # The legacy snapshot write above is untouched for audit parity.
-                kdf_batch_id = db_writers.start_sync_batch(
-                    source="google_ads_api",
-                    dataset="keyword_facts",
-                    sync_type="weekly",
-                    date_from=run_date - timedelta(days=30),
-                    date_to=run_date,
-                    run_id=run_id,
-                )
-                kdf = db_writers.write_keyword_daily_facts(
-                    run_id=run_id, keyword_rows=keywords, sync_batch_id=kdf_batch_id or None)
+                # PR-ADS-146A: durable keyword facts via the ONE shared sync path
+                # (the same sync_keyword_daily_facts used by daily / weekly /
+                # monthly, the admin refresh action and the bootstrap — no
+                # competing keyword-fact persistence implementations). It creates +
+                # finishes its own keyword_facts sync batch and updates sync_state.
+                from services.keyword_sync_service import sync_keyword_daily_facts  # noqa: PLC0415
+                kdf = sync_keyword_daily_facts(
+                    run_date - timedelta(days=29), run_date, "weekly", run_id=run_id)
                 log.info("[weekly] Durable keyword facts: %s", kdf)
-                if kdf_batch_id:
-                    # A partial persistence (rows skipped for missing identity, or
-                    # fetched-but-not-written) must NOT report full success.
-                    skipped = kdf["skipped_missing_identity"] + kdf["skipped_no_date"]
-                    kdf_ok = (not kdf["db_unavailable"] and skipped == 0
-                              and kdf["written"] == kdf["prepared"])
-                    db_writers.finish_sync_batch(
-                        batch_id=kdf_batch_id,
-                        status="success" if kdf_ok else "failed",
-                        row_count=kdf["written"],
-                        last_source_date=max_source_date(keywords, fallback_date=run_date),
-                        error_message=None if kdf_ok else (
-                            f"keyword-fact persistence partial: {kdf}"
-                        ),
-                    )
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write keywords failed: %s", db_exc)
 

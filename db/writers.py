@@ -1048,7 +1048,10 @@ def write_keyword_daily_facts(
 
 # Allowed values — used for normalisation/validation; not hard-fail guards so
 # that new sources/datasets can be added to the system without a code deploy.
-VALID_SYNC_SOURCES   = {"windsor", "hubspot", "gclid"}
+# ``google_ads_api`` is the active Platform Evidence source (PR-ADS-104 cutover:
+# campaigns / search_terms / geo / keyword_facts); it must be recognised so
+# start_sync_batch never logs a false "unknown source 'google_ads_api'".
+VALID_SYNC_SOURCES   = {"windsor", "google_ads_api", "hubspot", "gclid"}
 VALID_SYNC_DATASETS  = {"campaigns", "keywords", "keyword_facts", "search_terms",
                         "geo", "contacts", "deals", "matches"}
 VALID_SYNC_TYPES     = {"backfill", "daily", "weekly", "monthly", "manual"}
@@ -1764,6 +1767,226 @@ def get_latest_recovery_job(job_type: Optional[str] = None) -> Optional[dict]:
                 return _recovery_job_row_to_dict(cols, row)
     except Exception as exc:  # noqa: BLE001
         log.error("get_latest_recovery_job failed: %s", exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Durable job lease (PR-ADS-146A) — atomic cross-process claim + heartbeat so
+# only one worker owns a resumable job (keyword_bootstrap), and a stale lease
+# from a crashed worker can be recovered. The partial unique index
+# uq_recovery_running_keyword_bootstrap makes the claim atomic across processes.
+# ---------------------------------------------------------------------------
+
+# Sentinel dict returned when the DB is unavailable, so callers can distinguish
+# "couldn't reach the durable checkpoint" (fail closed) from "someone else owns it".
+_LEASE_DB_UNAVAILABLE = {"claimed": False, "reason": "db_unavailable", "job": None}
+
+
+def acquire_recovery_lease(
+    job_type: str,
+    lease_token: str,
+    ttl_seconds: int,
+    *,
+    date_from,
+    date_to,
+    chunk_months: int = 1,
+    seed_completed_chunks: Optional[list] = None,
+    stale_takeover: bool = True,
+) -> dict:
+    """Atomically claim (or take over a stale) durable job for ``job_type``.
+
+    In one transaction: lock the latest job row FOR UPDATE, then decide:
+      - a RUNNING job with a live lease  -> not claimed (reason=active_lease);
+      - a RUNNING job with an EXPIRED lease -> take it over (recover stale);
+      - a resumable non-success job      -> take it over (reuse completed_chunks);
+      - otherwise                        -> insert a fresh running job.
+    The insert relies on the partial unique index to break a cold-start race.
+
+    Returns ``{claimed: bool, reason: str, job: dict|None}``. Never raises.
+    """
+    from psycopg2 import errors as _pg_errors  # noqa: PLC0415
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return dict(_LEASE_DB_UNAVAILABLE)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM revenue_recovery_jobs WHERE job_type = %s "
+                    "ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+                    (job_type,),
+                )
+                row = cur.fetchone()
+                latest = _recovery_job_row_to_dict([d[0] for d in cur.description], row) if row else None
+
+                if latest and latest.get("status") == "running":
+                    # Live lease? Not claimable. Expired? fall through to take over.
+                    cur.execute(
+                        "SELECT (lease_expires_at IS NOT NULL AND lease_expires_at > NOW()) "
+                        "FROM revenue_recovery_jobs WHERE job_id = %s",
+                        (latest["job_id"],),
+                    )
+                    live = cur.fetchone()[0]
+                    if live:
+                        return {"claimed": False, "reason": "active_lease", "job": latest}
+                    if not stale_takeover:
+                        return {"claimed": False, "reason": "stale_no_takeover", "job": latest}
+
+                take_over = latest is not None and latest.get("status") in (
+                    "running", "partial", "failed", "queued")
+                if take_over:
+                    cur.execute(
+                        """
+                        UPDATE revenue_recovery_jobs
+                        SET status='running', lease_token=%s,
+                            heartbeat_at=NOW(),
+                            lease_expires_at=NOW() + make_interval(secs => %s),
+                            last_progress_at=NOW(),
+                            started_at=COALESCE(started_at, NOW()),
+                            date_from=%s, date_to=%s,
+                            updated_at=NOW()
+                        WHERE id=%s
+                        RETURNING *
+                        """,
+                        (lease_token, int(ttl_seconds), date_from, date_to, latest["id"]),
+                    )
+                    updated = _recovery_job_row_to_dict([d[0] for d in cur.description], cur.fetchone())
+                    return {"claimed": True, "reason": "resumed", "job": updated}
+
+                # Fresh job — seed completed chunks (e.g. from a prior success that
+                # no longer covers a newly-closed month) so we never re-sync them.
+                new_job_id = f"kwbs_{date_to}_{lease_token[:8]}"
+                seed = json.dumps(list(seed_completed_chunks or []))
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO revenue_recovery_jobs (
+                            job_id, job_type, status, dry_run, date_from, date_to,
+                            chunk_months, completed_chunks, errors,
+                            lease_token, heartbeat_at, lease_expires_at,
+                            last_progress_at, started_at
+                        ) VALUES (%s, %s, 'running', FALSE, %s, %s, %s,
+                                  %s::jsonb, '[]'::jsonb,
+                                  %s, NOW(), NOW() + make_interval(secs => %s), NOW(), NOW())
+                        RETURNING *
+                        """,
+                        (new_job_id, job_type, date_from, date_to, int(chunk_months),
+                         seed, lease_token, int(ttl_seconds)),
+                    )
+                    created = _recovery_job_row_to_dict([d[0] for d in cur.description], cur.fetchone())
+                    return {"claimed": True, "reason": "created", "job": created}
+                except _pg_errors.UniqueViolation:
+                    # Lost the cold-start race — another worker inserted first.
+                    conn.rollback()
+                    return {"claimed": False, "reason": "active_lease", "job": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("acquire_recovery_lease failed (job_type=%s): %s", job_type, exc)
+        return dict(_LEASE_DB_UNAVAILABLE)
+
+
+def renew_recovery_lease(
+    job_id: str,
+    lease_token: str,
+    ttl_seconds: int,
+    *,
+    completed_chunks: Optional[list] = None,
+    current_chunk: Optional[str] = None,
+    errors: Optional[list] = None,
+) -> bool:
+    """Heartbeat + checkpoint. Advances the lease and (optionally) persists the
+    completed-chunk ledger. Returns True only when THIS worker still owns the
+    lease (job_id + lease_token match). False => lease lost / DB unavailable, and
+    the caller must fail closed rather than continue a non-durable bootstrap."""
+    sets = ["heartbeat_at = NOW()",
+            "last_progress_at = NOW()",
+            "lease_expires_at = NOW() + make_interval(secs => %s)",
+            "updated_at = NOW()"]
+    values: list = [int(ttl_seconds)]
+    if completed_chunks is not None:
+        sets.append("completed_chunks = %s::jsonb")
+        values.append(json.dumps(list(completed_chunks)))
+    if current_chunk is not None:
+        sets.append("current_chunk = %s")
+        values.append(current_chunk)
+    if errors is not None:
+        sets.append("errors = %s::jsonb")
+        values.append(json.dumps(list(errors)))
+    values.extend([job_id, lease_token])
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE revenue_recovery_jobs SET {', '.join(sets)} "
+                    "WHERE job_id = %s AND lease_token = %s RETURNING job_id",
+                    tuple(values),
+                )
+                return cur.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001
+        log.error("renew_recovery_lease failed (job_id=%s): %s", job_id, exc)
+        return False
+
+
+def release_recovery_lease(
+    job_id: str,
+    lease_token: str,
+    *,
+    status: str,
+    summary: Optional[dict] = None,
+    completed_chunks: Optional[list] = None,
+    finished_at: Optional[str] = None,
+) -> bool:
+    """Finalise the job, clearing the lease so the next deploy can start fresh.
+    Only the current lease owner may release. Returns True on success."""
+    sets = ["status = %s", "current_chunk = NULL", "lease_expires_at = NULL",
+            "last_progress_at = NOW()", "updated_at = NOW()"]
+    values: list = [status]
+    if summary is not None:
+        sets.append("summary = %s::jsonb")
+        values.append(json.dumps(summary))
+    if completed_chunks is not None:
+        sets.append("completed_chunks = %s::jsonb")
+        values.append(json.dumps(list(completed_chunks)))
+    sets.append("finished_at = %s")
+    values.append(finished_at)
+    values.extend([job_id, lease_token])
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE revenue_recovery_jobs SET {', '.join(sets)} "
+                    "WHERE job_id = %s AND lease_token = %s RETURNING job_id",
+                    tuple(values),
+                )
+                return cur.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001
+        log.error("release_recovery_lease failed (job_id=%s): %s", job_id, exc)
+        return False
+
+
+def latest_successful_batch_source_date(source: str, dataset: str):
+    """MAX(date_to) across SUCCESSFUL sync_batches for (source, dataset) — the
+    furthest date the dataset has been PROVEN synced through, independent of
+    whether any rows exist for the most recent dates (zero-activity days). Used
+    for selected-window coverage proof (PR-ADS-146A §6). None when unavailable."""
+    source = (source or "").strip().lower()
+    dataset = (dataset or "").strip().lower()
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MAX(date_to) FROM sync_batches "
+                    "WHERE source = %s AND dataset = %s AND status = 'success'",
+                    (source, dataset),
+                )
+                row = cur.fetchone()
+                return row[0] if row and row[0] else None
+    except Exception as exc:  # noqa: BLE001
+        log.error("latest_successful_batch_source_date failed: %s", exc)
         return None
 
 

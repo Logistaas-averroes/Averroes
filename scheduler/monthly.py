@@ -200,31 +200,11 @@ def run_monthly_report():
                         ),
                     )
 
-                # PR-ADS-146: durable keyword daily facts (source_date grain).
-                kdf_batch_id = db_writers.start_sync_batch(
-                    source="google_ads_api",
-                    dataset="keyword_facts",
-                    sync_type="monthly",
-                    date_from=run_date - timedelta(days=30),
-                    date_to=run_date,
-                    run_id=run_id,
-                )
-                kdf = db_writers.write_keyword_daily_facts(
-                    run_id=run_id, keyword_rows=keywords, sync_batch_id=kdf_batch_id or None)
+                # PR-ADS-146A: durable keyword facts via the ONE shared sync path.
+                from services.keyword_sync_service import sync_keyword_daily_facts  # noqa: PLC0415
+                kdf = sync_keyword_daily_facts(
+                    run_date - timedelta(days=29), run_date, "monthly", run_id=run_id)
                 log.info("Durable keyword facts (run_id=%s): %s", run_id, kdf)
-                if kdf_batch_id:
-                    skipped = kdf["skipped_missing_identity"] + kdf["skipped_no_date"]
-                    kdf_ok = (not kdf["db_unavailable"] and skipped == 0
-                              and kdf["written"] == kdf["prepared"])
-                    db_writers.finish_sync_batch(
-                        batch_id=kdf_batch_id,
-                        status="success" if kdf_ok else "failed",
-                        row_count=kdf["written"],
-                        last_source_date=max_source_date(keywords, fallback_date=run_date),
-                        error_message=None if kdf_ok else (
-                            f"keyword-fact persistence partial: {kdf}"
-                        ),
-                    )
         except Exception as db_exc:  # noqa: BLE001
             log.error("DB write keywords failed: %s", db_exc)
 

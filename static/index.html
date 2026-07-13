@@ -874,11 +874,18 @@
 
         <!-- Dataset Freshness panel -->
         <div class="panel" id="dataset-freshness-panel" style="margin-top:var(--space-6)">
-          <div class="panel__header" style="display:flex;align-items:center;justify-content:space-between">
+          <div class="panel__header" style="display:flex;align-items:center;justify-content:space-between;gap:var(--space-3)">
             <span>Dataset Freshness</span>
-            <button id="dataset-freshness-refresh-btn" class="btn btn--ghost btn--sm" type="button" aria-label="Refresh dataset freshness">Refresh</button>
+            <div style="display:flex;align-items:center;gap:var(--space-2)">
+              <!-- PR-ADS-146A §5 — admin-only recent keyword-facts refresh. Local
+                   writes only; never mutates Google Ads. Shown only to admins. -->
+              <button id="kw-refresh-btn" class="btn btn--secondary btn--sm" type="button"
+                      aria-label="Refresh keyword data" hidden>Refresh Keyword Data</button>
+              <button id="dataset-freshness-refresh-btn" class="btn btn--ghost btn--sm" type="button" aria-label="Refresh dataset freshness">Refresh</button>
+            </div>
           </div>
           <div class="panel__body">
+            <div id="kw-refresh-feedback" class="run-feedback" hidden></div>
             <div id="dataset-freshness-summary" class="freshness-summary-grid"></div>
             <div class="dataset-freshness-table-wrap">
               <div id="dataset-freshness-table"></div>
