@@ -171,6 +171,7 @@
     "landing_page_experience": "AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 6.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "Broad-match exposure"
@@ -204,6 +205,7 @@
     "landing_page_experience": "AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 3.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "No platform concern detected"
@@ -237,6 +239,7 @@
     "landing_page_experience": "AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 2.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "No platform concern detected"
@@ -270,6 +273,7 @@
     "landing_page_experience": "BELOW_AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 1.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "Broad-match exposure"
@@ -303,6 +307,7 @@
     "landing_page_experience": "AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 2.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "No platform concern detected"
@@ -336,6 +341,7 @@
     "landing_page_experience": "AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 1.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "Broad-match exposure"
@@ -369,6 +375,7 @@
     "landing_page_experience": "AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 1.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "No platform concern detected"
@@ -402,6 +409,7 @@
     "landing_page_experience": "AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": null,
+    "conversion_status": "unavailable",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "Platform conversions unavailable"
@@ -435,6 +443,7 @@
     "landing_page_experience": "AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 1.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "No platform concern detected"
@@ -468,6 +477,7 @@
     "landing_page_experience": "AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 0.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "Broad-match exposure"
@@ -501,6 +511,7 @@
     "landing_page_experience": null,
     "quality_observed_date": null,
     "platform_conversions": 0.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "Broad-match exposure"
@@ -534,6 +545,7 @@
     "landing_page_experience": "ABOVE_AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 0.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "Spend without platform conversion"
@@ -567,6 +579,7 @@
     "landing_page_experience": "AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 1.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "Currency unavailable"
@@ -600,6 +613,7 @@
     "landing_page_experience": null,
     "quality_observed_date": null,
     "platform_conversions": 0.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-09",
     "review_signal": "Currency unavailable"
@@ -633,6 +647,7 @@
     "landing_page_experience": null,
     "quality_observed_date": null,
     "platform_conversions": 0.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-09",
     "review_signal": "Currency unavailable"
@@ -706,7 +721,7 @@
    "source_table": "keyword_daily_facts",
    "legacy_source_table": "keywords",
    "date_field": "source_date",
-   "natural_key": "source_date + COALESCE(customer_id,'') + COALESCE(campaign_id,'') + COALESCE(ad_group_id,'') + COALESCE(criterion_id,'') (UNIQUE index idx_keyword_daily_facts_unique; writer upserts ON CONFLICT)",
+   "natural_key": "source_date + customer_id + campaign_id + ad_group_id + criterion_id (UNIQUE index idx_keyword_daily_facts_unique; writer upserts ON CONFLICT; all identity columns NOT NULL)",
    "window_start": "2026-06-14",
    "window_end": "2026-07-13",
    "all_time": false,
@@ -718,6 +733,13 @@
    "legacy_unverified_count": 2,
    "campaign_identity_status": "available",
    "quality_semantics": "Latest-observed Google Ads quality diagnostics per keyword criterion \u2014 never a selected-window average; NULL = unavailable, distinct from 0.",
+   "conversion_evidence": {
+    "complete_criteria": 14,
+    "partial_criteria": 0,
+    "unavailable_criteria": 1,
+    "status": "partial",
+    "semantics": "Platform conversions are counted only where every source-date fact reported one; a criterion with any NULL day is partial (never a confirmed zero); zero conversions is never waste."
+   },
    "keyword_coverage_status": "partial",
    "pagination_complete": true,
    "reconciliation_status": {
@@ -776,6 +798,7 @@
     "landing_page_experience": "AVERAGE",
     "quality_observed_date": "2026-07-13T05:30:00Z",
     "platform_conversions": 6.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "Broad-match exposure"
@@ -937,6 +960,7 @@
     "landing_page_experience": null,
     "quality_observed_date": null,
     "platform_conversions": 0.0,
+    "conversion_status": "complete",
     "first_seen": "2026-06-14",
     "last_seen": "2026-07-12",
     "review_signal": "Broad-match exposure"

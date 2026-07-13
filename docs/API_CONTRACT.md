@@ -1910,12 +1910,21 @@ small-sample guard, quality bands) — never hardcoded. Zero platform conversion
 is never treated as confirmed waste.
 
 **Truth-completion guarantees (PR-ADS-146 §1–§6):**
-- **Unknown conversions ≠ 0.** `platform_conversions` is `null` when the value
-  is unavailable (never a fabricated 0) in the row, drawer, KPI, CSV and
-  match-type summary; the match-type summary sums only known values, returns
-  `null` when all members are unavailable and sets `conversions_partial: true`
-  when some are. `Spend without platform conversion` fires ONLY for a verified
-  zero; unavailable spend/conversions surface `Platform conversions unavailable`.
+- **Unknown conversions ≠ 0, tracked per criterion.** Conversion evidence is
+  classified per criterion from its durable fact rows — `complete` (every
+  source-date reported a count), `partial` (some reported, some NULL — never a
+  confirmed zero), `unavailable` (none reported). Each row/drawer exposes
+  `conversion_status` and a `platform_conversions` that is `null` when
+  unavailable and the **known** total otherwise (a NULL day is never summed as
+  0). `Spend without platform conversion` fires ONLY when `conversion_status ==
+  complete` **and** the known total is exactly 0; `partial`/`unavailable`
+  surface `Platform conversions unavailable`. The match-type summary sums only
+  known totals, returns `null` when all members are unavailable, and sets
+  `conversions_partial: true` when some members are partial/unavailable. The
+  `audit.conversion_evidence` block rolls up complete/partial/unavailable
+  criteria counts. `fetch_keyword_aggregates` returns
+  `known_conversion_fact_rows` / `missing_conversion_fact_rows` /
+  `conversions_known_total` per criterion.
 - **Fail closed on identity.** The durable table's immutable id columns
   (`customer_id`, `campaign_id`, `ad_group_id`, `criterion_id`) are `NOT NULL`;
   the writer skips + counts rows missing any of them (`skipped_missing_identity`)

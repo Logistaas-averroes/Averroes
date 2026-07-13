@@ -225,7 +225,10 @@ def normalize_keyword_row(row: dict) -> dict:
         "spend": spend,
         "clicks": clicks,
         "impressions": row.get("impressions", 0) or 0,
-        "conversions": row.get("conversions", 0.0) or 0.0,
+        # Nullable passthrough (PR-ADS-146 §1): None stays None (platform
+        # conversion evidence unavailable), a genuine 0 stays 0, positive
+        # unchanged — never coerced with `or 0.0`.
+        "conversions": row.get("conversions"),
         "cpc": safe_divide(spend, clicks),
         "quality_score": row.get("quality_score"),
         "quality_available": row.get("quality_available", False),

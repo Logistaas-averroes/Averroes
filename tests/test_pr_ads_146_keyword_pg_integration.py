@@ -311,3 +311,55 @@ def test_service_end_to_end_currency_truth(monkeypatch, pg):
     assert audit["summary"]["durable_criteria"] == 2
     assert audit["summary"]["rows_unverified_currency"] == 1
     assert audit["summary"]["duplicate_key_groups"] == 0
+
+
+# ── §2 conversion completeness: a 0 day + a NULL day is PARTIAL, not zero ──────
+def test_mixed_conversion_days_are_partial_not_confirmed_zero(monkeypatch, pg):
+    connection = _use_cluster(monkeypatch, pg)
+    import db.writers as writers
+    import db.keyword_repository as kr
+    writers.write_keyword_daily_facts(None, [
+        _kwrow(date="2026-07-01", criterion_id="1001", conversions=0.0, cost_micros=1_000_000),
+        _kwrow(date="2026-07-02", criterion_id="1001", conversions=None, cost_micros=1_000_000),
+    ])
+    agg = kr.fetch_keyword_aggregates(date(2026, 7, 1), date(2026, 7, 2))
+    row = agg["rows"][0]
+    assert row["known_conversion_fact_rows"] == 1     # only the 0 day is known
+    assert row["missing_conversion_fact_rows"] == 1   # the NULL day is missing
+    assert row["conversions_known_total"] == 0.0      # sum of known (the 0), not 2 rows
+
+    # The service must classify this PARTIAL — never a confirmed zero-conversion.
+    import db.revenue_repository as rr
+
+    def _fx(s, e, b, q):
+        return {"available": True, "rates": {date(2026, 7, 1): 1.25, date(2026, 7, 2): 1.25}}
+
+    with patch.object(rr, "fetch_fx_rates", _fx), \
+         patch.object(rr, "fetch_canonical_campaign_spend",
+                      lambda s, e: {"available": True, "customer_id": "C1",
+                                    "total_spend_usd": 100.0, "fx_complete": True,
+                                    "rows": [{"campaign_id": "10", "campaign_name": "Brand - UK"}]}), \
+         patch.object(rr, "fetch_campaign_identity",
+                      lambda customer_id=None: {"available": True, "mappings": []}):
+        from services.keyword_evidence_service import build_keyword_evidence
+        out = build_keyword_evidence("30d", now=datetime(2026, 7, 13, tzinfo=timezone.utc))
+    r = out["rows"][0]
+    assert r["conversion_status"] == "partial"
+    assert r["review_signal"] != "Spend without platform conversion"
+
+
+def test_conversions_null_end_to_end_adapter_to_writer(monkeypatch, pg):
+    # §1: a connector row with conversions=None → adapter None → writer stores NULL.
+    connection = _use_cluster(monkeypatch, pg)
+    from connectors.google_ads_source import normalize_keyword_row
+    import db.writers as writers
+    adapted = normalize_keyword_row({
+        "date": "2026-07-12", "customer_id": "C1", "campaign_id": "10",
+        "ad_group_id": "100", "criterion_id": "1001", "keyword_text": "kw",
+        "keyword_match_type": "BROAD", "cost_micros": 1_000_000, "currency_code": "GBP",
+        "conversions": None})
+    assert adapted["conversions"] is None
+    writers.write_keyword_daily_facts(None, [adapted])
+    (stored,) = _count(connection,
+        "SELECT conversions FROM keyword_daily_facts WHERE criterion_id='1001'")
+    assert stored is None      # NULL preserved end to end

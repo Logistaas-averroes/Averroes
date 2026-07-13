@@ -8,11 +8,12 @@ business totals, and overlapping scheduler snapshots must never be SUM'd.
 
 Natural-key / duplication contract:
   The table enforces a UNIQUE index ``idx_keyword_daily_facts_unique`` on
-  (source_date, COALESCE(customer_id,''), COALESCE(campaign_id,''),
-   COALESCE(ad_group_id,''), COALESCE(criterion_id,'')) and the writer
-  (``db.writers.write_keyword_daily_facts``) upserts ON CONFLICT on that same
-  key. The key is immutable Google Ads identity — a repeated scheduler pull for
-  the same fact UPDATES the row in place, so summing rows inside a window never
+  (source_date, customer_id, campaign_id, ad_group_id, criterion_id) and the
+  writer (``db.writers.write_keyword_daily_facts``) upserts ON CONFLICT on that
+  same key. All identity columns are NOT NULL — there is NO empty-string
+  fallback; a row missing any id is rejected at the writer and by the DB. The
+  key is immutable Google Ads identity — a repeated scheduler pull for the same
+  fact UPDATES the row in place, so summing rows inside a window never
   multiplies the same fact, and two campaigns / ad groups / criteria sharing a
   display name stay separate.
 
@@ -46,10 +47,12 @@ from db.connection import get_conn
 logger = logging.getLogger(__name__)
 
 # The documented durable natural key (disclosed verbatim by the audit layer).
+# The immutable identity columns are NOT NULL, so there is NO empty-string
+# fallback — a row missing any id is rejected at the writer and by the DB.
 KEYWORD_DAILY_FACTS_NATURAL_KEY = (
-    "source_date + COALESCE(customer_id,'') + COALESCE(campaign_id,'') + "
-    "COALESCE(ad_group_id,'') + COALESCE(criterion_id,'') "
-    "(UNIQUE index idx_keyword_daily_facts_unique; writer upserts ON CONFLICT)"
+    "source_date + customer_id + campaign_id + ad_group_id + criterion_id "
+    "(UNIQUE index idx_keyword_daily_facts_unique; writer upserts ON CONFLICT; "
+    "all identity columns NOT NULL)"
 )
 
 # Selected-window predicate: NULL start = all_time (no lower bound); source_date
@@ -80,7 +83,14 @@ def fetch_keyword_aggregates(start: date | None, end: date) -> dict:
           SUM(cost_micros)::bigint            AS cost_micros,
           SUM(clicks)::bigint                 AS clicks,
           SUM(impressions)::bigint            AS impressions,
-          SUM(conversions)::numeric           AS conversions,
+          -- Conversion COMPLETENESS per criterion (PR-ADS-146 §2): a SUM alone
+          -- hides NULLs, so a criterion with a 0 day + a NULL day would look
+          -- like a verified 0. Track known vs missing fact rows so the service
+          -- can classify complete / partial / unavailable and never mistake a
+          -- partial for a confirmed zero-conversion.
+          COUNT(*) FILTER (WHERE conversions IS NOT NULL)::int AS known_conversion_fact_rows,
+          COUNT(*) FILTER (WHERE conversions IS NULL)::int     AS missing_conversion_fact_rows,
+          SUM(conversions)::numeric           AS conversions_known_total,
           MIN(source_date)                    AS first_seen,
           MAX(source_date)                    AS last_seen,
           COUNT(*)::int                       AS fact_rows,
@@ -143,8 +153,12 @@ def fetch_keyword_aggregates(start: date | None, end: date) -> dict:
     for r in rows:
         r["currency_codes"] = list(r.get("currency_codes") or [])
         r["source_systems"] = list(r.get("source_systems") or [])
-        if r.get("conversions") is not None:
-            r["conversions"] = float(r["conversions"])
+        # conversions_known_total is the SUM of the KNOWN conversion days only
+        # (NULL is unavailable, never counted as 0). None when every day is NULL.
+        if r.get("known_conversion_fact_rows"):
+            r["conversions_known_total"] = float(r.get("conversions_known_total") or 0)
+        else:
+            r["conversions_known_total"] = None
         if r.get("quality_score") is not None:
             r["quality_score"] = int(r["quality_score"])
     if source:
@@ -281,8 +295,7 @@ def fetch_keyword_legacy_audit() -> dict:
         SELECT COUNT(*)::int AS duplicate_key_groups FROM (
             SELECT 1
             FROM keyword_daily_facts
-            GROUP BY source_date, COALESCE(customer_id,''), COALESCE(campaign_id,''),
-                     COALESCE(ad_group_id,''), COALESCE(criterion_id,'')
+            GROUP BY source_date, customer_id, campaign_id, ad_group_id, criterion_id
             HAVING COUNT(*) > 1
         ) d
     """

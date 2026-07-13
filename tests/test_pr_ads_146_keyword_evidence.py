@@ -59,7 +59,7 @@ def _source(rows):
             "cost_micros_total": sum(r["cost_micros"] or 0 for r in rows),
             "clicks_total": sum(r["clicks"] for r in rows),
             "impressions_total": sum(r["impressions"] for r in rows),
-            "conversions_total": sum(r["conversions"] or 0 for r in rows),
+            "conversions_total": sum((r.get("conversions") or 0) for r in rows),
             "distinct_source_dates": 12,
             "min_source_date": date(2026, 7, 1), "max_source_date": date(2026, 7, 12),
             "currency_codes": ["GBP"], "source_systems": ["google_ads_api"]}
@@ -567,3 +567,80 @@ def test_conversions_column_nullable_no_default_zero():
                 "criterion_id             TEXT NOT NULL"):
         assert col in SCHEMA
     assert "quality_observed_at      TIMESTAMPTZ" in SCHEMA
+
+
+# ════════════════ PR-ADS-146 conversion-completeness correction ════════════════
+def _kc(keyword, cid, crit, gbp, *, match="EXACT", known=1, missing=0, known_total=0.0, **kw):
+    """Aggregate row carrying per-criterion conversion completeness counts."""
+    r = _k(keyword, "Brand - UK", cid, crit, gbp, match=match, **kw)
+    r.pop("conversions", None)
+    r["known_conversion_fact_rows"] = known
+    r["missing_conversion_fact_rows"] = missing
+    r["conversions_known_total"] = known_total
+    return r
+
+
+def test_partial_conversion_not_confirmed_zero(monkeypatch):
+    # A criterion with a 0 day AND a NULL day is PARTIAL — never "Spend without
+    # platform conversion" (which requires COMPLETE evidence + exactly 0).
+    rows = [_kc("mixed", "1", "1001", 50.0, clicks=40, known=1, missing=1, known_total=0.0, qs=9)]
+    _patch(monkeypatch, rows)
+    r = _row(_build(), "mixed")
+    assert r["conversion_status"] == "partial"
+    assert r["review_signal"] == "Platform conversions unavailable"
+    assert r["review_signal"] != "Spend without platform conversion"
+
+
+def test_complete_zero_conversions_is_spend_without_conversion(monkeypatch):
+    rows = [_kc("zero", "1", "1001", 50.0, clicks=40, known=3, missing=0, known_total=0.0, qs=9)]
+    _patch(monkeypatch, rows)
+    r = _row(_build(), "zero")
+    assert r["conversion_status"] == "complete"
+    assert r["review_signal"] == "Spend without platform conversion"
+
+
+def test_all_null_conversions_unavailable(monkeypatch):
+    rows = [_kc("none", "1", "1001", 50.0, clicks=40, known=0, missing=3, known_total=None, qs=9)]
+    _patch(monkeypatch, rows)
+    r = _row(_build(), "none")
+    assert r["conversion_status"] == "unavailable"
+    assert r["platform_conversions"] is None
+    assert r["review_signal"] == "Platform conversions unavailable"
+
+
+def test_audit_reports_conversion_evidence(monkeypatch):
+    rows = [_kc("a", "1", "1001", 10.0, known=2, missing=0, known_total=2.0),
+            _kc("b", "1", "1002", 10.0, known=1, missing=1, known_total=0.0),
+            _kc("c", "1", "1003", 10.0, known=0, missing=2, known_total=None)]
+    _patch(monkeypatch, rows)
+    ce = _build()["audit"]["conversion_evidence"]
+    assert ce["complete_criteria"] == 1
+    assert ce["partial_criteria"] == 1
+    assert ce["unavailable_criteria"] == 1
+    assert ce["status"] == "partial"
+
+
+def test_match_type_conversion_partial_disclosed(monkeypatch):
+    rows = [_kc("k1", "1", "1001", 10.0, match="BROAD", known=1, missing=0, known_total=2.0),
+            _kc("k2", "1", "1002", 10.0, match="BROAD", known=0, missing=1, known_total=None)]
+    _patch(monkeypatch, rows)
+    b = {x["match_type"]: x for x in _build()["match_type_summary"]["buckets"]}["BROAD"]
+    assert b["platform_conversions"] == 2.0          # known only, not fabricated
+    assert b["conversions_partial"] is True
+
+
+def test_adapter_conversions_nullable_passthrough():
+    from connectors.google_ads_source import normalize_keyword_row
+    assert normalize_keyword_row({"conversions": None})["conversions"] is None
+    assert normalize_keyword_row({"conversions": 0})["conversions"] == 0
+    assert normalize_keyword_row({"conversions": 4.0})["conversions"] == 4.0
+    assert normalize_keyword_row({})["conversions"] is None       # absent → None
+
+
+def test_natural_key_doc_has_no_coalesce():
+    from db.keyword_repository import KEYWORD_DAILY_FACTS_NATURAL_KEY
+    assert KEYWORD_DAILY_FACTS_NATURAL_KEY == (
+        "source_date + customer_id + campaign_id + ad_group_id + criterion_id "
+        "(UNIQUE index idx_keyword_daily_facts_unique; writer upserts ON CONFLICT; "
+        "all identity columns NOT NULL)")
+    assert "COALESCE" not in KEYWORD_DAILY_FACTS_NATURAL_KEY

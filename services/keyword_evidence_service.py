@@ -176,6 +176,36 @@ def _quality_band(quality_score, th: dict) -> str:
     return "weak"
 
 
+# Conversion completeness statuses (PR-ADS-146 §2).
+CONV_COMPLETE = "complete"
+CONV_PARTIAL = "partial"
+CONV_UNAVAILABLE = "unavailable"
+
+
+def _conversion_evidence(unit: dict) -> tuple:
+    """Classify a criterion's platform-conversion evidence and known total.
+
+    Returns ``(status, known_total)`` where status is complete (every fact row
+    reported a conversion count), partial (some rows reported, some are NULL —
+    NEVER a confirmed zero), or unavailable (no row reported one → total None).
+    A raw ``conversions`` value is honoured for simple/mocked rows that predate
+    the completeness columns."""
+    known = unit.get("known_conversion_fact_rows")
+    if known is not None:
+        missing = unit.get("missing_conversion_fact_rows") or 0
+        total = unit.get("conversions_known_total")
+        if known == 0:
+            return CONV_UNAVAILABLE, None
+        if missing > 0:
+            return CONV_PARTIAL, (float(total) if total is not None else 0.0)
+        return CONV_COMPLETE, (float(total) if total is not None else 0.0)
+    # Fallback: a single scalar conversions value (mocked/simple rows).
+    conv = unit.get("conversions")
+    if conv is None:
+        return CONV_UNAVAILABLE, None
+    return CONV_COMPLETE, float(conv)
+
+
 # ── Population build ─────────────────────────────────────────────────────────
 def _build_population(start: date | None, end: date) -> dict:
     """Fetch + assemble the selected-window keyword population at the unique
@@ -220,6 +250,7 @@ def _build_population(start: date | None, end: date) -> dict:
         unit["criterion_key"] = _criterion_key(g)
         unit["_provenance"] = _assess_currency_provenance(g)
         unit["_daily_micros"] = daily_by_grain.get(_criterion_grain(g), {})
+        unit["_conv_status"], unit["_conv_total"] = _conversion_evidence(g)
         units.append(unit)
 
     _fx_convert_population(units, start, end)
@@ -277,14 +308,15 @@ def _keyword_signal(unit: dict, th: dict, window_end: date | None) -> str:
     if qs is None and _is_active(unit):
         return SIG_QUALITY_UNAVAILABLE
 
-    # Spend-without-conversion requires a VERIFIED zero — never inferred from a
-    # NULL (unavailable) conversions value. When conversions is unavailable but
-    # spend is meaningful, disclose that explicitly rather than implying zero.
-    conv = unit.get("conversions")
+    # Spend-without-conversion requires COMPLETE conversion evidence AND a total
+    # of exactly zero — never inferred from a partial/unavailable value (a
+    # criterion with a 0 day and a NULL day is NOT a confirmed zero).
     if verified_usd >= th["min_spend"]:
-        if conv is None:
+        conv_status = unit.get("_conv_status")
+        conv_total = unit.get("_conv_total")
+        if conv_status in (CONV_PARTIAL, CONV_UNAVAILABLE):
             return SIG_CONV_UNAVAILABLE
-        if float(conv) == 0.0:
+        if conv_status == CONV_COMPLETE and float(conv_total or 0) == 0.0:
             return SIG_SPEND_NO_CONV
 
     return SIG_NONE
@@ -337,8 +369,11 @@ def _unit_row(unit: dict, th: dict, window_end: date | None) -> dict:
         # Genuine observation time (pull time), never the activity source_date.
         "quality_observed_date": _iso_str(unit.get("quality_observed_at")),
         # Platform evidence only — never business value. NULL stays NULL
-        # (conversion evidence unavailable), never coerced to 0.
-        "platform_conversions": _round2(unit.get("conversions")) if unit.get("conversions") is not None else None,
+        # (conversion evidence unavailable), never coerced to 0. conversion_status
+        # discloses complete / partial / unavailable so a partial is never read as
+        # a confirmed zero.
+        "platform_conversions": _round2(unit.get("_conv_total")) if unit.get("_conv_total") is not None else None,
+        "conversion_status": unit.get("_conv_status"),
         "first_seen": _iso_str(unit.get("first_seen")),
         "last_seen": _iso_str(unit.get("last_seen")),
         "review_signal": _keyword_signal(unit, th, window_end),
@@ -360,11 +395,14 @@ def _match_type_summary(units: list) -> dict:
                            for u in members if u.get("_currency_verified"))
         clicks = sum(int(u.get("clicks") or 0) for u in members)
         impressions = sum(int(u.get("impressions") or 0) for u in members)
-        # Conversions: sum ONLY known values; unavailable when every member is
-        # NULL; disclose partial coverage when some are NULL. Never treat NULL as 0.
-        known_conv = [float(u["conversions"]) for u in members if u.get("conversions") is not None]
-        any_conv_null = any(u.get("conversions") is None for u in members)
-        platform_conversions = _round2(sum(known_conv)) if known_conv else None
+        # Conversions: sum ONLY the KNOWN totals; unavailable when every member's
+        # conversion evidence is unavailable; disclose partial coverage when some
+        # members are partial/unavailable. Never treat a NULL day as 0.
+        statuses = [u.get("_conv_status") for u in members]
+        known_totals = [u.get("_conv_total") for u in members if u.get("_conv_total") is not None]
+        has_known = any(s in (CONV_COMPLETE, CONV_PARTIAL) for s in statuses)
+        platform_conversions = _round2(sum(known_totals)) if has_known else None
+        conversions_partial = has_known and any(s != CONV_COMPLETE for s in statuses)
         any_unverified = any(not u.get("_currency_verified") for u in members)
         buckets[mt] = {
             "match_type": mt,
@@ -376,7 +414,7 @@ def _match_type_summary(units: list) -> dict:
             "ctr": _ctr(clicks, impressions),
             "avg_cpc_usd": _cpc(verified_usd, clicks),
             "platform_conversions": platform_conversions,
-            "conversions_partial": bool(known_conv) and any_conv_null,
+            "conversions_partial": conversions_partial,
             "spend_partial": any_unverified,
         }
     return {
@@ -566,6 +604,23 @@ def _audit_block(base: dict, pop: dict, mon: dict, rows_total: int,
         "table_drawer_export_same_population": True,
         "status": "ok" if (unique_criteria == len(pop.get("units") or [])) else "variance",
     }
+    # Conversion-evidence completeness rollup across the population (§2).
+    units = pop.get("units") or []
+    conv_counts = {CONV_COMPLETE: 0, CONV_PARTIAL: 0, CONV_UNAVAILABLE: 0}
+    for u in units:
+        conv_counts[u.get("_conv_status", CONV_UNAVAILABLE)] = \
+            conv_counts.get(u.get("_conv_status", CONV_UNAVAILABLE), 0) + 1
+    conversion_evidence = {
+        "complete_criteria": conv_counts[CONV_COMPLETE],
+        "partial_criteria": conv_counts[CONV_PARTIAL],
+        "unavailable_criteria": conv_counts[CONV_UNAVAILABLE],
+        "status": (CONV_COMPLETE if conv_counts[CONV_PARTIAL] == 0 and conv_counts[CONV_UNAVAILABLE] == 0
+                   else CONV_UNAVAILABLE if conv_counts[CONV_COMPLETE] == 0 and conv_counts[CONV_PARTIAL] == 0
+                   else CONV_PARTIAL),
+        "semantics": ("Platform conversions are counted only where every source-date "
+                      "fact reported one; a criterion with any NULL day is partial "
+                      "(never a confirmed zero); zero conversions is never waste."),
+    }
     return {
         "source_table": "keyword_daily_facts",
         "legacy_source_table": "keywords",
@@ -578,10 +633,11 @@ def _audit_block(base: dict, pop: dict, mon: dict, rows_total: int,
         "currency_semantics": CURRENCY_SEMANTICS,
         "fx_status": ("complete" if canonical.get("fx_complete") else "incomplete_or_unavailable"),
         "monetary_completeness_status": mon.get("monetary_completeness_status"),
-        "durable_unit_count": len(pop.get("units") or []),
+        "durable_unit_count": len(units),
         "legacy_unverified_count": mon.get("unverified_currency_units"),
         "campaign_identity_status": ("available" if pop.get("identity_available") else "unavailable"),
         "quality_semantics": QUALITY_SEMANTICS,
+        "conversion_evidence": conversion_evidence,
         "keyword_coverage_status": (pop.get("currency_info") or {}).get(
             "monetary_completeness_status"),
         "pagination_complete": pagination_complete,
