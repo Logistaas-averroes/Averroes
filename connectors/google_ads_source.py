@@ -182,16 +182,26 @@ def normalize_keyword_row(row: dict) -> dict:
     """Convert a google_ads_direct keyword row to the internal contract shape.
 
     Input fields (from fetch_keyword_performance):
-        date, campaign_id, campaign_name, ad_group_id, ad_group_name,
-        keyword_text, keyword_match_type, impressions, clicks, spend,
-        conversions
+        date, currency_code, campaign_id, campaign_name, ad_group_id,
+        ad_group_name, criterion_id, criterion_status, keyword_text,
+        keyword_match_type, impressions, clicks, cost_micros, spend,
+        conversions, quality_score, quality_available, expected_ctr,
+        ad_relevance, landing_page_experience
 
     Output fields:
         date, campaign, campaign_id (str), ad_group, ad_group_id (str),
-        keyword, match_type (uppercase), impressions, clicks, spend,
-        conversions, cpc, source="google_ads_api"
+        criterion_id (str), criterion_status, keyword, match_type (uppercase),
+        cost_micros, currency_code, impressions, clicks, spend, conversions,
+        cpc, quality_score, quality_available, expected_ctr, ad_relevance,
+        landing_page_experience, source="google_ads_api"
 
     match_type is normalised to uppercase Google Ads name: EXACT / PHRASE / BROAD
+
+    Currency lineage (PR-ADS-146): ``cost_micros`` and ``currency_code`` are
+    preserved so the durable writer can store native-currency provenance;
+    ``spend`` stays the legacy cost_micros/1e6 value. Quality fields are
+    latest-observed keyword attributes — passed through unchanged (None stays
+    None; a genuine 0 is never invented, and unavailable stays distinct from 0).
     """
     clicks = row.get("clicks", 0) or 0
     spend = row.get("spend", 0.0) or 0.0
@@ -201,17 +211,31 @@ def normalize_keyword_row(row: dict) -> dict:
 
     return {
         "date": row.get("date"),
+        "customer_id": normalize_id(row.get("customer_id")),
         "campaign": row.get("campaign_name"),
         "campaign_id": normalize_id(row.get("campaign_id")),
         "ad_group": row.get("ad_group_name"),
         "ad_group_id": normalize_id(row.get("ad_group_id")),
+        "criterion_id": normalize_id(row.get("criterion_id")),
+        "criterion_status": row.get("criterion_status"),
         "keyword": row.get("keyword_text"),
         "match_type": match_type,
+        "cost_micros": row.get("cost_micros"),
+        "currency_code": row.get("currency_code"),
         "spend": spend,
         "clicks": clicks,
         "impressions": row.get("impressions", 0) or 0,
-        "conversions": row.get("conversions", 0.0) or 0.0,
+        # Nullable passthrough (PR-ADS-146 §1): None stays None (platform
+        # conversion evidence unavailable), a genuine 0 stays 0, positive
+        # unchanged — never coerced with `or 0.0`.
+        "conversions": row.get("conversions"),
         "cpc": safe_divide(spend, clicks),
+        "quality_score": row.get("quality_score"),
+        "quality_available": row.get("quality_available", False),
+        "expected_ctr": row.get("expected_ctr"),
+        "ad_relevance": row.get("ad_relevance"),
+        "landing_page_experience": row.get("landing_page_experience"),
+        "quality_observed_at": row.get("quality_observed_at"),
         "source": _SOURCE,
     }
 

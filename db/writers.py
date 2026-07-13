@@ -850,6 +850,198 @@ def write_search_terms(
         return 0
 
 
+def write_keyword_daily_facts(
+    run_id: Optional[int],
+    keyword_rows: list,
+    sync_batch_id: Optional[int] = None,
+) -> dict:
+    """Upsert durable keyword daily facts (PR-ADS-146) into keyword_daily_facts.
+
+    Accepts rows from pull_keyword_performance()/normalize_keyword_row (Google
+    Ads direct connector). Natural key is immutable Google Ads identity:
+    ``source_date + customer_id + campaign_id + ad_group_id + criterion_id`` — a
+    repeated scheduler pull for the same fact UPDATES the same row, so overlapping
+    windows never multiply totals. Two ids sharing a display name stay separate.
+
+    FAIL CLOSED on identity: a row missing source_date OR any of customer_id /
+    campaign_id / ad_group_id / criterion_id is REJECTED (never filed under today
+    or under an empty-string id) and counted, so two incomplete facts can never
+    collide. The DB enforces the same via NOT NULL columns.
+
+    Currency lineage: raw ``cost_micros`` + native ``currency_code`` +
+    ``source_system`` are stored durably; native cost is NEVER written into a USD
+    field, and a missing value is NEVER coerced to zero. conversions is kept NULL
+    when unavailable (unknown ≠ a genuine 0). Quality diagnostics are
+    LATEST-OBSERVED (selected by quality_observed_at); a null never wipes a prior
+    observation and a fail-closed no-quality pull carries no observation stamp.
+
+    The legacy ``keywords`` snapshot table is NOT touched. Returns structured
+    persistence stats ``{fetched, prepared, written, skipped_no_date,
+    skipped_missing_identity, db_unavailable}`` so the scheduler can distinguish
+    complete from partial persistence. Never raises.
+    """
+    input_rows = len(keyword_rows or [])
+    stats = {"fetched": input_rows, "prepared": 0, "written": 0,
+             "skipped_no_date": 0, "skipped_missing_identity": 0,
+             "db_unavailable": False}
+    if not keyword_rows:
+        log.info("write_keyword_daily_facts: input_rows=0, nothing to write")
+        return stats
+
+    rows = []
+
+    def _clean(v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    for raw in keyword_rows:
+        # ── Resolve source_date (reporting date, never run_date) ─────────
+        raw_date = raw.get("date") or raw.get("source_date")
+        if raw_date is None:
+            stats["skipped_no_date"] += 1
+            continue
+        try:
+            source_date = raw_date if isinstance(raw_date, date) else date.fromisoformat(str(raw_date))
+        except (ValueError, TypeError):
+            log.warning("write_keyword_daily_facts: skipping unparseable date %r", raw_date)
+            stats["skipped_no_date"] += 1
+            continue
+
+        customer_id  = _clean(raw.get("customer_id"))
+        campaign_id  = _clean(raw.get("campaign_id"))
+        ad_group_id  = _clean(raw.get("ad_group_id"))
+        criterion_id = _clean(raw.get("criterion_id"))
+
+        # ── Fail closed on any missing immutable identity ────────────────
+        missing = [name for name, val in (("customer_id", customer_id),
+                                          ("campaign_id", campaign_id),
+                                          ("ad_group_id", ad_group_id),
+                                          ("criterion_id", criterion_id))
+                   if not val]
+        if missing:
+            stats["skipped_missing_identity"] += 1
+            log.warning("write_keyword_daily_facts: skipping row missing identity field(s): %s",
+                        ",".join(missing))
+            continue
+
+        campaign_name = _clean(raw.get("campaign") or raw.get("campaign_name"))
+        ad_group_name = _clean(raw.get("ad_group") or raw.get("ad_group_name"))
+        criterion_status = _clean(raw.get("criterion_status"))
+        keyword_text = _clean(raw.get("keyword") or raw.get("keyword_text"))
+
+        match_type_raw = raw.get("match_type")
+        match_type = str(match_type_raw).strip() or None if match_type_raw is not None else None
+
+        cost_micros = _int_or_none(raw.get("cost_micros"))
+        currency_code = _clean(raw.get("currency_code"))
+        source_system = raw.get("source") or "unknown"
+
+        impressions = int(_int_or_none(raw.get("impressions")) or 0)
+        clicks      = int(_int_or_none(raw.get("clicks")) or 0)
+        # Keep conversions NULL when missing so "unknown" stays distinct from a
+        # genuine 0 (and never wipes a prior value on upsert — see COALESCE below).
+        conversions = _float_or_none(raw.get("conversions"))
+
+        # Quality attributes — preserve NULL (unavailable) distinct from 0.
+        quality_score = _int_or_none(raw.get("quality_score"))
+        expected_ctr = _clean(raw.get("expected_ctr"))
+        ad_relevance = _clean(raw.get("ad_relevance"))
+        landing_page_experience = _clean(raw.get("landing_page_experience"))
+        # Genuine observation timestamp — only present when quality was observed.
+        quality_observed_at = raw.get("quality_observed_at") if quality_score is not None else None
+
+        rows.append((
+            run_id, source_date, customer_id, campaign_id, campaign_name,
+            ad_group_id, ad_group_name, criterion_id, keyword_text, match_type,
+            criterion_status, cost_micros, currency_code, source_system,
+            impressions, clicks, conversions,
+            quality_score, expected_ctr, ad_relevance, landing_page_experience,
+            quality_observed_at, sync_batch_id,
+        ))
+
+    stats["prepared"] = len(rows)
+    if not rows:
+        log.info("write_keyword_daily_facts: nothing to write after prep "
+                 "(skipped_no_date=%d skipped_missing_identity=%d)",
+                 stats["skipped_no_date"], stats["skipped_missing_identity"])
+        return stats
+
+    _upsert_sql = """
+        INSERT INTO keyword_daily_facts (
+            run_id, source_date, customer_id, campaign_id, campaign_name,
+            ad_group_id, ad_group_name, criterion_id, keyword_text, match_type,
+            criterion_status, cost_micros, currency_code, source_system,
+            impressions, clicks, conversions,
+            quality_score, expected_ctr, ad_relevance, landing_page_experience,
+            quality_observed_at, sync_batch_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (source_date, customer_id, campaign_id, ad_group_id, criterion_id)
+        DO UPDATE SET
+            run_id           = EXCLUDED.run_id,
+            sync_batch_id    = COALESCE(EXCLUDED.sync_batch_id, keyword_daily_facts.sync_batch_id),
+            campaign_name    = COALESCE(EXCLUDED.campaign_name, keyword_daily_facts.campaign_name),
+            ad_group_name    = COALESCE(EXCLUDED.ad_group_name, keyword_daily_facts.ad_group_name),
+            keyword_text     = COALESCE(EXCLUDED.keyword_text, keyword_daily_facts.keyword_text),
+            match_type       = COALESCE(EXCLUDED.match_type, keyword_daily_facts.match_type),
+            criterion_status = COALESCE(EXCLUDED.criterion_status, keyword_daily_facts.criterion_status),
+            cost_micros      = COALESCE(EXCLUDED.cost_micros, keyword_daily_facts.cost_micros),
+            currency_code    = COALESCE(EXCLUDED.currency_code, keyword_daily_facts.currency_code),
+            source_system    = COALESCE(EXCLUDED.source_system, keyword_daily_facts.source_system),
+            impressions      = EXCLUDED.impressions,
+            clicks           = EXCLUDED.clicks,
+            -- A missing (NULL) conversions in a re-pull never wipes a prior value.
+            conversions      = COALESCE(EXCLUDED.conversions, keyword_daily_facts.conversions),
+            -- Quality is latest-observed by quality_observed_at: a new observation
+            -- (non-null score WITH a stamp) wins; a null score never wipes a prior
+            -- observation, and a no-quality fallback (null stamp) leaves it intact.
+            -- 0 is a real score and is preserved.
+            quality_score       = CASE WHEN EXCLUDED.quality_observed_at IS NOT NULL
+                                       AND (keyword_daily_facts.quality_observed_at IS NULL
+                                            OR EXCLUDED.quality_observed_at >= keyword_daily_facts.quality_observed_at)
+                                       THEN EXCLUDED.quality_score
+                                       ELSE keyword_daily_facts.quality_score END,
+            expected_ctr        = CASE WHEN EXCLUDED.quality_observed_at IS NOT NULL
+                                       AND (keyword_daily_facts.quality_observed_at IS NULL
+                                            OR EXCLUDED.quality_observed_at >= keyword_daily_facts.quality_observed_at)
+                                       THEN EXCLUDED.expected_ctr
+                                       ELSE keyword_daily_facts.expected_ctr END,
+            ad_relevance        = CASE WHEN EXCLUDED.quality_observed_at IS NOT NULL
+                                       AND (keyword_daily_facts.quality_observed_at IS NULL
+                                            OR EXCLUDED.quality_observed_at >= keyword_daily_facts.quality_observed_at)
+                                       THEN EXCLUDED.ad_relevance
+                                       ELSE keyword_daily_facts.ad_relevance END,
+            landing_page_experience = CASE WHEN EXCLUDED.quality_observed_at IS NOT NULL
+                                       AND (keyword_daily_facts.quality_observed_at IS NULL
+                                            OR EXCLUDED.quality_observed_at >= keyword_daily_facts.quality_observed_at)
+                                       THEN EXCLUDED.landing_page_experience
+                                       ELSE keyword_daily_facts.landing_page_experience END,
+            quality_observed_at = GREATEST(keyword_daily_facts.quality_observed_at,
+                                           EXCLUDED.quality_observed_at),
+            updated_at       = NOW()
+    """
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                stats["db_unavailable"] = True
+                return stats
+            with conn.cursor() as cur:
+                cur.executemany(_upsert_sql, rows)
+                stats["written"] = len(rows)
+        log.info("write_keyword_daily_facts: upserted %d rows (run_id=%s) "
+                 "[fetched=%d prepared=%d skipped_no_date=%d skipped_missing_identity=%d]",
+                 stats["written"], run_id, input_rows, stats["prepared"],
+                 stats["skipped_no_date"], stats["skipped_missing_identity"])
+        return stats
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_keyword_daily_facts failed (run_id=%s): %s", run_id, exc)
+        stats["db_unavailable"] = True
+        return stats
+
+
 # ---------------------------------------------------------------------------
 # Sync tracking helpers (PR-ADS-039)
 # ---------------------------------------------------------------------------
@@ -857,8 +1049,8 @@ def write_search_terms(
 # Allowed values — used for normalisation/validation; not hard-fail guards so
 # that new sources/datasets can be added to the system without a code deploy.
 VALID_SYNC_SOURCES   = {"windsor", "hubspot", "gclid"}
-VALID_SYNC_DATASETS  = {"campaigns", "keywords", "search_terms", "geo",
-                        "contacts", "deals", "matches"}
+VALID_SYNC_DATASETS  = {"campaigns", "keywords", "keyword_facts", "search_terms",
+                        "geo", "contacts", "deals", "matches"}
 VALID_SYNC_TYPES     = {"backfill", "daily", "weekly", "monthly", "manual"}
 VALID_SYNC_STATUSES  = {"running", "success", "failed", "unknown"}
 

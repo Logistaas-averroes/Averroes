@@ -96,7 +96,14 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "blocks": [],
     },
     "keywords": {
-        "label": "Keywords",
+        "label": "Keywords (legacy snapshot)",
+        "source": "google_ads_api",
+        "page": None,
+        "depends_on": [],
+        "blocks": [],
+    },
+    "keyword_facts": {
+        "label": "Keyword Evidence",
         "source": "google_ads_api",
         "page": "Keywords",
         "depends_on": [],
@@ -154,7 +161,7 @@ SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
     # Windsor remains only as legacy/deprecated history, not the active source.
     "google_ads_api": {
         "label": "Google Ads API",
-        "datasets": ["campaigns", "search_terms", "keywords", "geo"],
+        "datasets": ["campaigns", "search_terms", "keywords", "keyword_facts", "geo"],
     },
     "hubspot": {
         "label": "HubSpot CRM",
@@ -183,7 +190,7 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
     "search-terms": ["search_terms"],
     "ngrams": ["ngrams", "search_terms"],
     "geo": ["geo"],
-    "keywords": ["keywords"],
+    "keywords": ["keyword_facts"],
     "leads": ["leads"],
     "deals": ["deals"],
     "gclid-attribution": ["gclid_attribution", "gclid_coverage_snapshots"],
@@ -196,7 +203,7 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
 # ── Core datasets vs derived ───────────────────────────────────────────────
 
 CORE_DATASETS = frozenset([
-    "campaigns", "search_terms", "leads", "deals", "keywords", "geo",
+    "campaigns", "search_terms", "leads", "deals", "keywords", "keyword_facts", "geo",
 ])
 
 DERIVED_DATASETS = frozenset([

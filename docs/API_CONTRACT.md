@@ -1817,6 +1817,164 @@ export). Invalid window/filters → 400.
 
 ---
 
+### Keyword Evidence (PR-ADS-146)
+
+Read-only Platform Evidence over the durable **`keyword_daily_facts`** table.
+Windows use `source_date` (never `run_date`); the table's UNIQUE natural key —
+`source_date + customer_id + campaign_id + ad_group_id + criterion_id` — and the
+writer's ON CONFLICT upsert guarantee overlapping scheduler snapshots are never
+SUM'd. The legacy `keywords` snapshot table is preserved untouched and never
+reinterpreted as durable USD. Currency/FX/monetary doctrine is the SAME as
+Search Terms (per-source-date FX; complete/partial/unavailable). Quality
+diagnostics are LATEST-OBSERVED keyword attributes (never averaged; NULL =
+unavailable, distinct from 0). No SQLs, customers, ROAS, CPQL or business value;
+Google Ads conversions appear only as secondary platform evidence with the
+disclosure "Platform conversion event — not a confirmed SQL, customer or
+closed-won outcome."
+
+#### `GET /api/keyword-evidence`
+**Auth:** Auth · **Read-only:** Yes · **Source:** `keyword_daily_facts`
+
+**Query params:** `window` (7d|14d|30d|60d|180d|all_time), `page`, `page_size`
+(1–200), `q` (keyword/campaign/ad group contains), `campaign` (canonical
+campaign_key), `match_type` (BROAD|PHRASE|EXACT|UNKNOWN), `criterion_status`,
+`quality_band` (strong|medium|weak|unavailable), `signal` (review signal),
+`min_spend` (verified USD), `sort` (spend|clicks|cpc|ctr|quality|keyword|last_seen).
+Unknown window / invalid filter → **400**.
+
+KPIs are computed over the **complete filtered population**, never the returned
+page. Response:
+
+```jsonc
+{
+  "window": "30d", "window_start": "…", "window_end": "…", "all_time": false,
+  "account_timezone": "Europe/London", "reporting_currency": "USD",
+  "durable_coverage_start": "…", "durable_coverage_end": "…",
+  "kpis": {
+    "keywords_reported": 161,            // unique keyword criteria in window
+    "verified_spend_usd": 1234.56,       // per-source-date FX verified subtotal
+    "verified_spend_native": 987.65, "native_currency": "GBP",
+    "monetary": { "total_units": 161, "verified_currency_units": 158,
+      "unverified_currency_units": 3, "fx_complete_units": 158, "fx_incomplete_units": 0,
+      "verified_usd_spend": 1234.56, "verified_native_spend": 987.65,
+      "monetary_completeness_status": "partial", "monetary_population_pct": 98.1 },
+    "monetary_status": "partial",
+    "clicks": 4210,
+    "broad_match_exposure": { "broad_verified_spend_usd": 390.0,
+      "broad_share_pct": 31.6, "spend_status": "partial" },
+    "quality_evidence": { "active_criteria": 161, "with_quality": 138, "pct": 85.7 },
+    "coverage": { "status": "ok", "scope": "verified_only",
+      "canonical_spend_usd": 3444.8, "verified_keyword_spend_usd": 1234.56,
+      "coverage_pct": 35.8, "excluded_unverified_units": 3,
+      "excluded_fx_incomplete_units": 0 }   // Keyword-view reporting coverage
+  },
+  "match_type_summary": { "buckets": [ { "match_type": "BROAD",
+    "unique_keywords": 51, "verified_spend_usd": 390.0, "spend_share_pct": 31.6,
+    "clicks": 1200, "ctr": 4.1, "avg_cpc_usd": 0.33, "platform_conversions": 2.0,
+    "spend_partial": false } ], "total_verified_spend_usd": 1234.56,
+    "reconciles_to_population": true },
+  "rows": [ { "criterion_key": "10|100|1001", "criterion_id": "1001",
+    "keyword": "freight software", "match_type": "BROAD", "criterion_status": "ENABLED",
+    "campaign": "Brand - UK", "campaign_key": "10", "campaign_id": "10",
+    "ad_group": "Core", "ad_group_id": "100", "mapping_status": "mapped",
+    "spend_usd": 12.5, "spend_native": 10.0, "native_currency": "GBP",
+    "fx_complete": true, "currency_status": "verified",
+    "clicks": 40, "impressions": 1000, "ctr": 4.0, "cpc_usd": 0.31,
+    "quality_score": 8, "quality_band": "strong", "expected_ctr": "ABOVE_AVERAGE",
+    "ad_relevance": "AVERAGE", "landing_page_experience": "AVERAGE",
+    "quality_observed_date": "2026-07-12", "platform_conversions": 0.0,
+    "first_seen": "2026-07-01", "last_seen": "2026-07-12",
+    "review_signal": "Broad-match exposure" } ],
+  "pagination": { "total_count": 161, "returned_count": 50, "page": 1,
+    "page_size": 50, "has_more": true },
+  "facets": { "campaigns": [...], "match_types": [...], "quality_bands": [...],
+    "review_signals": [...] },
+  "audit": { "source_table": "keyword_daily_facts", "legacy_source_table": "keywords",
+    "date_field": "source_date", "natural_key": "…", "monetary_completeness_status": "partial",
+    "durable_unit_count": 161, "legacy_unverified_count": 3,
+    "campaign_identity_status": "available", "quality_semantics": "…",
+    "keyword_coverage_status": "partial", "pagination_complete": false,
+    "reconciliation_status": { "row_grain": "unique_keyword_criterion",
+      "rows_equal_unique_criteria": true, "verified_usd_from_source_date_fx": true,
+      "match_type_reconciles": true, "quality_latest_not_averaged": true,
+      "table_drawer_export_same_population": true, "status": "ok" } }
+}
+```
+
+**Review signals** are factual prioritisation only (never winner/loser/waste):
+`Broad-match exposure`, `Low quality evidence`, `Spend without platform
+conversion`, `No recent activity`, `Limited data`, `No platform concern
+detected`, `Quality unavailable`, `Currency unavailable`, `Platform conversions
+unavailable`. Thresholds come from `config/thresholds.yaml` (min spend,
+small-sample guard, quality bands) — never hardcoded. Zero platform conversions
+is never treated as confirmed waste.
+
+**Truth-completion guarantees (PR-ADS-146 §1–§6):**
+- **Unknown conversions ≠ 0, tracked per criterion.** Conversion evidence is
+  classified per criterion from its durable fact rows — `complete` (every
+  source-date reported a count), `partial` (some reported, some NULL — never a
+  confirmed zero), `unavailable` (none reported). Each row/drawer exposes
+  `conversion_status` and a `platform_conversions` that is `null` when
+  unavailable and the **known** total otherwise (a NULL day is never summed as
+  0). `Spend without platform conversion` fires ONLY when `conversion_status ==
+  complete` **and** the known total is exactly 0; `partial`/`unavailable`
+  surface `Platform conversions unavailable`. The match-type summary sums only
+  known totals, returns `null` when all members are unavailable, and sets
+  `conversions_partial: true` when some members are partial/unavailable. The
+  `audit.conversion_evidence` block rolls up complete/partial/unavailable
+  criteria counts. `fetch_keyword_aggregates` returns
+  `known_conversion_fact_rows` / `missing_conversion_fact_rows` /
+  `conversions_known_total` per criterion.
+- **Fail closed on identity.** The durable table's immutable id columns
+  (`customer_id`, `campaign_id`, `ad_group_id`, `criterion_id`) are `NOT NULL`;
+  the writer skips + counts rows missing any of them (`skipped_missing_identity`)
+  and returns structured stats so the scheduler marks a partial persistence as
+  failed, never full success. No COALESCE-to-empty fallback for durable facts.
+- **Quality lineage.** `quality_observed_at`/`quality_observed_date` is the
+  genuine observation time (pull time), never the activity `source_date`; latest
+  quality is selected by it, a null never wipes a prior observation, and a
+  fail-closed no-quality pull carries no stamp.
+- **Historical coverage.** `durable_coverage_start`/`durable_coverage_end`
+  expose the stored durable range; when the selected window begins before
+  `durable_coverage_start` (or `all_time`), the UI shows a compact
+  "Partial historical coverage" disclosure rather than implying full coverage.
+- **Freshness** for this page depends only on `google_ads_api/keyword_facts`
+  (the durable table); the legacy `keywords` snapshot is audit-only.
+- **Backfill.** `scripts/backfill_keyword_daily_facts.py` is an idempotent,
+  read-only operator backfill (date range / window / dry-run) that writes through
+  the natural-key upsert, tracks a `keyword_facts` sync batch, fails when rows
+  were fetched but none written, and runs a post-backfill audit (no duplicate
+  keys, identity complete, currency lineage complete/partial, source-date
+  coverage vs range).
+
+#### `GET /api/keyword-evidence/detail`
+**Auth:** Auth · **Read-only:** Yes. `criterion_key` (campaign_id|ad_group_id|
+criterion_id) + `window`. Same selected-window population as the table (headline
+matches the row). Scoped strictly by immutable identity — never borrows another
+criterion's rows. Returns `identity`, `activity` (verified USD + native + clicks
++ impressions + CTR + CPC + platform conversions + disclosure), `latest_quality`
+(Quality Score / Expected CTR / Ad Relevance / Landing Page Experience +
+observed date), `review_signal`, `daily` (per-source-date series, reported dates
+only — never fabricated as zero) and a `search_terms_link`.
+
+#### `GET /api/keyword-evidence/audit`
+**Auth:** Auth · **Read-only:** Yes (SELECT only). Operator audit: durable rows +
+criteria, earliest/latest durable source dates, rows with missing IDs, rows with
+unverified currency, duplicate-key candidates (0 under the unique index), rows
+with a quality observation, and the untouched legacy `keywords` snapshot count.
+No row is deleted, relabelled or assigned a currency. Also exposed as
+`scripts/audit_keyword_currency.py`.
+
+#### `GET /api/keyword-evidence/export`
+**Auth:** Auth · **Read-only:** Yes. Same filters as the list, **no pagination** —
+the COMPLETE server-filtered dataset. CSV includes the evidence window,
+source-date range, currency status, per-row completeness, stable IDs, match
+type, latest quality evidence and a platform-metric disclosure column; the
+filename carries `_partial_` when any exported unit is unverified. Source
+unavailable → **503**. No export implies permission to upload changes.
+
+---
+
 #### `GET /api/gclid-attribution`
 Paginated GCLID attribution rows for the last N days.
 

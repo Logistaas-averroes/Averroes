@@ -265,7 +265,10 @@ def test_evidence_loaders_use_window_param():
     # Each of the 7 evidence page loaders fetches with the evidence window,
     # never the legacy day integer.
     assert "/api/campaigns?${evidenceWindowQuery()}" in APP_JS
-    assert "/api/keywords?${evidenceWindowQuery()}" in APP_JS
+    # Keyword Evidence (PR-ADS-146) uses its own evidence endpoint + param builder
+    # (kwBuildParams sets window=getEvidenceWindow()), not the legacy /api/keywords.
+    assert "/api/keyword-evidence?${kwBuildParams().toString()}" in APP_JS
+    assert 'p.set("window", getEvidenceWindow())' in APP_JS
     assert "/api/waste?${evidenceWindowQuery()}" in APP_JS
     assert "/api/leads?${evidenceWindowQuery()}" in APP_JS
     assert "/api/geo?${evWindow}" in APP_JS

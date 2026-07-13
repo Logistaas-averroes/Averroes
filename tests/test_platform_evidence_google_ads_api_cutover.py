@@ -221,10 +221,18 @@ class TestDatasetSourceMapping:
     def test_page_dataset_map_uses_google_ads_api_keys(self):
         block = extract_js_object_block(APP_JS, "PAGE_DATASET_MAP")
         assert block is not None, "PAGE_DATASET_MAP not found"
-        for ds in GOOGLE_ADS_DATASETS:
+        # PR-ADS-146: the Keyword Evidence page depends on the DURABLE keyword_facts
+        # dataset, not the legacy keywords snapshot.
+        page_datasets = ["campaigns", "search_terms", "keyword_facts", "geo"]
+        for ds in page_datasets:
             assert f"google_ads_api/{ds}" in block, (
                 f"PAGE_DATASET_MAP must map to google_ads_api/{ds}"
             )
+        # The legacy keywords snapshot must NOT be a page dependency (§6).
+        assert "google_ads_api/keywords" not in block, (
+            "Keyword Evidence must depend only on keyword_facts, not the legacy "
+            "keywords snapshot"
+        )
         # No platform-evidence page should still point at windsor/<dataset>.
         for ds in GOOGLE_ADS_DATASETS:
             assert f"windsor/{ds}" not in block, (
@@ -306,9 +314,11 @@ class TestSearchTermsTabModel:
 
 class TestWindsorIsLegacyOnly:
     def test_platform_evidence_empty_states_do_not_blame_windsor(self):
-        # Empty-state subtexts for Platform Evidence pages must point at the
-        # Google Ads API, not Windsor.
-        for marker in ("geo-empty-subtext", "keywords-empty-subtext"):
+        # Empty-state subtexts for legacy Platform Evidence pages must point at
+        # the Google Ads API, not Windsor. (Keyword Evidence, PR-ADS-146, is now
+        # a full evidence page like Search Terms — its empty state is rendered in
+        # the shell and its Google-Ads-API source is asserted via help content.)
+        for marker in ("geo-empty-subtext",):
             idx = APP_JS.find(marker)
             assert idx != -1, f"empty-state marker '{marker}' not found"
             snippet = APP_JS[idx : idx + 240]
@@ -320,10 +330,10 @@ class TestWindsorIsLegacyOnly:
             )
 
     def test_index_html_platform_evidence_copy_uses_google_ads_api(self):
-        # Keywords page subtitle + geo/keyword empty states in index.html.
-        assert "Keyword performance from the Google Ads API" in INDEX_HTML
+        # Geo empty state in index.html. (Keyword Evidence, PR-ADS-146, renders
+        # its header/subtitle/empty state in the JS shell, not index.html; its
+        # Google-Ads-API source is asserted via PAGE_HELP_CONTENT above.)
         assert "Google Ads API country performance" in INDEX_HTML
-        assert "Google Ads API keyword performance" in INDEX_HTML
 
 
 # ───────────────────────────────────────────────────────────────────────────

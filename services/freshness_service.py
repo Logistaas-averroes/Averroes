@@ -163,7 +163,16 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "dataset": "keywords",
         "stale_threshold_days": 8,
         "depends_on": [],
-        "page": "keywords",
+        "page": None,   # legacy snapshot — audit-only; not a page dependency
+    },
+    "keyword_facts": {
+        "table": "keyword_daily_facts",
+        "date_column": "source_date",
+        "source": "google_ads_api",
+        "dataset": "keyword_facts",
+        "stale_threshold_days": 8,
+        "depends_on": [],
+        "page": "keywords",   # PR-ADS-146: Keyword Evidence depends on durable facts
     },
     "geo": {
         "table": "geo",
