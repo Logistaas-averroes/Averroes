@@ -4434,6 +4434,191 @@ def api_search_term_evidence_export(
 
 
 # ---------------------------------------------------------------------------
+# PR-ADS-146 — Keyword Evidence page endpoints. Read-only.
+#
+# One durable truth path (services/keyword_evidence_service.py): source_date-
+# bounded selected-window aggregation over the deduplicated keyword_daily_facts
+# table (unique immutable-criterion grain, never SUM'd across overlapping
+# scheduler snapshots), reusing the Search Terms currency/FX/monetary doctrine,
+# Campaign Evidence identity, latest-observed quality, factual review signals,
+# complete-population KPIs and server-side pagination. Unknown windows / invalid
+# filters → HTTP 400. The legacy /api/keywords endpoint above is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _keyword_evidence_call(window: str, builder, *args, fallback=None, **kwargs):
+    """Shared error contract: 400 for unknown window / invalid params; an
+    endpoint-appropriate db-unavailable shape (never a raw 500) otherwise."""
+    from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
+    from services.keyword_evidence_service import (  # noqa: PLC0415
+        KeywordQueryError, unavailable_keyword_response,
+    )
+    try:
+        return builder(*args, **kwargs)
+    except (EvidenceWindowError, KeywordQueryError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/keyword-evidence] error: %s", exc, exc_info=True)
+        return (fallback or unavailable_keyword_response)(window)
+
+
+@app.get("/api/keyword-evidence")
+def api_keyword_evidence(
+    user: dict = Depends(require_auth),
+    window: str = Query(default="30d",
+                        description="Evidence window: 7d|14d|30d|60d|180d|all_time"),
+    page: int = Query(default=1, description="1-based page number"),
+    page_size: int = Query(default=50, description="Rows per page (1–200)"),
+    q: str = Query(default=None, description="Contains filter on keyword/campaign/ad group"),
+    campaign: str = Query(default=None, description="Canonical campaign_key filter (from facets)"),
+    match_type: str = Query(default=None, description="BROAD|PHRASE|EXACT|UNKNOWN"),
+    criterion_status: str = Query(default=None, description="Keyword criterion status (e.g. ENABLED)"),
+    quality_band: str = Query(default=None, description="strong|medium|weak|unavailable"),
+    signal: str = Query(default=None, description="Review signal (from facets)"),
+    min_spend: float = Query(default=None, description="Minimum VERIFIED keyword spend (USD)"),
+    sort: str = Query(default="spend",
+                      description="spend|clicks|cpc|ctr|quality|keyword|last_seen"),
+) -> dict[str, Any]:
+    """Keyword Evidence — complete selected-window evidence (PR-ADS-146).
+
+    Durable ``keyword_daily_facts`` rows bounded by ``source_date`` (never
+    run_date), deduplicated by the unique immutable-criterion natural key.
+    KPI values are computed from the COMPLETE filtered population — never the
+    returned page. Spend is FX-safe verified keyword spend (per-source-date FX);
+    quality is latest-observed. Requires auth. Read-only."""
+    from services.keyword_evidence_service import build_keyword_evidence  # noqa: PLC0415
+    return _keyword_evidence_call(
+        window, build_keyword_evidence, window,
+        page=page, page_size=page_size, q=q, campaign=campaign,
+        match_type=match_type, criterion_status=criterion_status,
+        quality_band=quality_band, signal=signal, min_spend=min_spend, sort=sort)
+
+
+@app.get("/api/keyword-evidence/detail")
+def api_keyword_evidence_detail(
+    user: dict = Depends(require_auth),
+    criterion_key: str = Query(..., description="Stable criterion key (campaign_id|ad_group_id|criterion_id)"),
+    window: str = Query(default="30d",
+                        description="Evidence window: 7d|14d|30d|60d|180d|all_time"),
+) -> dict[str, Any]:
+    """Keyword evidence drawer payload (PR-ADS-146). Same selected-window
+    population as the table so the headline matches the row exactly. Scoped
+    strictly by immutable Google Ads identity — never borrows another criterion's
+    rows. Includes identity, verified activity, LATEST-observed quality, a
+    source-date daily series (reported dates only) and a search-terms link.
+    Platform conversions are secondary evidence, not SQLs. Requires auth."""
+    from services.keyword_evidence_service import (  # noqa: PLC0415
+        build_keyword_drawer, unavailable_keyword_drawer_response,
+    )
+    return _keyword_evidence_call(
+        window, build_keyword_drawer, window, criterion_key,
+        fallback=unavailable_keyword_drawer_response)
+
+
+@app.get("/api/keyword-evidence/audit")
+def api_keyword_evidence_audit(
+    user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Operator audit of durable vs legacy keyword data (PR-ADS-146 §4):
+    durable rows/criteria, earliest/latest durable source dates, rows with
+    missing IDs, rows with unverified currency, duplicate-key candidates, and the
+    untouched legacy ``keywords`` snapshot count. Strictly READ-ONLY (SELECT
+    only) — no row is deleted, relabelled or assigned a currency. Requires auth."""
+    import db.keyword_repository as kw_repo  # noqa: PLC0415
+    try:
+        audit = kw_repo.fetch_keyword_legacy_audit()
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/keyword-evidence/audit] error: %s", exc, exc_info=True)
+        return {"available": False, "summary": {}, "read_only": True}
+    return {**audit, "read_only": True}
+
+
+@app.get("/api/keyword-evidence/export")
+def api_keyword_evidence_export(
+    user: dict = Depends(require_auth),
+    window: str = Query(default="30d",
+                        description="Evidence window: 7d|14d|30d|60d|180d|all_time"),
+    q: str = Query(default=None, description="Contains filter on keyword/campaign/ad group"),
+    campaign: str = Query(default=None, description="Canonical campaign_key filter"),
+    match_type: str = Query(default=None, description="BROAD|PHRASE|EXACT|UNKNOWN"),
+    criterion_status: str = Query(default=None, description="Criterion status filter"),
+    quality_band: str = Query(default=None, description="strong|medium|weak|unavailable"),
+    signal: str = Query(default=None, description="Review signal filter"),
+    min_spend: float = Query(default=None, description="Minimum verified spend (USD)"),
+    sort: str = Query(default="spend",
+                      description="spend|clicks|cpc|ctr|quality|keyword|last_seen"),
+):
+    """CSV export of the COMPLETE server-filtered keyword population for the
+    selected window (never a silently truncated page). 503 when the source is
+    unavailable — an empty file is never presented as a complete export.
+    Requires auth. Read-only — no export implies permission to upload changes."""
+    import csv  # noqa: PLC0415
+    import io  # noqa: PLC0415
+
+    from fastapi.responses import Response as FastAPIResponse  # noqa: PLC0415
+
+    from analysis.evidence_windows import EvidenceWindowError  # noqa: PLC0415
+    from services.keyword_evidence_service import (  # noqa: PLC0415
+        KeywordQueryError, build_keyword_export,
+    )
+    try:
+        payload = build_keyword_export(
+            window, q=q, campaign=campaign, match_type=match_type,
+            criterion_status=criterion_status, quality_band=quality_band,
+            signal=signal, min_spend=min_spend, sort=sort)
+    except (EvidenceWindowError, KeywordQueryError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/keyword-evidence/export] error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503,
+                            detail="Keyword source unavailable.") from exc
+    if payload.get("db_unavailable"):
+        raise HTTPException(status_code=503, detail="Keyword source unavailable.")
+
+    rows = payload["rows"]
+    # Completeness status of the exported monetary values (disclosed in-file).
+    any_unverified = any(r.get("spend_usd") is None for r in rows)
+    completeness = "partial" if any_unverified else "complete"
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "keyword", "match_type", "campaign", "campaign_id", "ad_group",
+        "ad_group_id", "criterion_id", "criterion_status", "currency_status",
+        "verified_spend_usd", "spend_native", "native_currency", "clicks",
+        "impressions", "ctr", "cpc_usd", "platform_conversions",
+        "quality_score", "expected_ctr", "ad_relevance", "landing_page_experience",
+        "quality_observed_date", "review_signal", "first_seen", "last_seen",
+        "window", "window_start", "window_end", "monetary_completeness",
+        "platform_metric_disclosure",
+    ])
+    for r in rows:
+        writer.writerow([
+            r["keyword"], r["match_type"], r["campaign"], r["campaign_id"] or "",
+            r["ad_group"] or "", r["ad_group_id"] or "", r["criterion_id"] or "",
+            r["criterion_status"] or "", r["currency_status"] or "",
+            "" if r["spend_usd"] is None else r["spend_usd"],
+            "" if r["spend_native"] is None else r["spend_native"],
+            r["native_currency"] or "", r["clicks"], r["impressions"],
+            "" if r["ctr"] is None else r["ctr"],
+            "" if r["cpc_usd"] is None else r["cpc_usd"],
+            "" if r["platform_conversions"] is None else r["platform_conversions"],
+            "" if r["quality_score"] is None else r["quality_score"],
+            r["expected_ctr"] or "", r["ad_relevance"] or "",
+            r["landing_page_experience"] or "", r["quality_observed_date"] or "",
+            r["review_signal"], r["first_seen"] or "", r["last_seen"] or "",
+            payload["window"], payload["window_start"] or "",
+            payload["window_end"] or "", completeness,
+            "Platform conversion event — not a confirmed SQL/customer/closed-won.",
+        ])
+    tag = "_partial_" if any_unverified else "_complete"
+    filename = f"keyword_evidence_{payload['window']}{tag}.csv"
+    return FastAPIResponse(
+        content=buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ---------------------------------------------------------------------------
 # GCLID Attribution endpoint — cursor-paginated, read-only, auth required. (PR-ADS-044)
 # ---------------------------------------------------------------------------
 

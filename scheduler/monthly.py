@@ -199,6 +199,31 @@ def run_monthly_report():
                             f"write_keywords returned 0 for {len(keywords or [])} fetched rows"
                         ),
                     )
+
+                # PR-ADS-146: durable keyword daily facts (source_date grain).
+                kdf_batch_id = db_writers.start_sync_batch(
+                    source="google_ads_api",
+                    dataset="keyword_facts",
+                    sync_type="monthly",
+                    date_from=run_date - timedelta(days=30),
+                    date_to=run_date,
+                    run_id=run_id,
+                )
+                kdf_count = db_writers.write_keyword_daily_facts(
+                    run_id=run_id, keyword_rows=keywords, sync_batch_id=kdf_batch_id or None)
+                log.info("Wrote %d durable keyword-fact rows (run_id=%s)", kdf_count, run_id)
+                if kdf_batch_id:
+                    kdf_ok = persistence_succeeded(keywords, kdf_count)
+                    db_writers.finish_sync_batch(
+                        batch_id=kdf_batch_id,
+                        status="success" if kdf_ok else "failed",
+                        row_count=kdf_count,
+                        last_source_date=max_source_date(keywords, fallback_date=run_date),
+                        error_message=None if kdf_ok else (
+                            f"write_keyword_daily_facts returned {kdf_count} for "
+                            f"{len(keywords or [])} fetched rows"
+                        ),
+                    )
         except Exception as db_exc:  # noqa: BLE001
             log.error("DB write keywords failed: %s", db_exc)
 

@@ -407,6 +407,85 @@ CREATE INDEX IF NOT EXISTS idx_search_terms_sync_batch
 -- Until enabled, ?q= filtering is supported but uses a sequential scan.
 -- Do NOT add a plain B-tree index — it does not support LIKE '%term%' queries.
 
+-- PR-ADS-146: durable keyword daily fact table (Keyword Evidence).
+-- grain / natural key: source_date + customer_id + campaign_id + ad_group_id + criterion_id
+-- Immutable Google Ads identity — display names are NEVER the unique key, so two
+-- campaigns / ad groups / keyword criteria sharing a display name stay separate
+-- facts. A repeated scheduler pull for the same fact updates the SAME row
+-- (ON CONFLICT upsert in db/writers.write_keyword_daily_facts).
+--
+-- The legacy `keywords` snapshot table above is left UNTOUCHED for audit
+-- compatibility; its historical amounts are never reinterpreted as durable USD.
+-- cost_micros is raw metrics.cost_micros (native currency); currency_code is the
+-- native account currency; source_system is provenance. Quality diagnostics are
+-- LATEST-OBSERVED keyword attributes (NULL = unavailable, distinct from 0) — they
+-- are never averaged across scheduler snapshots.
+CREATE TABLE IF NOT EXISTS keyword_daily_facts (
+  id                       SERIAL PRIMARY KEY,
+  run_id                   INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+  source_date              DATE NOT NULL,
+  customer_id              TEXT,
+  campaign_id              TEXT,
+  campaign_name            TEXT,
+  ad_group_id              TEXT,
+  ad_group_name            TEXT,
+  criterion_id             TEXT,
+  keyword_text             TEXT,
+  match_type               TEXT,
+  criterion_status         TEXT,
+
+  -- Currency lineage: raw native cost + native currency + provenance.
+  cost_micros              BIGINT,
+  currency_code            TEXT,
+  source_system            TEXT,
+
+  impressions              BIGINT        DEFAULT 0,
+  clicks                   BIGINT        DEFAULT 0,
+  conversions              NUMERIC(12,2) DEFAULT 0,
+
+  -- Latest observed Google Ads quality diagnostics (keyword attributes).
+  -- NULL = unavailable (never conflated with a genuine 0/score). Not additive.
+  quality_score            SMALLINT,
+  expected_ctr             TEXT,
+  ad_relevance             TEXT,
+  landing_page_experience  TEXT,
+
+  sync_batch_id            INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  created_at               TIMESTAMPTZ DEFAULT NOW(),
+  updated_at               TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Unique natural key: immutable Google Ads identity. COALESCE makes the legacy
+-- empty-string fallback for a missing id EXPLICIT and documented — it never
+-- silently collapses unrelated facts (two distinct ids never share a key).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_keyword_daily_facts_unique
+  ON keyword_daily_facts (
+    source_date,
+    COALESCE(customer_id,  ''),
+    COALESCE(campaign_id,  ''),
+    COALESCE(ad_group_id,  ''),
+    COALESCE(criterion_id, '')
+  );
+
+-- Keyset/cursor pagination + lookup indexes.
+CREATE INDEX IF NOT EXISTS idx_kdf_cursor      ON keyword_daily_facts(source_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_kdf_source_date ON keyword_daily_facts(source_date);
+CREATE INDEX IF NOT EXISTS idx_kdf_campaign_id ON keyword_daily_facts(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_kdf_criterion   ON keyword_daily_facts(criterion_id);
+CREATE INDEX IF NOT EXISTS idx_kdf_match_type  ON keyword_daily_facts(match_type);
+CREATE INDEX IF NOT EXISTS idx_kdf_sync_batch  ON keyword_daily_facts(sync_batch_id);
+
+-- Register the migration marker. keyword_daily_facts is a NEW table, so
+-- CREATE TABLE / CREATE INDEX IF NOT EXISTS above are inherently idempotent and
+-- non-destructive on databases that predate PR-ADS-146; this marker records the
+-- upgrade for audit parity with the search_terms migration.
+DO $$
+BEGIN
+    INSERT INTO migrations (migration_id)
+    VALUES ('PR-ADS-146-keyword-daily-facts')
+    ON CONFLICT (migration_id) DO NOTHING;
+END $$;
+
 -- PR-ADS-040A: idempotent migration — enforce NOT NULL on search_terms.search_term
 -- New installs: search_term is already NOT NULL from CREATE TABLE above; these are no-ops.
 -- Existing DBs (from initial PR-ADS-040 deploy): purge any null/blank rows then

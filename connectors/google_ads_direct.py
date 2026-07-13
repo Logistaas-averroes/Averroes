@@ -277,30 +277,40 @@ def fetch_search_terms(start_date: str, end_date: str) -> list:
     return result
 
 
-def fetch_keyword_performance(start_date: str, end_date: str) -> list:
-    """Fetch keyword view performance.
+# Latest-observed keyword quality diagnostics (PR-ADS-146). These live on
+# ad_group_criterion.quality_info and are CURRENT attributes (not date-grained),
+# so they repeat across a criterion's daily rows — the writer keeps the latest
+# observation. Selectable on the installed Google Ads API version (v21–v24); if a
+# future/locked-down API rejects them we FAIL CLOSED (retry without, quality
+# unavailable) rather than inventing replacements.
+_KEYWORD_QUALITY_FIELDS = (
+    "ad_group_criterion.quality_info.quality_score",
+    "ad_group_criterion.quality_info.search_predicted_ctr",
+    "ad_group_criterion.quality_info.creative_quality_score",
+    "ad_group_criterion.quality_info.post_click_quality_score",
+)
 
-    Args:
-        start_date: ISO date string (YYYY-MM-DD), inclusive.
-        end_date:   ISO date string (YYYY-MM-DD), inclusive.
 
-    Returns:
-        List of dicts with keyword performance data.
-        Read-only. Does not mutate any Google Ads resource.
-    """
-    client = build_google_ads_client()
-    customer_id = get_customer_id()
-
-    query = f"""
+def _keyword_query(start_date: str, end_date: str, *, with_quality: bool) -> str:
+    """Build the keyword_view GAQL. ``with_quality`` toggles the quality_info
+    fields so we can retry without them if the API version rejects them."""
+    quality_block = ""
+    if with_quality:
+        quality_block = "".join(f"          {f},\n" for f in _KEYWORD_QUALITY_FIELDS)
+    return f"""
         SELECT
           segments.date,
+          customer.id,
+          customer.currency_code,
           campaign.id,
           campaign.name,
           ad_group.id,
           ad_group.name,
+          ad_group_criterion.criterion_id,
+          ad_group_criterion.status,
           ad_group_criterion.keyword.text,
           ad_group_criterion.keyword.match_type,
-          metrics.impressions,
+{quality_block}          metrics.impressions,
           metrics.clicks,
           metrics.cost_micros,
           metrics.conversions
@@ -309,25 +319,105 @@ def fetch_keyword_performance(start_date: str, end_date: str) -> list:
         ORDER BY segments.date DESC
     """
 
-    rows = _run_search_stream(client, customer_id, query)
+
+def _is_unsupported_field_error(exc: Exception) -> bool:
+    """True when a GoogleAdsException looks like an unrecognized/unsupported
+    field error for the quality_info selection. Conservative: when we can't tell,
+    return False so the original error re-raises (never silently swallowed)."""
+    text = str(getattr(exc, "failure", "") or exc).lower()
+    markers = (
+        "quality_info", "unrecognized_field", "unrecognized field",
+        "unknown field", "prohibited_field", "field_error",
+        "not a valid field", "cannot be selected",
+    )
+    return any(m in text for m in markers)
+
+
+def _quality_bucket(enum_val) -> str | None:
+    """Map a QualityScoreBucket enum to a display string, or None when the API
+    reports no bucket (UNSPECIFIED/UNKNOWN) — unavailable, never a fake value."""
+    name = getattr(enum_val, "name", None) or str(enum_val or "")
+    if name in ("UNSPECIFIED", "UNKNOWN", ""):
+        return None
+    return name  # BELOW_AVERAGE / AVERAGE / ABOVE_AVERAGE
+
+
+def fetch_keyword_performance(start_date: str, end_date: str) -> list:
+    """Fetch keyword_view performance with durable lineage + latest quality.
+
+    Args:
+        start_date: ISO date string (YYYY-MM-DD), inclusive.
+        end_date:   ISO date string (YYYY-MM-DD), inclusive.
+
+    Returns:
+        List of dicts with keyword performance data, preserving raw
+        ``cost_micros``, native ``currency_code``, immutable Google Ads identity
+        (campaign/ad_group/criterion ids), criterion status, and — when the API
+        supports them — latest-observed quality diagnostics. When the quality
+        fields are unsupported, retries WITHOUT them and marks quality
+        unavailable (fail closed).
+        Read-only. Does not mutate any Google Ads resource.
+    """
+    client = build_google_ads_client()
+    customer_id = get_customer_id()
+
+    with_quality = True
+    try:
+        rows = _run_search_stream(
+            client, customer_id, _keyword_query(start_date, end_date, with_quality=True))
+    except GoogleAdsException as exc:
+        if _is_unsupported_field_error(exc):
+            logger.warning(
+                "fetch_keyword_performance: quality_info fields unsupported by the "
+                "installed Google Ads API — retrying WITHOUT quality (fail closed)")
+            with_quality = False
+            rows = _run_search_stream(
+                client, customer_id, _keyword_query(start_date, end_date, with_quality=False))
+        else:
+            raise
+
     result = []
     for row in rows:
+        crit = row.ad_group_criterion
+        if with_quality:
+            qi = crit.quality_info
+            # Google Ads quality_score is 1–10 when available; 0/unset means
+            # unavailable — map that to None so "unavailable" stays distinct from
+            # a genuine stored 0 downstream.
+            qs_raw = int(getattr(qi, "quality_score", 0) or 0)
+            quality_score = qs_raw if qs_raw > 0 else None
+            expected_ctr = _quality_bucket(getattr(qi, "search_predicted_ctr", None))
+            ad_relevance = _quality_bucket(getattr(qi, "creative_quality_score", None))
+            landing_page_experience = _quality_bucket(getattr(qi, "post_click_quality_score", None))
+        else:
+            quality_score = expected_ctr = ad_relevance = landing_page_experience = None
+        status_enum = getattr(crit, "status", None)
         result.append({
             "date": row.segments.date,
+            "customer_id": row.customer.id,
+            "currency_code": row.customer.currency_code or None,
             "campaign_id": row.campaign.id,
             "campaign_name": row.campaign.name,
             "ad_group_id": row.ad_group.id,
             "ad_group_name": row.ad_group.name,
-            "keyword_text": row.ad_group_criterion.keyword.text,
-            "keyword_match_type": row.ad_group_criterion.keyword.match_type.name,
+            "criterion_id": crit.criterion_id,
+            "criterion_status": getattr(status_enum, "name", None),
+            "keyword_text": crit.keyword.text,
+            "keyword_match_type": crit.keyword.match_type.name,
             "impressions": row.metrics.impressions,
             "clicks": row.metrics.clicks,
             "cost_micros": row.metrics.cost_micros,
             "spend": round(row.metrics.cost_micros / 1_000_000, 6),
             "conversions": row.metrics.conversions,
+            "quality_score": quality_score,
+            "quality_available": with_quality,
+            "expected_ctr": expected_ctr,
+            "ad_relevance": ad_relevance,
+            "landing_page_experience": landing_page_experience,
         })
     logger.info(
-        "fetch_keyword_performance: %d rows (%s → %s)", len(result), start_date, end_date
+        "fetch_keyword_performance: %d rows (%s → %s), quality=%s",
+        len(result), start_date, end_date, "on" if with_quality else "unavailable"
     )
     return result
 

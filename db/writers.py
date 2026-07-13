@@ -850,6 +850,154 @@ def write_search_terms(
         return 0
 
 
+def write_keyword_daily_facts(
+    run_id: Optional[int],
+    keyword_rows: list,
+    sync_batch_id: Optional[int] = None,
+) -> int:
+    """Upsert durable keyword daily facts (PR-ADS-146) into keyword_daily_facts.
+
+    Accepts rows from pull_keyword_performance()/normalize_keyword_row (Google
+    Ads direct connector). Natural key is immutable Google Ads identity:
+    ``source_date + customer_id + campaign_id + ad_group_id + criterion_id`` — a
+    repeated scheduler pull for the same fact UPDATES the same row, so overlapping
+    windows never multiply totals. Two ids sharing a display name stay separate.
+
+    Currency lineage: raw ``cost_micros`` + native ``currency_code`` +
+    ``source_system`` are stored durably; native cost is NEVER written into a USD
+    field, and a missing value is NEVER coerced to zero merely to fill a column.
+
+    Quality diagnostics are LATEST-OBSERVED keyword attributes: on conflict a new
+    non-null value wins, but a null (e.g. a fail-closed pull with quality
+    unavailable) never wipes a previously observed value. A genuine 0 quality
+    score is preserved distinct from NULL (unavailable).
+
+    The legacy ``keywords`` snapshot table is NOT touched here. Returns count of
+    upserted rows; 0 safely for empty input or DB unavailable. Never raises.
+    """
+    if not keyword_rows:
+        log.info("write_keyword_daily_facts: input_rows=0, nothing to write")
+        return 0
+
+    today = _today()
+    rows = []
+    input_rows = len(keyword_rows)
+    skipped_no_date = 0
+
+    for raw in keyword_rows:
+        # ── Resolve source_date ──────────────────────────────────────────
+        raw_date = raw.get("date") or raw.get("source_date")
+        if raw_date is not None:
+            try:
+                source_date = raw_date if isinstance(raw_date, date) else date.fromisoformat(str(raw_date))
+            except (ValueError, TypeError):
+                log.warning("write_keyword_daily_facts: skipping unparseable date %r", raw_date)
+                skipped_no_date += 1
+                continue
+        else:
+            source_date = today
+
+        def _clean(v):
+            if v is None:
+                return None
+            s = str(v).strip()
+            return s or None
+
+        customer_id  = _clean(raw.get("customer_id"))
+        campaign_id  = _clean(raw.get("campaign_id"))
+        campaign_name = _clean(raw.get("campaign") or raw.get("campaign_name"))
+        ad_group_id  = _clean(raw.get("ad_group_id"))
+        ad_group_name = _clean(raw.get("ad_group") or raw.get("ad_group_name"))
+        criterion_id = _clean(raw.get("criterion_id"))
+        criterion_status = _clean(raw.get("criterion_status"))
+        keyword_text = _clean(raw.get("keyword") or raw.get("keyword_text"))
+
+        match_type_raw = raw.get("match_type")
+        match_type = str(match_type_raw).strip() or None if match_type_raw is not None else None
+
+        cost_micros = _int_or_none(raw.get("cost_micros"))
+        currency_code = _clean(raw.get("currency_code"))
+        source_system = raw.get("source") or "unknown"
+
+        impressions = int(_int_or_none(raw.get("impressions")) or 0)
+        clicks      = int(_int_or_none(raw.get("clicks")) or 0)
+        conversions = float(_float_or_none(raw.get("conversions")) or 0)
+
+        # Quality attributes — preserve NULL (unavailable) distinct from 0.
+        quality_score = _int_or_none(raw.get("quality_score"))
+        expected_ctr = _clean(raw.get("expected_ctr"))
+        ad_relevance = _clean(raw.get("ad_relevance"))
+        landing_page_experience = _clean(raw.get("landing_page_experience"))
+
+        rows.append((
+            run_id, source_date, customer_id, campaign_id, campaign_name,
+            ad_group_id, ad_group_name, criterion_id, keyword_text, match_type,
+            criterion_status, cost_micros, currency_code, source_system,
+            impressions, clicks, conversions,
+            quality_score, expected_ctr, ad_relevance, landing_page_experience,
+            sync_batch_id,
+        ))
+
+    if not rows:
+        log.info("write_keyword_daily_facts: nothing to write after prep (skipped_no_date=%d)",
+                 skipped_no_date)
+        return 0
+
+    _upsert_sql = """
+        INSERT INTO keyword_daily_facts (
+            run_id, source_date, customer_id, campaign_id, campaign_name,
+            ad_group_id, ad_group_name, criterion_id, keyword_text, match_type,
+            criterion_status, cost_micros, currency_code, source_system,
+            impressions, clicks, conversions,
+            quality_score, expected_ctr, ad_relevance, landing_page_experience,
+            sync_batch_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (
+            source_date,
+            COALESCE(customer_id,  ''),
+            COALESCE(campaign_id,  ''),
+            COALESCE(ad_group_id,  ''),
+            COALESCE(criterion_id, '')
+        ) DO UPDATE SET
+            run_id           = EXCLUDED.run_id,
+            sync_batch_id    = COALESCE(EXCLUDED.sync_batch_id, keyword_daily_facts.sync_batch_id),
+            campaign_name    = COALESCE(EXCLUDED.campaign_name, keyword_daily_facts.campaign_name),
+            ad_group_name    = COALESCE(EXCLUDED.ad_group_name, keyword_daily_facts.ad_group_name),
+            keyword_text     = COALESCE(EXCLUDED.keyword_text, keyword_daily_facts.keyword_text),
+            match_type       = COALESCE(EXCLUDED.match_type, keyword_daily_facts.match_type),
+            criterion_status = COALESCE(EXCLUDED.criterion_status, keyword_daily_facts.criterion_status),
+            cost_micros      = COALESCE(EXCLUDED.cost_micros, keyword_daily_facts.cost_micros),
+            currency_code    = COALESCE(EXCLUDED.currency_code, keyword_daily_facts.currency_code),
+            source_system    = COALESCE(EXCLUDED.source_system, keyword_daily_facts.source_system),
+            impressions      = EXCLUDED.impressions,
+            clicks           = EXCLUDED.clicks,
+            conversions      = EXCLUDED.conversions,
+            -- Quality is latest-observed: a new non-null wins; a null never wipes
+            -- a prior observation. 0 is a real value and is preserved.
+            quality_score    = COALESCE(EXCLUDED.quality_score, keyword_daily_facts.quality_score),
+            expected_ctr     = COALESCE(EXCLUDED.expected_ctr, keyword_daily_facts.expected_ctr),
+            ad_relevance     = COALESCE(EXCLUDED.ad_relevance, keyword_daily_facts.ad_relevance),
+            landing_page_experience = COALESCE(EXCLUDED.landing_page_experience,
+                                               keyword_daily_facts.landing_page_experience),
+            updated_at       = NOW()
+    """
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(_upsert_sql, rows)
+                attempted = len(rows)
+        log.info("write_keyword_daily_facts: upserted %d rows (run_id=%s) [input=%d skipped_no_date=%d]",
+                 attempted, run_id, input_rows, skipped_no_date)
+        return attempted
+    except Exception as exc:  # noqa: BLE001
+        log.error("write_keyword_daily_facts failed (run_id=%s): %s", run_id, exc)
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Sync tracking helpers (PR-ADS-039)
 # ---------------------------------------------------------------------------
@@ -857,8 +1005,8 @@ def write_search_terms(
 # Allowed values — used for normalisation/validation; not hard-fail guards so
 # that new sources/datasets can be added to the system without a code deploy.
 VALID_SYNC_SOURCES   = {"windsor", "hubspot", "gclid"}
-VALID_SYNC_DATASETS  = {"campaigns", "keywords", "search_terms", "geo",
-                        "contacts", "deals", "matches"}
+VALID_SYNC_DATASETS  = {"campaigns", "keywords", "keyword_facts", "search_terms",
+                        "geo", "contacts", "deals", "matches"}
 VALID_SYNC_TYPES     = {"backfill", "daily", "weekly", "monthly", "manual"}
 VALID_SYNC_STATUSES  = {"running", "success", "failed", "unknown"}
 

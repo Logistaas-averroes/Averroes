@@ -7408,3 +7408,76 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
 .st-mon-badge--partial { color: #b45309; background: rgba(245, 158, 11, 0.14); border: 1px solid rgba(245,158,11,0.32); }
 .st-mon-badge--complete { color: #047857; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16,185,129,0.30); }
 .st-legacy-marker { display: inline-block; margin-left: 8px; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 999px; color: var(--text-muted); background: var(--surface-alt); border: 1px solid var(--border); }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   PR-ADS-146 — Keyword Evidence page
+   ───────────────────────────────────────────────────────────────────────── */
+.kw-table { width: 100%; }
+.kw-table th.num, .kw-table td.num { text-align: right; white-space: nowrap; }
+.kw-table .st-td-term { min-width: 220px; width: 30%; }
+.kw-table .st-td-campaign { max-width: 200px; }
+.kw-table .st-td-chev { text-align: right; color: var(--text-muted); width: 1.5rem; }
+.kw-row { cursor: pointer; }
+.kw-row:hover { background: var(--surface-alt); }
+.kw-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.st-map-note { display: inline-block; font-size: 10px; font-weight: 600; color: #b45309; }
+
+/* Match-type badges */
+.kw-match { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
+.kw-match--broad { color: #b45309; background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.30); }
+.kw-match--phrase { color: #1d4ed8; background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.30); }
+.kw-match--exact { color: #047857; background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.30); }
+.kw-match--unknown { color: var(--text-muted); background: var(--surface-alt); }
+
+/* Review-signal badges */
+.kw-signal { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); }
+.kw-signal--warn { color: #b45309; background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.30); }
+.kw-signal--ok { color: #047857; background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.30); }
+.kw-signal--neutral { color: var(--text-muted); background: var(--surface-alt); }
+
+/* Quality cell */
+.kw-quality { font-weight: 600; }
+.kw-quality--strong { color: #047857; }
+.kw-quality--medium { color: #b45309; }
+.kw-quality--weak { color: #b91c1c; }
+.kw-quality--na { font-size: 10px; font-weight: 600; color: var(--text-muted); }
+.kw-status-pill { font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 999px; color: var(--text-muted); background: var(--surface-alt); border: 1px solid var(--border); }
+
+/* Compact match-type comparison row */
+.kw-mt-summary { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: var(--space-3) 0 var(--space-4); }
+.kw-mt-seg { flex: 1 1 180px; min-width: 160px; border: 1px solid var(--border); border-radius: var(--radius-md, 8px); padding: var(--space-3); background: var(--surface); }
+.kw-mt-seg__head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.kw-mt-seg__kw { font-size: 11px; color: var(--text-muted); }
+.kw-mt-seg__spend { font-size: 18px; font-weight: 700; margin-top: 4px; }
+.kw-mt-seg__meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+/* Drawer helpers (shared visual language with the evidence drawers) */
+.st-drawer-section { padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
+.st-drawer-section:last-child { border-bottom: none; }
+.st-drawer-h { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+.st-drawer-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: var(--space-2); }
+.st-drawer-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px var(--space-3); margin: 0; font-size: 13px; }
+.st-drawer-facts dt { color: var(--text-muted); }
+.st-drawer-facts dd { margin: 0; text-align: right; word-break: break-word; }
+.st-drawer-note { font-size: 12px; color: var(--text-muted); margin: var(--space-2) 0 0; }
+.st-drawer-kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); }
+.st-drawer-kpi { border: 1px solid var(--border); border-radius: var(--radius-md, 8px); padding: var(--space-2); }
+.st-drawer-kpi__label { font-size: 11px; color: var(--text-muted); }
+.st-drawer-kpi__value { font-size: 16px; font-weight: 700; }
+
+/* Responsive: rows → cards on narrow screens (PR-ADS-146 §21).
+   Spend and quality status are NEVER hidden. */
+@media (max-width: 560px) {
+  .kw-table thead { display: none; }
+  .kw-table, .kw-table tbody, .kw-table tr, .kw-table td { display: block; width: 100%; }
+  .kw-table tr.kw-row { border: 1px solid var(--border); border-radius: var(--radius-md, 8px); margin-bottom: var(--space-3); padding: var(--space-2); }
+  .kw-table td { text-align: right; padding: 4px 6px; border: none; }
+  .kw-table td.num { text-align: right; }
+  .kw-table td::before { content: attr(data-label); float: left; font-weight: 600; color: var(--text-muted); font-size: 12px; }
+  .kw-table td.st-td-term { text-align: left; font-weight: 700; font-size: 15px; }
+  .kw-table td.st-td-term::before { content: ""; }
+  .kw-table td.st-td-chev { display: none; }
+  .st-drawer-kpis { grid-template-columns: repeat(2, 1fr); }
+  .kw-mt-seg { flex-basis: 100%; }
+}

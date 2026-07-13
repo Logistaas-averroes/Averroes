@@ -170,6 +170,33 @@ def run_weekly_report():
                             f"write_keywords returned 0 for {len(keywords or [])} fetched rows"
                         ),
                     )
+
+                # PR-ADS-146: also persist DURABLE keyword daily facts (source_date
+                # grain, natural-key upsert) that back the Keyword Evidence page.
+                # The legacy snapshot write above is untouched for audit parity.
+                kdf_batch_id = db_writers.start_sync_batch(
+                    source="google_ads_api",
+                    dataset="keyword_facts",
+                    sync_type="weekly",
+                    date_from=run_date - timedelta(days=30),
+                    date_to=run_date,
+                    run_id=run_id,
+                )
+                kdf_count = db_writers.write_keyword_daily_facts(
+                    run_id=run_id, keyword_rows=keywords, sync_batch_id=kdf_batch_id or None)
+                log.info("[weekly] Wrote %d durable keyword-fact rows", kdf_count)
+                if kdf_batch_id:
+                    kdf_ok = persistence_succeeded(keywords, kdf_count)
+                    db_writers.finish_sync_batch(
+                        batch_id=kdf_batch_id,
+                        status="success" if kdf_ok else "failed",
+                        row_count=kdf_count,
+                        last_source_date=max_source_date(keywords, fallback_date=run_date),
+                        error_message=None if kdf_ok else (
+                            f"write_keyword_daily_facts returned {kdf_count} for "
+                            f"{len(keywords or [])} fetched rows"
+                        ),
+                    )
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write keywords failed: %s", db_exc)
 

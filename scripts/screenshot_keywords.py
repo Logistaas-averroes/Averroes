@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Render the Keyword Evidence page at desktop/tablet/mobile widths (PR-ADS-146).
+
+Serves ./static over a local HTTP server and intercepts /api/* with fixtures from
+scripts/keyword_evidence_fixtures.json (generated from the REAL service with
+mocked repositories). The /api/keyword-evidence/detail fixture is a dict keyed by
+criterion_key so different drawers can be served. Screenshots:
+
+  - Main page            @ 1440px
+  - Keyword drawer       @ 1440px (rich quality)
+  - Partial-currency     @ 1440px (main page — Verified Keyword Spend · Partial)
+  - Quality-unavailable  @ 1440px (drawer of a keyword with no quality score)
+  - Main page            @ 1024px (tablet)
+  - Main page            @  390px (mobile — rows become cards)
+
+Usage: python scripts/screenshot_keywords.py [out_dir]
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FIXTURES = os.path.join(ROOT, "scripts", "keyword_evidence_fixtures.json")
+
+
+def _chrome_executable() -> str | None:
+    import glob
+    env = os.environ.get("CHROME_BIN")
+    if env and os.path.exists(env):
+        return env
+    base = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
+    for pat in ("chromium-*/chrome-linux/chrome",
+                "chromium_headless_shell-*/chrome-linux/headless_shell"):
+        matches = sorted(glob.glob(os.path.join(base, pat)))
+        if matches:
+            return matches[-1]
+    return None
+
+
+class _Handler(SimpleHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        if self.path == "/" or self.path.split("?", 1)[0] == "/":
+            self.path = "/static/index.html"
+        return super().do_GET()
+
+    def log_message(self, *a):
+        pass
+
+
+def _serve() -> ThreadingHTTPServer:
+    handler = partial(_Handler, directory=ROOT)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+def main() -> int:
+    from playwright.sync_api import sync_playwright
+
+    out_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "screenshots")
+    os.makedirs(out_dir, exist_ok=True)
+    with open(FIXTURES, encoding="utf-8") as fh:
+        fixtures = json.load(fh)
+
+    httpd = _serve()
+    port = httpd.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+
+    def route_api(route):
+        url = urlparse(route.request.url.split(base, 1)[-1])
+        path = url.path
+        for key in sorted(fixtures, key=len, reverse=True):
+            if path == key or path.rstrip("/") == key:
+                body = fixtures[key]
+                # Detail is keyed by criterion_key → pick the requested drawer.
+                if key == "/api/keyword-evidence/detail" and isinstance(body, dict):
+                    ck = (parse_qs(url.query).get("criterion_key") or [""])[0]
+                    body = body.get(ck) or next(iter(body.values()))
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(body))
+                return
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    written = []
+    chrome = _chrome_executable()
+
+    def open_page(ctx):
+        page = ctx.new_page()
+        page.route("**/api/**", route_api)
+        page.route("**/auth/**", route_api)
+        page.goto(f"{base}/#/keywords", wait_until="networkidle")
+        page.wait_for_timeout(1200)
+        page.evaluate("window.location.hash = '#/keywords'")
+        page.wait_for_timeout(1500)
+        return page
+
+    with sync_playwright() as pw:
+        launch_kwargs = {"args": ["--no-sandbox"]}
+        if chrome:
+            launch_kwargs["executable_path"] = chrome
+        browser = pw.chromium.launch(**launch_kwargs)
+
+        def new_ctx(w, h):
+            ctx = browser.new_context(viewport={"width": w, "height": h},
+                                      device_scale_factor=2)
+            ctx.add_cookies([{"name": "ads_session", "value": "screenshot", "url": base}])
+            return ctx
+
+        def shot(page, name):
+            out = os.path.join(out_dir, name)
+            page.screenshot(path=out, full_page=True)
+            written.append(out)
+
+        # ── Desktop 1440: main + partial-currency (same page) ──
+        ctx = new_ctx(1440, 900)
+        page = open_page(ctx)
+        shot(page, "keyword-evidence-desktop-1440.png")
+        shot(page, "keyword-evidence-partial-currency-1440.png")
+        # Rich-quality drawer.
+        page.locator('tr[data-kw-key="1|101|1001"]').click()
+        page.wait_for_timeout(1200)
+        shot(page, "keyword-evidence-drawer-desktop-1440.png")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
+        # Quality-unavailable drawer.
+        page.locator('tr[data-kw-key="2|201|2004"]').click()
+        page.wait_for_timeout(1200)
+        shot(page, "keyword-evidence-quality-unavailable-1440.png")
+        ctx.close()
+
+        # ── Tablet 1024 ──
+        ctx = new_ctx(1024, 800)
+        page = open_page(ctx)
+        shot(page, "keyword-evidence-tablet-1024.png")
+        ctx.close()
+
+        # ── Mobile 390 ──
+        ctx = new_ctx(390, 844)
+        page = open_page(ctx)
+        shot(page, "keyword-evidence-mobile-390.png")
+        ctx.close()
+
+        browser.close()
+    httpd.shutdown()
+    for p in written:
+        print(p)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

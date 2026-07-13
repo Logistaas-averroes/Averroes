@@ -118,11 +118,11 @@
           </a>
         </li>
         <li>
-          <a class="nav-item" data-page="keywords" href="#" role="button" tabindex="0" aria-label="Keywords">
+          <a class="nav-item" data-page="keywords" href="#" role="button" tabindex="0" aria-label="Keyword Evidence">
             <span class="nav-item__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/></svg>
             </span>
-            <span class="nav-item__label">Keywords</span>
+            <span class="nav-item__label">Keyword Evidence</span>
           </a>
         </li>
         <li>
@@ -608,70 +608,11 @@
         </p>
       </section>
 
-      <!-- Keywords -->
-      <section id="page-keywords" class="page" hidden>
-        <header class="page-header">
-          <h1 class="page-title">Keyword Performance</h1>
-          <p class="page-subtitle">Keyword performance from the Google Ads API. This view shows ad-platform metrics only — not HubSpot lead quality.</p>
-        </header>
+      <!-- Keyword Evidence (PR-ADS-146) -->
+      <section id="page-keywords" class="page page--wide" hidden>
         <div id="page-explanation-keywords" hidden></div>
         <p id="run-meta-keywords" class="run-meta" data-section="keywords"></p>
-        <div class="kpi-grid">
-          <div class="kpi-card">
-            <div class="kpi-card__label">Keyword Spend</div>
-            <div class="kpi-card__value" id="kw-kpi-spend">—</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-card__label">Active Keywords</div>
-            <div class="kpi-card__value" id="kw-kpi-active">—</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-card__label">Broad Match Spend</div>
-            <div class="kpi-card__value" id="kw-kpi-broad">—</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-card__label">Avg Quality Score</div>
-            <div class="kpi-card__value" id="kw-kpi-qs">—</div>
-          </div>
-        </div>
-        <div class="matchtype-summary" id="kw-matchtype-summary"></div>
-        <div class="keywords-controls">
-          <input
-            type="text"
-            id="kw-filter-search"
-            class="waste-search-input"
-            placeholder="Filter by keyword, campaign, or ad group…"
-            aria-label="Filter keywords"
-          />
-          <select id="kw-filter-campaign" class="waste-filter-select" aria-label="Filter by campaign">
-            <option value="">All campaigns</option>
-          </select>
-          <select id="kw-filter-matchtype" class="waste-filter-select" aria-label="Filter by match type">
-            <option value="">All match types</option>
-            <option value="broad">Broad</option>
-            <option value="phrase">Phrase</option>
-            <option value="exact">Exact</option>
-            <option value="unknown">Unknown</option>
-          </select>
-          <button id="kw-copy-btn" class="btn btn--secondary waste-copy-btn" type="button">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            Copy keywords
-          </button>
-        </div>
-        <p class="waste-copy-hint">Copies visible filtered rows as TSV. Review only — no write action.</p>
-        <div class="panel">
-          <div class="panel__header">
-            <span class="panel__header-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="2"/></svg></span>
-            Keyword Performance
-          </div>
-          <div class="panel__body panel__body--flush" id="kw-table-body">
-            <p class="empty-state" style="padding: var(--space-5);">Loading keywords…</p>
-          </div>
-        </div>
-        <p class="grace-note">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Keyword rows appear after weekly or monthly runs persist Google Ads API keyword performance to the database.
-        </p>
+        <div id="keyword-evidence-shell"></div>
       </section>
 
       <!-- Lead Quality -->
@@ -1288,6 +1229,20 @@
       </button>
     </div>
     <div class="campaign-drawer__body" id="st-drawer-body">
+      <p class="empty-state">Loading…</p>
+    </div>
+  </aside>
+
+  <!-- ── Keyword Evidence Drawer (PR-ADS-146) ── -->
+  <div id="kw-drawer-overlay" class="drawer-overlay" hidden aria-hidden="true"></div>
+  <aside id="kw-drawer" class="campaign-drawer" hidden aria-label="Keyword evidence" role="dialog" aria-modal="true">
+    <div class="campaign-drawer__header">
+      <div id="kw-drawer-title" class="campaign-drawer__title"></div>
+      <button id="kw-drawer-close-btn" class="drawer-close" type="button" aria-label="Close evidence drawer">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="campaign-drawer__body" id="kw-drawer-body">
       <p class="empty-state">Loading…</p>
     </div>
   </aside>

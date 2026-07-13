@@ -128,7 +128,7 @@ const PAGE_DATASET_MAP = {
   search_terms:      ["google_ads_api/search_terms"],
   ngrams:            ["google_ads_api/search_terms"],   // n-grams derived from search_terms
   geo:               ["google_ads_api/geo"],
-  keywords:          ["google_ads_api/keywords"],
+  keywords:          ["google_ads_api/keyword_facts", "google_ads_api/keywords"],
   lead_quality:      ["hubspot/contacts"],
   deals:             ["hubspot/deals"],
   gclid_attribution: ["gclid/matches"],
@@ -213,11 +213,11 @@ const PAGE_EXPLANATIONS = {
     nextAction: "Check System Status → Google Ads API / Geo."
   },
   keywords: {
-    title: "Keyword Performance",
-    purpose: "Keyword-level performance metrics and quality signals.",
-    source: "Google Ads API keyword data.",
-    dependsOn: ["keywords"],
-    emptyMeans: "No Google Ads API keyword data has been synced yet for this window. Run the weekly/monthly scheduler or check System Status.",
+    title: "Keyword Evidence",
+    purpose: "Google Ads keyword activity, match-type exposure and quality diagnostics.",
+    source: "Durable Google Ads keyword facts (keyword_daily_facts).",
+    dependsOn: ["keyword_facts"],
+    emptyMeans: "No reported keyword activity for this window. A blank Quality Score does not mean poor quality, and no keyword rows does not mean the account has no targeting or spend.",
     nextAction: "Check System Status → Google Ads API / Keywords."
   },
   leads: {
@@ -360,11 +360,11 @@ const PAGE_HELP_CONTENT = {
     checkNext: "Flagged Waste Terms for the flagged review queue, or Campaign Evidence for canonical spend and lead outcomes."
   },
   keywords: {
-    what: "Keyword-level performance metrics — impressions, clicks, spend, conversions, and quality signals per keyword.",
-    source: "Google Ads API keyword data.",
-    howToUse: "Sort by spend or quality score. Filter to find high-spend low-quality keywords that may need attention.",
-    doNotAssume: "Keyword data reflects Google Ads reporting. Quality scores are Google's metric, not an internal calculation.",
-    checkNext: "Campaigns page for campaign-level context, or Search Terms to see what queries matched each keyword."
+    what: "Keyword Evidence — the selected-window keyword population at the unique Google Ads criterion grain, with match-type exposure, latest-observed quality diagnostics and one factual review signal per keyword.",
+    source: "Durable Google Ads API keyword facts (keyword_daily_facts) totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound) — never SUM'd across overlapping scheduler snapshots. Verified Keyword Spend is Σ(per-source-date native cost × that date's FX rate); it is a verified subtotal shown Complete, Partial (excludes N unverified/FX-incomplete units) or Unavailable. Quality Score, Expected CTR, Ad Relevance and Landing Page Experience are the LATEST observed Google Ads attributes per criterion — not window averages; a blank score means unavailable, distinct from a genuine 0.",
+    howToUse: "Pick an Evidence Window, filter by campaign, match type, criterion status, quality band, review signal or minimum verified spend, and click any row to open its evidence drawer. Export CSV returns the complete server-filtered dataset. Keyword-view reporting coverage compares FX-safe verified keyword-view USD against FX-safe canonical campaign USD — a completeness diagnostic, not a reconciliation failure.",
+    doNotAssume: "Review signals are review-prioritisation only — never winner/loser/waste. Zero platform conversions is not confirmed waste, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Broad-match exposure is a factual share, not a recommendation to change match type. Read-only: no keywords are added/paused, no bids/match-types changed, no negatives created, nothing written to Google Ads or HubSpot. The legacy keywords snapshot table is preserved and never reinterpreted as durable USD.",
+    checkNext: "Search Terms to see which queries matched a keyword, or Campaign Evidence for canonical spend and lead outcomes."
   },
   geo: {
     what: "Country-level ad performance and HubSpot lead quality shown side by side. Identify which countries produce quality leads vs. waste.",
@@ -477,7 +477,7 @@ const PAGE_DEPENDENCIES = {
   "search-terms":          ["google_ads_api/search_terms"],
   ngrams:                  ["google_ads_api/search_terms"],
   geo:                     ["google_ads_api/geo"],
-  keywords:                ["google_ads_api/keywords"],
+  keywords:                ["google_ads_api/keyword_facts", "google_ads_api/keywords"],
   leads:                   ["hubspot/contacts"],
   deals:                   ["hubspot/deals"],
   "gclid-attribution":     ["gclid/matches"],
@@ -10406,306 +10406,507 @@ async function loadGclidCoverageForAttribution() {
   }
 }
 
-async function loadKeywords() {
+// ── Keyword Evidence page (PR-ADS-146) ──────────────────────────────────────
+// Full-width, read-only. Durable keyword_daily_facts via /api/keyword-evidence:
+// source_date selected-window totals (never SUM'd over overlapping snapshots),
+// per-source-date FX verified spend, latest-observed quality, factual review
+// signals. Layout mirrors the accepted Search Terms / Campaign Evidence pages.
+let _kwData = null;
+let _kwLoadState = "idle";
+let _kwFilters = { q: "", campaign: "", matchType: "", status: "", quality: "",
+                   signal: "", minSpend: "", sort: "spend", page: 1 };
+let _kwReqId = 0;
+let _kwDebounce = null;
+let _kwDrawerKeyHandler = null;
+
+const KW_SIGNAL_TONE = {
+  "Broad-match exposure": "warn",
+  "Low quality evidence": "warn",
+  "Spend without platform conversion": "warn",
+  "No recent activity": "neutral",
+  "Limited data": "neutral",
+  "No platform concern detected": "ok",
+  "Quality unavailable": "neutral",
+  "Currency unavailable": "neutral",
+};
+
+function kwSignalBadge(signal) {
+  if (!signal) return "—";
+  const tone = KW_SIGNAL_TONE[signal] || "neutral";
+  return `<span class="kw-signal kw-signal--${tone}">${escapeHtml(signal)}</span>`;
+}
+
+function kwMatchBadge(mt) {
+  const label = mt || "UNKNOWN";
+  const cls = { BROAD: "broad", PHRASE: "phrase", EXACT: "exact" }[label] || "unknown";
+  return `<span class="kw-match kw-match--${cls}">${escapeHtml(label[0] + label.slice(1).toLowerCase())}</span>`;
+}
+
+function kwQualityCell(row) {
+  // Latest-observed quality. NULL (unavailable) is distinct from a genuine 0.
+  if (row.quality_score === null || row.quality_score === undefined) {
+    return `<span class="kw-quality kw-quality--na" title="Latest quality score unavailable — not a poor score">Unavailable</span>`;
+  }
+  const band = row.quality_band || "medium";
+  return `<span class="kw-quality kw-quality--${band}" title="Latest observed Quality Score">${row.quality_score}</span>`;
+}
+
+function kwSpendCell(row) {
+  // Verified USD, else native disclosure, else an Unverified marker — never $0.
+  if (row.spend_usd !== null && row.spend_usd !== undefined) return stMoney(row.spend_usd);
+  if (row.spend_native !== null && row.spend_native !== undefined) {
+    const cur = row.native_currency || "?";
+    const val = Number(row.spend_native).toLocaleString(undefined,
+      { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return `<span title="USD unavailable — FX incomplete">${escapeHtml(cur)} ${val}</span>`;
+  }
+  return `<span class="st-legacy-marker" title="Currency lineage unverified — monetary value withheld, never assumed GBP/USD">Unverified</span>`;
+}
+
+function kwPct(v) { return (v === null || v === undefined) ? "—" : `${Number(v).toFixed(1)}%`; }
+function kwNum(v) { return (v === null || v === undefined) ? "—" : fmtCount(v); }
+
+function kwWindowLabel() {
+  const w = getEvidenceWindow();
+  return (typeof CAMPAIGN_WINDOW_LABELS !== "undefined" && CAMPAIGN_WINDOW_LABELS[w]) || w;
+}
+
+// ── Entry point (router calls loadKeywords) ──────────────────────────────────
+function loadKeywords() {
   renderPageDatasetFreshness("keywords");
-  const tableEl   = document.getElementById("kw-table-body");
-  const summaryEl = document.getElementById("kw-matchtype-summary");
-  if (summaryEl) summaryEl.innerHTML = "";
+  _kwFilters.page = 1;
+  renderKeywordShell();
+  loadKeywordTab();
+}
 
-  ["kw-kpi-spend", "kw-kpi-active", "kw-kpi-broad", "kw-kpi-qs"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = "—";
-  });
+function renderKeywordShell() {
+  const shell = document.getElementById("keyword-evidence-shell");
+  if (!shell) return;
+  shell.innerHTML = `
+    <header class="campaign-evidence-head">
+      <div class="campaign-evidence-head__text">
+        <h2 class="campaign-evidence-title">Keyword Evidence</h2>
+        <p class="campaign-evidence-sub">Google Ads keyword activity, match-type exposure and quality diagnostics.</p>
+      </div>
+      <span class="campaign-evidence-window" title="Selected evidence window">${escapeHtml(kwWindowLabel())}</span>
+    </header>
+    <div id="kw-tab-body"></div>`;
+}
 
-  keywordLoadStatus = "loading";
+function kwBuildParams() {
+  const p = new URLSearchParams();
+  p.set("window", getEvidenceWindow());
+  p.set("page", String(_kwFilters.page));
+  p.set("page_size", "50");
+  p.set("sort", _kwFilters.sort || "spend");
+  if (_kwFilters.q) p.set("q", _kwFilters.q);
+  if (_kwFilters.campaign) p.set("campaign", _kwFilters.campaign);
+  if (_kwFilters.matchType) p.set("match_type", _kwFilters.matchType);
+  if (_kwFilters.status) p.set("criterion_status", _kwFilters.status);
+  if (_kwFilters.quality) p.set("quality_band", _kwFilters.quality);
+  if (_kwFilters.signal) p.set("signal", _kwFilters.signal);
+  if (_kwFilters.minSpend !== "" && _kwFilters.minSpend !== null) p.set("min_spend", String(_kwFilters.minSpend));
+  return p;
+}
 
+async function loadKeywordTab() {
+  const reqId = ++_kwReqId;
+  _kwLoadState = "loading";
+  renderKeywordTab();
   try {
-    const data = await fetchJSON(`/api/keywords?${evidenceWindowQuery()}`);
-
-    if (data.db_unavailable) {
-      keywordLoadStatus = "db_unavailable";
-      keywordRows = [];
-      renderKeywordsTable([]);
-      return;
-    }
-
-    keywordRows = data.rows || [];
-
-    if (keywordRows.length === 0) {
-      keywordLoadStatus = "empty";
-      renderKeywordsTable([]);
-      return;
-    }
-
-    keywordLoadStatus = "ok";
-    renderKeywordsKPIs(keywordRows);
-    renderMatchTypeSummary(keywordRows);
-    populateKeywordFilters(keywordRows);
-    // PR-ADS-142: apply a campaign prefill from the campaign drawer, if present.
-    if (keywordsPrefill && keywordsPrefill.campaign) {
-      const sel = document.getElementById("kw-filter-campaign");
-      if (sel && Array.from(sel.options).some((o) => o.value === keywordsPrefill.campaign)) {
-        sel.value = keywordsPrefill.campaign;
-      }
-      keywordsPrefill = null;
-    }
-    applyKeywordFilters();
-
-  } catch (_) {
-    keywordLoadStatus = "error";
-    keywordRows = [];
-    renderKeywordsTable([]);
+    const data = await fetchJSON(`/api/keyword-evidence?${kwBuildParams().toString()}`);
+    if (reqId !== _kwReqId) return;
+    _kwData = data;
+    _kwLoadState = data.db_unavailable ? "db_unavailable" : "ok";
+  } catch (err) {
+    if (reqId !== _kwReqId) return;
+    console.error("keyword-evidence load failed", err);
+    _kwLoadState = "error";
   }
+  renderKeywordTab();
 }
 
-function keywordDedupeKey(r) {
-  return `${(r.keyword || "").toLowerCase()}|${normalizeMatchType(r.match_type)}|${(r.campaign_name || "").toLowerCase()}`;
+function kwHasActiveFilters() {
+  return Boolean(_kwFilters.q || _kwFilters.campaign || _kwFilters.matchType ||
+    _kwFilters.status || _kwFilters.quality || _kwFilters.signal || _kwFilters.minSpend !== "");
 }
 
-function renderKeywordsKPIs(rows) {
-  const totalSpend = rows.reduce((s, r) => s + (r.spend_usd || 0), 0);
-
-  const activeKeywords = new Set(rows.map(keywordDedupeKey)).size;
-
-  const broadSpend = rows
-    .filter((r) => normalizeMatchType(r.match_type) === "broad")
-    .reduce((s, r) => s + (r.spend_usd || 0), 0);
-
-  const qsRows = rows.filter((r) => r.quality_score != null);
-  const avgQS  = qsRows.length > 0
-    ? qsRows.reduce((s, r) => s + r.quality_score, 0) / qsRows.length
-    : null;
-
-  const spendEl  = document.getElementById("kw-kpi-spend");
-  const activeEl = document.getElementById("kw-kpi-active");
-  const broadEl  = document.getElementById("kw-kpi-broad");
-  const qsEl     = document.getElementById("kw-kpi-qs");
-
-  if (spendEl)  spendEl.textContent  = fmtDollar(totalSpend);
-  if (activeEl) activeEl.textContent = String(activeKeywords);
-  if (broadEl)  broadEl.textContent  = fmtDollar(broadSpend);
-  if (qsEl)     qsEl.textContent     = avgQS != null ? avgQS.toFixed(1) : "—";
-}
-
-function renderMatchTypeSummary(rows) {
-  const el = document.getElementById("kw-matchtype-summary");
-  if (!el) return;
-
-  const types  = ["broad", "phrase", "exact", "unknown"];
-  const labels = { broad: "Broad", phrase: "Phrase", exact: "Exact", unknown: "Unknown" };
-
-  const grouped = {};
-  types.forEach((t) => { grouped[t] = { keys: new Set(), spend: 0, clicks: 0, conversions: 0 }; });
-
-  for (const row of rows) {
-    const t = normalizeMatchType(row.match_type);
-    // Count distinct keyword texts per match type (same keyword in multiple ad groups counts once)
-    grouped[t].keys.add((row.keyword || "").trim().toLowerCase());
-    grouped[t].spend       += row.spend_usd    || 0;
-    grouped[t].clicks      += row.clicks       || 0;
-    grouped[t].conversions += row.conversions  || 0;
-  }
-
-  const cards = types.map((t) => {
-    const g = grouped[t];
-    if (g.keys.size === 0) return "";
-    return `
-      <div class="matchtype-card">
-        <div class="matchtype-card__header">
-          <span class="match-type-badge match-type-${t}">${labels[t]}</span>
-        </div>
-        <div class="matchtype-card__stats">
-          <div class="matchtype-card__stat">
-            <span class="matchtype-card__num">${g.keys.size}</span>
-            <span class="matchtype-card__label">keywords</span>
-          </div>
-          <div class="matchtype-card__stat">
-            <span class="matchtype-card__num">${fmtDollar(g.spend)}</span>
-            <span class="matchtype-card__label">spend</span>
-          </div>
-          <div class="matchtype-card__stat">
-            <span class="matchtype-card__num">${g.clicks}</span>
-            <span class="matchtype-card__label">clicks</span>
-          </div>
-          <div class="matchtype-card__stat">
-            <!-- Google Ads conversions are fractional due to cross-device attribution -->
-            <span class="matchtype-card__num">${g.conversions.toFixed(1)}</span>
-            <span class="matchtype-card__label">Google conv.</span>
-          </div>
-        </div>
-      </div>`;
-  }).join("");
-
-  el.innerHTML = cards || `<p class="empty-state">No match type data available.</p>`;
-}
-
-function populateKeywordFilters(rows) {
-  const campSel = document.getElementById("kw-filter-campaign");
-  if (campSel) {
-    const camps = [...new Set(rows.map((r) => r.campaign_name).filter(Boolean))].sort();
-    campSel.innerHTML = `<option value="">All campaigns</option>` +
-      camps.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
-  }
-}
-
-function getFilteredKeywordRows() {
-  const searchInput = document.getElementById("kw-filter-search");
-  const campSel     = document.getElementById("kw-filter-campaign");
-  const matchSel    = document.getElementById("kw-filter-matchtype");
-
-  const search = searchInput ? searchInput.value.trim().toLowerCase() : "";
-  const camp   = campSel     ? campSel.value  : "";
-  const match  = matchSel    ? matchSel.value : "";
-
-  let filtered = keywordRows;
-  if (search) {
-    filtered = filtered.filter((r) =>
-      (r.keyword       || "").toLowerCase().includes(search) ||
-      (r.campaign_name || "").toLowerCase().includes(search) ||
-      (r.ad_group      || "").toLowerCase().includes(search)
-    );
-  }
-  if (camp)  filtered = filtered.filter((r) => r.campaign_name === camp);
-  if (match) filtered = filtered.filter((r) => normalizeMatchType(r.match_type) === match);
-  return filtered;
-}
-
-function applyKeywordFilters() {
-  if (keywordLoadStatus !== "ok") {
-    renderKeywordsTable([]);
+function renderKeywordTab() {
+  const body = document.getElementById("kw-tab-body");
+  if (!body) return;
+  if (_kwLoadState === "loading" && !_kwData) {
+    body.innerHTML = `<div class="evidence-empty-state">Loading keyword evidence…</div>`;
     return;
   }
-  renderKeywordsTable(getFilteredKeywordRows());
-}
+  if (_kwLoadState === "db_unavailable") {
+    body.innerHTML = `<div class="evidence-empty-state">
+      Data unavailable — the keyword source cannot be reached right now.
+      No metrics are shown because none can be verified.
+      <a href="#/health">Check System Status</a>.</div>`;
+    return;
+  }
+  if (_kwLoadState === "error") {
+    body.innerHTML = `<div class="evidence-empty-state">
+      Keyword evidence could not be loaded. Retry, or check System Status.</div>`;
+    return;
+  }
+  if (!_kwData) return;
 
-// Keyword rows with spend at or above uiThresholds.spend.high_spend_usd get subtle high-spend emphasis.
-// Value is loaded from /api/config/ui-thresholds after auth; falls back to DEFAULT_UI_THRESHOLDS.
-
-function renderKeywordsTable(rows) {
-  const tableEl = document.getElementById("kw-table-body");
-  if (!tableEl) return;
-
-  if (keywordLoadStatus === "db_unavailable") {
-    tableEl.innerHTML = `
-      <div class="keywords-empty-state">
-        <p class="empty-state">Keyword data temporarily unavailable — database offline.</p>
-      </div>`;
+  const total = (_kwData.pagination && _kwData.pagination.total_count) || 0;
+  if (total === 0 && !kwHasActiveFilters()) {
+    body.innerHTML = `${renderKeywordKPIs(_kwData.kpis)}
+      <div class="evidence-empty-state">No reported keyword activity for this window.</div>`;
     return;
   }
 
-  if (keywordLoadStatus === "error") {
-    tableEl.innerHTML = `
-      <div class="keywords-empty-state">
-        <p class="empty-state">Could not load keyword data. Check API health or run status.</p>
-      </div>`;
-    return;
-  }
-
-  if (rows.length === 0) {
-    if (keywordLoadStatus === "empty") {
-      tableEl.innerHTML = `
-        <div class="keywords-empty-state">
-          <p class="empty-state">No keyword data available for the selected window.</p>
-          <p class="keywords-empty-subtext">No Google Ads API keyword data has been synced yet. Run the weekly or monthly scheduler or check System Status.</p>
-        </div>`;
-    } else {
-      tableEl.innerHTML =
-        `<p class="empty-state" style="padding:var(--space-5)">No results match the current filter.</p>`;
-    }
-    return;
-  }
-
-  const sorted = [...rows].sort((a, b) => (b.spend_usd || 0) - (a.spend_usd || 0));
-
-  const thead = `
-    <thead>
-      <tr>
-        <th>Keyword</th>
-        <th>Match Type</th>
-        <th>Campaign</th>
-        <th>Ad Group</th>
-        <th class="td--num">Spend</th>
-        <th class="td--num">Clicks</th>
-        <th class="td--num">Impressions</th>
-        <th class="td--num">CPC</th>
-        <th class="td--num">Google Conv.</th>
-        <th>Quality Score</th>
-        <th class="td--num">Runs</th>
-        <th>Last Run</th>
-      </tr>
-    </thead>`;
-
-  const tbody = sorted.map((r) => {
-    const highSpend = (r.spend_usd || 0) >= uiThresholds.spend.high_spend_usd;
-    return `
-      <tr${highSpend ? ' class="row--high-spend"' : ""}>
-        <td class="td--name">${escapeHtml(r.keyword || "—")}</td>
-        <td>${matchTypeBadge(r.match_type)}</td>
-        <td>${escapeHtml(r.campaign_name || "—")}</td>
-        <td>${escapeHtml(r.ad_group || "—")}</td>
-        <td class="td--num${highSpend ? " waste-spend--high" : ""}">${r.spend_usd != null ? fmtDollar(r.spend_usd) : "—"}</td>
-        <td class="td--num">${r.clicks != null ? r.clicks : "—"}</td>
-        <td class="td--num">${r.impressions != null ? r.impressions : "—"}</td>
-        <td class="td--num">${r.cpc_usd != null ? "$" + r.cpc_usd.toFixed(2) : "—"}</td>
-        <td class="td--num">${r.conversions != null ? r.conversions.toFixed(1) : "—"}</td>
-        <td>${qualityScoreBadge(r.quality_score)}</td>
-        <td class="td--num">${r.runs != null ? r.runs : "—"}</td>
-        <td>${r.last_run_date ? escapeHtml(r.last_run_date) : "—"}</td>
-      </tr>`;
-  }).join("");
-
-  tableEl.innerHTML = `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+  body.innerHTML = `
+    ${renderKeywordKPIs(_kwData.kpis)}
+    ${renderMatchTypeSummary(_kwData.match_type_summary)}
+    ${renderKeywordFilters(_kwData.facets)}
+    <div class="evidence-table-shell">
+      <div class="evidence-table-scroll" id="kw-table"></div>
+    </div>`;
+  renderKeywordTable();
+  wireKeywordControls();
 }
 
-function copyKeywordRows() {
-  const rows = getFilteredKeywordRows();
-  if (rows.length === 0) return;
-
-  const sorted = [...rows].sort((a, b) => (b.spend_usd || 0) - (a.spend_usd || 0));
-  const headers = ["keyword", "match_type", "campaign_name", "spend_usd", "clicks", "conversions"];
-  const lines = [headers.join("\t")].concat(
-    sorted.map((r) => [
-      r.keyword        || "",
-      normalizeMatchType(r.match_type),
-      r.campaign_name  || "",
-      r.spend_usd      != null ? r.spend_usd.toFixed(2)      : "",
-      r.clicks         != null ? String(r.clicks)             : "",
-      r.conversions    != null ? r.conversions.toFixed(1)     : "",
-    ].join("\t"))
-  );
-  const text = lines.join("\n");
-
-  const btn      = document.getElementById("kw-copy-btn");
-  const origHTML = btn ? btn.innerHTML : null;
-
-  const showFeedback = (success) => {
-    if (!btn) return;
-    btn.innerHTML = success
-      ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Copied!`
-      : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> Copy failed`;
-    btn.disabled = true;
-    setTimeout(() => {
-      if (btn && origHTML !== null) { btn.innerHTML = origHTML; btn.disabled = false; }
-    }, 2000);
-  };
-
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(
-      () => showFeedback(true),
-      () => showFeedback(false),
-    );
+// ── KPI strip (5 compact cards + coverage) ───────────────────────────────────
+function kwVerifiedSpendCard(kpis) {
+  const mon = kpis.monetary || {};
+  const status = kpis.monetary_status || mon.monetary_completeness_status || "unavailable";
+  const usd = kpis.verified_spend_usd;
+  if (status === "unavailable" || usd === null || usd === undefined) {
+    return stKpiCard("Verified Keyword Spend", stUnavailable(),
+      "No verified currency lineage for this window");
+  }
+  const nativeSub = (mon.verified_native_spend !== null && mon.verified_native_spend !== undefined)
+    ? `${escapeHtml(mon.native_currency || "GBP")} ${Number(mon.verified_native_spend).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} native`
+    : "";
+  const badge = status === "partial"
+    ? `<span class="st-mon-badge st-mon-badge--partial" title="Verified subtotal — excludes unverified or FX-incomplete keyword units">Partial</span>`
+    : `<span class="st-mon-badge st-mon-badge--complete" title="All keyword units verified and FX-complete">Complete</span>`;
+  let sub;
+  if (status === "partial") {
+    sub = `${badge} ${kwExclusionPhrase(mon.unverified_currency_units, mon.fx_incomplete_units)}` +
+      (nativeSub ? ` · ${nativeSub}` : "");
   } else {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity  = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    let ok = false;
-    try { ok = document.execCommand("copy"); } catch (_) { /* ignore */ }
-    document.body.removeChild(ta);
-    showFeedback(ok);
+    sub = `${badge} ${nativeSub ? `${nativeSub} · FX-converted USD` : "FX-converted USD"}`;
   }
+  return stKpiCard("Verified Keyword Spend", stMoney(usd), sub);
+}
+
+function kwExclusionPhrase(legacy, fxIncomplete) {
+  legacy = legacy || 0; fxIncomplete = fxIncomplete || 0;
+  const total = legacy + fxIncomplete;
+  if (!total) return "excludes unverified keyword units";
+  if (legacy && fxIncomplete) {
+    return `excludes ${fmtCount(total)} unverified units (${fmtCount(legacy)} legacy · ${fmtCount(fxIncomplete)} FX-incomplete)`;
+  }
+  if (fxIncomplete) return `excludes ${fmtCount(fxIncomplete)} FX-incomplete unit${fxIncomplete === 1 ? "" : "s"}`;
+  return `excludes ${fmtCount(legacy)} unverified keyword unit${legacy === 1 ? "" : "s"}`;
+}
+
+function renderKeywordKPIs(kpis) {
+  if (!kpis) return "";
+  const broad = kpis.broad_match_exposure || {};
+  const qual = kpis.quality_evidence || {};
+  const coverage = kpis.coverage || {};
+  const broadVal = (broad.broad_verified_spend_usd === null || broad.broad_verified_spend_usd === undefined)
+    ? stUnavailable()
+    : stMoney(broad.broad_verified_spend_usd);
+  const broadSub = (broad.broad_share_pct !== null && broad.broad_share_pct !== undefined)
+    ? `${broad.broad_share_pct.toFixed(0)}% of verified keyword spend`
+    : "Broad verified spend";
+  const qualVal = (qual.with_quality === null || qual.with_quality === undefined)
+    ? stUnavailable()
+    : `${fmtCount(qual.with_quality)} of ${fmtCount(qual.active_criteria)}`;
+  const cards = [
+    stKpiCard("Keywords Reported", kwNum(kpis.keywords_reported), "Unique keyword criteria in window"),
+    kwVerifiedSpendCard(kpis),
+    stKpiCard("Clicks", kwNum(kpis.clicks), ""),
+    stKpiCard("Broad Match Exposure", broadVal, broadSub),
+    stKpiCard("Keywords with Quality Evidence", qualVal, "Latest observed Google Ads quality diagnostics"),
+  ];
+  if (coverage.status === "ok" && coverage.coverage_pct !== null &&
+      coverage.coverage_pct !== undefined && !kwHasActiveFilters()) {
+    const verifiedOnly = coverage.scope === "verified_only";
+    cards.push(stKpiCard(
+      "Keyword-view Coverage",
+      `${Number(coverage.coverage_pct).toFixed(1)}%`,
+      (verifiedOnly
+        ? `Verified keyword-view rows only — ${kwExclusionPhrase(coverage.excluded_unverified_units, coverage.excluded_fx_incomplete_units)} · of `
+        : "Keyword-view reporting coverage of ") +
+      `${stMoney(coverage.canonical_spend_usd)} canonical spend`));
+  }
+  return `<div class="evidence-kpi-grid st-kpi-grid">${cards.join("")}</div>`;
+}
+
+// ── Compact match-type summary (slim comparison row) ─────────────────────────
+function renderMatchTypeSummary(summary) {
+  if (!summary || !summary.buckets || !summary.buckets.length) return "";
+  const cells = summary.buckets.map((b) => `
+    <div class="kw-mt-seg">
+      <div class="kw-mt-seg__head">${kwMatchBadge(b.match_type)}
+        <span class="kw-mt-seg__kw">${fmtCount(b.unique_keywords)} kw</span></div>
+      <div class="kw-mt-seg__spend">${stMoney(b.verified_spend_usd)}${b.spend_partial ? ` <span class="st-mon-badge st-mon-badge--partial" title="Verified subtotal — some units unverified">Partial</span>` : ""}</div>
+      <div class="kw-mt-seg__meta">${b.spend_share_pct !== null && b.spend_share_pct !== undefined ? `${b.spend_share_pct.toFixed(0)}% share` : "—"} · ${fmtCount(b.clicks)} clicks · CTR ${kwPct(b.ctr)} · CPC ${b.avg_cpc_usd !== null && b.avg_cpc_usd !== undefined ? stMoney(b.avg_cpc_usd) : "—"} · ${b.platform_conversions} conv</div>
+    </div>`).join("");
+  return `<div class="kw-mt-summary" aria-label="Match-type exposure (verified spend)">${cells}</div>`;
+}
+
+// ── Filter row ───────────────────────────────────────────────────────────────
+function kwCampaignOptions(facets, selected) {
+  const opts = [`<option value="">All campaigns</option>`];
+  (facets && facets.campaigns ? facets.campaigns : []).forEach((c) => {
+    const marker = c.mapping_status === "unmatched" ? " (mapping review)"
+      : c.mapping_status === "not_google_ads" ? " (not Google Ads)" : "";
+    opts.push(`<option value="${escapeHtml(c.campaign_key)}"${c.campaign_key === selected ? " selected" : ""}>${escapeHtml(c.campaign_name || c.campaign_key)}${marker}</option>`);
+  });
+  return opts.join("");
+}
+
+function renderKeywordFilters(facets) {
+  const sigOpts = [`<option value="">All review signals</option>`]
+    .concat((facets && facets.review_signals ? facets.review_signals : []).map((s) =>
+      `<option value="${escapeHtml(s)}"${s === _kwFilters.signal ? " selected" : ""}>${escapeHtml(s)}</option>`)).join("");
+  return `<div class="campaign-controls st-controls">
+    <input type="search" id="kw-q" class="waste-search-input" placeholder="Search keyword, campaign or ad group…"
+      value="${escapeHtml(_kwFilters.q)}" aria-label="Search keywords" />
+    <select id="kw-campaign" class="waste-filter-select" aria-label="Filter by campaign">${kwCampaignOptions(facets, _kwFilters.campaign)}</select>
+    <select id="kw-matchtype" class="waste-filter-select" aria-label="Filter by match type">
+      <option value="">All match types</option>
+      <option value="BROAD"${_kwFilters.matchType === "BROAD" ? " selected" : ""}>Broad</option>
+      <option value="PHRASE"${_kwFilters.matchType === "PHRASE" ? " selected" : ""}>Phrase</option>
+      <option value="EXACT"${_kwFilters.matchType === "EXACT" ? " selected" : ""}>Exact</option>
+      <option value="UNKNOWN"${_kwFilters.matchType === "UNKNOWN" ? " selected" : ""}>Unknown</option>
+    </select>
+    <select id="kw-status" class="waste-filter-select" aria-label="Filter by criterion status">
+      <option value="">All statuses</option>
+      <option value="ENABLED"${_kwFilters.status === "ENABLED" ? " selected" : ""}>Enabled</option>
+      <option value="PAUSED"${_kwFilters.status === "PAUSED" ? " selected" : ""}>Paused</option>
+      <option value="REMOVED"${_kwFilters.status === "REMOVED" ? " selected" : ""}>Removed</option>
+    </select>
+    <select id="kw-quality" class="waste-filter-select" aria-label="Filter by quality band">
+      <option value="">All quality</option>
+      <option value="strong"${_kwFilters.quality === "strong" ? " selected" : ""}>Strong</option>
+      <option value="medium"${_kwFilters.quality === "medium" ? " selected" : ""}>Medium</option>
+      <option value="weak"${_kwFilters.quality === "weak" ? " selected" : ""}>Weak</option>
+      <option value="unavailable"${_kwFilters.quality === "unavailable" ? " selected" : ""}>Unavailable</option>
+    </select>
+    <select id="kw-signal" class="waste-filter-select" aria-label="Filter by review signal">${sigOpts}</select>
+    <input type="number" id="kw-min-spend" min="0" step="1" class="waste-search-input st-min-spend"
+      placeholder="Min $" value="${escapeHtml(String(_kwFilters.minSpend))}" aria-label="Minimum verified spend" />
+    <select id="kw-sort" class="waste-filter-select" aria-label="Sort">
+      <option value="spend"${_kwFilters.sort === "spend" ? " selected" : ""}>Highest spend</option>
+      <option value="clicks"${_kwFilters.sort === "clicks" ? " selected" : ""}>Most clicks</option>
+      <option value="cpc"${_kwFilters.sort === "cpc" ? " selected" : ""}>Highest CPC</option>
+      <option value="ctr"${_kwFilters.sort === "ctr" ? " selected" : ""}>Highest CTR</option>
+      <option value="quality"${_kwFilters.sort === "quality" ? " selected" : ""}>Quality score</option>
+      <option value="keyword"${_kwFilters.sort === "keyword" ? " selected" : ""}>Keyword A–Z</option>
+      <option value="last_seen"${_kwFilters.sort === "last_seen" ? " selected" : ""}>Recently active</option>
+    </select>
+    <button id="kw-reset" class="btn btn--secondary" type="button">Reset</button>
+    <button id="kw-export" class="btn btn--secondary" type="button">Export CSV</button>
+  </div>`;
+}
+
+// ── Table ────────────────────────────────────────────────────────────────────
+function kwCampaignCell(r) {
+  const marker = r.mapping_status === "unmatched"
+    ? `<span class="st-map-note" title="Unmatched — mapping review">Mapping review</span>`
+    : r.mapping_status === "not_google_ads"
+    ? `<span class="st-map-note">Not Google Ads</span>` : "";
+  return `${escapeHtml(r.campaign || "—")}${marker ? `<br>${marker}` : ""}`;
+}
+
+function renderKeywordTable() {
+  const host = document.getElementById("kw-table");
+  if (!host || !_kwData) return;
+  const rows = _kwData.rows || [];
+  const pg = _kwData.pagination || {};
+  if (!rows.length) {
+    host.innerHTML = `<div class="evidence-empty-state">No keywords match the current filters.</div>`;
+    return;
+  }
+  const bodyRows = rows.map((r) => `
+    <tr class="kw-row" data-kw-key="${escapeHtml(r.criterion_key)}" tabindex="0" role="button" aria-label="Open keyword evidence for ${escapeHtml(r.keyword || "keyword")}">
+      <td class="st-td-term" data-label="Keyword">${escapeHtml(r.keyword || "—")}</td>
+      <td data-label="Match">${kwMatchBadge(r.match_type)}</td>
+      <td class="st-td-campaign" data-label="Campaign">${kwCampaignCell(r)}</td>
+      <td data-label="Ad Group">${escapeHtml(r.ad_group || "—")}</td>
+      <td class="num" data-label="Spend">${kwSpendCell(r)}</td>
+      <td class="num" data-label="Clicks">${fmtCount(r.clicks)}</td>
+      <td class="num" data-label="CTR">${kwPct(r.ctr)}</td>
+      <td class="num" data-label="CPC">${r.cpc_usd !== null && r.cpc_usd !== undefined ? stMoney(r.cpc_usd) : "—"}</td>
+      <td class="num" data-label="Quality">${kwQualityCell(r)}</td>
+      <td data-label="Signal">${kwSignalBadge(r.review_signal)}</td>
+      <td class="st-td-chev" aria-hidden="true">›</td>
+    </tr>`).join("");
+  const start = ((pg.page || 1) - 1) * (pg.page_size || 50);
+  const shown = `${rows.length ? start + 1 : 0}–${start + rows.length}`;
+  host.innerHTML = `
+    <table class="campaign-decision-table kw-table">
+      <thead><tr>
+        <th>Keyword</th><th>Match</th><th>Campaign</th><th>Ad Group</th>
+        <th class="num">Spend</th><th class="num">Clicks</th><th class="num">CTR</th>
+        <th class="num">CPC</th><th class="num">Quality</th><th>Signal</th><th></th>
+      </tr></thead>
+      <tbody>${bodyRows}</tbody>
+    </table>
+    <div class="st-pagination">
+      <span class="st-pagination__info">Showing ${shown} of ${fmtCount(pg.total_count || 0)} keywords</span>
+      <span class="st-pagination__btns">
+        <button id="kw-prev" type="button" ${(pg.page || 1) <= 1 ? "disabled" : ""}>‹ Prev</button>
+        <button id="kw-next" type="button" ${pg.has_more ? "" : "disabled"}>Next ›</button>
+      </span>
+    </div>`;
+  host.querySelectorAll(".kw-row").forEach((tr) => {
+    const open = () => openKwDrawer(tr.dataset.kwKey);
+    tr.addEventListener("click", open);
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+  });
+  const prev = document.getElementById("kw-prev");
+  const next = document.getElementById("kw-next");
+  if (prev) prev.addEventListener("click", () => { if (_kwFilters.page > 1) { _kwFilters.page--; loadKeywordTab(); } });
+  if (next) next.addEventListener("click", () => { if (pg.has_more) { _kwFilters.page++; loadKeywordTab(); } });
+}
+
+// ── Controls wiring + CSV export ─────────────────────────────────────────────
+function wireKeywordControls() {
+  const applyText = () => { _kwFilters.page = 1; loadKeywordTab(); };
+  const q = document.getElementById("kw-q");
+  if (q) q.addEventListener("input", () => {
+    _kwFilters.q = q.value.trim();
+    clearTimeout(_kwDebounce);
+    _kwDebounce = setTimeout(applyText, 300);
+  });
+  const bind = (id, key, transform) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("change", () => { _kwFilters[key] = transform ? transform(el.value) : el.value; applyText(); });
+  };
+  bind("kw-campaign", "campaign");
+  bind("kw-matchtype", "matchType");
+  bind("kw-status", "status");
+  bind("kw-quality", "quality");
+  bind("kw-signal", "signal");
+  bind("kw-sort", "sort");
+  const ms = document.getElementById("kw-min-spend");
+  if (ms) ms.addEventListener("change", () => { _kwFilters.minSpend = ms.value === "" ? "" : Number(ms.value); applyText(); });
+  const reset = document.getElementById("kw-reset");
+  if (reset) reset.addEventListener("click", () => {
+    _kwFilters = { q: "", campaign: "", matchType: "", status: "", quality: "", signal: "", minSpend: "", sort: "spend", page: 1 };
+    loadKeywordTab();
+  });
+  const exp = document.getElementById("kw-export");
+  if (exp) exp.addEventListener("click", () => {
+    const p = kwBuildParams();
+    p.delete("page"); p.delete("page_size");
+    window.location.href = `/api/keyword-evidence/export?${p.toString()}`;
+  });
+}
+
+// ── Drawer ───────────────────────────────────────────────────────────────────
+function kwDrawerKpi(label, valueHtml) {
+  return `<div class="st-drawer-kpi"><div class="st-drawer-kpi__label">${label}</div><div class="st-drawer-kpi__value">${valueHtml}</div></div>`;
+}
+
+function closeKwDrawer() {
+  const overlay = document.getElementById("kw-drawer-overlay");
+  const drawer = document.getElementById("kw-drawer");
+  if (overlay) { overlay.hidden = true; overlay.setAttribute("aria-hidden", "true"); }
+  if (drawer) { drawer.hidden = true; }
+  if (_kwDrawerKeyHandler) { document.removeEventListener("keydown", _kwDrawerKeyHandler); _kwDrawerKeyHandler = null; }
+}
+
+async function openKwDrawer(criterionKey) {
+  const overlay = document.getElementById("kw-drawer-overlay");
+  const drawer = document.getElementById("kw-drawer");
+  const title = document.getElementById("kw-drawer-title");
+  const bodyEl = document.getElementById("kw-drawer-body");
+  if (!overlay || !drawer || !bodyEl) return;
+  overlay.hidden = false; overlay.setAttribute("aria-hidden", "false");
+  drawer.hidden = false;
+  if (title) title.textContent = "Keyword evidence";
+  bodyEl.innerHTML = `<p class="empty-state">Loading…</p>`;
+  overlay.onclick = closeKwDrawer;
+  const closeBtn = document.getElementById("kw-drawer-close-btn");
+  if (closeBtn) closeBtn.onclick = closeKwDrawer;
+  _kwDrawerKeyHandler = (e) => { if (e.key === "Escape") closeKwDrawer(); };
+  document.addEventListener("keydown", _kwDrawerKeyHandler);
+  try {
+    const p = new URLSearchParams({ criterion_key: criterionKey, window: getEvidenceWindow() });
+    const data = await fetchJSON(`/api/keyword-evidence/detail?${p.toString()}`);
+    renderKwDrawer(bodyEl, data);
+  } catch (err) {
+    console.error("keyword drawer load failed", err);
+    bodyEl.innerHTML = `<p class="empty-state">Evidence could not be loaded.</p>`;
+  }
+}
+
+function renderKwDrawer(bodyEl, data) {
+  if (!data || data.found === false || !data.keyword) {
+    bodyEl.innerHTML = `<p class="empty-state">No evidence found for this keyword in the selected window.</p>`;
+    return;
+  }
+  const k = data.keyword;
+  const id = data.identity || {};
+  const act = data.activity || {};
+  const lq = data.latest_quality || {};
+  const daily = data.daily || [];
+  const title = document.getElementById("kw-drawer-title");
+  if (title) title.textContent = k.keyword || "Keyword evidence";
+
+  const dailyRows = daily.map((d) => `<tr>
+    <td>${escapeHtml(d.source_date || "—")}</td>
+    <td class="num">${d.spend_usd !== null && d.spend_usd !== undefined ? stMoney(d.spend_usd) : (d.spend_native !== null && d.spend_native !== undefined ? `${escapeHtml(d.native_currency || "?")} ${Number(d.spend_native).toFixed(2)}` : "—")}</td>
+    <td class="num">${fmtCount(d.clicks || 0)}</td>
+    <td class="num">${fmtCount(d.impressions || 0)}</td>
+    <td class="num">${d.impressions ? ((d.clicks || 0) / d.impressions * 100).toFixed(2) + "%" : "—"}</td>
+  </tr>`).join("");
+
+  bodyEl.innerHTML = `
+    <div class="st-drawer-section">
+      <div class="st-drawer-badges">${kwMatchBadge(k.match_type)} ${kwSignalBadge(data.review_signal)}
+        ${id.criterion_status ? `<span class="kw-status-pill">${escapeHtml(id.criterion_status)}</span>` : ""}</div>
+      <dl class="st-drawer-facts">
+        <dt>Campaign</dt><dd>${escapeHtml(id.campaign || "—")}${id.mapping_status === "unmatched" ? " (mapping review)" : ""}</dd>
+        <dt>Campaign ID</dt><dd>${escapeHtml(id.campaign_id || "—")}</dd>
+        <dt>Ad group</dt><dd>${escapeHtml(id.ad_group || "—")}</dd>
+        <dt>Ad group ID</dt><dd>${escapeHtml(id.ad_group_id || "—")}</dd>
+        <dt>Criterion ID</dt><dd>${escapeHtml(id.criterion_id || "—")}</dd>
+      </dl>
+    </div>
+    <div class="st-drawer-section">
+      <h4 class="st-drawer-h">Selected-window activity</h4>
+      <div class="st-drawer-kpis">
+        ${kwDrawerKpi("Verified spend", act.spend_usd !== null && act.spend_usd !== undefined ? stMoney(act.spend_usd) : stUnavailable())}
+        ${kwDrawerKpi("Native", act.spend_native !== null && act.spend_native !== undefined ? `${escapeHtml(act.native_currency || "?")} ${Number(act.spend_native).toFixed(2)}` : "—")}
+        ${kwDrawerKpi("Clicks", fmtCount(act.clicks || 0))}
+        ${kwDrawerKpi("Impressions", fmtCount(act.impressions || 0))}
+        ${kwDrawerKpi("CTR", act.ctr !== null && act.ctr !== undefined ? act.ctr.toFixed(2) + "%" : "—")}
+        ${kwDrawerKpi("CPC", act.cpc_usd !== null && act.cpc_usd !== undefined ? stMoney(act.cpc_usd) : "—")}
+      </div>
+      <p class="st-drawer-note">Platform conversions: ${act.platform_conversions ?? 0}. ${escapeHtml(act.platform_conversion_disclosure || "")}</p>
+      <p class="st-drawer-note">Reported ${escapeHtml(act.first_seen || "—")} → ${escapeHtml(act.last_seen || "—")}. Currency: ${escapeHtml(act.currency_status || "—")}.</p>
+    </div>
+    <div class="st-drawer-section">
+      <h4 class="st-drawer-h">Latest observed quality diagnostics</h4>
+      <dl class="st-drawer-facts">
+        <dt>Quality Score</dt><dd>${lq.quality_score === null || lq.quality_score === undefined ? "Unavailable" : lq.quality_score}</dd>
+        <dt>Expected CTR</dt><dd>${escapeHtml(lq.expected_ctr || "Unavailable")}</dd>
+        <dt>Ad Relevance</dt><dd>${escapeHtml(lq.ad_relevance || "Unavailable")}</dd>
+        <dt>Landing Page Exp.</dt><dd>${escapeHtml(lq.landing_page_experience || "Unavailable")}</dd>
+        <dt>Observed</dt><dd>${escapeHtml(lq.observed_date || "—")}</dd>
+      </dl>
+      <p class="st-drawer-note">${escapeHtml(lq.semantics || "")}</p>
+    </div>
+    <div class="st-drawer-section">
+      <h4 class="st-drawer-h">Daily evidence</h4>
+      ${daily.length ? `<table class="st-fact-table"><thead><tr><th>Date</th><th class="num">Spend</th><th class="num">Clicks</th><th class="num">Impr.</th><th class="num">CTR</th></tr></thead><tbody>${dailyRows}</tbody></table>` : `<p class="st-drawer-note">No reported daily rows in this window.</p>`}
+    </div>
+    <div class="st-drawer-links">
+      <a href="#/search-terms?campaign=${encodeURIComponent(id.campaign_key || "")}">View related search terms →</a>
+    </div>`;
 }
 
 // ── In Progress Leads page ─────────────────────────────────────────────────
@@ -11491,7 +11692,8 @@ function datasetRelatedPage(source, dataset) {
   const key = `${source}/${dataset}`;
   const map = {
     "google_ads_api/search_terms": { page: "search-terms", label: "Search Term Universe" },
-    "google_ads_api/keywords":     { page: "keywords",     label: "Keyword Performance" },
+    "google_ads_api/keyword_facts": { page: "keywords",    label: "Keyword Evidence" },
+    "google_ads_api/keywords":     { page: "keywords",     label: "Keyword Evidence" },
     "google_ads_api/geo":          { page: "geo",           label: "Country Performance" },
     "google_ads_api/campaigns":    { page: "campaigns",     label: "Campaigns"    },
     "hubspot/contacts":     { page: "leads",         label: "Lead Quality" },
@@ -13181,15 +13383,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
 
-  // Wire up keywords filter controls
-  const kwSearch   = document.getElementById("kw-filter-search");
-  const kwCampSel  = document.getElementById("kw-filter-campaign");
-  const kwMatchSel = document.getElementById("kw-filter-matchtype");
-  const kwCopyBtn  = document.getElementById("kw-copy-btn");
-  if (kwSearch)   kwSearch.addEventListener("input",   applyKeywordFilters);
-  if (kwCampSel)  kwCampSel.addEventListener("change", applyKeywordFilters);
-  if (kwMatchSel) kwMatchSel.addEventListener("change", applyKeywordFilters);
-  if (kwCopyBtn)  kwCopyBtn.addEventListener("click",  copyKeywordRows);
+  // Keyword Evidence (PR-ADS-146) wires its own controls inside the page shell
+  // (wireKeywordControls) — no global keyword filter wiring here.
 
   // Wire up action queue filter controls
   const aqSevSel  = document.getElementById("aq-filter-severity");

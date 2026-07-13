@@ -306,9 +306,11 @@ class TestSearchTermsTabModel:
 
 class TestWindsorIsLegacyOnly:
     def test_platform_evidence_empty_states_do_not_blame_windsor(self):
-        # Empty-state subtexts for Platform Evidence pages must point at the
-        # Google Ads API, not Windsor.
-        for marker in ("geo-empty-subtext", "keywords-empty-subtext"):
+        # Empty-state subtexts for legacy Platform Evidence pages must point at
+        # the Google Ads API, not Windsor. (Keyword Evidence, PR-ADS-146, is now
+        # a full evidence page like Search Terms — its empty state is rendered in
+        # the shell and its Google-Ads-API source is asserted via help content.)
+        for marker in ("geo-empty-subtext",):
             idx = APP_JS.find(marker)
             assert idx != -1, f"empty-state marker '{marker}' not found"
             snippet = APP_JS[idx : idx + 240]
@@ -320,10 +322,10 @@ class TestWindsorIsLegacyOnly:
             )
 
     def test_index_html_platform_evidence_copy_uses_google_ads_api(self):
-        # Keywords page subtitle + geo/keyword empty states in index.html.
-        assert "Keyword performance from the Google Ads API" in INDEX_HTML
+        # Geo empty state in index.html. (Keyword Evidence, PR-ADS-146, renders
+        # its header/subtitle/empty state in the JS shell, not index.html; its
+        # Google-Ads-API source is asserted via PAGE_HELP_CONTENT above.)
         assert "Google Ads API country performance" in INDEX_HTML
-        assert "Google Ads API keyword performance" in INDEX_HTML
 
 
 # ───────────────────────────────────────────────────────────────────────────
