@@ -62,18 +62,22 @@ _LEGACY = [
 def _agg_rows():
     rows = []
     for (kw, camp, cid, ag, agid, crit, mt, gbp, clk, imp, conv, status, qs, ectr, adr, lp) in _KW + [_FX_INCOMPLETE]:
+        # One verified keyword has UNAVAILABLE platform conversions (NULL) to
+        # exercise the "Platform conversions unavailable" signal + partial
+        # conversion coverage — never shown as a fabricated 0.
+        conv_val = None if crit == "1004" else float(conv)
         rows.append({
             "customer_id": CUST, "campaign_id": cid, "campaign_name": camp,
             "ad_group_id": agid, "ad_group_name": ag, "criterion_id": crit,
             "keyword_text": kw, "match_type": mt, "criterion_status": status,
             "cost_micros": int(round(gbp * 1_000_000)),
-            "clicks": clk, "impressions": imp, "conversions": float(conv),
+            "clicks": clk, "impressions": imp, "conversions": conv_val,
             "first_seen": WINDOW_START, "last_seen": date(2026, 7, 12),
             "fact_rows": 20, "currency_codes": ["GBP"],
             "source_systems": ["google_ads_api"],
             "quality_score": qs, "expected_ctr": ectr, "ad_relevance": adr,
             "landing_page_experience": lp,
-            "quality_date": date(2026, 7, 12) if qs is not None else None,
+            "quality_observed_at": "2026-07-13T05:30:00Z" if qs is not None else None,
         })
     for (kw, camp, cid, ag, agid, crit, mt, clk, imp) in _LEGACY:
         rows.append({
@@ -85,7 +89,7 @@ def _agg_rows():
             "last_seen": date(2026, 7, 9), "fact_rows": 6,
             "currency_codes": [], "source_systems": [],
             "quality_score": None, "expected_ctr": None, "ad_relevance": None,
-            "landing_page_experience": None, "quality_date": None,
+            "landing_page_experience": None, "quality_observed_at": None,
         })
     return rows
 
@@ -98,7 +102,7 @@ def _fetch_keyword_aggregates(start, end):
         "cost_micros_total": sum(r["cost_micros"] or 0 for r in rows),
         "clicks_total": sum(r["clicks"] for r in rows),
         "impressions_total": sum(r["impressions"] for r in rows),
-        "conversions_total": sum(r["conversions"] for r in rows),
+        "conversions_total": sum(r["conversions"] or 0 for r in rows),
         "distinct_source_dates": 30,
         "min_source_date": WINDOW_START, "max_source_date": date(2026, 7, 12),
         "currency_codes": ["GBP"], "source_systems": ["google_ads_api"]}}

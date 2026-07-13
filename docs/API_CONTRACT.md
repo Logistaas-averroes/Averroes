@@ -1904,9 +1904,39 @@ page. Response:
 **Review signals** are factual prioritisation only (never winner/loser/waste):
 `Broad-match exposure`, `Low quality evidence`, `Spend without platform
 conversion`, `No recent activity`, `Limited data`, `No platform concern
-detected`, `Quality unavailable`, `Currency unavailable`. Thresholds come from
-`config/thresholds.yaml` (min spend, small-sample guard, quality bands) — never
-hardcoded. Zero platform conversions is never treated as confirmed waste.
+detected`, `Quality unavailable`, `Currency unavailable`, `Platform conversions
+unavailable`. Thresholds come from `config/thresholds.yaml` (min spend,
+small-sample guard, quality bands) — never hardcoded. Zero platform conversions
+is never treated as confirmed waste.
+
+**Truth-completion guarantees (PR-ADS-146 §1–§6):**
+- **Unknown conversions ≠ 0.** `platform_conversions` is `null` when the value
+  is unavailable (never a fabricated 0) in the row, drawer, KPI, CSV and
+  match-type summary; the match-type summary sums only known values, returns
+  `null` when all members are unavailable and sets `conversions_partial: true`
+  when some are. `Spend without platform conversion` fires ONLY for a verified
+  zero; unavailable spend/conversions surface `Platform conversions unavailable`.
+- **Fail closed on identity.** The durable table's immutable id columns
+  (`customer_id`, `campaign_id`, `ad_group_id`, `criterion_id`) are `NOT NULL`;
+  the writer skips + counts rows missing any of them (`skipped_missing_identity`)
+  and returns structured stats so the scheduler marks a partial persistence as
+  failed, never full success. No COALESCE-to-empty fallback for durable facts.
+- **Quality lineage.** `quality_observed_at`/`quality_observed_date` is the
+  genuine observation time (pull time), never the activity `source_date`; latest
+  quality is selected by it, a null never wipes a prior observation, and a
+  fail-closed no-quality pull carries no stamp.
+- **Historical coverage.** `durable_coverage_start`/`durable_coverage_end`
+  expose the stored durable range; when the selected window begins before
+  `durable_coverage_start` (or `all_time`), the UI shows a compact
+  "Partial historical coverage" disclosure rather than implying full coverage.
+- **Freshness** for this page depends only on `google_ads_api/keyword_facts`
+  (the durable table); the legacy `keywords` snapshot is audit-only.
+- **Backfill.** `scripts/backfill_keyword_daily_facts.py` is an idempotent,
+  read-only operator backfill (date range / window / dry-run) that writes through
+  the natural-key upsert, tracks a `keyword_facts` sync batch, fails when rows
+  were fetched but none written, and runs a post-backfill audit (no duplicate
+  keys, identity complete, currency lineage complete/partial, source-date
+  coverage vs range).
 
 #### `GET /api/keyword-evidence/detail`
 **Auth:** Auth · **Read-only:** Yes. `criterion_key` (campaign_id|ad_group_id|

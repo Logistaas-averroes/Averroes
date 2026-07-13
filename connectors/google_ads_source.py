@@ -232,6 +232,7 @@ def normalize_keyword_row(row: dict) -> dict:
         "expected_ctr": row.get("expected_ctr"),
         "ad_relevance": row.get("ad_relevance"),
         "landing_page_experience": row.get("landing_page_experience"),
+        "quality_observed_at": row.get("quality_observed_at"),
         "source": _SOURCE,
     }
 

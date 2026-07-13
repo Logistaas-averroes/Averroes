@@ -361,6 +361,11 @@ def fetch_keyword_performance(start_date: str, end_date: str) -> list:
     client = build_google_ads_client()
     customer_id = get_customer_id()
 
+    # The quality attributes are CURRENT at query time — stamp the genuine
+    # observation moment (pull time), never the historical activity source_date.
+    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+    observed_at = _dt.now(tz=_tz.utc).isoformat()
+
     with_quality = True
     try:
         rows = _run_search_stream(
@@ -414,6 +419,9 @@ def fetch_keyword_performance(start_date: str, end_date: str) -> list:
             "expected_ctr": expected_ctr,
             "ad_relevance": ad_relevance,
             "landing_page_experience": landing_page_experience,
+            # Genuine observation time — only when a quality score was actually
+            # observed (fail-closed fallback pulls carry no quality timestamp).
+            "quality_observed_at": observed_at if (with_quality and quality_score is not None) else None,
         })
     logger.info(
         "fetch_keyword_performance: %d rows (%s → %s), quality=%s",

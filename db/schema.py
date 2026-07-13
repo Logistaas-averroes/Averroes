@@ -420,16 +420,21 @@ CREATE INDEX IF NOT EXISTS idx_search_terms_sync_batch
 -- native account currency; source_system is provenance. Quality diagnostics are
 -- LATEST-OBSERVED keyword attributes (NULL = unavailable, distinct from 0) — they
 -- are never averaged across scheduler snapshots.
+-- The immutable Google Ads identity columns are NOT NULL: a durable fact with a
+-- missing id is REJECTED at the writer (fail closed) and by the DB — we never
+-- COALESCE a missing id to '' as a production fallback (that could let two
+-- distinct-but-incomplete facts collide). quality_observed_at is the genuine time
+-- the quality attributes were observed (pull time), NOT the activity source_date.
 CREATE TABLE IF NOT EXISTS keyword_daily_facts (
   id                       SERIAL PRIMARY KEY,
   run_id                   INTEGER REFERENCES runs(id) ON DELETE SET NULL,
   source_date              DATE NOT NULL,
-  customer_id              TEXT,
-  campaign_id              TEXT,
+  customer_id              TEXT NOT NULL,
+  campaign_id              TEXT NOT NULL,
   campaign_name            TEXT,
-  ad_group_id              TEXT,
+  ad_group_id              TEXT NOT NULL,
   ad_group_name            TEXT,
-  criterion_id             TEXT,
+  criterion_id             TEXT NOT NULL,
   keyword_text             TEXT,
   match_type               TEXT,
   criterion_status         TEXT,
@@ -441,30 +446,31 @@ CREATE TABLE IF NOT EXISTS keyword_daily_facts (
 
   impressions              BIGINT        DEFAULT 0,
   clicks                   BIGINT        DEFAULT 0,
-  conversions              NUMERIC(12,2) DEFAULT 0,
+  -- conversions is NULLABLE: NULL = platform-conversion evidence unavailable,
+  -- distinct from a genuine verified 0. Never coerced to 0 on ingestion.
+  conversions              NUMERIC(12,2),
 
   -- Latest observed Google Ads quality diagnostics (keyword attributes).
   -- NULL = unavailable (never conflated with a genuine 0/score). Not additive.
+  -- quality_observed_at stamps WHEN these attributes were observed; latest
+  -- quality is chosen by this timestamp, never by the activity source_date.
   quality_score            SMALLINT,
   expected_ctr             TEXT,
   ad_relevance             TEXT,
   landing_page_experience  TEXT,
+  quality_observed_at      TIMESTAMPTZ,
 
   sync_batch_id            INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
   created_at               TIMESTAMPTZ DEFAULT NOW(),
   updated_at               TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Unique natural key: immutable Google Ads identity. COALESCE makes the legacy
--- empty-string fallback for a missing id EXPLICIT and documented — it never
--- silently collapses unrelated facts (two distinct ids never share a key).
+-- Unique natural key over the NOT NULL immutable Google Ads identity. No COALESCE
+-- fallback — a row missing any id never reaches this index (writer + NOT NULL
+-- reject it), so two incomplete facts can never collide.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_keyword_daily_facts_unique
   ON keyword_daily_facts (
-    source_date,
-    COALESCE(customer_id,  ''),
-    COALESCE(campaign_id,  ''),
-    COALESCE(ad_group_id,  ''),
-    COALESCE(criterion_id, '')
+    source_date, customer_id, campaign_id, ad_group_id, criterion_id
   );
 
 -- Keyset/cursor pagination + lookup indexes.

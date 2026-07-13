@@ -133,7 +133,8 @@ def _kwrow(**kw):
                 currency_code="GBP", source="google_ads_api",
                 clicks=10, impressions=200, conversions=0.0, quality_score=8,
                 expected_ctr="AVERAGE", ad_relevance="AVERAGE",
-                landing_page_experience="AVERAGE", date="2026-07-12")
+                landing_page_experience="AVERAGE",
+                quality_observed_at="2026-07-12T05:00:00Z", date="2026-07-12")
     base.update(kw)
     return base
 
@@ -190,19 +191,81 @@ def test_duplicate_ids_stay_separate_and_source_date_preserved(monkeypatch, pg):
     assert str(sd) == "2026-07-12"
 
 
-# ── §5 quality latest-observed, never averaged ───────────────────────────────
-def test_quality_latest_not_averaged(monkeypatch, pg):
+# ── §5 quality latest-observed by quality_observed_at, never averaged ─────────
+def test_quality_latest_by_observed_at_not_averaged(monkeypatch, pg):
     connection = _use_cluster(monkeypatch, pg)
     import db.writers as writers
     import db.keyword_repository as kr
+    # The EARLIER activity date carries the LATER observation → its quality wins,
+    # proving selection is by quality_observed_at, not by source_date.
     writers.write_keyword_daily_facts(None, [
-        _kwrow(date="2026-07-01", criterion_id="1001", quality_score=5, cost_micros=1_000_000),
-        _kwrow(date="2026-07-02", criterion_id="1001", quality_score=8, cost_micros=1_000_000),
+        _kwrow(date="2026-07-02", criterion_id="1001", quality_score=5, cost_micros=1_000_000,
+               quality_observed_at="2026-07-02T05:00:00Z"),
+        _kwrow(date="2026-07-01", criterion_id="1001", quality_score=8, cost_micros=1_000_000,
+               quality_observed_at="2026-07-03T05:00:00Z"),
     ])
     agg = kr.fetch_keyword_aggregates(date(2026, 7, 1), date(2026, 7, 2))
     assert agg["available"]
     assert len(agg["rows"]) == 1
-    assert agg["rows"][0]["quality_score"] == 8    # latest, NOT (5+8)/2 average
+    assert agg["rows"][0]["quality_score"] == 8    # latest observation, not average
+
+
+def test_quality_observed_at_is_pull_time_not_source_date(monkeypatch, pg):
+    # A 30-day-historical activity pull that runs "today" must record the quality
+    # observation date as TODAY (pull time), never the historical source_date.
+    connection = _use_cluster(monkeypatch, pg)
+    import db.writers as writers
+    import db.keyword_repository as kr
+    writers.write_keyword_daily_facts(None, [
+        _kwrow(date="2026-06-13", criterion_id="1001", quality_score=7,
+               quality_observed_at="2026-07-13T05:30:00Z", cost_micros=1_000_000),
+    ])
+    agg = kr.fetch_keyword_aggregates(date(2026, 6, 1), date(2026, 7, 13))
+    row = agg["rows"][0]
+    assert str(row["quality_observed_at"]).startswith("2026-07-13")   # pull day
+    assert not str(row["quality_observed_at"]).startswith("2026-06-13")  # not activity day
+
+
+def test_null_quality_pull_never_wipes_prior_observation(monkeypatch, pg):
+    connection = _use_cluster(monkeypatch, pg)
+    import db.writers as writers
+    import db.keyword_repository as kr
+    writers.write_keyword_daily_facts(None, [
+        _kwrow(criterion_id="1001", quality_score=8, quality_observed_at="2026-07-12T05:00:00Z")])
+    # A later fail-closed pull with NO quality (no score, no stamp).
+    writers.write_keyword_daily_facts(None, [
+        _kwrow(criterion_id="1001", quality_score=None, expected_ctr=None,
+               ad_relevance=None, landing_page_experience=None, quality_observed_at=None)])
+    row = kr.fetch_keyword_aggregates(date(2026, 7, 1), date(2026, 7, 31))["rows"][0]
+    assert row["quality_score"] == 8     # prior observation intact
+
+
+# ── §2 fail closed on missing immutable identity ──────────────────────────────
+def test_missing_identity_rows_rejected_before_insert(monkeypatch, pg):
+    connection = _use_cluster(monkeypatch, pg)
+    import db.writers as writers
+    stats = writers.write_keyword_daily_facts(None, [
+        _kwrow(criterion_id="", keyword_text="no-crit"),          # blank criterion_id
+        _kwrow(ad_group_id=None, keyword_text="no-adgroup"),      # missing ad_group_id
+        _kwrow(criterion_id="1001", keyword_text="valid"),        # the only valid row
+    ])
+    assert stats["skipped_missing_identity"] == 2
+    assert stats["written"] == 1
+    (n,) = _count(connection, "SELECT COUNT(*) FROM keyword_daily_facts")
+    assert n == 1     # two incomplete rows never inserted, so never collide
+
+
+def test_conversions_null_preserved_distinct_from_zero(monkeypatch, pg):
+    connection = _use_cluster(monkeypatch, pg)
+    import db.writers as writers
+    writers.write_keyword_daily_facts(None, [
+        _kwrow(criterion_id="1001", conversions=None),
+        _kwrow(criterion_id="1002", conversions=0.0)])
+    unavailable, zero = _count(connection,
+        "SELECT (SELECT conversions FROM keyword_daily_facts WHERE criterion_id='1001'), "
+        "(SELECT conversions FROM keyword_daily_facts WHERE criterion_id='1002')")
+    assert unavailable is None      # unknown stays NULL
+    assert float(zero) == 0.0       # genuine zero preserved
 
 
 # ── §4 end-to-end: £ native ≠ $ USD, verified subtotal survives legacy ────────

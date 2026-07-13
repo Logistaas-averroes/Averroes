@@ -221,10 +221,18 @@ class TestDatasetSourceMapping:
     def test_page_dataset_map_uses_google_ads_api_keys(self):
         block = extract_js_object_block(APP_JS, "PAGE_DATASET_MAP")
         assert block is not None, "PAGE_DATASET_MAP not found"
-        for ds in GOOGLE_ADS_DATASETS:
+        # PR-ADS-146: the Keyword Evidence page depends on the DURABLE keyword_facts
+        # dataset, not the legacy keywords snapshot.
+        page_datasets = ["campaigns", "search_terms", "keyword_facts", "geo"]
+        for ds in page_datasets:
             assert f"google_ads_api/{ds}" in block, (
                 f"PAGE_DATASET_MAP must map to google_ads_api/{ds}"
             )
+        # The legacy keywords snapshot must NOT be a page dependency (§6).
+        assert "google_ads_api/keywords" not in block, (
+            "Keyword Evidence must depend only on keyword_facts, not the legacy "
+            "keywords snapshot"
+        )
         # No platform-evidence page should still point at windsor/<dataset>.
         for ds in GOOGLE_ADS_DATASETS:
             assert f"windsor/{ds}" not in block, (

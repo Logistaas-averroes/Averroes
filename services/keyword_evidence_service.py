@@ -79,9 +79,11 @@ SIG_LIMITED_DATA = "Limited data"
 SIG_NONE = "No platform concern detected"
 SIG_QUALITY_UNAVAILABLE = "Quality unavailable"
 SIG_CURRENCY_UNAVAILABLE = "Currency unavailable"
+SIG_CONV_UNAVAILABLE = "Platform conversions unavailable"
 REVIEW_SIGNALS = (
     SIG_BROAD_EXPOSURE, SIG_LOW_QUALITY, SIG_SPEND_NO_CONV, SIG_NO_ACTIVITY,
     SIG_LIMITED_DATA, SIG_NONE, SIG_QUALITY_UNAVAILABLE, SIG_CURRENCY_UNAVAILABLE,
+    SIG_CONV_UNAVAILABLE,
 )
 
 SPEND_SEMANTICS = (
@@ -275,8 +277,15 @@ def _keyword_signal(unit: dict, th: dict, window_end: date | None) -> str:
     if qs is None and _is_active(unit):
         return SIG_QUALITY_UNAVAILABLE
 
-    if verified_usd >= th["min_spend"] and float(unit.get("conversions") or 0.0) == 0.0:
-        return SIG_SPEND_NO_CONV
+    # Spend-without-conversion requires a VERIFIED zero — never inferred from a
+    # NULL (unavailable) conversions value. When conversions is unavailable but
+    # spend is meaningful, disclose that explicitly rather than implying zero.
+    conv = unit.get("conversions")
+    if verified_usd >= th["min_spend"]:
+        if conv is None:
+            return SIG_CONV_UNAVAILABLE
+        if float(conv) == 0.0:
+            return SIG_SPEND_NO_CONV
 
     return SIG_NONE
 
@@ -325,9 +334,11 @@ def _unit_row(unit: dict, th: dict, window_end: date | None) -> dict:
         "expected_ctr": unit.get("expected_ctr"),
         "ad_relevance": unit.get("ad_relevance"),
         "landing_page_experience": unit.get("landing_page_experience"),
-        "quality_observed_date": _iso_str(unit.get("quality_date")),
-        # Platform evidence only — never business value.
-        "platform_conversions": _round2(unit.get("conversions")),
+        # Genuine observation time (pull time), never the activity source_date.
+        "quality_observed_date": _iso_str(unit.get("quality_observed_at")),
+        # Platform evidence only — never business value. NULL stays NULL
+        # (conversion evidence unavailable), never coerced to 0.
+        "platform_conversions": _round2(unit.get("conversions")) if unit.get("conversions") is not None else None,
         "first_seen": _iso_str(unit.get("first_seen")),
         "last_seen": _iso_str(unit.get("last_seen")),
         "review_signal": _keyword_signal(unit, th, window_end),
@@ -349,7 +360,11 @@ def _match_type_summary(units: list) -> dict:
                            for u in members if u.get("_currency_verified"))
         clicks = sum(int(u.get("clicks") or 0) for u in members)
         impressions = sum(int(u.get("impressions") or 0) for u in members)
-        conv = sum(float(u.get("conversions") or 0.0) for u in members)
+        # Conversions: sum ONLY known values; unavailable when every member is
+        # NULL; disclose partial coverage when some are NULL. Never treat NULL as 0.
+        known_conv = [float(u["conversions"]) for u in members if u.get("conversions") is not None]
+        any_conv_null = any(u.get("conversions") is None for u in members)
+        platform_conversions = _round2(sum(known_conv)) if known_conv else None
         any_unverified = any(not u.get("_currency_verified") for u in members)
         buckets[mt] = {
             "match_type": mt,
@@ -360,7 +375,8 @@ def _match_type_summary(units: list) -> dict:
             "clicks": clicks,
             "ctr": _ctr(clicks, impressions),
             "avg_cpc_usd": _cpc(verified_usd, clicks),
-            "platform_conversions": _round2(conv),
+            "platform_conversions": platform_conversions,
+            "conversions_partial": bool(known_conv) and any_conv_null,
             "spend_partial": any_unverified,
         }
     return {

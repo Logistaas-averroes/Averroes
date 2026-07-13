@@ -92,17 +92,18 @@ def fetch_keyword_aggregates(start: date | None, end: date) -> dict:
           (ARRAY_AGG(keyword_text     ORDER BY source_date DESC, id DESC))[1] AS keyword_text,
           (ARRAY_AGG(match_type       ORDER BY source_date DESC, id DESC))[1] AS match_type,
           (ARRAY_AGG(criterion_status ORDER BY source_date DESC, id DESC))[1] AS criterion_status,
-          -- Latest NON-NULL quality observation (0 is a real value; NULL = unavailable).
-          (ARRAY_AGG(quality_score ORDER BY source_date DESC, id DESC)
+          -- Latest quality observation selected by quality_observed_at (the genuine
+          -- observation time), NEVER by the activity source_date. 0 is a real
+          -- value; NULL = unavailable.
+          (ARRAY_AGG(quality_score ORDER BY quality_observed_at DESC NULLS LAST, id DESC)
              FILTER (WHERE quality_score IS NOT NULL))[1] AS quality_score,
-          (ARRAY_AGG(expected_ctr ORDER BY source_date DESC, id DESC)
+          (ARRAY_AGG(expected_ctr ORDER BY quality_observed_at DESC NULLS LAST, id DESC)
              FILTER (WHERE expected_ctr IS NOT NULL))[1] AS expected_ctr,
-          (ARRAY_AGG(ad_relevance ORDER BY source_date DESC, id DESC)
+          (ARRAY_AGG(ad_relevance ORDER BY quality_observed_at DESC NULLS LAST, id DESC)
              FILTER (WHERE ad_relevance IS NOT NULL))[1] AS ad_relevance,
-          (ARRAY_AGG(landing_page_experience ORDER BY source_date DESC, id DESC)
+          (ARRAY_AGG(landing_page_experience ORDER BY quality_observed_at DESC NULLS LAST, id DESC)
              FILTER (WHERE landing_page_experience IS NOT NULL))[1] AS landing_page_experience,
-          (ARRAY_AGG(source_date ORDER BY source_date DESC, id DESC)
-             FILTER (WHERE quality_score IS NOT NULL))[1] AS quality_date
+          MAX(quality_observed_at) FILTER (WHERE quality_score IS NOT NULL) AS quality_observed_at
         FROM keyword_daily_facts
         WHERE {_WINDOW}
         GROUP BY customer_id, campaign_id, ad_group_id, criterion_id

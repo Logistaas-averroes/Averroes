@@ -209,19 +209,20 @@ def run_monthly_report():
                     date_to=run_date,
                     run_id=run_id,
                 )
-                kdf_count = db_writers.write_keyword_daily_facts(
+                kdf = db_writers.write_keyword_daily_facts(
                     run_id=run_id, keyword_rows=keywords, sync_batch_id=kdf_batch_id or None)
-                log.info("Wrote %d durable keyword-fact rows (run_id=%s)", kdf_count, run_id)
+                log.info("Durable keyword facts (run_id=%s): %s", run_id, kdf)
                 if kdf_batch_id:
-                    kdf_ok = persistence_succeeded(keywords, kdf_count)
+                    skipped = kdf["skipped_missing_identity"] + kdf["skipped_no_date"]
+                    kdf_ok = (not kdf["db_unavailable"] and skipped == 0
+                              and kdf["written"] == kdf["prepared"])
                     db_writers.finish_sync_batch(
                         batch_id=kdf_batch_id,
                         status="success" if kdf_ok else "failed",
-                        row_count=kdf_count,
+                        row_count=kdf["written"],
                         last_source_date=max_source_date(keywords, fallback_date=run_date),
                         error_message=None if kdf_ok else (
-                            f"write_keyword_daily_facts returned {kdf_count} for "
-                            f"{len(keywords or [])} fetched rows"
+                            f"keyword-fact persistence partial: {kdf}"
                         ),
                     )
         except Exception as db_exc:  # noqa: BLE001

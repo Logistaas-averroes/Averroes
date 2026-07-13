@@ -36,20 +36,21 @@ CUST = "C1"
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 def _k(keyword, campaign, cid, crit, gbp, *, ad_group="AG", ad_group_id="10",
        match="BROAD", clicks=20, impressions=500, conv=0.0, status="ENABLED",
-       qs=8, ccy="GBP", src="google_ads_api"):
+       qs=8, ccy="GBP", src="google_ads_api", observed="2026-07-12T05:00:00Z"):
     micros = int(round(gbp * 1_000_000)) if gbp is not None else None
     return {"customer_id": CUST, "campaign_id": cid, "campaign_name": campaign,
             "ad_group_id": ad_group_id, "ad_group_name": ad_group,
             "criterion_id": crit, "keyword_text": keyword, "match_type": match,
             "criterion_status": status, "cost_micros": micros,
-            "clicks": clicks, "impressions": impressions, "conversions": float(conv),
+            "clicks": clicks, "impressions": impressions,
+            "conversions": (float(conv) if conv is not None else None),
             "first_seen": date(2026, 7, 1), "last_seen": date(2026, 7, 12),
             "fact_rows": 10, "currency_codes": [ccy] if ccy else [],
             "source_systems": [src] if src else [],
             "quality_score": qs, "expected_ctr": "AVERAGE" if qs is not None else None,
             "ad_relevance": "AVERAGE" if qs is not None else None,
             "landing_page_experience": "AVERAGE" if qs is not None else None,
-            "quality_date": date(2026, 7, 12) if qs is not None else None}
+            "quality_observed_at": observed if qs is not None else None}
 
 
 def _source(rows):
@@ -58,7 +59,7 @@ def _source(rows):
             "cost_micros_total": sum(r["cost_micros"] or 0 for r in rows),
             "clicks_total": sum(r["clicks"] for r in rows),
             "impressions_total": sum(r["impressions"] for r in rows),
-            "conversions_total": sum(r["conversions"] for r in rows),
+            "conversions_total": sum(r["conversions"] or 0 for r in rows),
             "distinct_source_dates": 12,
             "min_source_date": date(2026, 7, 1), "max_source_date": date(2026, 7, 12),
             "currency_codes": ["GBP"], "source_systems": ["google_ads_api"]}
@@ -226,8 +227,8 @@ def test_missing_source_date_row_skipped_not_dated_today():
     # Writer must never file a report-date-less row under today (source_date is
     # the reporting date). Static check on the writer body.
     kdf = WRITERS.split("def write_keyword_daily_facts")[1].split("\ndef ")[0]
-    assert "source_date = today" not in kdf
-    assert "skipping row with no source_date" in kdf
+    assert "source_date = today" not in kdf          # never defaulted to today
+    assert 'stats["skipped_no_date"] += 1' in kdf    # skipped + counted instead
 
 
 def test_conversions_null_preserved_and_coalesced_on_upsert():
@@ -480,3 +481,89 @@ def test_help_and_contract_updated():
     assert "keyword_daily_facts" in CONTRACT
     assert "/api/keyword-evidence" in CONTRACT
     assert "Platform conversion event" in CONTRACT
+
+
+# ════════════════ PR-ADS-146 truth-completion (§1–§6) ════════════════
+def test_null_conversions_never_zero_in_row_signal_and_export(monkeypatch):
+    rows = [_k("kw", "Brand - UK", "1", "1001", 50.0, match="EXACT", clicks=40, conv=None, qs=9)]
+    _patch(monkeypatch, rows)
+    r = _row(_build(), "kw")
+    assert r["platform_conversions"] is None          # unknown, never 0
+    assert r["review_signal"] == "Platform conversions unavailable"
+    # CSV export keeps it blank, never 0.
+    from services.keyword_evidence_service import build_keyword_export
+    exp = build_keyword_export("30d", now=datetime(2026, 7, 13, tzinfo=timezone.utc))
+    assert exp["rows"][0]["platform_conversions"] is None
+
+
+def test_verified_zero_conversions_is_spend_without_conversion(monkeypatch):
+    rows = [_k("kw", "Brand - UK", "1", "1001", 50.0, match="EXACT", clicks=40, conv=0.0, qs=9)]
+    _patch(monkeypatch, rows)
+    assert _row(_build(), "kw")["review_signal"] == "Spend without platform conversion"
+
+
+def test_match_type_conversion_coverage(monkeypatch):
+    # BROAD: one known (2.0) + one NULL → sum known only, partial disclosed.
+    # PHRASE: all NULL → unavailable.
+    rows = [_k("a", "Brand - UK", "1", "1001", 10.0, match="BROAD", conv=2.0),
+            _k("b", "Brand - UK", "1", "1002", 10.0, match="BROAD", conv=None),
+            _k("c", "Brand - UK", "1", "1003", 10.0, match="PHRASE", conv=None)]
+    _patch(monkeypatch, rows)
+    buckets = {b["match_type"]: b for b in _build()["match_type_summary"]["buckets"]}
+    assert buckets["BROAD"]["platform_conversions"] == 2.0     # known only, not 2+0
+    assert buckets["BROAD"]["conversions_partial"] is True
+    assert buckets["PHRASE"]["platform_conversions"] is None   # all NULL → unavailable
+
+
+def test_writer_skips_missing_identity_and_reports_stats():
+    # No DB needed: the identity skip is counted during row prep, before insert.
+    import db.writers as writers
+    stats = writers.write_keyword_daily_facts(None, [
+        {"date": "2026-07-12", "customer_id": "C1", "campaign_id": "10",
+         "ad_group_id": "", "criterion_id": "1001"},          # missing ad_group_id
+        {"customer_id": "C1", "campaign_id": "10", "ad_group_id": "20"},  # missing date + criterion
+    ])
+    assert isinstance(stats, dict)
+    assert stats["skipped_missing_identity"] == 1
+    assert stats["skipped_no_date"] == 1
+    assert stats["prepared"] == 0
+
+
+def test_quality_observed_date_is_observation_not_source_date(monkeypatch):
+    rows = [_k("kw", "Brand - UK", "1", "1001", 10.0, qs=9, observed="2026-07-13T05:30:00Z")]
+    _patch(monkeypatch, rows)
+    r = _row(_build(), "kw")
+    assert r["quality_observed_date"] == "2026-07-13T05:30:00Z"   # observation time
+    assert r["quality_observed_date"] != r["last_seen"]           # not the activity date
+
+
+def test_partial_historical_coverage_copy_present():
+    kw_mod = APP_JS[APP_JS.find("// ── Keyword Evidence page (PR-ADS-146)"):
+                    APP_JS.find("// ── In Progress Leads page")]
+    assert "function kwHistoricalCoverageNote" in kw_mod
+    assert "Partial historical coverage" in kw_mod
+    assert "durable_coverage_start" in kw_mod
+
+
+def test_freshness_depends_only_on_keyword_facts():
+    # PAGE_DATASET_MAP / PAGE_DEPENDENCIES map the keywords page to keyword_facts
+    # (durable), not the legacy keywords snapshot.
+    block = APP_JS[APP_JS.find("const PAGE_DATASET_MAP"):
+                   APP_JS.find("const PAGE_DATASET_MAP") + 2000]
+    assert '"google_ads_api/keyword_facts"' in block
+    assert '"google_ads_api/keywords"' not in block
+
+
+def test_connector_stamps_quality_observed_at():
+    assert "quality_observed_at" in CONNECTOR
+    assert "observed_at if (with_quality and quality_score is not None) else None" in CONNECTOR
+
+
+def test_conversions_column_nullable_no_default_zero():
+    assert "conversions              NUMERIC(12,2)," in SCHEMA   # nullable, no DEFAULT 0
+    for col in ("customer_id              TEXT NOT NULL",
+                "campaign_id              TEXT NOT NULL",
+                "ad_group_id              TEXT NOT NULL",
+                "criterion_id             TEXT NOT NULL"):
+        assert col in SCHEMA
+    assert "quality_observed_at      TIMESTAMPTZ" in SCHEMA

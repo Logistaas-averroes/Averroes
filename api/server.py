@@ -3003,6 +3003,7 @@ _KNOWN_DATASETS: list[tuple[str, str]] = [
     # directly (scheduler cutover landed in PR-ADS-104). Windsor is legacy only.
     ("google_ads_api", "campaigns"),
     ("google_ads_api", "keywords"),
+    ("google_ads_api", "keyword_facts"),
     ("google_ads_api", "search_terms"),
     ("google_ads_api", "geo"),
     ("hubspot", "contacts"),

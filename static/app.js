@@ -128,7 +128,7 @@ const PAGE_DATASET_MAP = {
   search_terms:      ["google_ads_api/search_terms"],
   ngrams:            ["google_ads_api/search_terms"],   // n-grams derived from search_terms
   geo:               ["google_ads_api/geo"],
-  keywords:          ["google_ads_api/keyword_facts", "google_ads_api/keywords"],
+  keywords:          ["google_ads_api/keyword_facts"],
   lead_quality:      ["hubspot/contacts"],
   deals:             ["hubspot/deals"],
   gclid_attribution: ["gclid/matches"],
@@ -477,7 +477,7 @@ const PAGE_DEPENDENCIES = {
   "search-terms":          ["google_ads_api/search_terms"],
   ngrams:                  ["google_ads_api/search_terms"],
   geo:                     ["google_ads_api/geo"],
-  keywords:                ["google_ads_api/keyword_facts", "google_ads_api/keywords"],
+  keywords:                ["google_ads_api/keyword_facts"],
   leads:                   ["hubspot/contacts"],
   deals:                   ["hubspot/deals"],
   "gclid-attribution":     ["gclid/matches"],
@@ -1754,7 +1754,8 @@ function _datasetDisplayName(key) {
   const labels = {
     "google_ads_api/campaigns":    "Campaign data",
     "google_ads_api/search_terms": "Search-term data",
-    "google_ads_api/keywords":     "Keyword data",
+    "google_ads_api/keyword_facts": "Keyword evidence data",
+    "google_ads_api/keywords":     "Keyword data (legacy snapshot)",
     "google_ads_api/geo":          "Geo data",
     "hubspot/contacts":     "Contacts data",
     "hubspot/deals":        "Deals data",
@@ -10531,6 +10532,21 @@ function kwHasActiveFilters() {
     _kwFilters.status || _kwFilters.quality || _kwFilters.signal || _kwFilters.minSpend !== "");
 }
 
+// Compact disclosure when the selected window reaches before the stored durable
+// range (PR-ADS-146 §5) — never implies 180d / All time is fully covered.
+function kwHistoricalCoverageNote() {
+  if (!_kwData) return "";
+  const ds = _kwData.durable_coverage_start;
+  const de = _kwData.durable_coverage_end;
+  const ws = _kwData.window_start;
+  if (!ds) return "";
+  const partial = _kwData.all_time || (ws && ws < ds);
+  if (!partial) return "";
+  return `<div class="kw-coverage-note" role="note">
+    <strong>Partial historical coverage.</strong> Durable keyword facts are stored from
+    ${escapeHtml(ds)} to ${escapeHtml(de || ds)}; earlier dates in this window are not yet backfilled.</div>`;
+}
+
 function renderKeywordTab() {
   const body = document.getElementById("kw-tab-body");
   if (!body) return;
@@ -10560,6 +10576,7 @@ function renderKeywordTab() {
   }
 
   body.innerHTML = `
+    ${kwHistoricalCoverageNote()}
     ${renderKeywordKPIs(_kwData.kpis)}
     ${renderMatchTypeSummary(_kwData.match_type_summary)}
     ${renderKeywordFilters(_kwData.facets)}
@@ -10886,7 +10903,7 @@ function renderKwDrawer(bodyEl, data) {
         ${kwDrawerKpi("CTR", act.ctr !== null && act.ctr !== undefined ? act.ctr.toFixed(2) + "%" : "—")}
         ${kwDrawerKpi("CPC", act.cpc_usd !== null && act.cpc_usd !== undefined ? stMoney(act.cpc_usd) : "—")}
       </div>
-      <p class="st-drawer-note">Platform conversions: ${act.platform_conversions ?? 0}. ${escapeHtml(act.platform_conversion_disclosure || "")}</p>
+      <p class="st-drawer-note">Platform conversions: ${(act.platform_conversions === null || act.platform_conversions === undefined) ? "Unavailable" : act.platform_conversions}. ${escapeHtml(act.platform_conversion_disclosure || "")}</p>
       <p class="st-drawer-note">Reported ${escapeHtml(act.first_seen || "—")} → ${escapeHtml(act.last_seen || "—")}. Currency: ${escapeHtml(act.currency_status || "—")}.</p>
     </div>
     <div class="st-drawer-section">
@@ -11693,7 +11710,6 @@ function datasetRelatedPage(source, dataset) {
   const map = {
     "google_ads_api/search_terms": { page: "search-terms", label: "Search Term Universe" },
     "google_ads_api/keyword_facts": { page: "keywords",    label: "Keyword Evidence" },
-    "google_ads_api/keywords":     { page: "keywords",     label: "Keyword Evidence" },
     "google_ads_api/geo":          { page: "geo",           label: "Country Performance" },
     "google_ads_api/campaigns":    { page: "campaigns",     label: "Campaigns"    },
     "hubspot/contacts":     { page: "leads",         label: "Lead Quality" },
