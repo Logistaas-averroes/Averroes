@@ -567,7 +567,11 @@ def selected_window_coverage(window_start: date | None, window_end: date | None,
         fully = hist["history_complete"]
         exp = hist.get("history_start_expected")
         exp_date = date.fromisoformat(exp) if exp else None
-        merged = _merge_intervals(_keyword_success_intervals(exp_date, _account_today(now)))
+        # Without a resolvable history start there is no meaningful all-time
+        # coverage window — skip the batch-interval query rather than scan every
+        # historical successful batch.
+        merged = (_merge_intervals(_keyword_success_intervals(exp_date, _account_today(now)))
+                  if exp_date else [])
         cov_ranges = [{"start": a.isoformat(), "end": b.isoformat()} for a, b in merged]
         return {
             "selected_window_coverage_status": (
