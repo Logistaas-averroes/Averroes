@@ -92,11 +92,11 @@
     "status": "ok",
     "scope": "verified_only",
     "canonical_spend_usd": 3302.0,
-    "verified_search_term_spend_usd": 1769.91,
     "coverage_pct": 53.6,
     "excluded_unverified_units": 2,
     "excluded_fx_incomplete_units": 1,
-    "note": "Verified-row reporting coverage \u2014 EXCLUDES 2 unverified legacy row(s) and 1 FX-incomplete row(s). Completeness diagnostic only \u2014 verified search-term spend is not expected to reconcile exactly with canonical spend."
+    "note": "Verified keyword-view reporting coverage \u2014 EXCLUDES 2 unverified legacy row(s) and 1 FX-incomplete row(s). Completeness diagnostic only \u2014 verified keyword-view spend is not expected to reconcile exactly with canonical spend.",
+    "verified_keyword_spend_usd": 1769.91
    }
   },
   "match_type_summary": {

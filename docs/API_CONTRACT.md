@@ -1864,7 +1864,7 @@ page. Response:
       "broad_share_pct": 31.6, "spend_status": "partial" },
     "quality_evidence": { "active_criteria": 161, "with_quality": 138, "pct": 85.7 },
     "coverage": { "status": "ok", "scope": "verified_only",
-      "canonical_spend_usd": 3444.8, "verified_search_term_spend_usd": 1234.56,
+      "canonical_spend_usd": 3444.8, "verified_keyword_spend_usd": 1234.56,
       "coverage_pct": 35.8, "excluded_unverified_units": 3,
       "excluded_fx_incomplete_units": 0 }   // Keyword-view reporting coverage
   },

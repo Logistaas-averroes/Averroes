@@ -442,7 +442,9 @@ def _sort_rows(rows: list, sort: str) -> list:
     if sort == "keyword":
         return sorted(rows, key=lambda r: (r.get("keyword") or "").lower())
     if sort == "last_seen":
-        return sorted(rows, key=lambda r: (r.get("last_seen") is None, r.get("last_seen") or ""),
+        # Recently active: most recent first, rows with no last_seen ALWAYS last.
+        # (has_date sorts before the date so reverse=True keeps nulls at the end.)
+        return sorted(rows, key=lambda r: (r.get("last_seen") is not None, r.get("last_seen") or ""),
                       reverse=True)
     keymap = {
         "spend": lambda r: r.get("spend_usd"),
@@ -503,8 +505,24 @@ def _kpis(rows: list, units: list, mon: dict, canonical: dict) -> dict:
         "clicks": clicks,
         "broad_match_exposure": _broad_exposure_kpi(units, mon),
         "quality_evidence": _quality_evidence_kpi(units),
-        "coverage": _coverage_block(mon, canonical),
+        "coverage": _keyword_coverage(mon, canonical),
     }
+
+
+def _keyword_coverage(mon: dict, canonical: dict) -> dict:
+    """Keyword-view reporting coverage. Reuses the shared Search Terms coverage
+    math but renames its search-term-specific field/note into keyword-view terms
+    so the /api/keyword-evidence contract never leaks cross-endpoint vocabulary."""
+    cov = dict(_coverage_block(mon, canonical))
+    if "verified_search_term_spend_usd" in cov:
+        cov["verified_keyword_spend_usd"] = cov.pop("verified_search_term_spend_usd")
+    note = cov.get("note")
+    if isinstance(note, str):
+        cov["note"] = (note.replace("Verified-row reporting coverage",
+                                    "Verified keyword-view reporting coverage")
+                       .replace("verified search-term spend", "verified keyword-view spend")
+                       .replace("search-term", "keyword-view"))
+    return cov
 
 
 def _durable_coverage(pop: dict) -> tuple:

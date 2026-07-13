@@ -216,6 +216,39 @@ def test_coverage_verified_only_when_partial(monkeypatch):
     assert cov["scope"] == "verified_only"
     assert cov["excluded_unverified_units"] == 1
     assert "excluded_fx_incomplete_units" in cov
+    # Coverage uses KEYWORD terminology, never search-term field/note leakage.
+    assert "verified_keyword_spend_usd" in cov
+    assert "verified_search_term_spend_usd" not in cov
+    assert "search-term" not in (cov.get("note") or "")
+
+
+def test_missing_source_date_row_skipped_not_dated_today():
+    # Writer must never file a report-date-less row under today (source_date is
+    # the reporting date). Static check on the writer body.
+    kdf = WRITERS.split("def write_keyword_daily_facts")[1].split("\ndef ")[0]
+    assert "source_date = today" not in kdf
+    assert "skipping row with no source_date" in kdf
+
+
+def test_conversions_null_preserved_and_coalesced_on_upsert():
+    kdf = WRITERS.split("def write_keyword_daily_facts")[1].split("\ndef ")[0]
+    assert "conversions = _float_or_none(raw.get(\"conversions\"))" in kdf
+    assert "COALESCE(EXCLUDED.conversions, keyword_daily_facts.conversions)" in kdf
+
+
+def test_last_seen_sort_puts_nulls_last(monkeypatch):
+    rows = [_k("recent", "Brand - UK", "1", "1001", 10.0),
+            _k("older", "Brand - UK", "1", "1002", 10.0)]
+    rows[0]["last_seen"] = date(2026, 7, 12)
+    rows[1]["last_seen"] = date(2026, 7, 1)
+    none_row = _k("noactivity", "Brand - UK", "1", "1003", 10.0)
+    none_row["last_seen"] = None
+    rows.append(none_row)
+    _patch(monkeypatch, rows)
+    out = _build(sort="last_seen")
+    order = [r["keyword"] for r in out["rows"]]
+    assert order[0] == "recent"          # most recent first
+    assert order[-1] == "noactivity"     # NULL last_seen sorts LAST
 
 
 # ════════════════ Quality diagnostics ════════════════

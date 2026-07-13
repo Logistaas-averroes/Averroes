@@ -895,7 +895,13 @@ def write_keyword_daily_facts(
                 skipped_no_date += 1
                 continue
         else:
-            source_date = today
+            # source_date is the Google Ads REPORTING date, never run_date. A row
+            # with no report date must be skipped (and counted) — assigning today
+            # would file the fact under the wrong day and could collide on the
+            # natural key.
+            log.warning("write_keyword_daily_facts: skipping row with no source_date")
+            skipped_no_date += 1
+            continue
 
         def _clean(v):
             if v is None:
@@ -921,7 +927,9 @@ def write_keyword_daily_facts(
 
         impressions = int(_int_or_none(raw.get("impressions")) or 0)
         clicks      = int(_int_or_none(raw.get("clicks")) or 0)
-        conversions = float(_float_or_none(raw.get("conversions")) or 0)
+        # Keep conversions NULL when missing so "unknown" stays distinct from a
+        # genuine 0 (and never wipes a prior value on upsert — see COALESCE below).
+        conversions = _float_or_none(raw.get("conversions"))
 
         # Quality attributes — preserve NULL (unavailable) distinct from 0.
         quality_score = _int_or_none(raw.get("quality_score"))
@@ -972,7 +980,8 @@ def write_keyword_daily_facts(
             source_system    = COALESCE(EXCLUDED.source_system, keyword_daily_facts.source_system),
             impressions      = EXCLUDED.impressions,
             clicks           = EXCLUDED.clicks,
-            conversions      = EXCLUDED.conversions,
+            -- A missing (NULL) conversions in a re-pull never wipes a prior value.
+            conversions      = COALESCE(EXCLUDED.conversions, keyword_daily_facts.conversions),
             -- Quality is latest-observed: a new non-null wins; a null never wipes
             -- a prior observation. 0 is a real value and is preserved.
             quality_score    = COALESCE(EXCLUDED.quality_score, keyword_daily_facts.quality_score),
