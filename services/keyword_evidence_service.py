@@ -584,6 +584,24 @@ def _durable_coverage(pop: dict) -> tuple:
     return _iso_str(src.get("min_source_date")), _iso_str(src.get("max_source_date"))
 
 
+def _selected_window_coverage(start, end, is_all_time: bool, now) -> dict:
+    """Backend selected-window coverage proof (PR-ADS-146A §6). Delegates to the
+    keyword-sync service; defensive so a coverage-lookup failure never breaks the
+    evidence page (falls back to an unknown, not-fully-synced verdict)."""
+    try:
+        from services.keyword_sync_service import selected_window_coverage  # noqa: PLC0415
+        return selected_window_coverage(start, end, is_all_time=bool(is_all_time), now=now)
+    except Exception:  # noqa: BLE001
+        return {
+            "selected_window_coverage_status": "unknown",
+            "selected_window_fully_synced": False,
+            "selected_window_coverage_start": None,
+            "selected_window_coverage_end": None,
+            "missing_window_ranges": [],
+            "latest_successful_sync_date": None,
+        }
+
+
 def _audit_block(base: dict, pop: dict, mon: dict, rows_total: int,
                  filtered_rows: list, pagination_complete: bool) -> dict:
     src = pop.get("source") or {}
@@ -688,10 +706,14 @@ def build_keyword_evidence(window: str, *, page: int = 1,
 
     kpis = _kpis(ordered, filtered_units, mon, pop.get("canonical") or {})
     dcov_start, dcov_end = _durable_coverage(pop)
+    # §6 — backend proof of whether THIS window was actually synced, so the
+    # frontend never infers "$0 Complete" from a stored-range comparison alone.
+    swc = _selected_window_coverage(start, end, base.get("all_time"), now)
     return {
         **base,
         "durable_coverage_start": dcov_start,
         "durable_coverage_end": dcov_end,
+        **swc,
         "kpis": kpis,
         "match_type_summary": _match_type_summary(filtered_units),
         "rows": page_rows,

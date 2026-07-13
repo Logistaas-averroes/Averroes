@@ -10661,16 +10661,21 @@ function kwFirstSyncState() {
   return "has_data";
 }
 
-// Whether the SELECTED window is fully inside stored durable coverage
-// (PR-ADS-146A §8). A verified-empty window may present $0.00 only when it was
-// actually synced; all-time and windows reaching before the backfill are not.
+// Whether the SELECTED window was actually synced (PR-ADS-146A §6/§8). The
+// backend proves this (window start covered, end within the sync watermark, no
+// missing range); a verified-empty window may present $0.00 only when true.
 function kwWindowProvenSynced() {
   if (!_kwData) return false;
+  // Authoritative backend verdict when present.
+  if (typeof _kwData.selected_window_fully_synced === "boolean") {
+    return _kwData.selected_window_fully_synced;
+  }
+  // Conservative fallback for older payloads without the coverage proof.
   const ds = _kwData.durable_coverage_start;
-  if (!ds) return false;               // no durable facts at all
-  if (_kwData.all_time) return false;  // partial history never fully proven
+  if (!ds) return false;
+  if (_kwData.all_time) return false;
   const ws = _kwData.window_start;
-  if (ws && ws < ds) return false;     // window reaches before stored coverage
+  if (ws && ws < ds) return false;
   return true;
 }
 

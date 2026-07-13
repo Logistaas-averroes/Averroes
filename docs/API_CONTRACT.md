@@ -1850,6 +1850,15 @@ page. Response:
   "window": "30d", "window_start": "…", "window_end": "…", "all_time": false,
   "account_timezone": "Europe/London", "reporting_currency": "USD",
   "durable_coverage_start": "…", "durable_coverage_end": "…",
+  // §6 backend proof of whether THIS window was actually synced. The frontend
+  // may present a zero verified subtotal as "Complete" only when
+  // selected_window_fully_synced is true (window start covered, window end
+  // within the proven sync watermark, no missing range). All-time defers to
+  // history_complete. Never inferred from window_start >= durable_coverage_start.
+  "selected_window_coverage_status": "fully_synced",  // fully_synced|partial|not_synced|unknown
+  "selected_window_fully_synced": true,
+  "selected_window_coverage_start": "…", "selected_window_coverage_end": "…",
+  "missing_window_ranges": [], "latest_successful_sync_date": "…",
   "kpis": {
     "keywords_reported": 161,            // unique keyword criteria in window
     "verified_spend_usd": 1234.56,       // per-source-date FX verified subtotal
@@ -1980,10 +1989,20 @@ state whether `All time` is genuinely complete. Returns `available` plus:
 `history_start_expected` (env override or earliest canonical Google Ads spend
 date; `null` when unresolved), `durable_coverage_start` / `durable_coverage_end`
 (MIN/MAX `source_date` in `keyword_daily_facts`), `durable_row_count`,
-`history_complete` (true only when bootstrap start ≤ expected AND coverage
-reaches current AND no missing chunks AND the latest bootstrap job succeeded),
-`missing_date_ranges`, `bootstrap_status` and `bootstrap_summary`. A six-month
-stored range against a two-year account is reported incomplete, never complete.
+`latest_successful_sync_date` (the furthest date PROVEN synced — MAX `date_to`
+across successful `keyword_facts` batches, independent of zero-activity days),
+`history_complete` (true only when every required CLOSED month is in the durable
+ledger AND the recent incremental sync is current — the current open month is
+proven by the daily sync, not a bootstrap chunk, so completeness stays true the
+next calendar day), `missing_date_ranges` (stable `YYYY-MM` closed months not yet
+backfilled), `bootstrap_status` and `bootstrap_summary`. A six-month stored range
+against a two-year account is reported incomplete, never complete.
+
+The historical bootstrap runs under a **DB-backed atomic lease** (a partial unique
+index enforces a single running `keyword_bootstrap` worker); a crashed worker's
+stale lease is detected via heartbeat expiry and recovered — the completed-chunk
+ledger is retained and the missing months resume — so a lost daemon never leaves
+the job stuck in `running` forever.
 
 #### `POST /api/keyword-evidence/refresh`
 **Auth:** Admin (session admin role or admin token) · **Read-only vs Google Ads:**

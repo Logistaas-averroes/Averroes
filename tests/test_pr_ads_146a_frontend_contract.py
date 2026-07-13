@@ -48,6 +48,12 @@ def test_no_dollar_zero_complete_for_unsynced_window():
     assert "predates completed keyword facts" in _APP_JS
 
 
+def test_window_proof_uses_backend_verdict():
+    # §6 — the frontend trusts the backend's selected_window_fully_synced proof
+    # rather than inferring coverage from a stored-range comparison alone.
+    assert "selected_window_fully_synced" in _APP_JS
+
+
 def test_first_sync_state_reads_keyword_facts_freshness():
     assert '"google_ads_api/keyword_facts"' in _APP_JS
     assert "canonical_status" in _APP_JS

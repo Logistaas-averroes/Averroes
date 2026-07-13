@@ -668,8 +668,28 @@ CREATE TABLE IF NOT EXISTS revenue_recovery_jobs (
 ALTER TABLE revenue_recovery_jobs
   ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'revenue_recovery';
 
+-- PR-ADS-146A: DB-backed lease so only one worker/process owns a resumable job
+-- (e.g. keyword_bootstrap) at a time, and a stale lease (crashed Render worker)
+-- can be detected and recovered. All idempotent.
+ALTER TABLE revenue_recovery_jobs
+  ADD COLUMN IF NOT EXISTS lease_token      TEXT;
+ALTER TABLE revenue_recovery_jobs
+  ADD COLUMN IF NOT EXISTS heartbeat_at     TIMESTAMPTZ;
+ALTER TABLE revenue_recovery_jobs
+  ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE revenue_recovery_jobs
+  ADD COLUMN IF NOT EXISTS last_progress_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS idx_revenue_recovery_jobs_created
   ON revenue_recovery_jobs(created_at DESC);
+
+-- At most one RUNNING keyword_bootstrap job at a time — the atomic claim that
+-- makes the DB lease authoritative even across processes (a cold-start race
+-- resolves to a single winner via this partial unique index). Scoped to
+-- keyword_bootstrap so existing job types are unaffected.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_recovery_running_keyword_bootstrap
+  ON revenue_recovery_jobs (job_type)
+  WHERE status = 'running' AND job_type = 'keyword_bootstrap';
 
 -- PR-ADS-115: durable lead-truth exclusions. A missing-event-date paid lead with
 -- no verifiable HubSpot identity / created date is excluded from revenue-truth
