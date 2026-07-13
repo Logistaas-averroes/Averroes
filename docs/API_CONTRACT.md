@@ -1850,14 +1850,17 @@ page. Response:
   "window": "30d", "window_start": "…", "window_end": "…", "all_time": false,
   "account_timezone": "Europe/London", "reporting_currency": "USD",
   "durable_coverage_start": "…", "durable_coverage_end": "…",
-  // §6 backend proof of whether THIS window was actually synced. The frontend
-  // may present a zero verified subtotal as "Complete" only when
-  // selected_window_fully_synced is true (window start covered, window end
-  // within the proven sync watermark, no missing range). All-time defers to
-  // history_complete. Never inferred from window_start >= durable_coverage_start.
+  // §6/§B1 backend proof of whether THIS window was actually synced, from the
+  // UNION of successful keyword_facts sync-batch intervals — never inferred from
+  // MIN(source_date)/MAX(date_to). The frontend may present a zero verified
+  // subtotal as "Complete" only when selected_window_fully_synced is true (the
+  // interval union covers every date in the window). A failed month between two
+  // successful ones appears in missing_window_ranges. All-time defers to
+  // history_complete.
   "selected_window_coverage_status": "fully_synced",  // fully_synced|partial|not_synced|unknown
   "selected_window_fully_synced": true,
   "selected_window_coverage_start": "…", "selected_window_coverage_end": "…",
+  "successful_coverage_ranges": [ { "start": "…", "end": "…" } ],  // merged successful intervals ∩ window
   "missing_window_ranges": [], "latest_successful_sync_date": "…",
   "kpis": {
     "keywords_reported": 161,            // unique keyword criteria in window

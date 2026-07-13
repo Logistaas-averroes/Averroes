@@ -597,6 +597,7 @@ def _selected_window_coverage(start, end, is_all_time: bool, now) -> dict:
             "selected_window_fully_synced": False,
             "selected_window_coverage_start": None,
             "selected_window_coverage_end": None,
+            "successful_coverage_ranges": [],
             "missing_window_ranges": [],
             "latest_successful_sync_date": None,
         }

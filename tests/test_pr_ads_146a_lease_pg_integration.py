@@ -229,3 +229,36 @@ def test_latest_successful_batch_source_date(monkeypatch, pg):
                             date_from=date(2026, 7, 1), date_to=date(2026, 7, 13))
     w.finish_sync_batch(batch_id=b3, status="success", row_count=0, last_source_date=date(2026, 7, 13))
     assert w.latest_successful_batch_source_date(src, ds) == date(2026, 7, 13)
+
+
+# ── §B1 interval-union coverage detects a failed-month gap (real Postgres) ────
+def test_interval_union_coverage_reports_february_gap(monkeypatch, pg):
+    _use_cluster(monkeypatch, pg)
+    import db.writers as w
+    from services import keyword_sync_service as kss
+    src, ds = "google_ads_api", "keyword_facts"
+
+    def _batch(df, dt, status):
+        bid = w.start_sync_batch(source=src, dataset=ds, sync_type="backfill",
+                                 date_from=df, date_to=dt)
+        w.finish_sync_batch(batch_id=bid, status=status, row_count=1,
+                            last_source_date=(dt if status == "success" else None))
+
+    _batch(date(2026, 1, 1), date(2026, 1, 31), "success")
+    _batch(date(2026, 2, 1), date(2026, 2, 28), "failed")   # February gap
+    _batch(date(2026, 3, 1), date(2026, 3, 31), "success")
+
+    # Only the successful intervals are returned.
+    ivs = w.successful_batch_intervals(src, ds, date(2026, 1, 1), date(2026, 3, 31))
+    assert ivs == [(date(2026, 1, 1), date(2026, 1, 31)),
+                   (date(2026, 3, 1), date(2026, 3, 31))]
+
+    cov = kss.selected_window_coverage(date(2026, 1, 1), date(2026, 3, 31), is_all_time=False)
+    assert cov["selected_window_fully_synced"] is False
+    assert cov["missing_window_ranges"] == [{"start": "2026-02-01", "end": "2026-02-28"}]
+
+    # Re-running February successfully closes the gap.
+    _batch(date(2026, 2, 1), date(2026, 2, 28), "success")
+    cov2 = kss.selected_window_coverage(date(2026, 1, 1), date(2026, 3, 31), is_all_time=False)
+    assert cov2["selected_window_fully_synced"] is True
+    assert cov2["missing_window_ranges"] == []
