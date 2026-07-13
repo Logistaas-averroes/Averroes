@@ -10644,7 +10644,7 @@ function renderKeywordTab() {
 // google_ads_api/keyword_facts and falls back to the durable coverage
 // reported in the evidence payload when the freshness cache is cold.
 // Returns one of: db_unavailable | not_run | running | failed_no_data |
-// has_data | verified.
+// has_data.
 function kwFirstSyncState() {
   const row = _datasetFreshnessByKey && _datasetFreshnessByKey["google_ads_api/keyword_facts"];
   const status = row && row.canonical_status;

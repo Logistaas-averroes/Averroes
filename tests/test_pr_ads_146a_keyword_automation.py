@@ -107,12 +107,22 @@ def test_fetched_but_zero_written_marks_failed(sync_env):
     res = kss.sync_keyword_daily_facts(date(2026, 6, 1), date(2026, 6, 30), "daily")
     assert res["ok"] is False
     assert sync_env["finish"].call_args.kwargs["status"] == "failed"
+    # A partial-persistence failure must carry a human-readable reason so the
+    # admin refresh UI never falls back to "Unknown error".
+    assert res["error"] and "wrote 0" in res["error"]
 
 
 def test_skipped_identity_marks_failed(sync_env):
     sync_env["write"].return_value = _stats(fetched=3, prepared=2, written=2, skip_id=1)
     res = kss.sync_keyword_daily_facts(date(2026, 6, 1), date(2026, 6, 30), "daily")
     assert res["ok"] is False
+    assert res["error"] and "rejected" in res["error"]
+
+
+def test_successful_sync_has_no_error_string(sync_env):
+    res = kss.sync_keyword_daily_facts(date(2026, 6, 1), date(2026, 6, 30), "daily")
+    assert res["ok"] is True
+    assert res["error"] is None
 
 
 def test_verified_empty_range_is_ok_and_advances_watermark(sync_env):

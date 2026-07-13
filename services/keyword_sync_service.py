@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -155,17 +155,36 @@ def sync_keyword_daily_facts(date_from: date, date_to: date, sync_type: str, *,
           and stats.get("written", 0) == stats.get("prepared", 0)
           and not fetched_not_written)
 
+    # Always surface a human-readable reason on failure so the admin refresh UI
+    # never falls back to "Unknown error" for a partial-persistence outcome.
+    error = None
+    if not ok:
+        if stats.get("db_unavailable"):
+            error = "database unavailable — no keyword facts were written"
+        elif fetched_not_written:
+            error = f"pulled {fetched} keyword row(s) but wrote 0 — persistence failed"
+        elif skipped:
+            error = (f"{skipped} row(s) rejected (missing_identity="
+                     f"{stats.get('skipped_missing_identity', 0)}, "
+                     f"no_date={stats.get('skipped_no_date', 0)})")
+        elif stats.get("written", 0) != stats.get("prepared", 0):
+            error = (f"wrote {stats.get('written', 0)} of "
+                     f"{stats.get('prepared', 0)} prepared row(s)")
+        else:
+            error = "keyword-fact sync did not complete cleanly"
+
     if batch_id:
         w.finish_sync_batch(
             batch_id=batch_id,
             status="success" if ok else "failed",
             row_count=stats.get("written", 0),
             last_source_date=date_to,   # watermark advances even on a verified-empty range
-            error_message=None if ok else f"keyword-fact sync partial/failed: {stats}")
+            error_message=None if ok else f"{error}: {stats}")
 
     return {"ok": ok, "batch_id": batch_id or None,
             "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
             "currency_incomplete_rows": sum(1 for r in (rows or []) if not r.get("currency_code")),
+            "error": error,
             **stats}
 
 
@@ -278,7 +297,9 @@ def run_keyword_bootstrap(*, now: datetime | None = None, force: bool = False) -
     }
     w.update_recovery_job(job_id, status="success" if all_ok else "partial",
                           current_chunk=None, summary=summary,
-                          finished_at=datetime.utcnow().isoformat())
+                          # Timezone-aware ISO (…+00:00) so `new Date()` in the UI
+                          # never reads a naive timestamp as browser-local time.
+                          finished_at=datetime.now(timezone.utc).isoformat())
     return {"status": "success" if all_ok else "partial", "job_id": job_id, "summary": summary}
 
 
