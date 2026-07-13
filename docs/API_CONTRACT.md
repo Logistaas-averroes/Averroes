@@ -1973,6 +1973,29 @@ type, latest quality evidence and a platform-metric disclosure column; the
 filename carries `_partial_` when any exported unit is unverified. Source
 unavailable → **503**. No export implies permission to upload changes.
 
+#### `GET /api/keyword-evidence/history`
+**Auth:** Auth · **Read-only:** Yes (reads PostgreSQL bootstrap state only, never
+Google Ads). All-time completeness metadata (PR-ADS-146A §6) so the page can
+state whether `All time` is genuinely complete. Returns `available` plus:
+`history_start_expected` (env override or earliest canonical Google Ads spend
+date; `null` when unresolved), `durable_coverage_start` / `durable_coverage_end`
+(MIN/MAX `source_date` in `keyword_daily_facts`), `durable_row_count`,
+`history_complete` (true only when bootstrap start ≤ expected AND coverage
+reaches current AND no missing chunks AND the latest bootstrap job succeeded),
+`missing_date_ranges`, `bootstrap_status` and `bootstrap_summary`. A six-month
+stored range against a two-year account is reported incomplete, never complete.
+
+#### `POST /api/keyword-evidence/refresh`
+**Auth:** Admin (session admin role or admin token) · **Read-only vs Google Ads:**
+Yes — a pull-only local write. Admin operational fallback (PR-ADS-146A §5): re-pulls
+the recent rolling incremental range (today + previous 29 account-local dates) from
+the direct Google Ads API and upserts durable `keyword_daily_facts` on the immutable
+natural key (no duplication). NEVER mutates Google Ads (no keyword/bid/match-type/
+negative changes). Concurrency-guarded — returns **409** while a refresh is already
+running. Returns `{status, read_only_external: true, result}` where `result` carries
+the sync-batch persistence stats (`ok`, `written`, `date_from`, `date_to`, …).
+Routine Evidence-Window changes never call this — they are a database query.
+
 ---
 
 #### `GET /api/gclid-attribution`

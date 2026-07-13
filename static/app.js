@@ -363,7 +363,8 @@ const PAGE_HELP_CONTENT = {
     what: "Keyword Evidence — the selected-window keyword population at the unique Google Ads criterion grain, with match-type exposure, latest-observed quality diagnostics and one factual review signal per keyword.",
     source: "Durable Google Ads API keyword facts (keyword_daily_facts) totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound) — never SUM'd across overlapping scheduler snapshots. Verified Keyword Spend is Σ(per-source-date native cost × that date's FX rate); it is a verified subtotal shown Complete, Partial (excludes N unverified/FX-incomplete units) or Unavailable. Quality Score, Expected CTR, Ad Relevance and Landing Page Experience are the LATEST observed Google Ads attributes per criterion — not window averages; a blank score means unavailable, distinct from a genuine 0.",
     howToUse: "Pick an Evidence Window, filter by campaign, match type, criterion status, quality band, review signal or minimum verified spend, and click any row to open its evidence drawer. Export CSV returns the complete server-filtered dataset. Keyword-view reporting coverage compares FX-safe verified keyword-view USD against FX-safe canonical campaign USD — a completeness diagnostic, not a reconciliation failure.",
-    doNotAssume: "Review signals are review-prioritisation only — never winner/loser/waste. Zero platform conversions is not confirmed waste, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Broad-match exposure is a factual share, not a recommendation to change match type. Read-only: no keywords are added/paused, no bids/match-types changed, no negatives created, nothing written to Google Ads or HubSpot. The legacy keywords snapshot table is preserved and never reinterpreted as durable USD.",
+    howItStaysCurrent: "Changing the Evidence Window is a PostgreSQL query over already-stored facts — it filters instantly and never calls or mutates Google Ads. A scheduled daily sync re-pulls the recent rolling range (so late Google Ads metric and conversion adjustments update the stored facts without duplication), and a one-time historical bootstrap backfills the account's full keyword history so 'All time' can become genuinely complete. 'Partial historical coverage' means the stored durable facts start after the account's history start — earlier dates are not yet backfilled, so 'All time' is a truthful partial, never presented as complete. Admins can trigger a recent-range refresh from System Status → Dataset Freshness; it writes locally only.",
+    doNotAssume: "Review signals are review-prioritisation only — never winner/loser/waste. Zero platform conversions is not confirmed waste, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Broad-match exposure is a factual share, not a recommendation to change match type. Read-only: no keywords are added/paused, no bids/match-types changed, no negatives created, nothing written to Google Ads or HubSpot. Before the first successful sync completes, keyword spend reads 'Unavailable' — never a fabricated $0.00. The legacy keywords snapshot table is preserved and never reinterpreted as durable USD.",
     checkNext: "Search Terms to see which queries matched a keyword, or Campaign Evidence for canonical spend and lead outcomes."
   },
   geo: {
@@ -702,6 +703,13 @@ function renderPageExplanation(pageKey, options = {}) {
   // drawer, not a permanent strip above the table — so no inline explanation chips.
   if (pageKey === "campaigns" && !options.forceVisible) {
     const el = document.getElementById("page-explanation-campaigns");
+    if (el) { el.hidden = true; el.innerHTML = ""; }
+    return "";
+  }
+  // PR-ADS-146A §7: Keyword Evidence keeps source/methodology in Help, not a
+  // permanent strip of technical chips (keyword_facts / Depends on / Read-only).
+  if (pageKey === "keywords" && !options.forceVisible) {
+    const el = document.getElementById("page-explanation-keywords");
     if (el) { el.hidden = true; el.innerHTML = ""; }
     return "";
   }
@@ -1059,8 +1067,11 @@ function setEvidenceWindow(value) {
   _evidenceWindow = normalized;
   try { sessionStorage.setItem("evidence_window", normalized); } catch (_) { /* ignore */ }
   syncEvidenceWindowControls(normalized);
-  // Close the campaign drawer so stale detail from the previous window is dropped.
+  // Close open drawers so stale detail from the previous window is dropped
+  // (PR-ADS-146A §4). The window change is a DB query — it re-invokes the active
+  // page loader (/api/keyword-evidence?window=…) and never calls Google Ads.
   closeCampaignDrawer();
+  if (typeof closeKwDrawer === "function") closeKwDrawer();
   if (_currentPage) loadPage(_currentPage);
   loadDataFreshness();
 }
@@ -10419,6 +10430,10 @@ let _kwFilters = { q: "", campaign: "", matchType: "", status: "", quality: "",
 let _kwReqId = 0;
 let _kwDebounce = null;
 let _kwDrawerKeyHandler = null;
+// All-time completeness metadata from /api/keyword-evidence/history
+// (PR-ADS-146A §6). Populated on load; drives the "Partial historical
+// coverage" note vs. a complete all-time state.
+let _kwHistory = null;
 
 const KW_SIGNAL_TONE = {
   "Broad-match exposure": "warn",
@@ -10477,7 +10492,22 @@ function loadKeywords() {
   renderPageDatasetFreshness("keywords");
   _kwFilters.page = 1;
   renderKeywordShell();
+  loadKeywordHistory();
   loadKeywordTab();
+}
+
+// Fetch all-time completeness metadata (PR-ADS-146A §6). Non-blocking — the tab
+// renders from /api/keyword-evidence; this only refines the coverage note once
+// it resolves. Never calls Google Ads (reads PostgreSQL bootstrap state only).
+async function loadKeywordHistory() {
+  try {
+    const data = await fetchJSON("/api/keyword-evidence/history");
+    _kwHistory = data && data.available ? data : null;
+  } catch (err) {
+    _kwHistory = null;
+  }
+  // Re-render if the tab has already painted, so the note reflects completeness.
+  if (_kwData && document.getElementById("kw-tab-body")) renderKeywordTab();
 }
 
 function renderKeywordShell() {
@@ -10540,8 +10570,13 @@ function kwHistoricalCoverageNote() {
   const de = _kwData.durable_coverage_end;
   const ws = _kwData.window_start;
   if (!ds) return "";
-  const partial = _kwData.all_time || (ws && ws < ds);
-  if (!partial) return "";
+  // §6 — when the full account history is backfilled, All-time is complete and
+  // carries no partial-coverage warning. history_complete is authoritative
+  // (bootstrap start == verified account-history start AND no missing ranges).
+  const historyComplete = !!(_kwHistory && _kwHistory.history_complete);
+  const reachesBeforeCoverage = _kwData.all_time || (ws && ws < ds);
+  if (!reachesBeforeCoverage) return "";
+  if (_kwData.all_time && historyComplete) return "";
   return `<div class="kw-coverage-note" role="note">
     <strong>Partial historical coverage.</strong> Durable keyword facts are stored from
     ${escapeHtml(ds)} to ${escapeHtml(de || ds)}; earlier dates in this window are not yet backfilled.</div>`;
@@ -10570,8 +10605,25 @@ function renderKeywordTab() {
 
   const total = (_kwData.pagination && _kwData.pagination.total_count) || 0;
   if (total === 0 && !kwHasActiveFilters()) {
-    body.innerHTML = `${renderKeywordKPIs(_kwData.kpis)}
-      <div class="evidence-empty-state">No reported keyword activity for this window.</div>`;
+    // §8 — distinguish "not run / running / failed" from a genuinely verified
+    // empty window. Only the latter may present zero as evidence.
+    const st = kwFirstSyncState();
+    let msg;
+    if (st === "not_run") {
+      msg = "Keyword facts have not completed their first sync. Historical backfill runs automatically after deploy — check back once it finishes.";
+    } else if (st === "running") {
+      msg = "Keyword facts are syncing for the first time. Metrics will appear once the initial sync completes.";
+    } else if (st === "failed_no_data") {
+      msg = "The latest keyword sync failed and no verified data is available yet. Check System Status.";
+    } else if (st === "db_unavailable") {
+      msg = "Data unavailable — the keyword source cannot be reached right now.";
+    } else if (!kwWindowProvenSynced()) {
+      msg = "This window predates completed keyword facts and has not been backfilled yet.";
+    } else {
+      msg = "No reported keyword activity for this window.";
+    }
+    body.innerHTML = `${kwHistoricalCoverageNote()}${renderKeywordKPIs(_kwData.kpis)}
+      <div class="evidence-empty-state">${escapeHtml(msg)}</div>`;
     return;
   }
 
@@ -10587,14 +10639,70 @@ function renderKeywordTab() {
   wireKeywordControls();
 }
 
+// Truthful first-sync state for the durable keyword-facts dataset
+// (PR-ADS-146A §8). Reads the canonical freshness verdict for
+// google_ads_api/keyword_facts and falls back to the durable coverage
+// reported in the evidence payload when the freshness cache is cold.
+// Returns one of: db_unavailable | not_run | running | failed_no_data |
+// has_data | verified.
+function kwFirstSyncState() {
+  const row = _datasetFreshnessByKey && _datasetFreshnessByKey["google_ads_api/keyword_facts"];
+  const status = row && row.canonical_status;
+  const hasDurable = !!(_kwData && _kwData.durable_coverage_start);
+  if (status === "db_unavailable") return "db_unavailable";
+  if (status === "running") return "running";
+  if (status === "not_run" || status === "not_run_no_upstream_data") {
+    // Freshness says never-run; trust durable facts if the payload proves any
+    // exist (covers a freshness cache that lags a completed backfill).
+    return hasDurable ? "has_data" : "not_run";
+  }
+  if (status === "failed_no_data") return hasDurable ? "has_data" : "failed_no_data";
+  if (!status) return hasDurable ? "has_data" : "not_run";
+  return "has_data";
+}
+
+// Whether the SELECTED window is fully inside stored durable coverage
+// (PR-ADS-146A §8). A verified-empty window may present $0.00 only when it was
+// actually synced; all-time and windows reaching before the backfill are not.
+function kwWindowProvenSynced() {
+  if (!_kwData) return false;
+  const ds = _kwData.durable_coverage_start;
+  if (!ds) return false;               // no durable facts at all
+  if (_kwData.all_time) return false;  // partial history never fully proven
+  const ws = _kwData.window_start;
+  if (ws && ws < ds) return false;     // window reaches before stored coverage
+  return true;
+}
+
 // ── KPI strip (5 compact cards + coverage) ───────────────────────────────────
 function kwVerifiedSpendCard(kpis) {
+  // §8 — before the first successful keyword-fact sync, never render zero spend
+  // as verified evidence. Distinguish not-run / running / failed-no-data.
+  const syncState = kwFirstSyncState();
+  if (syncState === "not_run" || syncState === "db_unavailable") {
+    return stKpiCard("Verified Keyword Spend", stUnavailable(),
+      "Keyword facts have not completed their first sync");
+  }
+  if (syncState === "running") {
+    return stKpiCard("Verified Keyword Spend", stUnavailable(),
+      "Keyword facts are syncing for the first time");
+  }
+  if (syncState === "failed_no_data") {
+    return stKpiCard("Verified Keyword Spend", stUnavailable(),
+      "Latest keyword sync failed — no verified data available yet");
+  }
   const mon = kpis.monetary || {};
   const status = kpis.monetary_status || mon.monetary_completeness_status || "unavailable";
   const usd = kpis.verified_spend_usd;
   if (status === "unavailable" || usd === null || usd === undefined) {
     return stKpiCard("Verified Keyword Spend", stUnavailable(),
       "No verified currency lineage for this window");
+  }
+  // §8 — a zero verified subtotal is truthful "Complete" only when the window is
+  // proven synced. Otherwise it predates the backfill and zero is not evidence.
+  if (Number(usd) === 0 && !kwWindowProvenSynced()) {
+    return stKpiCard("Verified Keyword Spend", stUnavailable(),
+      "This window predates completed keyword facts — not yet backfilled");
   }
   const nativeSub = (mon.verified_native_spend !== null && mon.verified_native_spend !== undefined)
     ? `${escapeHtml(mon.native_currency || "GBP")} ${Number(mon.verified_native_spend).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} native`
@@ -11554,6 +11662,66 @@ async function loadHealth() {
   loadGclidCoverage();
   loadSearchTermsVerdict();
   loadWarRoom();
+  wireKeywordRefreshButton();
+}
+
+// PR-ADS-146A §5 — admin-only "Refresh Keyword Data" action. Pulls the recent
+// rolling incremental into PostgreSQL (local writes only); never mutates Google
+// Ads. Concurrency is guarded server-side (409 while a run is in flight).
+function wireKeywordRefreshButton() {
+  const btn = document.getElementById("kw-refresh-btn");
+  if (!btn) return;
+  const isAdmin = _currentUser && _currentUser.role === "admin";
+  btn.hidden = !isAdmin;
+  if (!isAdmin || btn.dataset.wired === "1") return;
+  btn.dataset.wired = "1";
+  btn.addEventListener("click", runKeywordRefresh);
+}
+
+async function runKeywordRefresh() {
+  const btn = document.getElementById("kw-refresh-btn");
+  const fb = document.getElementById("kw-refresh-feedback");
+  if (btn) btn.disabled = true;
+  if (fb) {
+    fb.hidden = false;
+    fb.className = "run-feedback run-feedback--loading";
+    fb.innerHTML = `<span class="spinner"></span> Refreshing recent keyword facts — local write only, Google Ads is read-only…`;
+  }
+  try {
+    const res = await fetch("/api/keyword-evidence/refresh", {
+      method: "POST",
+      credentials: "same-origin",
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.status === "success") {
+      const r = data.result || {};
+      const wrote = r.written !== undefined && r.written !== null ? `${r.written} facts written` : "completed";
+      const range = r.date_from && r.date_to ? ` (${escapeHtml(r.date_from)} → ${escapeHtml(r.date_to)})` : "";
+      showKwRefreshFeedback("success", `Keyword data refreshed — ${escapeHtml(String(wrote))}${range}.`);
+      loadDatasetFreshness();
+    } else if (res.status === 409) {
+      showKwRefreshFeedback("error", "A keyword refresh is already running — please wait for it to finish.");
+    } else if (res.status === 403) {
+      showKwRefreshFeedback("error", "Access denied — admin role required.");
+    } else if (res.status === 401) {
+      showLogin();
+    } else {
+      const msg = data.error || data.detail || (data.result && data.result.error) || "Unknown error";
+      showKwRefreshFeedback("error", `Refresh failed: ${escapeHtml(String(msg))}`);
+    }
+  } catch (e) {
+    showKwRefreshFeedback("error", `Request failed: ${escapeHtml(e.message)}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function showKwRefreshFeedback(type, msg) {
+  const el = document.getElementById("kw-refresh-feedback");
+  if (!el) return;
+  el.hidden = false;
+  el.className = `run-feedback run-feedback--${type}`;
+  el.innerHTML = msg;
 }
 
 // ── System Status War Room (PR-ADS-068) ────────────────────────────────────
@@ -15704,6 +15872,11 @@ function openHelpDrawer(pageKey) {
         <h3 class="help-drawer__section-title">How to use it</h3>
         <p>${escapeHtml(content.howToUse)}</p>
       </div>
+      ${content.howItStaysCurrent ? `
+      <div class="help-drawer__section">
+        <h3 class="help-drawer__section-title">How it stays current</h3>
+        <p>${escapeHtml(content.howItStaysCurrent)}</p>
+      </div>` : ""}
       <div class="help-drawer__section">
         <h3 class="help-drawer__section-title">What not to assume</h3>
         <p>${escapeHtml(content.doNotAssume)}</p>

@@ -149,11 +149,23 @@ def run_daily_pulse():
                 )
             log.warning("[daily] Daily search_terms sync failed: %s", exc)
 
+        # PR-ADS-146A: keep durable keyword facts current daily via the ONE shared
+        # sync path — re-pull a rolling recent range (today + previous 29
+        # account-local dates) so late Google Ads metric/conversion adjustments
+        # update existing durable facts without duplication. Read-only vs Google
+        # Ads; failures are isolated so the rest of the daily run continues.
+        try:
+            from services.keyword_sync_service import sync_recent_keyword_facts  # noqa: PLC0415
+            kdf = sync_recent_keyword_facts("daily", run_id=run_id)
+            log.info("[daily] Durable keyword facts (rolling): %s", kdf)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[daily] Daily keyword-facts sync failed: %s", exc)
+
         # Do not update sync_state for datasets that are pulled but not persisted
         # as durable source facts. Freshness means "stored locally and queryable",
         # not merely "fetched from an external API".
         # google_ads_api/campaigns — campaign data is analysis output only, not raw source facts
-        # google_ads_api/keywords  — not pulled in daily
+        # google_ads_api/keywords  — legacy snapshot; not pulled in daily (durable keyword_facts is)
         # google_ads_api/geo       — not pulled in daily
         # hubspot/deals     — not pulled in daily
         # gclid/matches     — no DB persistence path yet
