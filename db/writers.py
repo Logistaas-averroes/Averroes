@@ -1966,6 +1966,41 @@ def release_recovery_lease(
         return False
 
 
+def successful_batch_intervals(source: str, dataset: str,
+                               window_start=None, window_end=None) -> list:
+    """Return ``[(date_from, date_to), …]`` for SUCCESSFUL sync_batches of
+    (source, dataset) whose interval intersects ``[window_start, window_end]``
+    (either bound may be None to leave that side unbounded). Only batches with
+    both dates set are returned. Used for interval-union coverage proof
+    (PR-ADS-146B §1) — a window is covered only when the union of these actual
+    successful intervals spans it, never inferred from MIN/MAX alone."""
+    source = (source or "").strip().lower()
+    dataset = (dataset or "").strip().lower()
+    clauses = ["source = %s", "dataset = %s", "status = 'success'",
+               "date_from IS NOT NULL", "date_to IS NOT NULL"]
+    params: list = [source, dataset]
+    if window_end is not None:
+        clauses.append("date_from <= %s")
+        params.append(window_end)
+    if window_start is not None:
+        clauses.append("date_to >= %s")
+        params.append(window_start)
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return []
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT date_from, date_to FROM sync_batches "
+                    f"WHERE {' AND '.join(clauses)} ORDER BY date_from, date_to",
+                    tuple(params),
+                )
+                return [(r[0], r[1]) for r in cur.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        log.error("successful_batch_intervals failed: %s", exc)
+        return []
+
+
 def latest_successful_batch_source_date(source: str, dataset: str):
     """MAX(date_to) across SUCCESSFUL sync_batches for (source, dataset) — the
     furthest date the dataset has been PROVEN synced through, independent of

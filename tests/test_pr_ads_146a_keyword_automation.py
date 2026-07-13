@@ -575,22 +575,24 @@ def test_history_incomplete_when_required_month_missing():
 # §6 — selected-window coverage proof
 # ─────────────────────────────────────────────────────────────────────────────
 def test_recent_window_not_synced_is_not_fully_synced():
-    # sync watermark is a week old; today's 7-day window cannot be proven synced.
-    with patch.object(kss, "_durable_coverage", return_value=(date(2026, 1, 15), date(2026, 7, 6), 400)), \
+    # No successful batch covers the recent 7-day window -> not proven synced.
+    with patch.object(kss, "_keyword_success_intervals", return_value=[]), \
          patch.object(kss, "_latest_successful_sync_date", return_value=date(2026, 7, 6)):
         cov = kss.selected_window_coverage(date(2026, 7, 7), date(2026, 7, 13), is_all_time=False)
     assert cov["selected_window_fully_synced"] is False
-    assert cov["selected_window_coverage_status"] == "partial"
+    assert cov["selected_window_coverage_status"] == "not_synced"
     assert cov["missing_window_ranges"]
 
 
 def test_recent_window_fully_synced_allows_zero_complete():
-    # sync ran through today; the window genuinely has no rows -> verified empty.
-    with patch.object(kss, "_durable_coverage", return_value=(date(2026, 1, 15), date(2026, 7, 6), 400)), \
+    # A successful batch covers the whole window though it has no rows -> verified empty.
+    with patch.object(kss, "_keyword_success_intervals",
+                      return_value=[(date(2026, 6, 14), date(2026, 7, 13))]), \
          patch.object(kss, "_latest_successful_sync_date", return_value=date(2026, 7, 13)):
         cov = kss.selected_window_coverage(date(2026, 7, 7), date(2026, 7, 13), is_all_time=False)
     assert cov["selected_window_fully_synced"] is True
     assert cov["missing_window_ranges"] == []
+    assert cov["successful_coverage_ranges"] == [{"start": "2026-07-07", "end": "2026-07-13"}]
 
 
 def test_never_synced_window_is_not_synced():

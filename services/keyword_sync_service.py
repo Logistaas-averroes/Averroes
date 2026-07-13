@@ -373,11 +373,22 @@ def run_keyword_bootstrap(*, now: datetime | None = None, force: bool = False) -
         "currency_incomplete_rows": totals["currency_incomplete"],
     }
     final_status = "success" if all_ok else "partial"
-    w.release_recovery_lease(job_id, lease_token, status=final_status, summary=summary,
-                             completed_chunks=sorted(completed),
-                             # Timezone-aware ISO (…+00:00) so the UI's new Date()
-                             # never reads a naive timestamp as browser-local time.
-                             finished_at=datetime.now(timezone.utc).isoformat())
+    released = w.release_recovery_lease(
+        job_id, lease_token, status=final_status, summary=summary,
+        completed_chunks=sorted(completed),
+        # Timezone-aware ISO (…+00:00) so the UI's new Date() never reads a naive
+        # timestamp as browser-local time.
+        finished_at=datetime.now(timezone.utc).isoformat())
+    if not released:
+        # §B2 — the final checkpoint did not persist (lease lost or DB down). Do
+        # NOT report success: the job row keeps its running/lease state and stays
+        # recoverable via stale-lease takeover once the lease expires.
+        logger.error("keyword bootstrap %s could not persist its final checkpoint", job_id)
+        return {"status": "interrupted", "reason": "final_checkpoint_failed",
+                "job_id": job_id, "summary": summary, "history_ready": history_ready,
+                "error": "could not persist the final bootstrap checkpoint (lease lost "
+                         "or database unavailable); the job remains recoverable via "
+                         "stale-lease takeover"}
     return {"status": final_status, "job_id": job_id, "summary": summary,
             "history_ready": history_ready}
 
@@ -498,53 +509,108 @@ def keyword_history_status(now: datetime | None = None) -> dict:
     }
 
 
-# ── Selected-window coverage proof (§6) ──────────────────────────────────────
+# ── Interval-union coverage (§B1) ────────────────────────────────────────────
+def _merge_intervals(intervals: list) -> list:
+    """Merge overlapping OR adjacent (gap ≤ 1 day) date intervals into a sorted,
+    non-overlapping list. Adjacent daily/monthly batches therefore fuse into one
+    continuous covered range."""
+    ivs = sorted((a, b) for a, b in intervals if a and b and a <= b)
+    merged: list = []
+    for a, b in ivs:
+        if merged and a <= merged[-1][1] + timedelta(days=1):
+            if b > merged[-1][1]:
+                merged[-1] = (merged[-1][0], b)
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _uncovered_ranges(ws: date, we: date, merged: list) -> list:
+    """Dates in [ws, we] NOT covered by the (sorted, merged) intervals."""
+    missing: list = []
+    cursor = ws
+    for a, b in merged:
+        a = max(a, ws)
+        b = min(b, we)
+        if b < a:                      # interval falls outside the window
+            continue
+        if a > cursor:
+            missing.append((cursor, a - timedelta(days=1)))
+        cursor = max(cursor, b + timedelta(days=1))
+        if cursor > we:
+            break
+    if cursor <= we:
+        missing.append((cursor, we))
+    return missing
+
+
+def _keyword_success_intervals(window_start: date | None, window_end: date | None) -> list:
+    import db.writers as w  # noqa: PLC0415
+    return w.successful_batch_intervals(
+        KEYWORD_FACTS_SOURCE, KEYWORD_FACTS_DATASET, window_start, window_end)
+
+
+# ── Selected-window coverage proof (§6 / §B1) ────────────────────────────────
 def selected_window_coverage(window_start: date | None, window_end: date | None, *,
                              is_all_time: bool, now: datetime | None = None) -> dict:
-    """Backend proof of whether the SELECTED window was actually synced — never
-    inferred from ``window_start >= durable_coverage_start`` alone. A finite
-    window is fully synced only when its start is covered, its end is within the
-    proven sync watermark, and no required range is missing. All-time defers to
+    """Backend proof of whether the SELECTED window was actually synced — from the
+    UNION of successful keyword_facts sync-batch intervals, never inferred from
+    MIN(source_date)/MAX(date_to). A finite window is fully synced only when that
+    union covers every date in it; any gap (e.g. a failed month between two
+    successful ones) is returned as a missing range. All-time defers to
     ``history_complete``. The frontend may present ``$0 Complete`` only when
     ``selected_window_fully_synced`` is true."""
-    cov_start, _cov_end, _rows = _durable_coverage()
     latest = _latest_successful_sync_date(now)
 
     if is_all_time:
         hist = keyword_history_status(now)
         fully = hist["history_complete"]
+        exp = hist.get("history_start_expected")
+        exp_date = date.fromisoformat(exp) if exp else None
+        # Without a resolvable history start there is no meaningful all-time
+        # coverage window — skip the batch-interval query rather than scan every
+        # historical successful batch.
+        merged = (_merge_intervals(_keyword_success_intervals(exp_date, _account_today(now)))
+                  if exp_date else [])
+        cov_ranges = [{"start": a.isoformat(), "end": b.isoformat()} for a, b in merged]
         return {
             "selected_window_coverage_status": (
-                "fully_synced" if fully else ("not_synced" if latest is None else "partial")),
+                "fully_synced" if fully else ("not_synced" if not merged else "partial")),
             "selected_window_fully_synced": fully,
-            "selected_window_coverage_start": hist["history_start_expected"],
+            "selected_window_coverage_start": exp,
             "selected_window_coverage_end": latest.isoformat() if latest else None,
+            "successful_coverage_ranges": cov_ranges,
             "missing_window_ranges": hist["missing_date_ranges"],
             "latest_successful_sync_date": latest.isoformat() if latest else None,
         }
 
-    missing: list = []
-    end_covered = latest is not None and window_end is not None and window_end <= latest
-    start_covered = cov_start is not None and window_start is not None and window_start >= cov_start
+    if window_start is None or window_end is None:
+        return {
+            "selected_window_coverage_status": "unknown",
+            "selected_window_fully_synced": False,
+            "selected_window_coverage_start": None,
+            "selected_window_coverage_end": None,
+            "successful_coverage_ranges": [],
+            "missing_window_ranges": [],
+            "latest_successful_sync_date": latest.isoformat() if latest else None,
+        }
 
-    if window_end is not None and not end_covered:
-        gap_start = (latest + timedelta(days=1)) if latest else window_start
-        if gap_start is not None:
-            missing.append({"start": gap_start.isoformat(), "end": window_end.isoformat()})
-    if window_start is not None and not start_covered:
-        if cov_start is not None and window_start < cov_start:
-            missing.append({"start": window_start.isoformat(),
-                            "end": (cov_start - timedelta(days=1)).isoformat()})
-        elif cov_start is None and window_end is not None:
-            missing.append({"start": window_start.isoformat(), "end": window_end.isoformat()})
+    merged = _merge_intervals(_keyword_success_intervals(window_start, window_end))
+    # Clip the merged union to the window for reporting.
+    clipped = [(max(a, window_start), min(b, window_end)) for a, b in merged
+               if a <= window_end and b >= window_start]
+    missing = _uncovered_ranges(window_start, window_end, merged)
+    fully = not missing and bool(clipped)
 
-    fully = bool(end_covered and start_covered and not missing)
     return {
         "selected_window_coverage_status": (
-            "fully_synced" if fully else ("not_synced" if latest is None else "partial")),
+            "fully_synced" if fully else ("not_synced" if not clipped else "partial")),
         "selected_window_fully_synced": fully,
-        "selected_window_coverage_start": cov_start.isoformat() if cov_start else None,
-        "selected_window_coverage_end": latest.isoformat() if latest else None,
-        "missing_window_ranges": missing,
+        "selected_window_coverage_start": clipped[0][0].isoformat() if clipped else None,
+        "selected_window_coverage_end": clipped[-1][1].isoformat() if clipped else None,
+        "successful_coverage_ranges": [
+            {"start": a.isoformat(), "end": b.isoformat()} for a, b in clipped],
+        "missing_window_ranges": [
+            {"start": a.isoformat(), "end": b.isoformat()} for a, b in missing],
         "latest_successful_sync_date": latest.isoformat() if latest else None,
     }
