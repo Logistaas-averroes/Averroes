@@ -1048,7 +1048,10 @@ def write_keyword_daily_facts(
 
 # Allowed values — used for normalisation/validation; not hard-fail guards so
 # that new sources/datasets can be added to the system without a code deploy.
-VALID_SYNC_SOURCES   = {"windsor", "hubspot", "gclid"}
+# ``google_ads_api`` is the active Platform Evidence source (PR-ADS-104 cutover:
+# campaigns / search_terms / geo / keyword_facts); it must be recognised so
+# start_sync_batch never logs a false "unknown source 'google_ads_api'".
+VALID_SYNC_SOURCES   = {"windsor", "google_ads_api", "hubspot", "gclid"}
 VALID_SYNC_DATASETS  = {"campaigns", "keywords", "keyword_facts", "search_terms",
                         "geo", "contacts", "deals", "matches"}
 VALID_SYNC_TYPES     = {"backfill", "daily", "weekly", "monthly", "manual"}
