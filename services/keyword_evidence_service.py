@@ -296,7 +296,7 @@ def _keyword_sql_attribution(pop: dict, start: date | None, end: date) -> dict:
         attr["contacts"] = contacts
         return attr
     except Exception as exc:  # noqa: BLE001
-        log.warning("[keyword-evidence] SQL attribution failed: %s", exc)
+        logger.warning("[keyword-evidence] SQL attribution failed: %s", exc)
         return {"by_criterion": {}, "reconciliation": {}, "coverage": {},
                 "audit": {}, "available": False, "contacts": []}
 

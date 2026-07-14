@@ -42,7 +42,15 @@ def _have_postgres() -> bool:
         pwd.getpwnam("postgres")
     except (KeyError, ImportError):
         return False
-    return shutil.which("sudo") is not None
+    if not shutil.which("sudo"):
+        return False
+    # Require NON-INTERACTIVE sudo — otherwise `sudo -u postgres …` would hang or
+    # fail for a password prompt instead of the suite being cleanly skipped.
+    try:
+        return subprocess.run(["sudo", "-n", "true"],
+                              capture_output=True, timeout=5).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
 
 
 pytestmark = pytest.mark.skipif(
@@ -65,7 +73,13 @@ def _run(cmd):
 class _PgCluster:
     def __init__(self):
         self.tmp = tempfile.mkdtemp(prefix="pgkw146c_")
-        _run(["chown", "-R", "postgres:postgres", self.tmp])
+        # chown via sudo so the postgres user can own the data dir even when the
+        # test runner is not root (non-interactive sudo is guaranteed by the skip
+        # guard above). The return code is asserted so a failure surfaces clearly
+        # rather than as a confusing initdb permission error later.
+        r = _run(["sudo", "-n", "chown", "-R", "postgres:postgres", self.tmp])
+        if r.returncode != 0:
+            raise RuntimeError(f"chown failed: {r.stderr}")
         self.data = os.path.join(self.tmp, "data")
         self.port = _free_port()
         self.url = None

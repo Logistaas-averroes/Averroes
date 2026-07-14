@@ -11178,7 +11178,8 @@ function kwDrawerSqlSection(s) {
     unavailable: "Unavailable",
   }[s.sql_attribution_status] || "Unavailable";
   const countHtml = (s.attributed_sqls === null || s.attributed_sqls === undefined)
-    ? "—" : `<span class="kw-sql kw-sql--pos">${fmtCount(s.attributed_sqls)}</span>`;
+    ? "—"
+    : `<span class="kw-sql ${s.attributed_sqls > 0 ? "kw-sql--pos" : "kw-sql--zero"}">${fmtCount(s.attributed_sqls)}</span>`;
   const cov = (s.sql_attribution_coverage_pct === null || s.sql_attribution_coverage_pct === undefined)
     ? "—" : `${s.sql_attribution_coverage_pct}%`;
   const contacts = s.contacts || [];

@@ -16,7 +16,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT))
 
 from services import platform_sql_attribution_service as sql  # noqa: E402
 
@@ -234,7 +235,7 @@ def test_population_resolves_identity_and_marks_search_term_absent():
 
 
 def test_repository_selects_qualified_only_and_no_search_term_column():
-    src = Path("db/platform_sql_attribution_repository.py").read_text()
+    src = (_ROOT / "db" / "platform_sql_attribution_repository.py").read_text()
     assert "status_category = 'qualified'" in src
     assert "source_type = 'paid_search'" in src
     assert "contact_created_at" in src
@@ -246,7 +247,7 @@ def test_repository_selects_qualified_only_and_no_search_term_column():
 def test_service_is_strictly_read_only():
     for path in ("services/platform_sql_attribution_service.py",
                  "db/platform_sql_attribution_repository.py"):
-        src = Path(path).read_text().lower()
+        src = (_ROOT / path).read_text().lower()
         for banned in ("insert into", "update ", "delete from", "mutate",
                        "upload_conversion", "add_negative", "create_negative"):
             assert banned not in src, f"{path}: forbidden {banned!r}"
