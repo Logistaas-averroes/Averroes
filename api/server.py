@@ -4264,7 +4264,9 @@ def api_search_term_evidence(
     junk_category: str = Query(default=None, description="Junk category filter (from facets)"),
     min_spend: float = Query(default=None, description="Minimum reported search-term spend (USD)"),
     sort: str = Query(default="spend",
-                      description="spend|clicks|cpc|conversions|last_seen|term"),
+                      description="spend|clicks|cpc|conversions|last_seen|term|attributed_sqls"),
+    sql_state: str = Query(default=None,
+                           description="Attributed-SQL state: all|has_sql|known_zero|unavailable"),
 ) -> dict[str, Any]:
     """Search Term Universe — complete selected-window evidence (PR-ADS-144).
 
@@ -4278,7 +4280,7 @@ def api_search_term_evidence(
     return _search_term_evidence_call(
         window, build_search_term_evidence, window,
         page=page, page_size=page_size, q=q, campaign=campaign, state=state,
-        junk_category=junk_category, min_spend=min_spend, sort=sort)
+        junk_category=junk_category, min_spend=min_spend, sort=sort, sql_state=sql_state)
 
 
 @app.get("/api/search-term-evidence/term")
@@ -4387,7 +4389,9 @@ def api_search_term_evidence_export(
     junk_category: str = Query(default=None, description="Junk category filter"),
     min_spend: float = Query(default=None, description="Minimum reported spend (USD)"),
     sort: str = Query(default="spend",
-                      description="spend|clicks|cpc|conversions|last_seen|term"),
+                      description="spend|clicks|cpc|conversions|last_seen|term|attributed_sqls"),
+    sql_state: str = Query(default=None,
+                           description="Attributed-SQL state: all|has_sql|known_zero|unavailable"),
 ):
     """CSV export of the COMPLETE server-filtered Search Term Universe for the
     selected window (never a silently truncated page). 503 when the source is
@@ -4405,7 +4409,8 @@ def api_search_term_evidence_export(
     try:
         payload = build_search_term_export(
             window, q=q, campaign=campaign, state=state,
-            junk_category=junk_category, min_spend=min_spend, sort=sort)
+            junk_category=junk_category, min_spend=min_spend, sort=sort,
+            sql_state=sql_state)
     except (EvidenceWindowError, SearchTermQueryError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -4422,6 +4427,9 @@ def api_search_term_evidence_export(
         "search_term", "review_state", "campaign", "mapping_status",
         "reported_spend_usd", "clicks", "impressions", "cpc_usd",
         "platform_conversions", "junk_categories", "matched_patterns",
+        # PR-ADS-146C — Attributed SQLs (no contact ids in the main table CSV).
+        "attributed_sqls", "sql_attribution_status", "sql_attribution_source",
+        "sql_attribution_coverage", "sql_ambiguity_reason",
         "first_seen", "last_seen", "window", "window_start", "window_end",
     ])
     for r in payload["rows"]:
@@ -4433,6 +4441,11 @@ def api_search_term_evidence_export(
             "" if r["cpc_usd"] is None else r["cpc_usd"],
             "" if r["conversions"] is None else r["conversions"],
             "; ".join(r["junk_categories"]), "; ".join(r["matched_patterns"]),
+            "" if r.get("attributed_sqls") is None else r.get("attributed_sqls"),
+            r.get("sql_attribution_status") or "",
+            r.get("sql_attribution_source") or "",
+            "" if r.get("sql_attribution_coverage") is None else r.get("sql_attribution_coverage"),
+            r.get("sql_ambiguity_reason") or "",
             r["first_seen"] or "", r["last_seen"] or "",
             payload["window"], payload["window_start"] or "",
             payload["window_end"] or "",
@@ -4736,7 +4749,9 @@ def api_keyword_evidence(
     signal: str = Query(default=None, description="Review signal (from facets)"),
     min_spend: float = Query(default=None, description="Minimum VERIFIED keyword spend (USD)"),
     sort: str = Query(default="spend",
-                      description="spend|clicks|cpc|ctr|quality|keyword|last_seen"),
+                      description="spend|clicks|cpc|ctr|quality|keyword|last_seen|attributed_sqls"),
+    sql_state: str = Query(default=None,
+                           description="Attributed-SQL state: all|has_sql|known_zero|ambiguous|unavailable"),
 ) -> dict[str, Any]:
     """Keyword Evidence — complete selected-window evidence (PR-ADS-146).
 
@@ -4750,7 +4765,8 @@ def api_keyword_evidence(
         window, build_keyword_evidence, window,
         page=page, page_size=page_size, q=q, campaign=campaign,
         match_type=match_type, criterion_status=criterion_status,
-        quality_band=quality_band, signal=signal, min_spend=min_spend, sort=sort)
+        quality_band=quality_band, signal=signal, min_spend=min_spend, sort=sort,
+        sql_state=sql_state)
 
 
 @app.get("/api/keyword-evidence/detail")
@@ -4851,7 +4867,9 @@ def api_keyword_evidence_export(
     signal: str = Query(default=None, description="Review signal filter"),
     min_spend: float = Query(default=None, description="Minimum verified spend (USD)"),
     sort: str = Query(default="spend",
-                      description="spend|clicks|cpc|ctr|quality|keyword|last_seen"),
+                      description="spend|clicks|cpc|ctr|quality|keyword|last_seen|attributed_sqls"),
+    sql_state: str = Query(default=None,
+                           description="Attributed-SQL state: all|has_sql|known_zero|ambiguous|unavailable"),
 ):
     """CSV export of the COMPLETE server-filtered keyword population for the
     selected window (never a silently truncated page). 503 when the source is
@@ -4870,7 +4888,7 @@ def api_keyword_evidence_export(
         payload = build_keyword_export(
             window, q=q, campaign=campaign, match_type=match_type,
             criterion_status=criterion_status, quality_band=quality_band,
-            signal=signal, min_spend=min_spend, sort=sort)
+            signal=signal, min_spend=min_spend, sort=sort, sql_state=sql_state)
     except (EvidenceWindowError, KeywordQueryError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -4893,7 +4911,11 @@ def api_keyword_evidence_export(
         "verified_spend_usd", "spend_native", "native_currency", "clicks",
         "impressions", "ctr", "cpc_usd", "platform_conversions",
         "quality_score", "expected_ctr", "ad_relevance", "landing_page_experience",
-        "quality_observed_date", "review_signal", "first_seen", "last_seen",
+        "quality_observed_date", "review_signal",
+        # PR-ADS-146C — Attributed SQLs (no contact ids in the main table CSV).
+        "attributed_sqls", "sql_attribution_status", "sql_attribution_source",
+        "sql_attribution_coverage", "sql_ambiguity_reason",
+        "first_seen", "last_seen",
         "window", "window_start", "window_end", "monetary_completeness",
         "platform_metric_disclosure",
     ])
@@ -4911,7 +4933,13 @@ def api_keyword_evidence_export(
             "" if r["quality_score"] is None else r["quality_score"],
             r["expected_ctr"] or "", r["ad_relevance"] or "",
             r["landing_page_experience"] or "", r["quality_observed_date"] or "",
-            r["review_signal"], r["first_seen"] or "", r["last_seen"] or "",
+            r["review_signal"],
+            "" if r.get("attributed_sqls") is None else r.get("attributed_sqls"),
+            r.get("sql_attribution_status") or "",
+            r.get("sql_attribution_source") or "",
+            "" if r.get("sql_attribution_coverage") is None else r.get("sql_attribution_coverage"),
+            r.get("sql_ambiguity_reason") or "",
+            r["first_seen"] or "", r["last_seen"] or "",
             payload["window"], payload["window_start"] or "",
             payload["window_end"] or "", completeness,
             "Platform conversion event — not a confirmed SQL/customer/closed-won.",
