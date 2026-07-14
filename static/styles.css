@@ -7481,3 +7481,21 @@ a.dash-footer-note { color: var(--brand-sky-accent); font-weight: 600; }
   .st-drawer-kpis { grid-template-columns: repeat(2, 1fr); }
   .kw-mt-seg { flex-basis: 100%; }
 }
+
+/* PR-ADS-146C — Attributed SQLs cell + coverage disclosure. Restrained green for
+   a positive count; neutral zero; muted "—" for ambiguous/unavailable. */
+.kw-sql { font-variant-numeric: tabular-nums; }
+.kw-sql--pos { color: var(--c-success, #15803d); font-weight: 600; }
+.kw-sql--zero { color: var(--text-secondary, #6b7280); }
+.kw-sql--na { color: var(--text-muted, #9ca3af); }
+.kw-sql-note {
+  margin: var(--space-2, 8px) 0 var(--space-3, 12px);
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary, #4b5563);
+  background: var(--surface-alt, #f9fafb);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+}
+.kw-sql-note strong { color: var(--text-primary, #111827); }
