@@ -179,6 +179,42 @@ def test_sql_population_dedup_window_and_exclusions(monkeypatch, pg):
     assert res["leads_have_search_term"] is False
 
 
+def test_latest_status_wins_over_stale_qualified(monkeypatch, pg):
+    # §1 — dedup to the latest snapshot FIRST, then keep qualified.
+    connection = _use_cluster(monkeypatch, pg)
+    import db.platform_sql_attribution_repository as repo
+    with connection.get_conn() as conn:
+        # older qualified + newer wrong_fit → NOT an SQL (latest wins).
+        _insert_lead(conn, contact_id="t1", status="qualified", run_date="2026-07-05")
+        _insert_lead(conn, contact_id="t1", status="wrong_fit", run_date="2026-07-09")
+        # older junk + newer qualified → ONE SQL.
+        _insert_lead(conn, contact_id="t2", status="junk", run_date="2026-07-04")
+        _insert_lead(conn, contact_id="t2", status="qualified", run_date="2026-07-08")
+        # repeated qualified snapshots → ONE SQL.
+        _insert_lead(conn, contact_id="t3", status="qualified", run_date="2026-07-02")
+        _insert_lead(conn, contact_id="t3", status="qualified", run_date="2026-07-06")
+        # latest in-progress (unknown) → NOT an SQL.
+        _insert_lead(conn, contact_id="t4", status="qualified", run_date="2026-07-03")
+        _insert_lead(conn, contact_id="t4", status="unknown", run_date="2026-07-07")
+    res = repo.fetch_sql_contacts(date(2026, 7, 1), date(2026, 7, 31))
+    assert sorted(r["contact_key"] for r in res["rows"]) == ["t2", "t3"]
+
+
+def test_sql_population_reconciles_with_campaign_evidence(monkeypatch, pg):
+    connection = _use_cluster(monkeypatch, pg)
+    import db.platform_sql_attribution_repository as repo
+    import db.revenue_repository as rev
+    with connection.get_conn() as conn:
+        _insert_lead(conn, contact_id="a1", status="qualified", run_date="2026-07-04")
+        _insert_lead(conn, contact_id="a1", status="wrong_fit", run_date="2026-07-15")  # latest not SQL
+        _insert_lead(conn, contact_id="a2", status="qualified")
+        _insert_lead(conn, contact_id="a3", status="junk")
+    sql_pop = repo.fetch_sql_contacts(date(2026, 7, 1), date(2026, 7, 31))
+    lq = rev.fetch_lead_quality(date(2026, 7, 1), date(2026, 7, 31))
+    ce_qualified = sum(1 for r in lq["rows"] if r["status_category"] == "qualified")
+    assert len(sql_pop["rows"]) == ce_qualified == 1   # only a2
+
+
 def test_end_to_end_unique_keyword_attribution(monkeypatch, pg):
     connection = _use_cluster(monkeypatch, pg)
     import db.writers as writers

@@ -626,7 +626,14 @@
       "sql_unattributed_count": 24,
       "sql_total_contacts": 24,
       "sql_row_sum": 0,
-      "sql_reconciliation_status": "ok"
+      "sql_reconciliation_status": "ok",
+      "sql_contacts_with_exact_search_term": 0,
+      "uniquely_attributed_search_term_sql_contacts": 0,
+      "sql_contacts_with_campaign_identity": 21,
+      "sql_contacts_missing_campaign_identity": 3,
+      "sql_contacts_missing_search_term": 24,
+      "sql_attribution_completeness_status": "partial",
+      "zero_proof_available": false
     }
   },
   "/api/search-term-evidence/term": {

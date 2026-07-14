@@ -61,6 +61,11 @@ def fetch_sql_contacts(start: date | None, end: date) -> dict:
             if conn is None:
                 return _unavailable("leads", {"date_field": "contact_created_at"})
             with conn.cursor() as cur:
+                # Deduplicate to the LATEST snapshot per durable contact identity
+                # FIRST (run_date DESC, id DESC — identical to Campaign Evidence),
+                # and only THEN keep the qualified ones. Filtering qualified before
+                # the dedup would resurrect a stale qualified snapshot for a contact
+                # whose latest status is no longer qualified (PR-ADS-146C §1).
                 cur.execute(
                     f"""
                     WITH deduped AS (
@@ -75,7 +80,6 @@ def fetch_sql_contacts(start: date | None, end: date) -> dict:
                             (gclid IS NOT NULL AND gclid <> '') AS has_gclid
                         FROM leads
                         WHERE source_type = 'paid_search'
-                          AND status_category = 'qualified'
                           AND contact_created_at IS NOT NULL
                           AND contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
                           AND contact_created_at < (%s::date + INTERVAL '1 day')
@@ -88,6 +92,7 @@ def fetch_sql_contacts(start: date | None, end: date) -> dict:
                     SELECT contact_key, contact_id, company, campaign_name, keyword,
                            status_category, contact_created_at, has_gclid
                     FROM deduped
+                    WHERE status_category = 'qualified'
                     ORDER BY contact_created_at DESC
                     """,
                     (start, end, _PSEUDO_CAMPAIGNS),

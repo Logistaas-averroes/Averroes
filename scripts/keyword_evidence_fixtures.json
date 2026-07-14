@@ -860,7 +860,13 @@
       "sql_unattributed_count": 13,
       "sql_total_contacts": 22,
       "sql_row_sum": 7,
-      "sql_reconciliation_status": "ok"
+      "sql_reconciliation_status": "ok",
+      "sql_contacts_with_campaign_identity": 20,
+      "sql_contacts_with_keyword": 22,
+      "sql_contacts_missing_campaign_identity": 0,
+      "sql_contacts_missing_keyword": 0,
+      "sql_attribution_completeness_status": "complete",
+      "zero_proof_available": true
     }
   },
   "/api/keyword-evidence/detail": {

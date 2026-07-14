@@ -93,12 +93,92 @@ def test_same_keyword_across_duplicate_campaign_ids_is_ambiguous():
 
 
 def test_unresolved_campaign_contact_is_not_attributed():
+    # §2 — an unresolved-campaign contact could plausibly belong to K1, so a zero
+    # cannot be proven: the empty row is partial_attribution ("—"), not known_zero.
     contacts = [_contact("c1", mapping="unmatched", keyword="freight software")]
     criteria = [_crit("K1", cid="10", keyword="freight software")]
     r = sql.attribute_keywords(contacts, criteria, available=True)
-    assert r["by_criterion"]["K1"]["sql_attribution_status"] == "known_zero"
+    assert r["by_criterion"]["K1"]["sql_attribution_status"] == "partial_attribution"
+    assert r["by_criterion"]["K1"]["attributed_sqls"] is None
     assert r["reconciliation"]["unattributed_sql_contacts"] == 1
     assert r["reconciliation"]["uniquely_attributed_sql_contacts"] == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# §2 — do not fabricate known_zero under incomplete attribution
+# ─────────────────────────────────────────────────────────────────────────────
+def test_one_unresolved_contact_prevents_known_zero():
+    contacts = [_contact("c1", cid="10", keyword="cargo ship"),          # resolved
+                _contact("c2", mapping="unmatched", keyword="x")]        # unresolved campaign
+    criteria = [_crit("K1", cid="10", keyword="cargo ship"),            # attributed (c1)
+                _crit("K2", cid="10", keyword="no match")]              # would be zero
+    r = sql.attribute_keywords(contacts, criteria, available=True)
+    # Positive attribution stays visible…
+    assert r["by_criterion"]["K1"]["sql_attribution_status"] == "attributed"
+    assert r["by_criterion"]["K1"]["attributed_sqls"] == 1
+    # …but the zero row cannot be proven.
+    assert r["by_criterion"]["K2"]["sql_attribution_status"] == "partial_attribution"
+    assert r["by_criterion"]["K2"]["attributed_sqls"] is None
+    assert r["completeness"]["zero_proof_available"] is False
+    assert r["completeness"]["sql_attribution_completeness_status"] == "partial"
+
+
+def test_one_missing_keyword_contact_prevents_known_zero():
+    contacts = [_contact("c1", cid="10", keyword=None)]                  # resolved, no keyword
+    criteria = [_crit("K1", cid="10", keyword="cargo ship")]
+    r = sql.attribute_keywords(contacts, criteria, available=True)
+    assert r["by_criterion"]["K1"]["sql_attribution_status"] == "partial_attribution"
+    assert r["completeness"]["sql_contacts_missing_keyword"] == 1
+    assert r["completeness"]["zero_proof_available"] is False
+
+
+def test_zero_total_contacts_permits_known_zero():
+    r = sql.attribute_keywords([], [_crit("K1", cid="10", keyword="cargo ship")], available=True)
+    assert r["by_criterion"]["K1"]["sql_attribution_status"] == "known_zero"
+    assert r["by_criterion"]["K1"]["attributed_sqls"] == 0
+    assert r["completeness"]["zero_proof_available"] is True
+    assert r["completeness"]["sql_attribution_completeness_status"] == "complete"
+
+
+def test_fully_resolved_contacts_elsewhere_permit_known_zero():
+    # Every contact is fully resolved (campaign + keyword) and lands on OTHER
+    # keywords → K3 can be proven zero.
+    contacts = [_contact("c1", cid="10", keyword="cargo ship"),
+                _contact("c2", cid="10", keyword="freight software")]
+    criteria = [_crit("K1", cid="10", keyword="cargo ship"),
+                _crit("K2", cid="10", keyword="freight software"),
+                _crit("K3", cid="10", keyword="nobody searched this")]
+    r = sql.attribute_keywords(contacts, criteria, available=True)
+    assert r["by_criterion"]["K3"]["sql_attribution_status"] == "known_zero"
+    assert r["by_criterion"]["K3"]["attributed_sqls"] == 0
+    assert r["completeness"]["zero_proof_available"] is True
+
+
+def test_positive_counts_visible_under_partial_coverage():
+    contacts = [_contact("c1", cid="10", keyword="cargo ship"),
+                _contact("c2", mapping="unmatched", keyword="x")]   # breaks zero-proof
+    criteria = [_crit("K1", cid="10", keyword="cargo ship"),
+                _crit("K2", cid="10", keyword="empty one")]
+    r = sql.attribute_keywords(contacts, criteria, available=True)
+    # The confirmed count is still shown even though the window is not fully covered.
+    assert r["by_criterion"]["K1"]["attributed_sqls"] == 1
+    assert r["by_criterion"]["K1"]["sql_attribution_status"] == "attributed"
+    # It is a confirmed attributed count, not a complete SQL total.
+    assert r["completeness"]["zero_proof_available"] is False
+
+
+# §3 — attribution completeness exposed.
+def test_completeness_fields_exposed():
+    contacts = [_contact("c1", cid="10", keyword="a"),
+                _contact("c2", mapping="unmatched", keyword=None)]
+    r = sql.attribute_keywords(contacts, [_crit("K1", cid="10", keyword="a")], available=True)
+    c = r["completeness"]
+    assert c["sql_contacts_with_campaign_identity"] == 1
+    assert c["sql_contacts_missing_campaign_identity"] == 1
+    assert c["sql_contacts_with_keyword"] == 1
+    assert c["sql_contacts_missing_keyword"] == 1
+    assert c["sql_attribution_completeness_status"] == "partial"
+    assert c["zero_proof_available"] is False
 
 
 def test_criterion_with_unresolved_campaign_is_mapping_review():
@@ -187,6 +267,22 @@ def test_same_term_in_separate_campaigns_stays_separate():
                                    leads_have_search_term=True)
     assert r["by_unit"]["u10"]["sql_attribution_status"] == "attributed"
     assert r["by_unit"]["u20"]["sql_attribution_status"] == "known_zero"
+
+
+def test_search_term_exact_query_and_attributed_counts_are_distinct():
+    # §4 — 3 contacts carry an exact query; only 2 uniquely attribute (one query
+    # matches two units → ambiguous). The two counts must not be conflated.
+    contacts = [_contact("c1", cid="10", search_term="a"),
+                _contact("c2", cid="10", search_term="b"),
+                _contact("c3", cid="10", search_term="dup")]
+    units = [_st_unit("u1", cid="10", term="a"), _st_unit("u2", cid="10", term="b"),
+             _st_unit("u3", cid="10", term="dup"), _st_unit("u4", cid="10", term="dup")]
+    r = sql.attribute_search_terms(contacts, units, available=True,
+                                   leads_have_search_term=True)
+    sta = r["audit"]["search_term_attribution"]
+    assert sta["sql_contacts_with_exact_search_term"] == 3
+    assert sta["uniquely_attributed_search_term_sql_contacts"] == 2   # 'dup' is ambiguous
+    assert sta["sql_contacts_with_exact_search_term"] != sta["uniquely_attributed_search_term_sql_contacts"]
 
 
 def test_search_term_row_sum_equals_uniquely_attributed():

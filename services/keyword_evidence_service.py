@@ -330,6 +330,7 @@ def _sql_attribution_block(attr: dict) -> dict:
     recon = attr.get("reconciliation") or {}
     cov = attr.get("coverage") or {}
     audit = attr.get("audit") or {}
+    comp = attr.get("completeness") or {}
     return {
         "sql_source": SQL_SOURCE,
         "sql_definition": SQL_DEFINITION,
@@ -344,6 +345,13 @@ def _sql_attribution_block(attr: dict) -> dict:
         "sql_total_contacts": recon.get("total_sql_contacts"),
         "sql_row_sum": recon.get("row_sql_sum"),
         "sql_reconciliation_status": recon.get("reconciliation_status"),
+        # §3 — attribution completeness / zero-proof.
+        "sql_contacts_with_campaign_identity": comp.get("sql_contacts_with_campaign_identity"),
+        "sql_contacts_with_keyword": comp.get("sql_contacts_with_keyword"),
+        "sql_contacts_missing_campaign_identity": comp.get("sql_contacts_missing_campaign_identity"),
+        "sql_contacts_missing_keyword": comp.get("sql_contacts_missing_keyword"),
+        "sql_attribution_completeness_status": comp.get("sql_attribution_completeness_status"),
+        "zero_proof_available": comp.get("zero_proof_available"),
         "population": audit.get("population"),
         "keyword_attribution": audit.get("keyword_attribution"),
     }
@@ -605,7 +613,8 @@ def _filter_sql_state(rows: list, sql_state: str | None) -> list:
     if sql_state == "ambiguous":
         return [r for r in rows if r.get("sql_attribution_status") == "ambiguous"]
     if sql_state == "unavailable":
-        return [r for r in rows if r.get("sql_attribution_status") in ("unavailable", "mapping_review")]
+        return [r for r in rows if r.get("sql_attribution_status")
+                in ("unavailable", "mapping_review", "partial_attribution")]
     return rows
 
 

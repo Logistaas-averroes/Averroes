@@ -9359,15 +9359,20 @@ function stSqlCell(r) {
   const st = r.sql_attribution_status;
   const n = r.attributed_sqls;
   if (st === "attributed" && n > 0) {
-    return `<span class="kw-sql kw-sql--pos" title="${escapeHtml(String(n))} HubSpot-confirmed SQL contact(s) with this exact user query">${fmtCount(n)}</span>`;
+    return `<span class="kw-sql kw-sql--pos" title="Confirmed attribution: ${escapeHtml(String(n))} HubSpot-confirmed SQL contact(s) with this exact user query">${fmtCount(n)}</span>`;
   }
   if (st === "known_zero") {
-    return `<span class="kw-sql kw-sql--zero" title="Uniquely attributable — no qualified contact carried this exact query in the window">0</span>`;
+    return `<span class="kw-sql kw-sql--zero" title="Proven zero: attribution coverage is complete and no qualified contact carried this exact query in the window">0</span>`;
+  }
+  if (st === "partial_attribution") {
+    return `<span class="kw-sql kw-sql--na" title="Unavailable — exact-query attribution coverage is incomplete this window, so a zero cannot be proven">—</span>`;
   }
   return `<span class="kw-sql kw-sql--na" title="Search-term-level SQL attribution unavailable — the CRM stores a keyword, not the actual user query">—</span>`;
 }
 
-// §9 — compact search-term SQL coverage disclosure (window-scoped).
+// §4/§9 — compact search-term SQL coverage disclosure (window-scoped). Exact-query
+// evidence and unique attribution are DISTINCT counts and are shown separately —
+// the attributed count is never described as exact-query evidence.
 function stSqlCoverageNote() {
   const s = _stData && _stData.sql_attribution;
   if (!s) return "";
@@ -9376,11 +9381,18 @@ function stSqlCoverageNote() {
   }
   const total = s.sql_total_contacts;
   if (total === null || total === undefined) return "";
-  const attr = s.sql_attributed_count || 0;
+  const withQuery = s.sql_contacts_with_exact_search_term || 0;
+  const attr = (s.uniquely_attributed_search_term_sql_contacts !== undefined
+    && s.uniquely_attributed_search_term_sql_contacts !== null)
+    ? s.uniquely_attributed_search_term_sql_contacts
+    : (s.sql_attributed_count || 0);
   const extra = s.exact_query_evidence_available
     ? ""
     : " The CRM stores a HubSpot keyword, not the actual user query, so exact search-term attribution is unavailable.";
-  return `<div class="kw-sql-note" role="note">Search-term SQL coverage: <strong>${fmtCount(attr)} of ${fmtCount(total)}</strong> qualified contacts had exact query evidence.${extra}</div>`;
+  return `<div class="kw-sql-note" role="note">`
+    + `Exact query evidence: <strong>${fmtCount(withQuery)} of ${fmtCount(total)}</strong> qualified contacts`
+    + ` · Uniquely attributed to a search term: <strong>${fmtCount(attr)} of ${fmtCount(total)}</strong>.`
+    + `${extra}</div>`;
 }
 
 // §8 — HubSpot SQL attribution section for the search-term drawer. Explains
@@ -10740,14 +10752,20 @@ function kwSqlCoverageNote() {
 function kwSqlCell(r) {
   const st = r.sql_attribution_status;
   const n = r.attributed_sqls;
+  // Confirmed positive attribution.
   if (st === "attributed" && n > 0) {
-    return `<span class="kw-sql kw-sql--pos" title="${escapeHtml(String(n))} HubSpot-confirmed SQL contact(s) uniquely attributed to this keyword">${fmtCount(n)}</span>`;
+    return `<span class="kw-sql kw-sql--pos" title="Confirmed attribution: ${escapeHtml(String(n))} HubSpot-confirmed SQL contact(s) uniquely tied to this keyword. This is a confirmed attributed count, not the complete SQL total.">${fmtCount(n)}</span>`;
   }
+  // Proven zero — only when the window's SQL population is complete enough to prove it.
   if (st === "known_zero") {
-    return `<span class="kw-sql kw-sql--zero" title="Uniquely attributable — no qualified paid-search contact maps to this keyword in this window">0</span>`;
+    return `<span class="kw-sql kw-sql--zero" title="Proven zero: attribution coverage is complete for this window and no qualified contact maps to this uniquely-attributable keyword">0</span>`;
   }
   if (st === "ambiguous") {
     const reason = r.sql_ambiguity_reason || "Keyword text matches multiple criteria — SQL not uniquely attributable";
+    return `<span class="kw-sql kw-sql--na" title="${escapeHtml(reason)}">—</span>`;
+  }
+  if (st === "partial_attribution") {
+    const reason = r.sql_ambiguity_reason || "Unavailable — attribution coverage is incomplete this window (unresolved-campaign or missing-keyword contacts), so a zero cannot be proven";
     return `<span class="kw-sql kw-sql--na" title="${escapeHtml(reason)}">—</span>`;
   }
   if (st === "mapping_review") {

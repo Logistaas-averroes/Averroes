@@ -53,6 +53,15 @@ ST_KNOWN_ZERO = "known_zero"
 ST_AMBIGUOUS = "ambiguous"
 ST_UNAVAILABLE = "unavailable"
 ST_MAPPING_REVIEW = "mapping_review"
+# PR-ADS-146C §2 — a row that WOULD be zero but cannot be proven zero because the
+# window's SQL population has unresolved-campaign / missing-text contacts that
+# could plausibly belong to it. Displays "—", never a fabricated 0.
+ST_PARTIAL_ATTRIBUTION = "partial_attribution"
+
+_PARTIAL_ZERO_REASON = (
+    "Attribution coverage is incomplete for this window — some qualified contacts "
+    "have an unresolved campaign or no keyword evidence and could plausibly belong "
+    "here, so a zero cannot be proven for this keyword.")
 
 
 # ── Normalization ────────────────────────────────────────────────────────────
@@ -120,13 +129,16 @@ def fetch_and_resolve_contacts(start: date | None, end: date) -> dict:
 
 # ── Generic exact-unique attribution ─────────────────────────────────────────
 def _attribute(contacts: list, units: list, *, text_field: str, available: bool,
-               population_has_text: bool) -> dict:
+               population_has_text: bool, zero_proof: bool) -> dict:
     """Assign each SQL contact to at most ONE unit by (canonical campaign id +
     exact normalized ``text_field``), only when exactly one unit matches. Shared
     by keyword (text_field='keyword_norm') and search-term
     (text_field='search_term_norm') attribution.
 
     ``units`` items: {key, campaign_id, text_norm, mapping_status}.
+    ``zero_proof``: whether the window's SQL population is complete enough to prove
+    a zero (no unresolved-campaign / missing-text contacts). When False a
+    would-be-zero row is reported ``partial_attribution`` (—), never a fake 0.
     Returns {by_unit, reconciliation, coverage, contacts_by_unit}.
     """
     # Group attributable units by (campaign_id, text_norm) — only mapped units
@@ -188,11 +200,17 @@ def _attribute(contacts: list, units: list, *, text_field: str, available: bool,
             continue
         keys = assigned_to.get(key, [])
         row_sql_sum += len(keys)
-        by_unit[key] = _row_state(
-            ST_ATTRIBUTED if keys else ST_KNOWN_ZERO, len(keys),
-            source=(KEYWORD_ATTR_SOURCE if text_field == "keyword_norm"
-                    else SEARCH_TERM_ATTR_SOURCE),
-            contact_keys=keys)
+        src = (KEYWORD_ATTR_SOURCE if text_field == "keyword_norm"
+               else SEARCH_TERM_ATTR_SOURCE)
+        if keys:
+            # A confirmed positive attribution — always visible, even under
+            # partial coverage (it is a confirmed attributed count, not a claim
+            # of the complete SQL total).
+            by_unit[key] = _row_state(ST_ATTRIBUTED, len(keys), source=src, contact_keys=keys)
+        elif zero_proof:
+            by_unit[key] = _row_state(ST_KNOWN_ZERO, 0, source=src, contact_keys=[])
+        else:
+            by_unit[key] = _row_state(ST_PARTIAL_ATTRIBUTION, None, reason=_PARTIAL_ZERO_REASON)
 
     total = len(contacts)
     unattributed = total - uniquely_attributed - ambiguous_contacts
@@ -224,6 +242,36 @@ def _row_state(status, count, *, source=None, contact_keys=None,
     }
 
 
+# ── Attribution completeness / zero-proof (§2/§3) ────────────────────────────
+def _completeness(contacts: list, *, text_field: str, available: bool) -> dict:
+    """Whether the window's SQL population is complete enough to PROVE a zero.
+    A single unresolved-campaign or missing-text contact could plausibly belong
+    to any criterion, so it blocks every known-zero for the window."""
+    total = len(contacts)
+    with_identity = sum(1 for c in contacts if c.get("canonical_campaign_id"))
+    with_text = sum(1 for c in contacts if c.get(text_field))
+    missing_identity = total - with_identity
+    missing_text = sum(1 for c in contacts if not c.get(text_field))
+    if not available:
+        status = "unavailable"
+    elif missing_identity == 0 and missing_text == 0:
+        status = "complete"
+    else:
+        status = "partial"
+    # A genuinely empty (but available) population proves zero for all criteria.
+    zero_proof = available and missing_identity == 0 and missing_text == 0
+    return {
+        "sql_contacts_with_campaign_identity": with_identity,
+        "sql_contacts_with_keyword" if text_field == "keyword_norm"
+        else "sql_contacts_with_exact_search_term": with_text,
+        "sql_contacts_missing_campaign_identity": missing_identity,
+        "sql_contacts_missing_keyword" if text_field == "keyword_norm"
+        else "sql_contacts_missing_search_term": missing_text,
+        "sql_attribution_completeness_status": status,
+        "zero_proof_available": zero_proof,
+    }
+
+
 # ── Keyword attribution (§4) ─────────────────────────────────────────────────
 def attribute_keywords(contacts: list, criteria: list, *, available: bool) -> dict:
     """``criteria``: [{criterion_key, campaign_id, keyword_text, mapping_status}].
@@ -236,27 +284,29 @@ def attribute_keywords(contacts: list, criteria: list, *, available: bool) -> di
         "mapping_status": c.get("mapping_status"),
     } for c in criteria]
 
+    completeness = _completeness(contacts, text_field="keyword_norm", available=available)
     res = _attribute(contacts, units, text_field="keyword_norm",
-                     available=available, population_has_text=available)
-    audit = _keyword_audit(contacts, res, available=available)
+                     available=available, population_has_text=available,
+                     zero_proof=completeness["zero_proof_available"])
+    audit = _keyword_audit(contacts, res, available=available, completeness=completeness)
     return {
         "by_criterion": res["by_unit"],
         "reconciliation": res["reconciliation"],
         "coverage": audit["coverage"],
+        "completeness": completeness,
         "audit": audit,
         "available": available,
     }
 
 
-def _keyword_audit(contacts: list, res: dict, *, available: bool) -> dict:
+def _keyword_audit(contacts: list, res: dict, *, available: bool, completeness: dict) -> dict:
     total = len(contacts)
     with_gclid = sum(1 for c in contacts if c.get("has_gclid"))
     with_identity = sum(1 for c in contacts if c.get("canonical_campaign_id"))
     with_keyword = sum(1 for c in contacts if c.get("keyword_norm"))
     with_search_term = sum(1 for c in contacts if c.get("search_term_norm"))
     campaign_unmatched = sum(1 for c in contacts if not c.get("canonical_campaign_id"))
-    missing_keyword = sum(1 for c in contacts
-                          if c.get("canonical_campaign_id") and not c.get("keyword_norm"))
+    missing_keyword = sum(1 for c in contacts if not c.get("keyword_norm"))
     uniq = res["uniquely_attributed"]
     cov_pct = round(uniq / total * 100.0, 1) if total else None
     return {
@@ -274,12 +324,14 @@ def _keyword_audit(contacts: list, res: dict, *, available: bool) -> dict:
             "missing_keyword_sql_contacts": missing_keyword,
             "coverage_pct": cov_pct,
         },
+        "completeness": completeness,
         "coverage": {
             "available": available,
             "total_sql_contacts": total,
             "uniquely_attributed_sql_contacts": uniq,
             "coverage_pct": cov_pct,
             "grain": "keyword",
+            **completeness,
         },
     }
 
@@ -300,14 +352,18 @@ def attribute_search_terms(contacts: list, units_in: list, *, available: bool,
         "mapping_status": u.get("mapping_status"),
     } for u in units_in]
 
+    completeness = _completeness(contacts, text_field="search_term_norm", available=available)
     res = _attribute(contacts, units, text_field="search_term_norm",
-                     available=available, population_has_text=population_has_text)
+                     available=available, population_has_text=population_has_text,
+                     zero_proof=completeness["zero_proof_available"] and population_has_text)
     audit = _search_term_audit(contacts, res, available=available,
-                               population_has_text=population_has_text)
+                               population_has_text=population_has_text,
+                               completeness=completeness)
     return {
         "by_unit": res["by_unit"],
         "reconciliation": res["reconciliation"],
         "coverage": audit["coverage"],
+        "completeness": completeness,
         "audit": audit,
         "available": available,
         "population_has_text": population_has_text,
@@ -315,17 +371,19 @@ def attribute_search_terms(contacts: list, units_in: list, *, available: bool,
 
 
 def _search_term_audit(contacts: list, res: dict, *, available: bool,
-                       population_has_text: bool) -> dict:
+                       population_has_text: bool, completeness: dict) -> dict:
     total = len(contacts)
     with_search_term = sum(1 for c in contacts if c.get("search_term_norm"))
     campaign_unmatched = sum(1 for c in contacts if not c.get("canonical_campaign_id"))
-    missing_search_term = sum(1 for c in contacts
-                              if c.get("canonical_campaign_id") and not c.get("search_term_norm"))
+    missing_search_term = sum(1 for c in contacts if not c.get("search_term_norm"))
     uniq = res["uniquely_attributed"]
     cov_pct = round(uniq / total * 100.0, 1) if total else None
     return {
         "search_term_attribution": {
-            "uniquely_attributed_sql_contacts": uniq,
+            # §4 — these are DISTINCT: contacts that carried an exact user query
+            # vs. contacts uniquely attributed to a term. Never conflate them.
+            "sql_contacts_with_exact_search_term": with_search_term,
+            "uniquely_attributed_search_term_sql_contacts": uniq,
             "ambiguous_sql_contacts": res["ambiguous_contacts"],
             "missing_search_term_sql_contacts": missing_search_term,
             "campaign_unmatched_sql_contacts": campaign_unmatched,
@@ -335,11 +393,13 @@ def _search_term_audit(contacts: list, res: dict, *, available: bool,
         "coverage": {
             "available": available,
             "total_sql_contacts": total,
-            "uniquely_attributed_sql_contacts": uniq,
             "sql_contacts_with_exact_search_term": with_search_term,
+            "uniquely_attributed_search_term_sql_contacts": uniq,
+            "uniquely_attributed_sql_contacts": uniq,
             "coverage_pct": cov_pct,
             "exact_query_evidence_available": population_has_text,
             "grain": "search_term",
+            **completeness,
         },
     }
 

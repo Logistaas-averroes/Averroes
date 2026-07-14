@@ -56,7 +56,23 @@ def test_coverage_disclosures_present():
     assert "function kwSqlCoverageNote" in _APP
     assert "function stSqlCoverageNote" in _APP
     assert "SQL attribution coverage:" in _APP
-    assert "Search-term SQL coverage:" in _APP
+    # §4 — exact-query evidence and unique attribution are shown as DISTINCT
+    # counts; the attributed count is never described as exact-query evidence.
+    assert "Exact query evidence:" in _APP
+    assert "Uniquely attributed to a search term:" in _APP
+
+
+def test_partial_attribution_state_present():
+    # §2 — a would-be-zero row under incomplete coverage renders "—", not 0.
+    assert "partial_attribution" in _APP
+    assert "cannot be proven" in _APP
+
+
+def test_zero_proof_and_completeness_exposed_in_services():
+    assert "zero_proof_available" in _KW_SVC
+    assert "sql_attribution_completeness_status" in _KW_SVC
+    assert "uniquely_attributed_search_term_sql_contacts" in _ST_SVC
+    assert "sql_contacts_with_exact_search_term" in _ST_SVC
 
 
 def test_drawer_sql_sections_present_without_email():

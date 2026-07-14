@@ -1025,7 +1025,8 @@ def _filter_units_sql(units: list, sql_state: str | None) -> list:
     if sql_state == "known_zero":
         return [u for u in units if u.get("sql_attribution_status") == "known_zero"]
     if sql_state == "unavailable":
-        return [u for u in units if u.get("sql_attribution_status") in ("unavailable", "mapping_review")]
+        return [u for u in units if u.get("sql_attribution_status")
+                in ("unavailable", "mapping_review", "partial_attribution")]
     return units
 
 
@@ -1038,6 +1039,8 @@ def _search_term_sql_block(attr: dict) -> dict:
     recon = attr.get("reconciliation") or {}
     cov = attr.get("coverage") or {}
     audit = attr.get("audit") or {}
+    comp = attr.get("completeness") or {}
+    sta = audit.get("search_term_attribution") or {}
     return {
         "sql_source": SQL_SOURCE,
         "sql_definition": SQL_DEFINITION,
@@ -1047,13 +1050,22 @@ def _search_term_sql_block(attr: dict) -> dict:
         "sql_attribution_available": bool(attr.get("available")),
         "exact_query_evidence_available": bool(attr.get("population_has_text")),
         "sql_attribution_coverage_pct": cov.get("coverage_pct"),
+        # §4 — DISTINCT counts: exact-query evidence vs uniquely attributed.
+        "sql_contacts_with_exact_search_term": sta.get("sql_contacts_with_exact_search_term"),
+        "uniquely_attributed_search_term_sql_contacts": sta.get("uniquely_attributed_search_term_sql_contacts"),
         "sql_attributed_count": recon.get("uniquely_attributed_sql_contacts"),
         "sql_ambiguous_count": recon.get("ambiguous_sql_contacts"),
         "sql_unattributed_count": recon.get("unattributed_sql_contacts"),
         "sql_total_contacts": recon.get("total_sql_contacts"),
         "sql_row_sum": recon.get("row_sql_sum"),
         "sql_reconciliation_status": recon.get("reconciliation_status"),
-        "search_term_attribution": audit.get("search_term_attribution"),
+        # §3 completeness / zero-proof.
+        "sql_contacts_with_campaign_identity": comp.get("sql_contacts_with_campaign_identity"),
+        "sql_contacts_missing_campaign_identity": comp.get("sql_contacts_missing_campaign_identity"),
+        "sql_contacts_missing_search_term": comp.get("sql_contacts_missing_search_term"),
+        "sql_attribution_completeness_status": comp.get("sql_attribution_completeness_status"),
+        "zero_proof_available": comp.get("zero_proof_available"),
+        "search_term_attribution": sta,
     }
 
 

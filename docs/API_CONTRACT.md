@@ -1503,18 +1503,36 @@ once regardless of scheduler snapshots or associated deals. Campaign identity
 reuses the Campaign Evidence doctrine (durable id → approved mapping →
 exact-normalized unique fallback; never fuzzy; `not_google_ads` excluded).
 
+- The SQL population is **deduplicated to the latest snapshot per contact FIRST**
+  (run_date DESC, id DESC) and only THEN filtered to `qualified` — identical to
+  Campaign Evidence — so a stale qualified snapshot for a contact whose latest
+  status is no longer qualified is never counted.
 - **Keyword** attribution assigns a contact to a criterion only when exactly one
   criterion matches (canonical campaign id + exact normalized keyword). The same
   keyword text across ad groups / criterion ids / duplicate campaign ids is
   `ambiguous` and attaches to none. Per-row: `attributed_sqls`,
-  `sql_attribution_status` (`attributed|known_zero|ambiguous|unavailable|mapping_review`),
+  `sql_attribution_status` (`attributed|known_zero|ambiguous|partial_attribution|unavailable|mapping_review`),
   `sql_attribution_source`, `sql_attribution_coverage`, `sql_ambiguity_reason`;
   `sql_contact_keys` only in the drawer.
+- **Zero-proof (§2):** a row shows `known_zero` (a real `0`) only when the window's
+  SQL population is complete enough to prove it — SQL available, the criterion
+  uniquely attributable, and NO window contact has an unresolved campaign or a
+  missing keyword (either could plausibly belong to the criterion). Otherwise a
+  would-be-zero row is `partial_attribution` and displays `—`; confirmed positive
+  counts stay visible as confirmed attributed counts (not complete SQL totals).
+  Each response exposes `sql_contacts_with_campaign_identity`,
+  `sql_contacts_with_keyword`, `sql_contacts_missing_campaign_identity`,
+  `sql_contacts_missing_keyword`, `sql_attribution_completeness_status`
+  (`complete|partial|unavailable`) and `zero_proof_available`.
 - **Search-term** attribution requires a directly persisted, non-empty user query.
   The durable `leads` table stores only a HubSpot keyword, never the query, so
   exact search-term coverage is currently zero and every unit is `unavailable`
   (—), never a fabricated `0`. A search term is never inferred from a keyword /
-  match type / campaign / similarity.
+  match type / campaign / similarity. **Exact-query evidence and unique
+  attribution are DISTINCT counts** and are surfaced separately —
+  `sql_contacts_with_exact_search_term` (X of N qualified contacts) vs.
+  `uniquely_attributed_search_term_sql_contacts` (Y of N). The attributed count is
+  never described as exact-query evidence.
 
 Row totals reconcile to **uniquely attributed** contacts (ambiguous / unattributed
 stay outside). Each response exposes `platform_date_field: source_date`,
