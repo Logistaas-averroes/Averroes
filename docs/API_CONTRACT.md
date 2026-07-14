@@ -1492,6 +1492,62 @@ It does not create negative keyword candidates, push changes, or provide recomme
 
 ---
 
+##### Attributed SQLs (PR-ADS-146C) — shared by Keyword Evidence + Search Terms
+
+Both endpoints add HubSpot-confirmed **Attributed SQLs** via one shared read-only
+service (`services/platform_sql_attribution_service.py`). An SQL is a
+deduplicated **qualified** paid-search contact on its `contact_created_at` event
+date (the exact Campaign Evidence lead-quality contract) — never a Google Ads
+platform conversion, MQL, meeting, in-progress lead or deal, and a contact counts
+once regardless of scheduler snapshots or associated deals. Campaign identity
+reuses the Campaign Evidence doctrine (durable id → approved mapping →
+exact-normalized unique fallback; never fuzzy; `not_google_ads` excluded).
+
+- The SQL population is **deduplicated to the latest snapshot per contact FIRST**
+  (run_date DESC, id DESC) and only THEN filtered to `qualified` — identical to
+  Campaign Evidence — so a stale qualified snapshot for a contact whose latest
+  status is no longer qualified is never counted.
+- **Keyword** attribution assigns a contact to a criterion only when exactly one
+  criterion matches (canonical campaign id + exact normalized keyword). The same
+  keyword text across ad groups / criterion ids / duplicate campaign ids is
+  `ambiguous` and attaches to none. Per-row: `attributed_sqls`,
+  `sql_attribution_status` (`attributed|known_zero|ambiguous|partial_attribution|unavailable|mapping_review`),
+  `sql_attribution_source`, `sql_attribution_coverage`, `sql_ambiguity_reason`;
+  `sql_contact_keys` only in the drawer.
+- **Zero-proof (§2):** a row shows `known_zero` (a real `0`) only when the window's
+  SQL population is complete enough to prove it — SQL available, the criterion
+  uniquely attributable, and NO window contact has an unresolved campaign or a
+  missing keyword (either could plausibly belong to the criterion). Otherwise a
+  would-be-zero row is `partial_attribution` and displays `—`; confirmed positive
+  counts stay visible as confirmed attributed counts (not complete SQL totals).
+  Each response exposes `sql_contacts_with_campaign_identity`,
+  `sql_contacts_with_keyword`, `sql_contacts_missing_campaign_identity`,
+  `sql_contacts_missing_keyword`, `sql_attribution_completeness_status`
+  (`complete|partial|unavailable`) and `zero_proof_available`.
+- **Search-term** attribution requires a directly persisted, non-empty user query.
+  The durable `leads` table stores only a HubSpot keyword, never the query, so
+  exact search-term coverage is currently zero and every unit is `unavailable`
+  (—), never a fabricated `0`. A search term is never inferred from a keyword /
+  match type / campaign / similarity. **Exact-query evidence and unique
+  attribution are DISTINCT counts** and are surfaced separately —
+  `sql_contacts_with_exact_search_term` (X of N qualified contacts) vs.
+  `uniquely_attributed_search_term_sql_contacts` (Y of N). The attributed count is
+  never described as exact-query evidence.
+
+Row totals reconcile to **uniquely attributed** contacts (ambiguous / unattributed
+stay outside). Each response exposes `platform_date_field: source_date`,
+`sql_date_field: contact_created_at`, and an `sql_attribution` audit block:
+`sql_source` (HubSpot), `sql_definition` (status_category qualified),
+`sql_date_field`, `sql_dedup_key`, `sql_attribution_method`,
+`sql_attribution_coverage_pct`, `sql_attributed_count`, `sql_ambiguous_count`,
+`sql_unattributed_count`, `sql_total_contacts`, `sql_row_sum`,
+`sql_reconciliation_status`. Both endpoints accept `sql_state`
+(`all|has_sql|known_zero|ambiguous*|unavailable`; `ambiguous` keyword-only) and
+`sort=attributed_sqls`, and add the five SQL fields to their CSV exports (never
+contact ids in the main table CSV). Read-only throughout.
+
+---
+
 #### `GET /api/search-term-evidence` *(PR-ADS-144 — Search Terms page, Terms tab)*
 
 Complete selected-window Search Term Universe: durable `search_terms` rows

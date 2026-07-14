@@ -62,7 +62,10 @@ from services.search_term_evidence_service import (  # noqa: PLC0415
 logger = logging.getLogger(__name__)
 
 # ── Vocabulary / limits ──────────────────────────────────────────────────────
-KEYWORD_SORTS = ("spend", "clicks", "cpc", "ctr", "quality", "keyword", "last_seen")
+KEYWORD_SORTS = ("spend", "clicks", "cpc", "ctr", "quality", "keyword", "last_seen",
+                 "attributed_sqls")
+# PR-ADS-146C — Attributed-SQL row-state filters.
+KEYWORD_SQL_STATES = ("all", "has_sql", "known_zero", "ambiguous", "unavailable")
 MATCH_TYPES = ("BROAD", "PHRASE", "EXACT")
 MATCH_UNKNOWN = "UNKNOWN"
 DEFAULT_PAGE_SIZE = 50
@@ -271,6 +274,89 @@ def _build_population(start: date | None, end: date) -> dict:
     }
 
 
+# ── HubSpot SQL attribution (PR-ADS-146C §4) ─────────────────────────────────
+def _keyword_sql_attribution(pop: dict, start: date | None, end: date) -> dict:
+    """Attribute deduplicated qualified SQL contacts to the keyword population
+    over the WHOLE window (filter-independent). Defensive — a failure yields an
+    unavailable verdict rather than breaking the page."""
+    try:
+        from services.platform_sql_attribution_service import (  # noqa: PLC0415
+            attribute_keywords, fetch_and_resolve_contacts,
+        )
+        contacts_res = fetch_and_resolve_contacts(start, end)
+        available = bool(contacts_res.get("available"))
+        contacts = contacts_res.get("contacts") or []
+        criteria = [{
+            "criterion_key": u.get("criterion_key"),
+            "campaign_id": u.get("campaign_id"),
+            "keyword_text": u.get("keyword_text"),
+            "mapping_status": u.get("mapping_status"),
+        } for u in (pop.get("units") or [])]
+        attr = attribute_keywords(contacts, criteria, available=available)
+        attr["contacts"] = contacts
+        return attr
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[keyword-evidence] SQL attribution failed: %s", exc)
+        return {"by_criterion": {}, "reconciliation": {}, "coverage": {},
+                "audit": {}, "available": False, "contacts": []}
+
+
+def _apply_keyword_sql(rows: list, attr: dict, *, drawer: bool = False) -> None:
+    """Merge per-criterion attribution onto rows. ``sql_contact_keys`` is included
+    only in drawer payloads (never leaked into the table/CSV)."""
+    by = attr.get("by_criterion") or {}
+    cov_pct = (attr.get("coverage") or {}).get("coverage_pct")
+    for r in rows:
+        st = by.get(r.get("criterion_key")) or {
+            "attributed_sqls": None, "sql_attribution_status": "unavailable",
+            "sql_attribution_source": None, "sql_ambiguity_reason": None,
+            "sql_candidate_count": None, "sql_contact_keys": []}
+        r["attributed_sqls"] = st.get("attributed_sqls")
+        r["sql_attribution_status"] = st.get("sql_attribution_status")
+        r["sql_attribution_source"] = st.get("sql_attribution_source")
+        r["sql_attribution_coverage"] = cov_pct
+        r["sql_candidate_count"] = st.get("sql_candidate_count")
+        r["sql_ambiguity_reason"] = st.get("sql_ambiguity_reason")
+        if drawer:
+            r["sql_contact_keys"] = st.get("sql_contact_keys") or []
+
+
+def _sql_attribution_block(attr: dict) -> dict:
+    """Response-level SQL-attribution audit + reconciliation (PR-ADS-146C §11/§13)."""
+    from services.platform_sql_attribution_service import (  # noqa: PLC0415
+        SQL_ATTRIBUTION_METHOD_KEYWORD, SQL_DATE_FIELD, SQL_DEDUP_KEY,
+        SQL_DEFINITION, SQL_SOURCE,
+    )
+    recon = attr.get("reconciliation") or {}
+    cov = attr.get("coverage") or {}
+    audit = attr.get("audit") or {}
+    comp = attr.get("completeness") or {}
+    return {
+        "sql_source": SQL_SOURCE,
+        "sql_definition": SQL_DEFINITION,
+        "sql_date_field": SQL_DATE_FIELD,
+        "sql_dedup_key": SQL_DEDUP_KEY,
+        "sql_attribution_method": SQL_ATTRIBUTION_METHOD_KEYWORD,
+        "sql_attribution_available": bool(attr.get("available")),
+        "sql_attribution_coverage_pct": cov.get("coverage_pct"),
+        "sql_attributed_count": recon.get("uniquely_attributed_sql_contacts"),
+        "sql_ambiguous_count": recon.get("ambiguous_sql_contacts"),
+        "sql_unattributed_count": recon.get("unattributed_sql_contacts"),
+        "sql_total_contacts": recon.get("total_sql_contacts"),
+        "sql_row_sum": recon.get("row_sql_sum"),
+        "sql_reconciliation_status": recon.get("reconciliation_status"),
+        # §3 — attribution completeness / zero-proof.
+        "sql_contacts_with_campaign_identity": comp.get("sql_contacts_with_campaign_identity"),
+        "sql_contacts_with_keyword": comp.get("sql_contacts_with_keyword"),
+        "sql_contacts_missing_campaign_identity": comp.get("sql_contacts_missing_campaign_identity"),
+        "sql_contacts_missing_keyword": comp.get("sql_contacts_missing_keyword"),
+        "sql_attribution_completeness_status": comp.get("sql_attribution_completeness_status"),
+        "zero_proof_available": comp.get("zero_proof_available"),
+        "population": audit.get("population"),
+        "keyword_attribution": audit.get("keyword_attribution"),
+    }
+
+
 # ── Review signal (factual, config-thresholded) ──────────────────────────────
 def _keyword_signal(unit: dict, th: dict, window_end: date | None) -> str:
     """One factual review-prioritisation signal per keyword (PR-ADS-146 §12).
@@ -452,7 +538,7 @@ def _broad_exposure_kpi(units: list, mon: dict) -> dict:
 
 
 # ── Filters / sort / validate ────────────────────────────────────────────────
-def _validate(match_type, criterion_status, quality_band, signal, sort):
+def _validate(match_type, criterion_status, quality_band, signal, sort, sql_state=None):
     if sort not in KEYWORD_SORTS:
         raise KeywordQueryError(f"invalid sort '{sort}'")
     if match_type and match_type.upper() not in (*MATCH_TYPES, MATCH_UNKNOWN):
@@ -461,6 +547,8 @@ def _validate(match_type, criterion_status, quality_band, signal, sort):
         raise KeywordQueryError(f"invalid quality_band '{quality_band}'")
     if signal and signal not in REVIEW_SIGNALS:
         raise KeywordQueryError(f"invalid review signal '{signal}'")
+    if sql_state and sql_state not in KEYWORD_SQL_STATES:
+        raise KeywordQueryError(f"invalid sql_state '{sql_state}'")
 
 
 def _filter_rows(rows: list, *, q, campaign, match_type, criterion_status,
@@ -506,9 +594,28 @@ def _sort_rows(rows: list, sort: str) -> list:
         "cpc": lambda r: r.get("cpc_usd"),
         "ctr": lambda r: r.get("ctr"),
         "quality": lambda r: r.get("quality_score"),
+        # Attributed SQLs: highest first; ambiguous/unavailable (null count) last.
+        "attributed_sqls": lambda r: r.get("attributed_sqls"),
     }
     getter = keymap.get(sort, keymap["spend"])
     return sorted(rows, key=lambda r: _null_last(getter(r)))
+
+
+def _filter_sql_state(rows: list, sql_state: str | None) -> list:
+    """Filter by Attributed-SQL row state (PR-ADS-146C §7)."""
+    if not sql_state or sql_state == "all":
+        return rows
+    if sql_state == "has_sql":
+        return [r for r in rows if r.get("sql_attribution_status") == "attributed"
+                and (r.get("attributed_sqls") or 0) > 0]
+    if sql_state == "known_zero":
+        return [r for r in rows if r.get("sql_attribution_status") == "known_zero"]
+    if sql_state == "ambiguous":
+        return [r for r in rows if r.get("sql_attribution_status") == "ambiguous"]
+    if sql_state == "unavailable":
+        return [r for r in rows if r.get("sql_attribution_status")
+                in ("unavailable", "mapping_review", "partial_attribution")]
+    return rows
 
 
 def _facets(rows: list) -> dict:
@@ -676,10 +783,11 @@ def build_keyword_evidence(window: str, *, page: int = 1,
                            criterion_status: str | None = None,
                            quality_band: str | None = None, signal: str | None = None,
                            min_spend: float | None = None, sort: str = "spend",
+                           sql_state: str | None = None,
                            now: datetime | None = None) -> dict:
     """Main Keyword Evidence builder. KPIs are computed over the COMPLETE filtered
     population; only the page slice is serialized into ``rows``."""
-    _validate(match_type, criterion_status, quality_band, signal, sort)
+    _validate(match_type, criterion_status, quality_band, signal, sort, sql_state)
     page = max(1, int(page or 1))
     page_size = max(1, min(int(page_size or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
 
@@ -692,9 +800,15 @@ def build_keyword_evidence(window: str, *, page: int = 1,
     units = pop["units"]
     all_rows = [_unit_row(u, th, end) for u in units]
 
+    # §4 — attribute qualified SQL contacts to the WHOLE population (window-scoped,
+    # filter-independent) then merge the per-criterion verdict onto every row.
+    sql_attr = _keyword_sql_attribution(pop, start, end)
+    _apply_keyword_sql(all_rows, sql_attr)
+
     filtered = _filter_rows(all_rows, q=q, campaign=campaign, match_type=match_type,
                             criterion_status=criterion_status, quality_band=quality_band,
                             signal=signal, min_spend=min_spend)
+    filtered = _filter_sql_state(filtered, sql_state)
     # Units aligned to the filtered rows (for monetary/match-type math).
     fk = {r["criterion_key"] for r in filtered}
     filtered_units = [u for u in units if u.get("criterion_key") in fk]
@@ -730,7 +844,13 @@ def build_keyword_evidence(window: str, *, page: int = 1,
             "q": q, "campaign": campaign, "match_type": match_type,
             "criterion_status": criterion_status, "quality_band": quality_band,
             "signal": signal, "min_spend": min_spend, "sort": sort,
+            "sql_state": sql_state,
         },
+        # §10 — the window applies to Google Ads facts by source_date AND to SQL
+        # contacts by contact_created_at; disclose both grains, never conflate them.
+        "platform_date_field": "source_date",
+        "sql_date_field": "contact_created_at",
+        "sql_attribution": _sql_attribution_block(sql_attr),
         "audit": _audit_block(base, pop, mon, total, ordered,
                               pagination_complete=(total <= offset + page_size)),
     }
@@ -738,18 +858,22 @@ def build_keyword_evidence(window: str, *, page: int = 1,
 
 def build_keyword_export(window: str, *, q=None, campaign=None, match_type=None,
                          criterion_status=None, quality_band=None, signal=None,
-                         min_spend=None, sort="spend", now=None) -> dict:
+                         min_spend=None, sort="spend", sql_state=None, now=None) -> dict:
     """Full server-filtered dataset (NO pagination) for CSV export."""
-    _validate(match_type, criterion_status, quality_band, signal, sort)
+    _validate(match_type, criterion_status, quality_band, signal, sort, sql_state)
     start, end, base = _base(window, now)
     pop = _build_population(start, end)
     if not pop.get("available"):
         return {**base, "db_unavailable": True, "complete": False, "rows": []}
     th = _load_signal_thresholds()
     all_rows = [_unit_row(u, th, end) for u in pop["units"]]
+    # SQL attribution for the export (no sql_contact_keys — the main CSV never
+    # carries contact ids, PR-ADS-146C §12).
+    _apply_keyword_sql(all_rows, _keyword_sql_attribution(pop, start, end))
     filtered = _filter_rows(all_rows, q=q, campaign=campaign, match_type=match_type,
                             criterion_status=criterion_status, quality_band=quality_band,
                             signal=signal, min_spend=min_spend)
+    filtered = _filter_sql_state(filtered, sql_state)
     ordered = _sort_rows(filtered, sort)
     return {**base, "db_unavailable": False, "complete": True, "rows": ordered}
 
@@ -778,6 +902,11 @@ def build_keyword_drawer(window: str, criterion_key: str, *, now: datetime | Non
         ad_group_id=match.get("ad_group_id"),
         customer_id=match.get("customer_id"))
     daily_usd = _convert_daily_series(daily.get("rows") or [], start, end)
+
+    # §7 — HubSpot SQL attribution for this criterion + its supporting contacts.
+    sql_attr = _keyword_sql_attribution(pop, start, end)
+    _apply_keyword_sql([row], sql_attr, drawer=True)
+    sql_block = _keyword_drawer_sql_block(row, sql_attr)
 
     return {
         **base,
@@ -809,10 +938,33 @@ def build_keyword_drawer(window: str, criterion_key: str, *, now: datetime | Non
         },
         "review_signal": row["review_signal"],
         "daily": daily_usd,
+        "sql_attribution": sql_block,
         "search_terms_link": {
             "campaign_key": row["campaign_key"], "ad_group_id": row["ad_group_id"],
             "keyword": row["keyword"], "window": base["window"],
         },
+    }
+
+
+def _keyword_drawer_sql_block(row: dict, attr: dict) -> dict:
+    """HubSpot SQL attribution block for the keyword drawer — status, coverage,
+    source, ambiguity, and the supporting deduplicated contacts (no emails)."""
+    from services.platform_sql_attribution_service import (  # noqa: PLC0415
+        contact_details_for_keys,
+    )
+    contacts = contact_details_for_keys(attr.get("contacts") or [],
+                                        row.get("sql_contact_keys") or [])
+    cov = attr.get("coverage") or {}
+    return {
+        "attributed_sqls": row.get("attributed_sqls"),
+        "sql_attribution_status": row.get("sql_attribution_status"),
+        "sql_attribution_source": row.get("sql_attribution_source"),
+        "sql_attribution_coverage_pct": cov.get("coverage_pct"),
+        "sql_candidate_count": row.get("sql_candidate_count"),
+        "sql_ambiguity_reason": row.get("sql_ambiguity_reason"),
+        "available": bool(attr.get("available")),
+        "contacts": contacts,
+        "contact_count": len(contacts),
     }
 
 

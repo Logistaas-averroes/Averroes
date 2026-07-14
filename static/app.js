@@ -356,7 +356,7 @@ const PAGE_HELP_CONTENT = {
     what: "Search Terms + Patterns — the selected-window Search Term Universe with factual review states (Flagged waste = durable flag OR safely-confirmed waste evidence · Reviewed clean = every row stored false · Needs review = not yet classified) and waste evidence, plus a Patterns tab of recurring 1–3-word phrases derived from the same terms.",
     source: "Durable Google Ads API search-term rows totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound). Currency is assessed independently per term × campaign: verified Google Ads GBP rows are FX-converted to USD per source-date; unverified legacy rows keep their monetary value withheld (never assumed GBP/USD) and stay visible. Verified Search-Term Spend is therefore a verified subtotal shown as Complete, Partial (excludes N legacy rows) or Unavailable. Reporting Coverage compares FX-safe VERIFIED search-term USD against FX-safe canonical campaign USD; when partial it is verified-row-only.",
     howToUse: "Pick an Evidence Window, filter by campaign, review state, junk category or minimum spend, and click any row to open its evidence drawer. Switch to Patterns for word-level analysis derived from the same selected-window terms; a term can appear in several patterns, so pattern-row spends overlap and must never be summed.",
-    doNotAssume: "Review states are classification facts, not business outcomes — Reviewed clean does not mean valuable, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Absence of waste evidence is NOT clean — only an explicit stored false is. A flagged term is a human-review candidate, not an approved negative. Read-only: no negative keywords are added and nothing is written to Google Ads or HubSpot. The legacy spend_usd column in storage is NOT proven USD — it stores the raw cost_micros/1e6 value in the account's native currency, and the 78 unverified legacy rows are preserved, never relabelled.",
+    doNotAssume: "Review states are classification facts, not business outcomes — Reviewed clean does not mean valuable, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Absence of waste evidence is NOT clean — only an explicit stored false is. A flagged term is a human-review candidate, not an approved negative. Attributed SQLs need a directly persisted user query to tie a qualified contact to an exact search term; the CRM stores a HubSpot keyword, not the query, so this normally reads '—' (unavailable) — never a fabricated 0, and a keyword is never treated as a search term. Read-only: no negative keywords are added and nothing is written to Google Ads or HubSpot. The legacy spend_usd column in storage is NOT proven USD — it stores the raw cost_micros/1e6 value in the account's native currency, and the 78 unverified legacy rows are preserved, never relabelled.",
     checkNext: "Flagged Waste Terms for the flagged review queue, or Campaign Evidence for canonical spend and lead outcomes."
   },
   keywords: {
@@ -364,7 +364,7 @@ const PAGE_HELP_CONTENT = {
     source: "Durable Google Ads API keyword facts (keyword_daily_facts) totalled by their source_date report date for the selected Evidence Window (all_time has no lower bound) — never SUM'd across overlapping scheduler snapshots. Verified Keyword Spend is Σ(per-source-date native cost × that date's FX rate); it is a verified subtotal shown Complete, Partial (excludes N unverified/FX-incomplete units) or Unavailable. Quality Score, Expected CTR, Ad Relevance and Landing Page Experience are the LATEST observed Google Ads attributes per criterion — not window averages; a blank score means unavailable, distinct from a genuine 0.",
     howToUse: "Pick an Evidence Window, filter by campaign, match type, criterion status, quality band, review signal or minimum verified spend, and click any row to open its evidence drawer. Export CSV returns the complete server-filtered dataset. Keyword-view reporting coverage compares FX-safe verified keyword-view USD against FX-safe canonical campaign USD — a completeness diagnostic, not a reconciliation failure.",
     howItStaysCurrent: "Changing the Evidence Window is a PostgreSQL query over already-stored facts — it filters instantly and never calls or mutates Google Ads. A scheduled daily sync re-pulls the recent rolling range (so late Google Ads metric and conversion adjustments update the stored facts without duplication), and a one-time historical bootstrap backfills the account's full keyword history so 'All time' can become genuinely complete. 'Partial historical coverage' means the stored durable facts start after the account's history start — earlier dates are not yet backfilled, so 'All time' is a truthful partial, never presented as complete. Admins can trigger a recent-range refresh from System Status → Dataset Freshness; it writes locally only.",
-    doNotAssume: "Review signals are review-prioritisation only — never winner/loser/waste. Zero platform conversions is not confirmed waste, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Broad-match exposure is a factual share, not a recommendation to change match type. Read-only: no keywords are added/paused, no bids/match-types changed, no negatives created, nothing written to Google Ads or HubSpot. Before the first successful sync completes, keyword spend reads 'Unavailable' — never a fabricated $0.00. The legacy keywords snapshot table is preserved and never reinterpreted as durable USD.",
+    doNotAssume: "Review signals are review-prioritisation only — never winner/loser/waste. Zero platform conversions is not confirmed waste, and a platform conversion is never a confirmed SQL, customer or closed-won deal. Broad-match exposure is a factual share, not a recommendation to change match type. Attributed SQLs are HubSpot-confirmed qualified contacts on their created date, uniquely tied to one keyword criterion; a blank ('—') means the SQL could not be uniquely attributed (ambiguous keyword text or unresolved campaign), never zero, and a genuine 0 means uniquely attributable with no matching contact. Read-only: no keywords are added/paused, no bids/match-types changed, no negatives created, nothing written to Google Ads or HubSpot. Before the first successful sync completes, keyword spend reads 'Unavailable' — never a fabricated $0.00. The legacy keywords snapshot table is preserved and never reinterpreted as durable USD.",
     checkNext: "Search Terms to see which queries matched a keyword, or Campaign Evidence for canonical spend and lead outcomes."
   },
   geo: {
@@ -8982,7 +8982,7 @@ function qualityScoreBadge(qs) {
 let _stTab = "terms";               // terms | patterns
 let _stData = null;                  // /api/search-term-evidence payload
 let _stLoadState = "idle";           // idle | loading | ok | db_unavailable | error
-let _stFilters = { q: "", campaign: "", state: "", junk: "", minSpend: "", sort: "spend", page: 1 };
+let _stFilters = { q: "", campaign: "", state: "", junk: "", sqlState: "", minSpend: "", sort: "spend", page: 1 };
 let _stReqId = 0;
 let _stDebounceTimer = null;
 
@@ -9158,6 +9158,7 @@ function stBuildTermsParams() {
   if (_stFilters.campaign) p.set("campaign", _stFilters.campaign);
   if (_stFilters.state) p.set("state", _stFilters.state);
   if (_stFilters.junk) p.set("junk_category", _stFilters.junk);
+  if (_stFilters.sqlState) p.set("sql_state", _stFilters.sqlState);
   if (_stFilters.minSpend !== "" && _stFilters.minSpend !== null) {
     p.set("min_spend", String(_stFilters.minSpend));
   }
@@ -9211,6 +9212,7 @@ function renderTermsTab() {
   body.innerHTML = `
     ${renderTermsKPIs(_stData.kpis)}
     ${renderTermsFilters(_stData.facets)}
+    ${stSqlCoverageNote()}
     <div class="evidence-table-shell">
       <div class="evidence-table-scroll" id="st-terms-table"></div>
       <div class="st-pagination" id="st-terms-pagination"></div>
@@ -9327,6 +9329,12 @@ function renderTermsFilters(facets) {
       ${stStateOptions(_stFilters.state)}</select>
     <select id="st-junk" class="waste-filter-select" aria-label="Filter by junk category">
       ${junkOpts.join("")}</select>
+    <select id="st-sqlstate" class="waste-filter-select" aria-label="Filter by SQL attribution">
+      <option value=""${!_stFilters.sqlState ? " selected" : ""}>All SQL attribution</option>
+      <option value="has_sql"${_stFilters.sqlState === "has_sql" ? " selected" : ""}>Has attributed SQL</option>
+      <option value="known_zero"${_stFilters.sqlState === "known_zero" ? " selected" : ""}>Known zero</option>
+      <option value="unavailable"${_stFilters.sqlState === "unavailable" ? " selected" : ""}>Unavailable</option>
+    </select>
     <input type="number" id="st-min-spend" min="0" step="1" class="waste-search-input st-min-spend"
       placeholder="Min spend $" value="${escapeHtml(String(_stFilters.minSpend))}"
       aria-label="Minimum reported spend in USD" />
@@ -9335,6 +9343,7 @@ function renderTermsFilters(facets) {
       <option value="clicks"${_stFilters.sort === "clicks" ? " selected" : ""}>Most clicks</option>
       <option value="cpc"${_stFilters.sort === "cpc" ? " selected" : ""}>Highest CPC</option>
       <option value="conversions"${_stFilters.sort === "conversions" ? " selected" : ""}>Most platform conversions</option>
+      <option value="attributed_sqls"${_stFilters.sort === "attributed_sqls" ? " selected" : ""}>Highest attributed SQLs</option>
       <option value="last_seen"${_stFilters.sort === "last_seen" ? " selected" : ""}>Newest seen</option>
       <option value="term"${_stFilters.sort === "term" ? " selected" : ""}>Search term</option>
     </select>
@@ -9342,6 +9351,84 @@ function renderTermsFilters(facets) {
     <button id="st-export" type="button" class="revenue-filter-chip campaign-clear-btn"
       title="Export the complete server-filtered dataset for this window">Export CSV</button>
   </div>`;
+}
+
+// §8 — Attributed-SQL cell. Direct persisted query only; missing evidence is "—",
+// never a fabricated zero.
+function stSqlCell(r) {
+  const st = r.sql_attribution_status;
+  const n = r.attributed_sqls;
+  if (st === "attributed" && n > 0) {
+    return `<span class="kw-sql kw-sql--pos" title="Confirmed attribution: ${escapeHtml(String(n))} HubSpot-confirmed SQL contact(s) with this exact user query">${fmtCount(n)}</span>`;
+  }
+  if (st === "known_zero") {
+    return `<span class="kw-sql kw-sql--zero" title="Proven zero: attribution coverage is complete and no qualified contact carried this exact query in the window">0</span>`;
+  }
+  if (st === "partial_attribution") {
+    return `<span class="kw-sql kw-sql--na" title="Unavailable — exact-query attribution coverage is incomplete this window, so a zero cannot be proven">—</span>`;
+  }
+  return `<span class="kw-sql kw-sql--na" title="Search-term-level SQL attribution unavailable — the CRM stores a keyword, not the actual user query">—</span>`;
+}
+
+// §4/§9 — compact search-term SQL coverage disclosure (window-scoped). Exact-query
+// evidence and unique attribution are DISTINCT counts and are shown separately —
+// the attributed count is never described as exact-query evidence.
+function stSqlCoverageNote() {
+  const s = _stData && _stData.sql_attribution;
+  if (!s) return "";
+  if (!s.sql_attribution_available) {
+    return `<div class="kw-sql-note" role="note">Search-term SQL attribution unavailable — HubSpot qualified-contact evidence could not be loaded for this window.</div>`;
+  }
+  const total = s.sql_total_contacts;
+  if (total === null || total === undefined) return "";
+  const withQuery = s.sql_contacts_with_exact_search_term || 0;
+  const attr = (s.uniquely_attributed_search_term_sql_contacts !== undefined
+    && s.uniquely_attributed_search_term_sql_contacts !== null)
+    ? s.uniquely_attributed_search_term_sql_contacts
+    : (s.sql_attributed_count || 0);
+  const extra = s.exact_query_evidence_available
+    ? ""
+    : " The CRM stores a HubSpot keyword, not the actual user query, so exact search-term attribution is unavailable.";
+  return `<div class="kw-sql-note" role="note">`
+    + `Exact query evidence: <strong>${fmtCount(withQuery)} of ${fmtCount(total)}</strong> qualified contacts`
+    + ` · Uniquely attributed to a search term: <strong>${fmtCount(attr)} of ${fmtCount(total)}</strong>.`
+    + `${extra}</div>`;
+}
+
+// §8 — HubSpot SQL attribution section for the search-term drawer. Explains
+// plainly when term-level attribution is unavailable (CRM stores a keyword only).
+function stDrawerSqlSection(s) {
+  if (!s) return "";
+  const statusLabel = {
+    attributed: "Attributed", known_zero: "Known zero",
+    mapping_review: "Mapping review", unavailable: "Unavailable",
+  }[s.sql_attribution_status] || "Unavailable";
+  const count = (s.attributed_sqls === null || s.attributed_sqls === undefined)
+    ? "—" : fmtCount(s.attributed_sqls);
+  const cov = (s.sql_attribution_coverage_pct === null || s.sql_attribution_coverage_pct === undefined)
+    ? "—" : `${s.sql_attribution_coverage_pct}%`;
+  const contacts = s.contacts || [];
+  const rows = contacts.map((c) => `<tr>
+    <td>${escapeHtml(c.company || "—")}</td>
+    <td>${escapeHtml(c.contact_id || "—")}</td>
+    <td>${escapeHtml(c.sql_date || "—")}</td>
+    <td>${escapeHtml(c.campaign_label || "—")}</td>
+    <td>${c.has_gclid ? "Yes" : "No"}</td>
+  </tr>`).join("");
+  return `
+    <div class="drawer-section">
+      <div class="drawer-section__title">HubSpot SQL Attribution</div>
+      <table class="drawer-table st-fact-table"><tbody>
+        <tr><th>Attributed SQLs</th><td class="td--num">${count}</td></tr>
+        <tr><th>Status</th><td>${escapeHtml(statusLabel)}</td></tr>
+        <tr><th>Campaign identity</th><td>${escapeHtml(s.campaign_identity_status || "—")}</td></tr>
+        <tr><th>Window coverage</th><td class="td--num">${cov}</td></tr>
+      </tbody></table>
+      ${s.explanation ? `<p class="drawer-source-note">${escapeHtml(s.explanation)}</p>` : ""}
+      ${contacts.length
+        ? `<table class="drawer-table"><thead><tr><th>Company</th><th>Contact ID</th><th>SQL date</th><th>Campaign</th><th>GCLID</th></tr></thead><tbody>${rows}</tbody></table>`
+        : `<p class="drawer-source-note">No exact-query qualified contacts for this term in the selected window.</p>`}
+    </div>`;
 }
 
 function stCampaignCell(r) {
@@ -9385,6 +9472,7 @@ function renderTermsTable() {
       <td class="td--num" data-label="Spend">${stSpendCell(r)}</td>
       <td class="td--num" data-label="Clicks">${fmtCount(r.clicks)}</td>
       <td class="td--num" data-label="CPC">${stMoney(r.cpc_usd)}</td>
+      <td class="td--num" data-label="Attributed SQLs">${stSqlCell(r)}</td>
       <td class="td--num" data-label="Last Seen">${r.last_seen ? escapeHtml(r.last_seen) : "—"}</td>
       <td class="td--action" data-label=""><span class="campaign-open-icon" aria-hidden="true" title="Open evidence">›</span></td>
     </tr>`).join("");
@@ -9393,7 +9481,8 @@ function renderTermsTable() {
     <thead><tr>
       <th class="td--name">Search Term</th><th>State</th><th>Campaign</th>
       <th class="td--num">Spend</th><th class="td--num">Clicks</th>
-      <th class="td--num">CPC</th><th class="td--num">Last Seen</th>
+      <th class="td--num">CPC</th><th class="td--num">Attributed SQLs</th>
+      <th class="td--num">Last Seen</th>
       <th class="td--action"><span class="sr-only">Open evidence</span></th>
     </tr></thead><tbody>${body}</tbody></table>`;
 
@@ -9437,7 +9526,8 @@ function wireTermsControls() {
   };
   if (q) q.addEventListener("input", debounced);
   if (minSpend) minSpend.addEventListener("input", debounced);
-  [["st-campaign", "campaign"], ["st-state", "state"], ["st-junk", "junk"], ["st-sort", "sort"]]
+  [["st-campaign", "campaign"], ["st-state", "state"], ["st-junk", "junk"],
+   ["st-sqlstate", "sqlState"], ["st-sort", "sort"]]
     .forEach(([id, key]) => {
       const el = document.getElementById(id);
       if (el) el.addEventListener("change", () => {
@@ -9448,7 +9538,7 @@ function wireTermsControls() {
     });
   const reset = document.getElementById("st-reset");
   if (reset) reset.addEventListener("click", () => {
-    _stFilters = { q: "", campaign: "", state: "", junk: "", minSpend: "", sort: "spend", page: 1 };
+    _stFilters = { q: "", campaign: "", state: "", junk: "", sqlState: "", minSpend: "", sort: "spend", page: 1 };
     loadTermsTab();
   });
   const exportBtn = document.getElementById("st-export");
@@ -9816,6 +9906,7 @@ function renderStTermDrawer(body, data) {
         : ""}
       <p class="drawer-source-note">Flagged waste = stored is_flagged_waste true (a human-review candidate, not an approved negative). Reviewed clean = stored false. Needs review = not yet classified.</p>
     </div>
+    ${stDrawerSqlSection(data.sql_attribution)}
     <div class="drawer-section">
       <div class="drawer-section__title">Platform Conversions</div>
       <table class="drawer-table st-fact-table"><tbody>
@@ -10426,7 +10517,7 @@ async function loadGclidCoverageForAttribution() {
 let _kwData = null;
 let _kwLoadState = "idle";
 let _kwFilters = { q: "", campaign: "", matchType: "", status: "", quality: "",
-                   signal: "", minSpend: "", sort: "spend", page: 1 };
+                   signal: "", sqlState: "", minSpend: "", sort: "spend", page: 1 };
 let _kwReqId = 0;
 let _kwDebounce = null;
 let _kwDrawerKeyHandler = null;
@@ -10536,6 +10627,7 @@ function kwBuildParams() {
   if (_kwFilters.status) p.set("criterion_status", _kwFilters.status);
   if (_kwFilters.quality) p.set("quality_band", _kwFilters.quality);
   if (_kwFilters.signal) p.set("signal", _kwFilters.signal);
+  if (_kwFilters.sqlState) p.set("sql_state", _kwFilters.sqlState);
   if (_kwFilters.minSpend !== "" && _kwFilters.minSpend !== null) p.set("min_spend", String(_kwFilters.minSpend));
   return p;
 }
@@ -10632,11 +10724,54 @@ function renderKeywordTab() {
     ${renderKeywordKPIs(_kwData.kpis)}
     ${renderMatchTypeSummary(_kwData.match_type_summary)}
     ${renderKeywordFilters(_kwData.facets)}
+    ${kwSqlCoverageNote()}
     <div class="evidence-table-shell">
       <div class="evidence-table-scroll" id="kw-table"></div>
     </div>`;
   renderKeywordTable();
   wireKeywordControls();
+}
+
+// §9 — compact SQL-attribution coverage disclosure (window-scoped). Never lets
+// low attribution coverage hide behind a headline count.
+function kwSqlCoverageNote() {
+  const s = _kwData && _kwData.sql_attribution;
+  if (!s) return "";
+  if (!s.sql_attribution_available) {
+    return `<div class="kw-sql-note" role="note">SQL attribution unavailable — HubSpot qualified-contact evidence could not be loaded for this window.</div>`;
+  }
+  const total = s.sql_total_contacts;
+  if (total === null || total === undefined) return "";
+  const attr = s.sql_attributed_count || 0;
+  const amb = s.sql_ambiguous_count || 0;
+  return `<div class="kw-sql-note" role="note">SQL attribution coverage: <strong>${fmtCount(attr)} of ${fmtCount(total)}</strong> qualified paid-search contacts uniquely attributed to a keyword${amb ? ` · ${fmtCount(amb)} ambiguous` : ""}. SQLs are HubSpot-confirmed qualified contacts on their created date — not Google Ads conversions.</div>`;
+}
+
+// §7 — one compact Attributed-SQLs cell. Positive = restrained green; genuine
+// zero = neutral; ambiguous / unavailable = "—" with an explanatory tooltip.
+function kwSqlCell(r) {
+  const st = r.sql_attribution_status;
+  const n = r.attributed_sqls;
+  // Confirmed positive attribution.
+  if (st === "attributed" && n > 0) {
+    return `<span class="kw-sql kw-sql--pos" title="Confirmed attribution: ${escapeHtml(String(n))} HubSpot-confirmed SQL contact(s) uniquely tied to this keyword. This is a confirmed attributed count, not the complete SQL total.">${fmtCount(n)}</span>`;
+  }
+  // Proven zero — only when the window's SQL population is complete enough to prove it.
+  if (st === "known_zero") {
+    return `<span class="kw-sql kw-sql--zero" title="Proven zero: attribution coverage is complete for this window and no qualified contact maps to this uniquely-attributable keyword">0</span>`;
+  }
+  if (st === "ambiguous") {
+    const reason = r.sql_ambiguity_reason || "Keyword text matches multiple criteria — SQL not uniquely attributable";
+    return `<span class="kw-sql kw-sql--na" title="${escapeHtml(reason)}">—</span>`;
+  }
+  if (st === "partial_attribution") {
+    const reason = r.sql_ambiguity_reason || "Unavailable — attribution coverage is incomplete this window (unresolved-campaign or missing-keyword contacts), so a zero cannot be proven";
+    return `<span class="kw-sql kw-sql--na" title="${escapeHtml(reason)}">—</span>`;
+  }
+  if (st === "mapping_review") {
+    return `<span class="kw-sql kw-sql--na" title="Campaign identity unresolved (mapping review) — SQL attribution withheld">—</span>`;
+  }
+  return `<span class="kw-sql kw-sql--na" title="SQL attribution unavailable for this window">—</span>`;
 }
 
 // Truthful first-sync state for the durable keyword-facts dataset
@@ -10824,6 +10959,13 @@ function renderKeywordFilters(facets) {
       <option value="unavailable"${_kwFilters.quality === "unavailable" ? " selected" : ""}>Unavailable</option>
     </select>
     <select id="kw-signal" class="waste-filter-select" aria-label="Filter by review signal">${sigOpts}</select>
+    <select id="kw-sqlstate" class="waste-filter-select" aria-label="Filter by SQL attribution">
+      <option value=""${!_kwFilters.sqlState ? " selected" : ""}>All SQL attribution</option>
+      <option value="has_sql"${_kwFilters.sqlState === "has_sql" ? " selected" : ""}>Has attributed SQL</option>
+      <option value="known_zero"${_kwFilters.sqlState === "known_zero" ? " selected" : ""}>Known zero</option>
+      <option value="ambiguous"${_kwFilters.sqlState === "ambiguous" ? " selected" : ""}>Ambiguous</option>
+      <option value="unavailable"${_kwFilters.sqlState === "unavailable" ? " selected" : ""}>Unavailable</option>
+    </select>
     <input type="number" id="kw-min-spend" min="0" step="1" class="waste-search-input st-min-spend"
       placeholder="Min $" value="${escapeHtml(String(_kwFilters.minSpend))}" aria-label="Minimum verified spend" />
     <select id="kw-sort" class="waste-filter-select" aria-label="Sort">
@@ -10832,6 +10974,7 @@ function renderKeywordFilters(facets) {
       <option value="cpc"${_kwFilters.sort === "cpc" ? " selected" : ""}>Highest CPC</option>
       <option value="ctr"${_kwFilters.sort === "ctr" ? " selected" : ""}>Highest CTR</option>
       <option value="quality"${_kwFilters.sort === "quality" ? " selected" : ""}>Quality score</option>
+      <option value="attributed_sqls"${_kwFilters.sort === "attributed_sqls" ? " selected" : ""}>Highest attributed SQLs</option>
       <option value="keyword"${_kwFilters.sort === "keyword" ? " selected" : ""}>Keyword A–Z</option>
       <option value="last_seen"${_kwFilters.sort === "last_seen" ? " selected" : ""}>Recently active</option>
     </select>
@@ -10869,6 +11012,7 @@ function renderKeywordTable() {
       <td class="num" data-label="CTR">${kwPct(r.ctr)}</td>
       <td class="num" data-label="CPC">${r.cpc_usd !== null && r.cpc_usd !== undefined ? stMoney(r.cpc_usd) : "—"}</td>
       <td class="num" data-label="Quality">${kwQualityCell(r)}</td>
+      <td class="num" data-label="Attributed SQLs">${kwSqlCell(r)}</td>
       <td data-label="Signal">${kwSignalBadge(r.review_signal)}</td>
       <td class="st-td-chev" aria-hidden="true">›</td>
     </tr>`).join("");
@@ -10879,7 +11023,8 @@ function renderKeywordTable() {
       <thead><tr>
         <th>Keyword</th><th>Match</th><th>Campaign</th><th>Ad Group</th>
         <th class="num">Spend</th><th class="num">Clicks</th><th class="num">CTR</th>
-        <th class="num">CPC</th><th class="num">Quality</th><th>Signal</th><th></th>
+        <th class="num">CPC</th><th class="num">Quality</th>
+        <th class="num">Attributed SQLs</th><th>Signal</th><th></th>
       </tr></thead>
       <tbody>${bodyRows}</tbody>
     </table>
@@ -10919,12 +11064,13 @@ function wireKeywordControls() {
   bind("kw-status", "status");
   bind("kw-quality", "quality");
   bind("kw-signal", "signal");
+  bind("kw-sqlstate", "sqlState");
   bind("kw-sort", "sort");
   const ms = document.getElementById("kw-min-spend");
   if (ms) ms.addEventListener("change", () => { _kwFilters.minSpend = ms.value === "" ? "" : Number(ms.value); applyText(); });
   const reset = document.getElementById("kw-reset");
   if (reset) reset.addEventListener("click", () => {
-    _kwFilters = { q: "", campaign: "", matchType: "", status: "", quality: "", signal: "", minSpend: "", sort: "spend", page: 1 };
+    _kwFilters = { q: "", campaign: "", matchType: "", status: "", quality: "", signal: "", sqlState: "", minSpend: "", sort: "spend", page: 1 };
     loadKeywordTab();
   });
   const exp = document.getElementById("kw-export");
@@ -11030,12 +11176,52 @@ function renderKwDrawer(bodyEl, data) {
       </dl>
       <p class="st-drawer-note">${escapeHtml(lq.semantics || "")}</p>
     </div>
+    ${kwDrawerSqlSection(data.sql_attribution)}
     <div class="st-drawer-section">
       <h4 class="st-drawer-h">Daily evidence</h4>
       ${daily.length ? `<table class="st-fact-table"><thead><tr><th>Date</th><th class="num">Spend</th><th class="num">Clicks</th><th class="num">Impr.</th><th class="num">CTR</th></tr></thead><tbody>${dailyRows}</tbody></table>` : `<p class="st-drawer-note">No reported daily rows in this window.</p>`}
     </div>
     <div class="st-drawer-links">
       <a href="#/search-terms?campaign=${encodeURIComponent(id.campaign_key || "")}">View related search terms →</a>
+    </div>`;
+}
+
+// §7 — HubSpot SQL attribution section for the keyword drawer. Shows the state,
+// coverage and the supporting deduplicated qualified contacts (never emails).
+function kwDrawerSqlSection(s) {
+  if (!s) return "";
+  const statusLabel = {
+    attributed: "Attributed", known_zero: "Known zero",
+    ambiguous: "Ambiguous", mapping_review: "Mapping review",
+    unavailable: "Unavailable",
+  }[s.sql_attribution_status] || "Unavailable";
+  const countHtml = (s.attributed_sqls === null || s.attributed_sqls === undefined)
+    ? "—"
+    : `<span class="kw-sql ${s.attributed_sqls > 0 ? "kw-sql--pos" : "kw-sql--zero"}">${fmtCount(s.attributed_sqls)}</span>`;
+  const cov = (s.sql_attribution_coverage_pct === null || s.sql_attribution_coverage_pct === undefined)
+    ? "—" : `${s.sql_attribution_coverage_pct}%`;
+  const contacts = s.contacts || [];
+  const rows = contacts.map((c) => `<tr>
+    <td>${escapeHtml(c.company || "—")}</td>
+    <td>${escapeHtml(c.contact_id || "—")}</td>
+    <td>${escapeHtml(c.sql_date || "—")}</td>
+    <td>${escapeHtml(c.campaign_label || "—")}</td>
+    <td>${escapeHtml(c.keyword || "—")}</td>
+    <td>${c.has_gclid ? "Yes" : "No"}</td>
+  </tr>`).join("");
+  return `
+    <div class="st-drawer-section">
+      <h4 class="st-drawer-h">HubSpot SQL attribution</h4>
+      <div class="st-drawer-kpis">
+        ${kwDrawerKpi("Attributed SQLs", countHtml)}
+        ${kwDrawerKpi("Status", escapeHtml(statusLabel))}
+        ${kwDrawerKpi("Window coverage", cov)}
+      </div>
+      ${s.sql_ambiguity_reason ? `<p class="st-drawer-note">${escapeHtml(s.sql_ambiguity_reason)}</p>` : ""}
+      <p class="st-drawer-note">Source: HubSpot-confirmed qualified contacts on their created date (contact_created_at). A platform conversion is never counted as an SQL.</p>
+      ${contacts.length
+        ? `<table class="st-fact-table"><thead><tr><th>Company</th><th>Contact ID</th><th>SQL date</th><th>Campaign</th><th>Keyword</th><th>GCLID</th></tr></thead><tbody>${rows}</tbody></table>`
+        : `<p class="st-drawer-note">No supporting qualified contacts for this keyword in the selected window.</p>`}
     </div>`;
 }
 

@@ -95,7 +95,11 @@ SIGNAL_NEEDS_REVIEW = "needs_review"
 SIGNAL_MIXED = "mixed"
 SIGNAL_CLEAN_ONLY = "reviewed_clean_only"
 
-TERM_SORTS = ("spend", "clicks", "cpc", "conversions", "last_seen", "term")
+TERM_SORTS = ("spend", "clicks", "cpc", "conversions", "last_seen", "term",
+              "attributed_sqls")
+# PR-ADS-146C — Attributed-SQL row-state filters (search terms have no
+# "ambiguous" state: a query is either directly persisted or unavailable).
+TERM_SQL_STATES = ("all", "has_sql", "known_zero", "unavailable")
 PATTERN_SORTS = ("spend", "terms", "flagged", "pattern")
 PATTERN_LENGTHS = (1, 2, 3)
 
@@ -881,6 +885,12 @@ def _unit_row(unit: dict, aliases_by_id: dict) -> dict:
         "classification_source": _unit_classification(unit)["classification_source"],
         "crm_junk_confirmed": (unit.get("_waste_evidence") or {}).get("crm_junk_confirmed"),
         "source_rows": unit["row_count"],
+        # PR-ADS-146C — HubSpot Attributed SQLs (direct query evidence only).
+        "attributed_sqls": unit.get("attributed_sqls"),
+        "sql_attribution_status": unit.get("sql_attribution_status", "unavailable"),
+        "sql_attribution_source": unit.get("sql_attribution_source"),
+        "sql_attribution_coverage": unit.get("sql_attribution_coverage"),
+        "sql_ambiguity_reason": unit.get("sql_ambiguity_reason"),
     }
 
 
@@ -946,8 +956,117 @@ def _sort_units(units: list, sort: str) -> list:
         "last_seen": lambda u: ((1, 0) if u["last_seen"] is None
                                 else (0, -u["last_seen"].toordinal()), *base(u)),
         "term": lambda u: base(u),
+        # Attributed SQLs: highest first; unavailable/null count always last.
+        "attributed_sqls": lambda u: (_null_last_desc(u.get("attributed_sqls")), *base(u)),
     }
     return sorted(units, key=keyers.get(sort or "spend", keyers["spend"]))
+
+
+# ── HubSpot SQL attribution (PR-ADS-146C §5) ─────────────────────────────────
+def _st_unit_key(u: dict) -> str:
+    """Stable term × canonical-campaign key for SQL attribution."""
+    return f"{u.get('campaign_key')}\x00{u.get('search_term')}"
+
+
+def _search_term_sql_attribution(pop: dict, start, end) -> dict:
+    """Attribute qualified SQL contacts to term × campaign units. Search-term
+    attribution requires a directly persisted user query; the durable leads table
+    has none, so every unit resolves UNAVAILABLE (—), never a fabricated 0.
+    Defensive — a failure yields an unavailable verdict, never a page break."""
+    try:
+        from services.platform_sql_attribution_service import (  # noqa: PLC0415
+            attribute_search_terms, fetch_and_resolve_contacts,
+        )
+        contacts_res = fetch_and_resolve_contacts(start, end)
+        available = bool(contacts_res.get("available"))
+        contacts = contacts_res.get("contacts") or []
+        units_in = [{
+            "unit_key": _st_unit_key(u),
+            "campaign_id": (u.get("campaign_key") if u.get("mapping_status") == "mapped" else None),
+            "search_term": u.get("search_term"),
+            "mapping_status": u.get("mapping_status"),
+        } for u in (pop.get("units") or [])]
+        attr = attribute_search_terms(
+            contacts, units_in, available=available,
+            leads_have_search_term=bool(contacts_res.get("leads_have_search_term")))
+        attr["contacts"] = contacts
+        return attr
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[search-term-evidence] SQL attribution failed: %s", exc)
+        return {"by_unit": {}, "reconciliation": {}, "coverage": {},
+                "audit": {}, "available": False, "contacts": [],
+                "population_has_text": False}
+
+
+def _apply_search_term_sql(units: list, attr: dict) -> None:
+    """Attach per-unit attribution to units so filter/sort/row see it."""
+    by = attr.get("by_unit") or {}
+    cov = (attr.get("coverage") or {}).get("coverage_pct")
+    for u in units:
+        st = by.get(_st_unit_key(u)) or {
+            "attributed_sqls": None, "sql_attribution_status": "unavailable",
+            "sql_attribution_source": None, "sql_ambiguity_reason": None,
+            "sql_candidate_count": None, "sql_contact_keys": []}
+        u["attributed_sqls"] = st.get("attributed_sqls")
+        u["sql_attribution_status"] = st.get("sql_attribution_status")
+        u["sql_attribution_source"] = st.get("sql_attribution_source")
+        u["sql_attribution_coverage"] = cov
+        u["sql_candidate_count"] = st.get("sql_candidate_count")
+        u["sql_ambiguity_reason"] = st.get("sql_ambiguity_reason")
+        u["sql_contact_keys"] = st.get("sql_contact_keys") or []
+
+
+def _filter_units_sql(units: list, sql_state: str | None) -> list:
+    if not sql_state or sql_state == "all":
+        return units
+    if sql_state == "has_sql":
+        return [u for u in units if u.get("sql_attribution_status") == "attributed"
+                and (u.get("attributed_sqls") or 0) > 0]
+    if sql_state == "known_zero":
+        return [u for u in units if u.get("sql_attribution_status") == "known_zero"]
+    if sql_state == "unavailable":
+        return [u for u in units if u.get("sql_attribution_status")
+                in ("unavailable", "mapping_review", "partial_attribution")]
+    return units
+
+
+def _search_term_sql_block(attr: dict) -> dict:
+    """Response-level SQL-attribution audit + reconciliation (§11/§13)."""
+    from services.platform_sql_attribution_service import (  # noqa: PLC0415
+        SQL_ATTRIBUTION_METHOD_SEARCH_TERM, SQL_DATE_FIELD, SQL_DEDUP_KEY,
+        SQL_DEFINITION, SQL_SOURCE,
+    )
+    recon = attr.get("reconciliation") or {}
+    cov = attr.get("coverage") or {}
+    audit = attr.get("audit") or {}
+    comp = attr.get("completeness") or {}
+    sta = audit.get("search_term_attribution") or {}
+    return {
+        "sql_source": SQL_SOURCE,
+        "sql_definition": SQL_DEFINITION,
+        "sql_date_field": SQL_DATE_FIELD,
+        "sql_dedup_key": SQL_DEDUP_KEY,
+        "sql_attribution_method": SQL_ATTRIBUTION_METHOD_SEARCH_TERM,
+        "sql_attribution_available": bool(attr.get("available")),
+        "exact_query_evidence_available": bool(attr.get("population_has_text")),
+        "sql_attribution_coverage_pct": cov.get("coverage_pct"),
+        # §4 — DISTINCT counts: exact-query evidence vs uniquely attributed.
+        "sql_contacts_with_exact_search_term": sta.get("sql_contacts_with_exact_search_term"),
+        "uniquely_attributed_search_term_sql_contacts": sta.get("uniquely_attributed_search_term_sql_contacts"),
+        "sql_attributed_count": recon.get("uniquely_attributed_sql_contacts"),
+        "sql_ambiguous_count": recon.get("ambiguous_sql_contacts"),
+        "sql_unattributed_count": recon.get("unattributed_sql_contacts"),
+        "sql_total_contacts": recon.get("total_sql_contacts"),
+        "sql_row_sum": recon.get("row_sql_sum"),
+        "sql_reconciliation_status": recon.get("reconciliation_status"),
+        # §3 completeness / zero-proof.
+        "sql_contacts_with_campaign_identity": comp.get("sql_contacts_with_campaign_identity"),
+        "sql_contacts_missing_campaign_identity": comp.get("sql_contacts_missing_campaign_identity"),
+        "sql_contacts_missing_search_term": comp.get("sql_contacts_missing_search_term"),
+        "sql_attribution_completeness_status": comp.get("sql_attribution_completeness_status"),
+        "zero_proof_available": comp.get("zero_proof_available"),
+        "search_term_attribution": sta,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1112,6 +1231,7 @@ def build_search_term_evidence(window: str, *, page: int = 1,
                                junk_category: str | None = None,
                                min_spend: float | None = None,
                                sort: str = "spend",
+                               sql_state: str | None = None,
                                now: datetime | None = None) -> dict[str, Any]:
     """Complete selected-window Search Term Universe payload. Read-only.
 
@@ -1121,6 +1241,9 @@ def build_search_term_evidence(window: str, *, page: int = 1,
     for invalid filters (caller maps both to HTTP 400).
     """
     _validate_filters(state, sort, TERM_SORTS)
+    if sql_state and sql_state not in TERM_SQL_STATES:
+        raise SearchTermQueryError(
+            f"Unsupported sql_state '{sql_state}'. Valid: {', '.join(TERM_SQL_STATES)}.")
     try:
         page = max(1, int(page))
     except (TypeError, ValueError) as exc:
@@ -1148,8 +1271,13 @@ def build_search_term_evidence(window: str, *, page: int = 1,
 
     units = pop["units"]
     currency_info = pop.get("currency_info") or {}
+    # §5 — attribute qualified SQL contacts to term × campaign units (window-scoped,
+    # filter-independent). Direct persisted query only; unavailable is never zero.
+    sql_attr = _search_term_sql_attribution(pop, start, end)
+    _apply_search_term_sql(units, sql_attr)
     filtered = _filter_units(units, q=q, campaign=campaign, state=state,
                              junk_category=junk_category, min_spend=min_spend)
+    filtered = _filter_units_sql(filtered, sql_state)
     ordered = _sort_units(filtered, sort)
 
     # ── Complete-population KPIs (never page-scoped) ──
@@ -1202,7 +1330,11 @@ def build_search_term_evidence(window: str, *, page: int = 1,
             "has_more": offset + len(page_rows) < total,
         },
         "facets": _facets(units),
-        "filters": _echo_filters(q, campaign, state, junk_category, min_spend, sort),
+        "filters": {**_echo_filters(q, campaign, state, junk_category, min_spend, sort),
+                    "sql_state": sql_state},
+        "platform_date_field": "source_date",
+        "sql_date_field": "contact_created_at",
+        "sql_attribution": _search_term_sql_block(sql_attr),
         "audit": _audit_block(base, pop, coverage_status=coverage["status"],
                               state_counts=state_counts,
                               population_count=len(filtered)),
@@ -1318,18 +1450,22 @@ def _facets(units: list) -> dict:
 
 def build_search_term_export(window: str, *, q=None, campaign=None, state=None,
                              junk_category=None, min_spend=None, sort="spend",
-                             now: datetime | None = None) -> dict[str, Any]:
+                             sql_state=None, now: datetime | None = None) -> dict[str, Any]:
     """COMPLETE server-filtered dataset for export (no pagination) — the export
     is the full filtered population at term×campaign grain, so it is never a
     silently truncated page. Read-only."""
     _validate_filters(state, sort, TERM_SORTS)
+    if sql_state and sql_state not in TERM_SQL_STATES:
+        raise SearchTermQueryError(
+            f"Unsupported sql_state '{sql_state}'. Valid: {', '.join(TERM_SQL_STATES)}.")
     start, end, base = _base(window, now)
     pop = _build_population(start, end)
     if not pop["available"]:
         return {**base, "db_unavailable": True, "rows": [], "complete": False}
-    filtered = _sort_units(
-        _filter_units(pop["units"], q=q, campaign=campaign, state=state,
-                      junk_category=junk_category, min_spend=min_spend), sort)
+    _apply_search_term_sql(pop["units"], _search_term_sql_attribution(pop, start, end))
+    filtered = _filter_units(pop["units"], q=q, campaign=campaign, state=state,
+                             junk_category=junk_category, min_spend=min_spend)
+    filtered = _sort_units(_filter_units_sql(filtered, sql_state), sort)
     aliases_by_id = pop["aliases_by_id"]
     return {**base, "db_unavailable": False, "complete": True,
             "rows": [_unit_row(u, aliases_by_id) for u in filtered]}
@@ -1471,6 +1607,12 @@ def build_search_term_drawer(window: str, term: str,
         "clicks": m["clicks"],
     } for m in matches]
 
+    # §8 — HubSpot SQL attribution for this term. Direct persisted query only; the
+    # CRM stores a keyword, not the user query, so this is normally unavailable.
+    sql_attr = _search_term_sql_attribution(pop, start, end)
+    _apply_search_term_sql(matches, sql_attr)
+    sql_block = _search_term_drawer_sql_block(matches, sql_attr)
+
     return {
         **base,
         "db_unavailable": False,
@@ -1505,6 +1647,7 @@ def build_search_term_drawer(window: str, term: str,
             "conversions": _round2(unit["conversions"]),
             "disclosure": PLATFORM_CONVERSION_DISCLOSURE,
         },
+        "sql_attribution": sql_block,
         "daily": {
             "available": bool(daily.get("available")),
             "rows": _convert_daily_series(daily.get("rows") or [], start, end),
@@ -1515,6 +1658,49 @@ def build_search_term_drawer(window: str, term: str,
                      "USD is converted at that day's own FX rate; days without "
                      "a rate show native only."),
         },
+    }
+
+
+def _search_term_drawer_sql_block(matches: list, attr: dict) -> dict:
+    """HubSpot SQL attribution block for the search-term drawer. Explains plainly
+    when term-level attribution is unavailable because the CRM record holds only a
+    keyword, not the actual user query."""
+    from services.platform_sql_attribution_service import (  # noqa: PLC0415
+        contact_details_for_keys,
+    )
+    keys: list = []
+    for m in matches:
+        keys.extend(m.get("sql_contact_keys") or [])
+    contacts = contact_details_for_keys(attr.get("contacts") or [], keys)
+    statuses = {m.get("sql_attribution_status") for m in matches}
+    if "attributed" in statuses:
+        status = "attributed"
+    elif "known_zero" in statuses:
+        status = "known_zero"
+    elif statuses == {"mapping_review"}:
+        status = "mapping_review"
+    else:
+        status = "unavailable"
+    count = sum(m.get("attributed_sqls") or 0 for m in matches) if status == "attributed" else None
+    cov = attr.get("coverage") or {}
+    exact_available = bool(attr.get("population_has_text"))
+    explanation = None
+    if status == "unavailable":
+        explanation = ("Search-term-level SQL attribution is unavailable: the CRM "
+                       "record stores only a HubSpot keyword, not the actual user "
+                       "search query, so a qualified contact cannot be tied to an "
+                       "exact search term. A keyword is never treated as a query.")
+    return {
+        "attributed_sqls": count,
+        "sql_attribution_status": status,
+        "sql_attribution_source": (matches[0].get("sql_attribution_source") if matches else None),
+        "sql_attribution_coverage_pct": cov.get("coverage_pct"),
+        "campaign_identity_status": (matches[0].get("mapping_status") if matches else None),
+        "exact_query_evidence_available": exact_available,
+        "explanation": explanation,
+        "available": bool(attr.get("available")),
+        "contacts": contacts,
+        "contact_count": len(contacts),
     }
 
 
