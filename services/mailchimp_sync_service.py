@@ -89,7 +89,10 @@ def run_incremental(*, refresh_recent_days: int = DEFAULT_REFRESH_RECENT_DAYS,
     since = None
     if watermark:
         try:
-            wm = datetime.fromisoformat(str(watermark))
+            # Normalise a trailing 'Z' (Mailchimp send_time uses it) to +00:00 so
+            # a Z-suffixed watermark never fails to parse and silently re-pulls
+            # every campaign each incremental run.
+            wm = datetime.fromisoformat(str(watermark).replace("Z", "+00:00"))
             since = _iso(wm - timedelta(days=INCREMENTAL_OVERLAP_DAYS))
         except (ValueError, TypeError):
             since = None

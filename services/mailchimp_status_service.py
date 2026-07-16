@@ -4,7 +4,7 @@ services/mailchimp_status_service.py
 Read-only Mailchimp connection + dataset status (PR-ADS-151).
 
 Surfaces the states the System Status page needs:
-  connection:  connected | not_configured | permission_denied | rate_limited | failed
+  connection:  connected | not_configured | permission_denied | rate_limited | failed | not_checked
   per dataset: fresh | stale | partial_backfill | failed | not_run | empty | db_unavailable
 
 Credentials are NEVER included in any output (only the non-secret data-centre
@@ -18,12 +18,16 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# Connection states
+# Connection states (string enum — ``state`` is ALWAYS one of these)
 CONN_CONNECTED = "connected"
 CONN_NOT_CONFIGURED = "not_configured"
 CONN_PERMISSION_DENIED = "permission_denied"
 CONN_RATE_LIMITED = "rate_limited"
 CONN_FAILED = "failed"
+# Configured but the live ping was intentionally skipped (live=0) — the
+# connection was not verified this call. Never None, so clients can rely on the
+# state being a defined string.
+CONN_NOT_CHECKED = "not_checked"
 
 # Mailchimp datasets tracked in the shared sync_state / freshness model.
 MAILCHIMP_DATASETS = ["campaigns", "reports", "audiences", "attribution"]
@@ -191,9 +195,13 @@ def get_status(*, live_ping: bool = True) -> dict:
 
     if live_ping:
         connection = derive_connection_state(config, mc.ping)
+    elif not config.get("configured"):
+        # Not configured — report it without a network call (ping never invoked).
+        connection = derive_connection_state(config, lambda: None)
     else:
-        connection = derive_connection_state(config, lambda: None) \
-            if not config.get("configured") else {"state": None, "detail": "ping skipped"}
+        # Configured, but the caller asked to skip the live ping. Return a defined
+        # state (never None) so clients can rely on the string-enum contract.
+        connection = {"state": CONN_NOT_CHECKED, "detail": "live ping skipped (live=0)"}
 
     coverage = repo.coverage()
     mc_state = repo.get_sync_state() or {}

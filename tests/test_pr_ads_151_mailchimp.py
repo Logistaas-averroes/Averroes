@@ -435,6 +435,15 @@ class TestStatusService:
             {"enabled": True, "has_api_key": True, "server_prefix": "us1"}, ping=_ping)
         assert state["state"] == CONN_FAILED
 
+    def test_skipped_ping_returns_defined_state_not_none(self, monkeypatch):
+        """live_ping=False on a configured connector must still return a defined
+        string state (never None), preserving the connection-state contract."""
+        from services import mailchimp_status_service as st
+        with _mc_env(monkeypatch, key="deadbeef-us7"):
+            status = st.get_status(live_ping=False)
+        assert status["connection"]["state"] == st.CONN_NOT_CHECKED
+        assert status["connection"]["state"] is not None
+
     def test_map_dataset_state(self):
         from services.mailchimp_status_service import (
             map_dataset_state, DS_FRESH, DS_STALE, DS_PARTIAL_BACKFILL, DS_FAILED, DS_NOT_RUN)

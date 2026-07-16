@@ -157,14 +157,17 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "source": "mailchimp",
         "page": "Email Marketing",
         "depends_on": [],
-        "blocks": ["mailchimp_reports", "mailchimp_attribution"],
+        "blocks": ["mailchimp_reports"],
     },
     "mailchimp_reports": {
         "label": "Mailchimp Reports",
         "source": "mailchimp",
         "page": "Email Marketing",
         "depends_on": ["mailchimp_campaigns"],
-        "blocks": [],
+        # Attribution feasibility is derived from report evidence (its freshness
+        # tracks mailchimp_campaign_reports), so reports — not campaigns — is its
+        # direct upstream: stale/failed reports block attribution.
+        "blocks": ["mailchimp_attribution"],
     },
     "mailchimp_audiences": {
         "label": "Mailchimp Audiences",
@@ -177,7 +180,7 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "label": "Mailchimp Attribution",
         "source": "mailchimp",
         "page": "Email Marketing",
-        "depends_on": ["mailchimp_campaigns"],
+        "depends_on": ["mailchimp_reports"],
         "blocks": [],
     },
 }
