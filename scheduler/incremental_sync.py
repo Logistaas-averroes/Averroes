@@ -217,6 +217,11 @@ def run_daily_incremental_sync(
         run_id=run_id, date_to=today, errors=errors,
     )
 
+    # ── mailchimp — read-only email-marketing refresh (PR-ADS-151). Pulls recent
+    # campaigns + refreshes recent reports + snapshots audiences. Skipped cleanly
+    # when Mailchimp is not configured. GET-only; local DB writes only.
+    datasets["mailchimp/refresh"] = _sync_mailchimp(run_id=run_id, errors=errors)
+
     finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     overall_status = _overall_status(datasets)
@@ -254,6 +259,39 @@ def run_daily_incremental_sync(
 # ---------------------------------------------------------------------------
 # Per-dataset sync helpers
 # ---------------------------------------------------------------------------
+
+def _sync_mailchimp(*, run_id, errors: list) -> dict:
+    """Read-only Mailchimp incremental refresh (PR-ADS-151).
+
+    Delegates to services.mailchimp_sync_service.run_incremental, which manages
+    its own sync_batches for mailchimp/campaigns, mailchimp/reports and
+    mailchimp/audiences. Returns a compact status; a not-configured Mailchimp is a
+    clean skip (never an error). GET-only against Mailchimp.
+    """
+    try:
+        from services.mailchimp_sync_service import run_incremental  # noqa: PLC0415
+        result = run_incremental(run_id=run_id)
+        status = result.get("status", "unknown")
+        if status == "skipped":
+            return {"status": "skipped", "reason": result.get("reason"),
+                    "note": result.get("detail")}
+        if status not in ("success", "partial"):
+            err = f"mailchimp/refresh: {result.get('reason') or status}"
+            errors.append(err)
+            log.warning("[incremental_sync] %s", err)
+        ds = result.get("datasets", {})
+        return {
+            "status": status,
+            "campaigns": (ds.get("campaigns") or {}).get("written"),
+            "reports_refreshed": (ds.get("reports") or {}).get("refreshed"),
+            "audiences": (ds.get("audiences") or {}).get("written"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        err = f"mailchimp/refresh: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+        return {"status": "failed", "error": str(exc)[:500]}
+
 
 def _sync_windsor_campaigns(
     *, run_id, date_from, date_to, errors: list

@@ -126,6 +126,28 @@ The system will never:
 
 ---
 
+## Mailchimp (read-only email-marketing evidence)
+
+PR-ADS-151 adds a **pull-only** connection to the Logistaas Mailchimp account. The
+connector (`connectors/mailchimp_pull.py`) issues **GET requests exclusively** — it
+never creates, edits, sends, schedules, or deletes anything in Mailchimp, and there
+is no mutation route anywhere in the API. Credentials are server-side only and are
+never exposed through the API or frontend.
+
+Configure via environment variables (see `.env.example`):
+
+| Variable | Purpose |
+|----------|---------|
+| `MAILCHIMP_API_KEY` | Marketing API key (its `-usXX` suffix derives the data centre) |
+| `MAILCHIMP_SERVER_PREFIX` | Optional explicit data-centre prefix (e.g. `us21`) |
+| `MAILCHIMP_ENABLED` | `true` to enable live pulls; otherwise the connector reports "not configured" and never touches the network |
+
+Durable, additive tables (`mailchimp_campaigns`, `mailchimp_campaign_reports`,
+`mailchimp_campaign_links`, `mailchimp_audience_snapshots`, `mailchimp_sync_state`)
+store campaign/report/link/audience evidence keyed on immutable Mailchimp IDs, so
+repeated syncs upsert in place and never duplicate campaigns or metrics. Read-only
+endpoints: `GET /api/mailchimp/{status,audit,campaigns,campaign-detail}`.
+
 ## HubSpot Fields Used
 
 | Field | Purpose |

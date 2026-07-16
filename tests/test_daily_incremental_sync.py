@@ -120,6 +120,7 @@ class TestSummaryShape:
             "hubspot/source_classification",
             "google_ads/canonical_spend",
             "fx/daily_rates",
+            "mailchimp/refresh",
         }
         assert set(result["datasets"].keys()) == expected
 

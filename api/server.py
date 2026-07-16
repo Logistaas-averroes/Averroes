@@ -69,6 +69,11 @@ Protected endpoints (require authenticated session):
   GET  /api/dashboard/campaigns    — Read-only Dashboard Campaigns & Keywords contract by business window (PR-ADS-137).
   GET  /api/dashboard/countries    — Read-only Dashboard Countries & Geo Intelligence contract by business window (PR-ADS-138).
   GET  /api/dashboard/deals        — Read-only Dashboard Deals & Pipeline Intelligence contract by business window (PR-ADS-139).
+  GET  /api/mailchimp/status        — Mailchimp connection + dataset status (read-only; never returns credentials; PR-ADS-151).
+  GET  /api/mailchimp/audit         — Attribution feasibility audit vs HubSpot (admin; privacy-preserving; PR-ADS-151).
+  GET  /api/mailchimp/campaigns     — Stored Mailchimp campaigns + report metrics (read-only; PR-ADS-151).
+  GET  /api/mailchimp/campaign-detail — One Mailchimp campaign's metadata + report + links (read-only; PR-ADS-151).
+  POST /api/mailchimp/sync          — Operator trigger for the read-only Mailchimp sync (admin; GET-only vs Mailchimp; PR-ADS-151).
 """
 
 import base64
@@ -140,6 +145,15 @@ async def lifespan(application: FastAPI):
         log.info("[startup] keyword-fact bootstrap on deploy: %s", _bs)
     except Exception as exc:  # noqa: BLE001
         log.warning("[startup] keyword-fact bootstrap auto-start skipped: %s", exc)
+    # PR-ADS-151: auto-start the Mailchimp read-only historical backfill when
+    # configured and not yet complete. Daemon thread — never blocks startup; a
+    # completed backfill is never restarted; a no-op when Mailchimp is disabled.
+    try:
+        from services.mailchimp_sync_service import maybe_start_backfill_on_deploy
+        _mc = maybe_start_backfill_on_deploy()
+        log.info("[startup] mailchimp backfill on deploy: %s", _mc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[startup] mailchimp backfill auto-start skipped: %s", exc)
     yield
     stop_scheduler()
 
@@ -3022,6 +3036,11 @@ _KNOWN_DATASETS: list[tuple[str, str]] = [
     ("analysis", "waste_terms"),
     ("computed", "ngrams"),
     ("analysis", "historical_intelligence"),
+    # PR-ADS-151: Mailchimp read-only email-marketing datasets.
+    ("mailchimp", "campaigns"),
+    ("mailchimp", "reports"),
+    ("mailchimp", "audiences"),
+    ("mailchimp", "attribution"),
 ]
 _SAFE_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -8208,3 +8227,140 @@ async def update_churn_input(
         raise HTTPException(status_code=500, detail="Failed to update churn config") from exc
 
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Mailchimp read-only endpoints (PR-ADS-151)
+#
+# Pull-only email-marketing evidence. Mailchimp access is GET-only (enforced in
+# connectors/mailchimp_pull.py). NO mutation route exists here — there is no
+# create/edit/send/schedule/audience/tag/delete path. Credentials never reach
+# the browser: only the non-secret data-centre prefix is ever surfaced.
+#
+# These are operator/audit endpoints, not final Email Marketing UI contracts.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/mailchimp/status")
+def api_mailchimp_status(request: Request, user: dict = Depends(require_auth),
+                         live: int = 1) -> dict[str, Any]:
+    """Mailchimp connection + dataset status (connected / not configured /
+    permission denied / rate limited / stale / fresh / partial backfill / failed).
+
+    Auth required. Read-only. ``live=0`` skips the network ping. The API key is
+    never returned — only the data-centre prefix.
+    """
+    try:
+        from services.mailchimp_status_service import get_status  # noqa: PLC0415
+        return get_status(live_ping=bool(live))
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/mailchimp/status] failed: %s", exc)
+        return {"connection": {"state": "failed", "detail": "status check failed"},
+                "datasets": [], "db_unavailable": True}
+
+
+@app.get("/api/mailchimp/audit")
+def api_mailchimp_audit(request: Request, max_campaigns: int = 10,
+                        hubspot_window_days: int = 365) -> dict[str, Any]:
+    """Attribution feasibility audit — can Mailchimp recipients be safely
+    reconciled with HubSpot contacts, and with what coverage?
+
+    Admin/operator only (bounded live pulls). Read-only. NEVER exposes recipient
+    email addresses; HubSpot outcomes are attached only for safe 1:1 matches, and
+    coverage is reported before any outcomes.
+    """
+    check_admin_or_token(request)
+    max_campaigns = max(1, min(50, int(max_campaigns)))
+    hubspot_window_days = max(1, min(1825, int(hubspot_window_days)))
+    try:
+        from services.mailchimp_audit_service import run_audit  # noqa: PLC0415
+        return run_audit(max_campaigns=max_campaigns,
+                         hubspot_window_days=hubspot_window_days)
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/mailchimp/audit] failed: %s", exc)
+        return {"status": "failed", "detail": "attribution audit failed"}
+
+
+@app.get("/api/mailchimp/campaigns")
+def api_mailchimp_campaigns(request: Request, user: dict = Depends(require_auth),
+                            limit: int = 100, offset: int = 0,
+                            list_id: str | None = None) -> dict[str, Any]:
+    """Paginated read of stored Mailchimp campaigns joined to report metrics.
+
+    Auth required. Read-only from the durable ``mailchimp_campaigns`` /
+    ``mailchimp_campaign_reports`` tables. No recipient PII.
+    """
+    try:
+        from db import mailchimp_repository as repo  # noqa: PLC0415
+        result = repo.list_campaigns(limit=limit, offset=offset, list_id=list_id)
+        return {
+            "items": result["items"],
+            "total": result["total"],
+            "limit": max(1, min(500, int(limit))),
+            "offset": max(0, int(offset)),
+            "db_unavailable": result["db_unavailable"],
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/mailchimp/campaigns] failed: %s", exc)
+        return {"items": [], "total": 0, "db_unavailable": True}
+
+
+@app.get("/api/mailchimp/campaign-detail")
+def api_mailchimp_campaign_detail(request: Request, campaign_id: str,
+                                  user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Full stored detail for one campaign: metadata + report metrics + link rows.
+
+    Auth required. Read-only. No recipient PII.
+    """
+    campaign_id = (campaign_id or "").strip()
+    if not campaign_id:
+        raise HTTPException(status_code=400, detail="campaign_id is required")
+    try:
+        from db import mailchimp_repository as repo  # noqa: PLC0415
+        result = repo.campaign_detail(campaign_id)
+        if result.get("db_unavailable"):
+            return {"found": False, "db_unavailable": True}
+        if not result.get("found"):
+            raise HTTPException(status_code=404, detail="campaign not found")
+        return {
+            "campaign_id": campaign_id,
+            "campaign": result["campaign"],
+            "report": result["report"],
+            "links": result["links"],
+            "db_unavailable": False,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/mailchimp/campaign-detail] failed: %s", exc)
+        return {"found": False, "db_unavailable": True}
+
+
+@app.post("/api/mailchimp/sync")
+def api_mailchimp_sync(request: Request, mode: str = "incremental") -> dict[str, Any]:
+    """Trigger a Mailchimp read-only sync. Admin session or ADMIN_API_TOKEN.
+
+    ``mode=incremental`` (default) runs a bounded refresh synchronously and returns
+    its summary. ``mode=backfill`` spawns the full historical backfill on a
+    background daemon thread and returns immediately. GET-only against Mailchimp;
+    writes only the local durable tables.
+    """
+    check_admin_or_token(request)
+    mode = (mode or "incremental").strip().lower()
+    if mode not in ("incremental", "backfill"):
+        raise HTTPException(status_code=400, detail="mode must be 'incremental' or 'backfill'")
+    try:
+        import services.mailchimp_sync_service as sync  # noqa: PLC0415
+        if mode == "backfill":
+            state = sync.maybe_start_backfill_on_deploy()
+            return {"status": "accepted", "mode": "backfill", "backfill": state}
+        result = sync.run_incremental()
+        # Strip verbose per-dataset error strings; status is safe to surface.
+        safe = {k: {ek: ev for ek, ev in v.items() if ek not in ("error",)}
+                for k, v in (result.get("datasets") or {}).items()
+                if isinstance(v, dict)}
+        return {"status": result.get("status"), "mode": "incremental",
+                "reason": result.get("reason"), "datasets": safe}
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/mailchimp/sync] failed: %s", exc, exc_info=True)
+        return {"status": "failed", "mode": mode,
+                "error": f"{type(exc).__name__}: sync failed"}

@@ -49,3 +49,12 @@ services:
         sync: false
       - key: REPORT_RECIPIENT_EMAIL
         sync: false
+      # Mailchimp read-only email-marketing evidence (PR-ADS-151). Pull-only —
+      # GET requests exclusively; never written back to Mailchimp. Set the key +
+      # prefix in the Render dashboard; set MAILCHIMP_ENABLED=true to activate.
+      - key: MAILCHIMP_API_KEY
+        sync: false
+      - key: MAILCHIMP_SERVER_PREFIX
+        sync: false
+      - key: MAILCHIMP_ENABLED
+        sync: false

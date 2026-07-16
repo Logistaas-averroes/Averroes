@@ -899,6 +899,146 @@ CREATE TABLE IF NOT EXISTS google_ads_campaign_identity (
 
 CREATE INDEX IF NOT EXISTS idx_ga_campaign_identity_label
   ON google_ads_campaign_identity(external_campaign_label);
+
+-- PR-ADS-151: Mailchimp read-only email-marketing evidence foundation.
+-- Additive, durable, natural-key tables. Immutable Mailchimp campaign IDs are
+-- the natural key so a repeated sync UPDATES the same row (never duplicates).
+-- Campaign totals are stored ONE ROW PER CAMPAIGN (upserted), never as repeated
+-- scheduler snapshots that could later be summed together accidentally.
+-- Mailchimp is PULL ONLY — nothing here is ever written back to Mailchimp.
+
+-- One row per campaign (immutable campaign_id = natural key).
+CREATE TABLE IF NOT EXISTS mailchimp_campaigns (
+  id               SERIAL PRIMARY KEY,
+  campaign_id      TEXT NOT NULL UNIQUE,       -- immutable Mailchimp id (natural key)
+  web_id           BIGINT,
+  list_id          TEXT,                       -- audience/list id
+  campaign_type    TEXT,
+  status           TEXT,
+  subject_line     TEXT,
+  title            TEXT,
+  create_time      TIMESTAMPTZ,
+  send_time        TIMESTAMPTZ,
+  emails_sent      INTEGER,
+  recipient_count  INTEGER,
+  source_system    TEXT,                       -- source provenance
+  sync_batch_id    INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  first_seen_at    TIMESTAMPTZ DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_mc_campaigns_list       ON mailchimp_campaigns(list_id);
+CREATE INDEX IF NOT EXISTS idx_mc_campaigns_send_time  ON mailchimp_campaigns(send_time DESC);
+CREATE INDEX IF NOT EXISTS idx_mc_campaigns_status     ON mailchimp_campaigns(status);
+CREATE INDEX IF NOT EXISTS idx_mc_campaigns_sync_batch ON mailchimp_campaigns(sync_batch_id);
+
+-- One row per campaign report (campaign_id = natural key). Metrics may keep
+-- changing after send, so the row is UPDATED in place on each refresh — this is
+-- current-state truth, NOT an additive snapshot ledger.
+CREATE TABLE IF NOT EXISTS mailchimp_campaign_reports (
+  id                       SERIAL PRIMARY KEY,
+  campaign_id              TEXT NOT NULL UNIQUE,   -- natural key
+  list_id                  TEXT,
+  campaign_type            TEXT,
+  subject_line             TEXT,
+  title                    TEXT,
+  send_time                TIMESTAMPTZ,
+  emails_sent              INTEGER,
+  delivered_estimate       INTEGER,               -- emails_sent − hard − soft − syntax
+  opens_total              INTEGER,
+  unique_opens             INTEGER,
+  open_rate                NUMERIC(8,5),
+  clicks_total             INTEGER,
+  unique_clicks            INTEGER,
+  unique_subscriber_clicks INTEGER,
+  click_rate               NUMERIC(8,5),
+  hard_bounces             INTEGER,
+  soft_bounces             INTEGER,
+  syntax_errors            INTEGER,
+  unsubscribes             INTEGER,
+  abuse_reports            INTEGER,
+  forwards_count           INTEGER,
+  last_open                TIMESTAMPTZ,
+  last_click               TIMESTAMPTZ,
+  last_report_update       TIMESTAMPTZ,           -- when we last refreshed this report
+  source_system            TEXT,
+  sync_batch_id            INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  first_seen_at            TIMESTAMPTZ DEFAULT NOW(),
+  updated_at               TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_mc_reports_list        ON mailchimp_campaign_reports(list_id);
+CREATE INDEX IF NOT EXISTS idx_mc_reports_send_time   ON mailchimp_campaign_reports(send_time DESC);
+CREATE INDEX IF NOT EXISTS idx_mc_reports_updated     ON mailchimp_campaign_reports(last_report_update DESC);
+CREATE INDEX IF NOT EXISTS idx_mc_reports_sync_batch  ON mailchimp_campaign_reports(sync_batch_id);
+
+-- One row per (campaign_id, link_id) — aggregate click metrics per link/URL.
+CREATE TABLE IF NOT EXISTS mailchimp_campaign_links (
+  id                       SERIAL PRIMARY KEY,
+  campaign_id              TEXT NOT NULL,
+  link_id                  TEXT NOT NULL,
+  url                      TEXT,
+  total_clicks             INTEGER,
+  unique_clicks            INTEGER,
+  click_percentage         NUMERIC(8,5),
+  unique_click_percentage  NUMERIC(8,5),
+  source_system            TEXT,
+  sync_batch_id            INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  first_seen_at            TIMESTAMPTZ DEFAULT NOW(),
+  updated_at               TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (campaign_id, link_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mc_links_campaign   ON mailchimp_campaign_links(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_mc_links_sync_batch ON mailchimp_campaign_links(sync_batch_id);
+
+-- Point-in-time audience state snapshots (list_id + snapshot_date = natural key).
+-- Audiences legitimately change over time, so these ARE dated snapshots — but the
+-- unique key prevents two rows for the same list+day, so a re-sync overwrites the
+-- day rather than accumulating summable duplicates.
+CREATE TABLE IF NOT EXISTS mailchimp_audience_snapshots (
+  id                   SERIAL PRIMARY KEY,
+  list_id              TEXT NOT NULL,
+  snapshot_date        DATE NOT NULL,
+  list_name            TEXT,
+  date_created         TIMESTAMPTZ,
+  member_count         INTEGER,
+  unsubscribe_count    INTEGER,
+  cleaned_count        INTEGER,
+  pending_count        INTEGER,
+  member_count_since_send INTEGER,
+  open_rate            NUMERIC(8,5),
+  click_rate           NUMERIC(8,5),
+  campaign_count       INTEGER,
+  source_system        TEXT,
+  sync_batch_id        INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  created_at           TIMESTAMPTZ DEFAULT NOW(),
+  updated_at           TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (list_id, snapshot_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mc_audience_list ON mailchimp_audience_snapshots(list_id);
+CREATE INDEX IF NOT EXISTS idx_mc_audience_date ON mailchimp_audience_snapshots(snapshot_date DESC);
+
+-- Mailchimp-specific sync state — backfill completeness + rolling-refresh
+-- watermarks per scope (e.g. 'campaigns'). Distinct from the generic sync_state
+-- table (which drives Dataset Freshness); this tracks the historical-backfill
+-- lifecycle and the rolling report-refresh window.
+CREATE TABLE IF NOT EXISTS mailchimp_sync_state (
+  id                     SERIAL PRIMARY KEY,
+  scope                  TEXT NOT NULL UNIQUE,   -- 'campaigns'
+  backfill_status        TEXT NOT NULL DEFAULT 'not_started',  -- not_started|running|partial|complete|failed
+  backfill_started_at    TIMESTAMPTZ,
+  backfill_completed_at  TIMESTAMPTZ,
+  last_incremental_at    TIMESTAMPTZ,
+  earliest_send_time     TIMESTAMPTZ,
+  latest_send_time       TIMESTAMPTZ,
+  campaigns_seen         INTEGER DEFAULT 0,
+  reports_refreshed      INTEGER DEFAULT 0,
+  last_batch_id          INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  last_error             TEXT,
+  updated_at             TIMESTAMPTZ DEFAULT NOW()
+);
 """
 
 
