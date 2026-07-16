@@ -691,6 +691,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_recovery_running_keyword_bootstrap
   ON revenue_recovery_jobs (job_type)
   WHERE status = 'running' AND job_type = 'keyword_bootstrap';
 
+-- PR-ADS-151 §5: at most one RUNNING mailchimp_backfill job at a time — the
+-- atomic claim that makes the durable Mailchimp backfill lease authoritative
+-- across processes/deploys (reuses the same recovery-job lease machinery).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_recovery_running_mailchimp_backfill
+  ON revenue_recovery_jobs (job_type)
+  WHERE status = 'running' AND job_type = 'mailchimp_backfill';
+
 -- PR-ADS-115: durable lead-truth exclusions. A missing-event-date paid lead with
 -- no verifiable HubSpot identity / created date is excluded from revenue-truth
 -- metrics with an explicit, auditable reason. Historical `leads` rows are NEVER

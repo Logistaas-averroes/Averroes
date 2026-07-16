@@ -12,13 +12,14 @@ GOVERNANCE (non-negotiable):
     returned to callers, logged, or exposed through the API/frontend.
 
 Credentials (env):
-  MAILCHIMP_API_KEY        — Marketing API key. Its data-centre suffix (…-usXX)
-                             is used to derive the server prefix when
-                             MAILCHIMP_SERVER_PREFIX is not set explicitly.
-  MAILCHIMP_SERVER_PREFIX  — optional explicit data-centre prefix (e.g. "us21").
-  MAILCHIMP_ENABLED        — "true"/"1"/"yes" to enable live calls. When unset or
-                             false the connector reports "not configured" and
-                             never touches the network.
+  MAILCHIMP_API_KEY        — Marketing API key. This is the ONLY required
+                             variable: a present key with a valid data-centre
+                             suffix (…-usXX) both enables the connector and lets
+                             it derive the server prefix. Key absent → the
+                             connector reports "not configured" and never touches
+                             the network.
+  MAILCHIMP_SERVER_PREFIX  — OPTIONAL explicit data-centre prefix (e.g. "us21").
+                             Only needed to override the key-derived prefix.
 
 Read-only sources exposed here (all GET):
   - ping / account root (connection test);
@@ -63,7 +64,7 @@ class MailchimpError(RuntimeError):
 
 
 class MailchimpNotConfigured(MailchimpError):
-    """MAILCHIMP_ENABLED is off, or the API key / server prefix is missing."""
+    """The API key is missing, or its data-centre prefix could not be resolved."""
 
 
 class MailchimpAuthError(MailchimpError):
@@ -86,8 +87,13 @@ def _env(name: str) -> str:
 
 
 def is_enabled() -> bool:
-    """True when MAILCHIMP_ENABLED is an affirmative value."""
-    return _env("MAILCHIMP_ENABLED").lower() in ("1", "true", "yes", "on", "enabled")
+    """True when Mailchimp is usable — i.e. an API key is set AND a data-centre
+    prefix is resolvable from it (or from an explicit override).
+
+    The API key is the single required variable; MAILCHIMP_ENABLED is no longer
+    used (a present, valid key is what enables the connector).
+    """
+    return bool(_api_key() and derive_server_prefix())
 
 
 def _api_key() -> str:
@@ -135,30 +141,32 @@ def config_status() -> dict:
     data-centre identifier, not a credential).
     """
     prefix = derive_server_prefix()
+    has_key = bool(_api_key())
+    configured = bool(has_key and prefix)
     return {
-        "enabled": is_enabled(),
-        "has_api_key": bool(_api_key()),
+        # A valid key alone (with a resolvable prefix) makes the connector both
+        # enabled and configured — these are equal by design now.
+        "enabled": configured,
+        "has_api_key": has_key,
         "server_prefix": prefix,
         "server_prefix_source": (
             "explicit" if _env("MAILCHIMP_SERVER_PREFIX") else
             ("derived_from_key" if prefix else "unresolved")
         ),
-        "configured": bool(is_enabled() and _api_key() and prefix),
+        "configured": configured,
     }
 
 
 def _require_config() -> tuple[str, str]:
     """Return (base_url, api_key) or raise MailchimpNotConfigured. Never logs the key."""
-    if not is_enabled():
-        raise MailchimpNotConfigured("MAILCHIMP_ENABLED is not set to true")
     key = _api_key()
     if not key:
         raise MailchimpNotConfigured("MAILCHIMP_API_KEY is not set")
     burl = base_url()
     if not burl:
         raise MailchimpNotConfigured(
-            "Mailchimp server prefix could not be resolved — set "
-            "MAILCHIMP_SERVER_PREFIX or use an API key with a -usXX suffix")
+            "Mailchimp server prefix could not be resolved — use an API key with a "
+            "-usXX suffix or set the optional MAILCHIMP_SERVER_PREFIX override")
     return burl, key
 
 

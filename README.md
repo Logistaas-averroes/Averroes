@@ -138,9 +138,8 @@ Configure via environment variables (see `.env.example`):
 
 | Variable | Purpose |
 |----------|---------|
-| `MAILCHIMP_API_KEY` | Marketing API key (its `-usXX` suffix derives the data centre) |
-| `MAILCHIMP_SERVER_PREFIX` | Optional explicit data-centre prefix (e.g. `us21`) |
-| `MAILCHIMP_ENABLED` | `true` to enable live pulls; otherwise the connector reports "not configured" and never touches the network |
+| `MAILCHIMP_API_KEY` | **The only required variable.** Marketing API key — a valid `-usXX` key both enables the connector and derives the data centre. Key absent → "not configured", no network calls |
+| `MAILCHIMP_SERVER_PREFIX` | Optional explicit data-centre prefix (e.g. `us21`) — only to override the key-derived prefix |
 
 Durable, additive tables (`mailchimp_campaigns`, `mailchimp_campaign_reports`,
 `mailchimp_campaign_links`, `mailchimp_audience_snapshots`, `mailchimp_sync_state`)

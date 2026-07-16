@@ -55,14 +55,12 @@ def derive_connection_state(config: dict, ping: Callable[[], Any]) -> dict:
     """
     from connectors import mailchimp_pull as mc  # noqa: PLC0415
 
-    if not config.get("enabled"):
-        return {"state": CONN_NOT_CONFIGURED,
-                "detail": "MAILCHIMP_ENABLED is not set to true"}
     if not config.get("has_api_key"):
         return {"state": CONN_NOT_CONFIGURED, "detail": "MAILCHIMP_API_KEY is not set"}
     if not config.get("server_prefix"):
         return {"state": CONN_NOT_CONFIGURED,
-                "detail": "Mailchimp server prefix could not be resolved"}
+                "detail": "Mailchimp server prefix could not be resolved "
+                          "(use a -usXX key suffix or set MAILCHIMP_SERVER_PREFIX)"}
     try:
         result = ping()
         return {"state": CONN_CONNECTED,

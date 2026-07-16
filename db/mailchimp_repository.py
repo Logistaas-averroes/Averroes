@@ -543,7 +543,12 @@ def latest_audience_snapshots() -> list:
 
 
 def recent_sent_campaign_ids(limit: int = 25) -> list:
-    """Return the most-recently-sent campaign ids (audit sampling). Read-only."""
+    """Return the most-recently-sent campaign ids (audit sampling). Read-only.
+
+    Sent-only: a campaign counts as sent when status='sent' AND it has a real
+    send_time — drafts / scheduled / paused / cancelled campaigns are excluded so
+    the audit never samples an unsent campaign.
+    """
     try:
         with get_conn() as conn:
             if conn is None:
@@ -551,13 +556,143 @@ def recent_sent_campaign_ids(limit: int = 25) -> list:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT campaign_id FROM mailchimp_campaigns "
-                    "WHERE status = 'sent' OR send_time IS NOT NULL "
+                    "WHERE status = 'sent' AND send_time IS NOT NULL "
                     "ORDER BY send_time DESC NULLS LAST LIMIT %s",
                     (max(1, min(500, int(limit))),))
                 return [r[0] for r in cur.fetchall()]
     except Exception as exc:  # noqa: BLE001
         log.error("recent_sent_campaign_ids failed: %s", exc)
         return []
+
+
+def sent_campaign_ids_for_refresh(window_days: Optional[int] = None) -> list:
+    """Campaign ids whose reports should be (re)pulled, read from the DURABLE
+    ``mailchimp_campaigns`` table — NOT from whatever a watermark API call just
+    returned (PR-ADS-151 §2/§3).
+
+    Only PROVEN-SENT campaigns qualify: ``status='sent'`` AND a real ``send_time``.
+    Draft / scheduled / paused / cancelled / unsent campaigns are never selected,
+    so they can never produce a report error or keep a backfill partial.
+
+    ``window_days=None`` → every sent campaign (full backfill refresh).
+    ``window_days=N``    → sent campaigns whose send_time is within the last N
+                           days (the rolling report-refresh window; report metrics
+                           keep changing after send).
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return []
+            with conn.cursor() as cur:
+                if window_days is None:
+                    cur.execute(
+                        "SELECT campaign_id FROM mailchimp_campaigns "
+                        "WHERE status = 'sent' AND send_time IS NOT NULL "
+                        "ORDER BY send_time DESC")
+                else:
+                    cur.execute(
+                        "SELECT campaign_id FROM mailchimp_campaigns "
+                        "WHERE status = 'sent' AND send_time IS NOT NULL "
+                        "AND send_time >= (NOW() - make_interval(days => %s)) "
+                        "ORDER BY send_time DESC",
+                        (int(window_days),))
+                return [r[0] for r in cur.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        log.error("sent_campaign_ids_for_refresh failed: %s", exc)
+        return []
+
+
+def fetch_durable_outcome_populations(window_start=None, window_end=None) -> dict:
+    """Read Averroes' DURABLE business-truth populations for the attribution audit
+    (PR-ADS-151 §4). Read-only. Never recomputes SQL/customer/revenue from live
+    HubSpot lifecycle — it reuses the same durable contracts used elsewhere:
+
+      - SQL  = ``leads`` deduped per durable contact key to the LATEST snapshot,
+               ``status_category='qualified'``, honouring ``lead_truth_exclusions``,
+               windowed by ``contact_created_at`` (the business event date);
+      - customers + closed-won revenue = ``deal_source_attribution`` (the complete,
+               source-agnostic closed-won ledger) deduped per ``deal_id`` and
+               windowed by ``deal_close_date``; revenue is ``SUM(deal_amount_usd)``
+               per contact.
+
+    Returns sets of real HubSpot contact_ids + a contact→closed-won amount map, plus
+    the durable population sizes (so the audit can prove attributed outcomes are a
+    subset). ``db_unavailable`` distinguishes a DB failure from genuinely empty
+    populations. Never raises.
+    """
+    out = {
+        "sql_contacts": set(), "customer_contacts": set(),
+        "closed_won_by_contact": {},
+        "durable_sql_population": 0, "durable_customer_population": 0,
+        "durable_closed_won_population": 0,
+        "db_unavailable": False,
+        "window_start": window_start.isoformat() if hasattr(window_start, "isoformat") else window_start,
+        "window_end": window_end.isoformat() if hasattr(window_end, "isoformat") else window_end,
+    }
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                out["db_unavailable"] = True
+                return out
+            with conn.cursor() as cur:
+                # ── SQL / qualified contacts (durable `leads` contract) ────────
+                cur.execute(
+                    """
+                    WITH deduped AS (
+                        SELECT DISTINCT ON (COALESCE(NULLIF(contact_id,''),'id:'||id::text))
+                            NULLIF(contact_id,'') AS contact_id,
+                            status_category
+                        FROM leads
+                        WHERE contact_created_at IS NOT NULL
+                          AND (%s::timestamptz IS NULL OR contact_created_at >= %s::timestamptz)
+                          AND (%s::date IS NULL OR contact_created_at < (%s::date + INTERVAL '1 day'))
+                          AND COALESCE(NULLIF(contact_id,''),'id:'||id::text)
+                              NOT IN (SELECT lead_id FROM lead_truth_exclusions)
+                        ORDER BY COALESCE(NULLIF(contact_id,''),'id:'||id::text),
+                                 run_date DESC, id DESC
+                    )
+                    SELECT contact_id FROM deduped
+                    WHERE status_category = 'qualified' AND contact_id IS NOT NULL
+                    """,
+                    (window_start, window_start, window_end, window_end),
+                )
+                out["sql_contacts"] = {str(r[0]) for r in cur.fetchall() if r[0]}
+
+                # ── customers + closed-won revenue (durable deal ledger) ───────
+                cur.execute(
+                    """
+                    WITH won AS (
+                        SELECT DISTINCT ON (deal_id)
+                            deal_id,
+                            associated_contact_id AS contact_id,
+                            deal_amount_usd
+                        FROM deal_source_attribution
+                        WHERE deal_id IS NOT NULL
+                          AND associated_contact_id IS NOT NULL
+                          AND deal_close_date IS NOT NULL
+                          AND (%s::date IS NULL OR deal_close_date >= %s::date)
+                          AND (%s::date IS NULL OR deal_close_date < (%s::date + INTERVAL '1 day'))
+                        ORDER BY deal_id, classified_at DESC
+                    )
+                    SELECT contact_id, SUM(COALESCE(deal_amount_usd, 0)) AS revenue
+                    FROM won GROUP BY contact_id
+                    """,
+                    (window_start, window_start, window_end, window_end),
+                )
+                for cid, revenue in cur.fetchall():
+                    cid = str(cid)
+                    amt = float(revenue or 0)
+                    out["customer_contacts"].add(cid)
+                    if amt > 0:
+                        out["closed_won_by_contact"][cid] = amt
+
+        out["durable_sql_population"] = len(out["sql_contacts"])
+        out["durable_customer_population"] = len(out["customer_contacts"])
+        out["durable_closed_won_population"] = len(out["closed_won_by_contact"])
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_durable_outcome_populations failed: %s", exc)
+        out["db_unavailable"] = True
+    return out
 
 
 def _row_to_jsonable(cur, row) -> dict:

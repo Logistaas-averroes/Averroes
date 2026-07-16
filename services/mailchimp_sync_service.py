@@ -26,6 +26,7 @@ Nothing here ever writes to Mailchimp.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -42,6 +43,11 @@ DEFAULT_REFRESH_RECENT_DAYS = 30
 # Small overlap so a campaign sent right on the watermark boundary is not missed.
 INCREMENTAL_OVERLAP_DAYS = 2
 
+# PR-ADS-151 §5 — durable backfill lease (reuses the revenue_recovery_jobs lease).
+BACKFILL_JOB_TYPE = "mailchimp_backfill"
+LEASE_TTL_SECONDS = int(os.getenv("MAILCHIMP_BACKFILL_LEASE_TTL_SECONDS", "900"))  # 15 min
+
+# Fast in-process guard (the DB lease is the authoritative cross-process guard).
 _backfill_lock = threading.Lock()
 _backfill_running = False
 
@@ -65,13 +71,12 @@ def _preflight() -> tuple[bool, dict]:
     """Return (ready, skip_result). Never touches the network on failure."""
     from connectors import mailchimp_pull as mc  # noqa: PLC0415
     cfg = mc.config_status()
-    if not cfg["enabled"]:
-        return False, _skip_result("not_configured", "MAILCHIMP_ENABLED is off")
     if not cfg["has_api_key"]:
         return False, _skip_result("not_configured", "MAILCHIMP_API_KEY is not set")
     if not cfg["server_prefix"]:
         return False, _skip_result(
-            "not_configured", "Mailchimp server prefix could not be resolved")
+            "not_configured", "Mailchimp server prefix could not be resolved "
+            "(use a -usXX key suffix or set MAILCHIMP_SERVER_PREFIX)")
     return True, {}
 
 
@@ -111,29 +116,90 @@ def run_incremental(*, refresh_recent_days: int = DEFAULT_REFRESH_RECENT_DAYS,
 
 def run_backfill(*, run_id=None) -> dict:
     """Full historical backfill of every campaign + report + link, plus a current
-    audience snapshot. Idempotent (natural-key upserts). Returns a summary."""
+    audience snapshot. Idempotent (natural-key upserts).
+
+    PR-ADS-151 §5 — concurrency + checkpoint safety. Guarded by a DURABLE atomic
+    lease (revenue_recovery_jobs, job_type='mailchimp_backfill') reusing the proven
+    Keyword-Evidence recovery-job pattern:
+      - at most ONE active backfill across workers/deploys (partial unique index);
+      - a crashed worker's stale lease is recovered by the next run;
+      - Mailchimp is NEVER called if the durable checkpoint cannot be created (fail
+        closed on DB-unavailable);
+      - final ``success`` is reported ONLY after durable completion is persisted.
+    """
     ready, skip = _preflight()
     if not ready:
         return skip
+    import uuid  # noqa: PLC0415
+    import db.writers as w  # noqa: PLC0415
     from db import mailchimp_repository as repo  # noqa: PLC0415
 
+    today = _now().date()
+    lease_token = uuid.uuid4().hex
+    claim = w.acquire_recovery_lease(
+        BACKFILL_JOB_TYPE, lease_token, LEASE_TTL_SECONDS,
+        date_from=today, date_to=today, chunk_months=1)
+
+    if not claim.get("claimed"):
+        reason = claim.get("reason")
+        if reason == "db_unavailable":
+            # No durable checkpoint → do NOT touch Mailchimp.
+            return {"status": "failed", "reason": "durable_job_unavailable",
+                    "ok": False, "datasets": {},
+                    "error": "could not create/claim a durable Mailchimp backfill "
+                             "job (database unavailable) — refusing to run without a "
+                             "checkpoint"}
+        if reason == "active_lease":
+            return {"status": "running", "reason": "already_running", "ok": False,
+                    "datasets": {}, "job_id": (claim.get("job") or {}).get("job_id")}
+        return {"status": "skipped", "reason": reason, "ok": False, "datasets": {},
+                "job_id": (claim.get("job") or {}).get("job_id")}
+
+    job = claim["job"]
+    job_id = job["job_id"]
     repo.update_sync_state(backfill_status="running", backfill_started_at=_now(),
                            last_error=None)
+
     result = _sync_campaigns(sync_type="backfill", since_send_time=None,
                              refresh_recent_days=None, full=True, run_id=run_id)
+    # Heartbeat between phases so a long report refresh does not let the lease lapse.
+    w.renew_recovery_lease(job_id, lease_token, LEASE_TTL_SECONDS, current_chunk="audiences")
     result["datasets"][DS_AUDIENCES] = _sync_audiences(sync_type="backfill", run_id=run_id)
 
     ok = all(d.get("ok") for d in result["datasets"].values() if isinstance(d, dict))
+    errs = "; ".join(
+        str(d.get("error")) for d in result["datasets"].values()
+        if isinstance(d, dict) and d.get("error"))
+    final_status = "success" if ok else "partial"
+
+    summary = {
+        "campaigns": (result["datasets"].get(DS_CAMPAIGNS) or {}).get("written"),
+        "reports_refreshed": (result["datasets"].get(DS_REPORTS) or {}).get("refreshed"),
+        "audiences": (result["datasets"].get(DS_AUDIENCES) or {}).get("written"),
+        "completed_at": _now().isoformat(),
+    }
+    released = w.release_recovery_lease(
+        job_id, lease_token, status=final_status, summary=summary,
+        finished_at=_now().isoformat())
+    if not released:
+        # Final checkpoint did not persist (lease lost / DB down). Do NOT claim
+        # success — the job stays recoverable via stale-lease takeover.
+        repo.update_sync_state(backfill_status="partial",
+                               last_error="final backfill checkpoint did not persist")
+        return {"status": "interrupted", "reason": "final_checkpoint_failed",
+                "ok": False, "job_id": job_id, "datasets": result["datasets"],
+                "error": "could not persist the final Mailchimp backfill checkpoint; "
+                         "the job remains recoverable via stale-lease takeover"}
+
     if ok:
         repo.update_sync_state(backfill_status="complete",
                                backfill_completed_at=_now(), last_error=None)
     else:
-        errs = "; ".join(
-            str(d.get("error")) for d in result["datasets"].values()
-            if isinstance(d, dict) and d.get("error"))
-        repo.update_sync_state(backfill_status="partial", last_error=errs[:1000] or "partial backfill")
+        repo.update_sync_state(backfill_status="partial",
+                               last_error=errs[:1000] or "partial backfill")
     result["ok"] = ok
-    result["status"] = "success" if ok else "partial"
+    result["status"] = final_status
+    result["job_id"] = job_id
     return result
 
 
@@ -184,12 +250,18 @@ def _sync_campaigns(*, sync_type: str, since_send_time, refresh_recent_days,
     out["datasets"][DS_CAMPAIGNS] = camp_ds
 
     # ── reports dataset (+ links) ─────────────────────────────────────────────
+    # PR-ADS-151 §2/§3: the rolling report-refresh set is selected from the DURABLE
+    # mailchimp_campaigns table (proven-sent campaigns in the rolling window), NOT
+    # from whatever the discovery/watermark call above returned. So a campaign sent
+    # 15 days ago is still refreshed even when discovery finds no new campaigns, and
+    # unsent campaigns are never requested (no spurious report failures).
     report_batch = w.start_sync_batch(source=MAILCHIMP_SOURCE, dataset=DS_REPORTS,
                                       sync_type=sync_type, run_id=run_id)
     rep_ds = {"ok": False, "refreshed": 0, "links": 0, "errors": 0,
               "batch_id": report_batch or None}
 
-    to_refresh = _campaigns_needing_report(campaigns, today, refresh_recent_days, full)
+    to_refresh = repo.sent_campaign_ids_for_refresh(
+        window_days=None if full else refresh_recent_days)
     refreshed = links_written = errors = 0
     first_error = None
     for cid in to_refresh:
@@ -246,36 +318,6 @@ def _sync_campaigns(*, sync_type: str, since_send_time, refresh_recent_days,
     return out
 
 
-def _campaigns_needing_report(campaigns, today, refresh_recent_days, full) -> list:
-    """Which campaign ids to (re)pull reports for.
-
-    Backfill (full=True): every campaign. Incremental: campaigns whose send_time
-    falls inside the rolling recent window (metrics may still be moving)."""
-    ids = []
-    cutoff = None
-    if not full and refresh_recent_days is not None:
-        cutoff = today - timedelta(days=refresh_recent_days)
-    for c in campaigns:
-        cid = c.get("campaign_id")
-        if not cid:
-            continue
-        if full or cutoff is None:
-            ids.append(cid)
-            continue
-        st = c.get("send_time")
-        if not st:
-            # Unsent/draft — no report to refresh in incremental mode.
-            continue
-        try:
-            sd = datetime.fromisoformat(str(st).replace("Z", "+00:00")).date()
-        except (ValueError, TypeError):
-            ids.append(cid)
-            continue
-        if sd >= cutoff:
-            ids.append(cid)
-    return ids
-
-
 # ── Audiences ─────────────────────────────────────────────────────────────────
 
 def _sync_audiences(*, sync_type: str, run_id) -> dict:
@@ -313,13 +355,31 @@ def _sync_audiences(*, sync_type: str, run_id) -> dict:
 # ── Auto backfill on deploy ───────────────────────────────────────────────────
 
 def _backfill_needed() -> bool:
+    import db.writers as w  # noqa: PLC0415
     from db import mailchimp_repository as repo  # noqa: PLC0415
+    # A live durable lease means a worker already owns the backfill — not needed.
+    job = w.get_latest_recovery_job(BACKFILL_JOB_TYPE)
+    if job and job.get("status") == "running" and _lease_active(job):
+        return False
     state = repo.get_sync_state()
     if not state:
         return True
-    if state.get("backfill_status") in ("complete",):
+    return state.get("backfill_status") != "complete"
+
+
+def _lease_active(job: dict) -> bool:
+    """True when the job holds a non-expired durable lease."""
+    exp = (job or {}).get("lease_expires_at")
+    if exp is None:
         return False
-    return True
+    if isinstance(exp, str):
+        try:
+            exp = datetime.fromisoformat(exp)
+        except ValueError:
+            return False
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    return exp > datetime.now(timezone.utc)
 
 
 def maybe_start_backfill_on_deploy() -> str:

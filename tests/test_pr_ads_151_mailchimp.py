@@ -39,10 +39,12 @@ class _FakeResp:
 
 
 @contextmanager
-def _mc_env(monkeypatch, *, enabled="true", key="deadbeef-us21", prefix=""):
-    monkeypatch.setenv("MAILCHIMP_ENABLED", enabled)
+def _mc_env(monkeypatch, *, key="deadbeef-us21", prefix=""):
+    # MAILCHIMP_API_KEY is the only required variable (PR-ADS-151 completion);
+    # MAILCHIMP_ENABLED is no longer used.
     monkeypatch.setenv("MAILCHIMP_API_KEY", key)
     monkeypatch.setenv("MAILCHIMP_SERVER_PREFIX", prefix)
+    monkeypatch.delenv("MAILCHIMP_ENABLED", raising=False)
     yield
 
 
@@ -73,16 +75,41 @@ class TestConnectorConfig:
         # No field named api_key / key leaks the secret.
         assert "api_key" not in cfg and "key" not in cfg
 
-    def test_is_enabled_variants(self, monkeypatch):
+    def test_key_alone_enables_and_configures(self, monkeypatch):
+        """A valid API key alone (no MAILCHIMP_ENABLED) → configured=true."""
         from connectors import mailchimp_pull as mc
-        for val, expected in [("true", True), ("1", True), ("yes", True),
-                              ("false", False), ("", False), ("no", False)]:
-            monkeypatch.setenv("MAILCHIMP_ENABLED", val)
-            assert mc.is_enabled() is expected
+        monkeypatch.delenv("MAILCHIMP_ENABLED", raising=False)
+        monkeypatch.setenv("MAILCHIMP_SERVER_PREFIX", "")
+        monkeypatch.setenv("MAILCHIMP_API_KEY", "abcd1234-us3")
+        assert mc.is_enabled() is True
+        cfg = mc.config_status()
+        assert cfg["configured"] is True
+        assert cfg["enabled"] is True
+        assert cfg["server_prefix"] == "us3"
+
+    def test_key_absent_not_configured(self, monkeypatch):
+        from connectors import mailchimp_pull as mc
+        monkeypatch.delenv("MAILCHIMP_ENABLED", raising=False)
+        monkeypatch.setenv("MAILCHIMP_API_KEY", "")
+        assert mc.is_enabled() is False
+        assert mc.config_status()["configured"] is False
+
+    def test_key_without_resolvable_prefix_not_configured(self, monkeypatch):
+        from connectors import mailchimp_pull as mc
+        monkeypatch.setenv("MAILCHIMP_SERVER_PREFIX", "")
+        monkeypatch.setenv("MAILCHIMP_API_KEY", "nodashkey")
+        assert mc.config_status()["configured"] is False
+
+    def test_enabled_true_env_is_ignored_without_key(self, monkeypatch):
+        """MAILCHIMP_ENABLED is no longer honoured: it can't configure without a key."""
+        from connectors import mailchimp_pull as mc
+        monkeypatch.setenv("MAILCHIMP_ENABLED", "true")
+        monkeypatch.setenv("MAILCHIMP_API_KEY", "")
+        assert mc.config_status()["configured"] is False
 
     def test_not_configured_raises(self, monkeypatch):
         from connectors import mailchimp_pull as mc
-        monkeypatch.setenv("MAILCHIMP_ENABLED", "false")
+        monkeypatch.setenv("MAILCHIMP_API_KEY", "")
         with pytest.raises(mc.MailchimpNotConfigured):
             mc.ping()
 
@@ -349,41 +376,81 @@ class TestRepositoryUpserts:
 # ── Sync service ──────────────────────────────────────────────────────────────
 
 class TestSyncService:
-    def test_preflight_skips_when_disabled(self, monkeypatch):
+    def test_preflight_skips_when_no_key(self, monkeypatch):
         import services.mailchimp_sync_service as sync
-        monkeypatch.setenv("MAILCHIMP_ENABLED", "false")
+        monkeypatch.setenv("MAILCHIMP_API_KEY", "")
         result = sync.run_incremental()
         assert result["status"] == "skipped"
         assert result["reason"] == "not_configured"
 
-    def test_backfill_skips_when_disabled(self, monkeypatch):
+    def test_backfill_skips_when_no_key(self, monkeypatch):
         import services.mailchimp_sync_service as sync
-        monkeypatch.setenv("MAILCHIMP_ENABLED", "false")
+        monkeypatch.setenv("MAILCHIMP_API_KEY", "")
         assert sync.maybe_start_backfill_on_deploy() == "not_configured"
 
-    def test_full_backfill_refreshes_all_campaigns(self):
-        import services.mailchimp_sync_service as sync
-        campaigns = [
-            {"campaign_id": "c1", "send_time": "2020-01-01T00:00:00+00:00"},
-            {"campaign_id": "c2", "send_time": None},
-            {"campaign_id": "c3", "send_time": "2026-06-01T00:00:00+00:00"},
-        ]
-        from datetime import date
-        ids = sync._campaigns_needing_report(campaigns, date(2026, 7, 1),
-                                             refresh_recent_days=30, full=True)
-        assert ids == ["c1", "c2", "c3"]
+    def _patch_sync_deps(self, monkeypatch, *, discovery, refresh_ids, reports_called):
+        """Wire _sync_campaigns' lazily-imported deps for a network-free unit test."""
+        from connectors import mailchimp_pull as mc
+        from db import mailchimp_repository as repo
+        import db.writers as w
+        monkeypatch.setattr(mc, "list_campaigns", lambda **k: list(discovery))
+        monkeypatch.setattr(mc, "get_campaign_report",
+                            lambda cid: (reports_called.append(cid) or {"campaign_id": cid}))
+        monkeypatch.setattr(mc, "get_campaign_link_details", lambda cid: [])
+        monkeypatch.setattr(w, "start_sync_batch", lambda **k: 0)
+        monkeypatch.setattr(w, "finish_sync_batch", lambda **k: True)
+        monkeypatch.setattr(repo, "upsert_campaigns",
+                            lambda rows, sync_batch_id=None: {"prepared": len(rows), "written": len(rows), "db_unavailable": False})
+        monkeypatch.setattr(repo, "upsert_campaign_reports",
+                            lambda rows, sync_batch_id=None: {"prepared": len(rows), "written": len(rows), "db_unavailable": False})
+        monkeypatch.setattr(repo, "upsert_campaign_links",
+                            lambda rows, sync_batch_id=None: {"prepared": len(rows), "written": len(rows), "db_unavailable": False})
+        monkeypatch.setattr(repo, "get_sync_state", lambda: {})
+        monkeypatch.setattr(repo, "update_sync_state", lambda **k: True)
+        captured = {}
+        monkeypatch.setattr(repo, "sent_campaign_ids_for_refresh",
+                            lambda window_days=None: (captured.__setitem__("window_days", window_days) or list(refresh_ids)))
+        return captured
 
-    def test_incremental_refreshes_only_recent(self):
+    def test_report_refresh_selected_from_durable_table_not_discovery(self, monkeypatch):
+        """§2: a campaign sent 15 days ago is refreshed from the DURABLE table even
+        when discovery (watermark API) returns no new campaigns."""
         import services.mailchimp_sync_service as sync
-        from datetime import date
-        campaigns = [
-            {"campaign_id": "old", "send_time": "2020-01-01T00:00:00+00:00"},
-            {"campaign_id": "draft", "send_time": None},
-            {"campaign_id": "recent", "send_time": "2026-06-20T00:00:00+00:00"},
-        ]
-        ids = sync._campaigns_needing_report(campaigns, date(2026, 7, 1),
-                                             refresh_recent_days=30, full=False)
-        assert ids == ["recent"]
+        reports_called: list = []
+        cap = self._patch_sync_deps(monkeypatch, discovery=[], refresh_ids=["c15"],
+                                    reports_called=reports_called)
+        out = sync._sync_campaigns(sync_type="daily", since_send_time=None,
+                                   refresh_recent_days=30, full=False, run_id=None)
+        assert reports_called == ["c15"]          # refreshed despite empty discovery
+        assert cap["window_days"] == 30            # rolling window applied
+        assert out["datasets"]["reports"]["refreshed"] == 1
+
+    def test_backfill_refreshes_all_sent(self, monkeypatch):
+        """§3: a full backfill refreshes ALL sent campaigns (window_days=None)."""
+        import services.mailchimp_sync_service as sync
+        reports_called: list = []
+        cap = self._patch_sync_deps(monkeypatch, discovery=[], refresh_ids=["a", "b"],
+                                    reports_called=reports_called)
+        sync._sync_campaigns(sync_type="backfill", since_send_time=None,
+                             refresh_recent_days=None, full=True, run_id=None)
+        assert cap["window_days"] is None
+        assert sorted(reports_called) == ["a", "b"]
+
+    def test_unsent_campaigns_do_not_cause_report_errors(self, monkeypatch):
+        """§3: unsent campaigns are never in the durable refresh set, so discovering
+        drafts never produces report errors or a partial result."""
+        import services.mailchimp_sync_service as sync
+        reports_called: list = []
+        # Discovery returns a draft + a sent campaign; durable refresh set is sent-only.
+        discovery = [{"campaign_id": "draft1", "status": "save", "send_time": None},
+                     {"campaign_id": "sent1", "status": "sent", "send_time": "2026-06-01T00:00:00+00:00"}]
+        self._patch_sync_deps(monkeypatch, discovery=discovery, refresh_ids=["sent1"],
+                              reports_called=reports_called)
+        out = sync._sync_campaigns(sync_type="daily", since_send_time=None,
+                                   refresh_recent_days=30, full=False, run_id=None)
+        assert reports_called == ["sent1"]           # draft never requested
+        assert out["datasets"]["reports"]["errors"] == 0
+        assert out["datasets"]["reports"]["ok"] is True
 
 
 # ── Status service ────────────────────────────────────────────────────────────
@@ -457,26 +524,36 @@ class TestStatusService:
 
 # ── Attribution audit ─────────────────────────────────────────────────────────
 
+def _durable(sql=None, cust=None, won=None, db_unavailable=False):
+    """Build a durable-population dict like fetch_durable_outcome_populations()."""
+    sql = set(sql or [])
+    cust = set(cust or [])
+    won = dict(won or {})
+    return {
+        "sql_contacts": sql, "customer_contacts": cust, "closed_won_by_contact": won,
+        "durable_sql_population": len(sql), "durable_customer_population": len(cust),
+        "durable_closed_won_population": len(won),
+        "db_unavailable": db_unavailable, "window_start": None, "window_end": None,
+    }
+
+
 class TestAttributionAudit:
     def test_md5_matches_mailchimp_convention(self):
         from services.mailchimp_audit_service import md5_email
-        # Mailchimp email_id is MD5 of the lowercased address.
         import hashlib
         assert md5_email("Foo@Bar.COM") == hashlib.md5(b"foo@bar.com").hexdigest()
         assert md5_email("") is None
         assert md5_email(None) is None
 
-    def test_safe_one_to_one_attaches_outcomes(self):
+    def test_outcomes_come_from_durable_truth(self):
+        """Outcomes are counted from durable SQL/customer/revenue sets, not lifecycle."""
         from services.mailchimp_audit_service import build_attribution_audit
         recipients = {"camp1": [
             {"member_id": "h1"}, {"member_id": "h2"}, {"member_id": "h3"}, {"member_id": ""},
         ]}
-        index = {
-            "h1": [{"contact_id": "1", "is_sql": True, "is_customer": False, "closed_won_amount": 0}],
-            "h2": [{"contact_id": "2", "is_sql": True, "is_customer": True, "closed_won_amount": 5000}],
-            # h3 not present → unmatched
-        }
-        audit = build_attribution_audit(recipients, index, hubspot_available=True)
+        identity = {"h1": ["1"], "h2": ["2"]}  # h3 → unmatched; "" → no identity
+        durable = _durable(sql={"1", "2"}, cust={"2"}, won={"2": 5000.0})
+        audit = build_attribution_audit(recipients, identity, durable, identity_available=True)
         assert audit["recipients_inspected"] == 4
         assert audit["recipients_with_member_identity"] == 3
         assert audit["recipients_safely_matchable"] == 2
@@ -486,53 +563,75 @@ class TestAttributionAudit:
         assert audit["contacts_with_closed_won_revenue"] == 1
         assert audit["overall_attribution_coverage"] == round(2 / 3, 4)
 
+    def test_attributed_outcomes_are_subset_of_durable_populations(self):
+        from services.mailchimp_audit_service import build_attribution_audit
+        recipients = {"c": [{"member_id": "h1"}, {"member_id": "h2"}]}
+        identity = {"h1": ["1"], "h2": ["2"]}
+        # Durable SQL population is larger than what Mailchimp attributes.
+        durable = _durable(sql={"1", "2", "9", "10"}, cust={"2"}, won={"2": 100.0})
+        audit = build_attribution_audit(recipients, identity, durable, identity_available=True)
+        rec = audit["reconciliation"]
+        assert rec["outcomes_available"] is True
+        assert rec["durable_sql_population"] == 4
+        assert rec["attributed_sql"] == 2
+        assert rec["sql_is_subset_of_durable"] is True
+        assert rec["customers_is_subset_of_durable"] is True
+        assert rec["closed_won_is_subset_of_durable"] is True
+        assert rec["attributed_closed_won_revenue_usd"] == 100.0
+
     def test_ambiguous_matches_get_no_outcomes(self):
         from services.mailchimp_audit_service import build_attribution_audit
         recipients = {"camp1": [{"member_id": "amb"}]}
-        index = {"amb": [
-            {"contact_id": "1", "is_sql": True, "is_customer": True, "closed_won_amount": 9},
-            {"contact_id": "2", "is_sql": True, "is_customer": True, "closed_won_amount": 9},
-        ]}
-        audit = build_attribution_audit(recipients, index, hubspot_available=True)
+        identity = {"amb": ["1", "2"]}  # one member → two contacts = ambiguous
+        durable = _durable(sql={"1", "2"}, cust={"1"}, won={"1": 9.0})
+        audit = build_attribution_audit(recipients, identity, durable, identity_available=True)
         assert audit["ambiguous_matches"] == 1
         assert audit["recipients_safely_matchable"] == 0
-        # No outcomes attached from an ambiguous match.
         assert audit["sql_contacts"] == 0
         assert audit["customer_contacts"] == 0
         assert audit["contacts_with_closed_won_revenue"] == 0
 
-    def test_hubspot_unavailable_withholds_outcomes(self):
+    def test_identity_unavailable_withholds_outcomes(self):
         from services.mailchimp_audit_service import build_attribution_audit
         recipients = {"camp1": [{"member_id": "h1"}, {"member_id": ""}]}
-        audit = build_attribution_audit(recipients, {}, hubspot_available=False)
-        # Identity coverage still measured...
+        audit = build_attribution_audit(recipients, {}, _durable(sql={"1"}),
+                                        identity_available=False)
         assert audit["recipients_with_member_identity"] == 1
-        # ...but matched/outcomes are withheld (None), never fabricated.
         assert audit["recipients_safely_matchable"] is None
         assert audit["sql_contacts"] is None
         assert audit["overall_attribution_coverage"] is None
 
-    def test_build_hubspot_index_flags_and_hashes(self):
-        from services.mailchimp_audit_service import build_hubspot_index, md5_email
+    def test_durable_unavailable_withholds_outcomes_but_keeps_coverage(self):
+        from services.mailchimp_audit_service import build_attribution_audit
+        recipients = {"c": [{"member_id": "h1"}]}
+        identity = {"h1": ["1"]}
+        audit = build_attribution_audit(recipients, identity, _durable(db_unavailable=True),
+                                        identity_available=True)
+        # Identity coverage still measured; outcomes withheld.
+        assert audit["recipients_safely_matchable"] == 1
+        assert audit["outcomes_available"] is False
+        assert audit["sql_contacts"] is None
+
+    def test_build_identity_index_hashes_and_carries_no_outcomes(self):
+        from services.mailchimp_audit_service import build_identity_index, md5_email
         contacts = [
             {"id": "1", "properties": {"email": "a@x.com", "lifecyclestage": "salesqualifiedlead"}},
-            {"id": "2", "properties": {"email": "b@x.com", "lifecyclestage": "customer"}},
+            {"id": "2", "properties": {"email": "b@x.com"}},
             {"id": "3", "properties": {"email": ""}},  # no email → skipped
         ]
-        index = build_hubspot_index(contacts, closed_won_contact_ids={"2"})
-        assert md5_email("a@x.com") in index
-        assert index[md5_email("a@x.com")][0]["is_sql"] is True
-        b = index[md5_email("b@x.com")][0]
-        assert b["is_customer"] is True
-        assert b["closed_won_amount"] > 0
-        # No raw emails retained anywhere in the index.
+        index = build_identity_index(contacts)
+        assert index[md5_email("a@x.com")] == ["1"]
+        assert md5_email("b@x.com") in index
+        # Identity bridge only — no outcome flags leak in, and no raw emails.
         assert "a@x.com" not in str(index)
+        assert "is_sql" not in str(index)
 
     def test_audit_output_contains_no_emails(self):
         from services.mailchimp_audit_service import build_attribution_audit
         recipients = {"c": [{"member_id": "h1"}]}
-        index = {"h1": [{"contact_id": "1", "is_sql": False, "is_customer": False, "closed_won_amount": 0}]}
-        audit = build_attribution_audit(recipients, index, hubspot_available=True)
+        identity = {"h1": ["1"]}
+        audit = build_attribution_audit(recipients, identity, _durable(sql={"1"}),
+                                        identity_available=True)
         assert "@" not in str(audit)
 
 
@@ -568,7 +667,7 @@ class TestMailchimpEndpoints:
         assert client.get("/api/mailchimp/status").status_code == 401
 
     def test_status_returns_config_without_key(self, monkeypatch):
-        monkeypatch.setenv("MAILCHIMP_ENABLED", "false")
+        monkeypatch.delenv("MAILCHIMP_ENABLED", raising=False)
         monkeypatch.setenv("MAILCHIMP_API_KEY", "supersecret-us9")
         client = _make_client()
         cookie = _admin_cookie()
