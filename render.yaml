@@ -49,3 +49,11 @@ services:
         sync: false
       - key: REPORT_RECIPIENT_EMAIL
         sync: false
+      # Mailchimp read-only email-marketing evidence (PR-ADS-151). Pull-only —
+      # GET requests exclusively; never written back to Mailchimp. MAILCHIMP_API_KEY
+      # is the ONLY required variable — a valid -usXX key enables the connector and
+      # derives the data centre. MAILCHIMP_SERVER_PREFIX is an optional override.
+      - key: MAILCHIMP_API_KEY
+        sync: false
+      - key: MAILCHIMP_SERVER_PREFIX
+        sync: false

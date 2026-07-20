@@ -151,6 +151,38 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "blocks": [],
     },
+    # PR-ADS-151: Mailchimp read-only email-marketing evidence.
+    "mailchimp_campaigns": {
+        "label": "Mailchimp Campaigns",
+        "source": "mailchimp",
+        "page": "Email Marketing",
+        "depends_on": [],
+        "blocks": ["mailchimp_reports"],
+    },
+    "mailchimp_reports": {
+        "label": "Mailchimp Reports",
+        "source": "mailchimp",
+        "page": "Email Marketing",
+        "depends_on": ["mailchimp_campaigns"],
+        # Attribution feasibility is derived from report evidence (its freshness
+        # tracks mailchimp_campaign_reports), so reports — not campaigns — is its
+        # direct upstream: stale/failed reports block attribution.
+        "blocks": ["mailchimp_attribution"],
+    },
+    "mailchimp_audiences": {
+        "label": "Mailchimp Audiences",
+        "source": "mailchimp",
+        "page": "Email Marketing",
+        "depends_on": [],
+        "blocks": [],
+    },
+    "mailchimp_attribution": {
+        "label": "Mailchimp Attribution",
+        "source": "mailchimp",
+        "page": "Email Marketing",
+        "depends_on": ["mailchimp_reports"],
+        "blocks": [],
+    },
 }
 
 # ── Source Definitions ──────────────────────────────────────────────────────
@@ -179,6 +211,12 @@ SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "label": "Computed Layer",
         "datasets": ["ngrams"],
     },
+    # PR-ADS-151: Mailchimp read-only source.
+    "mailchimp": {
+        "label": "Mailchimp",
+        "datasets": ["mailchimp_campaigns", "mailchimp_reports",
+                     "mailchimp_audiences", "mailchimp_attribution"],
+    },
 }
 
 # ── Page Impact Mapping ─────────────────────────────────────────────────────
@@ -198,6 +236,8 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
     "health": ["all"],
     "backfill": ["admin"],
     "historical-intelligence": ["historical_intelligence"],
+    "mailchimp": ["mailchimp_campaigns", "mailchimp_reports",
+                  "mailchimp_audiences", "mailchimp_attribution"],
 }
 
 # ── Core datasets vs derived ───────────────────────────────────────────────
@@ -209,6 +249,7 @@ CORE_DATASETS = frozenset([
 DERIVED_DATASETS = frozenset([
     "waste_terms", "ngrams", "gclid_attribution",
     "gclid_coverage_snapshots", "historical_intelligence",
+    "mailchimp_attribution",
 ])
 
 

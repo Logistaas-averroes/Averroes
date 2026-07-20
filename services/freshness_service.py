@@ -228,6 +228,48 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "page": "historical-intelligence",
     },
+    # PR-ADS-151: Mailchimp read-only email-marketing evidence datasets.
+    "mailchimp_campaigns": {
+        "table": "mailchimp_campaigns",
+        "date_column": "send_time",
+        "source": "mailchimp",
+        "dataset": "campaigns",
+        "stale_threshold_days": 8,
+        "depends_on": [],
+        "page": "mailchimp",
+    },
+    "mailchimp_reports": {
+        "table": "mailchimp_campaign_reports",
+        "date_column": "last_report_update",
+        "source": "mailchimp",
+        "dataset": "reports",
+        "stale_threshold_days": 8,
+        "depends_on": [],
+        "page": "mailchimp",
+    },
+    "mailchimp_audiences": {
+        "table": "mailchimp_audience_snapshots",
+        "date_column": "snapshot_date",
+        "source": "mailchimp",
+        "dataset": "audiences",
+        "stale_threshold_days": 8,
+        "depends_on": [],
+        "page": "mailchimp",
+    },
+    # Attribution feasibility is computed on demand by /api/mailchimp/audit — it
+    # has no durable date-stamped table of its own. Its freshness therefore tracks
+    # the report evidence it reconciles (mailchimp_campaign_reports): the audit can
+    # run whenever that evidence is fresh. Actual coverage is measured by the audit
+    # endpoint, not by a scheduler watermark.
+    "mailchimp_attribution": {
+        "table": "mailchimp_campaign_reports",
+        "date_column": "last_report_update",
+        "source": "mailchimp",
+        "dataset": "attribution",
+        "stale_threshold_days": 30,
+        "depends_on": [],
+        "page": "mailchimp",
+    },
 }
 
 # States that block dependents (upstream is unusable for downstream derivation)
