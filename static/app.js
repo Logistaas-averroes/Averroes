@@ -2418,8 +2418,11 @@ function renderDashKpiRow(d) {
       value: k.google_ads_source_sqls_status === "mismatch"
         ? "Reconciliation required"
         : dashValue(k.google_ads_source_sqls, fmtCount),
+      // When the campaign-attributable subset is null (identity contract
+      // unavailable) show an honest "unavailable" — NOT sqlRate, which belongs to
+      // the old narrower campaign-attributable population (PR-ADS-152).
       sub: (k.campaign_attributable_sqls === null || k.campaign_attributable_sqls === undefined)
-        ? sqlRate
+        ? "Campaign attribution unavailable"
         : `${escapeHtml(fmtCount(k.campaign_attributable_sqls))} safely campaign-attributable`,
       // PR-ADS-152: NO delta on the Google Ads-source SQL headline — the
       // period_change "sqls" delta is the campaign-attributable subset, a

@@ -355,6 +355,14 @@ def test_dashboard_ga_source_card_has_no_campaign_attributable_delta():
     assert 'dashDeltaChip("sqls"' not in card          # never the campaign-attributable delta
 
 
+def test_dashboard_null_campaign_attributable_shows_unavailable_not_rate():
+    card = _ga_source_card()
+    # When campaign_attributable_sqls is null, the card shows an honest
+    # "unavailable", NOT sqlRate (which belongs to the narrower population).
+    assert '? "Campaign attribution unavailable"' in card
+    assert "? sqlRate" not in card                     # the old rate fallback is gone
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Correction 3 — campaign-identity failure: NO safe-label fallback
 # ═════════════════════════════════════════════════════════════════════════════

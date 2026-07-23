@@ -54,12 +54,16 @@ def fetch_canonical_inputs(start: date | None, end: date) -> dict:
     Returns ``{available, lead_rows, exclusions, classification, table,
     date_field}`` where:
 
-      - ``lead_rows`` — EVERY ``leads`` snapshot whose ``contact_created_at`` is
-        inside ``[start, end]`` (or ``contact_created_at IS NULL``, so the
-        service can prove the "missing business date → not counted" rule), across
-        ALL sources. Never pre-deduplicated: the service picks the latest snapshot
-        per durable identity (run_date DESC, id DESC) so latest-state truth is
-        decided in ONE audited place. ``start=None`` means no lower bound.
+      - ``lead_rows`` — the LATEST ``leads`` snapshot per durable contact identity
+        (DISTINCT ON contact key, run_date DESC, id DESC across ALL snapshots),
+        THEN windowed to those whose latest ``contact_created_at`` is inside
+        ``[start, end]`` (or ``contact_created_at IS NULL``, so the service can
+        prove the "missing business date → not counted" rule), across ALL sources.
+        Deduplicating globally BEFORE windowing means a newer out-of-window
+        snapshot correctly suppresses an older in-window one — latest-state truth
+        is read from the true latest snapshot. One row per contact (not unlimited
+        history). ``start=None`` means no lower bound. The service re-applies the
+        window/dedup harmlessly (idempotent) and layers exclusions + scopes on top.
       - ``exclusions`` — the set of ``lead_truth_exclusions.lead_id`` keys.
       - ``classification`` — the durable ``contact_source_classification`` rows
         (one per contact_key) so the service can detect stale / missing
@@ -74,22 +78,38 @@ def fetch_canonical_inputs(start: date | None, end: date) -> dict:
             if conn is None:
                 return _unavailable()
             with conn.cursor() as cur:
+                # PR-ADS-152: deduplicate to the LATEST snapshot per durable contact
+                # key GLOBALLY first (across all snapshots), and only THEN window the
+                # resulting latest rows. Filtering by contact_created_at before the
+                # dedup would let an older in-window snapshot survive when the
+                # contact's true latest snapshot is out of the window — the window
+                # (and the latest status) must be read from the latest snapshot. The
+                # dedup is one row per contact (not unlimited history) so it stays
+                # bounded.
                 cur.execute(
                     f"""
-                    SELECT {_CONTACT_KEY} AS contact_key,
-                           contact_id,
-                           id AS row_id,
-                           run_date,
-                           contact_created_at,
-                           status_category,
-                           source_type,
-                           hs_analytics_source,
-                           campaign_name,
-                           keyword,
-                           country,
-                           company,
-                           (gclid IS NOT NULL AND gclid <> '') AS has_gclid
-                    FROM leads
+                    WITH latest AS (
+                        SELECT DISTINCT ON ({_CONTACT_KEY})
+                               {_CONTACT_KEY} AS contact_key,
+                               contact_id,
+                               id AS row_id,
+                               run_date,
+                               contact_created_at,
+                               status_category,
+                               source_type,
+                               hs_analytics_source,
+                               campaign_name,
+                               keyword,
+                               country,
+                               company,
+                               (gclid IS NOT NULL AND gclid <> '') AS has_gclid
+                        FROM leads
+                        ORDER BY {_CONTACT_KEY}, run_date DESC, id DESC
+                    )
+                    SELECT contact_key, contact_id, row_id, run_date, contact_created_at,
+                           status_category, source_type, hs_analytics_source, campaign_name,
+                           keyword, country, company, has_gclid
+                    FROM latest
                     WHERE contact_created_at IS NULL
                        OR (contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
                            AND (%s::date IS NULL

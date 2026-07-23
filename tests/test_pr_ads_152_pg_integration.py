@@ -204,6 +204,63 @@ def test_repair_dry_run_reads_dated_contacts_apply_repairs(monkeypatch, pg):
     assert again["report"]["missing_backfilled"] == 0
 
 
+def _seed_ordering(connection):
+    """Seed the latest-snapshot ordering scenarios. Window = current_quarter
+    (Jul 1–23, 2026); in-window date = 2026-07-05, out-of-window date = 2026-06-01."""
+    with connection.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO runs (run_type, started_at, status) "
+                        "VALUES ('weekly', NOW(), 'success') RETURNING id")
+            run_id = cur.fetchone()[0]
+
+            def lead(contact_id, status, created, run_date):
+                cur.execute(
+                    """INSERT INTO leads (run_id, run_date, contact_id, campaign_name,
+                                          keyword, country, mql_status, status_category,
+                                          gclid, source_type, company, contact_created_at,
+                                          hs_analytics_source)
+                       VALUES (%s,%s,%s,'Brand - US','tms','US','x',%s,'G',
+                               'paid_search',%s,%s,'PAID_SEARCH')""",
+                    (run_id, run_date, contact_id, status, f"Co {contact_id}", created))
+
+            # s1: older in-window qualified, newer OUT-OF-WINDOW wrong_fit → latest is
+            # out of window → NOT counted.
+            lead("s1", "qualified", "2026-07-05", "2026-07-06")
+            lead("s1", "wrong_fit", "2026-06-01", "2026-07-12")
+            # s2: older in-window qualified, newer OUT-OF-WINDOW qualified → NOT counted.
+            lead("s2", "qualified", "2026-07-05", "2026-07-06")
+            lead("s2", "qualified", "2026-06-01", "2026-07-12")
+            # s3: older OUT-OF-WINDOW, newer in-window qualified → counted once.
+            lead("s3", "wrong_fit", "2026-06-01", "2026-07-06")
+            lead("s3", "qualified", "2026-07-05", "2026-07-12")
+            # s4: same-day snapshots — the LATER inserted row (higher id) is qualified;
+            # id DESC must pick it → counted (id ASC would pick wrong_fit → not counted).
+            lead("s4", "wrong_fit", "2026-07-05", "2026-07-12")
+            lead("s4", "qualified", "2026-07-05", "2026-07-12")
+            # s5: identical contact_created_at across snapshots; latest run_date status
+            # (wrong_fit) must win → NOT counted.
+            lead("s5", "qualified", "2026-07-05", "2026-07-06")
+            lead("s5", "wrong_fit", "2026-07-05", "2026-07-12")
+
+
+def test_latest_snapshot_selected_before_window(monkeypatch, pg):
+    connection = _use_cluster(monkeypatch, pg)
+    _seed_ordering(connection)
+    from services import canonical_contact_outcome_service as canon
+
+    now = datetime(2026, 7, 23, tzinfo=timezone.utc)
+    out = canon.build(canon.WINDOW_BUSINESS, "current_quarter", now=now)
+    counted = {c["contact_key"] for c in out["contacts"] if c["is_sql"]}
+    # Only s3 (newer in-window qualified) and s4 (same-day, id DESC → qualified).
+    assert counted == {"s3", "s4"}
+    assert out["counts"]["total_all_source_sqls"] == 2
+    assert out["counts"]["google_ads_source_sqls"] == 2
+    # s1/s2 prove a newer out-of-window snapshot suppresses an older in-window one.
+    assert "s1" not in counted and "s2" not in counted
+    # s5 proves latest status wins even with identical contact_created_at.
+    assert "s5" not in counted
+
+
 def test_canonical_scopes_dedupe_and_exclude(monkeypatch, pg):
     connection = _use_cluster(monkeypatch, pg)
     _seed(connection)
