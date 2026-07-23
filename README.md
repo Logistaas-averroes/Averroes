@@ -12,9 +12,7 @@ This system connects Windsor.ai (Google Ads data), HubSpot CRM (pipeline data), 
 
 | Component | Tool | Cost |
 |-----------|------|------|
-| AI engine | Claude Sonnet (Anthropic API) | ~$20/mo |
 | Version control | GitHub | $10/mo |
-| Google Ads data | Windsor.ai Basic | $23/mo |
 | Hosting + scheduler | Render.com | $7/mo |
 | **Total** | | **$60/mo** |
 
