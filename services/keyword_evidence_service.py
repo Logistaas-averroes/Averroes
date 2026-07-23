@@ -851,9 +851,30 @@ def build_keyword_evidence(window: str, *, page: int = 1,
         "platform_date_field": "source_date",
         "sql_date_field": "contact_created_at",
         "sql_attribution": _sql_attribution_block(sql_attr),
+        # PR-ADS-152: canonical SQL-scope reconciliation (§7). The keyword page
+        # counts the keyword-attributable subset — the coverage statement discloses
+        # total Google Ads-source SQLs, the campaign-attributable subset, and the
+        # uniquely-keyword-attributed further subset.
+        "sql_reconciliation": _canonical_keyword_reconciliation(window, sql_attr, now),
         "audit": _audit_block(base, pop, mon, total, ordered,
                               pagination_complete=(total <= offset + page_size)),
     }
+
+
+def _canonical_keyword_reconciliation(window, sql_attr, now) -> dict:
+    """Canonical reconciliation block for the keyword page — keyword-attributable
+    scope, on the evidence window. Defensive; never breaks the page."""
+    try:
+        from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+        recon = sql_attr.get("reconciliation") or {}
+        kw_attributed = recon.get("uniquely_attributed_sql_contacts")
+        return _canon.page_reconciliation(
+            _canon.WINDOW_EVIDENCE, window, _canon.SCOPE_KEYWORD_ATTRIBUTABLE,
+            now=now, consumer_count=kw_attributed, keyword_attributable=kw_attributed)
+    except Exception:  # noqa: BLE001
+        from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+        return _canon.page_reconciliation(
+            _canon.WINDOW_EVIDENCE, window, _canon.SCOPE_KEYWORD_ATTRIBUTABLE, now=now)
 
 
 def build_keyword_export(window: str, *, q=None, campaign=None, match_type=None,

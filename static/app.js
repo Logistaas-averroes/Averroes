@@ -2409,14 +2409,30 @@ function renderDashKpiRow(d) {
       ok: k.customers !== null && k.customers !== undefined,
     },
     {
-      key: "sqls",
-      label: "SQLs",
-      value: dashValue(k.sqls, fmtCount),
-      sub: sqlRate,
-      delta: dashDeltaChip("sqls", pc),
+      // PR-ADS-152 §1: the SQL headline is the canonical Google Ads-source count
+      // (deduplicated, exclusion-filtered, staleness-aware, real campaign
+      // identity) — never the campaign-attributable subset under a bare "SQLs"
+      // label. A mismatch is withheld, never shown as a normal number.
+      key: "google_ads_source_sqls",
+      label: "Google Ads-source SQLs",
+      value: k.google_ads_source_sqls_status === "mismatch"
+        ? "Reconciliation required"
+        : dashValue(k.google_ads_source_sqls, fmtCount),
+      // When the campaign-attributable subset is null (identity contract
+      // unavailable) show an honest "unavailable" — NOT sqlRate, which belongs to
+      // the old narrower campaign-attributable population (PR-ADS-152).
+      sub: (k.campaign_attributable_sqls === null || k.campaign_attributable_sqls === undefined)
+        ? "Campaign attribution unavailable"
+        : `${escapeHtml(fmtCount(k.campaign_attributable_sqls))} safely campaign-attributable`,
+      // PR-ADS-152: NO delta on the Google Ads-source SQL headline — the
+      // period_change "sqls" delta is the campaign-attributable subset, a
+      // different scope, and there is no previous-period canonical Google
+      // Ads-source comparison yet. Attaching it would mislabel the delta.
+      delta: "",
       spark: "",
-      source: "HubSpot qualified leads",
-      ok: k.sqls !== null && k.sqls !== undefined,
+      source: "Canonical Google Ads-source SQLs",
+      ok: k.google_ads_source_sqls_status !== "mismatch"
+        && k.google_ads_source_sqls !== null && k.google_ads_source_sqls !== undefined,
     },
     {
       key: "roas",
@@ -7715,6 +7731,21 @@ function renderSourceChannelRows(group, ch, gi, ci) {
   return channelHead + platformRows;
 }
 
+// PR-ADS-152 §1: the Google Ads group's SQL count is the canonical
+// google_ads_source_sqls scope (not the classification-derived legacy count),
+// with the campaign-attributable subset disclosed. A mismatch is withheld and
+// rendered "Reconciliation required", never a contradictory normal number.
+function sourceGaSqlsChip(group) {
+  if (group.has_spend !== true) return "";
+  const val = group.sql_reconciliation_status === "mismatch"
+    ? "Reconciliation required"
+    : dashValue(group.google_ads_source_sqls, fmtCount);
+  const camp = (group.campaign_attributable_sqls === null || group.campaign_attributable_sqls === undefined)
+    ? ""
+    : `<small class="source-sqls-scope">${escapeHtml(fmtCount(group.campaign_attributable_sqls))} campaign-attributable</small>`;
+  return `<div><span>Google Ads-source SQLs</span><strong>${escapeHtml(val)}</strong>${camp}</div>`;
+}
+
 function renderSourceGroupSection(group, gi, spendTruth) {
   const channels = group.channels || [];
   const headerRow = `
@@ -7756,6 +7787,7 @@ function renderSourceGroupSection(group, gi, spendTruth) {
       </div>
       <div class="revenue-summary-strip revenue-summary-strip--four source-group-kpis">
         <div><span>Leads</span><strong>${fmtCount(group.leads)}</strong></div>
+        ${sourceGaSqlsChip(group)}
         <div><span>Customers</span><strong>${fmtCount(group.customers)}</strong></div>
         <div><span>Won Revenue</span><strong>${fmtMoney(group.won_revenue)}</strong></div>
         ${spendChip}
@@ -10736,15 +10768,31 @@ function renderKeywordTab() {
 // low attribution coverage hide behind a headline count.
 function kwSqlCoverageNote() {
   const s = _kwData && _kwData.sql_attribution;
+  const r = _kwData && _kwData.sql_reconciliation;
   if (!s) return "";
+  // PR-ADS-152: a canonical-scope mismatch is never rendered as a normal count.
+  if (r && r.reconciliation_status === "mismatch") {
+    return `<div class="kw-sql-note" role="note">SQL attribution coverage: <strong>Reconciliation required</strong> — the canonical SQL scopes do not reconcile for this window, so the counts are withheld.</div>`;
+  }
   if (!s.sql_attribution_available) {
     return `<div class="kw-sql-note" role="note">SQL attribution unavailable — HubSpot qualified-contact evidence could not be loaded for this window.</div>`;
   }
-  const total = s.sql_total_contacts;
-  if (total === null || total === undefined) return "";
-  const attr = s.sql_attributed_count || 0;
-  const amb = s.sql_ambiguous_count || 0;
-  return `<div class="kw-sql-note" role="note">SQL attribution coverage: <strong>${fmtCount(attr)} of ${fmtCount(total)}</strong> qualified paid-search contacts uniquely attributed to a keyword${amb ? ` · ${fmtCount(amb)} ambiguous` : ""}. SQLs are HubSpot-confirmed qualified contacts on their created date — not Google Ads conversions.</div>`;
+  // The nested scopes, most-inclusive first: Google Ads-source ⊇
+  // campaign-attributable ⊇ uniquely keyword-attributed.
+  const gaSource = r ? r.google_ads_source_sqls : null;
+  const campAttr = r ? r.campaign_attributable_sqls : null;
+  const uniq = s.sql_attributed_count;
+  const amb = (s.sql_ambiguous_count || 0) + (s.sql_unattributed_count || 0);
+  return `<div class="kw-sql-note" role="note">
+    <div class="kw-sql-coverage-title">SQL attribution coverage:</div>
+    <ul class="kw-sql-coverage">
+      <li>Google Ads-source SQLs: <strong>${dashValue(gaSource, fmtCount)}</strong></li>
+      <li>Campaign-attributable SQLs: <strong>${dashValue(campAttr, fmtCount)}</strong></li>
+      <li>Uniquely keyword-attributed SQLs: <strong>${dashValue(uniq, fmtCount)}</strong></li>
+      <li>Ambiguous/unattributed: <strong>${fmtCount(amb)}</strong></li>
+    </ul>
+    <div class="kw-sql-coverage-foot">Each scope is a subset of the one above it. SQLs are HubSpot-confirmed qualified contacts on their created date — not Google Ads conversions.</div>
+  </div>`;
 }
 
 // §7 — one compact Attributed-SQLs cell. Positive = restrained green; genuine

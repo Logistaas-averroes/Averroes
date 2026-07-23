@@ -332,6 +332,46 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
 
     summary = source_attribution_health_counts()
 
+    # PR-ADS-152 §1: the Google Ads group's DISPLAYED SQL count is the canonical
+    # google_ads_source_sqls — deduplicated, exclusion-filtered, staleness-aware,
+    # real campaign identity — NOT the raw classification count. The old
+    # classification-derived number moves to an audit-only ``legacy_classification_sqls``
+    # field. The group, its canonical Paid Search channel and its Google Ads
+    # platform all display the SAME reconciled total. A mismatch withholds the count
+    # (rendered "Reconciliation required"), never a contradictory normal number.
+    from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+    sql_reconciliation = _canon.page_reconciliation(
+        _canon.WINDOW_BUSINESS, window, _canon.SCOPE_GOOGLE_ADS_SOURCE, now=now)
+    _recon_status = sql_reconciliation.get("reconciliation_status")
+    _available = _recon_status != _canon.STATUS_UNAVAILABLE
+    _mismatch = _recon_status == _canon.STATUS_MISMATCH
+    canonical_ga_sqls = sql_reconciliation.get("google_ads_source_sqls")
+    _display_sqls = None if _mismatch else canonical_ga_sqls
+
+    for g in groups:
+        if g["group"] != GROUP_GOOGLE_ADS:
+            continue
+        g["google_ads_source_sqls"] = canonical_ga_sqls
+        g["campaign_attributable_sqls"] = sql_reconciliation.get("campaign_attributable_sqls")
+        g["sqls_scope"] = _canon.SCOPE_GOOGLE_ADS_SOURCE
+        g["sql_reconciliation_status"] = _recon_status
+        # Only override the displayed count when the canonical reconciliation is
+        # actually available; otherwise keep the classification-derived number so a
+        # DB-less context still renders an honest figure.
+        if _available:
+            g["legacy_classification_sqls"] = g.get("sqls")
+            g["sqls"] = _display_sqls
+            for ch in g.get("channels") or []:
+                if ch.get("channel") == CH_PAID_SEARCH:
+                    ch["legacy_classification_sqls"] = ch.get("sqls")
+                    ch["sqls"] = _display_sqls
+                    ch["sqls_scope"] = _canon.SCOPE_GOOGLE_ADS_SOURCE
+                    for pf in ch.get("platforms") or []:
+                        if pf.get("platform") == PF_GOOGLE_ADS:
+                            pf["legacy_classification_sqls"] = pf.get("sqls")
+                            pf["sqls"] = _display_sqls
+                            pf["sqls_scope"] = _canon.SCOPE_GOOGLE_ADS_SOURCE
+
     return {
         "window": resolved,
         "groups": groups,
@@ -342,6 +382,8 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         "source_spend_truth": spend_truth,
         "source_truth": "hubspot_original_source_classification",
         "google_ads_conversion_value_used": False,
+        # PR-ADS-152: canonical SQL-scope reconciliation metadata (§7).
+        "sql_reconciliation": sql_reconciliation,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 

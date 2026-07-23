@@ -894,6 +894,20 @@ def build_dashboard_overview(window: str = "current_quarter",
         ledger_status=(deals_contract.get("source_health") or {}).get("ledger_status"),
     )
 
+    # PR-ADS-152 §1: the Dashboard SQL headline is the canonical
+    # google_ads_source_sqls (deduplicated, exclusion-filtered, staleness-aware,
+    # real campaign identity) — NOT the mart's campaign-attributable ``sqls`` under
+    # a bare "SQLs" label. The campaign-attributable subset is a secondary
+    # disclosure. The page displays the canonical count verbatim, so consumer_count
+    # is None (never summary.sqls, which is a different, narrower scope).
+    from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+    sql_reconciliation = _canon.page_reconciliation(
+        _canon.WINDOW_BUSINESS, window, _canon.SCOPE_GOOGLE_ADS_SOURCE, now=now)
+    _recon_status = sql_reconciliation.get("reconciliation_status")
+    # A mismatch is never rendered as a normal count — the headline is withheld.
+    _ga_source_display = (None if _recon_status == _canon.STATUS_MISMATCH
+                          else sql_reconciliation.get("google_ads_source_sqls"))
+
     kpis = {
         # USD spend is strictly canonical: None whenever FX/coverage is unsafe.
         "google_ads_spend_usd": summary.get("spend_usd"),
@@ -904,7 +918,16 @@ def build_dashboard_overview(window: str = "current_quarter",
         "closed_won_revenue_usd": won_revenue_usd,
         "google_ads_roas": roas,
         "leads": summary.get("leads"),
+        # PR-ADS-152 §1 — the SQL headline: canonical Google Ads-source SQLs.
+        "google_ads_source_sqls": _ga_source_display,
+        "google_ads_source_sqls_scope": _canon.SCOPE_GOOGLE_ADS_SOURCE,
+        "google_ads_source_sqls_status": _recon_status,
+        # Secondary disclosure — the campaign-attributable subset (the old mart
+        # count), now under an explicitly named field, never a bare "SQLs" KPI.
+        "campaign_attributable_sqls": sql_reconciliation.get("campaign_attributable_sqls"),
+        # Back-compat: the mart's campaign-attributable count, explicitly scoped.
         "sqls": summary.get("sqls"),
+        "sqls_scope": _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
         "customers": customers,
         "sql_rate": _rate(summary.get("sqls"), summary.get("leads")),
         "customer_rate": _rate(customers, summary.get("leads")),
@@ -927,4 +950,8 @@ def build_dashboard_overview(window: str = "current_quarter",
                                           period_change, trend),
         "source_truth": "revenue_decision_mart",
         "google_ads_conversion_value_used": False,
+        # PR-ADS-152: canonical SQL-scope reconciliation metadata (§7). Its
+        # google_ads_source_sqls equals the Revenue by Source Google Ads SQL count
+        # (both read the one canonical population) — acceptance criterion #1.
+        "sql_reconciliation": sql_reconciliation,
     }

@@ -1051,7 +1051,28 @@ def api_leads(
         "returned_count": returned_count,
         "has_more": total_count > returned_count,
         "aggregates": {"totals": totals, "by_campaign": by_campaign},
+        # PR-ADS-152 §6: canonical SQL-scope reconciliation. Lead Quality counts
+        # ALL qualified leads (every source), windowed by run_date; the canonical
+        # all-source scope (windowed by contact_created_at) is disclosed here with
+        # its explicit scope so this page's "qualified" is never mistaken for a
+        # Google Ads-source SQL count.
+        "sql_reconciliation": _lead_quality_sql_reconciliation(window_key),
     }
+
+
+def _lead_quality_sql_reconciliation(window_key: str) -> dict:
+    """Canonical all-source SQL-scope reconciliation for the Lead Quality page
+    (evidence window). Defensive — never breaks the page."""
+    try:
+        from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+        block = _canon.page_reconciliation(
+            _canon.WINDOW_EVIDENCE, window_key, _canon.SCOPE_ALL_SOURCE)
+        # The page's own date field differs from the canonical business-event date;
+        # disclose it so the two are never conflated.
+        block["page_date_field"] = "run_date"
+        return block
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 @app.get("/api/deals")
@@ -8364,3 +8385,50 @@ def api_mailchimp_sync(request: Request, mode: str = "incremental") -> dict[str,
         log.error("[api/mailchimp/sync] failed: %s", exc, exc_info=True)
         return {"status": "failed", "mode": mode,
                 "error": f"{type(exc).__name__}: sync failed"}
+
+
+# ── PR-ADS-152: Canonical SQL-truth reconciliation (admin, read-only) ─────────
+@app.get("/api/audit/sql-truth")
+def api_audit_sql_truth(
+    request: Request,
+    business_window: str = Query(default="current_quarter"),
+    evidence_window: str = Query(default="30d"),
+) -> dict[str, Any]:
+    """Admin-only contact-level SQL-truth audit (PR-ADS-152 §1).
+
+    Proves, contact by contact, why the Dashboard / Revenue Decision Mart, Revenue
+    by Source and Keyword Evidence pages report different SQL counts for the same
+    account — reconciling the production "7 vs 1" through one canonical
+    contact-outcome population. Read-only; NEVER exposes email addresses (contact
+    id + company only). Business and evidence windows stay distinct vocabularies.
+    """
+    check_admin_or_token(request)
+    try:
+        from services.sql_truth_audit_service import run  # noqa: PLC0415
+        return run(business_window=business_window, evidence_window=evidence_window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/audit/sql-truth] failed: %s", exc)
+        raise HTTPException(status_code=500, detail="SQL-truth audit failed") from exc
+
+
+@app.post("/api/audit/sql-truth/repair-classification")
+def api_audit_sql_truth_repair(
+    request: Request,
+    apply: bool = Query(default=False),
+) -> dict[str, Any]:
+    """Reconcile and repair the contact_source_classification cache against the
+    canonical latest leads (PR-ADS-152 §6). Admin session or ADMIN_API_TOKEN.
+
+    Defaults to a dry run (plan only). ``apply=true`` performs the idempotent
+    local upsert. Read-only with respect to HubSpot / Google Ads; never deletes or
+    overwrites original evidence.
+    """
+    check_admin_or_token(request)
+    try:
+        from services.canonical_classification_repair_service import run_repair  # noqa: PLC0415
+        return run_repair(dry_run=not apply)
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/audit/sql-truth/repair-classification] failed: %s", exc)
+        raise HTTPException(status_code=500, detail="classification repair failed") from exc
