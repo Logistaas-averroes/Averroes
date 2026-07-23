@@ -8364,3 +8364,50 @@ def api_mailchimp_sync(request: Request, mode: str = "incremental") -> dict[str,
         log.error("[api/mailchimp/sync] failed: %s", exc, exc_info=True)
         return {"status": "failed", "mode": mode,
                 "error": f"{type(exc).__name__}: sync failed"}
+
+
+# ── PR-ADS-152: Canonical SQL-truth reconciliation (admin, read-only) ─────────
+@app.get("/api/audit/sql-truth")
+def api_audit_sql_truth(
+    request: Request,
+    business_window: str = Query(default="current_quarter"),
+    evidence_window: str = Query(default="30d"),
+) -> dict[str, Any]:
+    """Admin-only contact-level SQL-truth audit (PR-ADS-152 §1).
+
+    Proves, contact by contact, why the Dashboard / Revenue Decision Mart, Revenue
+    by Source and Keyword Evidence pages report different SQL counts for the same
+    account — reconciling the production "7 vs 1" through one canonical
+    contact-outcome population. Read-only; NEVER exposes email addresses (contact
+    id + company only). Business and evidence windows stay distinct vocabularies.
+    """
+    check_admin_or_token(request)
+    try:
+        from services.sql_truth_audit_service import run  # noqa: PLC0415
+        return run(business_window=business_window, evidence_window=evidence_window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/audit/sql-truth] failed: %s", exc)
+        raise HTTPException(status_code=500, detail="SQL-truth audit failed") from exc
+
+
+@app.post("/api/audit/sql-truth/repair-classification")
+def api_audit_sql_truth_repair(
+    request: Request,
+    apply: bool = Query(default=False),
+) -> dict[str, Any]:
+    """Reconcile and repair the contact_source_classification cache against the
+    canonical latest leads (PR-ADS-152 §6). Admin session or ADMIN_API_TOKEN.
+
+    Defaults to a dry run (plan only). ``apply=true`` performs the idempotent
+    local upsert. Read-only with respect to HubSpot / Google Ads; never deletes or
+    overwrites original evidence.
+    """
+    check_admin_or_token(request)
+    try:
+        from services.canonical_classification_repair_service import run_repair  # noqa: PLC0415
+        return run_repair(dry_run=not apply)
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/audit/sql-truth/repair-classification] failed: %s", exc)
+        raise HTTPException(status_code=500, detail="classification repair failed") from exc

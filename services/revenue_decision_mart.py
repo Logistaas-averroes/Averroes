@@ -427,11 +427,24 @@ def build_revenue_decision_mart(
     payload = _view_payload(view, window, core, now)
     diagnostics = _diagnostics(core, view, spend_truth)
 
+    # PR-ADS-152: the mart top-line (and ROAS by Campaign) is the
+    # campaign-attributable SQL subset — campaign ROAS requires campaign identity.
+    # Disclose that scope explicitly and reconcile against the canonical
+    # population, so the top-line is never mistaken for every Google Ads-source SQL.
+    from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+    sql_reconciliation = _canon.page_reconciliation(
+        _canon.WINDOW_BUSINESS, window, _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+        now=now, consumer_count=summary.get("sqls"))
+
     return {
         "view": view,
         "window": _window_block(core),
         "spend_truth": spend_truth,
         "summary": summary,
+        # PR-ADS-152: canonical SQL-scope reconciliation metadata (§7). The mart's
+        # ``summary.sqls`` is the campaign-attributable subset, not every Google
+        # Ads-source SQL — disclosed here.
+        "sql_reconciliation": sql_reconciliation,
         "readiness": readiness,
         "rows": payload["rows"],
         # Deal view: the ledger's own summary (consistent with its rows) and the

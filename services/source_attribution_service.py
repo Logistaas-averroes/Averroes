@@ -332,6 +332,24 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
 
     summary = source_attribution_health_counts()
 
+    # PR-ADS-152: reconcile the Google Ads row against the canonical
+    # contact-outcome population. The Google Ads row's SQL scope is
+    # google_ads_source_sqls — deduplicated, exclusion-filtered, staleness-aware —
+    # NOT a raw classification count. This block names the scope so the number is
+    # never rendered as a bare, unscoped "SQLs", and discloses the
+    # campaign-attributable subset that the mart / keyword pages count.
+    from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+    sql_reconciliation = _canon.page_reconciliation(
+        _canon.WINDOW_BUSINESS, window, _canon.SCOPE_GOOGLE_ADS_SOURCE, now=now)
+    canonical_ga_sqls = sql_reconciliation.get("google_ads_source_sqls")
+    for g in groups:
+        if g["group"] == GROUP_GOOGLE_ADS:
+            # The reconciled, exclusion-safe Google Ads-source SQL count for the
+            # row (the classification-derived ``sqls`` stays for continuity/audit).
+            g["google_ads_source_sqls"] = canonical_ga_sqls
+            g["campaign_attributable_sqls"] = sql_reconciliation.get(
+                "campaign_attributable_sqls")
+
     return {
         "window": resolved,
         "groups": groups,
@@ -342,6 +360,8 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         "source_spend_truth": spend_truth,
         "source_truth": "hubspot_original_source_classification",
         "google_ads_conversion_value_used": False,
+        # PR-ADS-152: canonical SQL-scope reconciliation metadata (§7).
+        "sql_reconciliation": sql_reconciliation,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 

@@ -894,6 +894,16 @@ def build_dashboard_overview(window: str = "current_quarter",
         ledger_status=(deals_contract.get("source_health") or {}).get("ledger_status"),
     )
 
+    # PR-ADS-152: make the SQL KPI scope explicit. The mart's ``sqls`` is the
+    # campaign-attributable subset; the canonical service supplies the broader
+    # google_ads_source_sqls headline plus the campaign-attributable disclosure so
+    # a scoped subset is never shown under a bare "SQLs" label. Additive and
+    # defensive — the existing KPIs are unchanged.
+    from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+    sql_reconciliation = _canon.page_reconciliation(
+        _canon.WINDOW_BUSINESS, window, _canon.SCOPE_GOOGLE_ADS_SOURCE, now=now,
+        consumer_count=summary.get("sqls"))
+
     kpis = {
         # USD spend is strictly canonical: None whenever FX/coverage is unsafe.
         "google_ads_spend_usd": summary.get("spend_usd"),
@@ -905,6 +915,11 @@ def build_dashboard_overview(window: str = "current_quarter",
         "google_ads_roas": roas,
         "leads": summary.get("leads"),
         "sqls": summary.get("sqls"),
+        # The existing ``sqls`` KPI is the campaign-attributable subset — labelled
+        # so the UI never renders it as an unscoped "SQLs" (PR-ADS-152 §4).
+        "sqls_scope": _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+        "google_ads_source_sqls": sql_reconciliation.get("google_ads_source_sqls"),
+        "campaign_attributable_sqls": sql_reconciliation.get("campaign_attributable_sqls"),
         "customers": customers,
         "sql_rate": _rate(summary.get("sqls"), summary.get("leads")),
         "customer_rate": _rate(customers, summary.get("leads")),
@@ -927,4 +942,8 @@ def build_dashboard_overview(window: str = "current_quarter",
                                           period_change, trend),
         "source_truth": "revenue_decision_mart",
         "google_ads_conversion_value_used": False,
+        # PR-ADS-152: canonical SQL-scope reconciliation metadata (§7). Its
+        # google_ads_source_sqls equals the Revenue by Source Google Ads SQL count
+        # (both read the one canonical population) — acceptance criterion #1.
+        "sql_reconciliation": sql_reconciliation,
     }
