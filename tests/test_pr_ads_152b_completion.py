@@ -311,6 +311,105 @@ def test_app_disclosure_of_campaign_attributable_subset():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Correction 1 — Keyword Evidence coverage disclosure shows the four scoped lines
+# ═════════════════════════════════════════════════════════════════════════════
+def _kw_note():
+    i = _APP.index("function kwSqlCoverageNote")
+    return _APP[i:i + 1600]
+
+
+def test_keyword_coverage_shows_four_scoped_lines():
+    note = _kw_note()
+    assert "Google Ads-source SQLs:" in note
+    assert "Campaign-attributable SQLs:" in note
+    assert "Uniquely keyword-attributed SQLs:" in note
+    assert "Ambiguous/unattributed:" in note
+
+
+def test_keyword_coverage_reads_reconciliation_and_attribution():
+    note = _kw_note()
+    assert "_kwData.sql_reconciliation" in note      # scopes from sql_reconciliation
+    assert "_kwData.sql_attribution" in note          # attributed/ambiguous from sql_attribution
+    assert "r.google_ads_source_sqls" in note
+    assert "r.campaign_attributable_sqls" in note
+    assert "s.sql_attributed_count" in note
+
+
+def test_keyword_coverage_mismatch_shows_reconciliation_required():
+    note = _kw_note()
+    assert 'reconciliation_status === "mismatch"' in note
+    assert "Reconciliation required" in note
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Correction 2 — Dashboard Google Ads-source SQL headline has NO mislabelled delta
+# ═════════════════════════════════════════════════════════════════════════════
+def _ga_source_card():
+    i = _APP.index('key: "google_ads_source_sqls"')
+    return _APP[i:i + 1100]
+
+
+def test_dashboard_ga_source_card_has_no_campaign_attributable_delta():
+    card = _ga_source_card()
+    assert 'delta: ""' in card                         # delta removed on this card
+    assert 'dashDeltaChip("sqls"' not in card          # never the campaign-attributable delta
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Correction 3 — campaign-identity failure: NO safe-label fallback
+# ═════════════════════════════════════════════════════════════════════════════
+def test_unavailable_resolver_never_treats_a_label_as_resolved():
+    ok, reason = canon.unavailable_campaign_resolver("A Perfectly Real-Looking Campaign")
+    assert ok is False
+    assert reason == canon.REASON_CAMPAIGN_IDENTITY_UNAVAILABLE
+
+
+def test_identity_contract_unavailable_returns_no_fallback(monkeypatch):
+    # Canonical spend source unavailable → identity_available False, unavailable
+    # resolver (NOT the safe-label default).
+    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend",
+                        lambda s, e: {"available": False, "rows": []})
+    resolver, available = canon._build_identity_resolver(date(2026, 7, 1), date(2026, 7, 23))
+    assert available is False
+    assert resolver is canon.unavailable_campaign_resolver
+    assert resolver("Brand - US") == (False, canon.REASON_CAMPAIGN_IDENTITY_UNAVAILABLE)
+
+
+def test_build_nulls_campaign_attributable_when_identity_unavailable(monkeypatch):
+    rows = [_lead("g1", campaign="Brand - US"), _lead("g2", campaign="Brand - UK")]
+    monkeypatch.setattr(
+        "db.canonical_contact_outcome_repository.fetch_canonical_inputs",
+        lambda start, end: {"available": True, "lead_rows": rows,
+                            "exclusions": set(), "classification": []})
+    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend",
+                        lambda s, e: {"available": False, "rows": []})
+    out = canon.build(canon.WINDOW_BUSINESS, "current_quarter",
+                      now=datetime(2026, 7, 23, tzinfo=timezone.utc))
+    # google_ads_source stays available; campaign_attributable is null, not 0.
+    assert out["counts"]["google_ads_source_sqls"] == 2
+    assert out["counts"]["campaign_attributable_sqls"] is None
+    assert out["reconciliation"]["campaign_attributable_sqls"] is None
+    assert out["reconciliation"]["reconciliation_status"] in (
+        canon.STATUS_PARTIAL, canon.STATUS_UNAVAILABLE)
+
+
+def test_reconciliation_status_partial_when_campaign_attributable_null():
+    counts = {"total_all_source_sqls": 3, "google_ads_source_sqls": 2,
+              "campaign_attributable_sqls": None, "excluded_sql_contacts": 0}
+    meta = canon.reconciliation_metadata({"counts": counts}, canon.SCOPE_GOOGLE_ADS_SOURCE)
+    assert meta["campaign_attributable_sqls"] is None
+    assert meta["reconciliation_status"] == canon.STATUS_PARTIAL
+
+
+def test_no_safe_label_fallback_in_source():
+    src = (_ROOT / "services" / "canonical_contact_outcome_service.py").read_text()
+    # The production identity builder must not silently fall back to the safe-label
+    # resolver on error.
+    assert "using safe-label fallback" not in src
+    assert "return default_campaign_resolver" not in src
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # §6 — every consuming page wires the canonical reconciliation
 # ═════════════════════════════════════════════════════════════════════════════
 @pytest.mark.parametrize("path,needle", [

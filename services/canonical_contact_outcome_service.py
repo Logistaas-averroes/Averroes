@@ -104,6 +104,10 @@ REASON_UNKNOWN = "unknown_reason"
 REASON_CAMPAIGN_NOT_GOOGLE_ADS = "campaign_not_google_ads"
 REASON_AMBIGUOUS_CAMPAIGN_IDENTITY = "ambiguous_campaign_identity"
 REASON_UNRESOLVED_CAMPAIGN_MAPPING = "unresolved_campaign_mapping"
+# The Google Ads campaign-identity contract could not be consulted (errored /
+# source unavailable). Campaign attribution is UNAVAILABLE — never guessed from a
+# bare campaign label.
+REASON_CAMPAIGN_IDENTITY_UNAVAILABLE = "campaign_identity_unavailable"
 
 
 # ── Small pure helpers ───────────────────────────────────────────────────────
@@ -535,6 +539,11 @@ def _reconciliation_status(*, available, counts, keyword_attributable,
         if canonical is not None and consumer_count != canonical:
             return STATUS_MISMATCH
 
+    # Campaign attribution unavailable (identity contract could not be consulted)
+    # while the source layer is present → partial, never reconciled.
+    if camp is None and ga is not None:
+        return STATUS_PARTIAL
+
     # Coverage gap: qualified contacts excluded, or Google-Ads-source SQLs that are
     # not campaign-attributable, or a stale/missing classification cache — all
     # honest "partial" states (the difference is explained, not hidden).
@@ -612,7 +621,7 @@ def build(window_type: str, window_key: str, now: datetime | None = None) -> dic
     win = resolve_window_contract(window_type, window_key, now=now)
     inputs = repo.fetch_canonical_inputs(win["start"], win["end"])
     available = inputs.get("available", False)
-    resolver = _build_identity_resolver(win["start"], win["end"])
+    resolver, identity_available = _build_identity_resolver(win["start"], win["end"])
     populations = build_populations(
         inputs.get("lead_rows") or [],
         inputs.get("exclusions") or set(),
@@ -620,6 +629,10 @@ def build(window_type: str, window_key: str, now: datetime | None = None) -> dic
         win["start"], win["end"],
         campaign_resolver=resolver,
     )
+    # Campaign attribution is UNAVAILABLE (null), not zero, when the identity
+    # contract could not be consulted — google_ads_source stays available.
+    if not identity_available:
+        populations["counts"]["campaign_attributable_sqls"] = None
     window_out = {k: v for k, v in win.items() if k not in ("start", "end")}
     return {
         "available": available,
@@ -633,23 +646,41 @@ def build(window_type: str, window_key: str, now: datetime | None = None) -> dic
     }
 
 
+def unavailable_campaign_resolver(_campaign_name) -> tuple[bool, str | None]:
+    """Resolver for when the Google Ads campaign-identity contract cannot be
+    consulted: NOTHING is campaign-attributable and a non-empty label is NEVER
+    treated as a resolved identity. The caller nulls the campaign_attributable
+    count so it renders Unavailable, not a fabricated 0 (PR-ADS-152 §3 follow-up)."""
+    return (False, REASON_CAMPAIGN_IDENTITY_UNAVAILABLE)
+
+
 def _build_identity_resolver(start: date | None, end: date | None):
-    """Construct the production Google Ads campaign-identity resolver from the
-    canonical spend + durable identity mappings. Falls back to the safe-label
-    resolver if the identity contract is unavailable (never fabricates a mapping)."""
+    """Return ``(resolver, identity_available)`` for the production Google Ads
+    campaign-identity contract.
+
+    There is NO safe-label fallback: if the contract errors or its source is
+    unavailable, ``identity_available`` is False and the resolver marks everything
+    unattributable — a non-empty campaign string is never treated as a resolved
+    identity. Only a SUCCESSFULLY-consulted (possibly empty) contract yields a real
+    resolver with ``identity_available`` True.
+    """
     try:
         from db import revenue_repository as rev  # noqa: PLC0415
         from services.search_term_evidence_service import (  # noqa: PLC0415
             _identity_label_index, _spend_index,
         )
         canonical = rev.fetch_canonical_campaign_spend(start, end)
+        if not canonical or canonical.get("available") is False:
+            return unavailable_campaign_resolver, False
         identity = rev.fetch_campaign_identity(canonical.get("customer_id"))
         spend_by_id, norm_to_ids = _spend_index(canonical)
         identity_by_label, _aliases = _identity_label_index(identity)
-        return make_identity_campaign_resolver(spend_by_id, norm_to_ids, identity_by_label)
+        return (make_identity_campaign_resolver(spend_by_id, norm_to_ids, identity_by_label),
+                True)
     except Exception as exc:  # noqa: BLE001
-        logger.info("campaign-identity resolver unavailable, using safe-label fallback: %s", exc)
-        return default_campaign_resolver
+        logger.info("campaign-identity contract unavailable — campaign attribution "
+                    "withheld (no safe-label fallback): %s", exc)
+        return unavailable_campaign_resolver, False
 
 
 def page_reconciliation(window_type: str, window_key: str, scope: str,

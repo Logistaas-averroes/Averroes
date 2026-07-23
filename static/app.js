@@ -2421,7 +2421,11 @@ function renderDashKpiRow(d) {
       sub: (k.campaign_attributable_sqls === null || k.campaign_attributable_sqls === undefined)
         ? sqlRate
         : `${escapeHtml(fmtCount(k.campaign_attributable_sqls))} safely campaign-attributable`,
-      delta: dashDeltaChip("sqls", pc),
+      // PR-ADS-152: NO delta on the Google Ads-source SQL headline — the
+      // period_change "sqls" delta is the campaign-attributable subset, a
+      // different scope, and there is no previous-period canonical Google
+      // Ads-source comparison yet. Attaching it would mislabel the delta.
+      delta: "",
       spark: "",
       source: "Canonical Google Ads-source SQLs",
       ok: k.google_ads_source_sqls_status !== "mismatch"
@@ -10761,15 +10765,31 @@ function renderKeywordTab() {
 // low attribution coverage hide behind a headline count.
 function kwSqlCoverageNote() {
   const s = _kwData && _kwData.sql_attribution;
+  const r = _kwData && _kwData.sql_reconciliation;
   if (!s) return "";
+  // PR-ADS-152: a canonical-scope mismatch is never rendered as a normal count.
+  if (r && r.reconciliation_status === "mismatch") {
+    return `<div class="kw-sql-note" role="note">SQL attribution coverage: <strong>Reconciliation required</strong> — the canonical SQL scopes do not reconcile for this window, so the counts are withheld.</div>`;
+  }
   if (!s.sql_attribution_available) {
     return `<div class="kw-sql-note" role="note">SQL attribution unavailable — HubSpot qualified-contact evidence could not be loaded for this window.</div>`;
   }
-  const total = s.sql_total_contacts;
-  if (total === null || total === undefined) return "";
-  const attr = s.sql_attributed_count || 0;
-  const amb = s.sql_ambiguous_count || 0;
-  return `<div class="kw-sql-note" role="note">SQL attribution coverage: <strong>${fmtCount(attr)} of ${fmtCount(total)}</strong> qualified paid-search contacts uniquely attributed to a keyword${amb ? ` · ${fmtCount(amb)} ambiguous` : ""}. SQLs are HubSpot-confirmed qualified contacts on their created date — not Google Ads conversions.</div>`;
+  // The nested scopes, most-inclusive first: Google Ads-source ⊇
+  // campaign-attributable ⊇ uniquely keyword-attributed.
+  const gaSource = r ? r.google_ads_source_sqls : null;
+  const campAttr = r ? r.campaign_attributable_sqls : null;
+  const uniq = s.sql_attributed_count;
+  const amb = (s.sql_ambiguous_count || 0) + (s.sql_unattributed_count || 0);
+  return `<div class="kw-sql-note" role="note">
+    <div class="kw-sql-coverage-title">SQL attribution coverage:</div>
+    <ul class="kw-sql-coverage">
+      <li>Google Ads-source SQLs: <strong>${dashValue(gaSource, fmtCount)}</strong></li>
+      <li>Campaign-attributable SQLs: <strong>${dashValue(campAttr, fmtCount)}</strong></li>
+      <li>Uniquely keyword-attributed SQLs: <strong>${dashValue(uniq, fmtCount)}</strong></li>
+      <li>Ambiguous/unattributed: <strong>${fmtCount(amb)}</strong></li>
+    </ul>
+    <div class="kw-sql-coverage-foot">Each scope is a subset of the one above it. SQLs are HubSpot-confirmed qualified contacts on their created date — not Google Ads conversions.</div>
+  </div>`;
 }
 
 // §7 — one compact Attributed-SQLs cell. Positive = restrained green; genuine
