@@ -92,9 +92,10 @@ def fetch_canonical_inputs(start: date | None, end: date) -> dict:
                     FROM leads
                     WHERE contact_created_at IS NULL
                        OR (contact_created_at >= COALESCE(%s::timestamptz, contact_created_at)
-                           AND contact_created_at < (%s::date + INTERVAL '1 day'))
+                           AND (%s::date IS NULL
+                                OR contact_created_at < (%s::date + INTERVAL '1 day')))
                     """,
-                    (start, end),
+                    (start, end, end),
                 )
                 lead_rows = _rows_as_dicts(cur)
                 for r in lead_rows:

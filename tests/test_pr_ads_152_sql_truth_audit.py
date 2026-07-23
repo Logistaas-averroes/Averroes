@@ -246,6 +246,14 @@ def test_endpoint_returns_audit_with_admin_token(monkeypatch):
     monkeypatch.setattr(
         "db.canonical_contact_outcome_repository.fetch_canonical_inputs",
         lambda start, end: _inputs(_seven_vs_one_rows()))
+    # The one campaign-attributable contact ("Brand - US") resolves to a canonical
+    # Google Ads campaign id via the real identity contract; the other six do not.
+    monkeypatch.setattr(
+        "db.revenue_repository.fetch_canonical_campaign_spend",
+        lambda s, e: {"customer_id": "X", "rows": [{"campaign_id": "1", "campaign_name": "Brand - US"}]})
+    monkeypatch.setattr(
+        "db.revenue_repository.fetch_campaign_identity",
+        lambda cid=None: {"available": True, "mappings": []})
     client, _server = _client()
     resp = client.get("/api/audit/sql-truth?business_window=current_quarter&evidence_window=30d",
                       headers={"Authorization": "Bearer secret-token"})

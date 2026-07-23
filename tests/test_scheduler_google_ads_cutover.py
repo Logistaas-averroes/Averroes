@@ -373,6 +373,11 @@ class TestNoUiFilesTouched:
                     content = fh.read()
             except OSError:
                 continue
-            assert "google_ads_source" not in content, (
+            # PR-ADS-152: the canonical SQL-scope field ``google_ads_source_sqls``
+            # is a legitimate UI concept (the Google Ads-source SQL count) and is
+            # unrelated to the google_ads_source data-source *adapter* this guard
+            # protects against. Strip the scope field before checking.
+            probe = content.replace("google_ads_source_sqls", "")
+            assert "google_ads_source" not in probe, (
                 f"UI file {path} must not reference google_ads_source"
             )

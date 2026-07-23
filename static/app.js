@@ -2409,14 +2409,23 @@ function renderDashKpiRow(d) {
       ok: k.customers !== null && k.customers !== undefined,
     },
     {
-      key: "sqls",
-      label: "SQLs",
-      value: dashValue(k.sqls, fmtCount),
-      sub: sqlRate,
+      // PR-ADS-152 §1: the SQL headline is the canonical Google Ads-source count
+      // (deduplicated, exclusion-filtered, staleness-aware, real campaign
+      // identity) — never the campaign-attributable subset under a bare "SQLs"
+      // label. A mismatch is withheld, never shown as a normal number.
+      key: "google_ads_source_sqls",
+      label: "Google Ads-source SQLs",
+      value: k.google_ads_source_sqls_status === "mismatch"
+        ? "Reconciliation required"
+        : dashValue(k.google_ads_source_sqls, fmtCount),
+      sub: (k.campaign_attributable_sqls === null || k.campaign_attributable_sqls === undefined)
+        ? sqlRate
+        : `${escapeHtml(fmtCount(k.campaign_attributable_sqls))} safely campaign-attributable`,
       delta: dashDeltaChip("sqls", pc),
       spark: "",
-      source: "HubSpot qualified leads",
-      ok: k.sqls !== null && k.sqls !== undefined,
+      source: "Canonical Google Ads-source SQLs",
+      ok: k.google_ads_source_sqls_status !== "mismatch"
+        && k.google_ads_source_sqls !== null && k.google_ads_source_sqls !== undefined,
     },
     {
       key: "roas",
@@ -7715,6 +7724,21 @@ function renderSourceChannelRows(group, ch, gi, ci) {
   return channelHead + platformRows;
 }
 
+// PR-ADS-152 §1: the Google Ads group's SQL count is the canonical
+// google_ads_source_sqls scope (not the classification-derived legacy count),
+// with the campaign-attributable subset disclosed. A mismatch is withheld and
+// rendered "Reconciliation required", never a contradictory normal number.
+function sourceGaSqlsChip(group) {
+  if (group.has_spend !== true) return "";
+  const val = group.sql_reconciliation_status === "mismatch"
+    ? "Reconciliation required"
+    : dashValue(group.google_ads_source_sqls, fmtCount);
+  const camp = (group.campaign_attributable_sqls === null || group.campaign_attributable_sqls === undefined)
+    ? ""
+    : `<small class="source-sqls-scope">${escapeHtml(fmtCount(group.campaign_attributable_sqls))} campaign-attributable</small>`;
+  return `<div><span>Google Ads-source SQLs</span><strong>${escapeHtml(val)}</strong>${camp}</div>`;
+}
+
 function renderSourceGroupSection(group, gi, spendTruth) {
   const channels = group.channels || [];
   const headerRow = `
@@ -7756,6 +7780,7 @@ function renderSourceGroupSection(group, gi, spendTruth) {
       </div>
       <div class="revenue-summary-strip revenue-summary-strip--four source-group-kpis">
         <div><span>Leads</span><strong>${fmtCount(group.leads)}</strong></div>
+        ${sourceGaSqlsChip(group)}
         <div><span>Customers</span><strong>${fmtCount(group.customers)}</strong></div>
         <div><span>Won Revenue</span><strong>${fmtMoney(group.won_revenue)}</strong></div>
         ${spendChip}

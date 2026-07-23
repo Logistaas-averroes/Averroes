@@ -100,21 +100,10 @@ def load_status_thresholds() -> dict[str, float]:
 
 # Google Ads account reporting timezone — spend_date rows are account-local days,
 # so the window boundary is resolved in this zone (not an implicit UTC date).
-ACCOUNT_TZ = "Europe/London"
-
-
-def _account_today(now: datetime | None) -> date:
-    """Today's date in the Google Ads account timezone (Europe/London)."""
-    try:
-        from zoneinfo import ZoneInfo  # noqa: PLC0415
-
-        tz = ZoneInfo(ACCOUNT_TZ)
-    except Exception:  # noqa: BLE001 - zoneinfo/tzdata unavailable
-        tz = timezone.utc
-    base = now or datetime.now(tz=timezone.utc)
-    if base.tzinfo is None:
-        base = base.replace(tzinfo=timezone.utc)
-    return base.astimezone(tz).date()
+# PR-ADS-152: the account timezone + "today" resolver now live in the shared
+# analysis.account_time module so the canonical Evidence Window reconciliation
+# resolves its boundary date identically. Re-exported here for back-compat.
+from analysis.account_time import ACCOUNT_TZ, account_today as _account_today  # noqa: E402,F401
 
 
 def _window_bounds(window: str, now: datetime | None) -> tuple[date | None, date, dict]:
@@ -400,12 +389,31 @@ def build_campaign_evidence(window: str, now: datetime | None = None,
         **base,
         "campaigns": campaigns,
         "summary": summary,
+        # PR-ADS-152 §6: explicit canonical SQL-scope reconciliation. Campaign
+        # Evidence counts campaign-attributable SQLs (mapped Google Ads campaign
+        # identity), disclosed against the one canonical population.
+        "sql_reconciliation": _canonical_sql_reconciliation(
+            window, summary.get("mapped_sqls"), now),
         "audit": _audit_block(base, spend_result, lead_result,
                               spend_native_sum=sums["native"], spend_usd_sum=sums["usd"],
                               sql_sum=sums["sqls"], junk_sum=sums["junk"],
                               spend_available=spend_available, lead_available=lead_available,
                               identity_available=bool(identity_result.get("available"))),
     }
+
+
+def _canonical_sql_reconciliation(window, consumer_count, now) -> dict:
+    """Canonical campaign-attributable SQL-scope reconciliation (evidence window).
+    Defensive — never breaks the page."""
+    try:
+        from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+        return _canon.page_reconciliation(
+            _canon.WINDOW_EVIDENCE, window, _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+            now=now, consumer_count=consumer_count)
+    except Exception:  # noqa: BLE001
+        from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+        return _canon.page_reconciliation(
+            _canon.WINDOW_EVIDENCE, window, _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE, now=now)
 
 
 def _row(base, campaign_key, display, sp, lq, lead_available, spend_available,

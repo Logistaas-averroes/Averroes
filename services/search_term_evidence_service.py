@@ -1335,10 +1335,25 @@ def build_search_term_evidence(window: str, *, page: int = 1,
         "platform_date_field": "source_date",
         "sql_date_field": "contact_created_at",
         "sql_attribution": _search_term_sql_block(sql_attr),
+        # PR-ADS-152 §6: canonical SQL-scope reconciliation. Search Terms attribute
+        # only exact persisted queries; the underlying SQL population is the
+        # campaign-attributable subset, disclosed here with its explicit scope.
+        "sql_reconciliation": _canonical_st_reconciliation(window, now),
         "audit": _audit_block(base, pop, coverage_status=coverage["status"],
                               state_counts=state_counts,
                               population_count=len(filtered)),
     }
+
+
+def _canonical_st_reconciliation(window, now) -> dict:
+    """Canonical campaign-attributable SQL-scope reconciliation for Search Terms
+    (evidence window). Defensive — never breaks the page."""
+    try:
+        from services import canonical_contact_outcome_service as _canon  # noqa: PLC0415
+        return _canon.page_reconciliation(
+            _canon.WINDOW_EVIDENCE, window, _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE, now=now)
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _safe_base(window: str, now: datetime | None = None) -> dict:

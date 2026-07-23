@@ -37,6 +37,7 @@ _DEFAULT_EVIDENCE_WINDOW = "30d"
 # ── Pure audit assembly ──────────────────────────────────────────────────────
 def build_audit(inputs: dict, business_win: dict, evidence_win: dict,
                 *, keyword_attributable_keys: set | None = None,
+                campaign_resolver=None,
                 now: datetime | None = None) -> dict:
     """Assemble the full SQL-truth audit from raw canonical inputs. Pure.
 
@@ -53,8 +54,10 @@ def build_audit(inputs: dict, business_win: dict, evidence_win: dict,
     excl = inputs.get("exclusions") or set()
     cls = inputs.get("classification") or []
 
-    pops_b = canon.build_populations(rows, excl, cls, business_win["start"], business_win["end"])
-    pops_e = canon.build_populations(rows, excl, cls, evidence_win["start"], evidence_win["end"])
+    pops_b = canon.build_populations(rows, excl, cls, business_win["start"],
+                                     business_win["end"], campaign_resolver=campaign_resolver)
+    pops_e = canon.build_populations(rows, excl, cls, evidence_win["start"],
+                                     evidence_win["end"], campaign_resolver=campaign_resolver)
 
     contract = {
         "contract_id": "logistaas",
@@ -301,9 +304,13 @@ def run(business_window: str = _DEFAULT_BUSINESS_WINDOW,
     inputs = repo.fetch_canonical_inputs(union_start, union_end)
 
     keyword_keys = _keyword_attributable_keys(evidence_win)
+    # Use the real Google Ads campaign-identity resolver (business-window range) so
+    # the audit's campaign-attributable scope matches the pages contact-for-contact.
+    resolver = canon._build_identity_resolver(business_win["start"], business_win["end"])
 
     return build_audit(inputs, business_win, evidence_win,
-                       keyword_attributable_keys=keyword_keys, now=now)
+                       keyword_attributable_keys=keyword_keys,
+                       campaign_resolver=resolver, now=now)
 
 
 def _keyword_attributable_keys(evidence_win: dict) -> set | None:

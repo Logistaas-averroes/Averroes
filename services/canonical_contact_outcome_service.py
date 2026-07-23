@@ -52,6 +52,7 @@ import logging
 import re
 from datetime import date, datetime, timezone
 
+from analysis.account_time import account_today
 from analysis.business_windows import is_valid_window, resolve_window
 from analysis.evidence_windows import is_evidence_window, resolve_evidence_window
 from analysis.source_classification import GROUP_GOOGLE_ADS, classify_source
@@ -98,6 +99,11 @@ REASON_OUTSIDE_BUSINESS_WINDOW = "outside_business_window"
 REASON_OUTSIDE_EVIDENCE_WINDOW = "outside_evidence_window"
 REASON_CONTACT_KEY_MISMATCH = "contact_key_mismatch"
 REASON_UNKNOWN = "unknown_reason"
+# PR-ADS-152 §2 — campaign-identity resolution reasons (real identity, not a bare
+# non-empty campaign string).
+REASON_CAMPAIGN_NOT_GOOGLE_ADS = "campaign_not_google_ads"
+REASON_AMBIGUOUS_CAMPAIGN_IDENTITY = "ambiguous_campaign_identity"
+REASON_UNRESOLVED_CAMPAIGN_MAPPING = "unresolved_campaign_mapping"
 
 
 # ── Small pure helpers ───────────────────────────────────────────────────────
@@ -131,10 +137,55 @@ def campaign_disqualifier(campaign_name) -> str | None:
 
 
 def derive_acquisition_group(row: dict) -> str:
-    """Durable acquisition group derived from the contact's OWN HubSpot source
-    (Original Source + campaign detail) — independent of the classification cache
-    so a stale cache can never inflate a scope."""
-    return classify_source(row.get("hs_analytics_source"), row.get("campaign_name"))
+    """Durable acquisition group derived from the contact's OWN HubSpot Original
+    Source — independent of the classification cache so a stale cache can never
+    inflate a scope.
+
+    PR-ADS-152 §4: the drill-down detail is NEVER taken from ``campaign_name`` (a
+    campaign label is not the HubSpot source drill-down). The durable ``leads``
+    table stores no genuine drill-down, so detail is None here; Offline sub-
+    classification degrades gracefully (Offline stays Offline) rather than being
+    invented from a campaign name.
+    """
+    return classify_source(row.get("hs_analytics_source"), None)
+
+
+# ── Campaign-identity resolution (PR-ADS-152 §2) ─────────────────────────────
+def default_campaign_resolver(campaign_name) -> tuple[bool, str | None]:
+    """Fallback resolver used when no live Google Ads campaign-identity index is
+    available (pure unit tests, DB down). A safe campaign LABEL — present, not a
+    HubSpot pseudo-name, not an email-send — is treated as attributable. Production
+    replaces this with the real canonical-identity resolver (``build``)."""
+    dq = campaign_disqualifier(campaign_name)
+    return (dq is None, dq)
+
+
+def make_identity_campaign_resolver(spend_by_id, norm_to_ids, identity_by_label):
+    """Build the production campaign resolver from the canonical Google Ads
+    campaign-identity contract (PR-ADS-143): stored id → approved mapping →
+    exact-normalized UNIQUE fallback; not_google_ads excluded; duplicate names
+    ambiguous; unresolved stays unattributed. A contact is campaign-attributable
+    only when ONE safe canonical Google Ads campaign identity resolves."""
+    from services.campaign_identity_service import normalize_campaign_name  # noqa: PLC0415
+    from services.search_term_evidence_service import _resolve_campaign_identity  # noqa: PLC0415
+
+    def _resolve(campaign_name) -> tuple[bool, str | None]:
+        # Definitive non-campaigns keep their precise admin-safe reason.
+        dq = campaign_disqualifier(campaign_name)
+        if dq is not None:
+            return (False, dq)
+        status, _key, _display = _resolve_campaign_identity(
+            None, campaign_name, spend_by_id, norm_to_ids, identity_by_label)
+        if status == "mapped":
+            return (True, None)
+        if status == "not_google_ads":
+            return (False, REASON_CAMPAIGN_NOT_GOOGLE_ADS)
+        norm = normalize_campaign_name(campaign_name)
+        if norm and len(norm_to_ids.get(norm) or ()) > 1:
+            return (False, REASON_AMBIGUOUS_CAMPAIGN_IDENTITY)
+        return (False, REASON_UNRESOLVED_CAMPAIGN_MAPPING)
+
+    return _resolve
 
 
 def deduplicate_latest(raw_rows: list[dict]) -> list[dict]:
@@ -188,6 +239,8 @@ def build_populations(
     classification: list[dict] | None,
     start: date | None,
     end: date | None,
+    *,
+    campaign_resolver=None,
 ) -> dict:
     """Build the canonical contact-outcome population from raw ingredients. Pure.
 
@@ -205,6 +258,7 @@ def build_populations(
     excluded contacts (for the audit).
     """
     exclusions = exclusions or set()
+    resolver = campaign_resolver or default_campaign_resolver
     class_by_key = {c.get("contact_key"): c for c in (classification or [])
                     if c.get("contact_key")}
 
@@ -246,7 +300,7 @@ def build_populations(
         elif class_state == "missing":
             missing_classification += 1
 
-        contact = _canonical_contact(row, group, is_sql, stored, class_state)
+        contact = _canonical_contact(row, group, is_sql, stored, class_state, resolver)
         contacts.append(contact)
 
     counts = _scope_counts(contacts)
@@ -263,20 +317,41 @@ def build_populations(
     }
 
 
+def group_safely_rederivable(primary_raw) -> bool:
+    """True only when the acquisition group is determined by the HubSpot Original
+    Source ALONE — i.e. it does NOT need the Original-Source drill-down detail
+    (which the durable ``leads`` table does not persist).
+
+    PR-ADS-152 §4: "Offline Sources" and "Other Offline Sources" sub-classify by
+    drill-down (SalesNash/Events → Other Paid, reseller/referral → Organic). We
+    have no genuine drill-down, so those are NOT safely re-derivable and their
+    stored group is preserved — Meta, LinkedIn, Email Marketing, Events and
+    referral classifications are never damaged by repair.
+    """
+    from analysis.source_classification import normalize_source  # noqa: PLC0415
+    norm = normalize_source(primary_raw)
+    if not norm:
+        return False  # no source → cannot classify safely; preserve stored
+    return norm not in ("offline sources", "offline source", "other offline sources")
+
+
 def _classification_state(row: dict, stored: dict | None) -> str:
     """Reconcile the stored classification against the canonical latest row.
 
     Returns 'ok' | 'stale' | 'missing'. Stale = present but disagreeing on the
-    latest outcome, the business date, or the current acquisition group — i.e. the
-    cache no longer reflects canonical truth (PR-ADS-152 §6)."""
+    latest outcome, the business date, or a SAFELY re-derivable acquisition group.
+    The group is only compared when it can be re-derived from the primary source
+    alone; an offline sub-classification that needs the drill-down detail is left
+    untouched (never falsely flagged stale, never damaged) — PR-ADS-152 §4/§6."""
     if stored is None:
         return "missing"
     if _norm(stored.get("status_category")) != _norm(row.get("status_category")):
         return "stale"
     if _as_day(stored.get("contact_created_at")) != _as_day(row.get("contact_created_at")):
         return "stale"
-    if _norm(stored.get("acquisition_group")) != _norm(derive_acquisition_group(row)):
-        return "stale"
+    if group_safely_rederivable(row.get("hs_analytics_source")):
+        if _norm(stored.get("acquisition_group")) != _norm(derive_acquisition_group(row)):
+            return "stale"
     return "ok"
 
 
@@ -286,13 +361,14 @@ def _as_day(value) -> str | None:
     return str(value)[:10]
 
 
-def _canonical_contact(row, group, is_sql, stored, class_state) -> dict:
+def _canonical_contact(row, group, is_sql, stored, class_state, resolver) -> dict:
     is_google_ads = group == GROUP_GOOGLE_ADS
-    campaign_bad = campaign_disqualifier(row.get("campaign_name"))
-    has_safe_campaign = campaign_bad is None
+    # PR-ADS-152 §2: campaign attribution uses the REAL canonical Google Ads
+    # campaign-identity contract (resolver), not a bare non-empty string.
+    campaign_ok, campaign_reason = resolver(row.get("campaign_name"))
     is_all_source_sql = is_sql
     is_google_ads_source_sql = is_sql and is_google_ads
-    is_campaign_attributable = is_google_ads_source_sql and has_safe_campaign
+    is_campaign_attributable = is_google_ads_source_sql and campaign_ok
     return {
         "contact_key": row.get("contact_key"),
         "contact_id": row.get("contact_id"),
@@ -312,13 +388,15 @@ def _canonical_contact(row, group, is_sql, stored, class_state) -> dict:
         "is_google_ads_source_sql": is_google_ads_source_sql,
         "is_campaign_attributable_sql": is_campaign_attributable,
         "scope_block_reasons": _scope_block_reasons(
-            row, group, is_sql, campaign_bad, class_state),
+            row, group, is_sql, campaign_reason, class_state),
     }
 
 
-def _scope_block_reasons(row, group, is_sql, campaign_bad, class_state) -> list[str]:
+def _scope_block_reasons(row, group, is_sql, campaign_reason, class_state) -> list[str]:
     """Admin-safe reasons this contact drops out of the narrower scopes. Ordered
-    from broadest scope inward so the audit can explain any set difference."""
+    from broadest scope inward so the audit can explain any set difference.
+    ``campaign_reason`` is the campaign-identity resolver's reason (missing /
+    pseudo / email / not_google_ads / ambiguous / unresolved) or None."""
     reasons: list[str] = []
     if not is_sql:
         reasons.append(REASON_LATEST_STATUS_NOT_QUALIFIED)
@@ -327,8 +405,8 @@ def _scope_block_reasons(row, group, is_sql, campaign_bad, class_state) -> list[
         reasons.append(REASON_NOT_GOOGLE_ADS)
         if _norm(row.get("source_type")) != "paid_search":
             reasons.append(REASON_SOURCE_TYPE_NOT_PAID_SEARCH)
-    if campaign_bad:
-        reasons.append(campaign_bad)
+    if campaign_reason:
+        reasons.append(campaign_reason)
     if class_state == "stale":
         reasons.append(REASON_SOURCE_CLASSIFICATION_STALE)
     elif class_state == "missing":
@@ -494,7 +572,10 @@ def resolve_window_contract(window_type: str, window_key: str,
         if not is_evidence_window(window_key):
             raise ValueError(f"Invalid evidence window '{window_key}'")
         resolved = resolve_evidence_window(window_key)
-        end = now.date()
+        # PR-ADS-152 §5: resolve the boundary in the Google Ads account timezone
+        # (the SAME resolver Campaign / Keyword / Search-Term Evidence use), never
+        # an implicit UTC now.date() — so BST boundaries line up across pages.
+        end = account_today(now)
         days = resolved["days"]
         start = None if days is None else (end - _timedelta_days(days - 1))
         return _window_block(WINDOW_EVIDENCE, window_key, start, end)
@@ -531,11 +612,13 @@ def build(window_type: str, window_key: str, now: datetime | None = None) -> dic
     win = resolve_window_contract(window_type, window_key, now=now)
     inputs = repo.fetch_canonical_inputs(win["start"], win["end"])
     available = inputs.get("available", False)
+    resolver = _build_identity_resolver(win["start"], win["end"])
     populations = build_populations(
         inputs.get("lead_rows") or [],
         inputs.get("exclusions") or set(),
         inputs.get("classification") or [],
         win["start"], win["end"],
+        campaign_resolver=resolver,
     )
     window_out = {k: v for k, v in win.items() if k not in ("start", "end")}
     return {
@@ -548,6 +631,25 @@ def build(window_type: str, window_key: str, now: datetime | None = None) -> dic
             populations, SCOPE_GOOGLE_ADS_SOURCE, available=available),
         "generated_at": (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+
+
+def _build_identity_resolver(start: date | None, end: date | None):
+    """Construct the production Google Ads campaign-identity resolver from the
+    canonical spend + durable identity mappings. Falls back to the safe-label
+    resolver if the identity contract is unavailable (never fabricates a mapping)."""
+    try:
+        from db import revenue_repository as rev  # noqa: PLC0415
+        from services.search_term_evidence_service import (  # noqa: PLC0415
+            _identity_label_index, _spend_index,
+        )
+        canonical = rev.fetch_canonical_campaign_spend(start, end)
+        identity = rev.fetch_campaign_identity(canonical.get("customer_id"))
+        spend_by_id, norm_to_ids = _spend_index(canonical)
+        identity_by_label, _aliases = _identity_label_index(identity)
+        return make_identity_campaign_resolver(spend_by_id, norm_to_ids, identity_by_label)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("campaign-identity resolver unavailable, using safe-label fallback: %s", exc)
+        return default_campaign_resolver
 
 
 def page_reconciliation(window_type: str, window_key: str, scope: str,
@@ -597,4 +699,6 @@ __all__ = [
     "is_safe_campaign", "scope_keys", "all_source_sqls", "google_ads_source_sqls",
     "campaign_attributable_sqls", "reconciliation_metadata",
     "resolve_window_contract", "page_reconciliation",
+    "default_campaign_resolver", "make_identity_campaign_resolver",
+    "group_safely_rederivable",
 ]
