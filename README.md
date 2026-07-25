@@ -14,7 +14,7 @@ This system connects Windsor.ai (Google Ads data), HubSpot CRM (pipeline data), 
 |-----------|------|------|
 | Version control | GitHub | $10/mo |
 | Hosting + scheduler | Render.com | $7/mo |
-| **Total** | | **$60/mo** |
+| **Total** | | **$17/mo** |
 
 ---
 
