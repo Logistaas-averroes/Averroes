@@ -306,7 +306,9 @@ def write_campaigns(run_id: int, campaigns: list) -> int:
     try:
         with get_conn() as conn:
             if conn is None:
-                return 0
+                # Unavailable is NEVER silently reported as "wrote nothing".
+                return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                        "error": "database_unavailable"}
             with conn.cursor() as cur:
                 cur.executemany(
                     """
@@ -2613,19 +2615,30 @@ _CONTACT_FUNNEL_UPDATE_SET = ",\n                        ".join(
 )
 
 
-def upsert_hubspot_contact_funnel(rows: list, *, sync_batch_id: Optional[int] = None) -> int:
+def upsert_hubspot_contact_funnel(rows: list, *,
+                                  sync_batch_id: Optional[int] = None) -> dict:
     """Upsert canonical HubSpot contact funnel rows, keyed on contact_id.
 
     Idempotent: re-ingesting the same contact updates it in place, never appends
     a second row. Latest HubSpot state always wins — an older snapshot can never
     resurrect a superseded lifecycle stage or status.
 
+    Returns a STRUCTURED result so the caller can distinguish the two very
+    different meanings of "nothing changed"::
+
+        {"ok": bool, "attempted": int, "persisted": int, "error": str | None}
+
+    ``ok=False``   the write could not be proven — the DB was unavailable or the
+                   statement raised. The caller must fail closed.
+    ``ok=True`` with ``persisted < attempted``
+                   a legitimate idempotent no-op: the latest-state guard rejected
+                   a stale row. This is success, not failure.
+
     Rows must already be normalised by
-    ``connectors.hubspot_pull.normalize_contact_funnel_row``. Returns the number
-    of rows written. Never raises.
+    ``connectors.hubspot_pull.normalize_contact_funnel_row``. Never raises.
     """
     if not rows:
-        return 0
+        return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
 
     prepared = []
     for r in rows:
@@ -2653,7 +2666,7 @@ def upsert_hubspot_contact_funnel(rows: list, *, sync_batch_id: Optional[int] = 
         prepared.append(tuple(values))
 
     if not prepared:
-        return 0
+        return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
 
     column_list = ", ".join(_CONTACT_FUNNEL_COLUMNS) + ", sync_batch_id"
     placeholders = ", ".join(["%s"] * (len(_CONTACT_FUNNEL_COLUMNS) + 1))
@@ -2679,10 +2692,16 @@ def upsert_hubspot_contact_funnel(rows: list, *, sync_batch_id: Optional[int] = 
                     """,
                     prepared,
                 )
-        return len(prepared)
+                # rowcount counts rows the statement actually inserted/updated.
+                # Fewer than attempted means the latest-state guard rejected a
+                # stale row — an idempotent no-op, not a failure.
+                persisted = cur.rowcount if cur.rowcount is not None else len(prepared)
+        return {"ok": True, "attempted": len(prepared),
+                "persisted": max(0, int(persisted)), "error": None}
     except Exception as exc:  # noqa: BLE001
         log.error("upsert_hubspot_contact_funnel failed: %s", exc)
-        return 0
+        return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                "error": str(exc)[:300]}
 
 
 _FUNNEL_SYNC_STATE_FIELDS = {

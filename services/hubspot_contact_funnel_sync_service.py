@@ -20,14 +20,26 @@ Sync doctrine
     means all source (PR-ADS-153B §18).
   * Resumable and restart-safe. The watermark is persisted after EVERY page, so
     completion state never lives in process memory and a killed worker resumes
-    where it stopped.
+    where it stopped. This applies to BOOTSTRAP TOO: an interrupted historical
+    bootstrap resumes from its durable watermark instead of rescanning the whole
+    portal, which is what makes a large backlog finishable at all. Only an
+    explicit operator ``restart_from_epoch`` forces a full rebuild.
   * Idempotent. Re-ingesting a page upserts on ``contact_id``; rows are never
     duplicated and an older read can never overwrite newer state.
-  * Fail-closed. A partial read raises out of the connector and is recorded as a
-    failed batch with the watermark left where it was proven — a partial sync is
-    never reported as complete.
-  * Bootstrap is the same code path with the watermark at the epoch, so there is
-    one implementation to reason about, not two.
+  * Fail-closed at every durable boundary. The run refuses to call HubSpot at all
+    unless its sync batches exist; per page it persists, VERIFIES the write was
+    proven, and only then advances the watermark; and the final state write must
+    succeed before the run may report success. A persistence or checkpoint
+    failure returns ``status='failed'`` and never advances completion.
+    Crucially, ``persisted < attempted`` is NOT a failure — that is the
+    latest-state guard rejecting a stale row, an idempotent no-op.
+  * Completion is PROVEN, not assumed. The iterator emits an explicit end-of-
+    result-set sentinel; a bootstrap may only be marked complete when that
+    sentinel was observed. Running out of pages — because the run was capped, or
+    because the scan stalled at HubSpot's 10,000-result boundary — proves
+    nothing and leaves the bootstrap partial.
+  * Bootstrap and incremental share one code path, differing only in the
+    starting watermark, so there is one implementation to reason about.
 
 Read-only with respect to HubSpot. NEVER writes to HubSpot or Google Ads.
 """
@@ -84,17 +96,29 @@ def _as_datetime(value):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def resolve_since(state: dict | None, mode: str, *, overlap_minutes: int) -> datetime:
+def resolve_since(state: dict | None, mode: str, *, overlap_minutes: int,
+                  restart_from_epoch: bool = False) -> datetime:
     """Resolve the modification watermark this run starts from. Pure.
 
-    Bootstrap always starts at the epoch. Incremental resumes from the durable
-    watermark minus an explicit overlap; with no watermark it degrades to a
-    bootstrap rather than silently syncing only recent contacts.
+    BOTH modes resume from durable state — an interrupted historical bootstrap
+    must not rescan the whole portal from the epoch on every retry, which would
+    make a large backlog impossible to finish and contradicts the restart-safe
+    contract:
+
+      * no durable watermark (first-ever bootstrap) → epoch;
+      * durable watermark present → that watermark minus the SAME safe overlap
+        incremental sync uses, so a contact modified in the same second as the
+        last checkpoint can never be skipped;
+      * ``restart_from_epoch=True`` → epoch regardless. Operator-only escape
+        hatch for a deliberate full rebuild; never normal bootstrap behaviour.
     """
-    if mode == MODE_BOOTSTRAP:
+    if restart_from_epoch:
         return _EPOCH
     watermark = _as_datetime((state or {}).get("last_modified_watermark"))
     if watermark is None:
+        # No proven progress yet: a bootstrap starts at the epoch, and an
+        # incremental run degrades to one rather than silently syncing only
+        # recent contacts.
         return _EPOCH
     return watermark - timedelta(minutes=max(0, int(overlap_minutes)))
 
@@ -121,6 +145,7 @@ def run_contact_funnel_sync(
     max_pages: int | None = None,
     run_id: int | None = None,
     page_iterator=None,
+    restart_from_epoch: bool = False,
     now: datetime | None = None,
 ) -> dict:
     """Sync canonical HubSpot contacts into ``hubspot_contact_funnel``.
@@ -137,7 +162,8 @@ def run_contact_funnel_sync(
 
     now = now or _utcnow()
     state = db_writers.get_contact_funnel_sync_state(SCOPE) or {}
-    since = resolve_since(state, mode, overlap_minutes=overlap_minutes)
+    since = resolve_since(state, mode, overlap_minutes=overlap_minutes,
+                          restart_from_epoch=restart_from_epoch)
 
     sync_type = "backfill" if mode == MODE_BOOTSTRAP else "daily"
     batch_id = db_writers.start_sync_batch(
@@ -151,13 +177,29 @@ def run_contact_funnel_sync(
         run_id=run_id,
     )
 
+    # Fail closed BEFORE touching HubSpot: without durable batch state there is
+    # no way to record that this run happened, so a failure would be invisible.
+    # `start_sync_batch` returns 0 when the DB is unavailable.
+    if not batch_id or not events_batch_id:
+        message = "durable sync batch could not be created"
+        log.warning("[hubspot_contact_funnel] %s — refusing to sync", message)
+        for bid in (batch_id, events_batch_id):
+            if bid:
+                db_writers.finish_sync_batch(
+                    batch_id=bid, status="failed", error_message=message)
+        return _failed_result(mode, message, since, watermark=None)
+
     if mode == MODE_BOOTSTRAP:
-        db_writers.update_contact_funnel_sync_state(
+        if not db_writers.update_contact_funnel_sync_state(
             SCOPE,
             bootstrap_status=BOOTSTRAP_RUNNING,
             bootstrap_started_at=now,
             last_error=None,
-        )
+        ):
+            message = "bootstrap state could not be persisted"
+            log.warning("[hubspot_contact_funnel] %s — refusing to sync", message)
+            _fail_batches(batch_id, events_batch_id, message)
+            return _failed_result(mode, message, since, watermark=None)
 
     if page_iterator is None:
         from connectors.hubspot_pull import (  # noqa: PLC0415
@@ -171,14 +213,24 @@ def run_contact_funnel_sync(
 
     contacts_seen = 0
     contacts_written = 0
+    contacts_attempted = 0
     pages = 0
     rejected_no_identity = 0
     stage_events_written = 0
+    scan_complete = False
     watermark = _as_datetime(state.get("last_modified_watermark"))
     error: str | None = None
 
     try:
         for raw_page, meta in page_iterator(since, max_pages=max_pages):
+            # §4 completion proof: the iterator signals the true end of the
+            # HubSpot result set with an explicit empty sentinel page. Running
+            # out of pages proves nothing (a capped run, or a stall at the
+            # 10,000-result boundary, also stops iterating).
+            if (meta or {}).get("complete"):
+                scan_complete = True
+                continue
+
             pages += 1
             contacts_seen += len(raw_page)
 
@@ -190,9 +242,18 @@ def run_contact_funnel_sync(
                     continue
                 normalised.append(row)
 
-            written = db_writers.upsert_hubspot_contact_funnel(
+            # 1. persist, 2. VERIFY the write was proven, 3. only then move on.
+            result = db_writers.upsert_hubspot_contact_funnel(
                 normalised, sync_batch_id=batch_id or None)
-            contacts_written += written
+            if not result.get("ok"):
+                # Persistence unproven. The watermark is NOT advanced, so the
+                # next run re-reads this page. `persisted < attempted` is NOT
+                # this case — that is the latest-state guard doing its job.
+                raise _PersistenceError(
+                    "contact persistence failed: "
+                    f"{result.get('error') or 'unknown error'}")
+            contacts_written += int(result.get("persisted") or 0)
+            contacts_attempted += int(result.get("attempted") or 0)
             stage_events_written += sum(
                 1 for r in normalised if r.get("latest_stage_entry_at") is not None
             )
@@ -201,8 +262,10 @@ def run_contact_funnel_sync(
             if page_watermark is not None:
                 watermark = page_watermark
 
-            # Durable checkpoint after EVERY page — a killed worker resumes here.
-            db_writers.update_contact_funnel_sync_state(
+            # 4. Durable checkpoint after EVERY page — a killed worker resumes
+            # here. If the checkpoint itself cannot be persisted we must stop:
+            # continuing would read pages whose progress can never be recorded.
+            if not db_writers.update_contact_funnel_sync_state(
                 SCOPE,
                 last_modified_watermark=watermark,
                 latest_modified_at=watermark,
@@ -210,15 +273,17 @@ def run_contact_funnel_sync(
                 pages_fetched=pages,
                 last_batch_id=batch_id or None,
                 last_error=None,
-            )
+            ):
+                raise _CheckpointError(
+                    "durable checkpoint failed — refusing to continue a sync "
+                    "whose progress cannot be recorded")
 
     except Exception as exc:  # noqa: BLE001
         error = str(exc)[:500]
         log.warning("[hubspot_contact_funnel] sync failed: %s", exc)
-        for bid in (batch_id, events_batch_id):
-            if bid:
-                db_writers.finish_sync_batch(
-                    batch_id=bid, status="failed", error_message=str(exc)[:1000])
+        _fail_batches(batch_id, events_batch_id, str(exc)[:1000])
+        # Completion is NEVER advanced on a failure. A partial bootstrap stays
+        # partial so the next run resumes it.
         db_writers.update_contact_funnel_sync_state(
             SCOPE,
             bootstrap_status=(
@@ -229,21 +294,17 @@ def run_contact_funnel_sync(
             contacts_seen=contacts_seen,
             pages_fetched=pages,
         )
-        return {
-            "status": "failed",
-            "mode": mode,
-            "error": error,
-            "since": since.isoformat(),
-            "contacts_seen": contacts_seen,
-            "contacts_written": contacts_written,
-            "pages": pages,
-            "watermark": watermark.isoformat() if watermark else None,
-        }
+        return _failed_result(mode, error, since, watermark,
+                              contacts_seen=contacts_seen,
+                              contacts_written=contacts_written, pages=pages)
 
-    # A capped run has not proven it reached the end of the backlog.
-    truncated = max_pages is not None and pages >= max_pages
+    # §4: a run may only be called complete when the iterator PROVED it reached
+    # the end of the result set. A capped run, or one that stopped for any other
+    # reason, is truncated.
+    truncated = (max_pages is not None and pages >= max_pages) or not scan_complete
     if mode == MODE_BOOTSTRAP:
-        bootstrap_status = BOOTSTRAP_PARTIAL if truncated else BOOTSTRAP_COMPLETE
+        bootstrap_status = BOOTSTRAP_COMPLETE if scan_complete and not (
+            max_pages is not None and pages >= max_pages) else BOOTSTRAP_PARTIAL
     else:
         bootstrap_status = state.get("bootstrap_status") or BOOTSTRAP_NOT_STARTED
 
@@ -259,7 +320,17 @@ def run_contact_funnel_sync(
     }
     if mode == MODE_BOOTSTRAP and bootstrap_status == BOOTSTRAP_COMPLETE:
         state_update["bootstrap_completed_at"] = now
-    db_writers.update_contact_funnel_sync_state(SCOPE, **state_update)
+
+    # §2: the FINAL durable state write must also be proven before this run may
+    # claim success — otherwise a "successful" bootstrap could leave no record
+    # that it completed, and the next run would rescan.
+    if not db_writers.update_contact_funnel_sync_state(SCOPE, **state_update):
+        message = "final durable checkpoint failed — run not reported successful"
+        log.warning("[hubspot_contact_funnel] %s", message)
+        _fail_batches(batch_id, events_batch_id, message)
+        return _failed_result(mode, message, since, watermark,
+                              contacts_seen=contacts_seen,
+                              contacts_written=contacts_written, pages=pages)
 
     if batch_id:
         db_writers.finish_sync_batch(
@@ -278,11 +349,50 @@ def run_contact_funnel_sync(
         "since": since.isoformat(),
         "contacts_seen": contacts_seen,
         "contacts_written": contacts_written,
+        "contacts_attempted": contacts_attempted,
         "stage_events_written": stage_events_written,
         "rejected_no_identity": rejected_no_identity,
         "pages": pages,
         "truncated": truncated,
+        "scan_complete": scan_complete,
         "bootstrap_status": bootstrap_status,
+        "watermark": watermark.isoformat() if watermark else None,
+    }
+
+
+class _PersistenceError(RuntimeError):
+    """Contact rows could not be durably persisted. The watermark must not move."""
+
+
+class _CheckpointError(RuntimeError):
+    """Durable sync state could not be written. The run must not claim success."""
+
+
+def _fail_batches(batch_id, events_batch_id, message: str) -> None:
+    """Mark whichever sync batches exist as failed. Best-effort by design: the
+    DB may be the very thing that is unavailable."""
+    for bid in (batch_id, events_batch_id):
+        if bid:
+            try:
+                db_writers.finish_sync_batch(
+                    batch_id=bid, status="failed", error_message=message)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[hubspot_contact_funnel] could not fail batch %s: %s",
+                            bid, exc)
+
+
+def _failed_result(mode, error, since, watermark, *, contacts_seen=0,
+                   contacts_written=0, pages=0) -> dict:
+    """A failed run never reports completion and never claims a bootstrap done."""
+    return {
+        "status": "failed",
+        "mode": mode,
+        "error": error,
+        "since": since.isoformat(),
+        "contacts_seen": contacts_seen,
+        "contacts_written": contacts_written,
+        "pages": pages,
+        "scan_complete": False,
         "watermark": watermark.isoformat() if watermark else None,
     }
 

@@ -189,7 +189,19 @@ def _write(contacts):
     from db import writers as db_writers
 
     rows = [normalize_contact_funnel_row(c) for c in contacts]
-    return db_writers.upsert_hubspot_contact_funnel([r for r in rows if r])
+    result = db_writers.upsert_hubspot_contact_funnel([r for r in rows if r])
+    assert result["ok"] is True, result
+    return result
+
+
+def _pages(*contact_pages, complete=True):
+    """Fake iterator that mirrors the real connector's completion sentinel."""
+    def iterator(since, max_pages=None):
+        for index, page in enumerate(contact_pages):
+            yield page, {"watermark_ms": 0, "page_index": index, "complete": False}
+        if complete:
+            yield [], {"watermark_ms": 0, "complete": True}
+    return iterator
 
 
 def _scalar(pg, sql, params=None):
@@ -485,7 +497,9 @@ def test_killed_sync_resumes_from_the_last_checkpointed_page(pg):
 
     def resuming(since, max_pages=None):
         seen_since["value"] = since
-        yield [_contact("2", modified="2026-07-02T00:00:00Z")], {"watermark_ms": 0}
+        yield ([_contact("2", modified="2026-07-02T00:00:00Z")],
+               {"watermark_ms": 0, "complete": False})
+        yield [], {"watermark_ms": 0, "complete": True}
 
     second = sync.run_contact_funnel_sync(
         mode=sync.MODE_INCREMENTAL, page_iterator=resuming,
@@ -496,11 +510,165 @@ def test_killed_sync_resumes_from_the_last_checkpointed_page(pg):
     assert _scalar(pg, "SELECT COUNT(*) FROM hubspot_contact_funnel") == 2
 
 
+def test_capped_bootstrap_persists_its_watermark_and_stays_partial(pg):
+    from services import hubspot_contact_funnel_sync_service as sync
+
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP,
+        page_iterator=_pages([_contact("1", modified="2026-07-01T00:00:00Z")],
+                             complete=False),
+        max_pages=1, now=datetime(2026, 7, 5, tzinfo=timezone.utc))
+
+    assert result["status"] == "success"
+    assert result["bootstrap_status"] == sync.BOOTSTRAP_PARTIAL
+    state = sync.db_writers.get_contact_funnel_sync_state("contacts")
+    assert state["last_modified_watermark"] == datetime(
+        2026, 7, 1, tzinfo=timezone.utc)
+
+
+def test_second_bootstrap_resumes_from_the_persisted_watermark(pg):
+    """The headline fix: an interrupted bootstrap must not rescan from the epoch."""
+    from services import hubspot_contact_funnel_sync_service as sync
+
+    sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP,
+        page_iterator=_pages([_contact("1", modified="2026-07-01T12:00:00Z")],
+                             complete=False),
+        max_pages=1, now=datetime(2026, 7, 5, tzinfo=timezone.utc))
+
+    seen_since = {}
+
+    def resuming(since, max_pages=None):
+        seen_since["value"] = since
+        yield ([_contact("2", modified="2026-07-02T00:00:00Z")],
+               {"watermark_ms": 0, "complete": False})
+        yield [], {"watermark_ms": 0, "complete": True}
+
+    second = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP, page_iterator=resuming,
+        now=datetime(2026, 7, 6, tzinfo=timezone.utc))
+
+    # Resumed at the persisted watermark minus the safe overlap — not the epoch.
+    assert seen_since["value"] == datetime(2026, 7, 1, 11, 45, tzinfo=timezone.utc)
+    assert seen_since["value"].year != 1970
+    assert second["status"] == "success"
+
+
+def test_killed_bootstrap_resumes_and_eventually_completes(pg):
+    """Kill → resume → complete, without ever rescanning from the epoch."""
+    from services import hubspot_contact_funnel_sync_service as sync
+
+    def failing(since, max_pages=None):
+        yield ([_contact("1", modified="2026-07-01T00:00:00Z")],
+               {"watermark_ms": 0, "complete": False})
+        raise RuntimeError("worker killed mid-bootstrap")
+
+    first = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP, page_iterator=failing,
+        now=datetime(2026, 7, 5, tzinfo=timezone.utc))
+    assert first["status"] == "failed"
+    assert sync.db_writers.get_contact_funnel_sync_state(
+        "contacts")["bootstrap_status"] == sync.BOOTSTRAP_PARTIAL
+    # An unfinished bootstrap keeps bootstrapping rather than going incremental.
+    assert sync.get_bootstrap_mode() == sync.MODE_BOOTSTRAP
+
+    seen_since = {}
+
+    def finishing(since, max_pages=None):
+        seen_since["value"] = since
+        yield ([_contact("2", modified="2026-07-03T00:00:00Z")],
+               {"watermark_ms": 0, "complete": False})
+        yield [], {"watermark_ms": 0, "complete": True}
+
+    second = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP, page_iterator=finishing,
+        now=datetime(2026, 7, 6, tzinfo=timezone.utc))
+
+    assert seen_since["value"].year == 2026  # resumed, not restarted
+    assert second["bootstrap_status"] == sync.BOOTSTRAP_COMPLETE
+    assert _scalar(pg, "SELECT COUNT(*) FROM hubspot_contact_funnel") == 2
+    # Only now does the scheduler switch to incremental.
+    assert sync.get_bootstrap_mode() == sync.MODE_INCREMENTAL
+
+
+def test_restart_from_epoch_is_an_explicit_operator_choice(pg):
+    from services import hubspot_contact_funnel_sync_service as sync
+
+    sync.db_writers.update_contact_funnel_sync_state(
+        "contacts", last_modified_watermark=datetime(
+            2026, 7, 1, tzinfo=timezone.utc))
+
+    seen_since = {}
+
+    def scan(since, max_pages=None):
+        seen_since["value"] = since
+        yield [], {"watermark_ms": 0, "complete": True}
+
+    sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP, page_iterator=scan, restart_from_epoch=True,
+        now=datetime(2026, 7, 6, tzinfo=timezone.utc))
+    assert seen_since["value"].year == 1970
+
+
+def test_scan_without_completion_proof_never_marks_bootstrap_complete(pg):
+    from services import hubspot_contact_funnel_sync_service as sync
+
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP,
+        page_iterator=_pages([_contact("1")], complete=False),
+        now=datetime(2026, 7, 5, tzinfo=timezone.utc))
+
+    assert result["scan_complete"] is False
+    assert result["bootstrap_status"] == sync.BOOTSTRAP_PARTIAL
+    assert sync.db_writers.get_contact_funnel_sync_state(
+        "contacts")["bootstrap_completed_at"] is None
+
+
+def test_persistence_failure_leaves_the_watermark_untouched(pg, monkeypatch):
+    """A DB write that cannot be proven must not advance progress."""
+    from db import writers as db_writers
+    from services import hubspot_contact_funnel_sync_service as sync
+
+    monkeypatch.setattr(
+        db_writers, "upsert_hubspot_contact_funnel",
+        lambda rows, **kw: {"ok": False, "attempted": len(rows),
+                            "persisted": 0, "error": "disk on fire"})
+
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP,
+        page_iterator=_pages([_contact("1", modified="2026-07-01T00:00:00Z")]),
+        now=datetime(2026, 7, 5, tzinfo=timezone.utc))
+
+    assert result["status"] == "failed"
+    state = sync.db_writers.get_contact_funnel_sync_state("contacts")
+    assert state["last_modified_watermark"] is None
+    assert state["bootstrap_status"] == sync.BOOTSTRAP_PARTIAL
+
+
+def test_stale_row_no_op_is_success_not_failure(pg):
+    """`persisted < attempted` is the latest-state guard working as designed."""
+    from db import writers as db_writers
+    from connectors.hubspot_pull import normalize_contact_funnel_row
+
+    _write([_contact("1", lifecyclestage="customer",
+                     modified="2026-09-01T00:00:00Z")])
+    stale = normalize_contact_funnel_row(
+        _contact("1", lifecyclestage="lead", modified="2026-07-01T00:00:00Z"))
+    result = db_writers.upsert_hubspot_contact_funnel([stale])
+
+    assert result["ok"] is True          # not a failure
+    assert result["attempted"] == 1
+    assert result["persisted"] == 0      # guard rejected the stale row
+    assert _row_of(pg, "1")["lifecycle_stage"] == "customer"
+
+
 def test_sync_records_a_freshness_batch_under_the_registered_keys(pg):
     from services import hubspot_contact_funnel_sync_service as sync
 
     def pages(since, max_pages=None):
-        yield [_contact("1", entered_sql="2026-07-01T00:00:00Z")], {"watermark_ms": 0}
+        yield ([_contact("1", entered_sql="2026-07-01T00:00:00Z")],
+               {"watermark_ms": 0, "complete": False})
+        yield [], {"watermark_ms": 0, "complete": True}
 
     sync.run_contact_funnel_sync(
         mode=sync.MODE_INCREMENTAL, page_iterator=pages,

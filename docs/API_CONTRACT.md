@@ -3455,6 +3455,7 @@ Read-only. Auth required.
 
 - **Scopes are provably nested** — `keyword_attributable ≤ campaign_attributable ≤ google_ads_source ≤ all_source`. A broken invariant returns `reconciliation.status = "mismatch"`, which must never render as a normal count.
 - **Unavailable ≠ zero.** When the canonical store cannot be read, `available` is `false` and every `count` is `null`.
+- **Attribution outages are scoped, not fatal.** When the Google Ads campaign-identity contract cannot be consulted, `campaign_identity_available` is `false`, `campaign_attributable` and `keyword_attributable` counts are `null`, and `all_source` / `google_ads_source` remain fully available. `reconciliation.status` is then `partial` with reason `campaign_identity_unavailable`. A *successfully consulted* contract that maps nothing still reports a real `0`.
 - **Counts are not mutually exclusive by current stage** — a contact now at Customer still counts in its historical SQL cohort.
 - **Conversions are cohort-safe** or reported `available: false` with `basis: "unavailable"`. Rates are never fabricated.
 - **Missing stage-entry evidence is a coverage gap**, surfaced in `coverage`, never back-filled with `createdate`.
@@ -3515,8 +3516,19 @@ company only.
 
 | Param | Default | Notes |
 |---|---|---|
-| `mode` | `incremental` | `bootstrap` scans the whole portal from the epoch; `incremental` resumes from the durable modification watermark |
+| `mode` | `incremental` | Both modes resume from the durable modification watermark. Only a portal with **no** watermark starts at the epoch. |
 | `max_pages` | *(none)* | caps the run; a capped run is reported `truncated: true` and never marks the bootstrap complete |
+
+**Fail-closed contract.** The run refuses to call HubSpot unless its durable sync
+batches exist; each page is persisted and **verified** before the watermark
+advances; and the final durable state write must succeed before `status:
+"success"` is returned. Any persistence or checkpoint failure returns
+`status: "failed"` and never advances completion.
+
+**Completion proof.** `scan_complete` is `true` only when the iterator emitted its
+explicit end-of-result-set sentinel. A capped run, or a stall at HubSpot's
+10,000-result paging boundary, leaves `bootstrap_status: "partial"` — running out
+of pages never counts as finishing.
 
 Reads HubSpot **read-only** and writes only the local canonical contact store.
 Never writes to HubSpot or Google Ads.

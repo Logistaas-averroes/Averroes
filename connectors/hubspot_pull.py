@@ -30,6 +30,17 @@ class HubSpotRetryableError(Exception):
     """A transient/HTTP HubSpot failure that must be retried, never silently
     treated as an empty/Unclassified result (PR-ADS-117)."""
 
+
+class HubSpotSearchStalledError(Exception):
+    """The contact scan cannot prove it reached the end of the result set.
+
+    Raised when more than one full page of contacts shares an identical
+    ``lastmodifieddate`` at HubSpot's 10,000-result paging boundary, so
+    re-anchoring the watermark cannot advance. Returning normally here would let
+    a caller mark a historical bootstrap COMPLETE while an unknown number of
+    contacts were never read (PR-ADS-153B truth-safety §4).
+    """
+
 # Fields confirmed live from Logistaas HubSpot account
 CONTACT_PROPERTIES = [
     "firstname",
@@ -672,6 +683,20 @@ def parse_hubspot_timestamp(value):
     return dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
 
 
+def _completion_sentinel(watermark_ms, total_yielded, page_index, reanchored):
+    """The explicit end-of-result-set marker. An empty page, so it can never
+    write rows or move a watermark — it only proves the scan finished."""
+    return [], {
+        "watermark_ms": watermark_ms,
+        "watermark_iso": datetime.utcfromtimestamp(
+            watermark_ms / 1000.0).isoformat() + "Z",
+        "total_yielded": total_yielded,
+        "page_index": page_index,
+        "reanchored": reanchored,
+        "complete": True,
+    }
+
+
 def iter_contacts_modified_since(
     since,
     *,
@@ -694,11 +719,20 @@ def iter_contacts_modified_since(
     paging past it (which HubSpot refuses).
 
     Yields ``(contacts, page_meta)`` where ``page_meta`` carries
-    ``{watermark_ms, watermark_iso, total_yielded, page_index, reanchored}``.
+    ``{watermark_ms, watermark_iso, total_yielded, page_index, reanchored,
+    complete}``.
 
-    Raises ``HubSpotRetryableError`` on a non-rate-limit API failure so the caller
-    marks the sync failed and retries — a partial read is NEVER reported as a
-    complete one. NEVER writes to HubSpot.
+    COMPLETION PROOF (PR-ADS-153B truth-safety §4): reaching the true end of the
+    result set is signalled EXPLICITLY by a final sentinel page
+    ``([], {"complete": True, ...})``. A caller may only treat a historical
+    bootstrap as complete when it observed that sentinel. Simply running out of
+    pages (e.g. because ``max_pages`` capped the run) proves nothing and yields
+    no sentinel.
+
+    Raises ``HubSpotRetryableError`` on a non-rate-limit API failure, and
+    ``HubSpotSearchStalledError`` when the watermark cannot advance at the
+    10,000-result boundary — a partial read is NEVER reported as a complete one.
+    NEVER writes to HubSpot.
     """
     client = client or get_client()
     watermark_ms = _epoch_ms(since)
@@ -717,6 +751,8 @@ def iter_contacts_modified_since(
 
         while True:
             if max_pages is not None and page_index >= max_pages:
+                # Capped run: deliberately NO completion sentinel. The caller
+                # must treat this as truncated, never as a finished scan.
                 return
 
             try:
@@ -751,6 +787,8 @@ def iter_contacts_modified_since(
 
             results = [c.to_dict() for c in (response.results or [])]
             if not results:
+                yield _completion_sentinel(
+                    watermark_ms, total_yielded, page_index, reanchored)
                 return
 
             fresh = []
@@ -783,12 +821,15 @@ def iter_contacts_modified_since(
                     "total_yielded": total_yielded,
                     "page_index": page_index,
                     "reanchored": reanchored,
+                    "complete": False,
                 }
 
             paging_next = getattr(response, "paging", None)
             after = getattr(getattr(paging_next, "next", None), "after", None)
 
             if not after:
+                yield _completion_sentinel(
+                    watermark_ms, total_yielded, page_index, reanchored)
                 return
             if page_count_this_query * page_size >= HUBSPOT_SEARCH_RESULT_CAP:
                 # HubSpot refuses to page further; re-anchor on the newest
@@ -797,13 +838,15 @@ def iter_contacts_modified_since(
 
         if not progressed:
             # More than one full search page shares an identical modification
-            # timestamp and re-anchoring cannot advance. Stop rather than loop
-            # forever; the caller reports a partial sync.
-            logger.warning(
-                "[hubspot_contact_funnel] watermark stalled at %s — stopping page scan",
-                watermark_ms,
+            # timestamp, so re-anchoring cannot advance and an unknown number of
+            # contacts is unreachable. Raise rather than return: returning here
+            # would let the caller mark a bootstrap COMPLETE on an incomplete
+            # scan (PR-ADS-153B truth-safety §4).
+            raise HubSpotSearchStalledError(
+                "HubSpot contact scan stalled at the 10,000-result boundary: "
+                f"more than one page shares lastmodifieddate={watermark_ms}. "
+                "The scan is INCOMPLETE and must not be reported as complete."
             )
-            return
         reanchored += 1
 
 

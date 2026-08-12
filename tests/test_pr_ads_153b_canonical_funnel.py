@@ -669,21 +669,37 @@ class _FakeWriters:
         self.state_updates: list[dict] = []
         self.batches: list[dict] = []
         self.finished: list[dict] = []
+        # Failure injection for the fail-closed contract.
+        self.upsert_ok = True
+        self.batch_ok = True
+        self.checkpoint_ok = True
+        self.fail_checkpoint_after = None  # fail the Nth+ state write
 
     def get_contact_funnel_sync_state(self, scope="contacts"):
         return dict(self.state) if self.state else None
 
     def update_contact_funnel_sync_state(self, scope="contacts", **fields):
-        self.state.update(fields)
         self.state_updates.append(dict(fields))
+        if self.checkpoint_ok is False:
+            return False
+        if (self.fail_checkpoint_after is not None
+                and len(self.state_updates) > self.fail_checkpoint_after):
+            return False
+        self.state.update(fields)
         return True
 
     def upsert_hubspot_contact_funnel(self, rows, *, sync_batch_id=None):
         self.upserts.append(list(rows))
-        return len(rows)
+        if self.upsert_ok is False:
+            return {"ok": False, "attempted": len(rows), "persisted": 0,
+                    "error": "database_unavailable"}
+        return {"ok": True, "attempted": len(rows),
+                "persisted": len(rows), "error": None}
 
     def start_sync_batch(self, **kwargs):
         self.batches.append(kwargs)
+        if self.batch_ok is False:
+            return 0
         return len(self.batches)
 
     def finish_sync_batch(self, **kwargs):
@@ -697,10 +713,15 @@ def fake_writers(monkeypatch):
     return writers
 
 
-def _page(*contacts):
+def _page(*contacts, complete=True):
+    """Fake iterator. Emits the explicit end-of-result-set sentinel by default,
+    mirroring the real connector; pass ``complete=False`` for a scan that stops
+    without proving it finished."""
     def iterator(since, max_pages=None):
         for index, page in enumerate(contacts):
-            yield page, {"watermark_ms": 0, "page_index": index}
+            yield page, {"watermark_ms": 0, "page_index": index, "complete": False}
+        if complete:
+            yield [], {"watermark_ms": 0, "complete": True}
     return iterator
 
 
@@ -766,9 +787,33 @@ def test_incremental_resumes_from_the_watermark_with_overlap():
     assert since == datetime(2026, 7, 1, 11, 45, tzinfo=timezone.utc)
 
 
-def test_bootstrap_always_starts_at_the_epoch():
-    state = {"last_modified_watermark": datetime(2026, 7, 1, tzinfo=timezone.utc)}
+def test_first_ever_bootstrap_starts_at_the_epoch():
+    since = sync.resolve_since({}, sync.MODE_BOOTSTRAP, overlap_minutes=15)
+    assert since.year == 1970
+
+
+def test_interrupted_bootstrap_resumes_from_its_durable_watermark():
+    """A bootstrap must NOT rescan the portal from the epoch on every retry —
+    that would make a large backlog impossible to finish."""
+    state = {"last_modified_watermark": datetime(2026, 7, 1, 12, 0,
+                                                 tzinfo=timezone.utc)}
     since = sync.resolve_since(state, sync.MODE_BOOTSTRAP, overlap_minutes=15)
+    assert since == datetime(2026, 7, 1, 11, 45, tzinfo=timezone.utc)
+
+
+def test_bootstrap_and_incremental_resume_from_the_same_point():
+    """Both modes share one resume rule; only the no-watermark case differs."""
+    state = {"last_modified_watermark": datetime(2026, 7, 1, 12, 0,
+                                                 tzinfo=timezone.utc)}
+    assert (sync.resolve_since(state, sync.MODE_BOOTSTRAP, overlap_minutes=15)
+            == sync.resolve_since(state, sync.MODE_INCREMENTAL, overlap_minutes=15))
+
+
+def test_restart_from_epoch_forces_a_full_rebuild():
+    """Operator-only escape hatch — never normal bootstrap behaviour."""
+    state = {"last_modified_watermark": datetime(2026, 7, 1, tzinfo=timezone.utc)}
+    since = sync.resolve_since(state, sync.MODE_BOOTSTRAP, overlap_minutes=15,
+                               restart_from_epoch=True)
     assert since.year == 1970
 
 
@@ -788,6 +833,289 @@ def test_sync_records_both_freshness_datasets(fake_writers):
         now=datetime(2026, 7, 3, tzinfo=timezone.utc))
     datasets = {b["dataset"] for b in fake_writers.batches}
     assert datasets == {sync.DATASET_CONTACT_FUNNEL, sync.DATASET_LIFECYCLE_EVENTS}
+
+
+# =============================================================================
+# Truth-safety §2 — fail closed on persistence / checkpoint failure
+# =============================================================================
+def test_batch_creation_failure_means_hubspot_is_never_called(fake_writers):
+    """Without durable batch state a failure would be invisible, so the run must
+    refuse to read HubSpot at all."""
+    fake_writers.batch_ok = False
+    called = {"value": False}
+
+    def iterator(since, max_pages=None):
+        called["value"] = True
+        yield [_hs_contact("1")], {"watermark_ms": 0, "complete": False}
+
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_INCREMENTAL, page_iterator=iterator,
+        now=datetime(2026, 7, 3, tzinfo=timezone.utc))
+
+    assert result["status"] == "failed"
+    assert called["value"] is False
+    assert fake_writers.upserts == []
+
+
+def test_contact_persistence_failure_does_not_advance_the_watermark(fake_writers):
+    fake_writers.upsert_ok = False
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_INCREMENTAL,
+        page_iterator=_page([_hs_contact("1", modified="2026-07-01T00:00:00Z")]),
+        now=datetime(2026, 7, 3, tzinfo=timezone.utc))
+
+    assert result["status"] == "failed"
+    advanced = [u for u in fake_writers.state_updates
+                if u.get("last_modified_watermark")]
+    assert advanced == []
+    assert fake_writers.state.get("last_modified_watermark") is None
+
+
+def test_page_checkpoint_failure_is_failed_not_success(fake_writers):
+    fake_writers.checkpoint_ok = False
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_INCREMENTAL, page_iterator=_page([_hs_contact("1")]),
+        now=datetime(2026, 7, 3, tzinfo=timezone.utc))
+
+    assert result["status"] == "failed"
+    assert any(f["status"] == "failed" for f in fake_writers.finished)
+
+
+def test_final_completion_checkpoint_failure_is_failed_not_complete(fake_writers):
+    """The last durable write must be proven before a bootstrap may claim it
+    finished — otherwise the next run would rescan from scratch."""
+    # Allow the running-state write and the per-page checkpoint; fail the final one.
+    fake_writers.fail_checkpoint_after = 2
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP, page_iterator=_page([_hs_contact("1")]),
+        now=datetime(2026, 7, 3, tzinfo=timezone.utc))
+
+    assert result["status"] == "failed"
+    assert result.get("bootstrap_status") != sync.BOOTSTRAP_COMPLETE
+    assert fake_writers.state.get("bootstrap_status") != sync.BOOTSTRAP_COMPLETE
+
+
+def test_successful_durable_path_still_reports_success(fake_writers):
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP, page_iterator=_page([_hs_contact("1")]),
+        now=datetime(2026, 7, 3, tzinfo=timezone.utc))
+    assert result["status"] == "success"
+    assert result["bootstrap_status"] == sync.BOOTSTRAP_COMPLETE
+
+
+def test_idempotent_stale_row_no_op_is_not_treated_as_failure(fake_writers, monkeypatch):
+    """`persisted < attempted` is the latest-state guard working, NOT a failure."""
+    def _stale_noop(rows, *, sync_batch_id=None):
+        return {"ok": True, "attempted": len(rows), "persisted": 0, "error": None}
+    monkeypatch.setattr(fake_writers, "upsert_hubspot_contact_funnel", _stale_noop)
+
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_INCREMENTAL, page_iterator=_page([_hs_contact("1")]),
+        now=datetime(2026, 7, 3, tzinfo=timezone.utc))
+    assert result["status"] == "success"
+    assert result["contacts_written"] == 0
+    assert result["contacts_attempted"] == 1
+
+
+# =============================================================================
+# Truth-safety §4 — completion is proven, never assumed
+# =============================================================================
+def test_scan_without_a_completion_sentinel_cannot_mark_bootstrap_complete(fake_writers):
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP,
+        page_iterator=_page([_hs_contact("1")], complete=False),
+        now=datetime(2026, 7, 3, tzinfo=timezone.utc))
+    assert result["scan_complete"] is False
+    assert result["bootstrap_status"] == sync.BOOTSTRAP_PARTIAL
+
+
+def test_stalled_scan_at_the_10k_boundary_cannot_mark_complete(fake_writers):
+    """Synthetic 10,000-result boundary: every contact shares one modification
+    timestamp, so the real iterator raises rather than returning normally."""
+    from connectors.hubspot_pull import HubSpotSearchStalledError
+
+    def stalled(since, max_pages=None):
+        yield ([_hs_contact(str(i), modified="2026-07-01T00:00:00Z")
+                for i in range(100)], {"watermark_ms": 0, "complete": False})
+        raise HubSpotSearchStalledError("stalled at the 10,000-result boundary")
+
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP, page_iterator=stalled,
+        now=datetime(2026, 7, 3, tzinfo=timezone.utc))
+
+    assert result["status"] == "failed"
+    assert result["scan_complete"] is False
+    assert fake_writers.state.get("bootstrap_status") == sync.BOOTSTRAP_PARTIAL
+
+
+def test_real_iterator_raises_rather_than_returning_on_a_stalled_watermark():
+    """Prove the connector itself refuses to end normally when >1 full page
+    shares a boundary timestamp — the condition that would otherwise let a
+    bootstrap be marked complete on an incomplete scan."""
+    from connectors.hubspot_pull import (
+        HUBSPOT_SEARCH_RESULT_CAP, HubSpotSearchStalledError,
+        iter_contacts_modified_since,
+    )
+
+    boundary_ms = "1751328000000"
+    page_size = 100
+    pages_to_cap = HUBSPOT_SEARCH_RESULT_CAP // page_size
+
+    class _Obj:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self):
+            return self._payload
+
+    class _Resp:
+        def __init__(self, results, after):
+            self.results = results
+            self.paging = type("P", (), {"next": type("N", (), {"after": after})()})()
+
+    class _FakeSearch:
+        """10,000 contacts that all share one lastmodifieddate.
+
+        Deterministic on the paging cursor, exactly like the real API: re-issuing
+        the query returns the SAME contacts, so re-anchoring the watermark cannot
+        make progress and the scan is provably incomplete.
+        """
+
+        def do_search(self, public_object_search_request=None):
+            after = (public_object_search_request or {}).get("after")
+            offset = int(after) if after else 0
+            results = [_Obj({"id": f"c{offset + i}", "properties": {
+                "lastmodifieddate": boundary_ms}}) for i in range(page_size)]
+            return _Resp(results, after=str(offset + page_size))
+
+    class _FakeClient:
+        def __init__(self):
+            self.crm = type("C", (), {})()
+            self.crm.contacts = type("K", (), {})()
+            self.crm.contacts.search_api = _FakeSearch()
+
+    iterator = iter_contacts_modified_since(0, client=_FakeClient())
+    saw_completion = False
+    with pytest.raises(HubSpotSearchStalledError):
+        for _page_rows, meta in iterator:
+            if meta.get("complete"):
+                saw_completion = True
+            if meta.get("page_index", 0) > pages_to_cap + 5:
+                break  # safety net; the raise should arrive first
+    assert saw_completion is False
+
+
+def test_real_iterator_emits_a_completion_sentinel_at_the_true_end():
+    from connectors.hubspot_pull import iter_contacts_modified_since
+
+    class _Obj:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self):
+            return self._payload
+
+    class _Resp:
+        def __init__(self, results):
+            self.results = results
+            self.paging = None
+
+    class _FakeSearch:
+        def do_search(self, public_object_search_request=None):
+            return _Resp([_Obj({"id": "1", "properties": {
+                "lastmodifieddate": "1751328000000"}})])
+
+    class _FakeClient:
+        def __init__(self):
+            self.crm = type("C", (), {})()
+            self.crm.contacts = type("K", (), {})()
+            self.crm.contacts.search_api = _FakeSearch()
+
+    metas = [meta for _rows, meta
+             in iter_contacts_modified_since(0, client=_FakeClient())]
+    assert metas[-1]["complete"] is True
+    assert all(m["complete"] is False for m in metas[:-1])
+
+
+# =============================================================================
+# Truth-safety §3 — campaign-identity availability is propagated, never zeroed
+# =============================================================================
+def test_identity_unavailable_withholds_narrow_scopes_but_keeps_broad_ones():
+    rows = [_row(str(i), sql="2026-07-05", source="PAID_SEARCH",
+                 campaign="Brand - US", keyword="tms") for i in range(1, 6)]
+    populations = funnel.build_populations(
+        rows, _Q3_START, _Q3_END, identity_available=False)
+    counts = populations["counts"][lifecycle.EVENT_SQL]
+
+    assert counts[funnel.SCOPE_ALL_SOURCE] == 5
+    assert counts[funnel.SCOPE_GOOGLE_ADS_SOURCE] == 5
+    assert counts[funnel.SCOPE_CAMPAIGN_ATTRIBUTABLE] is None
+    assert counts[funnel.SCOPE_KEYWORD_ATTRIBUTABLE] is None
+
+    status = funnel.reconciliation_status(populations, available=True)
+    assert status["status"] != "reconciled"
+    assert funnel.REASON_CAMPAIGN_IDENTITY_UNAVAILABLE in status["reasons"]
+
+
+def test_identity_unavailable_is_never_rendered_as_false_membership():
+    rows = [_row("1", sql="2026-07-05")]
+    populations = funnel.build_populations(
+        rows, _Q3_START, _Q3_END, identity_available=False)
+    scopes = populations["contacts"][0]["scopes"]
+    assert scopes[funnel.SCOPE_CAMPAIGN_ATTRIBUTABLE] is None
+    assert scopes[funnel.SCOPE_KEYWORD_ATTRIBUTABLE] is None
+
+
+def test_unavailable_scope_keys_are_none_not_an_empty_set():
+    rows = [_row("1", sql="2026-07-05")]
+    populations = funnel.build_populations(
+        rows, _Q3_START, _Q3_END, identity_available=False)
+    population = populations["events"][lifecycle.EVENT_SQL]
+    assert funnel.scope_keys(population, funnel.SCOPE_ALL_SOURCE) == {"1"}
+    assert funnel.scope_keys(population, funnel.SCOPE_CAMPAIGN_ATTRIBUTABLE) is None
+
+
+def test_unavailable_scopes_do_not_break_the_nesting_invariant():
+    """An unknown subset cannot violate nesting — it must not become a mismatch."""
+    rows = [_row("1", sql="2026-07-05"), _row("2", sql="2026-07-06")]
+    populations = funnel.build_populations(
+        rows, _Q3_START, _Q3_END, identity_available=False)
+    assert funnel.scopes_are_nested(
+        populations["events"][lifecycle.EVENT_SQL]) is True
+    assert funnel.reconciliation_status(
+        populations, available=True)["status"] == "partial"
+
+
+def test_consulted_identity_with_zero_mapped_campaigns_may_report_zero():
+    """A SUCCESSFULLY consulted contract that maps nothing is a real, provable
+    zero — that must still be allowed."""
+    def _maps_nothing(_campaign_name):
+        return False, "unresolved_campaign_mapping"
+
+    rows = [_row("1", sql="2026-07-05", source="PAID_SEARCH")]
+    populations = funnel.build_populations(
+        rows, _Q3_START, _Q3_END, campaign_resolver=_maps_nothing,
+        identity_available=True)
+    counts = populations["counts"][lifecycle.EVENT_SQL]
+
+    assert counts[funnel.SCOPE_GOOGLE_ADS_SOURCE] == 1
+    assert counts[funnel.SCOPE_CAMPAIGN_ATTRIBUTABLE] == 0
+    assert counts[funnel.SCOPE_KEYWORD_ATTRIBUTABLE] == 0
+
+
+def test_reconciliation_scope_coverage_withholds_unavailable_scopes():
+    funnel_rows = [_row("1", sql="2026-07-10", source="PAID_SEARCH")]
+    comparison = recon.compare_sql_counts(
+        funnel_rows, [], set(), _Q3_START, _Q3_END, identity_available=False)
+    coverage = comparison["attribution_coverage"]
+    assert coverage[funnel.SCOPE_ALL_SOURCE] == 1
+    assert coverage[funnel.SCOPE_CAMPAIGN_ATTRIBUTABLE] is None
+
+
+def test_build_campaign_resolver_returns_explicit_availability():
+    resolver, available = funnel._build_campaign_resolver(_Q3_START, _Q3_END)
+    assert callable(resolver)
+    assert isinstance(available, bool)
 
 
 # =============================================================================

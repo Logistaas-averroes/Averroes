@@ -121,6 +121,24 @@ paid-search-only table and so could never exceed the Google Ads scope.)
 carries a HubSpot keyword label. It is **not** a Google Ads criterion-level join —
 no such join exists (see the PR-ADS-153A audit).
 
+### 4.1 When campaign identity cannot be consulted
+
+The two narrow scopes depend on the Google Ads campaign-identity contract. If it
+cannot be consulted, they are **unavailable**, never zero:
+
+| Scope | Behaviour |
+|---|---|
+| `all_source` | fully available — a CRM funnel count does not depend on ad attribution |
+| `google_ads_source` | fully available — decided by the contact's own HubSpot source |
+| `campaign_attributable` | **`null`** (unavailable) |
+| `keyword_attributable` | **`null`** (unavailable) |
+| reconciliation status | `partial`, reason `campaign_identity_unavailable` — never `reconciled` |
+
+Rendering these as `0` would state "no campaign-attributable contacts" when the
+truth is "we could not check". A **successfully consulted** contract that maps
+nothing is a different thing entirely, and `campaign_attributable: 0` is then a
+real, provable zero.
+
 ---
 
 ## 5. Lifecycle Customer ≠ Revenue Customer
@@ -162,11 +180,66 @@ One service owns the canonical contact store:
 | Watermark | `lastmodifieddate` — **never** contact-creation recency. A contact created two years ago and qualified today is refreshed today. |
 | Scope | all sources; no `hs_analytics_source` filter |
 | Resumability | the watermark is persisted after **every page**; completion state never lives in process memory |
-| Bootstrap | the same code path with the watermark at the epoch; status is explicit (`not_started` / `running` / `partial` / `complete` / `failed`) |
+| Bootstrap | same code path as incremental, differing only in the starting watermark. Status is explicit (`not_started` / `running` / `partial` / `complete` / `failed`) |
 | Idempotency | upsert on `contact_id`, guarded by `last_modified_at` so a replayed older read can never resurrect a superseded stage |
 | Failure | a partial read is recorded as a failed batch with the watermark left at the last **proven** checkpoint — never reported as complete |
 
 Completeness is never claimed merely because recent rows exist.
+
+### 7.1 Bootstrap resumes — it does not rescan
+
+An interrupted historical bootstrap resumes from its **durable watermark**, using
+the same safe overlap incremental sync uses. It does **not** restart from the
+epoch, which would make a large backlog impossible to finish:
+
+| State | Starting point |
+|---|---|
+| No durable watermark (first-ever bootstrap) | epoch |
+| Durable watermark present | watermark − overlap |
+| `restart_from_epoch=true` | epoch — operator-only escape hatch for a deliberate full rebuild, never normal behaviour |
+
+An unfinished bootstrap keeps bootstrapping (`get_bootstrap_mode`) until it
+completes; only then does the scheduler switch to incremental.
+
+### 7.2 Fail closed at every durable boundary
+
+A canonical sync never reports success for writes it cannot prove:
+
+1. **Before calling HubSpot** — if the sync batches or the bootstrap-running
+   state cannot be persisted, the run refuses to read at all. A failure that
+   leaves no record is worse than no run.
+2. **Per page** — normalise → persist → **verify the write was proven** → only
+   then advance the durable watermark. A failed persist raises; the watermark
+   stays where it was, so the next run re-reads that page.
+3. **Per checkpoint** — `update_contact_funnel_sync_state` returns a boolean. If
+   the checkpoint cannot be written the run stops rather than reading pages whose
+   progress can never be recorded.
+4. **At finalisation** — the final durable state write must succeed before the
+   run may report success or mark a bootstrap complete.
+
+**`persisted < attempted` is NOT a failure.** The writer returns
+`{ok, attempted, persisted, error}` precisely so the caller can tell an
+idempotent stale-row no-op (the latest-state guard doing its job) apart from a
+persistence failure.
+
+### 7.3 Completion is proven, never assumed
+
+The iterator signals the true end of the HubSpot result set with an **explicit
+empty sentinel page** (`{"complete": true}`). A bootstrap may be marked complete
+only when that sentinel was observed.
+
+Running out of pages proves nothing:
+
+| Condition | Outcome |
+|---|---|
+| Sentinel observed | `complete` |
+| `max_pages` cap reached | `partial` (truncated) |
+| Stall at HubSpot's 10,000-result boundary | `HubSpotSearchStalledError` → run **failed**, bootstrap stays `partial` |
+
+The stall case is when more than one full page shares an identical
+`lastmodifieddate` at the paging cap, so re-anchoring cannot advance and an
+unknown number of contacts is unreachable. Returning normally there would let a
+bootstrap be marked complete on an incomplete scan.
 
 ---
 

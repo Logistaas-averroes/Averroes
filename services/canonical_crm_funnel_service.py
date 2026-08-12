@@ -97,6 +97,14 @@ ORDERED_SCOPES = (
     SCOPE_KEYWORD_ATTRIBUTABLE,
 )
 
+# Scopes that cannot be computed without a successfully-consulted Google Ads
+# campaign-identity contract. When it is unavailable these are UNAVAILABLE
+# (null) — never False membership and never a zero count.
+IDENTITY_DEPENDENT_SCOPES = (
+    SCOPE_CAMPAIGN_ATTRIBUTABLE,
+    SCOPE_KEYWORD_ATTRIBUTABLE,
+)
+
 SCOPE_LABELS = {
     SCOPE_ALL_SOURCE: "All sources",
     SCOPE_GOOGLE_ADS_SOURCE: "Google Ads-source",
@@ -119,6 +127,7 @@ BASIS_UNAVAILABLE = "unavailable"
 REASON_MISSING_STAGE_DATE = "missing_stage_entry_date"
 REASON_NOT_GOOGLE_ADS = "not_google_ads_source"
 REASON_UNKNOWN_LIFECYCLE_STAGE = "unknown_lifecycle_stage"
+REASON_CAMPAIGN_IDENTITY_UNAVAILABLE = "campaign_identity_unavailable"
 
 
 def _norm(value) -> str:
@@ -203,13 +212,30 @@ def default_campaign_resolver(campaign_name) -> tuple[bool, str | None]:
     return False, campaign_disqualifier(campaign_name)
 
 
-def _contact_scopes(row: dict, resolver) -> dict:
+def _contact_scopes(row: dict, resolver, identity_available: bool = True) -> dict:
     """Scope membership flags for ONE contact. Scope is a property of the
     contact's acquisition evidence and applies identically to every funnel event
     that contact produced — attribution creates subsets, it never redefines the
-    underlying event (Minimum Viable Truth rule 6)."""
+    underlying event (Minimum Viable Truth rule 6).
+
+    When the Google Ads campaign-identity contract could not be consulted, the
+    identity-dependent scopes are ``None`` (UNAVAILABLE), never ``False``.
+    Collapsing "we could not check" into "not a member" would render an
+    unknowable subset as a confident zero.
+    """
     group = derive_acquisition_group(row)
     is_google_ads = group == GROUP_GOOGLE_ADS
+
+    if not identity_available:
+        return {
+            "acquisition_group": group,
+            SCOPE_ALL_SOURCE: True,
+            SCOPE_GOOGLE_ADS_SOURCE: is_google_ads,
+            SCOPE_CAMPAIGN_ATTRIBUTABLE: None,
+            SCOPE_KEYWORD_ATTRIBUTABLE: None,
+            "campaign_block_reason": REASON_CAMPAIGN_IDENTITY_UNAVAILABLE,
+        }
+
     campaign_ok, campaign_reason = resolver(row.get("hs_analytics_source_data_1"))
     has_keyword = bool((row.get("hs_analytics_source_data_2") or "").strip())
 
@@ -234,8 +260,15 @@ def build_populations(
     end: date | None,
     *,
     campaign_resolver=None,
+    identity_available: bool = True,
 ) -> dict:
     """Build canonical funnel event populations from raw contact rows. Pure.
+
+    ``identity_available`` reports whether the Google Ads campaign-identity
+    contract was successfully consulted. When it is False the campaign- and
+    keyword-attributable counts are ``None`` (unavailable) rather than 0, and
+    the broader ``all_source`` / ``google_ads_source`` counts remain fully
+    available — an attribution outage must not suppress CRM funnel truth.
 
     For every funnel event, a contact belongs to that event's population when its
     stage-entry date for that event falls inside ``[start, end]``. A contact can
@@ -263,7 +296,7 @@ def build_populations(
             # No durable HubSpot identity — never counted, never synthesised.
             continue
 
-        scopes = _contact_scopes(raw, resolver)
+        scopes = _contact_scopes(raw, resolver, identity_available)
         stage = normalize_lifecycle_stage(raw.get("lifecycle_stage"))
         if stage is not None and not is_known_stage(stage):
             unknown_stage_contacts += 1
@@ -306,8 +339,7 @@ def build_populations(
                 events[event].append(contact)
 
     counts = {
-        event: {scope: sum(1 for c in events[event] if c["scopes"][scope])
-                for scope in ORDERED_SCOPES}
+        event: _event_counts(events[event], identity_available)
         for event in FUNNEL_EVENTS
     }
 
@@ -323,7 +355,24 @@ def build_populations(
         "contacts": contacts,
         "counts": counts,
         "coverage": coverage,
+        "identity_available": identity_available,
     }
+
+
+def _event_counts(population: list[dict], identity_available: bool) -> dict:
+    """Per-scope counts for one event population.
+
+    An identity-dependent scope is ``None`` when the campaign-identity contract
+    could not be consulted. Summing membership there would publish 0, which
+    reads as "no campaign-attributable contacts" rather than "we could not tell".
+    """
+    counts = {}
+    for scope in ORDERED_SCOPES:
+        if not identity_available and scope in IDENTITY_DEPENDENT_SCOPES:
+            counts[scope] = None
+            continue
+        counts[scope] = sum(1 for c in population if c["scopes"][scope])
+    return counts
 
 
 def _stage_reached(current_stage, event: str) -> bool:
@@ -342,17 +391,31 @@ def _stage_reached(current_stage, event: str) -> bool:
 
 
 # ── Scope key sets + nesting invariant ───────────────────────────────────────
-def scope_keys(population: list[dict], scope: str) -> set:
-    """Contact-id set for a named scope within one event population."""
+def scope_keys(population: list[dict], scope: str):
+    """Contact-id set for a named scope within one event population.
+
+    Returns ``None`` when the scope is UNAVAILABLE for this population (the
+    campaign-identity contract could not be consulted) — never an empty set,
+    which a caller could mistake for a proven zero.
+    """
     if scope not in ORDERED_SCOPES:
         raise ValueError(f"Unknown scope '{scope}'")
+    if any(c["scopes"].get(scope) is None for c in population):
+        return None
     return {c["contact_id"] for c in population if c["scopes"][scope]}
 
 
 def scopes_are_nested(population: list[dict]) -> bool:
-    """Prove keyword ⊆ campaign ⊆ google_ads ⊆ all_source for one population."""
+    """Prove keyword ⊆ campaign ⊆ google_ads ⊆ all_source for one population.
+
+    Unavailable scopes are skipped: an unknown subset cannot violate nesting,
+    and asserting over it would turn an attribution outage into a false
+    ``mismatch``.
+    """
     sets = [scope_keys(population, scope) for scope in ORDERED_SCOPES]
-    return all(sets[i + 1] <= sets[i] for i in range(len(sets) - 1))
+    available = [s for s in sets if s is not None]
+    return all(available[i + 1] <= available[i]
+               for i in range(len(available) - 1))
 
 
 # ── Cohort-safe conversions ──────────────────────────────────────────────────
@@ -448,6 +511,10 @@ def reconciliation_status(populations: dict, *, available: bool) -> dict:
         reasons.append(REASON_MISSING_STAGE_DATE)
     if (coverage.get("unknown_lifecycle_stage_contacts") or 0) > 0:
         reasons.append(REASON_UNKNOWN_LIFECYCLE_STAGE)
+    # An attribution outage never makes the funnel "reconciled": the narrow
+    # scopes are unknown, and saying otherwise would imply they were checked.
+    if populations.get("identity_available") is False:
+        reasons.append(REASON_CAMPAIGN_IDENTITY_UNAVAILABLE)
 
     if reasons:
         return {"status": STATUS_PARTIAL, "reasons": reasons}
@@ -483,8 +550,10 @@ def build(
     available = bool(fetched.get("available"))
     rows = fetched.get("rows") or []
 
-    resolver = _build_campaign_resolver(start, end)
-    populations = build_populations(rows, start, end, campaign_resolver=resolver)
+    resolver, identity_available = _build_campaign_resolver(start, end)
+    populations = build_populations(
+        rows, start, end, campaign_resolver=resolver,
+        identity_available=identity_available)
 
     counts = populations["counts"]
     status = reconciliation_status(populations, available=available)
@@ -515,6 +584,7 @@ def build(
         },
         "scope": scope,
         "scope_label": SCOPE_LABELS[scope],
+        "campaign_identity_available": identity_available,
         "canonical_source": FUNNEL_SOURCE,
         "table": FUNNEL_TABLE,
         "dedup_key": FUNNEL_DEDUP_KEY,
@@ -525,7 +595,12 @@ def build(
         "coverage": populations["coverage"] if available else None,
         "reconciliation": status,
         "sync": sync_state,
-        "notes": [
+        "notes": ([] if identity_available else [
+            "Google Ads campaign identity could not be consulted: "
+            "campaign-attributable and keyword-attributable counts are "
+            "UNAVAILABLE (null), not zero. All-source and Google Ads-source "
+            "counts are unaffected.",
+        ]) + [
             "Funnel counts are stage-ENTRY events, not current lifecycle stage. "
             "A contact now at Customer still counts in its historical SQL cohort.",
             "A missing stage-entry timestamp is a coverage gap. Contact creation "
@@ -538,6 +613,10 @@ def build(
 
 def _build_campaign_resolver(start: date | None, end: date | None):
     """Reuse the canonical Google Ads campaign-identity resolver (PR-ADS-152 §2).
+
+    Returns ``(resolver, identity_available)``. Availability is propagated — not
+    swallowed — so the caller can render the identity-dependent scopes as
+    unavailable rather than zero.
 
     Campaign attribution must resolve a REAL Google Ads campaign identity, never a
     bare non-empty label. When the identity contract cannot be consulted the
@@ -552,15 +631,16 @@ def _build_campaign_resolver(start: date | None, end: date | None):
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[crm_funnel] campaign identity resolver unavailable: %s", exc)
-        return unavailable_campaign_resolver
+        return unavailable_campaign_resolver, False
 
     if not identity_available:
         # Fail closed: an unconsultable identity contract means campaign
-        # attribution is UNAVAILABLE, never guessed from a bare campaign label.
+        # attribution is UNAVAILABLE, never guessed from a bare campaign label
+        # and never rendered as a confident zero.
         logger.info("[crm_funnel] campaign identity contract unavailable — "
                     "campaign/keyword scopes withheld")
-        return unavailable_campaign_resolver
-    return resolver
+        return unavailable_campaign_resolver, False
+    return resolver, True
 
 
 def _sync_state_block() -> dict:

@@ -258,6 +258,7 @@ def compare_sql_counts(
     end,
     *,
     campaign_resolver=None,
+    identity_available: bool = True,
 ) -> dict:
     """Explain the SQL count change for ONE window. Pure.
 
@@ -312,7 +313,8 @@ def compare_sql_counts(
     }
 
     scope_counts = _scope_coverage(
-        funnel_rows, lifecycle_in_window, campaign_resolver=campaign_resolver)
+        funnel_rows, lifecycle_in_window, campaign_resolver=campaign_resolver,
+        identity_available=identity_available)
 
     return {
         "legacy_sql_count": len(legacy_in_window),
@@ -341,18 +343,27 @@ def compare_sql_counts(
     }
 
 
-def _scope_coverage(funnel_rows, contact_ids: set, *, campaign_resolver=None) -> dict:
-    """Named-scope breakdown of a lifecycle SQL set (attribution creates subsets)."""
+def _scope_coverage(funnel_rows, contact_ids: set, *, campaign_resolver=None,
+                    identity_available: bool = True) -> dict:
+    """Named-scope breakdown of a lifecycle SQL set (attribution creates subsets).
+
+    An identity-dependent scope is ``None`` when the campaign-identity contract
+    could not be consulted — never a zero that reads as a proven absence.
+    """
     resolver = campaign_resolver or funnel.default_campaign_resolver
     rows = [r for r in (funnel_rows or [])
             if str(r.get("contact_id") or "") in contact_ids]
     populations = funnel.build_populations(
-        rows, None, None, campaign_resolver=resolver)
+        rows, None, None, campaign_resolver=resolver,
+        identity_available=identity_available)
     contacts = populations["contacts"]
-    return {
-        scope: sum(1 for c in contacts if c["scopes"][scope])
-        for scope in funnel.ORDERED_SCOPES
-    }
+    coverage = {}
+    for scope in funnel.ORDERED_SCOPES:
+        if not identity_available and scope in funnel.IDENTITY_DEPENDENT_SCOPES:
+            coverage[scope] = None
+            continue
+        coverage[scope] = sum(1 for c in contacts if c["scopes"][scope])
+    return coverage
 
 
 def _in_window(value, start, end) -> bool:
@@ -403,7 +414,8 @@ def run(business_window: str = "current_quarter", *, now=None) -> dict:
             },
         }
 
-    resolver = funnel._build_campaign_resolver(start, end)  # noqa: SLF001
+    resolver, identity_available = funnel._build_campaign_resolver(  # noqa: SLF001
+        start, end)
 
     return {
         "available": True,
@@ -415,7 +427,7 @@ def run(business_window: str = "current_quarter", *, now=None) -> dict:
         },
         "sql_comparison": compare_sql_counts(
             funnel_rows, legacy_rows, exclusions, start, end,
-            campaign_resolver=resolver),
+            campaign_resolver=resolver, identity_available=identity_available),
         "mismatches": reconcile_contacts(funnel_rows, legacy_rows, exclusions),
         "mql_status_pollution": {
             "available": bool(pollution.get("available")),
