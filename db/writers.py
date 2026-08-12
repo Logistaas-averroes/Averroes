@@ -306,9 +306,7 @@ def write_campaigns(run_id: int, campaigns: list) -> int:
     try:
         with get_conn() as conn:
             if conn is None:
-                # Unavailable is NEVER silently reported as "wrote nothing".
-                return {"ok": False, "attempted": len(prepared), "persisted": 0,
-                        "error": "database_unavailable"}
+                return 0
             with conn.cursor() as cur:
                 cur.executemany(
                     """
@@ -2674,7 +2672,10 @@ def upsert_hubspot_contact_funnel(rows: list, *,
     try:
         with get_conn() as conn:
             if conn is None:
-                return 0
+                # The documented contract is ALWAYS the structured result.
+                # Unavailable is never silently reported as "wrote nothing".
+                return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                        "error": "database_unavailable"}
             with conn.cursor() as cur:
                 cur.executemany(
                     f"""

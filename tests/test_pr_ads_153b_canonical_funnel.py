@@ -918,6 +918,145 @@ def test_idempotent_stale_row_no_op_is_not_treated_as_failure(fake_writers, monk
 
 
 # =============================================================================
+# Writer contracts — legacy writers keep their integer contract; the new
+# canonical writer always returns the structured result
+# =============================================================================
+class _NullConnCM:
+    """A `get_conn()` stand-in for an unavailable database."""
+
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.fixture()
+def db_unavailable(monkeypatch):
+    from db import writers as db_writers
+
+    monkeypatch.setattr(db_writers, "get_conn", lambda: _NullConnCM())
+    return db_writers
+
+
+def test_legacy_write_campaigns_keeps_its_integer_contract(db_unavailable):
+    """`write_campaigns` is annotated `-> int` and its callers expect an int.
+    The structured result introduced for the canonical funnel writer must NOT
+    leak into legacy writers."""
+    result = db_unavailable.write_campaigns(1, [{
+        "campaign_name": "Brand - US", "spend_usd": 10.0, "clicks": 5,
+        "impressions": 100, "conversions": 1, "total_leads": 2,
+        "confirmed_sqls": 1, "junk_count": 0, "junk_rate_pct": 0.0,
+        "cpql_usd": 10.0, "verdict": "HOLD", "verdict_reason": "test",
+    }])
+    assert isinstance(result, int)
+    assert not isinstance(result, bool)
+    assert result == 0
+
+
+def test_no_legacy_writer_returns_the_structured_result(db_unavailable):
+    """The sibling legacy writers must be untouched by the new contract.
+
+    Their exact pre-PR-ADS-153B return values are preserved as-is — including
+    quirks such as ``write_waste_terms`` returning None for empty input, which
+    is out of scope for this PR. The invariant asserted here is only that none
+    of them leaked the structured funnel result.
+    """
+    rows = [{
+        "campaign_name": "Brand - US", "spend_usd": 1.0,
+        "search_term": "tms", "country": "AE", "contact_id": "1",
+    }]
+    for name in ("write_campaigns", "write_leads", "write_waste_terms",
+                 "write_geo", "write_deals"):
+        for payload in ([], rows):
+            result = getattr(db_unavailable, name)(1, payload)
+            assert not isinstance(result, dict), (
+                f"{name} leaked the structured result: {result!r}")
+            assert result is None or isinstance(result, int), (
+                f"{name} returned an unexpected type: {result!r}")
+
+
+def test_legacy_writers_never_return_the_structured_result():
+    """Static guard: only the canonical funnel writer carries the new contract."""
+    import ast
+
+    source = (_ROOT / "db" / "writers.py").read_text()
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        annotation = ast.unparse(node.returns) if node.returns else None
+        returns_dict = any(
+            isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)
+            for n in ast.walk(node))
+        if returns_dict:
+            assert annotation not in ("int", "bool"), (
+                f"{node.name} is annotated -> {annotation} but returns a dict")
+
+
+def test_funnel_writer_always_returns_the_structured_result(db_unavailable):
+    """Every exit path — including the empty-input short circuit — is structured."""
+    for rows in ([], [None], [{"contact_id": "1",
+                               "last_modified_at": "2026-07-01T00:00:00+00:00"}]):
+        result = db_unavailable.upsert_hubspot_contact_funnel(rows)
+        assert isinstance(result, dict), rows
+        assert set(result) == {"ok", "attempted", "persisted", "error"}, rows
+        assert isinstance(result["ok"], bool)
+        assert isinstance(result["attempted"], int)
+        assert isinstance(result["persisted"], int)
+
+
+def test_funnel_writer_reports_unavailable_database_as_not_ok(db_unavailable):
+    """An unavailable DB is ok=False — never a bare 0, and never a silent
+    "wrote nothing" that the caller would treat as success."""
+    result = db_unavailable.upsert_hubspot_contact_funnel([{
+        "contact_id": "1", "last_modified_at": "2026-07-01T00:00:00+00:00"}])
+    assert result == {"ok": False, "attempted": 1, "persisted": 0,
+                      "error": "database_unavailable"}
+
+
+def test_funnel_writer_empty_input_is_ok_not_a_failure(db_unavailable):
+    """Nothing to write is success with zero attempted — distinct from a failure."""
+    result = db_unavailable.upsert_hubspot_contact_funnel([])
+    assert result["ok"] is True
+    assert result["attempted"] == 0
+    assert result["error"] is None
+
+
+def test_sync_fails_closed_cleanly_when_the_database_is_unavailable(monkeypatch):
+    """The real writer's unavailable path, inside the real sync orchestration.
+
+    With a bare-`0` return this raised AttributeError ("int has no attribute
+    'get'"). It must instead fail closed: status=failed, watermark untouched,
+    bootstrap never marked complete.
+    """
+    from db import writers as real_writers
+
+    monkeypatch.setattr(real_writers, "get_conn", lambda: _NullConnCM())
+
+    class _Writers(_FakeWriters):
+        """Durable batch/state calls succeed so the run reaches the REAL upsert."""
+
+        def upsert_hubspot_contact_funnel(self, rows, *, sync_batch_id=None):
+            return real_writers.upsert_hubspot_contact_funnel(
+                rows, sync_batch_id=sync_batch_id)
+
+    writers = _Writers()
+    monkeypatch.setattr(sync, "db_writers", writers)
+
+    result = sync.run_contact_funnel_sync(
+        mode=sync.MODE_BOOTSTRAP,
+        page_iterator=_page([_hs_contact("1", modified="2026-07-01T00:00:00Z")]),
+        now=datetime(2026, 7, 5, tzinfo=timezone.utc))
+
+    assert result["status"] == "failed"
+    assert "database_unavailable" in (result["error"] or "")
+    assert result["scan_complete"] is False
+    assert writers.state.get("bootstrap_status") == sync.BOOTSTRAP_PARTIAL
+    assert writers.state.get("last_modified_watermark") is None
+
+
+# =============================================================================
 # Truth-safety §4 — completion is proven, never assumed
 # =============================================================================
 def test_scan_without_a_completion_sentinel_cannot_mark_bootstrap_complete(fake_writers):
