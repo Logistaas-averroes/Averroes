@@ -40,6 +40,36 @@ These field names are confirmed from live API calls. Use exactly as shown.
 
 ---
 
+## Lifecycle Stage & Stage-Entry Dates (PR-ADS-153B — CANONICAL FUNNEL)
+
+**HubSpot Lifecycle Stage is the canonical Averroes funnel.** `mql_status` is an
+operational workflow dimension and no longer defines any funnel stage. Full
+doctrine: `docs/33_CANONICAL_CRM_FUNNEL.md`.
+
+| API Field Name | Purpose |
+|---------------|---------|
+| `lifecyclestage` | Canonical funnel stage. Values: `subscriber`, `lead`, `marketingqualifiedlead`, `salesqualifiedlead`, `opportunity`, `customer`, `evangelist`, `other`, plus custom `370543605` (Discarded Contact) and `377714653` (Reseller) |
+| `hs_v2_date_entered_lead` | Canonical **Lead** event date |
+| `hs_v2_date_entered_marketingqualifiedlead` | Canonical **MQL** event date |
+| `hs_v2_date_entered_salesqualifiedlead` | Canonical **SQL** event date |
+| `hs_v2_date_entered_opportunity` | Canonical **Opportunity** event date |
+| `hs_v2_date_entered_customer` | Canonical **Lifecycle Customer** event date |
+| `lastmodifieddate` | Modification watermark driving the incremental contact sync |
+
+Rules:
+
+- A missing `hs_v2_date_entered_*` is a **coverage gap**. `createdate` is NEVER
+  substituted for a funnel event date.
+- Funnel counts are **not** mutually exclusive by current stage — a contact now at
+  `customer` still counts in the SQL cohort of the window it entered SQL.
+- Unknown/new lifecycle values are preserved verbatim, never folded into one of
+  the five primary stages.
+
+Durable store: `hubspot_contact_funnel` (one row per HubSpot contact id, all
+sources). No email address is stored.
+
+---
+
 ## MQL Status Values (Exact Spelling)
 
 **`DICARDED` — one R, not two. This is how it appears in HubSpot. Preserve this spelling exactly in all code.**
@@ -55,6 +85,16 @@ These field names are confirmed from live API calls. Use exactly as shown.
 | `CLOSED - Job Seeker` | Confirmed junk | Looking for employment, not software |
 | `CLOSED - Sales Disqualified` | Wrong fit | Reached, not qualified |
 | `DICARDED` | Confirmed junk | No viable lead action — one R |
+
+**PR-ADS-153B:** the canonical mapping of every value now lives in ONE place —
+`analysis/mql_status_taxonomy.py`. It additionally maps `CLOSED - Bad Contact`,
+`CLOSED - No Response` and `RESELLER` (previously unmapped and silently collapsed
+into `unknown`), and distinguishes `no_verdict` (property is null) from `unmapped`
+(a NEW production value that must surface as an audit warning). The legacy
+`mql_status ← mql___mdr_comments` fallback is removed from the canonical path so
+free text can no longer reach the typed property. The `status_category` column
+derived from these values is now **compatibility-only** and is retired for funnel
+counting in PR-ADS-153C.
 
 ---
 

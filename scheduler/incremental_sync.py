@@ -116,6 +116,8 @@ def run_daily_incremental_sync(
       - windsor/search_terms — skipped; connector does not support explicit
                                date ranges reliably (documents as unsupported)
       - hubspot/contacts    (explicit date range via createdate filter)
+      - hubspot/contact_funnel — CANONICAL all-source lifecycle spine,
+                               watermarked on lastmodifieddate (PR-ADS-153B)
       - hubspot/deals       (via GCLID contacts pulled in the deals window)
       - gclid/matches       — skipped; no incremental DB path yet
 
@@ -181,6 +183,14 @@ def run_daily_incremental_sync(
     # ── hubspot/contacts ──────────────────────────────────────────────────────
     datasets["hubspot/contacts"] = _sync_hubspot_contacts(
         run_id=run_id, date_from=date_from_contacts, date_to=today, errors=errors,
+    )
+
+    # ── hubspot/contact_funnel — CANONICAL CRM funnel spine (PR-ADS-153B) ────
+    # Watermarked on lastmodifieddate, all sources, resumable. This is the ONE
+    # writer of hubspot_contact_funnel; the legacy `leads` snapshot above keeps
+    # serving pre-PR-ADS-153C pages until they migrate.
+    datasets["hubspot/contact_funnel"] = _sync_contact_funnel(
+        run_id=run_id, errors=errors,
     )
 
     # ── hubspot/deals (via GCLID contacts in the deal window) ────────────────
@@ -668,6 +678,38 @@ def _sync_source_classification(
         if batch_id:
             db_writers.finish_sync_batch(
                 batch_id=batch_id, status="failed", error_message=str(exc)[:1000])
+        return {"status": "failed", "error": str(exc)[:500]}
+
+
+def _sync_contact_funnel(*, run_id, errors: list) -> dict:
+    """Refresh the canonical HubSpot contact funnel (PR-ADS-153B).
+
+    Delegates entirely to the single owning ingestion service — this scheduler
+    never writes canonical contact rows itself, so ownership stays unambiguous.
+    The service manages its own sync batches, durable watermark and bootstrap
+    state, and never raises.
+    """
+    from services.hubspot_contact_funnel_sync_service import (  # noqa: PLC0415
+        get_bootstrap_mode, run_contact_funnel_sync,
+    )
+
+    try:
+        mode = get_bootstrap_mode()
+        result = run_contact_funnel_sync(mode=mode, run_id=run_id)
+        if result.get("status") == "failed":
+            err = f"hubspot/contact_funnel: {result.get('error')}"
+            errors.append(err)
+            log.warning("[incremental_sync] %s", err)
+        else:
+            log.info(
+                "[incremental_sync] hubspot/contact_funnel: mode=%s seen=%s written=%s",
+                mode, result.get("contacts_seen"), result.get("contacts_written"),
+            )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        err = f"hubspot/contact_funnel: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
         return {"status": "failed", "error": str(exc)[:500]}
 
 
