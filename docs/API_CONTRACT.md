@@ -3379,3 +3379,153 @@ Attribution Confidence Summary (PR-ADS-082). Returns confidence tier distributio
 - Does not rewrite ROAS calculations.
 - Does not write to Google Ads, HubSpot, or any external system.
 - Does not upload offline conversions.
+
+---
+
+# PR-ADS-153B — Canonical CRM Funnel Truth
+
+HubSpot Lifecycle Stage is the canonical funnel. Every count below is a
+**stage-entry event** dated by its own `hs_v2_date_entered_*` timestamp — never by
+contact creation date, and never derived from `mql_status`.
+
+Full doctrine: `docs/33_CANONICAL_CRM_FUNNEL.md`.
+
+---
+
+## `GET /api/crm-funnel`
+
+Read-only. Auth required.
+
+**Query parameters**
+
+| Param | Default | Values |
+|---|---|---|
+| `window` | `current_quarter` | business: `current_quarter`, `last_quarter`, `last_6_months`, `ytd`, `all_time` · evidence: `7d`, `14d`, `30d`, `60d`, `180d`, `all_time` |
+| `window_type` | `business` | `business` \| `evidence` |
+| `scope` | `all_source` | `all_source`, `google_ads_source`, `campaign_attributable`, `keyword_attributable` |
+| `event` | *(all)* | `lead`, `mql`, `sql`, `opportunity`, `customer` |
+
+**Response**
+
+```jsonc
+{
+  "available": true,
+  "window": { "window_type": "business", "window_key": "current_quarter",
+              "start_date": "2026-07-01", "end_date": "2026-09-30" },
+  "scope": "all_source",
+  "scope_label": "All sources",
+  "canonical_source": "hubspot_lifecycle",
+  "table": "hubspot_contact_funnel",
+  "dedup_key": "hubspot_contact_id",
+  "rule_version": "v1",
+  "events": {
+    "sql": {
+      "event": "sql",
+      "label": "SQLs",
+      "definition": "HubSpot contact entered lifecycle stage 'salesqualifiedlead'",
+      "event_date_property": "hs_v2_date_entered_salesqualifiedlead",
+      "event_date_column": "date_entered_sql",
+      "scope": "all_source",
+      "count": 14,
+      "counts_by_scope": { "all_source": 14, "google_ads_source": 9,
+                           "campaign_attributable": 7, "keyword_attributable": 5 },
+      "available": true
+    }
+    // … lead, mql, opportunity, customer
+  },
+  "conversions": [
+    { "from_event": "mql", "to_event": "sql", "scope": "all_source",
+      "cohort_size": 40, "converted": 14, "rate_pct": 35.0,
+      "basis": "cohort", "available": true, "reason": null }
+  ],
+  "coverage": {
+    "contacts_considered": 812,
+    "missing_stage_entry_dates": { "sql": 3, "customer": 1 },
+    "stage_reached_without_entry_date": { "customer": 1 },
+    "unknown_lifecycle_stage_contacts": 0
+  },
+  "reconciliation": { "status": "partial", "reasons": ["missing_stage_entry_date"] },
+  "sync": { "available": true, "bootstrap_status": "complete",
+            "last_modified_watermark": "2026-08-12T06:11:00+00:00" },
+  "notes": ["…"]
+}
+```
+
+**Contract guarantees**
+
+- **Scopes are provably nested** — `keyword_attributable ≤ campaign_attributable ≤ google_ads_source ≤ all_source`. A broken invariant returns `reconciliation.status = "mismatch"`, which must never render as a normal count.
+- **Unavailable ≠ zero.** When the canonical store cannot be read, `available` is `false` and every `count` is `null`.
+- **Counts are not mutually exclusive by current stage** — a contact now at Customer still counts in its historical SQL cohort.
+- **Conversions are cohort-safe** or reported `available: false` with `basis: "unavailable"`. Rates are never fabricated.
+- **Missing stage-entry evidence is a coverage gap**, surfaced in `coverage`, never back-filled with `createdate`.
+
+**Status vocabulary** — `reconciled` · `partial` (readable, stage evidence incomplete) · `mismatch` (invariant broken — do not render) · `unavailable`.
+
+---
+
+## `GET /api/crm-funnel/audit`
+
+**Admin only** (admin session or `ADMIN_API_TOKEN`). Read-only.
+
+Returns lifecycle + stage-date coverage, MQL-status mapping coverage (including
+unmapped values and historical free-text pollution), sync/bootstrap coverage, the
+contact-by-contact legacy-vs-lifecycle reconciliation, and the **before/after SQL
+comparison**.
+
+| Param | Default |
+|---|---|
+| `window` | `current_quarter` |
+
+Key blocks:
+
+```jsonc
+{
+  "sql_comparison": {
+    "legacy_sql_count": 7,
+    "lifecycle_sql_count": 11,
+    "delta": 4,
+    "overlap_contacts": 5,
+    "legacy_only_contacts": 2,
+    "lifecycle_only_contacts": 6,
+    "date_shifted_contacts": 4,          // SQL under BOTH doctrines, different window
+    "missing_sql_event_date_contacts": 2, // legacy qualified, HubSpot never marked SQL
+    "attribution_coverage": { "all_source": 11, "google_ads_source": 8, … },
+    "legacy_definition": "status_category = 'qualified' …, windowed by contact_created_at",
+    "canonical_definition": "entered lifecycle stage 'salesqualifiedlead', windowed by hs_v2_date_entered_salesqualifiedlead",
+    "sets": { "legacy_only": ["…"], "lifecycle_only": ["…"], "date_shifted": ["…"] }
+  },
+  "mismatches": { "counts": { "lifecycle_sql_legacy_not_qualified": 6, … },
+                  "labels": { … }, "contacts": [ { "contact_id": "…", "company": "…",
+                  "mismatch_classes": ["…"] } ] },
+  "mql_status_pollution": { "legacy_rows_with_unknown_status": 3, … },
+  "sync_coverage": { "bootstrap_status": "complete", "totals": {…},
+                     "stage_entry_coverage": {…} }
+}
+```
+
+Every SQL count change is explained by exactly two causes: a **date shift** or a
+**population** difference. **No email address is ever returned** — contact id and
+company only.
+
+---
+
+## `POST /api/crm-funnel/sync`
+
+**Admin only.** Triggers the canonical contact sync.
+
+| Param | Default | Notes |
+|---|---|---|
+| `mode` | `incremental` | `bootstrap` scans the whole portal from the epoch; `incremental` resumes from the durable modification watermark |
+| `max_pages` | *(none)* | caps the run; a capped run is reported `truncated: true` and never marks the bootstrap complete |
+
+Reads HubSpot **read-only** and writes only the local canonical contact store.
+Never writes to HubSpot or Google Ads.
+
+---
+
+## Datasets added to freshness
+
+| Source | Dataset | Table | Date column |
+|---|---|---|---|
+| `hubspot` | `contact_funnel` | `hubspot_contact_funnel` | `last_modified_at` |
+| `hubspot` | `lifecycle_events` | `hubspot_contact_funnel` | `latest_stage_entry_at` |

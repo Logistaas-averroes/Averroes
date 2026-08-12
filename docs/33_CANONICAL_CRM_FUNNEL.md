@@ -1,0 +1,245 @@
+# 33 — Canonical CRM Funnel Doctrine
+
+> PR-ADS-153B — HubSpot Lifecycle Stage is the Averroes funnel.
+
+---
+
+## 1. The rule
+
+**HubSpot owns CRM lifecycle truth.** Averroes may ingest it, persist it,
+deduplicate it, attribute it, window it, reconcile it and report it.
+
+Averroes must **never** invent a parallel lifecycle.
+
+The canonical funnel is:
+
+```
+Lead → Marketing Qualified Lead → Sales Qualified Lead → Opportunity → Customer
+```
+
+---
+
+## 2. Canonical definitions
+
+Every funnel metric is a **stage-entry EVENT**, proven by a HubSpot timestamp.
+
+| Metric | Definition | Canonical event date | Durable column |
+|---|---|---|---|
+| **Lead** | contact entered `lead` | `hs_v2_date_entered_lead` | `date_entered_lead` |
+| **MQL** | contact entered `marketingqualifiedlead` | `hs_v2_date_entered_marketingqualifiedlead` | `date_entered_mql` |
+| **SQL** | contact entered `salesqualifiedlead` | `hs_v2_date_entered_salesqualifiedlead` | `date_entered_sql` |
+| **Opportunity** | contact entered `opportunity` | `hs_v2_date_entered_opportunity` | `date_entered_opportunity` |
+| **Lifecycle Customer** | contact entered `customer` | `hs_v2_date_entered_customer` | `date_entered_customer` |
+
+Canonical source: `hubspot_lifecycle` · Table: `hubspot_contact_funnel` ·
+Dedup key: the durable HubSpot **contact id** · Rule version: `v1`
+(`analysis/crm_lifecycle.py`).
+
+### 2.1 What changed from the legacy doctrine
+
+| | Legacy (pre-PR-ADS-153B) | Canonical |
+|---|---|---|
+| SQL definition | `status_category = 'qualified'` ⟸ `mql_status ∈ {CLOSED - Sales Qualified, CLOSED - Deal Created}` | entered lifecycle stage `salesqualifiedlead` |
+| SQL event date | **contact creation date** | Sales-Qualified **entry** timestamp |
+| MQL | not modelled | lifecycle entry event |
+| Opportunity | not modelled | lifecycle entry event |
+| Customer | closed-won deal row | lifecycle entry event (revenue customer is separate — §5) |
+| Population | paid-search contacts only | **all sources** |
+
+A contact created in January and qualified in August is a **January Lead** and an
+**August SQL**. This is required behaviour, not a rounding difference.
+
+### 2.2 Absence is never a date
+
+A missing `hs_v2_date_entered_*` is a **coverage gap**. The contact is not counted
+in any bounded window and the gap is reported. `createdate` is **never**
+substituted for a missing funnel event date.
+
+### 2.3 Counts are not mutually exclusive
+
+A contact currently at `customer` **still** entered `salesqualifiedlead` on some
+date and remains in that historical SQL cohort. Funnel populations are never made
+mutually exclusive by current lifecycle stage.
+
+---
+
+## 3. `mql_status` — preserved, but demoted
+
+`mql_status` is an **operational workflow dimension inside the MQL process**. It
+is *not* the definition of any funnel stage.
+
+The single mapping lives in `analysis/mql_status_taxonomy.py`. It is imported
+everywhere; it is never duplicated in writers, analysis, UI or reports.
+
+| Raw HubSpot value | Operational category |
+|---|---|
+| `Open`, `OPEN - Connecting`, `OPEN - Pending Meeting`, `OPEN - Meeting Booked` | `open_working` |
+| `CLOSED - Sales Qualified` | `sales_qualified_signal` |
+| `CLOSED - Deal Created` | `deal_created_signal` |
+| `CLOSED - Sales Disqualified` | `disqualified` |
+| `CLOSED - Bad Product Fit` | `bad_fit` |
+| `CLOSED - Job Seeker`, `CLOSED - Bad Contact` | `contact_quality` |
+| `Closed`, `CLOSED - No Response` | `no_response` |
+| `DICARDED` *(one R — the real HubSpot internal value; label is DISCARDED)* | `discarded` |
+| `RESELLER` | `reseller` |
+| `Other` | `unmapped` *(carries no operational meaning — must surface in the audit)* |
+
+### 3.1 Two absences, never merged
+
+| Category | Meaning |
+|---|---|
+| `no_verdict` | the property is null/blank — the MDR has recorded nothing yet |
+| `unmapped` | a **non-null** value Averroes does not know — a NEW production value that must surface as an audit warning |
+
+A new HubSpot value appearing in production is never silently classified as
+normal.
+
+### 3.2 Free text can no longer reach the property
+
+The legacy `mql_status = mql_status OR mql___mdr_comments` fallback is **removed**
+from the canonical path: `mql___mdr_comments` is not even fetched
+(`CONTACT_FUNNEL_PROPERTIES`). Historical polluted rows are **detected and
+counted**, never rewritten or deleted.
+
+---
+
+## 4. Named scopes
+
+The PR-ADS-152 scope algebra applies to **every** funnel event:
+
+```
+keyword_attributable ≤ campaign_attributable ≤ google_ads_source ≤ all_source
+```
+
+Attribution creates **subsets**; it never redefines the underlying event.
+
+`all_source` is genuinely all-source: the canonical store ingests every HubSpot
+contact, not only paid-search ones. (The legacy `SCOPE_ALL_SOURCE` read a
+paid-search-only table and so could never exceed the Google Ads scope.)
+
+`keyword_attributable` here means a campaign-attributable contact that also
+carries a HubSpot keyword label. It is **not** a Google Ads criterion-level join —
+no such join exists (see the PR-ADS-153A audit).
+
+---
+
+## 5. Lifecycle Customer ≠ Revenue Customer
+
+Two distinct concepts, always named explicitly:
+
+| Concept | Definition | Owner |
+|---|---|---|
+| **Lifecycle Customer** | contact entered lifecycle stage `customer` | this PR |
+| **Revenue Customer** | canonical closed-won deal truth | **PR-ADS-153E** |
+
+The same applies to Opportunity: the CRM funnel `lifecycle_opportunity` (a
+contact stage transition) is distinct from a HubSpot **Deal** existing.
+PR-ADS-153E unifies deal/revenue truth.
+
+---
+
+## 6. Cohort-safe conversions
+
+A conversion rate is only ever published on a **cohort** basis:
+
+- **Denominator** — contacts that entered stage *X* **inside** the window.
+- **Numerator** — the subset of *that same cohort* which also entered stage *Y*,
+  whenever that happened.
+
+Dividing two independent event-period totals compares different cohorts and is
+never done. An empty cohort yields `rate_pct: null` with basis `unavailable` — a
+funnel rate is never fabricated.
+
+---
+
+## 7. Ingestion
+
+One service owns the canonical contact store:
+`services/hubspot_contact_funnel_sync_service.py`.
+
+| Property | Behaviour |
+|---|---|
+| Watermark | `lastmodifieddate` — **never** contact-creation recency. A contact created two years ago and qualified today is refreshed today. |
+| Scope | all sources; no `hs_analytics_source` filter |
+| Resumability | the watermark is persisted after **every page**; completion state never lives in process memory |
+| Bootstrap | the same code path with the watermark at the epoch; status is explicit (`not_started` / `running` / `partial` / `complete` / `failed`) |
+| Idempotency | upsert on `contact_id`, guarded by `last_modified_at` so a replayed older read can never resurrect a superseded stage |
+| Failure | a partial read is recorded as a failed batch with the watermark left at the last **proven** checkpoint — never reported as complete |
+
+Completeness is never claimed merely because recent rows exist.
+
+---
+
+## 8. Freshness
+
+| Dataset | Table | Date column | Meaning |
+|---|---|---|---|
+| `hubspot/contact_funnel` | `hubspot_contact_funnel` | `last_modified_at` | contact spine ingestion recency |
+| `hubspot/lifecycle_events` | `hubspot_contact_funnel` | `latest_stage_entry_at` | newest lifecycle transition held |
+
+The writer keys and the `DATASET_FRESHNESS_CONFIG` keys are asserted equal by a
+test, so the `google_ads` vs `google_ads_api` mismatch class (which left canonical
+spend with no freshness signal — PR-ADS-153A finding P1-1) cannot recur.
+
+---
+
+## 9. Legacy `status_category` — compatibility only
+
+`status_category` is **not deleted** in this PR. Too many surfaces still depend on
+it, and PR-ADS-153C migrates them.
+
+Until then it is explicitly **compatibility-only** and must not be treated as
+canonical funnel truth. `GET /api/crm-funnel/audit` reconciles the two doctrines
+contact by contact.
+
+---
+
+## 10. Reconciliation and the before/after contract
+
+Because SQL truth materially changes, the audit splits every delta into its two
+independent causes:
+
+| Cause | Meaning |
+|---|---|
+| **Date shift** | the contact is an SQL under *both* doctrines, but the event date moved from acquisition to qualification, so it lands in a different window |
+| **Population** | the contact qualifies under one doctrine only (e.g. legacy-qualified but HubSpot never marked it Sales Qualified) |
+
+Mismatch classes reported per contact (`services/crm_funnel_reconciliation_service.py`):
+lifecycle SQL vs legacy not qualified · legacy qualified never entered SQL ·
+lifecycle Opportunity vs legacy in-progress · lifecycle Customer with no customer
+date · `CLOSED - Deal Created` without Opportunity · `CLOSED - Sales Qualified`
+without SQL · unmapped status · no verdict · legacy row without HubSpot identity ·
+free-text pollution.
+
+No email address is ever returned — contact id and company only.
+
+---
+
+## 11. Windows
+
+No new window vocabulary. The canonical funnel accepts the **existing** shared
+resolvers (`resolve_window_contract`):
+
+- **Business** — Current Quarter, Last Quarter, Last 6 Months, YTD, All Time.
+- **Evidence** — retained for Platform Evidence surfaces.
+
+Window semantics are applied to the relevant **event date** for the requested
+event. There is no separate rolling-Postgres implementation of a visible label.
+
+---
+
+## 12. Governance
+
+Read-only relative to external systems. This PR adds no HubSpot contact/lifecycle
+/deal writes, no Google Ads mutation, no offline-conversion upload, no Mailchimp
+work, and deletes no historical evidence.
+
+---
+
+## Related
+
+- `docs/audits/PR-ADS-153A-MINIMUM-VIABLE-TRUTH-AUDIT.md` — the audit that
+  established these findings
+- `docs/24_UI_NAVIGATION_MODEL.md` — navigation (PR-ADS-153C/D)
+- PR-ADS-153C — Leads consolidation + Lead Intelligence retirement
+- PR-ADS-153E — Customer / Revenue canonical reconciliation

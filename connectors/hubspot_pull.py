@@ -73,6 +73,54 @@ WON_DEAL_STAGES = ["326093516"]
 LOST_DEAL_STAGES = ["379124201", "379124202", "379124203", "379260140"]
 
 
+# ---------------------------------------------------------------------------
+# PR-ADS-153B — canonical CRM funnel contact properties
+# ---------------------------------------------------------------------------
+# HubSpot Lifecycle Stage owns the funnel. These properties carry the canonical
+# stage-entry evidence (`hs_v2_date_entered_*`) that replaces the previous
+# "createdate is the event date for every stage" proxy, plus `lastmodifieddate`
+# which drives a true modification-watermark sync (a contact created two years
+# ago and qualified today MUST be refreshed today).
+#
+# `mql___mdr_comments` is deliberately ABSENT: PR-ADS-153B §15 removed the
+# `mql_status or mql___mdr_comments` fallback, so MDR free text can never again
+# be written into the typed status property.
+CONTACT_FUNNEL_PROPERTIES = [
+    # Identity / lifecycle truth
+    "lifecyclestage",
+    "hs_lead_status",
+    "mql_status",
+    "createdate",
+    "lastmodifieddate",
+    # Canonical stage-entry timestamps
+    "hs_v2_date_entered_lead",
+    "hs_v2_date_entered_marketingqualifiedlead",
+    "hs_v2_date_entered_salesqualifiedlead",
+    "hs_v2_date_entered_opportunity",
+    "hs_v2_date_entered_customer",
+    # Acquisition-source evidence (existing attribution doctrine)
+    "hs_analytics_source",
+    "hs_analytics_source_data_1",
+    "hs_analytics_source_data_2",
+    "hs_latest_source",
+    "hs_latest_source_data_1",
+    "hs_latest_source_data_2",
+    "hs_analytics_first_url",
+    "hs_google_click_id",
+    # Geography / firmographics used by country + source attribution
+    "ip_country",
+    "country",
+    "company",
+    "hubspot_owner_id",
+]
+
+# HubSpot's CRM search API refuses to page beyond 10,000 results for one query.
+# The sync re-anchors its watermark instead of paging past this (see
+# ``iter_contacts_modified_since``).
+HUBSPOT_SEARCH_RESULT_CAP = 10000
+_SEARCH_PAGE_SIZE = 100
+
+
 def get_client():
     if not HUBSPOT_API_KEY:
         raise RuntimeError("HUBSPOT_API_KEY is not set")
@@ -567,6 +615,286 @@ def pull_all_contacts_in_range(date_from: str, date_to: str) -> list:
             break
     logger.info("Pulled %d contacts (all sources, %s → %s)", len(contacts), date_from, date_to)
     return contacts
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-153B — canonical CRM funnel contact sync (all sources, watermarked)
+# ---------------------------------------------------------------------------
+def _epoch_ms(value) -> int:
+    """Coerce a datetime / ISO string / epoch-ms value to epoch milliseconds."""
+    from datetime import timezone as _tz
+
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=_tz.utc)
+        return int(dt.timestamp() * 1000)
+    text = str(value).strip()
+    if not text:
+        return 0
+    if text.isdigit():
+        return int(text)
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_tz.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def parse_hubspot_timestamp(value):
+    """Parse a HubSpot timestamp (ISO string or epoch ms) to an aware datetime.
+
+    Returns None for null/blank/unparseable input. Absence stays absence — the
+    caller must NEVER substitute another date for a missing stage-entry
+    timestamp (PR-ADS-153B §3).
+    """
+    from datetime import timezone as _tz
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=_tz.utc)
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value) / 1000.0, tz=_tz.utc)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return datetime.fromtimestamp(int(text) / 1000.0, tz=_tz.utc)
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
+
+
+def iter_contacts_modified_since(
+    since,
+    *,
+    page_size: int = _SEARCH_PAGE_SIZE,
+    max_pages: int | None = None,
+    client=None,
+):
+    """Yield pages of ALL-SOURCE HubSpot contacts modified at/after ``since``.
+
+    PR-ADS-153B §7. This is the canonical contact ingestion read. Unlike
+    ``pull_paid_search_contacts*`` it applies NO source filter, and unlike
+    ``pull_all_contacts_in_range`` it windows on ``lastmodifieddate`` rather than
+    ``createdate`` — so a contact created two years ago whose lifecycle changed
+    today IS returned today.
+
+    Results are sorted ASCENDING by ``lastmodifieddate`` so the caller can
+    durably checkpoint after every page: the last row's modification timestamp is
+    a safe resume watermark. When a single query reaches HubSpot's 10,000-result
+    paging cap the search is re-anchored at the newest timestamp seen instead of
+    paging past it (which HubSpot refuses).
+
+    Yields ``(contacts, page_meta)`` where ``page_meta`` carries
+    ``{watermark_ms, watermark_iso, total_yielded, page_index, reanchored}``.
+
+    Raises ``HubSpotRetryableError`` on a non-rate-limit API failure so the caller
+    marks the sync failed and retries — a partial read is NEVER reported as a
+    complete one. NEVER writes to HubSpot.
+    """
+    client = client or get_client()
+    watermark_ms = _epoch_ms(since)
+    total_yielded = 0
+    page_index = 0
+    reanchored = 0
+    # Contact ids already emitted at the CURRENT watermark value. Bounded: it is
+    # reset every time the watermark advances. Prevents re-emitting the boundary
+    # rows after a re-anchor, and detects a stalled watermark.
+    seen_at_watermark: set[str] = set()
+
+    while True:
+        after = None
+        page_count_this_query = 0
+        progressed = False
+
+        while True:
+            if max_pages is not None and page_index >= max_pages:
+                return
+
+            try:
+                response = client.crm.contacts.search_api.do_search(
+                    public_object_search_request={
+                        "filterGroups": [{"filters": [{
+                            "propertyName": "lastmodifieddate",
+                            "operator": "GTE",
+                            "value": str(watermark_ms),
+                        }]}],
+                        "properties": CONTACT_FUNNEL_PROPERTIES,
+                        "sorts": [{
+                            "propertyName": "lastmodifieddate",
+                            "direction": "ASCENDING",
+                        }],
+                        "limit": page_size,
+                        "after": after,
+                    }
+                )
+            except ApiException as exc:
+                if exc.status == 429:
+                    wait = INITIAL_BACKOFF_SECONDS * 2
+                    logger.warning(
+                        "HubSpot rate limited during contact-funnel sync — waiting %ds",
+                        wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise HubSpotRetryableError(
+                    f"HubSpot contact search failed (status={exc.status}): {exc}"
+                ) from exc
+
+            results = [c.to_dict() for c in (response.results or [])]
+            if not results:
+                return
+
+            fresh = []
+            for contact in results:
+                cid = str(contact.get("id") or "").strip()
+                modified = _epoch_ms(
+                    (contact.get("properties") or {}).get("lastmodifieddate")
+                )
+                if modified > watermark_ms:
+                    # The watermark advanced — boundary bookkeeping resets.
+                    watermark_ms = modified
+                    seen_at_watermark = {cid} if cid else set()
+                    fresh.append(contact)
+                    progressed = True
+                elif cid and cid not in seen_at_watermark:
+                    seen_at_watermark.add(cid)
+                    fresh.append(contact)
+                    progressed = True
+
+            page_index += 1
+            page_count_this_query += 1
+
+            if fresh:
+                total_yielded += len(fresh)
+                yield fresh, {
+                    "watermark_ms": watermark_ms,
+                    "watermark_iso": datetime.utcfromtimestamp(
+                        watermark_ms / 1000.0
+                    ).isoformat() + "Z",
+                    "total_yielded": total_yielded,
+                    "page_index": page_index,
+                    "reanchored": reanchored,
+                }
+
+            paging_next = getattr(response, "paging", None)
+            after = getattr(getattr(paging_next, "next", None), "after", None)
+
+            if not after:
+                return
+            if page_count_this_query * page_size >= HUBSPOT_SEARCH_RESULT_CAP:
+                # HubSpot refuses to page further; re-anchor on the newest
+                # timestamp seen and start a fresh query.
+                break
+
+        if not progressed:
+            # More than one full search page shares an identical modification
+            # timestamp and re-anchoring cannot advance. Stop rather than loop
+            # forever; the caller reports a partial sync.
+            logger.warning(
+                "[hubspot_contact_funnel] watermark stalled at %s — stopping page scan",
+                watermark_ms,
+            )
+            return
+        reanchored += 1
+
+
+def normalize_contact_funnel_row(contact: dict) -> dict | None:
+    """Normalise one raw HubSpot contact into a canonical funnel row.
+
+    PR-ADS-153B §4. Pure — no I/O, so it is directly unit-testable.
+
+    Doctrine enforced here:
+      * ``contact_id`` is the durable HubSpot identity; a contact without one is
+        rejected (returns None) rather than given a synthetic key.
+      * Missing stage-entry timestamps stay NULL. ``createdate`` is NEVER
+        substituted for a missing funnel event date.
+      * ``mql_status`` carries ONLY the HubSpot property — there is no MDR
+        free-text fallback.
+      * Unknown lifecycle stages are preserved verbatim, never guessed.
+      * No email address is read or returned.
+    """
+    from analysis.crm_lifecycle import (  # noqa: PLC0415
+        LIFECYCLE_RULE_VERSION, normalize_lifecycle_stage,
+    )
+    from analysis.mql_status_taxonomy import (  # noqa: PLC0415
+        MQL_STATUS_RULE_VERSION, classify_mql_status, normalize_mql_status,
+    )
+
+    if not contact:
+        return None
+    contact_id = str(contact.get("id") or "").strip()
+    if not contact_id:
+        return None
+
+    props = contact.get("properties") or {}
+
+    def _prop(name):
+        value = props.get(name)
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    gclid = _prop("hs_google_click_id")
+    mql_status = normalize_mql_status(props.get("mql_status"))
+
+    entered_lead = parse_hubspot_timestamp(props.get("hs_v2_date_entered_lead"))
+    entered_mql = parse_hubspot_timestamp(
+        props.get("hs_v2_date_entered_marketingqualifiedlead"))
+    entered_sql = parse_hubspot_timestamp(
+        props.get("hs_v2_date_entered_salesqualifiedlead"))
+    entered_opp = parse_hubspot_timestamp(props.get("hs_v2_date_entered_opportunity"))
+    entered_customer = parse_hubspot_timestamp(props.get("hs_v2_date_entered_customer"))
+    stage_dates = [d for d in (entered_lead, entered_mql, entered_sql,
+                               entered_opp, entered_customer) if d is not None]
+
+    return {
+        "contact_id": contact_id,
+        "created_at": parse_hubspot_timestamp(props.get("createdate")),
+        "last_modified_at": parse_hubspot_timestamp(props.get("lastmodifieddate")),
+
+        "lifecycle_stage": normalize_lifecycle_stage(props.get("lifecyclestage")),
+        "lead_status": _prop("hs_lead_status"),
+        "mql_status": mql_status,
+        "mql_status_category": classify_mql_status(mql_status),
+
+        # Canonical stage-entry evidence — absence stays absence.
+        "date_entered_lead": entered_lead,
+        "date_entered_mql": entered_mql,
+        "date_entered_sql": entered_sql,
+        "date_entered_opportunity": entered_opp,
+        "date_entered_customer": entered_customer,
+        "latest_stage_entry_at": max(stage_dates) if stage_dates else None,
+
+        "hs_analytics_source": _prop("hs_analytics_source"),
+        "hs_analytics_source_data_1": _prop("hs_analytics_source_data_1"),
+        "hs_analytics_source_data_2": _prop("hs_analytics_source_data_2"),
+        "hs_latest_source": _prop("hs_latest_source"),
+        "hs_latest_source_data_1": _prop("hs_latest_source_data_1"),
+        "hs_latest_source_data_2": _prop("hs_latest_source_data_2"),
+        "hs_analytics_first_url": _prop("hs_analytics_first_url"),
+
+        "ip_country": _prop("ip_country"),
+        "country": _prop("country"),
+        "company": _prop("company"),
+        "owner_id": _prop("hubspot_owner_id"),
+
+        "gclid": gclid,
+        "has_gclid": bool(gclid),
+
+        "source_system": "hubspot_api",
+        "lifecycle_rule_version": LIFECYCLE_RULE_VERSION,
+        "mql_rule_version": MQL_STATUS_RULE_VERSION,
+    }
 
 
 def pull_closed_won_deals_with_sources_in_range(date_from: str, date_to: str) -> list:

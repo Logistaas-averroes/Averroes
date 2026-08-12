@@ -115,6 +115,7 @@ class TestSummaryShape:
             "windsor/geo",
             "windsor/search_terms",
             "hubspot/contacts",
+            "hubspot/contact_funnel",
             "hubspot/deals",
             "gclid/matches",
             "hubspot/source_classification",
@@ -705,6 +706,21 @@ def _patch_all_datasets_success(
     # PR-ADS-119: daily FX rates step. Patch ensure_fx_rates so the FX connector
     # (network) is never hit. Mirror the spend failure mode (source_pull) so the
     # all-datasets-fail test still drives this dataset to failure.
+    # PR-ADS-153B: canonical CRM funnel contact sync. Patched at the service seam
+    # so tests never reach HubSpot or the canonical contact store. Mirrors the
+    # spend/FX failure mode (source_pull) so the all-fail scenario still fails it.
+    def _contact_funnel_stub(*a, **kw):
+        if source_pull:
+            source_pull()  # raises in the all-fail scenario
+        return {"status": "success", "mode": "incremental", "pages": 0,
+                "contacts_seen": 0, "contacts_written": 0}
+    monkeypatch.setattr(
+        "services.hubspot_contact_funnel_sync_service.run_contact_funnel_sync",
+        _contact_funnel_stub)
+    monkeypatch.setattr(
+        "services.hubspot_contact_funnel_sync_service.get_bootstrap_mode",
+        lambda: "incremental")
+
     def _fx_stub(*a, **kw):
         if source_pull:
             source_pull()  # raises in the all-fail scenario

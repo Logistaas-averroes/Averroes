@@ -103,6 +103,35 @@ data/ads_*.json        data/crm_*.json
 
 ---
 
+## Canonical CRM Funnel (PR-ADS-153B)
+
+HubSpot Lifecycle Stage is the canonical funnel spine. One ingestion service owns
+the canonical contact store; every consumer reads the one funnel service.
+
+```
+HubSpot (lifecyclestage + hs_v2_date_entered_* + lastmodifieddate)
+  └── connectors/hubspot_pull.iter_contacts_modified_since   (all sources, watermarked)
+        └── services/hubspot_contact_funnel_sync_service     (SOLE writer, resumable)
+              └── hubspot_contact_funnel                     (latest-state, contact_id key)
+                    └── db/crm_funnel_repository             (read-only)
+                          └── services/canonical_crm_funnel_service
+                                ├── GET /api/crm-funnel
+                                └── services/crm_funnel_reconciliation_service
+                                      └── GET /api/crm-funnel/audit
+```
+
+| Module | Responsibility |
+|---|---|
+| `analysis/crm_lifecycle.py` | Lifecycle stages, funnel events, event↔property map. Pure. |
+| `analysis/mql_status_taxonomy.py` | The ONE `mql_status` mapping. Pure. |
+| `services/hubspot_contact_funnel_sync_service.py` | Sole writer of the canonical contact store; bootstrap + incremental, durable watermark. |
+| `services/canonical_crm_funnel_service.py` | The one funnel definition: events, named scopes, cohort-safe conversions, coverage, reconciliation status. |
+| `services/crm_funnel_reconciliation_service.py` | Legacy `status_category` vs lifecycle, contact by contact; before/after SQL comparison. |
+
+Doctrine: `docs/33_CANONICAL_CRM_FUNNEL.md`.
+
+---
+
 ## Configuration (All Decision Rules in YAML)
 
 ### `config/junk_patterns.yaml`

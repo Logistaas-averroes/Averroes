@@ -1046,6 +1046,119 @@ CREATE TABLE IF NOT EXISTS mailchimp_sync_state (
   last_error             TEXT,
   updated_at             TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- ===========================================================================
+-- PR-ADS-153B — CANONICAL CRM FUNNEL TRUTH
+-- ===========================================================================
+-- HubSpot Lifecycle Stage is the canonical Averroes funnel spine. This table is
+-- the durable ALL-SOURCE latest-state contact store: one row per HubSpot contact
+-- id, refreshed by modification watermark (`lastmodifieddate`), never by contact
+-- creation recency. It exists alongside — and does NOT replace — the legacy
+-- `leads` snapshot table, whose historical semantics are paid-search lead
+-- evidence and which PR-ADS-153C will migrate off.
+--
+-- Truth rules baked into this shape:
+--   * `contact_id` is the durable HubSpot identity and the ONLY dedup key.
+--   * Stage-entry timestamps are persisted per stage so a contact currently at
+--     `customer` REMAINS countable in the historical MQL / SQL cohorts. Funnel
+--     counts are never made mutually exclusive by current lifecycle stage.
+--   * A NULL stage-entry column means "HubSpot supplied no evidence" — it is a
+--     coverage gap, NEVER silently substituted with createdate.
+--   * `mql_status` holds ONLY the real HubSpot property. Free text (MDR
+--     comments) may never be written here; historical pollution is detected and
+--     reported, never rewritten in place.
+--   * `lifecycle_stage` preserves every live value verbatim, including
+--     subscriber / evangelist / other and the custom Discarded-Contact and
+--     Reseller stages. Unknown new stages are preserved, never guessed.
+--   * No email address is stored. Identity is the HubSpot contact id.
+CREATE TABLE IF NOT EXISTS hubspot_contact_funnel (
+  id                        SERIAL PRIMARY KEY,
+  contact_id                TEXT NOT NULL UNIQUE,   -- durable HubSpot identity
+  created_at                TIMESTAMPTZ,            -- HubSpot createdate
+  last_modified_at          TIMESTAMPTZ,            -- HubSpot lastmodifieddate (sync watermark)
+
+  -- Canonical lifecycle truth
+  lifecycle_stage           TEXT,                   -- raw HubSpot lifecyclestage, normalised case only
+  lead_status               TEXT,                   -- hs_lead_status
+  mql_status                TEXT,                   -- HubSpot mql_status ONLY — never MDR free text
+  mql_status_category       TEXT,                   -- operational category (analysis/mql_status_taxonomy)
+
+  -- Canonical stage-entry event dates (NULL = no HubSpot evidence, not "createdate")
+  date_entered_lead         TIMESTAMPTZ,
+  date_entered_mql          TIMESTAMPTZ,
+  date_entered_sql          TIMESTAMPTZ,
+  date_entered_opportunity  TIMESTAMPTZ,
+  date_entered_customer     TIMESTAMPTZ,
+  -- Newest stage-entry timestamp on this row (max of the five above). Derived in
+  -- the same write from the same evidence — never a cache that can drift — so
+  -- the `hubspot/lifecycle_events` dataset has a real recency column.
+  latest_stage_entry_at     TIMESTAMPTZ,
+
+  -- Acquisition-source evidence (feeds the existing source/campaign/keyword
+  -- attribution doctrine — raw values only, never derived from campaign name)
+  hs_analytics_source       TEXT,
+  hs_analytics_source_data_1 TEXT,                  -- campaign label
+  hs_analytics_source_data_2 TEXT,                  -- keyword label
+  hs_latest_source          TEXT,
+  hs_latest_source_data_1   TEXT,
+  hs_latest_source_data_2   TEXT,
+  hs_analytics_first_url    TEXT,
+
+  -- Geography + firmographics used by existing country/source attribution
+  ip_country                TEXT,
+  country                   TEXT,
+  company                   TEXT,
+  owner_id                  TEXT,
+
+  -- GCLID evidence, same privacy doctrine as `leads` (no synthetic GCLIDs)
+  gclid                     TEXT,
+  has_gclid                 BOOLEAN DEFAULT FALSE,
+
+  -- Provenance / lineage
+  source_system             TEXT DEFAULT 'hubspot_api',
+  lifecycle_rule_version    TEXT,
+  mql_rule_version          TEXT,
+  first_ingested_at         TIMESTAMPTZ DEFAULT NOW(),
+  last_ingested_at          TIMESTAMPTZ DEFAULT NOW(),
+  sync_batch_id             INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  updated_at                TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_hcf_lifecycle_stage ON hubspot_contact_funnel(lifecycle_stage);
+CREATE INDEX IF NOT EXISTS idx_hcf_last_modified   ON hubspot_contact_funnel(last_modified_at DESC);
+CREATE INDEX IF NOT EXISTS idx_hcf_created         ON hubspot_contact_funnel(created_at);
+CREATE INDEX IF NOT EXISTS idx_hcf_source          ON hubspot_contact_funnel(hs_analytics_source);
+CREATE INDEX IF NOT EXISTS idx_hcf_entered_lead    ON hubspot_contact_funnel(date_entered_lead);
+CREATE INDEX IF NOT EXISTS idx_hcf_entered_mql     ON hubspot_contact_funnel(date_entered_mql);
+CREATE INDEX IF NOT EXISTS idx_hcf_entered_sql     ON hubspot_contact_funnel(date_entered_sql);
+CREATE INDEX IF NOT EXISTS idx_hcf_entered_opp     ON hubspot_contact_funnel(date_entered_opportunity);
+CREATE INDEX IF NOT EXISTS idx_hcf_entered_cust    ON hubspot_contact_funnel(date_entered_customer);
+CREATE INDEX IF NOT EXISTS idx_hcf_mql_category    ON hubspot_contact_funnel(mql_status_category);
+CREATE INDEX IF NOT EXISTS idx_hcf_latest_stage    ON hubspot_contact_funnel(latest_stage_entry_at DESC);
+
+-- Durable bootstrap + incremental watermark for the canonical contact sync.
+-- ONE ingestion service owns this table (services/hubspot_contact_funnel_sync_service).
+-- Completion state is never held in process memory: a restarted worker resumes
+-- from `last_modified_watermark`, and bootstrap completeness is explicit rather
+-- than inferred from the presence of recent rows.
+CREATE TABLE IF NOT EXISTS hubspot_contact_funnel_sync_state (
+  id                        SERIAL PRIMARY KEY,
+  scope                     TEXT NOT NULL UNIQUE,   -- 'contacts'
+  bootstrap_status          TEXT NOT NULL DEFAULT 'not_started', -- not_started|running|partial|complete|failed
+  bootstrap_started_at      TIMESTAMPTZ,
+  bootstrap_completed_at    TIMESTAMPTZ,
+  -- Exclusive-ish resume point: contacts modified at/after this instant are
+  -- re-fetched on the next run (an explicit overlap is applied by the service).
+  last_modified_watermark   TIMESTAMPTZ,
+  last_incremental_at       TIMESTAMPTZ,
+  earliest_created_at       TIMESTAMPTZ,
+  latest_modified_at        TIMESTAMPTZ,
+  contacts_seen             INTEGER DEFAULT 0,
+  pages_fetched             INTEGER DEFAULT 0,
+  last_batch_id             INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  last_error                TEXT,
+  updated_at                TIMESTAMPTZ DEFAULT NOW()
+);
 """
 
 

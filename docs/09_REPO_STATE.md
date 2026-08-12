@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-070 — Empty State & Page Explanation Upgrade (May 2026)
+**Last updated:** PR-ADS-153B — Canonical CRM Funnel Truth (August 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -13,7 +13,14 @@
 
 | File | Module | Notes |
 |------|--------|-------|
-| `connectors/hubspot_pull.py` | HubSpot CRM connector | associations_api crash fixed (PR-ADS-027); now uses CRM v4 REST API for associations — version-agnostic |
+| `analysis/crm_lifecycle.py` | Canonical CRM lifecycle taxonomy | **NEW in PR-ADS-153B** — HubSpot Lifecycle Stage is the funnel spine. Funnel events (lead/mql/sql/opportunity/customer) each map to their own `hs_v2_date_entered_*` property. Pure, no I/O |
+| `analysis/mql_status_taxonomy.py` | The ONE `mql_status` mapping | **NEW in PR-ADS-153B** — replaces four divergent copies. Maps every live value incl. previously-unmapped `CLOSED - Bad Contact` / `CLOSED - No Response` / `RESELLER`; distinguishes `no_verdict` from `unmapped`. Operational dimension only — NOT a funnel definition |
+| `services/hubspot_contact_funnel_sync_service.py` | Canonical contact ingestion | **NEW in PR-ADS-153B** — SOLE writer of `hubspot_contact_funnel`. All-source, watermarked on `lastmodifieddate`, resumable, durable bootstrap state. Read-only vs HubSpot |
+| `services/canonical_crm_funnel_service.py` | Canonical funnel contract | **NEW in PR-ADS-153B** — one definition of Lead/MQL/SQL/Opportunity/Lifecycle-Customer; named scopes (`keyword ≤ campaign ≤ google_ads_source ≤ all_source`); cohort-safe conversions; fail-closed (`unavailable ≠ zero`) |
+| `services/crm_funnel_reconciliation_service.py` | Legacy vs lifecycle reconciliation | **NEW in PR-ADS-153B** — contact-by-contact mismatch classes + before/after SQL comparison split into DATE-SHIFT vs POPULATION causes. No emails returned |
+| `db/crm_funnel_repository.py` | Canonical funnel reads | **NEW in PR-ADS-153B** — read-only; explicit `available: false` rather than an empty result |
+| `scripts/audit_crm_funnel_truth.py` | Production funnel audit | **NEW in PR-ADS-153B** — read-only Render validation (coverage, mql_status mapping, legacy reconciliation, source split) |
+| `connectors/hubspot_pull.py` | HubSpot CRM connector | **PR-ADS-153B**: added `CONTACT_FUNNEL_PROPERTIES` (lifecyclestage + all five `hs_v2_date_entered_*` + `lastmodifieddate`), `iter_contacts_modified_since()` (all-source, watermarked, resumable, 10k-cap re-anchoring) and the pure `normalize_contact_funnel_row()`. `mql___mdr_comments` deliberately excluded from the canonical path; associations_api crash fixed (PR-ADS-027); now uses CRM v4 REST API for associations — version-agnostic |
 | `connectors/windsor_pull.py` | Windsor.ai connector | search term query fixed (PR-ADS-027); removed segment=search_term (400 error), switched to date_preset; ✅ Search-term contract aligned to confirmed Windsor 60-day extraction path (PR-ADS-063); ✅ PR-ADS-065: Enhanced logging (row count, sample keys, search_term field presence), normalize_search_term_rows() added, loud warnings on empty/missing-field pulls |
 | `connectors/gclid_match.py` | GCLID reconciliation | Joins Windsor + HubSpot via GCLID; falls back if `logistaas_config.yaml` missing |
 | `analysis/core.py` | Waste detection + lead quality + campaign truth | All three functions in one file; `load_json` defined at line 471; PR-ADS-025F: Windsor spend + HubSpot SQLs merged into single row per campaign before write_campaigns() call; junk entries filtered pre-write; PR-ADS-025F-FIX: lq_by_campaign aggregates instead of overwrites; legacy keys emitted for backwards compat |

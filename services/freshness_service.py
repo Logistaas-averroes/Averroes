@@ -129,6 +129,32 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "page": "campaigns",
     },
+    # PR-ADS-153B: canonical CRM funnel spine. `source`/`dataset` MUST equal the
+    # keys the ingestion service stamps on its sync batches
+    # (services/hubspot_contact_funnel_sync_service.SYNC_SOURCE / DATASET_*),
+    # otherwise the dataset silently has no freshness signal — the defect class
+    # the PR-ADS-153A audit found on canonical_spend.
+    "contact_funnel": {
+        "table": "hubspot_contact_funnel",
+        "date_column": "last_modified_at",
+        "source": "hubspot",
+        "dataset": "contact_funnel",
+        "stale_threshold_days": 2,
+        "depends_on": [],
+        "page": None,
+    },
+    # Stage-entry evidence recency. Same table, but the date column is the newest
+    # lifecycle transition held — so a contact sync that is running while HubSpot
+    # stage evidence has gone stale is still visible.
+    "lifecycle_events": {
+        "table": "hubspot_contact_funnel",
+        "date_column": "latest_stage_entry_at",
+        "source": "hubspot",
+        "dataset": "lifecycle_events",
+        "stale_threshold_days": 8,
+        "depends_on": ["contact_funnel"],
+        "page": None,
+    },
     "search_terms": {
         "table": "search_terms",
         "date_column": "source_date",

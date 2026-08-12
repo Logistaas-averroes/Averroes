@@ -3052,6 +3052,9 @@ _KNOWN_DATASETS: list[tuple[str, str]] = [
     ("google_ads_api", "geo"),
     ("hubspot", "contacts"),
     ("hubspot", "deals"),
+    # PR-ADS-153B canonical CRM funnel truth
+    ("hubspot", "contact_funnel"),
+    ("hubspot", "lifecycle_events"),
     ("gclid",   "matches"),
     ("gclid",   "coverage_snapshots"),
     ("analysis", "waste_terms"),
@@ -8432,3 +8435,93 @@ def api_audit_sql_truth_repair(
     except Exception as exc:  # noqa: BLE001
         log.error("[api/audit/sql-truth/repair-classification] failed: %s", exc)
         raise HTTPException(status_code=500, detail="classification repair failed") from exc
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-153B — Canonical CRM funnel truth (read-only)
+# ---------------------------------------------------------------------------
+@app.get("/api/crm-funnel")
+def api_crm_funnel(
+    user: dict = Depends(require_auth),
+    window: str = Query(default="current_quarter"),
+    window_type: str = Query(default="business"),
+    scope: str = Query(default="all_source"),
+    event: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Canonical CRM funnel counts for one window (PR-ADS-153B §28).
+
+    Every number is a HubSpot lifecycle stage-ENTRY event dated by its own
+    ``hs_v2_date_entered_*`` timestamp — never by contact creation date, and never
+    derived from ``mql_status``. Counts are not mutually exclusive by current
+    lifecycle stage: a contact now at Customer still counts in its historical SQL
+    cohort.
+
+    Named scopes are always explicit and provably nested:
+    ``keyword_attributable ≤ campaign_attributable ≤ google_ads_source ≤ all_source``.
+
+    Unavailable truth is returned as ``available: false`` with null counts — never
+    as zero. Conversions are cohort-safe or reported unavailable.
+    """
+    try:
+        from services import canonical_crm_funnel_service as crm_funnel  # noqa: PLC0415
+        return crm_funnel.build(
+            window_type, window, scope=scope, event=event,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/crm-funnel] failed: %s", exc)
+        raise HTTPException(status_code=500, detail="CRM funnel unavailable") from exc
+
+
+@app.get("/api/crm-funnel/audit")
+def api_crm_funnel_audit(
+    request: Request,
+    window: str = Query(default="current_quarter"),
+) -> dict[str, Any]:
+    """Admin-only canonical-funnel audit (PR-ADS-153B §22–§23, §28).
+
+    Returns lifecycle + stage-date coverage, MQL-status mapping coverage
+    (including unmapped values and historical free-text pollution), sync/bootstrap
+    coverage, the contact-by-contact legacy-vs-lifecycle reconciliation, and the
+    before/after SQL comparison that explains any Dashboard SQL movement — split
+    into its DATE-SHIFT and POPULATION causes.
+
+    Read-only. Never exposes email addresses (contact id + company only).
+    """
+    check_admin_or_token(request)
+    try:
+        from services import crm_funnel_reconciliation_service as recon  # noqa: PLC0415
+        from services import hubspot_contact_funnel_sync_service as sync  # noqa: PLC0415
+
+        payload = recon.run(business_window=window)
+        payload["sync_coverage"] = sync.build_coverage()
+        return payload
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/crm-funnel/audit] failed: %s", exc)
+        raise HTTPException(status_code=500, detail="CRM funnel audit failed") from exc
+
+
+@app.post("/api/crm-funnel/sync")
+def api_crm_funnel_sync(
+    request: Request,
+    mode: str = Query(default="incremental"),
+    max_pages: int | None = Query(default=None),
+) -> dict[str, Any]:
+    """Trigger the canonical contact sync (admin session or ADMIN_API_TOKEN).
+
+    ``mode=bootstrap`` scans the full portal from the epoch; ``incremental``
+    resumes from the durable modification watermark. Reads HubSpot read-only and
+    writes ONLY the local canonical contact store — never to HubSpot.
+    """
+    check_admin_or_token(request)
+    try:
+        from services import hubspot_contact_funnel_sync_service as sync  # noqa: PLC0415
+        return sync.run_contact_funnel_sync(mode=mode, max_pages=max_pages)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/crm-funnel/sync] failed: %s", exc)
+        raise HTTPException(status_code=500, detail="contact funnel sync failed") from exc

@@ -1055,7 +1055,11 @@ VALID_SYNC_SOURCES   = {"windsor", "google_ads_api", "hubspot", "gclid", "mailch
 VALID_SYNC_DATASETS  = {"campaigns", "keywords", "keyword_facts", "search_terms",
                         "geo", "contacts", "deals", "matches",
                         # PR-ADS-151 Mailchimp read-only datasets
-                        "reports", "audiences", "attribution"}
+                        "reports", "audiences", "attribution",
+                        # PR-ADS-153B canonical CRM funnel datasets. These keys are
+                        # asserted against DATASET_FRESHNESS_CONFIG by a test so the
+                        # writer-key/registry-key mismatch class cannot recur.
+                        "contact_funnel", "lifecycle_events"}
 VALID_SYNC_TYPES     = {"backfill", "daily", "weekly", "monthly", "manual"}
 VALID_SYNC_STATUSES  = {"running", "success", "failed", "unknown"}
 
@@ -2568,4 +2572,195 @@ def upsert_campaign_identity(
         return True
     except Exception as exc:  # noqa: BLE001
         log.error("upsert_campaign_identity failed: %s", exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# PR-ADS-153B — canonical CRM funnel contact store
+# ---------------------------------------------------------------------------
+# ONE ingestion service owns these writes
+# (services/hubspot_contact_funnel_sync_service). The legacy `leads` snapshot
+# writers are untouched and continue to serve pre-PR-ADS-153C pages.
+
+_CONTACT_FUNNEL_COLUMNS = (
+    "contact_id", "created_at", "last_modified_at",
+    "lifecycle_stage", "lead_status", "mql_status", "mql_status_category",
+    "date_entered_lead", "date_entered_mql", "date_entered_sql",
+    "date_entered_opportunity", "date_entered_customer", "latest_stage_entry_at",
+    "hs_analytics_source", "hs_analytics_source_data_1", "hs_analytics_source_data_2",
+    "hs_latest_source", "hs_latest_source_data_1", "hs_latest_source_data_2",
+    "hs_analytics_first_url",
+    "ip_country", "country", "company", "owner_id",
+    "gclid", "has_gclid",
+    "source_system", "lifecycle_rule_version", "mql_rule_version",
+)
+
+# Every column except the identity is refreshed from the newest HubSpot read —
+# latest-state truth wins (PR-ADS-153B §6). `first_ingested_at` is preserved.
+#
+# The upsert carries a WHERE guard on `last_modified_at` so a REPLAYED older read
+# (the deliberate overlap window, or a retried page) can never resurrect a
+# superseded lifecycle stage or status. Latest-state truth is therefore
+# structural, not dependent on the order pages happen to arrive in.
+_CONTACT_FUNNEL_UPDATE_SET = ",\n                        ".join(
+    f"{col} = EXCLUDED.{col}" for col in _CONTACT_FUNNEL_COLUMNS if col != "contact_id"
+)
+
+
+def upsert_hubspot_contact_funnel(rows: list, *, sync_batch_id: Optional[int] = None) -> int:
+    """Upsert canonical HubSpot contact funnel rows, keyed on contact_id.
+
+    Idempotent: re-ingesting the same contact updates it in place, never appends
+    a second row. Latest HubSpot state always wins — an older snapshot can never
+    resurrect a superseded lifecycle stage or status.
+
+    Rows must already be normalised by
+    ``connectors.hubspot_pull.normalize_contact_funnel_row``. Returns the number
+    of rows written. Never raises.
+    """
+    if not rows:
+        return 0
+
+    prepared = []
+    for r in rows:
+        if not r:
+            continue
+        contact_id = str(r.get("contact_id") or "").strip()
+        if not contact_id:
+            # No durable HubSpot identity — never invent a synthetic key.
+            continue
+        values = [contact_id]
+        for col in _CONTACT_FUNNEL_COLUMNS[1:]:
+            value = r.get(col)
+            if col in {
+                "created_at", "last_modified_at", "date_entered_lead",
+                "date_entered_mql", "date_entered_sql",
+                "date_entered_opportunity", "date_entered_customer",
+                "latest_stage_entry_at",
+            }:
+                values.append(_parse_ts_or_none(value))
+            elif col == "has_gclid":
+                values.append(bool(value))
+            else:
+                values.append(value)
+        values.append(sync_batch_id)
+        prepared.append(tuple(values))
+
+    if not prepared:
+        return 0
+
+    column_list = ", ".join(_CONTACT_FUNNEL_COLUMNS) + ", sync_batch_id"
+    placeholders = ", ".join(["%s"] * (len(_CONTACT_FUNNEL_COLUMNS) + 1))
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.executemany(
+                    f"""
+                    INSERT INTO hubspot_contact_funnel ({column_list})
+                    VALUES ({placeholders})
+                    ON CONFLICT (contact_id) DO UPDATE SET
+                        {_CONTACT_FUNNEL_UPDATE_SET},
+                        sync_batch_id    = EXCLUDED.sync_batch_id,
+                        last_ingested_at = NOW(),
+                        updated_at       = NOW()
+                    WHERE hubspot_contact_funnel.last_modified_at IS NULL
+                       OR EXCLUDED.last_modified_at IS NULL
+                       OR EXCLUDED.last_modified_at
+                          >= hubspot_contact_funnel.last_modified_at
+                    """,
+                    prepared,
+                )
+        return len(prepared)
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_hubspot_contact_funnel failed: %s", exc)
+        return 0
+
+
+_FUNNEL_SYNC_STATE_FIELDS = {
+    "bootstrap_status", "bootstrap_started_at", "bootstrap_completed_at",
+    "last_modified_watermark", "last_incremental_at", "earliest_created_at",
+    "latest_modified_at", "contacts_seen", "pages_fetched", "last_batch_id",
+    "last_error",
+}
+
+
+def get_contact_funnel_sync_state(scope: str = "contacts") -> Optional[dict]:
+    """Read the durable contact-funnel sync state, or None when absent/unavailable.
+
+    Completion state lives here, never in process memory: a restarted worker
+    resumes from ``last_modified_watermark``.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT scope, bootstrap_status, bootstrap_started_at,
+                           bootstrap_completed_at, last_modified_watermark,
+                           last_incremental_at, earliest_created_at,
+                           latest_modified_at, contacts_seen, pages_fetched,
+                           last_batch_id, last_error, updated_at
+                    FROM hubspot_contact_funnel_sync_state
+                    WHERE scope = %s
+                    """,
+                    (scope,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                return dict(zip(cols, row))
+    except Exception as exc:  # noqa: BLE001
+        log.error("get_contact_funnel_sync_state failed: %s", exc)
+        return None
+
+
+def update_contact_funnel_sync_state(scope: str = "contacts", **fields) -> bool:
+    """Upsert the durable contact-funnel sync state. Never raises.
+
+    Only the documented fields are accepted; unknown keys are ignored so a typo
+    can never silently create an unread column.
+    """
+    updates = {k: v for k, v in fields.items() if k in _FUNNEL_SYNC_STATE_FIELDS}
+    if not updates:
+        return False
+
+    for ts_field in (
+        "bootstrap_started_at", "bootstrap_completed_at", "last_modified_watermark",
+        "last_incremental_at", "earliest_created_at", "latest_modified_at",
+    ):
+        if ts_field in updates:
+            updates[ts_field] = _parse_ts_or_none(updates[ts_field])
+
+    columns = list(updates)
+    insert_cols = ", ".join(["scope"] + columns)
+    placeholders = ", ".join(["%s"] * (len(columns) + 1))
+    update_set = ",\n                        ".join(
+        f"{c} = EXCLUDED.{c}" for c in columns
+    )
+    values = [scope] + [updates[c] for c in columns]
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO hubspot_contact_funnel_sync_state ({insert_cols})
+                    VALUES ({placeholders})
+                    ON CONFLICT (scope) DO UPDATE SET
+                        {update_set},
+                        updated_at = NOW()
+                    """,
+                    values,
+                )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("update_contact_funnel_sync_state failed: %s", exc)
         return False
