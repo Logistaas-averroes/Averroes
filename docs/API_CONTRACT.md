@@ -3416,7 +3416,7 @@ Read-only. Auth required.
   "scope_label": "All sources",
   "canonical_source": "hubspot_lifecycle",
   "table": "hubspot_contact_funnel",
-  "dedup_key": "hubspot_contact_id",
+  "dedup_key": "contact_id",
   "rule_version": "v1",
   "events": {
     "sql": {

@@ -115,7 +115,9 @@ def run_daily_incremental_sync(
       - windsor/geo         (explicit date range)
       - windsor/search_terms — skipped; connector does not support explicit
                                date ranges reliably (documents as unsupported)
-      - hubspot/contacts    (explicit date range via createdate filter)\n      - hubspot/contact_funnel — CANONICAL all-source lifecycle spine,\n                               watermarked on lastmodifieddate (PR-ADS-153B)
+      - hubspot/contacts    (explicit date range via createdate filter)
+      - hubspot/contact_funnel — CANONICAL all-source lifecycle spine,
+                               watermarked on lastmodifieddate (PR-ADS-153B)
       - hubspot/deals       (via GCLID contacts pulled in the deals window)
       - gclid/matches       — skipped; no incremental DB path yet
 

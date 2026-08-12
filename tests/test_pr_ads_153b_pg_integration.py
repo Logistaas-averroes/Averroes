@@ -58,7 +58,14 @@ def _have_postgres() -> bool:
         pwd.getpwnam("postgres")
     except (KeyError, ImportError):
         return False
-    return shutil.which("sudo") is not None
+    if shutil.which("sudo") is None:
+        return False
+    # `sudo` existing is not the same as `sudo` being usable non-interactively.
+    # Probe it (-n = never prompt) so the module SKIPS on a password-protected
+    # sudo instead of running and then failing inside the cluster fixture.
+    probe = subprocess.run(["sudo", "-n", "-u", "postgres", "true"],
+                           capture_output=True, text=True)
+    return probe.returncode == 0
 
 
 pytestmark = pytest.mark.skipif(
@@ -340,6 +347,33 @@ def test_older_read_cannot_resurrect_a_superseded_stage(pg):
     row = _row_of(pg, "1")
     assert row["lifecycle_stage"] == "customer"
     assert row["last_modified_at"].date() == date(2026, 9, 1)
+
+
+def test_read_without_a_modification_timestamp_cannot_overwrite_known_state(pg):
+    """An incoming row with NO `lastmodifieddate` must never beat a stored row
+    that has one. An unknown modification time is not evidence of recency, and
+    admitting it would blank out known-newer lifecycle state."""
+    _write([_contact("1", lifecyclestage="customer",
+                     modified="2026-09-01T00:00:00Z",
+                     entered_customer="2026-09-01T00:00:00Z")])
+
+    # Same contact, no modification timestamp at all, and a regressed stage.
+    _write([_contact("1", lifecyclestage="lead", modified=None)])
+
+    row = _row_of(pg, "1")
+    assert row["lifecycle_stage"] == "customer"
+    assert row["last_modified_at"].date() == date(2026, 9, 1)
+    assert row["date_entered_customer"] is not None
+
+
+def test_first_write_without_a_modification_timestamp_is_still_accepted(pg):
+    """The guard protects KNOWN state; it must not block the initial insert or a
+    refresh of a row that has no stored timestamp to protect."""
+    _write([_contact("1", lifecyclestage="lead", modified=None)])
+    assert _row_of(pg, "1")["lifecycle_stage"] == "lead"
+
+    _write([_contact("1", lifecyclestage="salesqualifiedlead", modified=None)])
+    assert _row_of(pg, "1")["lifecycle_stage"] == "salesqualifiedlead"
 
 
 def test_identical_modification_timestamps_are_deterministic(pg):

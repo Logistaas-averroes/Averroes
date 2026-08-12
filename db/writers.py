@@ -2602,6 +2602,12 @@ _CONTACT_FUNNEL_COLUMNS = (
 # (the deliberate overlap window, or a retried page) can never resurrect a
 # superseded lifecycle stage or status. Latest-state truth is therefore
 # structural, not dependent on the order pages happen to arrive in.
+#
+# A row with NO incoming `last_modified_at` never wins over a stored row that has
+# one: an unknown modification time is not evidence of recency, and letting it
+# through would blank out known-newer state. The guard only admits a write when
+# the STORED timestamp is absent (nothing to protect) or the incoming timestamp is
+# present and at least as new.
 _CONTACT_FUNNEL_UPDATE_SET = ",\n                        ".join(
     f"{col} = EXCLUDED.{col}" for col in _CONTACT_FUNNEL_COLUMNS if col != "contact_id"
 )
@@ -2667,9 +2673,9 @@ def upsert_hubspot_contact_funnel(rows: list, *, sync_batch_id: Optional[int] = 
                         last_ingested_at = NOW(),
                         updated_at       = NOW()
                     WHERE hubspot_contact_funnel.last_modified_at IS NULL
-                       OR EXCLUDED.last_modified_at IS NULL
-                       OR EXCLUDED.last_modified_at
-                          >= hubspot_contact_funnel.last_modified_at
+                       OR (EXCLUDED.last_modified_at IS NOT NULL
+                           AND EXCLUDED.last_modified_at
+                               >= hubspot_contact_funnel.last_modified_at)
                     """,
                     prepared,
                 )

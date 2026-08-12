@@ -107,7 +107,9 @@ SCOPE_LABELS = {
 # Canonical contract constants, surfaced in every payload.
 FUNNEL_SOURCE = "hubspot_lifecycle"
 FUNNEL_TABLE = "hubspot_contact_funnel"
-FUNNEL_DEDUP_KEY = "hubspot_contact_id"
+# The durable identity column on the canonical table. Named exactly as the
+# schema names it so API consumers can map the payload to the DDL.
+FUNNEL_DEDUP_KEY = "contact_id"
 
 # Conversion basis vocabulary. A rate is only ever published on a cohort basis.
 BASIS_COHORT = "cohort"
