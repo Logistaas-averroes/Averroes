@@ -37,8 +37,12 @@ REPO = open(os.path.join(ROOT, "db", "search_term_repository.py"),
 SERVER = open(os.path.join(ROOT, "api", "server.py"), encoding="utf-8").read()
 CONTRACT = open(os.path.join(ROOT, "docs", "API_CONTRACT.md"), encoding="utf-8").read()
 
-ST_MODULE = APP_JS[APP_JS.find("// ── Search Terms + Patterns evidence page (PR-ADS-144)"):
-                   APP_JS.find("function downloadWasteCSV() {")]
+# PR-ADS-153D renamed the section header (the page absorbed the retired Flagged
+# Waste Terms page as a Flagged tab) and deleted downloadWasteCSV, which used to
+# mark the end of the region.
+ST_MODULE = APP_JS[
+    APP_JS.find("// ── Search Terms evidence page (PR-ADS-144, consolidated in PR-ADS-153D)"):
+    APP_JS.find("// ── GCLID Attribution page ─")]
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────

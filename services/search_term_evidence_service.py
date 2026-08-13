@@ -75,6 +75,19 @@ from typing import Any
 
 from analysis.evidence_windows import EvidenceWindowError  # noqa: F401 (re-export)
 from analysis.ngrams import build_ngrams, tokenize_search_term
+from analysis.search_term_identity import unit_identity
+from analysis.search_term_review_state import (
+    REVIEW_STATES as LOCAL_REVIEW_STATES,
+    STATE_UNREVIEWED as LOCAL_STATE_UNREVIEWED,
+    normalize_review_state,
+    requires_action,
+    review_state_payload,
+)
+from analysis.waste_reason_taxonomy import (
+    ALL_REASONS,
+    classify_reasons,
+    primary_reason,
+)
 # Same window boundary + account timezone as Campaign Evidence (PR-ADS-143) —
 # deliberately shared so the two evidence pages can never disagree on what
 # "last 30 days" means.
@@ -105,6 +118,18 @@ PATTERN_LENGTHS = (1, 2, 3)
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
+
+# ── Flagged / Waste view (PR-ADS-153D) ───────────────────────────────────────
+# Sorts offered by the flagged view. ``priority`` is the deterministic,
+# explainable ordering defined in ``_flagged_priority`` — never an opaque score.
+FLAGGED_SORTS = ("priority", "spend", "clicks", "last_seen", "term",
+                 "attributed_sqls")
+
+# Truth states, shared vocabulary with the rest of the canonical contracts.
+TRUTH_RECONCILED = "reconciled"
+TRUTH_PARTIAL = "partial"
+TRUTH_MISMATCH = "mismatch"
+TRUTH_UNAVAILABLE = "unavailable"
 DEFAULT_PATTERN_LIMIT = 100
 MAX_PATTERN_LIMIT = 500
 PATTERN_DRAWER_TERM_CAP = 100
@@ -625,10 +650,17 @@ def _globally_ambiguous_norms(norm_to_ids: dict, aliases_by_id: dict) -> set:
 
 
 def _attach_waste_evidence(units: list, start, end, identity_by_label,
-                           aliases_by_id, norm_to_ids) -> None:
+                           aliases_by_id, norm_to_ids) -> dict:
     """Attach safely campaign-scoped ``waste_terms`` evidence to units so a term
     the weekly pipeline already confirmed shows as Flagged waste rather than
     Needs review (PR-ADS-145 §4). Mutates units in place.
+
+    Returns the JOIN CONTRACT outcome (PR-ADS-153D §24):
+    ``{available, annotation_rows, attached, legacy_unresolved}``. An annotation
+    row that could not be attributed to exactly one canonical campaign is
+    reported as ``legacy_unresolved`` — it is never guessed onto a unit, and
+    never silently dropped either, because a reviewer needs to know that
+    historical evidence exists which the current identifiers cannot place.
 
     Safety (no fuzzy, no cross-campaign borrowing). ``waste_terms`` rows key on
     (search_term, campaign_name) — they carry NO campaign_id — so evidence is
@@ -649,16 +681,25 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
 
     terms = sorted({u["search_term"] for u in units if u.get("search_term")})
     if not terms:
-        return
+        return {"available": True, "annotation_rows": 0, "attached": 0,
+                "legacy_unresolved": 0}
     evidence = st_repo.fetch_waste_evidence_for_terms(terms)
     if not evidence.get("available"):
-        return
+        return {"available": False, "annotation_rows": None, "attached": 0,
+                "legacy_unresolved": None}
     # (search_term, norm(campaign_name)) → latest evidence row.
     ev_by_key: dict = {}
+    unresolved_keys: set = set()
     for r in (evidence.get("rows") or []):
         norm = normalize_campaign_name(r.get("campaign_name"))
         if norm:
             ev_by_key[(r.get("search_term"), norm)] = r
+        else:
+            # No campaign label at all — the row can never be placed on a
+            # canonical campaign. Counted, never guessed.
+            unresolved_keys.add((r.get("search_term"), None, id(r)))
+    annotation_rows = len(evidence.get("rows") or [])
+    attached_keys: set = set()
 
     ambiguous_norms = _globally_ambiguous_norms(norm_to_ids, aliases_by_id)
 
@@ -688,12 +729,15 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
             if not unique_labels:
                 continue
             match = None
+            matched_key = None
             for lbl in sorted(unique_labels):
                 match = ev_by_key.get((term, lbl))
                 if match is not None:
+                    matched_key = (term, lbl)
                     break
             if match is None:
                 continue
+            attached_keys.add(matched_key)
             u["_waste_flag"] = True
             u["_waste_evidence"] = {
                 "junk_category": match.get("junk_category"),
@@ -702,6 +746,18 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
                 "classification_date": match.get("run_date"),
                 "classification_source": "waste_terms (weekly waste detection)",
             }
+
+    # Every annotation row that no safe join could place. These are historical
+    # evidence whose stored identifiers are too weak to attribute to one
+    # canonical campaign — surfaced as a named count so the gap is visible.
+    legacy_unresolved = (len(set(ev_by_key.keys()) - attached_keys)
+                         + len(unresolved_keys))
+    return {
+        "available": True,
+        "annotation_rows": annotation_rows,
+        "attached": len(attached_keys),
+        "legacy_unresolved": legacy_unresolved,
+    }
 
 
 def _build_population(start, end) -> dict:
@@ -782,8 +838,8 @@ def _build_population(start, end) -> dict:
     # Attach safely campaign-scoped waste_terms classification evidence so a
     # newly imported term that the weekly pipeline already confirmed shows as
     # Flagged waste rather than Needs review (PR-ADS-145 §4).
-    _attach_waste_evidence(unit_list, start, end, identity_by_label,
-                           aliases_by_id, norm_to_ids)
+    annotation_join = _attach_waste_evidence(
+        unit_list, start, end, identity_by_label, aliases_by_id, norm_to_ids)
 
     return {
         "available": True,
@@ -794,6 +850,9 @@ def _build_population(start, end) -> dict:
         "aliases_by_id": aliases_by_id,
         # Window-level three-state monetary picture (all units).
         "currency_info": _monetary_summary(unit_list),
+        # PR-ADS-153D §24 — how the durable waste ANNOTATIONS joined the
+        # canonical facts, including rows too weakly identified to place.
+        "annotation_join": annotation_join,
     }
 
 
@@ -1460,6 +1519,441 @@ def _facets(units: list) -> dict:
         "campaigns": sorted(campaigns.values(),
                             key=lambda c: (c["campaign_name"] or "").lower()),
         "junk_categories": sorted(junk),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Flagged / Waste view (PR-ADS-153D)
+# ─────────────────────────────────────────────────────────────────────────────
+# This REPLACES the standalone Flagged Waste Terms page. It is deliberately part
+# of this module rather than a new service, because the old page's core defect
+# was having a SECOND spend truth: it summed ``waste_terms`` rows across run
+# snapshots, so one term observed by five weekly runs counted five times and its
+# spend was multiplied by five.
+#
+# Here every metric comes from the SAME canonical population the Terms tab uses
+# — ``search_terms`` facts merged at (search term × canonical campaign) grain,
+# deduplicated by the unique fact index. ``waste_terms`` contributes ONLY
+# classification annotations (reason, matched rule, CRM-junk confirmation), and
+# never a number that is summed.
+
+
+def _flagged_priority(unit: dict, review_state: str, high_spend_usd: float) -> dict:
+    """Deterministic, fully explainable review priority. No AI score.
+
+    Every component is a stated rule with a stated weight, and every applied
+    component is echoed back in ``reasons`` so the ordering can be justified to
+    the person being asked to act on it.
+
+    Deliberately NOT a component: unavailable SQL attribution. "We could not
+    check whether this term produced qualified outcomes" is not evidence of
+    waste, and letting it raise priority would launder an unknown into a signal
+    (§13). Only a PROVEN zero counts.
+    """
+    score = 0
+    reasons: list[dict] = []
+
+    def _add(points: int, code: str, detail: str) -> None:
+        nonlocal score
+        score += points
+        reasons.append({"code": code, "points": points, "detail": detail})
+
+    spend = unit.get("spend_usd")
+    if spend is not None:
+        spend = float(spend)
+        if spend >= high_spend_usd:
+            _add(40, "high_spend",
+                 f"Spend ${spend:,.2f} is at or above the ${high_spend_usd:,.2f} "
+                 "review threshold")
+        elif spend > 0:
+            # Proportional, capped, so a large term can never be out-ranked by
+            # an accumulation of trivial ones.
+            _add(min(20, int(spend * 20 / high_spend_usd)) if high_spend_usd else 0,
+                 "spend_magnitude", f"Spend ${spend:,.2f} in the selected window")
+
+    reason = primary_reason(unit.get("junk_categories"))
+    from analysis.waste_reason_taxonomy import (  # noqa: PLC0415
+        CLEAR_DISQUALIFYING_REASONS,
+    )
+    if reason["reason"] in CLEAR_DISQUALIFYING_REASONS:
+        _add(25, "clear_disqualifying_intent",
+             f"Flag reason '{reason['reason_label']}' is disqualifying on its face")
+
+    # Proven zero only. `known_zero` means attribution was available and found
+    # no qualified outcome; `unavailable` deliberately scores nothing.
+    if unit.get("sql_attribution_status") == "known_zero":
+        _add(15, "proven_zero_qualified_outcome",
+             "Attribution available for this term and found no qualified SQL")
+
+    rows = int(unit.get("row_count") or 0)
+    if rows >= 2:
+        _add(min(10, rows), "repeated_occurrences",
+             f"Observed on {rows} canonical fact rows in the window")
+
+    if normalize_review_state(review_state) == LOCAL_STATE_UNREVIEWED:
+        _add(10, "never_reviewed", "No human decision recorded yet")
+
+    score = max(0, min(100, score))
+    band = "high" if score >= 60 else "medium" if score >= 30 else "low"
+    return {"priority_score": score, "priority_band": band,
+            "priority_reasons": reasons}
+
+
+def _flagged_row(unit: dict, aliases_by_id: dict, review: dict | None,
+                 high_spend_usd: float) -> dict:
+    """One flagged-view row: canonical facts + annotation + local decision."""
+    base = _unit_row(unit, aliases_by_id)
+    identity = unit_identity(unit)
+    review = review or {}
+    state = normalize_review_state(review.get("review_state"))
+    reasons = classify_reasons(base.get("junk_categories"))
+    primary = primary_reason(base.get("junk_categories"))
+    priority = _flagged_priority(unit, state, high_spend_usd)
+    classification = _unit_classification(unit)
+
+    return {
+        **base,
+        "term_identity": identity,
+        # Why it is flagged — canonical vocabulary, raw evidence preserved.
+        "flag_reason": primary["reason"],
+        "flag_reason_label": primary["reason_label"],
+        "flag_reasons": reasons,
+        "flag_reason_unmapped": any(r["unmapped"] for r in reasons),
+        "raw_junk_categories": base.get("junk_categories"),
+        "flag_source": classification["classification_source"],
+        "flag_confidence": classification["confidence"],
+        # Flag history from the durable review record (§25). Absent history is
+        # None — never a fabricated timestamp.
+        "first_flagged_at": review.get("first_flagged_at"),
+        "latest_flagged_at": review.get("latest_flagged_at"),
+        # Local review decision, shared verbatim with the Action Queue.
+        **review_state_payload(state),
+        "review_note": review.get("review_note"),
+        "reviewed_at": review.get("reviewed_at"),
+        "reviewed_by": review.get("reviewed_by"),
+        # Action state: still flagged AND no finished human decision.
+        "action_needed": requires_action(state),
+        **priority,
+    }
+
+
+def _flagged_truth_state(pop: dict, sql_attr: dict, *, available: bool) -> dict:
+    """Truth state for the flagged view. Never collapses into zero.
+
+    reconciled  canonical facts present AND SQL attribution resolvable
+    partial     Google Ads facts present but CRM attribution incomplete, or
+                durable annotations exist that could not be safely joined
+    mismatch    an internal invariant failed
+    unavailable the canonical fact source could not be read
+    """
+    if not available:
+        return {"status": TRUTH_UNAVAILABLE,
+                "reasons": ["canonical_search_term_facts_unavailable"]}
+
+    reasons: list[str] = []
+    units = pop.get("units") or []
+    flagged = [u for u in units if _unit_state(u) == STATE_FLAGGED]
+
+    # Invariant: a flagged unit must carry classification evidence explaining it.
+    # A flag with no reason at all would be an unexplainable classification,
+    # which this page must never render as normal (§8).
+    unexplained = [u for u in flagged
+                   if not (u.get("junk_categories")
+                           or (u.get("_waste_evidence") or {}).get("junk_category"))]
+    if unexplained:
+        reasons.append(f"flagged_without_reason_evidence:{len(unexplained)}")
+    if reasons:
+        return {"status": TRUTH_MISMATCH, "reasons": reasons}
+
+    if not sql_attr.get("available"):
+        reasons.append("sql_attribution_unavailable")
+    join = pop.get("annotation_join") or {}
+    if join.get("available") is False:
+        reasons.append("waste_annotations_unavailable")
+    elif (join.get("legacy_unresolved") or 0) > 0:
+        reasons.append(f"legacy_unresolved_annotations:{join['legacy_unresolved']}")
+
+    if reasons:
+        return {"status": TRUTH_PARTIAL, "reasons": reasons}
+    return {"status": TRUTH_RECONCILED, "reasons": []}
+
+
+def _flagged_sort_key(sort: str):
+    def _null_last(v):
+        return (v is None, -(float(v)) if v is not None else 0)
+
+    def _term(u):
+        return (u.get("search_term") or "").lower()
+
+    keyers = {
+        "priority": lambda u: (-int(u.get("priority_score") or 0), _term(u)),
+        "spend": lambda u: (_null_last(u.get("spend_usd")), _term(u)),
+        "clicks": lambda u: (-int(u.get("clicks") or 0), _term(u)),
+        "last_seen": lambda u: ((u.get("last_seen") is None),
+                                str(u.get("last_seen") or ""), _term(u)),
+        "term": _term,
+        "attributed_sqls": lambda u: (_null_last(u.get("attributed_sqls")), _term(u)),
+    }
+    return keyers.get(sort or "priority", keyers["priority"])
+
+
+def build_flagged_search_terms(
+    window: str, *, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE,
+    q: str | None = None, campaign: str | None = None,
+    review_state: str | None = None, flag_reason: str | None = None,
+    min_spend: float | None = None, sql_state: str | None = None,
+    sort: str = "priority", high_spend_usd: float = 100.0,
+    now: datetime | None = None) -> dict[str, Any]:
+    """The canonical Flagged / Waste view. Read-only.
+
+    A term appears here because DURABLE evidence says so — either
+    ``search_terms.is_flagged_waste = true`` or safely campaign-scoped
+    ``waste_terms`` evidence (the PR-ADS-145 §4 precedence). It is NEVER derived
+    from ``spend > 0 AND sqls = 0``: that rule would classify every term whose
+    attribution is merely unavailable as waste (§8, §13).
+
+    Every metric is the canonical ``search_terms`` fact, deduplicated by the
+    unique fact key — repeated ingestion of the same source-date fact cannot
+    change any number here (§10).
+
+    Raises ``EvidenceWindowError`` / ``SearchTermQueryError`` for bad input.
+    """
+    if sort not in FLAGGED_SORTS:
+        raise SearchTermQueryError(
+            f"Unsupported sort '{sort}'. Valid: {', '.join(FLAGGED_SORTS)}.")
+    if review_state is not None and review_state not in LOCAL_REVIEW_STATES:
+        raise SearchTermQueryError(
+            f"Unsupported review_state '{review_state}'. "
+            f"Valid: {', '.join(LOCAL_REVIEW_STATES)}.")
+    if flag_reason is not None and flag_reason not in ALL_REASONS:
+        raise SearchTermQueryError(
+            f"Unsupported flag_reason '{flag_reason}'. Valid: {', '.join(ALL_REASONS)}.")
+    if sql_state and sql_state not in TERM_SQL_STATES:
+        raise SearchTermQueryError(
+            f"Unsupported sql_state '{sql_state}'. Valid: {', '.join(TERM_SQL_STATES)}.")
+    try:
+        page = max(1, int(page))
+        page_size = max(1, min(MAX_PAGE_SIZE, int(page_size)))
+    except (TypeError, ValueError) as exc:
+        raise SearchTermQueryError("Invalid pagination.") from exc
+
+    start, end, base = _base(window, now)
+    pop = _build_population(start, end)
+
+    echo_filters = {
+        "q": q, "campaign": campaign, "review_state": review_state,
+        "flag_reason": flag_reason, "min_spend": min_spend,
+        "sql_state": sql_state, "sort": sort,
+    }
+
+    if not pop["available"]:
+        return {
+            **base, "view": "flagged", "db_unavailable": True,
+            "kpis": _empty_flagged_kpis(), "rows": [],
+            "pagination": {"total_count": None, "returned_count": 0,
+                           "page": page, "page_size": page_size,
+                           "has_more": False},
+            "facets": {"campaigns": [], "flag_reasons": [],
+                       "review_states": list(LOCAL_REVIEW_STATES)},
+            "filters": echo_filters,
+            "truth_state": _flagged_truth_state(pop, {}, available=False),
+            "annotation_join": pop.get("annotation_join") or {"available": False},
+        }
+
+    units = pop["units"]
+    sql_attr = _search_term_sql_attribution(pop, start, end)
+    _apply_search_term_sql(units, sql_attr)
+
+    # The flagged population: durable evidence only.
+    flagged_units = [u for u in units if _unit_state(u) == STATE_FLAGGED]
+
+    # Durable local decisions, joined by canonical identity — the SAME join the
+    # Action Queue uses, so the two surfaces cannot disagree.
+    reviews = _fetch_reviews_for_units(flagged_units)
+
+    rows_all = [_flagged_row(u, pop["aliases_by_id"],
+                             reviews.get(unit_identity(u)), high_spend_usd)
+                for u in flagged_units]
+
+    filtered = _filter_flagged_rows(rows_all, q=q, campaign=campaign,
+                                    review_state=review_state,
+                                    flag_reason=flag_reason,
+                                    min_spend=min_spend, sql_state=sql_state)
+    ordered = sorted(filtered, key=_flagged_sort_key(sort))
+
+    # KPIs over the COMPLETE filtered population, never the returned page.
+    kpi_units = [u for u in flagged_units
+                 if unit_identity(u) in {r["term_identity"] for r in filtered}]
+    mon = _monetary_summary(kpi_units)
+    kpis = _flagged_kpis(filtered, mon, sql_attr)
+
+    total = len(ordered)
+    offset = (page - 1) * page_size
+    page_rows = ordered[offset:offset + page_size]
+
+    return {
+        **base,
+        "view": "flagged",
+        "kpis": kpis,
+        "rows": page_rows,
+        "pagination": {
+            "total_count": total, "returned_count": len(page_rows),
+            "page": page, "page_size": page_size,
+            "has_more": offset + len(page_rows) < total,
+        },
+        "facets": _flagged_facets(rows_all),
+        "filters": echo_filters,
+        "platform_date_field": "source_date",
+        "sql_date_field": "contact_created_at",
+        "sql_attribution": _search_term_sql_block(sql_attr),
+        "truth_state": _flagged_truth_state(pop, sql_attr, available=True),
+        "annotation_join": pop.get("annotation_join") or {},
+        "review_state_available": reviews is not None,
+        "canonical_fact_source": {
+            "table": "search_terms",
+            "grain": ("source_date + campaign_name + campaign_id + ad_group + "
+                      "keyword + match_type + search_term"),
+            "dedup_key": "idx_search_terms_unique_fact",
+            "unit_grain": "search_term × canonical campaign identity",
+            "identity": "analysis/search_term_identity.term_identity_key",
+        },
+        "annotation_source": {
+            "table": "waste_terms",
+            "role": ("classification annotation only — reason, matched rule and "
+                     "CRM-junk confirmation. Never a source of spend, clicks or "
+                     "impressions."),
+        },
+        "governance": {
+            "read_only": True,
+            "google_ads_mutations": False,
+            "negative_keywords_applied": False,
+        },
+        "audit": _audit_block(base, pop, coverage_status="ok"),
+    }
+
+
+def _fetch_reviews_for_units(units: list) -> dict:
+    """Durable review rows for a set of canonical units, keyed by identity.
+
+    A DB outage yields an empty map — every unit then reads ``unreviewed``, which
+    is the honest default: no decision is on record that we can see. It never
+    invents ``keep``, which would silently drop terms out of the Action Queue.
+    """
+    try:
+        from db import search_term_review_repository as review_repo  # noqa: PLC0415
+
+        fetched = review_repo.fetch_reviews_for_identities(
+            [unit_identity(u) for u in units])
+        return fetched.get("rows") or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[search-term-evidence] review state unavailable: %s", exc)
+        return {}
+
+
+def _filter_flagged_rows(rows: list, *, q=None, campaign=None, review_state=None,
+                         flag_reason=None, min_spend=None, sql_state=None) -> list:
+    out = rows
+    if q:
+        needle = str(q).strip().lower()
+        out = [r for r in out
+               if needle in (r.get("search_term") or "").lower()
+               or needle in (r.get("campaign_name") or "").lower()]
+    if campaign:
+        out = [r for r in out if r.get("campaign_key") == campaign
+               or r.get("campaign_name") == campaign]
+    if review_state:
+        out = [r for r in out if r.get("review_state") == review_state]
+    if flag_reason:
+        out = [r for r in out if r.get("flag_reason") == flag_reason]
+    if min_spend not in (None, ""):
+        threshold = float(min_spend)
+        # A unit whose spend is UNAVAILABLE is not proven to be below the
+        # threshold, so it is never silently filtered out by one.
+        out = [r for r in out if r.get("spend_usd") is None
+               or float(r["spend_usd"]) >= threshold]
+    if sql_state and sql_state != "all":
+        if sql_state == "has_sql":
+            out = [r for r in out if r.get("sql_attribution_status") == "attributed"
+                   and (r.get("attributed_sqls") or 0) > 0]
+        elif sql_state == "known_zero":
+            out = [r for r in out if r.get("sql_attribution_status") == "known_zero"]
+        elif sql_state == "unavailable":
+            out = [r for r in out if r.get("sql_attribution_status")
+                   in ("unavailable", "mapping_review", "partial_attribution")]
+    return out
+
+
+def _flagged_kpis(rows: list, mon: dict, sql_attr: dict) -> dict:
+    """The four canonical flagged KPIs (§11). No vanity metrics.
+
+    ``sql_evidence`` is the sum of SAFELY ATTRIBUTED lifecycle SQLs only. When
+    no row has proven attribution it is ``None`` (Unavailable), never 0 — the
+    distinction between "no attributable SQLs" and "we could not attribute" is
+    the whole point of §13.
+    """
+    attributed = [r for r in rows if r.get("sql_attribution_status") == "attributed"]
+    known_zero = [r for r in rows if r.get("sql_attribution_status") == "known_zero"]
+    unavailable = [r for r in rows if r.get("sql_attribution_status")
+                   not in ("attributed", "known_zero")]
+    sql_evidence = (sum(int(r.get("attributed_sqls") or 0) for r in attributed)
+                    if (attributed or known_zero) else None)
+    return {
+        # Unique durable identities currently matching the flagged contract.
+        "flagged_terms": len({r["term_identity"] for r in rows}),
+        # Canonical Google Ads spend for those terms, FX-verified subtotal only.
+        "flagged_spend_usd": mon["verified_usd_spend"],
+        "flagged_spend_native": mon["verified_native_spend"],
+        "native_currency": mon["native_currency"],
+        "reporting_currency": mon["reporting_currency"],
+        "monetary": mon,
+        "monetary_status": mon["monetary_completeness_status"],
+        "clicks": sum(int(r.get("clicks") or 0) for r in rows),
+        # Search-term-attributable lifecycle SQLs — a strict attribution SUBSET,
+        # never a naked "SQLs" claim (§12).
+        "sql_evidence": sql_evidence,
+        "sql_evidence_label": "Search-term-attributable SQLs",
+        "sql_evidence_available": bool(attributed or known_zero),
+        "terms_with_attribution_unavailable": len(unavailable),
+        "terms_with_proven_zero_sqls": len(known_zero),
+        "sql_attribution_available": bool(sql_attr.get("available")),
+        # Flagged terms with no finished human decision.
+        "review_needed": sum(1 for r in rows if r.get("action_needed")),
+    }
+
+
+def _empty_flagged_kpis() -> dict:
+    return {
+        "flagged_terms": None, "flagged_spend_usd": None,
+        "flagged_spend_native": None, "native_currency": None,
+        "reporting_currency": "USD", "monetary": None, "monetary_status": None,
+        "clicks": None, "sql_evidence": None,
+        "sql_evidence_label": "Search-term-attributable SQLs",
+        "sql_evidence_available": False,
+        "terms_with_attribution_unavailable": None,
+        "terms_with_proven_zero_sqls": None,
+        "sql_attribution_available": False,
+        "review_needed": None,
+    }
+
+
+def _flagged_facets(rows: list) -> dict:
+    campaigns: dict = {}
+    reasons: dict = {}
+    for r in rows:
+        key = r.get("campaign_key")
+        if key and key not in campaigns:
+            campaigns[key] = {"campaign_key": key,
+                              "campaign_name": r.get("campaign_name"),
+                              "mapping_status": r.get("mapping_status")}
+        reason = r.get("flag_reason")
+        if reason:
+            reasons[reason] = {"reason": reason,
+                               "reason_label": r.get("flag_reason_label")}
+    return {
+        "campaigns": sorted(campaigns.values(),
+                            key=lambda c: (c["campaign_name"] or "").lower()),
+        "flag_reasons": sorted(reasons.values(), key=lambda r: r["reason"]),
+        "review_states": list(LOCAL_REVIEW_STATES),
     }
 
 

@@ -375,7 +375,7 @@ def test_service_is_read_only():
 
 def test_no_snapshot_language_on_campaign_page():
     region = _region(APP_JS, "// ── Campaign Evidence page (PR-ADS-143)",
-                     "// ── Waste Terms page")
+                     "// ── Flagged Waste Terms page — RETIRED (PR-ADS-153D)")
     for banned in ("Latest Snapshot", "latest stored snapshot", "snapshot_metric_period",
                    "per-run snapshot", "Snapshot metrics"):
         assert banned not in region, f"snapshot copy leaked: {banned}"

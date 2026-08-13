@@ -6,7 +6,7 @@ PR-ADS-074 — Dataset-Level Freshness Truth Across Dashboard Pages.
 Tests cover:
   - PAGE_DATASET_MAP includes all major data pages.
   - Every dataset key in PAGE_DATASET_MAP is a known "source/dataset" string.
-  - Derived pages (ngrams, waste) map to google_ads_api/search_terms.
+  - Derived pages (ngrams) map to google_ads_api/search_terms.
   - Multi-dataset pages (action_queue) reference the expected composite keys.
   - "Unknown" state is described as freshness-unverified, never as "failed".
   - No unsafe action wording appears in the freshness display copy.
@@ -51,7 +51,6 @@ KNOWN_DATASET_KEYS: set[str] = {
 # Pages that are expected to have dataset-level freshness strips.
 EXPECTED_PAGES: set[str] = {
     "campaigns",
-    "waste",
     "search_terms",
     "ngrams",
     "geo",
@@ -62,7 +61,7 @@ EXPECTED_PAGES: set[str] = {
 }
 
 # Derived pages whose mapping must point exclusively at google_ads_api/search_terms
-DERIVED_PAGES: set[str] = {"ngrams", "waste"}
+DERIVED_PAGES: set[str] = {"ngrams"}
 
 # ---------------------------------------------------------------------------
 # Parse PAGE_DATASET_MAP from app.js source (simple pattern extraction)
@@ -158,10 +157,12 @@ class TestDerivedPages:
             "ngrams page must map to google_ads_api/search_terms (derived dataset)"
         )
 
-    def test_waste_maps_to_search_terms(self):
-        assert "waste" in _PAGE_MAP, "waste not in PAGE_DATASET_MAP"
-        assert "google_ads_api/search_terms" in _PAGE_MAP["waste"], (
-            "waste page must map to google_ads_api/search_terms (derived dataset)"
+    def test_retired_waste_page_has_no_dataset_mapping(self):
+        """PR-ADS-153D retired the standalone Flagged Waste Terms page. Its
+        freshness now belongs to Search Terms, which owns the canonical facts —
+        a stale mapping left behind would advertise a page that cannot load."""
+        assert "waste" not in _PAGE_MAP, (
+            "waste must not remain in PAGE_DATASET_MAP after PR-ADS-153D"
         )
 
     def test_derived_pages_not_mapped_to_nonexistent_waste_terms_key(self):
@@ -377,7 +378,7 @@ class TestApiDatasetKey:
 # ---------------------------------------------------------------------------
 
 class TestDerivedDatasetPagesSet:
-    """DERIVED_DATASET_PAGES must exist and include ngrams and waste."""
+    """DERIVED_DATASET_PAGES must exist and include ngrams."""
 
     def test_derived_set_declared(self):
         assert "DERIVED_DATASET_PAGES" in _APP_JS_TEXT, (
@@ -393,14 +394,16 @@ class TestDerivedDatasetPagesSet:
         contents = match.group(1)
         assert "ngrams" in contents, "ngrams must be in DERIVED_DATASET_PAGES"
 
-    def test_waste_in_derived_set(self):
+    def test_retired_waste_page_not_in_derived_set(self):
         match = re.search(
             r"DERIVED_DATASET_PAGES\s*=\s*new Set\(\[([^\]]*)\]\)",
             _APP_JS_TEXT,
         )
         assert match, "DERIVED_DATASET_PAGES Set not found or not parseable"
         contents = match.group(1)
-        assert "waste" in contents, "waste must be in DERIVED_DATASET_PAGES"
+        assert "waste" not in contents, (
+            "waste must NOT be in DERIVED_DATASET_PAGES after PR-ADS-153D — the "
+            "standalone page is retired and has no freshness strip of its own")
 
 
 # ---------------------------------------------------------------------------

@@ -227,12 +227,14 @@ def test_evidence_pages_list_and_helper():
                    APP_JS.find("const EVIDENCE_PAGES") + 300]
     # BLOCKER 2: ngrams is derived Search Term evidence and uses the dropdown too.
     # PR-ADS-153C: "leads" moved to business windows; "opportunities" is retired.
-    for route in ("campaigns", "search-terms", "ngrams", "keywords", "geo",
-                  "waste"):
+    # PR-ADS-153D: "waste" is retired into Search Terms → Flagged, which is
+    # served by the Search Terms page's own evidence window — the retired page
+    # must not leave a second window implementation behind (§21).
+    for route in ("campaigns", "search-terms", "ngrams", "keywords", "geo"):
         assert f'"{route}"' in block, f"EVIDENCE_PAGES missing {route}"
-    for retired in ("leads", "opportunities"):
+    for retired in ("leads", "opportunities", "waste"):
         assert f'"{retired}"' not in block, (
-            f"EVIDENCE_PAGES must not contain {retired} after PR-ADS-153C")
+            f"EVIDENCE_PAGES must not contain the retired route {retired}")
     assert "function isEvidencePage(" in APP_JS
 
 
@@ -283,7 +285,11 @@ def test_evidence_loaders_use_window_param():
     # (kwBuildParams sets window=getEvidenceWindow()), not the legacy /api/keywords.
     assert "/api/keyword-evidence?${kwBuildParams().toString()}" in APP_JS
     assert 'p.set("window", getEvidenceWindow())' in APP_JS
-    assert "/api/waste?${evidenceWindowQuery()}" in APP_JS
+    # PR-ADS-153D: the standalone waste loader is gone. Its replacement is the
+    # Flagged tab, which builds its window param the same way the rest of the
+    # Search Terms family does (asserted below).
+    assert "/api/waste?" not in APP_JS
+    assert "/api/search-term-evidence/flagged?" in APP_JS
     # PR-ADS-153C: the Leads page is a business-window CRM page and consumes the
     # canonical /api/crm-funnel family instead of the evidence-windowed /api/leads.
     # The funnel query is built with URLSearchParams so the Source filter can be
@@ -457,18 +463,27 @@ def test_leads_all_time_aggregates_complete_beyond_row_cap(monkeypatch):
 
 
 def test_waste_all_time_discloses_truncation_beyond_500(monkeypatch):
-    WASTE_COLS = ["search_term", "campaign_name", "spend_usd",
-                  "junk_category", "matched_pattern", "crm_junk_confirmed", "run_date"]
-
-    def responder(sql, params):
-        if "COUNT(*)" in sql:                 # complete count
-            return ([(1200,)], ["count"])
-        rows = [("term%d" % i, "Alpha", 1.0, None, None, 0, "2026-07-01")
-                for i in range(500)]          # capped page
-        return (rows, WASTE_COLS)
-
-    _patch_conn(monkeypatch, responder)
+    """PR-ADS-153D: /api/waste is now a compatibility adapter over the CANONICAL
+    flagged view (search_terms facts), not over run-snapshot waste_terms rows.
+    Truncation disclosure must survive that migration unchanged."""
     import importlib
+
+    service = importlib.import_module("services.search_term_evidence_service")
+
+    def _flagged(window, **kwargs):
+        return {
+            "window": window,
+            "rows": [{"search_term": "term%d" % i, "campaign_name": "Alpha",
+                      "spend_usd": 1.0, "clicks": 1, "impressions": 2,
+                      "flag_reason": "job_seeker", "last_seen": "2026-07-01",
+                      "term_identity": "id%d" % i}
+                     for i in range(500)],
+            "pagination": {"total_count": 1200, "returned_count": 500,
+                           "page": 1, "page_size": 500, "has_more": True},
+            "kpis": {}, "truth_state": {"status": "partial"},
+        }
+
+    monkeypatch.setattr(service, "build_flagged_search_terms", _flagged)
     server = importlib.import_module("api.server")
     out = server.api_waste(user={"e": "x"}, days=30, window="all_time")
 
@@ -477,6 +492,9 @@ def test_waste_all_time_discloses_truncation_beyond_500(monkeypatch):
     assert out["total_count"] == 1200          # full window count, not the page
     assert out["has_more"] is True
     assert out["truncated"] is True
+    # The adapter names its canonical source and its replacement.
+    assert out["canonical_source"] == "search_terms"
+    assert out["superseded_by"] == "/api/search-term-evidence/flagged"
 
 
 def test_leads_aggregates_shape_empty_when_db_unavailable(monkeypatch):
@@ -499,13 +517,17 @@ class _NoneConn:
 
 
 def test_frontend_waste_discloses_showing_x_of_y_and_partial_export():
-    render = APP_JS[APP_JS.find("function renderWasteTable"):
-                    APP_JS.find("function renderWasteTable") + 1600]
-    assert "_wasteMeta.truncated" in render
-    assert "Showing" in render and "of" in render
-    exp = APP_JS[APP_JS.find("function downloadWasteCSV"):
-                 APP_JS.find("function downloadWasteCSV") + 900]
-    assert "_partial_first" in exp   # export never implies a complete library
+    """PR-ADS-153D: the standalone waste page was retired. The disclosure it
+    carried — never present a capped list as the complete library — is now met
+    by real server-side pagination on the Flagged tab, which reports the page
+    range against the complete filtered total instead of truncating."""
+    assert "function renderWasteTable" not in APP_JS
+    assert "function downloadWasteCSV" not in APP_JS
+    render = APP_JS[APP_JS.find("function renderFlaggedTable"):
+                    APP_JS.find("function renderFlaggedTable") + 3000]
+    # Page range against the COMPLETE filtered count, not a silent cap.
+    assert "pg.total_count" in render
+    assert "flag-prev" in render and "flag-next" in render
 
 
 # ════════════════ BLOCKER 3 — campaign drawer honours the window ═════════════
