@@ -372,8 +372,8 @@ def test_acquisition_group_filter_uses_the_canonical_taxonomy(pg):
         _contact("s", source="PAID_SOCIAL", entered_sql="2026-07-12T00:00:00Z"),
     ])
     facets = repo.fetch_distinct_facets()
-    google = funnel.resolve_source_allowlist("google_ads", facets["sources"])
-    page = repo.fetch_funnel_contact_page("sql", *_Q3, sources_in=google)
+    google = funnel.resolve_source_pair_allowlist("google_ads", facets["source_pairs"])
+    page = repo.fetch_funnel_contact_page("sql", *_Q3, source_pairs_in=google)
     assert [r["contact_id"] for r in page["rows"]] == ["g"]
 
 
@@ -382,7 +382,7 @@ def test_empty_allowlist_yields_an_empty_page_not_an_ignored_filter(pg):
     from db import crm_funnel_repository as repo
 
     _seed([_contact("1", entered_sql="2026-07-10T00:00:00Z")])
-    page = repo.fetch_funnel_contact_page("sql", *_Q3, sources_in=[])
+    page = repo.fetch_funnel_contact_page("sql", *_Q3, source_pairs_in=[])
     assert page["total"] == 0
 
 
@@ -479,3 +479,152 @@ def test_unavailable_database_is_not_reported_as_an_empty_page(pg, monkeypatch):
     assert page["available"] is False
     assert page["total"] == 0
     assert page["rows"] == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PR-ADS-153C follow-up — the FULL source contract survives the trip into SQL
+# ─────────────────────────────────────────────────────────────────────────────
+# "Offline Sources" is the case that proves it: the primary alone is ambiguous,
+# and only the drill-down separates SalesNash / Events (Other Paid) from
+# reseller / referral / direct email (Organic) from a plain CRM migration
+# (Offline). If the allow-list collapsed to the primary, all three would filter
+# together.
+
+_OFFLINE_FIXTURE = [
+    ("events",    "Offline Sources", "Events",        "other_paid"),
+    ("salesnash", "Offline Sources", "SalesNash",     "other_paid"),
+    ("reseller",  "Offline Sources", "reseller",      "organic"),
+    ("referral",  "Offline Sources", "referral",      "organic"),
+    ("email",     "Offline Sources", "direct email",  "organic"),
+    ("migration", "Offline Sources", "CRM migration", "offline"),
+    ("social",    "PAID_SOCIAL",     "linkedin",      "other_paid"),
+    ("organic",   "ORGANIC_SEARCH",  "google",        "organic"),
+    ("ads",       "PAID_SEARCH",     "Brand - US",    "google_ads"),
+]
+
+
+def _seed_source_fixture(day_start=5):
+    return _seed([
+        _contact(cid, source=primary, campaign=detail,
+                 entered_sql=f"2026-07-{day_start + i:02d}T00:00:00Z")
+        for i, (cid, primary, detail, _group) in enumerate(_OFFLINE_FIXTURE)
+    ])
+
+
+@pytest.mark.parametrize("group,expected", [
+    ("other_paid", {"events", "salesnash", "social"}),
+    ("organic", {"reseller", "referral", "email", "organic"}),
+    ("offline", {"migration"}),
+    ("google_ads", {"ads"}),
+])
+def test_pair_allowlist_filters_offline_sources_by_its_drilldown(pg, group, expected):
+    from db import crm_funnel_repository as repo
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed_source_fixture()
+    facets = repo.fetch_distinct_facets()
+    allowed = funnel.resolve_source_pair_allowlist(group, facets["source_pairs"])
+    page = repo.fetch_funnel_contact_page("sql", *_Q3, source_pairs_in=allowed)
+    assert {r["contact_id"] for r in page["rows"]} == expected
+    assert page["total"] == len(expected)
+
+
+def test_same_primary_source_splits_across_groups_in_sql(pg):
+    """All six rows share 'Offline Sources'; SQL still separates them."""
+    from db import crm_funnel_repository as repo
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed_source_fixture()
+    facets = repo.fetch_distinct_facets()
+    seen = set()
+    for group in ("other_paid", "organic", "offline"):
+        allowed = funnel.resolve_source_pair_allowlist(group, facets["source_pairs"])
+        page = repo.fetch_funnel_contact_page("sql", *_Q3, source_pairs_in=allowed)
+        ids = {r["contact_id"] for r in page["rows"]}
+        assert not (ids & seen), "a contact was counted in two groups"
+        seen |= ids
+    assert {"events", "salesnash", "reseller", "referral", "email",
+            "migration"} <= seen
+
+
+def test_null_source_evidence_still_matches_its_allowlist_entry(pg):
+    """NULL = NULL is unknown in SQL; the predicate must use IS NOT DISTINCT FROM."""
+    from db import crm_funnel_repository as repo
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed([
+        _contact("none", source=None, campaign=None,
+                 entered_sql="2026-07-05T00:00:00Z"),
+        _contact("ads", source="PAID_SEARCH", campaign="Brand - US",
+                 entered_sql="2026-07-06T00:00:00Z"),
+    ])
+    facets = repo.fetch_distinct_facets()
+    assert (None, None) in facets["source_pairs"]
+    allowed = funnel.resolve_source_pair_allowlist(
+        "unclassified", facets["source_pairs"])
+    page = repo.fetch_funnel_contact_page("sql", *_Q3, source_pairs_in=allowed)
+    assert [r["contact_id"] for r in page["rows"]] == ["none"]
+
+
+def test_funnel_aggregate_and_contact_page_agree_on_the_selected_source(pg):
+    """§1: one population — the headline count equals the rows the table pages."""
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed_source_fixture()
+    for group in ("other_paid", "organic", "offline", "google_ads"):
+        aggregate = funnel.build("business", "current_quarter",
+                                 acquisition_group=group,
+                                 now=datetime(2026, 8, 15, tzinfo=timezone.utc))
+        page = funnel.contacts("business", "current_quarter", event="sql",
+                               acquisition_group=group, page_size=100,
+                               now=datetime(2026, 8, 15, tzinfo=timezone.utc))
+        assert aggregate["events"]["sql"]["count"] == page["total"], group
+        assert {r["contact_id"] for r in page["rows"]} == {
+            c[0] for c in _OFFLINE_FIXTURE if c[3] == group}
+
+
+def test_operational_status_counts_honour_the_source_filter(pg):
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed([
+        _contact("a", source="PAID_SEARCH", mql_status="MQL",
+                 entered_lead="2026-07-05T00:00:00Z"),
+        _contact("b", source="ORGANIC_SEARCH", campaign="google",
+                 mql_status="MQL", entered_lead="2026-07-06T00:00:00Z"),
+        _contact("c", source="ORGANIC_SEARCH", campaign="google",
+                 mql_status="CLOSED - Bad Fit",
+                 entered_lead="2026-07-07T00:00:00Z"),
+    ])
+    now = datetime(2026, 8, 15, tzinfo=timezone.utc)
+    everything = funnel.operational_status_breakdown(
+        "business", "current_quarter", now=now)
+    assert sum(everything["counts"].values()) == 3
+
+    organic = funnel.operational_status_breakdown(
+        "business", "current_quarter", acquisition_group="organic", now=now)
+    assert sum(organic["counts"].values()) == 2
+    assert organic["acquisition_group"] == "organic"
+
+    google = funnel.operational_status_breakdown(
+        "business", "current_quarter", acquisition_group="google_ads", now=now)
+    assert sum(google["counts"].values()) == 1
+
+
+def test_non_google_rows_from_sql_carry_no_campaign_or_keyword(pg):
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed_source_fixture()
+    page = funnel.contacts("business", "current_quarter", event="sql",
+                           page_size=100,
+                           now=datetime(2026, 8, 15, tzinfo=timezone.utc))
+    by_id = {r["contact_id"]: r for r in page["rows"]}
+    for cid, _primary, detail, group in _OFFLINE_FIXTURE:
+        row = by_id[cid]
+        if group == "google_ads":
+            continue
+        assert row["campaign"] is None, cid
+        assert row["keyword"] is None, cid
+        assert row["campaign_semantics"] == "not_google_ads_source", cid
+        # The drill-down evidence is still returned — just not as a campaign.
+        assert row["source_detail_raw"] == detail
+        assert row["source_channel_label"]

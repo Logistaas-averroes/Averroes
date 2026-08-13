@@ -8446,6 +8446,7 @@ def api_crm_funnel(
     window: str = Query(default="current_quarter"),
     window_type: str = Query(default="business"),
     scope: str = Query(default="all_source"),
+    acquisition_group: str | None = Query(default=None),
     event: str | None = Query(default=None),
 ) -> dict[str, Any]:
     """Canonical CRM funnel counts for one window (PR-ADS-153B §28).
@@ -8459,13 +8460,19 @@ def api_crm_funnel(
     Named scopes are always explicit and provably nested:
     ``keyword_attributable ≤ campaign_attributable ≤ google_ads_source ≤ all_source``.
 
+    ``acquisition_group`` narrows the WHOLE aggregate — counts, cohort-safe
+    conversions and coverage — to one acquisition group, so a caller that filters
+    a contact list by source reports the same population in its headline
+    (PR-ADS-153C).
+
     Unavailable truth is returned as ``available: false`` with null counts — never
     as zero. Conversions are cohort-safe or reported unavailable.
     """
     try:
         from services import canonical_crm_funnel_service as crm_funnel  # noqa: PLC0415
         return crm_funnel.build(
-            window_type, window, scope=scope, event=event,
+            window_type, window, scope=scope,
+            acquisition_group=acquisition_group, event=event,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -8574,17 +8581,22 @@ def api_crm_funnel_operational_status(
     window: str = Query(default="current_quarter"),
     window_type: str = Query(default="business"),
     event: str = Query(default="lead"),
+    acquisition_group: str | None = Query(default=None),
 ) -> dict[str, Any]:
     """Working-status breakdown (``mql_status_category``) for one event window.
 
     These are OPERATIONAL statuses inside the MQL process, never funnel stages —
     the Leads page keeps the Disqualified / Other view visually distinct from the
     five canonical lifecycle stages.
+
+    ``acquisition_group`` applies the same population filter as the funnel and
+    the contact page, so a visible Source selector genuinely filters this view.
     """
     try:
         from services import canonical_crm_funnel_service as crm_funnel  # noqa: PLC0415
         return crm_funnel.operational_status_breakdown(
-            window_type, window, event=event)
+            window_type, window, event=event,
+            acquisition_group=acquisition_group)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001

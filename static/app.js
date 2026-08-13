@@ -6637,10 +6637,17 @@ async function leadsLoadFunnel() {
   const truth = document.getElementById("leads-truth-state");
   if (strip) strip.innerHTML = `<p class="empty-state">Loading funnel…</p>`;
 
-  const window_ = getRoasBusinessWindow();
+  // The funnel headline and the contact rows MUST describe one population, so
+  // the Source selector is sent to the aggregate contract too. A page that
+  // showed "Source: Organic" above an all-source funnel would be lying.
+  const params = new URLSearchParams({
+    window: getRoasBusinessWindow(),
+    window_type: "business",
+    scope: _leadsScope,
+  });
+  if (_leadsSourceGroup) params.set("acquisition_group", _leadsSourceGroup);
   try {
-    _leadsFunnel = await fetchJSON(
-      `/api/crm-funnel?window=${encodeURIComponent(window_)}&window_type=business&scope=${encodeURIComponent(_leadsScope)}`);
+    _leadsFunnel = await fetchJSON(`/api/crm-funnel?${params.toString()}`);
   } catch (_) {
     _leadsFunnel = null;
   }
@@ -6732,8 +6739,12 @@ function leadsFunnelStripHtml(payload) {
   }).join("");
 
   const scopeLabel = (payload && payload.scope_label) || "All Sources";
+  // The active source filter is disclosed on the headline itself, so the
+  // funnel can never read as all-source while a group is selected.
+  const groupLabel = (payload && payload.acquisition_group_label) || "All sources";
   return `<div class="dash-funnel" role="group" aria-label="CRM funnel">${cells}</div>
-    <p class="grace-note">Scope: ${escapeHtml(scopeLabel)} · Counts are stage-entry events, each on its own HubSpot date.</p>`;
+    <p class="grace-note">Scope: ${escapeHtml(scopeLabel)} · Source: ${escapeHtml(groupLabel)} ·
+      Counts are stage-entry events, each on its own HubSpot date.</p>`;
 }
 
 function leadsRenderControls() {
@@ -6753,7 +6764,10 @@ function leadsRenderControls() {
       (g) => `<option value="${g.key}">${escapeHtml(g.label)}</option>`).join("");
     sourceSel.value = _leadsSourceGroup;
     sourceSel.addEventListener("change", async (e) => {
+      // Reloads the FUNNEL as well as the rows — one selected source, one
+      // population, everywhere on the page.
       _leadsSourceGroup = e.target.value; _leadsPage = 1;
+      await leadsLoadFunnel();
       await leadsRenderActiveView();
     });
   }
@@ -6813,6 +6827,7 @@ function leadsRenderTabs() {
 async function leadsRenderActiveView() {
   const controls = document.getElementById("leads-table-controls");
   const pager = document.getElementById("leads-pagination");
+  leadsSyncControlVisibility();
   if (_leadsView === LEADS_VIEW_OVERVIEW) {
     if (controls) controls.hidden = true;
     if (pager) pager.innerHTML = "";
@@ -6826,6 +6841,29 @@ async function leadsRenderActiveView() {
     return;
   }
   await leadsRenderContacts(_leadsView);
+}
+
+/**
+ * Show only the filters the ACTIVE view can honour.
+ *
+ * The Disqualified / Other view is an aggregate breakdown BY working status, so
+ * a working-status filter would be circular and a company search has nothing
+ * per-contact to match. Both are hidden there rather than left visible and
+ * inert. Window, Scope and Source stay — they all genuinely filter that view.
+ */
+function leadsSyncControlVisibility() {
+  const operational = _leadsView === LEADS_VIEW_OTHER;
+  const statusControl = document.getElementById("leads-status-control");
+  const searchControl = document.getElementById("leads-search-control");
+  const note = document.getElementById("leads-controls-note");
+  if (statusControl) statusControl.hidden = operational;
+  if (searchControl) searchControl.hidden = operational;
+  if (note) {
+    note.hidden = !operational;
+    note.textContent = operational
+      ? "This view IS the working-status breakdown, so the status and company filters do not apply here. Window, scope and source do."
+      : "";
+  }
 }
 
 function leadsRenderOverview() {
@@ -6860,11 +6898,16 @@ async function leadsRenderOperational() {
   if (!body) return;
   body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">Loading…</p>`;
 
-  const window_ = getRoasBusinessWindow();
+  // The Source selector is visible on this view, so it must actually filter it.
+  const params = new URLSearchParams({
+    window: getRoasBusinessWindow(),
+    window_type: "business",
+    event: "lead",
+  });
+  if (_leadsSourceGroup) params.set("acquisition_group", _leadsSourceGroup);
   let payload = null;
   try {
-    payload = await fetchJSON(
-      `/api/crm-funnel/operational-status?window=${encodeURIComponent(window_)}&window_type=business&event=lead`);
+    payload = await fetchJSON(`/api/crm-funnel/operational-status?${params.toString()}`);
   } catch (_) { payload = null; }
 
   if (!payload || payload.available === false) {
@@ -6883,7 +6926,8 @@ async function leadsRenderOperational() {
       <tbody>${rows}</tbody></table>
     <p class="grace-note" style="padding: 0 var(--space-5) var(--space-4);">
       These are MDR working statuses inside the MQL process — they do not define any funnel stage.
-      Counted over contacts whose Lead stage-entry date falls in the window.</p>`;
+      Counted over contacts whose Lead stage-entry date falls in the window.
+      Source: ${escapeHtml(payload.acquisition_group_label || "All sources")}.</p>`;
 }
 
 async function leadsRenderContacts(event) {
@@ -6934,19 +6978,15 @@ async function leadsRenderContacts(event) {
   }
 
   const tbody = rows.map((r, i) => {
-    const campaign = r.campaign_available === false
-      ? `<span class="muted" title="Campaign identity contract unavailable">Unavailable</span>`
-      : escapeHtml(r.campaign || "—");
-    const keyword = r.campaign_available === false
-      ? `<span class="muted">Unavailable</span>` : escapeHtml(r.keyword || "—");
     return `<tr class="clickable-row" data-leads-row="${i}" tabindex="0">
       <td><strong>${escapeHtml(r.company || "—")}</strong></td>
       <td>${escapeHtml(r.event_date || "—")}</td>
       <td>${escapeHtml(r.lifecycle_stage_label || "—")}</td>
       <td>${escapeHtml(LEADS_STATUS_LABELS[r.mql_status_category] || r.mql_status_category || "—")}</td>
-      <td>${escapeHtml(sourceGroupLabel(r.acquisition_group))}</td>
-      <td>${campaign}</td>
-      <td>${keyword}</td>
+      <td>${escapeHtml(r.acquisition_group_label || sourceGroupLabel(r.acquisition_group))}</td>
+      <td>${leadsChannelPlatformHtml(r)}</td>
+      <td>${leadsCampaignCellHtml(r, "campaign")}</td>
+      <td>${leadsCampaignCellHtml(r, "keyword")}</td>
       <td>${escapeHtml(r.country || "—")}</td>
       <td>${r.has_gclid ? "Yes" : "No"}</td>
     </tr>`;
@@ -6957,7 +6997,11 @@ async function leadsRenderContacts(event) {
       <th>Company</th>
       <th title="The selected stage-entry event date">${escapeHtml(stage.label)} date</th>
       <th title="Current lifecycle stage — may be later than the selected event">Current stage</th>
-      <th>Working status</th><th>Source</th><th>Campaign</th><th>Keyword</th>
+      <th>Working status</th>
+      <th>Source</th>
+      <th title="Canonical acquisition channel and platform">Channel / Platform</th>
+      <th title="Google Ads campaign — only shown where Google Ads semantics are proven">Campaign</th>
+      <th title="Google Ads keyword — only shown where Google Ads semantics are proven">Keyword</th>
       <th>Country</th><th>GCLID</th>
     </tr></thead>
     <tbody>${tbody}</tbody></table>`;
@@ -6988,6 +7032,38 @@ function sourceGroupLabel(group) {
   return found ? found.label : (group || "—");
 }
 
+/** Canonical acquisition channel + platform, from the shared source taxonomy. */
+function leadsChannelPlatformHtml(row) {
+  const channel = row.source_channel_label || "—";
+  const platform = row.source_platform_label || "—";
+  if (channel === platform) return escapeHtml(channel);
+  return `${escapeHtml(channel)} <span class="muted">· ${escapeHtml(platform)}</span>`;
+}
+
+/**
+ * Campaign / keyword cell.
+ *
+ * `hs_analytics_source_data_1` / `_2` are HubSpot Original Source Drill-Down
+ * fields. They mean "Google Ads campaign / keyword" ONLY for Paid Search
+ * contacts. For Organic, Paid Social, Email, Referral, Offline and Event
+ * contacts they hold different text entirely, so this NEVER labels that text
+ * Campaign or Keyword — the row's canonical source columns carry that evidence
+ * instead, and the neutral drill-down value is available in the drawer.
+ */
+function leadsCampaignCellHtml(row, field) {
+  if (row.campaign_available) return escapeHtml(row[field] || "—");
+  switch (row.campaign_semantics) {
+    case "not_google_ads_source":
+      return `<span class="muted" title="Not a Google Ads contact — HubSpot's source drill-down is not a Google Ads ${field}. See the Source and Channel / Platform columns.">Not applicable</span>`;
+    case "campaign_identity_unavailable":
+      return `<span class="muted" title="The Google Ads campaign-identity contract could not be consulted. Unavailable — not absent.">Unavailable</span>`;
+    case "campaign_identity_unresolved":
+      return `<span class="muted" title="This label did not resolve to a real Google Ads campaign identity.">Unresolved</span>`;
+    default:
+      return `<span class="muted">—</span>`;
+  }
+}
+
 /** Contact drawer — funnel history, current CRM state, acquisition evidence. */
 function leadsOpenDrawer(row, stage) {
   if (!row) return;
@@ -7000,12 +7076,31 @@ function leadsOpenDrawer(row, stage) {
     return `<tr class="${isSelected}"><td>${escapeHtml(s.label)}</td><td>${cell}</td></tr>`;
   }).join("");
 
-  const attribution = row.campaign_available === false
-    ? `<p class="muted">Campaign / keyword attribution is unavailable — the Google Ads campaign-identity contract could not be consulted.</p>`
-    : `<table class="data-table">
-         <tr><td>Campaign</td><td>${escapeHtml(row.campaign || "—")}</td></tr>
-         <tr><td>Keyword</td><td>${escapeHtml(row.keyword || "—")}</td></tr>
-       </table>`;
+  // Google Ads campaign / keyword are shown ONLY where Google Ads semantics are
+  // proven. Everything else states why, and the neutral drill-down value below
+  // carries the contact's real source evidence without mislabelling it.
+  let attribution;
+  if (row.campaign_available) {
+    attribution = `<h4>Google Ads attribution</h4>
+      <table class="data-table"><tbody>
+        <tr><td>Campaign</td><td>${escapeHtml(row.campaign || "—")}</td></tr>
+        <tr><td>Keyword</td><td>${escapeHtml(row.keyword || "—")}</td></tr>
+      </tbody></table>`;
+  } else if (row.campaign_semantics === "not_google_ads_source") {
+    attribution = `<h4>Google Ads attribution</h4>
+      <p class="muted">Not applicable — this is not a Google Ads contact.
+      HubSpot's source drill-down for this contact is not a Google Ads campaign or
+      keyword, so it is reported above as canonical source evidence rather than
+      labelled as one.</p>`;
+  } else if (row.campaign_semantics === "campaign_identity_unresolved") {
+    attribution = `<h4>Google Ads attribution</h4>
+      <p class="muted">This contact's campaign label did not resolve to a real
+      Google Ads campaign identity, so no campaign or keyword is claimed.</p>`;
+  } else {
+    attribution = `<h4>Google Ads attribution</h4>
+      <p class="muted">Unavailable — the Google Ads campaign-identity contract
+      could not be consulted. Unavailable is not absent.</p>`;
+  }
 
   const html = `
     <h3>${escapeHtml(row.company || "Contact")}</h3>
@@ -7027,8 +7122,11 @@ function leadsOpenDrawer(row, stage) {
 
     <h4>Acquisition evidence</h4>
     <table class="data-table"><tbody>
-      <tr><td>Source</td><td>${escapeHtml(sourceGroupLabel(row.acquisition_group))}</td></tr>
+      <tr><td>Acquisition group</td><td>${escapeHtml(row.acquisition_group_label || sourceGroupLabel(row.acquisition_group))}</td></tr>
+      <tr><td>Channel</td><td>${escapeHtml(row.source_channel_label || "—")}</td></tr>
+      <tr><td>Platform</td><td>${escapeHtml(row.source_platform_label || "—")}</td></tr>
       <tr><td>Raw HubSpot source</td><td>${escapeHtml(row.acquisition_source_raw || "—")}</td></tr>
+      <tr><td title="HubSpot Original Source Drill-Down — a Google Ads campaign only for Paid Search contacts">Source detail</td><td>${escapeHtml(row.source_detail_raw || "—")}</td></tr>
       <tr><td>Country</td><td>${escapeHtml(row.country || "—")}</td></tr>
       <tr><td>GCLID</td><td>${row.has_gclid ? "Present" : "Absent"}</td></tr>
     </tbody></table>

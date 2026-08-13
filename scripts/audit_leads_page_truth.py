@@ -70,6 +70,11 @@ def collect(window: str) -> dict:
         "scopes": scopes,
         "operational": funnel.operational_status_breakdown(
             funnel.WINDOW_BUSINESS, window, event=funnel.EVENT_LEAD),
+        "acquisition_groups": {
+            group: funnel.build(funnel.WINDOW_BUSINESS, window,
+                                acquisition_group=group)
+            for group in funnel.ACQUISITION_GROUPS
+        },
         "reconciliation": recon.run(business_window=window),
     }
 
@@ -173,6 +178,26 @@ def main() -> int:
         counts = operational.get("counts") or {}
         for category in operational.get("categories") or []:
             print(f"    {category:<26} {counts.get(category, 0)}")
+
+    # ── 6. Acquisition groups ────────────────────────────────────────────────
+    _section("6. ACQUISITION GROUPS — the Source selector's populations")
+    total_sql = ((data["funnel"].get("events") or {}).get("sql") or {}).get("count")
+    summed = 0
+    for group, scoped in (data["acquisition_groups"] or {}).items():
+        block = (scoped.get("events") or {}).get("sql") or {}
+        count = block.get("count")
+        if count is not None:
+            summed += count
+        print(f"    {scoped.get('acquisition_group_label', group):<28} {_fmt(count):>10}")
+    print()
+    print(f"    {'sum of groups':<28} {summed:>10}")
+    print(f"    {'all-source SQLs':<28} {_fmt(total_sql):>10}")
+    if total_sql is not None and summed != total_sql:
+        print("  ⚠ Groups do not partition the all-source population — investigate.")
+    else:
+        print("  Groups partition the all-source population exactly (each contact")
+        print("  in exactly one group), classified with HubSpot Original Source")
+        print("  AND its Drill-Down — the same contract Revenue by Source uses.")
 
     print()
     print("=" * 72)

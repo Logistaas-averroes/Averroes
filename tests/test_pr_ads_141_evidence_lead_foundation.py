@@ -286,7 +286,13 @@ def test_evidence_loaders_use_window_param():
     assert "/api/waste?${evidenceWindowQuery()}" in APP_JS
     # PR-ADS-153C: the Leads page is a business-window CRM page and consumes the
     # canonical /api/crm-funnel family instead of the evidence-windowed /api/leads.
-    assert "/api/crm-funnel?window=" in APP_JS
+    # The funnel query is built with URLSearchParams so the Source filter can be
+    # attached; what matters is that Leads calls the canonical family with a
+    # BUSINESS window, never the evidence-windowed /api/leads.
+    assert "/api/crm-funnel?${params.toString()}" in APP_JS
+    load_funnel = APP_JS.split("async function leadsLoadFunnel(")[1].split("\n}")[0]
+    assert "window: getRoasBusinessWindow()" in load_funnel
+    assert 'window_type: "business"' in load_funnel
     assert "/api/geo?${evWindow}" in APP_JS
     assert "/api/leads/country-summary?${evWindow}" in APP_JS
     # Search-terms family sends window= in its param builders.

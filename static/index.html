@@ -631,10 +631,17 @@
         <div id="leads-funnel-strip"></div>
         <div class="tab-bar" id="leads-tabs" role="tablist" aria-label="Funnel stage"></div>
         <div class="roas-window-controls" id="leads-table-controls">
-          <label class="roas-window-label" for="leads-status">Working status:</label>
-          <select id="leads-status" class="waste-filter-select" aria-label="Working status"></select>
-          <label class="roas-window-label" for="leads-search">Company:</label>
-          <input id="leads-search" class="waste-filter-input" type="search" placeholder="Search company…" aria-label="Search by company">
+          <!-- Each filter is wrapped so a view it cannot affect hides it
+               outright, rather than showing a control that does nothing. -->
+          <span class="leads-control" id="leads-status-control">
+            <label class="roas-window-label" for="leads-status">Working status:</label>
+            <select id="leads-status" class="waste-filter-select" aria-label="Working status"></select>
+          </span>
+          <span class="leads-control" id="leads-search-control">
+            <label class="roas-window-label" for="leads-search">Company:</label>
+            <input id="leads-search" class="waste-filter-input" type="search" placeholder="Search company…" aria-label="Search by company">
+          </span>
+          <span class="grace-note" id="leads-controls-note" hidden></span>
         </div>
         <div class="panel">
           <div class="panel__header" id="leads-table-header">Contacts</div>

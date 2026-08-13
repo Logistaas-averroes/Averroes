@@ -3403,7 +3403,16 @@ Read-only. Auth required.
 | `window` | `current_quarter` | business: `current_quarter`, `last_quarter`, `last_6_months`, `ytd`, `all_time` · evidence: `7d`, `14d`, `30d`, `60d`, `180d`, `all_time` |
 | `window_type` | `business` | `business` \| `evidence` |
 | `scope` | `all_source` | `all_source`, `google_ads_source`, `campaign_attributable`, `keyword_attributable` |
+| `acquisition_group` | *(none)* | `google_ads`, `other_paid`, `organic`, `offline`, `unclassified` |
 | `event` | *(all)* | `lead`, `mql`, `sql`, `opportunity`, `customer` |
+
+`acquisition_group` narrows the **whole aggregate** — counts, cohort-safe
+conversions and coverage — to one acquisition group, and is echoed back as
+`acquisition_group` / `acquisition_group_label`. A caller that filters a contact
+list by source must pass the same value here, so the headline and the rows
+describe one population (PR-ADS-153C). Classification uses the full canonical
+contract — HubSpot Original Source **and** its Drill-Down — so a contact lands in
+the same group here as on Revenue by Source.
 
 **Response**
 
@@ -3576,13 +3585,34 @@ contacts behind a canonical funnel event.
 - Filtering, ordering and the page slice all execute in PostgreSQL. Scope and
   acquisition-group filters are applied as pre-resolved allow-lists derived from
   the canonical Python classifiers, so the taxonomy is never duplicated in SQL.
+  The acquisition-group allow-list is over `(hs_analytics_source,
+  hs_analytics_source_data_1)` **pairs**: `Offline Sources` alone is ambiguous,
+  and only its drill-down separates SalesNash / Events (Other Paid) from
+  reseller / referral / direct email (Organic) from a CRM migration (Offline).
+- `acquisition_group` must match the value passed to `GET /api/crm-funnel`, so
+  the funnel headline and these rows describe one population.
 - A narrow scope whose campaign-identity contract cannot be consulted returns
   `available: false` with `reason: "campaign_identity_unavailable"` and
   `total: null` — **never an empty page**, which would read as a proven zero.
 - Each row carries the selected `event_date`, ALL five `stage_dates`, the current
   `lifecycle_stage`, `mql_status` + `mql_status_category`, acquisition evidence
-  and a `has_gclid` boolean. `campaign` / `keyword` are `null` with
-  `campaign_available: false` when identity is unavailable.
+  and a `has_gclid` boolean.
+- **`campaign` / `keyword` are published only where Google Ads semantics are
+  proven.** `hs_analytics_source_data_1` / `_2` are HubSpot Original Source
+  Drill-Down fields; they mean "Google Ads campaign / keyword" only for Paid
+  Search contacts. Every row carries `campaign_semantics`:
+
+  | `campaign_semantics` | `campaign` / `keyword` | Meaning |
+  |---|---|---|
+  | `google_ads_campaign` | the resolved labels | Google Ads contact, identity consulted, label resolved |
+  | `not_google_ads_source` | `null` | Not a Google Ads contact — its drill-down is not a campaign |
+  | `campaign_identity_unavailable` | `null` | Identity contract could not be consulted (unavailable, not absent) |
+  | `campaign_identity_unresolved` | `null` | Label did not resolve to a real Google Ads campaign |
+
+  Non-Google rows instead carry the canonical source taxonomy —
+  `acquisition_group(_label)`, `source_channel(_label)`, `source_platform(_label)`,
+  `attribution_quality` — plus the neutral `source_detail_raw` (the raw
+  drill-down, never labelled Campaign).
 - **No email address is ever returned.**
 
 ## `GET /api/crm-funnel/operational-status`
@@ -3595,6 +3625,10 @@ page renders them in a visually distinct view.
 |---|---|
 | `window` / `window_type` | `current_quarter` / `business` |
 | `event` | `lead` |
+| `acquisition_group` | *(none)* — same values and same allow-list as above |
+
+`acquisition_group` applies the identical population filter, so a page that shows
+a Source selector beside this view genuinely filters it.
 
 ## Dashboard overview additions
 

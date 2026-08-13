@@ -383,6 +383,11 @@ class TestNoUiFilesTouched:
             # all_source) selected on the Leads page. Only the quoted scope
             # literal is exempt — a bare or module-style reference to the adapter
             # still fails this guard.
+            # PR-ADS-153C: ``"not_google_ads_source"`` is the campaign-semantics
+            # code meaning "this contact is not a Google Ads contact, so no
+            # campaign label is claimed". Canonical vocabulary, not the adapter.
+            # Stripped first — it is not a substring match of the shorter one.
+            probe = probe.replace('"not_google_ads_source"', "")
             probe = probe.replace('"google_ads_source"', "")
             assert "google_ads_source" not in probe, (
                 f"UI file {path} must not reference google_ads_source"

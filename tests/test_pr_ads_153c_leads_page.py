@@ -196,10 +196,11 @@ def test_contacts_endpoint_withholds_a_narrow_scope_without_identity(monkeypatch
 def test_scope_allowlists_are_resolved_from_the_canonical_classifiers():
     """Scope filtering happens server-side via pre-resolved allow-lists, so the
     taxonomy is never re-implemented in SQL."""
-    raw = ["PAID_SEARCH", "ORGANIC_SEARCH", "PAID_SOCIAL", None]
-    google = funnel.resolve_source_allowlist("google_ads", raw)
-    assert google == ["PAID_SEARCH"]
-    assert funnel.resolve_source_allowlist(None, raw) is None
+    pairs = [("PAID_SEARCH", "brand-us"), ("ORGANIC_SEARCH", None),
+             ("PAID_SOCIAL", "linkedin"), (None, None)]
+    google = funnel.resolve_source_pair_allowlist("google_ads", pairs)
+    assert google == [("PAID_SEARCH", "brand-us")]
+    assert funnel.resolve_source_pair_allowlist(None, pairs) is None
 
     resolver = lambda label: (label == "Brand - US", None)  # noqa: E731
     assert funnel.resolve_campaign_allowlist(
@@ -441,10 +442,30 @@ def test_contact_page_columns_exclude_email_and_free_text():
         assert "comment" not in column.lower()
 
 
+def _strip_js_comments(source: str) -> str:
+    """Drop // line comments and /* */ block comments — prose is not code.
+
+    The Leads page legitimately documents Email Marketing as an acquisition
+    channel; what must never exist is a code path that reads or renders an email
+    ADDRESS. Stripping comments keeps this guard aimed at the executable code.
+    """
+    without_blocks = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+    return re.sub(r"^\s*//.*$", "", without_blocks, flags=re.M)
+
+
 def test_leads_ui_does_not_render_an_email_field():
     page = _APP_JS.split("// ── Leads — canonical HubSpot CRM funnel explorer")[1]
     page = page.split("\n// ── ")[0]
-    assert "email" not in page.lower()
+    assert "email" not in _strip_js_comments(page).lower()
+
+
+def test_no_leads_code_path_reads_an_email_field():
+    """Belt-and-braces: no email property access anywhere in the page module,
+    comment-stripped or not."""
+    page = _APP_JS.split("// ── Leads — canonical HubSpot CRM funnel explorer")[1]
+    page = page.split("\n// ── ")[0].lower()
+    for accessor in (".email", '"email"', "'email'", "[email]", "email:"):
+        assert accessor not in page
 
 
 def test_contact_id_is_available_but_not_a_prominent_table_column():
@@ -567,3 +588,324 @@ def test_no_vanity_metrics_on_the_leads_page():
     for banned in ("engagement score", "health score", "lead score",
                    "propensity", "ai score"):
         assert banned not in page
+
+
+# =============================================================================
+# PR-ADS-153C follow-up §1 — ONE population behind the Source selector
+# =============================================================================
+# The Source selector previously filtered only the contact rows, leaving the
+# funnel headline on All Sources. "Source = Organic" above an all-source funnel
+# is a lie about which population the numbers describe.
+
+_MIXED_SOURCE_ROWS = [
+    _row("g1", source="PAID_SEARCH", sql="2026-07-05"),
+    _row("g2", source="PAID_SEARCH", sql="2026-07-06"),
+    _row("o1", source="ORGANIC_SEARCH", campaign="google", sql="2026-07-07"),
+    _row("s1", source="PAID_SOCIAL", campaign="linkedin", sql="2026-07-08"),
+]
+
+
+def test_funnel_counts_honour_the_selected_acquisition_group():
+    counts = _pops(_MIXED_SOURCE_ROWS)["counts"]
+    assert counts["sql"][funnel.SCOPE_ALL_SOURCE] == 4
+
+    organic = _pops(_MIXED_SOURCE_ROWS, acquisition_group="organic")
+    assert organic["counts"]["sql"][funnel.SCOPE_ALL_SOURCE] == 1
+    assert [c["contact_id"] for c in organic["events"]["sql"]] == ["o1"]
+
+
+def test_funnel_counts_and_contact_rows_use_the_same_selected_source():
+    """The aggregate and the row list must agree contact-for-contact."""
+    for group, expected in (("google_ads", {"g1", "g2"}),
+                            ("organic", {"o1"}),
+                            ("other_paid", {"s1"})):
+        populations = _pops(_MIXED_SOURCE_ROWS, acquisition_group=group)
+        headline = populations["counts"]["sql"][funnel.SCOPE_ALL_SOURCE]
+        rows_in_view = {c["contact_id"] for c in populations["events"]["sql"]}
+        # The rows the table would page over ARE the rows the headline counted.
+        assert rows_in_view == expected
+        assert headline == len(expected)
+
+
+def test_cohort_conversions_are_computed_on_the_filtered_population():
+    rows = [
+        _row("g", source="PAID_SEARCH", mql_="2026-07-01", sql="2026-07-20"),
+        _row("o", source="ORGANIC_SEARCH", campaign="google", mql_="2026-07-02"),
+    ]
+    all_source = funnel.cohort_conversion(_pops(rows), "mql", "sql")
+    assert all_source["cohort_size"] == 2
+    assert all_source["rate_pct"] == 50.0
+
+    google_only = funnel.cohort_conversion(
+        _pops(rows, acquisition_group="google_ads"), "mql", "sql")
+    assert google_only["cohort_size"] == 1
+    assert google_only["rate_pct"] == 100.0
+
+
+def test_coverage_reports_the_filtered_population():
+    populations = _pops(_MIXED_SOURCE_ROWS, acquisition_group="google_ads")
+    assert populations["coverage"]["contacts_considered"] == 2
+    assert populations["coverage"]["acquisition_group"] == "google_ads"
+
+
+def test_aggregate_contract_accepts_and_validates_acquisition_group():
+    import inspect
+    signature = inspect.signature(funnel.build)
+    assert "acquisition_group" in signature.parameters
+    assert "acquisition_group" in inspect.signature(funnel.contacts).parameters
+    assert "acquisition_group" in inspect.signature(
+        funnel.operational_status_breakdown).parameters
+    with pytest.raises(ValueError):
+        funnel.build("business", "current_quarter", acquisition_group="nonsense")
+
+
+def test_aggregate_endpoint_exposes_acquisition_group():
+    block = _SERVER_PY.split('@app.get("/api/crm-funnel")')[1].split("@app.")[0]
+    assert "acquisition_group" in block
+    ops = _SERVER_PY.split('@app.get("/api/crm-funnel/operational-status")')[1]
+    assert "acquisition_group" in ops.split("@app.")[0]
+
+
+def test_frontend_sends_the_source_filter_to_the_funnel_not_just_the_rows():
+    load_funnel = _APP_JS.split("async function leadsLoadFunnel(")[1].split("\n}")[0]
+    assert "/api/crm-funnel?" in load_funnel
+    assert 'params.set("acquisition_group", _leadsSourceGroup)' in load_funnel
+
+
+def test_source_selector_reloads_the_funnel():
+    controls = _APP_JS.split("function leadsRenderControls(")[1].split("\nfunction ")[0]
+    source_handler = controls.split('document.getElementById("leads-source")')[1]
+    source_handler = source_handler.split("statusSel")[0]
+    assert "leadsLoadFunnel()" in source_handler
+
+
+def test_funnel_strip_discloses_the_active_source_filter():
+    strip = _APP_JS.split("function leadsFunnelStripHtml(")[1].split("\nfunction ")[0]
+    assert "acquisition_group_label" in strip
+    assert "Source:" in strip
+
+
+# =============================================================================
+# PR-ADS-153C follow-up §3 — the FULL canonical source-classification contract
+# =============================================================================
+# `hs_analytics_source` alone is not the contract. The drill-down
+# (`hs_analytics_source_data_1`) is what routes Offline Sources to its real
+# group, and dropping it made Leads disagree with Revenue by Source.
+
+@pytest.mark.parametrize("primary,detail,expected", [
+    # Offline Sources is ambiguous until its drill-down is read.
+    ("Offline Sources", "Events", "other_paid"),
+    ("Offline Sources", "SalesNash", "other_paid"),
+    ("Offline Sources", "reseller", "organic"),
+    ("Offline Sources", "referral", "organic"),
+    ("Offline Sources", "direct email", "organic"),
+    ("Offline Sources", "CRM migration", "offline"),
+    # Unambiguous primaries.
+    ("PAID_SOCIAL", "linkedin", "other_paid"),
+    ("EMAIL_MARKETING", "hubspot", "other_paid"),
+    ("ORGANIC_SEARCH", "google", "organic"),
+    ("REFERRALS", "partner.com", "organic"),
+    ("PAID_SEARCH", "Brand - US", "google_ads"),
+    # Missing / unknown is Unclassified — never defaulted to Organic.
+    (None, None, "unclassified"),
+    ("", "", "unclassified"),
+    ("SOMETHING_NEW", "x", "unclassified"),
+])
+def test_leads_uses_the_full_primary_plus_detail_classification(
+        primary, detail, expected):
+    row = _row("1", source=primary, campaign=detail)
+    assert funnel.derive_acquisition_group(row) == expected
+
+
+@pytest.mark.parametrize("primary,detail", [
+    ("Offline Sources", "Events"),
+    ("Offline Sources", "SalesNash"),
+    ("Offline Sources", "reseller"),
+    ("Offline Sources", "referral"),
+    ("Offline Sources", "direct email"),
+    ("PAID_SOCIAL", "linkedin"),
+    ("EMAIL_MARKETING", "hubspot"),
+    ("ORGANIC_SEARCH", "google"),
+    ("PAID_SEARCH", "Brand - US"),
+    (None, None),
+])
+def test_leads_and_revenue_by_source_agree_on_the_same_contact(primary, detail):
+    """Two pages, one taxonomy. Same evidence must give the same group."""
+    from analysis.source_classification import classify_source
+    from services.source_attribution_service import classify_contact_row
+
+    revenue_side = classify_contact_row({
+        "id": "1",
+        "properties": {"hs_analytics_source": primary,
+                       "hs_analytics_source_data_1": detail},
+    })["acquisition_group"]
+    leads_side = funnel.derive_acquisition_group(
+        _row("1", source=primary, campaign=detail))
+    assert leads_side == revenue_side == classify_source(primary, detail)
+
+
+def test_leads_reuses_the_taxonomy_module_rather_than_redefining_it():
+    service = (_ROOT / "services" / "canonical_crm_funnel_service.py").read_text()
+    assert "from analysis.source_classification import" in service
+    assert "classify_source_taxonomy" in service
+    taxonomy_fn = service.split("def source_taxonomy(")[1].split("\ndef ")[0]
+    # Delegation only — no local rule table.
+    assert "classify_source_taxonomy(" in taxonomy_fn
+    assert "hs_analytics_source_data_1" in taxonomy_fn
+
+
+def test_no_classification_call_drops_the_detail_evidence():
+    """The `classify_source(primary, None)` shape must not return here."""
+    service = (_ROOT / "services" / "canonical_crm_funnel_service.py").read_text()
+    assert 'classify_source(row.get("hs_analytics_source"), None)' not in service
+
+
+def test_source_allowlist_is_resolved_over_evidence_pairs():
+    """Collapsing to the primary alone would re-lose the drill-down."""
+    pairs = [("Offline Sources", "Events"),
+             ("Offline Sources", "reseller"),
+             ("Offline Sources", "CRM migration"),
+             ("PAID_SEARCH", "Brand - US")]
+    assert funnel.resolve_source_pair_allowlist("other_paid", pairs) == [
+        ("Offline Sources", "Events")]
+    assert funnel.resolve_source_pair_allowlist("organic", pairs) == [
+        ("Offline Sources", "reseller")]
+    assert funnel.resolve_source_pair_allowlist("offline", pairs) == [
+        ("Offline Sources", "CRM migration")]
+
+
+def test_repository_filters_on_the_pair_not_the_primary_alone():
+    repo_src = (_ROOT / "db" / "crm_funnel_repository.py").read_text()
+    assert "source_pairs_in" in repo_src
+    predicate = repo_src.split("def _append_source_pair_filter(")[1].split("\ndef ")[0]
+    assert "unnest(" in predicate
+    # NULL sources/details are common; NULL = NULL would silently drop them.
+    assert "IS NOT DISTINCT FROM" in predicate
+    # An empty allow-list still filters everything out.
+    assert "FALSE" in predicate
+
+
+# =============================================================================
+# PR-ADS-153C follow-up §2 — no fabricated Campaign / Keyword
+# =============================================================================
+# hs_analytics_source_data_1/2 carry Google Ads campaign/keyword semantics ONLY
+# for Paid Search contacts. Everywhere else they are drill-down text.
+
+@pytest.mark.parametrize("primary,detail,group", [
+    ("ORGANIC_SEARCH", "google", "organic"),
+    ("PAID_SOCIAL", "linkedin", "other_paid"),
+    ("EMAIL_MARKETING", "hubspot", "other_paid"),
+    ("Offline Sources", "Events", "other_paid"),
+    ("Offline Sources", "CRM migration", "offline"),
+    ("REFERRALS", "partner.com", "organic"),
+])
+def test_non_google_contacts_never_get_campaign_or_keyword(primary, detail, group):
+    row = _row("1", source=primary, campaign=detail, keyword="whatever",
+               sql="2026-07-05")
+    payload = funnel._contact_row_payload(row, "sql", True)  # noqa: SLF001
+    assert payload["acquisition_group"] == group
+    assert payload["campaign"] is None
+    assert payload["keyword"] is None
+    assert payload["campaign_available"] is False
+    assert payload["campaign_semantics"] == "not_google_ads_source"
+    # The real evidence is still present — as canonical source information.
+    assert payload["source_channel"]
+    assert payload["source_platform"]
+    assert payload["source_detail_raw"] == detail
+
+
+def test_google_ads_contact_with_proven_identity_keeps_campaign_and_keyword():
+    row = _row("1", source="PAID_SEARCH", campaign="Brand - US", keyword="tms",
+               sql="2026-07-05")
+    payload = funnel._contact_row_payload(  # noqa: SLF001
+        row, "sql", True, lambda label: (True, None))
+    assert payload["campaign"] == "Brand - US"
+    assert payload["keyword"] == "tms"
+    assert payload["campaign_available"] is True
+    assert payload["campaign_semantics"] == "google_ads_campaign"
+
+
+def test_google_ads_contact_without_identity_contract_is_unavailable_not_absent():
+    row = _row("1", source="PAID_SEARCH", sql="2026-07-05")
+    payload = funnel._contact_row_payload(row, "sql", False)  # noqa: SLF001
+    assert payload["campaign"] is None
+    assert payload["campaign_semantics"] == "campaign_identity_unavailable"
+
+
+def test_google_ads_contact_whose_label_does_not_resolve_is_unresolved():
+    row = _row("1", source="PAID_SEARCH", campaign="(not set)", sql="2026-07-05")
+    payload = funnel._contact_row_payload(  # noqa: SLF001
+        row, "sql", True, lambda label: (False, "unsafe_campaign"))
+    assert payload["campaign"] is None
+    assert payload["campaign_semantics"] == "campaign_identity_unresolved"
+
+
+def test_keyword_requires_a_real_label_not_whitespace():
+    row = _row("1", source="PAID_SEARCH", keyword="   ", sql="2026-07-05")
+    payload = funnel._contact_row_payload(  # noqa: SLF001
+        row, "sql", True, lambda label: (True, None))
+    assert payload["keyword"] is None
+
+
+def test_table_shows_canonical_source_columns_for_non_google_contacts():
+    render = _APP_JS.split("function leadsRenderContacts(")[1].split("\nfunction ")[0]
+    header = render.split("<thead>")[1].split("</thead>")[0]
+    assert "Channel / Platform" in header
+    assert "leadsChannelPlatformHtml(r)" in render
+    assert "leadsCampaignCellHtml(r, \"campaign\")" in render
+    assert "leadsCampaignCellHtml(r, \"keyword\")" in render
+
+
+def test_campaign_cell_states_why_a_label_is_withheld():
+    cell = _APP_JS.split("function leadsCampaignCellHtml(")[1].split("\nfunction ")[0]
+    for semantics in ("not_google_ads_source", "campaign_identity_unavailable",
+                      "campaign_identity_unresolved"):
+        assert semantics in cell
+    assert "Not applicable" in cell
+    assert "Unavailable" in cell
+
+
+def test_drawer_surfaces_neutral_source_detail_not_a_fake_campaign():
+    drawer = _APP_JS.split("function leadsOpenDrawer(")[1].split("\nfunction ")[0]
+    assert "source_detail_raw" in drawer
+    assert "Source detail" in drawer
+    assert "source_channel_label" in drawer
+    assert "source_platform_label" in drawer
+    assert "not_google_ads_source" in drawer
+
+
+# =============================================================================
+# PR-ADS-153C follow-up §4 — no lying controls on Disqualified / Other
+# =============================================================================
+def test_status_and_company_controls_are_hidden_on_the_operational_view():
+    fn = _APP_JS.split("function leadsSyncControlVisibility(")[1].split("\n}")[0]
+    assert "_leadsView === LEADS_VIEW_OTHER" in fn
+    assert "statusControl.hidden = operational" in fn
+    assert "searchControl.hidden = operational" in fn
+
+
+def test_control_visibility_runs_on_every_view_switch():
+    fn = _APP_JS.split("async function leadsRenderActiveView(")[1].split("\n}")[0]
+    assert "leadsSyncControlVisibility()" in fn
+
+
+def test_each_leads_filter_is_wrapped_so_it_can_be_hidden_with_its_label():
+    section = _INDEX_HTML.split('id="page-leads"')[1].split("</section>")[0]
+    for control_id in ("leads-status-control", "leads-search-control"):
+        assert control_id in section
+    controls = section.split('id="leads-table-controls"')[1].split("</div>")[0]
+    # The label travels with its control, so hiding one cannot orphan the other.
+    assert controls.index('id="leads-status-control"') < controls.index('for="leads-status"')
+
+
+def test_source_filter_actually_filters_the_operational_view():
+    fn = _APP_JS.split("async function leadsRenderOperational(")[1].split("\nasync function ")[0]
+    assert 'params.set("acquisition_group", _leadsSourceGroup)' in fn
+    assert "acquisition_group_label" in fn
+
+
+def test_operational_status_service_applies_the_same_allowlist():
+    service = (_ROOT / "services" / "canonical_crm_funnel_service.py").read_text()
+    fn = service.split("def operational_status_breakdown(")[1].split("\ndef ")[0]
+    assert "resolve_source_pair_allowlist(" in fn
+    assert "source_pairs_in=pairs_in" in fn

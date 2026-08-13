@@ -73,7 +73,12 @@ from analysis.crm_lifecycle import (
     stage_label,
 )
 from analysis.mql_status_taxonomy import ALL_CATEGORIES as ALL_MQL_CATEGORIES
-from analysis.source_classification import GROUP_GOOGLE_ADS, classify_source
+from analysis.source_classification import (
+    GROUP_GOOGLE_ADS,
+    GROUP_LABELS,
+    classify_source,
+    classify_source_taxonomy,
+)
 from services.canonical_contact_outcome_service import (
     STATUS_MISMATCH,
     STATUS_PARTIAL,
@@ -131,6 +136,20 @@ REASON_MISSING_STAGE_DATE = "missing_stage_entry_date"
 REASON_NOT_GOOGLE_ADS = "not_google_ads_source"
 REASON_UNKNOWN_LIFECYCLE_STAGE = "unknown_lifecycle_stage"
 REASON_CAMPAIGN_IDENTITY_UNAVAILABLE = "campaign_identity_unavailable"
+
+# Why a contact row does (or does not) carry Google Ads campaign/keyword labels.
+# ``hs_analytics_source_data_1`` / ``_data_2`` are HubSpot Original Source
+# Drill-Down fields. They carry Google Ads campaign / keyword semantics ONLY for
+# Paid Search contacts; for Organic, Paid Social, Email, Referral, Offline and
+# Event contacts they hold entirely different drill-down text, so labelling them
+# "Campaign" / "Keyword" would fabricate an attribution that does not exist.
+CAMPAIGN_SEMANTICS_GOOGLE_ADS = "google_ads_campaign"
+CAMPAIGN_SEMANTICS_NOT_APPLICABLE = REASON_NOT_GOOGLE_ADS
+CAMPAIGN_SEMANTICS_UNAVAILABLE = REASON_CAMPAIGN_IDENTITY_UNAVAILABLE
+CAMPAIGN_SEMANTICS_UNRESOLVED = "campaign_identity_unresolved"
+
+# Acquisition groups accepted as a population filter (the PR-ADS-117 taxonomy).
+ACQUISITION_GROUPS = tuple(GROUP_LABELS.keys())
 
 
 def _norm(value) -> str:
@@ -194,14 +213,66 @@ def _as_date(value):
 
 
 # ── Scope derivation ─────────────────────────────────────────────────────────
-def derive_acquisition_group(row: dict) -> str:
-    """Acquisition group from the contact's OWN HubSpot Original Source.
+def source_taxonomy(row: dict) -> dict:
+    """The FULL canonical source classification for one canonical contact row.
 
-    The drill-down detail is not passed: it is not safely re-derivable for every
-    contact, and the established doctrine (PR-ADS-152 §4) refuses to guess it.
-    Campaign name is NEVER used to infer a source.
+    Reuses ``analysis.source_classification`` — the same group → channel →
+    platform contract Revenue by Source uses — with the SAME evidence pair the
+    durable ``contact_source_classification`` writer uses:
+
+        primary = ``hs_analytics_source``            (Original Source)
+        detail  = ``hs_analytics_source_data_1``     (Original Source Drill-Down)
+
+    Passing the detail is required, not optional. Without it every
+    ``Offline Sources`` contact collapses to the Offline group, when the
+    drill-down is exactly what routes SalesNash / Events to Other Paid and
+    reseller / referral / direct email to Organic. Dropping it made the Leads
+    page classify the same contact differently from Revenue by Source.
+
+    This is not a second taxonomy: no rule is defined here. Unlike the legacy
+    ``leads`` table (which stores ``campaign_name``, not the drill-down, which is
+    why PR-ADS-152 had to pass ``None``), the canonical contact store persists
+    the real HubSpot drill-down field, so the full contract is available.
+    Campaign name is still NEVER used to infer a source.
     """
-    return classify_source(row.get("hs_analytics_source"), None)
+    return classify_source_taxonomy(
+        row.get("hs_analytics_source"), row.get("hs_analytics_source_data_1"))
+
+
+def derive_acquisition_group(row: dict) -> str:
+    """Acquisition group from the contact's own HubSpot source evidence."""
+    return source_taxonomy(row)["source_group"]
+
+
+def campaign_identity(row: dict, resolver, identity_available: bool) -> dict:
+    """Google Ads campaign / keyword labels, or an explicit reason there are none.
+
+    A label is published ONLY where Google Ads semantics are proven:
+
+      * the contact's acquisition group is Google Ads (Paid Search), AND
+      * the Google Ads campaign-identity contract was consulted, AND
+      * the drill-down label resolved to a real Google Ads campaign.
+
+    Anything else returns ``None`` with a semantics code. A non-Google contact is
+    ``not_google_ads_source`` — its drill-down text is real evidence, but it is
+    not a campaign, and it is surfaced through the source taxonomy instead.
+    """
+    if derive_acquisition_group(row) != GROUP_GOOGLE_ADS:
+        return {"campaign": None, "keyword": None, "available": False,
+                "semantics": CAMPAIGN_SEMANTICS_NOT_APPLICABLE}
+    if not identity_available:
+        return {"campaign": None, "keyword": None, "available": False,
+                "semantics": CAMPAIGN_SEMANTICS_UNAVAILABLE}
+
+    label = row.get("hs_analytics_source_data_1")
+    resolved, _reason = resolver(label)
+    if not resolved:
+        return {"campaign": None, "keyword": None, "available": False,
+                "semantics": CAMPAIGN_SEMANTICS_UNRESOLVED}
+
+    keyword = (row.get("hs_analytics_source_data_2") or "").strip() or None
+    return {"campaign": label, "keyword": keyword, "available": True,
+            "semantics": CAMPAIGN_SEMANTICS_GOOGLE_ADS}
 
 
 def default_campaign_resolver(campaign_name) -> tuple[bool, str | None]:
@@ -264,8 +335,14 @@ def build_populations(
     *,
     campaign_resolver=None,
     identity_available: bool = True,
+    acquisition_group: str | None = None,
 ) -> dict:
     """Build canonical funnel event populations from raw contact rows. Pure.
+
+    ``acquisition_group`` restricts the population to one acquisition group, so
+    the funnel counts, the cohort-safe conversions, the coverage diagnostics and
+    the contact rows all describe THE SAME population. The page must never show
+    "Source = Organic" beside a headline that silently means all sources.
 
     ``identity_available`` reports whether the Google Ads campaign-identity
     contract was successfully consulted. When it is False the campaign- and
@@ -300,6 +377,10 @@ def build_populations(
             continue
 
         scopes = _contact_scopes(raw, resolver, identity_available)
+        if acquisition_group and scopes["acquisition_group"] != acquisition_group:
+            # Filtered out before any counting, so counts, conversions and
+            # coverage all describe the selected population.
+            continue
         stage = normalize_lifecycle_stage(raw.get("lifecycle_stage"))
         if stage is not None and not is_known_stage(stage):
             unknown_stage_contacts += 1
@@ -347,6 +428,7 @@ def build_populations(
     }
 
     coverage = {
+        "acquisition_group": acquisition_group,
         "contacts_considered": len(contacts),
         "missing_stage_entry_dates": missing_stage_dates,
         "stage_reached_without_entry_date": stage_reached_without_date,
@@ -530,6 +612,7 @@ def build(
     window_key: str,
     *,
     scope: str = SCOPE_ALL_SOURCE,
+    acquisition_group: str | None = None,
     event: str | None = None,
     now: datetime | None = None,
 ) -> dict:
@@ -538,9 +621,16 @@ def build(
     ``window_type`` is 'business' or 'evidence' — the two vocabularies are
     resolved by the SHARED resolver (PR-ADS-152 §5) and never merged, and this
     service never invents a third rolling implementation of the same label.
+
+    ``acquisition_group`` narrows the whole aggregate — counts, cohort-safe
+    conversions and coverage — to one acquisition group, so a page that offers a
+    Source selector reports ONE population rather than a filtered table beside an
+    all-source headline.
     """
     if scope not in ORDERED_SCOPES:
         raise ValueError(f"Unknown scope '{scope}'")
+    if acquisition_group is not None and acquisition_group not in ACQUISITION_GROUPS:
+        raise ValueError(f"Unknown acquisition group '{acquisition_group}'")
     if event is not None and not is_valid_event(event):
         raise ValueError(f"Unknown funnel event '{event}'")
 
@@ -556,7 +646,8 @@ def build(
     resolver, identity_available = _build_campaign_resolver(start, end)
     populations = build_populations(
         rows, start, end, campaign_resolver=resolver,
-        identity_available=identity_available)
+        identity_available=identity_available,
+        acquisition_group=acquisition_group)
 
     counts = populations["counts"]
     status = reconciliation_status(populations, available=available)
@@ -587,6 +678,9 @@ def build(
         },
         "scope": scope,
         "scope_label": SCOPE_LABELS[scope],
+        "acquisition_group": acquisition_group,
+        "acquisition_group_label": (GROUP_LABELS[acquisition_group]
+                                    if acquisition_group else "All sources"),
         "campaign_identity_available": identity_available,
         "canonical_source": FUNNEL_SOURCE,
         "table": FUNNEL_TABLE,
@@ -603,6 +697,10 @@ def build(
             "campaign-attributable and keyword-attributable counts are "
             "UNAVAILABLE (null), not zero. All-source and Google Ads-source "
             "counts are unaffected.",
+        ]) + ([] if not acquisition_group else [
+            f"Filtered to the {GROUP_LABELS[acquisition_group]} acquisition group: "
+            "every count, conversion and coverage figure below describes that "
+            "population only.",
         ]) + [
             "Funnel counts are stage-ENTRY events, not current lifecycle stage. "
             "A contact now at Customer still counts in its historical SQL cohort.",
@@ -615,20 +713,26 @@ def build(
 
 
 # ── PR-ADS-153C — server-side contact rows for the canonical Leads page ──────
-def resolve_source_allowlist(acquisition_group: str | None, raw_sources: list):
-    """Which raw ``hs_analytics_source`` values belong to an acquisition group.
+def resolve_source_pair_allowlist(acquisition_group: str | None, source_pairs: list):
+    """Which ``(Original Source, Drill-Down)`` PAIRS belong to an acquisition group.
 
-    The group classifier is pure Python, so it is applied ONCE to the small set
-    of distinct raw values held in the store and the matches become a SQL
-    allow-list. Filtering therefore stays server-side (so pagination is correct)
-    without re-implementing the taxonomy in SQL.
+    The classifier reads both fields — ``Offline Sources`` alone is ambiguous and
+    only its drill-down decides between Other Paid (SalesNash / Events), Organic
+    (reseller / referral / direct email) and Offline. So the allow-list must be
+    over pairs, not over the primary source alone; collapsing it to the primary
+    would re-introduce exactly the evidence loss this fixes.
+
+    The classifier is pure Python, so it is applied ONCE to the small set of
+    distinct pairs held in the store and the matches become a SQL allow-list.
+    Filtering therefore stays server-side (so pagination is correct) without
+    re-implementing the taxonomy in SQL.
 
     Returns ``None`` for "no constraint".
     """
     if not acquisition_group:
         return None
-    return [raw for raw in raw_sources
-            if classify_source(raw, None) == acquisition_group]
+    return [(primary, detail) for primary, detail in source_pairs
+            if classify_source(primary, detail) == acquisition_group]
 
 
 def resolve_campaign_allowlist(raw_campaigns: list, resolver):
@@ -664,6 +768,8 @@ def contacts(
     """
     if scope not in ORDERED_SCOPES:
         raise ValueError(f"Unknown scope '{scope}'")
+    if acquisition_group is not None and acquisition_group not in ACQUISITION_GROUPS:
+        raise ValueError(f"Unknown acquisition group '{acquisition_group}'")
     if not is_valid_event(event):
         raise ValueError(f"Unknown funnel event '{event}'")
 
@@ -692,14 +798,14 @@ def contacts(
         }
 
     facets = repo.fetch_distinct_facets()
-    raw_sources = facets.get("sources") or []
+    source_pairs = facets.get("source_pairs") or []
     raw_campaigns = facets.get("campaigns") or []
 
-    sources_in = resolve_source_allowlist(acquisition_group, raw_sources)
+    pairs_in = resolve_source_pair_allowlist(acquisition_group, source_pairs)
     if scope == SCOPE_GOOGLE_ADS_SOURCE or scope in IDENTITY_DEPENDENT_SCOPES:
-        google_sources = resolve_source_allowlist(GROUP_GOOGLE_ADS, raw_sources)
-        sources_in = (google_sources if sources_in is None
-                      else [s for s in sources_in if s in set(google_sources)])
+        google_pairs = resolve_source_pair_allowlist(GROUP_GOOGLE_ADS, source_pairs)
+        pairs_in = (google_pairs if pairs_in is None
+                    else [p for p in pairs_in if p in set(google_pairs)])
 
     campaigns_in = None
     if scope in IDENTITY_DEPENDENT_SCOPES:
@@ -707,7 +813,7 @@ def contacts(
 
     fetched = repo.fetch_funnel_contact_page(
         event, start, end,
-        sources_in=sources_in,
+        source_pairs_in=pairs_in,
         campaigns_in=campaigns_in,
         require_keyword=(scope == SCOPE_KEYWORD_ATTRIBUTABLE),
         operational_status=operational_status,
@@ -729,7 +835,9 @@ def contacts(
         "campaign_identity_available": identity_available,
         "acquisition_group": acquisition_group,
         "operational_status": operational_status,
-        "rows": [_contact_row_payload(r, event, identity_available)
+        "acquisition_group_label": (GROUP_LABELS[acquisition_group]
+                                    if acquisition_group else "All sources"),
+        "rows": [_contact_row_payload(r, event, identity_available, resolver)
                  for r in (fetched.get("rows") or [])],
         "total": fetched.get("total") if fetched.get("available") else None,
         "page": fetched.get("page", page),
@@ -749,17 +857,23 @@ def _window_payload(window: dict) -> dict:
     }
 
 
-def _contact_row_payload(row: dict, event: str, identity_available: bool) -> dict:
+def _contact_row_payload(row: dict, event: str, identity_available: bool,
+                         resolver=None) -> dict:
     """Admin-safe contact row. Company + HubSpot contact id only — NEVER email.
 
-    Campaign / keyword attribution is reported as ``None`` when the identity
-    contract could not be consulted, rather than echoing a raw label that has not
-    been resolved to a real Google Ads campaign.
+    Campaign and keyword are published ONLY where Google Ads semantics are proven
+    (see ``campaign_identity``). For every other acquisition group they are
+    ``None`` with ``campaign_semantics = 'not_google_ads_source'``, and the row
+    instead carries the canonical source taxonomy — group, channel, platform, and
+    the neutral raw drill-down — which is what that contact's evidence actually
+    means.
     """
     stage_dates = {
         e: _iso(row.get(EVENT_DATE_COLUMN[e])) for e in FUNNEL_EVENTS
     }
-    group = derive_acquisition_group(row)
+    taxonomy = source_taxonomy(row)
+    identity = campaign_identity(
+        row, resolver or default_campaign_resolver, identity_available)
     return {
         "contact_id": row.get("contact_id"),
         "company": row.get("company"),
@@ -769,11 +883,21 @@ def _contact_row_payload(row: dict, event: str, identity_available: bool) -> dic
         "stage_dates": stage_dates,
         "mql_status": row.get("mql_status"),
         "mql_status_category": row.get("mql_status_category"),
-        "acquisition_group": group,
+        "acquisition_group": taxonomy["source_group"],
+        "acquisition_group_label": taxonomy["source_group_label"],
+        "source_channel": taxonomy["source_channel"],
+        "source_channel_label": taxonomy["source_channel_label"],
+        "source_platform": taxonomy["source_platform"],
+        "source_platform_label": taxonomy["source_platform_label"],
+        "attribution_quality": taxonomy["attribution_quality"],
         "acquisition_source_raw": row.get("hs_analytics_source"),
-        "campaign": row.get("hs_analytics_source_data_1") if identity_available else None,
-        "campaign_available": identity_available,
-        "keyword": row.get("hs_analytics_source_data_2") if identity_available else None,
+        # Neutral name: this is the HubSpot Original Source Drill-Down, which is
+        # a Google Ads campaign only for Paid Search contacts.
+        "source_detail_raw": row.get("hs_analytics_source_data_1"),
+        "campaign": identity["campaign"],
+        "campaign_available": identity["available"],
+        "campaign_semantics": identity["semantics"],
+        "keyword": identity["keyword"],
         "country": row.get("ip_country") or row.get("country"),
         "owner_id": row.get("owner_id"),
         "has_gclid": bool(row.get("has_gclid")),
@@ -782,24 +906,40 @@ def _contact_row_payload(row: dict, event: str, identity_available: bool) -> dic
 
 def operational_status_breakdown(
     window_type: str, window_key: str, *, event: str = EVENT_LEAD,
+    acquisition_group: str | None = None,
     now: datetime | None = None) -> dict:
     """Counts by operational ``mql_status_category`` for one event window.
 
     These are WORKING statuses, not funnel stages — the Disqualified / Other view
     is deliberately kept distinct from the five canonical stages.
+
+    ``acquisition_group`` applies the SAME population filter as the funnel and
+    the contact rows, using the same pre-resolved pair allow-list, so the Source
+    selector means one thing everywhere on the page.
     """
     if not is_valid_event(event):
         raise ValueError(f"Unknown funnel event '{event}'")
+    if acquisition_group is not None and acquisition_group not in ACQUISITION_GROUPS:
+        raise ValueError(f"Unknown acquisition group '{acquisition_group}'")
     window = resolve_window_contract(window_type, window_key, now=now)
 
     from db import crm_funnel_repository as repo  # noqa: PLC0415
 
+    pairs_in = None
+    if acquisition_group:
+        facets = repo.fetch_distinct_facets()
+        pairs_in = resolve_source_pair_allowlist(
+            acquisition_group, facets.get("source_pairs") or [])
+
     fetched = repo.fetch_operational_status_counts(
-        event, window["start"], window["end"])
+        event, window["start"], window["end"], source_pairs_in=pairs_in)
     return {
         "available": bool(fetched.get("available")),
         "window": _window_payload(window),
         "event": event,
+        "acquisition_group": acquisition_group,
+        "acquisition_group_label": (GROUP_LABELS[acquisition_group]
+                                    if acquisition_group else "All sources"),
         "counts": fetched.get("counts") if fetched.get("available") else None,
         "categories": list(ALL_MQL_CATEGORIES),
     }
@@ -887,6 +1027,8 @@ __all__ = [
     "EVENT_MQL", "EVENT_SQL", "EVENT_OPPORTUNITY", "EVENT_CUSTOMER",
     "build", "build_populations", "build_conversions", "cohort_conversion",
     "contacts", "operational_status_breakdown",
+    "source_taxonomy", "derive_acquisition_group", "campaign_identity",
+    "resolve_source_pair_allowlist", "ACQUISITION_GROUPS",
     "funnel_definitions", "event_definition", "scope_keys", "scopes_are_nested",
     "reconciliation_status",
 ]

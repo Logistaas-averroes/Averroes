@@ -335,29 +335,64 @@ _CONTACT_PAGE_COLUMNS = (
 
 
 def fetch_distinct_facets() -> dict:
-    """Distinct raw sources and campaign labels held in the canonical store.
+    """Distinct source-evidence PAIRS and campaign labels in the canonical store.
 
     The acquisition-group and campaign-attributable scopes are decided by pure
     Python classifiers, so the caller resolves those classifiers ONCE over these
-    small distinct sets and passes the matching values back as an IN list. That
-    keeps filtering server-side (correct pagination) without duplicating the
+    small distinct sets and passes the matching values back as an allow-list.
+    That keeps filtering server-side (correct pagination) without duplicating the
     classification rules in SQL.
+
+    ``source_pairs`` is ``(hs_analytics_source, hs_analytics_source_data_1)`` —
+    Original Source together with its Drill-Down. The classifier needs BOTH:
+    "Offline Sources" alone is ambiguous, and only the drill-down separates
+    SalesNash / Events from reseller / referral / direct email.
     """
     try:
         with get_conn() as conn:
             if conn is None:
-                return _unavailable(sources=[], campaigns=[])
+                return _unavailable(source_pairs=[], campaigns=[])
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT DISTINCT hs_analytics_source FROM {FUNNEL_TABLE}")
-                sources = [r[0] for r in cur.fetchall()]
+                    f"""SELECT DISTINCT hs_analytics_source,
+                                        hs_analytics_source_data_1
+                        FROM {FUNNEL_TABLE}""")
+                source_pairs = [(r[0], r[1]) for r in cur.fetchall()]
                 cur.execute(
                     f"SELECT DISTINCT hs_analytics_source_data_1 FROM {FUNNEL_TABLE}")
                 campaigns = [r[0] for r in cur.fetchall()]
-        return {"available": True, "sources": sources, "campaigns": campaigns}
+        return {"available": True, "source_pairs": source_pairs,
+                "campaigns": campaigns}
     except Exception as exc:  # noqa: BLE001
         log.error("fetch_distinct_facets failed: %s", exc)
-        return _unavailable(sources=[], campaigns=[])
+        return _unavailable(source_pairs=[], campaigns=[])
+
+
+def _append_source_pair_filter(where: list, params: list, source_pairs_in) -> None:
+    """Constrain rows to a pre-resolved ``(source, drill-down)`` allow-list.
+
+    ``None`` means no constraint; an EMPTY list means "the classifier matched
+    nothing", which correctly yields an empty page rather than being ignored.
+
+    The pairs travel as two parallel text arrays and are re-zipped by ``unnest``,
+    so the predicate stays a single bounded parameter pair no matter how many
+    distinct pairs exist. ``IS NOT DISTINCT FROM`` is required because both
+    HubSpot fields are frequently NULL and ``NULL = NULL`` would drop those rows.
+    """
+    if source_pairs_in is None:
+        return
+    if not source_pairs_in:
+        where.append("FALSE")
+        return
+    where.append(
+        f"""EXISTS (
+            SELECT 1
+            FROM unnest(%s::text[], %s::text[]) AS allowed(src, detail)
+            WHERE allowed.src IS NOT DISTINCT FROM {FUNNEL_TABLE}.hs_analytics_source
+              AND allowed.detail IS NOT DISTINCT FROM {FUNNEL_TABLE}.hs_analytics_source_data_1
+        )""")
+    params.append([pair[0] for pair in source_pairs_in])
+    params.append([pair[1] for pair in source_pairs_in])
 
 
 def fetch_funnel_contact_page(
@@ -365,7 +400,7 @@ def fetch_funnel_contact_page(
     start: date | None,
     end: date | None,
     *,
-    sources_in: list | None = None,
+    source_pairs_in: list | None = None,
     campaigns_in: list | None = None,
     require_keyword: bool = False,
     operational_status: str | None = None,
@@ -377,10 +412,10 @@ def fetch_funnel_contact_page(
 
     Filtering, ordering and the page slice all happen in SQL.
 
-    ``sources_in`` / ``campaigns_in`` are the pre-resolved allow-lists produced by
-    the pure classifiers (acquisition group, campaign identity). ``None`` means no
-    constraint; an EMPTY list means "the classifier matched nothing", which
-    correctly yields an empty page rather than being ignored.
+    ``source_pairs_in`` / ``campaigns_in`` are the pre-resolved allow-lists
+    produced by the pure classifiers (acquisition group, campaign identity).
+    ``None`` means no constraint; an EMPTY list means "the classifier matched
+    nothing", which correctly yields an empty page rather than being ignored.
 
     Ordering is newest-event-first and deterministic (``contact_id`` tiebreak) so
     paging can never repeat or skip a row.
@@ -402,16 +437,7 @@ def fetch_funnel_contact_page(
     where.append(f"(%s::date IS NULL OR {date_column} < (%s::date + INTERVAL '1 day'))")
     params.extend([end, end])
 
-    if sources_in is not None:
-        # A NULL source can never be in a non-null allow-list, so compare
-        # explicitly rather than relying on SQL NULL semantics.
-        if sources_in:
-            where.append("(hs_analytics_source = ANY(%s))")
-            params.append([s for s in sources_in if s is not None])
-            if any(s is None for s in sources_in):
-                where[-1] = "(hs_analytics_source = ANY(%s) OR hs_analytics_source IS NULL)"
-        else:
-            where.append("FALSE")
+    _append_source_pair_filter(where, params, source_pairs_in)
 
     if campaigns_in is not None:
         if campaigns_in:
@@ -470,15 +496,27 @@ def fetch_funnel_contact_page(
 
 
 def fetch_operational_status_counts(
-    event: str, start: date | None, end: date | None) -> dict:
+    event: str, start: date | None, end: date | None,
+    *, source_pairs_in: list | None = None) -> dict:
     """Counts by ``mql_status_category`` for one event window.
 
     Powers the Disqualified / Other view and the working-status filter without a
-    second full scan in the browser.
+    second full scan in the browser. ``source_pairs_in`` applies the SAME
+    pre-resolved acquisition-group allow-list the contact page uses, so the
+    Source selector filters this view too instead of decorating it.
     """
     if event not in FUNNEL_EVENTS:
         raise ValueError(f"Unknown funnel event '{event}'")
     date_column = EVENT_DATE_COLUMN[event]
+
+    where = [
+        f"{date_column} IS NOT NULL",
+        f"({date_column} >= COALESCE(%s::timestamptz, {date_column}))",
+        f"(%s::date IS NULL OR {date_column} < (%s::date + INTERVAL '1 day'))",
+    ]
+    params: list = [start, end, end]
+    _append_source_pair_filter(where, params, source_pairs_in)
+
     try:
         with get_conn() as conn:
             if conn is None:
@@ -489,13 +527,10 @@ def fetch_operational_status_counts(
                     SELECT COALESCE(mql_status_category, 'no_verdict') AS category,
                            COUNT(*) AS contacts
                     FROM {FUNNEL_TABLE}
-                    WHERE {date_column} IS NOT NULL
-                      AND ({date_column} >= COALESCE(%s::timestamptz, {date_column}))
-                      AND (%s::date IS NULL
-                           OR {date_column} < (%s::date + INTERVAL '1 day'))
+                    WHERE {" AND ".join(where)}
                     GROUP BY 1
                     """,
-                    (start, end, end))
+                    params)
                 counts = {r[0]: int(r[1]) for r in cur.fetchall()}
         return {"available": True, "counts": counts}
     except Exception as exc:  # noqa: BLE001
