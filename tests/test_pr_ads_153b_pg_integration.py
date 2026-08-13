@@ -90,7 +90,13 @@ class _PgCluster:
 
     def __init__(self):
         self.tmp = tempfile.mkdtemp(prefix="pgst153b_")
-        _run(["chown", "-R", "postgres:postgres", self.tmp])
+        # `postgres` must be able to create data/ and write the socket + log
+        # inside this directory. mkdtemp gives us 0700, so widen it — chmod
+        # only needs ownership, which we have, and works without root.
+        # Handing ownership over is nicer where it is permitted, so try it
+        # too, but never depend on it: as an unprivileged user it will fail.
+        os.chmod(self.tmp, 0o777)
+        _run(["sudo", "-n", "chown", "-R", "postgres:postgres", self.tmp])
         self.data = os.path.join(self.tmp, "data")
         self.port = _free_port()
         self.url = None

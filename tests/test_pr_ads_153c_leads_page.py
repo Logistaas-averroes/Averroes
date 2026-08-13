@@ -529,6 +529,30 @@ def test_leads_window_selector_offers_the_business_vocabulary():
     assert "data-business-window-select" in section
 
 
+def test_leads_window_selector_is_actually_wired_to_the_shared_handler():
+    """A window control that does not change the window is a lying control.
+
+    ``data-business-window-select`` only keeps the select's *value* in sync
+    when some other surface changes the window; on its own it never listens.
+    """
+    assert 'const leadsWindow = document.getElementById("leads-window");' in _APP_JS
+    block = _APP_JS.split('const leadsWindow = document.getElementById("leads-window");')[1]
+    block = block.split("\n\n")[0]
+    assert "leadsWindow.value = getRoasBusinessWindow();" in block
+    assert 'leadsWindow.addEventListener("change", handleBusinessWindowSelectChange);' in block
+
+
+def test_business_window_change_reloads_leads_not_the_default_branch():
+    """Leads must not fall through to the switch's loadRoasCampaigns default."""
+    handler = _APP_JS.split("function handleBusinessWindowSelectChange(")[1].split("\n}")[0]
+    assert 'case "leads":' in handler
+    leads_case = handler.split('case "leads":')[1].split("break;")[0]
+    assert "loadLeads()" in leads_case
+    # A new window is a new cohort — paging must restart, never carry an
+    # offset that belonged to the previous window.
+    assert "_leadsPage = 1" in leads_case
+
+
 def test_no_bespoke_date_control_was_added():
     section = _INDEX_HTML.split('id="page-leads"')[1].split("</section>")[0]
     assert 'type="date"' not in section

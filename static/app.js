@@ -14247,6 +14247,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     btn.addEventListener("click", () => activateDashboardTab(btn.dataset.dashTab));
   });
 
+  // Wire up canonical Leads controls (business windows — PR-ADS-153C).
+  // The remaining Leads filters are wired by leadsRenderControls(); the window
+  // select is shared application state, so it is wired here like every other.
+  const leadsWindow = document.getElementById("leads-window");
+  if (leadsWindow) {
+    leadsWindow.value = getRoasBusinessWindow();
+    leadsWindow.addEventListener("change", handleBusinessWindowSelectChange);
+  }
+
   // Wire up ROAS by Campaign controls (business windows — PR-ADS-107A)
   const roasCampRefresh = document.getElementById("roas-campaigns-refresh-btn");
   const roasCampWindow  = document.getElementById("roas-campaigns-window");
@@ -14612,6 +14621,9 @@ function handleBusinessWindowSelectChange(e) {
   setRoasBusinessWindow(e.target.value);
   switch (_currentPage) {
     case "dashboard":       loadDashboardTab(); break;
+    // A new window is a new cohort — restart Leads paging at page 1 so the
+    // table can never show an offset that belonged to the previous window.
+    case "leads":           _leadsPage = 1; loadLeads(); break;
     case "roas-countries":  loadRoasCountries(); break;
     case "deals":           loadDeals();         break;
     case "revenue-health":  loadRevenueHealth(); break;
