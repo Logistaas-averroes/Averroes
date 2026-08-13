@@ -212,13 +212,27 @@ def test_evidence_windows_defined_with_all_six_options():
         assert label in block
 
 
+def test_canonical_leads_page_replaced_the_legacy_aggregate_contract():
+    """PR-ADS-153C: Lead Quality and In Progress Leads are retired. The canonical
+    Leads page is server-side paginated, so it never truncates a client-side list
+    and never needs a separate aggregates block."""
+    assert "loadOpportunities" not in APP_JS
+    fn = APP_JS.split("async function leadsRenderContacts(")[1].split("\nfunction ")[0]
+    assert "page_size" in fn and "has_more" in fn
+    assert "data.aggregates" not in fn
+
+
 def test_evidence_pages_list_and_helper():
     block = APP_JS[APP_JS.find("const EVIDENCE_PAGES"):
                    APP_JS.find("const EVIDENCE_PAGES") + 300]
     # BLOCKER 2: ngrams is derived Search Term evidence and uses the dropdown too.
+    # PR-ADS-153C: "leads" moved to business windows; "opportunities" is retired.
     for route in ("campaigns", "search-terms", "ngrams", "keywords", "geo",
-                  "leads", "opportunities", "waste"):
+                  "waste"):
         assert f'"{route}"' in block, f"EVIDENCE_PAGES missing {route}"
+    for retired in ("leads", "opportunities"):
+        assert f'"{retired}"' not in block, (
+            f"EVIDENCE_PAGES must not contain {retired} after PR-ADS-153C")
     assert "function isEvidencePage(" in APP_JS
 
 
@@ -270,7 +284,15 @@ def test_evidence_loaders_use_window_param():
     assert "/api/keyword-evidence?${kwBuildParams().toString()}" in APP_JS
     assert 'p.set("window", getEvidenceWindow())' in APP_JS
     assert "/api/waste?${evidenceWindowQuery()}" in APP_JS
-    assert "/api/leads?${evidenceWindowQuery()}" in APP_JS
+    # PR-ADS-153C: the Leads page is a business-window CRM page and consumes the
+    # canonical /api/crm-funnel family instead of the evidence-windowed /api/leads.
+    # The funnel query is built with URLSearchParams so the Source filter can be
+    # attached; what matters is that Leads calls the canonical family with a
+    # BUSINESS window, never the evidence-windowed /api/leads.
+    assert "/api/crm-funnel?${params.toString()}" in APP_JS
+    load_funnel = APP_JS.split("async function leadsLoadFunnel(")[1].split("\n}")[0]
+    assert "window: getRoasBusinessWindow()" in load_funnel
+    assert 'window_type: "business"' in load_funnel
     assert "/api/geo?${evWindow}" in APP_JS
     assert "/api/leads/country-summary?${evWindow}" in APP_JS
     # Search-terms family sends window= in its param builders.
@@ -474,24 +496,6 @@ class _NoneConn:
 
     def __exit__(self, *a):
         return False
-
-
-def test_frontend_lead_quality_uses_complete_aggregates():
-    fn = APP_JS[APP_JS.find("async function loadLeads"):
-                APP_JS.find("async function loadLeads") + 2600]
-    # KPIs + breakdown read the server aggregates, not a client-side row tally.
-    assert "data.aggregates" in fn
-    assert "agg.totals" in fn and "agg.by_campaign" in fn
-    # It must NOT recompute totals by iterating a truncated leads array.
-    assert "leads.forEach" not in fn
-
-
-def test_frontend_in_progress_discloses_truncation():
-    fn = APP_JS[APP_JS.find("async function loadOpportunities"):
-                APP_JS.find("async function loadOpportunities") + 3800]
-    assert "data.has_more" in fn
-    assert "data.total_count" in fn and "data.returned_count" in fn
-    assert "Showing" in fn
 
 
 def test_frontend_waste_discloses_showing_x_of_y_and_partial_export():

@@ -309,6 +309,89 @@ work, and deletes no historical evidence.
 
 ---
 
+## 13. Consuming surfaces (PR-ADS-153C)
+
+| Surface | What it reads |
+|---|---|
+| **Leads page** | `GET /api/crm-funnel` (funnel strip + definitions), `GET /api/crm-funnel/contacts` (server-side paginated rows), `GET /api/crm-funnel/operational-status` (working statuses). Default scope **All Sources** — it answers a CRM question, not an attribution one. |
+| **Dashboard funnel** | Canonical lifecycle Leads / MQLs / SQLs via `kpis.lifecycle_*`, with cohort-safe conversions. Customers and Closed-Won Revenue deliberately REMAIN on the revenue contract until PR-ADS-153E. |
+
+The Leads page never renders a narrower scope under a generic label, never
+divides unrelated period totals, and renders `—` for anything unavailable.
+
+### 13.1 One selector, one population
+
+A visible filter must move every number it sits beside. `acquisition_group` is
+therefore part of the **aggregate** contract, not only the row contract: the
+funnel strip, the cohort-safe conversions, the coverage block, the contact rows
+and the working-status breakdown all receive the same value. "Source = Organic"
+above an all-source funnel headline is a lie about which population is being
+reported, and is prevented by contract rather than by convention.
+
+The same rule governs the controls themselves: a filter the active view cannot
+honour is hidden, not shown and ignored. The Disqualified / Other view *is* the
+working-status breakdown, so the working-status and company filters are removed
+there while window, scope and source — which do filter it — remain.
+
+"Remain" means they work. The operational breakdown consumes the identical scope
+contract, resolved by the identical function
+(`resolve_population_filters`) that serves the contact page:
+
+| Scope | Population |
+|---|---|
+| `all_source` | no scope constraint |
+| `google_ads_source` | the canonical Google Ads acquisition population |
+| `campaign_attributable` | the above AND a label proven to be a real Google Ads campaign identity |
+| `keyword_attributable` | the above AND a HubSpot keyword label present |
+
+`acquisition_group` intersects with the scope rather than replacing it. A narrow
+scope with no consultable identity contract is `available: false` with
+`counts: null` — the same unavailable-never-zero rule §4.1 applies to the funnel
+counts. Sharing the resolver is the mechanism, not a convention: it is what makes
+"same scope, same population" true by construction rather than by review.
+
+### 13.2 Source classification uses the FULL contract
+
+Acquisition group comes from `analysis/source_classification.py`, the same module
+Revenue by Source and the durable `contact_source_classification` writer use, and
+with the same evidence pair:
+
+    primary = hs_analytics_source          (HubSpot Original Source)
+    detail  = hs_analytics_source_data_1   (HubSpot Original Source Drill-Down)
+
+Passing the detail is mandatory. `Offline Sources` is ambiguous on its own — only
+the drill-down routes SalesNash / Events to Other Paid, and reseller / referral /
+direct email to Organic. Dropping it made the Leads page classify the same
+contact differently from Revenue by Source. Because classification reads both
+fields, the server-side allow-list is over `(source, drill-down)` **pairs**;
+collapsing it to the primary would re-lose the same evidence.
+
+Unlike the legacy `leads` table — which stores `campaign_name`, not the
+drill-down, which is why PR-ADS-152 had to pass `None` — the canonical contact
+store persists the real HubSpot field, so the full contract is available. Campaign
+name is still never used to infer a source.
+
+### 13.3 Campaign and keyword are Google-Ads-only claims
+
+`hs_analytics_source_data_1` / `_2` do **not** universally mean "Google Ads
+campaign / keyword". They carry those semantics only for Paid Search contacts;
+for Organic, Paid Social, Email Marketing, Referral, Offline and Event contacts
+they hold entirely different drill-down text.
+
+A campaign or keyword label is therefore published only when all three hold: the
+contact's acquisition group is Google Ads, the Google Ads campaign-identity
+contract was consulted, and the label resolved to a real campaign identity.
+Otherwise both are `null` and the row states which condition failed
+(`not_google_ads_source`, `campaign_identity_unavailable`,
+`campaign_identity_unresolved`).
+
+Non-Google contacts are not left blank: they carry the canonical source taxonomy
+— acquisition group, channel, platform, attribution quality — plus the neutral
+raw drill-down as *Source detail*. The evidence is preserved; only the false
+label is refused.
+
+---
+
 ## Related
 
 - `docs/audits/PR-ADS-153A-MINIMUM-VIABLE-TRUTH-AUDIT.md` — the audit that

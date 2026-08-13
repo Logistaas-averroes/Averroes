@@ -3403,7 +3403,16 @@ Read-only. Auth required.
 | `window` | `current_quarter` | business: `current_quarter`, `last_quarter`, `last_6_months`, `ytd`, `all_time` · evidence: `7d`, `14d`, `30d`, `60d`, `180d`, `all_time` |
 | `window_type` | `business` | `business` \| `evidence` |
 | `scope` | `all_source` | `all_source`, `google_ads_source`, `campaign_attributable`, `keyword_attributable` |
+| `acquisition_group` | *(none)* | `google_ads`, `other_paid`, `organic`, `offline`, `unclassified` |
 | `event` | *(all)* | `lead`, `mql`, `sql`, `opportunity`, `customer` |
+
+`acquisition_group` narrows the **whole aggregate** — counts, cohort-safe
+conversions and coverage — to one acquisition group, and is echoed back as
+`acquisition_group` / `acquisition_group_label`. A caller that filters a contact
+list by source must pass the same value here, so the headline and the rows
+describe one population (PR-ADS-153C). Classification uses the full canonical
+contract — HubSpot Original Source **and** its Drill-Down — so a contact lands in
+the same group here as on Revenue by Source.
 
 **Response**
 
@@ -3541,3 +3550,115 @@ Never writes to HubSpot or Google Ads.
 |---|---|---|---|
 | `hubspot` | `contact_funnel` | `hubspot_contact_funnel` | `last_modified_at` |
 | `hubspot` | `lifecycle_events` | `hubspot_contact_funnel` | `latest_stage_entry_at` |
+
+
+---
+
+# PR-ADS-153C — Canonical Leads page contracts
+
+The Leads page consumes ONLY the canonical `/api/crm-funnel` family. No competing
+lead API was introduced.
+
+## `GET /api/crm-funnel/contacts`
+
+Read-only. Auth required. One **bounded, server-side paginated** page of the
+contacts behind a canonical funnel event.
+
+| Param | Default | Notes |
+|---|---|---|
+| `window` | `current_quarter` | business vocabulary |
+| `window_type` | `business` | |
+| `event` | `sql` | `lead` \| `mql` \| `sql` \| `opportunity` \| `customer` |
+| `scope` | `all_source` | `all_source` \| `google_ads_source` \| `campaign_attributable` \| `keyword_attributable` |
+| `acquisition_group` | *(none)* | `google_ads`, `other_paid`, `organic`, `offline`, `unclassified` |
+| `operational_status` | *(none)* | an `mql_status_category` value, e.g. `open_working` |
+| `q` | *(none)* | company substring search |
+| `page` / `page_size` | `1` / `50` | `page_size` capped at **100** |
+
+**Semantics**
+
+- Rows are contacts whose stage-entry date for `event` falls in the window —
+  **not** contacts currently at that lifecycle stage. A contact now at Customer is
+  still returned for the window it entered Sales Qualified Lead.
+- Ordering is `<event date> DESC, contact_id ASC` — newest relevant event first
+  and deterministic, so paging can neither repeat nor skip a row.
+- Filtering, ordering and the page slice all execute in PostgreSQL. Scope and
+  acquisition-group filters are applied as pre-resolved allow-lists derived from
+  the canonical Python classifiers, so the taxonomy is never duplicated in SQL.
+  The acquisition-group allow-list is over `(hs_analytics_source,
+  hs_analytics_source_data_1)` **pairs**: `Offline Sources` alone is ambiguous,
+  and only its drill-down separates SalesNash / Events (Other Paid) from
+  reseller / referral / direct email (Organic) from a CRM migration (Offline).
+- `acquisition_group` must match the value passed to `GET /api/crm-funnel`, so
+  the funnel headline and these rows describe one population.
+- A narrow scope whose campaign-identity contract cannot be consulted returns
+  `available: false` with `reason: "campaign_identity_unavailable"` and
+  `total: null` — **never an empty page**, which would read as a proven zero.
+- Each row carries the selected `event_date`, ALL five `stage_dates`, the current
+  `lifecycle_stage`, `mql_status` + `mql_status_category`, acquisition evidence
+  and a `has_gclid` boolean.
+- **`campaign` / `keyword` are published only where Google Ads semantics are
+  proven.** `hs_analytics_source_data_1` / `_2` are HubSpot Original Source
+  Drill-Down fields; they mean "Google Ads campaign / keyword" only for Paid
+  Search contacts. Every row carries `campaign_semantics`:
+
+  | `campaign_semantics` | `campaign` / `keyword` | Meaning |
+  |---|---|---|
+  | `google_ads_campaign` | the resolved labels | Google Ads contact, identity consulted, label resolved |
+  | `not_google_ads_source` | `null` | Not a Google Ads contact — its drill-down is not a campaign |
+  | `campaign_identity_unavailable` | `null` | Identity contract could not be consulted (unavailable, not absent) |
+  | `campaign_identity_unresolved` | `null` | Label did not resolve to a real Google Ads campaign |
+
+  Non-Google rows instead carry the canonical source taxonomy —
+  `acquisition_group(_label)`, `source_channel(_label)`, `source_platform(_label)`,
+  `attribution_quality` — plus the neutral `source_detail_raw` (the raw
+  drill-down, never labelled Campaign).
+- **No email address is ever returned.**
+
+## `GET /api/crm-funnel/operational-status`
+
+Counts by `mql_status_category` for one event window. These are MDR **working**
+statuses inside the MQL process — they never define a funnel stage, and the Leads
+page renders them in a visually distinct view.
+
+| Param | Default |
+|---|---|
+| `window` / `window_type` | `current_quarter` / `business` |
+| `event` | `lead` |
+| `scope` | `all_source` — same four named scopes as above |
+| `acquisition_group` | *(none)* — same values and same allow-list as above |
+
+`scope` and `acquisition_group` are translated into SQL filters by the SAME
+function the contact page uses (`resolve_population_filters`), so a named scope
+selects one population in both views and in the funnel strip above them:
+
+- `google_ads_source` — the canonical Google Ads acquisition population;
+- `campaign_attributable` — that population **and** a label that resolved to a
+  real Google Ads campaign identity;
+- `keyword_attributable` — the above **and** a HubSpot keyword label present.
+
+`acquisition_group` intersects with the scope rather than replacing it, so Scope
++ Source describe the same intersection everywhere they are both offered.
+
+A narrow scope whose campaign-identity contract cannot be consulted returns
+`available: false`, `counts: null`, `reason: "campaign_identity_unavailable"` —
+**never a zeroed breakdown**, which would read as a proven "no
+campaign-attributable contacts".
+
+## Dashboard overview additions
+
+`GET /api/dashboard/overview` now also returns canonical CRM lifecycle counts:
+
+```jsonc
+"kpis": {
+  "lifecycle_leads": 128, "lifecycle_mqls": 41, "lifecycle_sqls": 12,
+  "lifecycle_opportunities": 5, "lifecycle_customers": 2,
+  "lifecycle_scope": "all_source",
+  // Revenue truth is UNCHANGED and remains a different fact:
+  "customers": 3,                 // closed-won deals (PR-ADS-153E owns this)
+  "sqls": 7, "sqls_scope": "campaign_attributable"
+},
+"lifecycle_funnel": { "conversions": [...], "coverage": {...}, "sync": {...} }
+```
+
+A lifecycle customer is **never** substituted for a revenue customer.

@@ -18,7 +18,17 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
+// PR-ADS-153C: "opportunities" (In Progress Leads) is retired as a page but is
+// kept in the registry so its old URL resolves to a redirect rather than a dead
+// route. "leads" is now the canonical CRM funnel page.
 const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input", "revenue-health", "revenue-by-source"];
+
+// Retired pages that must still resolve. Each maps to its canonical destination
+// and (optionally) the filter intent the old page expressed (PR-ADS-153C §26).
+const RETIRED_PAGE_REDIRECTS = {
+  // In Progress Leads == the open_working operational filter on Leads.
+  opportunities: { page: "leads", status: "open_working" },
+};
 
 // PR-ADS-110/113: Revenue & Attribution pages. These use business-revenue
 // windows (not ad-style 7d/14d/30d/60d) and a clean readiness model — the global
@@ -27,7 +37,8 @@ const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ng
 // Ledger) and Revenue Health (admin diagnostics) joined in PR-ADS-113.
 // PR-ADS-134: the Dashboard is now the Executive Overview — a business-truth
 // command center on business windows — so it joins the clean revenue chrome.
-const REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source"];
+// PR-ADS-153C: Leads is a CRM/business page — business windows, clean chrome.
+const REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads"];
 
 function isRevenuePage(pageId) {
   return REVENUE_PAGES.includes(pageId);
@@ -129,10 +140,10 @@ const PAGE_DATASET_MAP = {
   ngrams:            ["google_ads_api/search_terms"],   // n-grams derived from search_terms
   geo:               ["google_ads_api/geo"],
   keywords:          ["google_ads_api/keyword_facts"],
-  lead_quality:      ["hubspot/contacts"],
+  // PR-ADS-153C: the canonical Leads page reads the CRM funnel spine.
+  leads:             ["hubspot/contact_funnel", "hubspot/lifecycle_events"],
   deals:             ["hubspot/deals"],
   gclid_attribution: ["gclid/matches"],
-  in_progress_leads: ["hubspot/contacts"],
   action_queue:      ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals"],
   reports:           ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals", "google_ads_api/search_terms"],
 };
@@ -221,12 +232,12 @@ const PAGE_EXPLANATIONS = {
     nextAction: "Check System Status → Google Ads API / Keywords."
   },
   leads: {
-    title: "Lead Quality",
-    purpose: "HubSpot lead-quality breakdown — lifecycle stage, junk rate, and campaign attribution.",
-    source: "HubSpot CRM contacts.",
-    dependsOn: ["leads"],
-    emptyMeans: "No HubSpot lead-quality rows found for this window. Contacts may not have synced.",
-    nextAction: "Check System Status → HubSpot CRM."
+    title: "Leads",
+    purpose: "HubSpot CRM funnel. Each stage counts contacts that ENTERED that lifecycle stage in the window, dated by its own HubSpot stage-entry timestamp.",
+    source: "HubSpot lifecycle truth (hubspot_contact_funnel).",
+    dependsOn: ["contact_funnel"],
+    emptyMeans: "No contacts entered this stage in the selected window.",
+    nextAction: "Check System Status → HubSpot CRM, or run the canonical contact sync."
   },
   deals: {
     title: "Deals",
@@ -243,14 +254,6 @@ const PAGE_EXPLANATIONS = {
     dependsOn: ["gclid_attribution", "gclid_coverage_snapshots"],
     emptyMeans: "No GCLID attribution rows found. This may mean no matching GCLIDs exist in the selected window.",
     nextAction: "Check System Status → GCLID / Matches."
-  },
-  opportunities: {
-    title: "In Progress Leads",
-    purpose: "Leads currently in active pipeline stages (not yet closed-won or lost).",
-    source: "HubSpot CRM contacts.",
-    dependsOn: ["leads"],
-    emptyMeans: "No in-progress leads in the selected window.",
-    nextAction: "Check System Status → HubSpot CRM."
   },
   scheduler: {
     title: "Data Runs",
@@ -518,9 +521,9 @@ const DEFAULT_EVIDENCE_WINDOW = "30d";
 // countries=geo, lead-quality=leads, in-progress-leads=opportunities,
 // flagged-waste-terms=waste.) N-Grams is derived Search Term evidence, so it
 // uses the same Evidence window dropdown (its request is window-driven).
+// PR-ADS-153C: Leads moved to business windows; In Progress Leads retired.
 const EVIDENCE_PAGES = [
-  "campaigns", "search-terms", "ngrams", "keywords", "geo",
-  "leads", "opportunities", "waste",
+  "campaigns", "search-terms", "ngrams", "keywords", "geo", "waste",
 ];
 
 function isEvidencePage(page) {
@@ -1400,6 +1403,15 @@ function navigate(page, options) {
   options = options || {};
   const updateHash = options.updateHash !== false;
 
+  // PR-ADS-153C: retired pages redirect to their canonical destination and
+  // carry the old page's filter intent, so no old link becomes a dead end.
+  const retired = RETIRED_PAGE_REDIRECTS[page];
+  if (retired) {
+    if (retired.status) leadsSetPendingStatus(retired.status);
+    navigate(retired.page, options);
+    return;
+  }
+
   // Route alias: "ngrams" redirects to search-terms with Patterns tab active
   if (page === "ngrams") {
     navigate("search-terms", options);
@@ -1527,7 +1539,6 @@ function loadPage(page) {
       loadGclidReadiness();
       loadAttributionConfidenceSummary();
       break;
-    case "opportunities": loadOpportunities(); break;
     case "scheduler":     loadScheduler();     break;
     case "health":        loadHealth();        break;
     case "action-queue":  loadActionQueue();   break;
@@ -2700,17 +2711,30 @@ function wireDashChartHover(root, d) {
 function renderDashFunnel(d) {
   const k = d.kpis || {};
   const pc = d.period_change || {};
-  // Leads has no period-change metric (the contract compares spend / revenue /
-  // sqls / customers / roas) — its stage simply carries no delta chip.
+  // PR-ADS-153C §21/§22: the CRM stages are canonical HubSpot lifecycle
+  // stage-ENTRY events, each on its own hs_v2_date_entered_* date — not the
+  // legacy contact-created-date proxy, and not the campaign-attributable subset
+  // that used to sit under a bare "SQLs" label.
+  //
+  // Customers / Closed-Won Revenue deliberately REMAIN on the revenue contract:
+  // a lifecycle customer is not a revenue customer, and PR-ADS-153E owns that
+  // reconciliation. They are labelled from their own source so the two are never
+  // confused.
+  const lf = d.lifecycle_funnel || {};
   const stages = [
-    { label: "Leads", value: k.leads, fmt: fmtCount, source: "HubSpot contacts", metric: null },
-    { label: "SQLs", value: k.sqls, fmt: fmtCount, source: "Qualified", metric: "sqls" },
+    { label: "Leads", value: k.lifecycle_leads, fmt: fmtCount, source: "HubSpot lifecycle · entered Lead", metric: null },
+    { label: "MQLs", value: k.lifecycle_mqls, fmt: fmtCount, source: "HubSpot lifecycle · entered MQL", metric: null },
+    { label: "SQLs", value: k.lifecycle_sqls, fmt: fmtCount, source: "HubSpot lifecycle · entered SQL", metric: null },
     { label: "Customers", value: k.customers, fmt: fmtCount, source: "Closed-won deals", metric: "customers" },
     { label: "Closed-Won Revenue", value: k.closed_won_revenue_usd, fmt: fmtMoney, source: "USD · HubSpot", metric: "revenue_usd" },
   ];
+  // Only cohort-safe conversions are ever displayed. Unrelated period totals are
+  // never divided, and the lifecycle→revenue step crosses two different truths,
+  // so it stays unavailable until PR-ADS-153E reconciles them.
   const conversions = [
-    dashConversion(k.sqls, k.leads),
-    dashConversion(k.customers, k.sqls),
+    dashCohortConversion(lf, "lead", "mql"),
+    dashCohortConversion(lf, "mql", "sql"),
+    null, // SQL → revenue Customer: different doctrines, not cohort-safe.
     null, // revenue is a value, not a count conversion
   ];
 
@@ -2737,11 +2761,27 @@ function renderDashFunnel(d) {
       <div class="dash-panel__header">
         <div>
           <h3 class="dash-panel__title">Pipeline</h3>
-          <p class="dash-panel__sub">Leads → SQLs → Customers → Closed-Won Revenue</p>
+          <p class="dash-panel__sub">HubSpot lifecycle stage entries → closed-won revenue</p>
         </div>
       </div>
       <div class="dash-funnel">${cells}</div>
     </section>`;
+}
+
+/**
+ * Cohort-safe conversion between two canonical funnel events, read from the
+ * backend contract. Returns null (rendered as "—") unless the service PROVED the
+ * rate is cohort-based: of the contacts that entered X inside this window, the
+ * share that later entered Y. Dividing two independent period totals compares
+ * different cohorts and is never done here.
+ */
+function dashCohortConversion(lifecycleFunnel, fromEvent, toEvent) {
+  const list = (lifecycleFunnel || {}).conversions;
+  if (!Array.isArray(list)) return null;
+  const found = list.find((c) => c && c.from_event === fromEvent && c.to_event === toEvent);
+  if (!found || !found.available || found.basis !== "cohort") return null;
+  if (found.rate_pct === null || found.rate_pct === undefined) return null;
+  return `${found.rate_pct}%`;
 }
 
 // Stage-to-stage conversion; null (not "0%") when either side is unavailable.
@@ -6504,96 +6544,628 @@ function copyWasteTerms() {
 
 // ── Lead Quality page ──────────────────────────────────────────────────────
 
+// ── Leads — canonical HubSpot CRM funnel explorer (PR-ADS-153C) ────────────
+// ONE page replaces Lead Quality + In Progress Leads. Every number is a HubSpot
+// lifecycle stage-ENTRY event on its own event date; nothing here is derived
+// from legacy `status_category`, and contact-creation date is never a fallback.
+
+const LEADS_STAGES = [
+  { event: "lead",        label: "Leads",              tab: "Leads" },
+  { event: "mql",         label: "MQLs",               tab: "MQLs" },
+  { event: "sql",         label: "SQLs",               tab: "SQLs" },
+  { event: "opportunity", label: "Opportunities",      tab: "Opportunities" },
+  // Tab reads "Customers" for brevity; the metric is always disclosed as
+  // HubSpot LIFECYCLE customers so it can never be mistaken for closed-won
+  // revenue customers (PR-ADS-153E owns that reconciliation).
+  { event: "customer",    label: "Lifecycle Customers", tab: "Customers" },
+];
+
+const LEADS_VIEW_OVERVIEW = "overview";
+const LEADS_VIEW_OTHER = "other";
+
+const LEADS_SCOPES = [
+  { key: "all_source",            label: "All Sources" },
+  { key: "google_ads_source",     label: "Google Ads-source" },
+  { key: "campaign_attributable", label: "Campaign-attributable" },
+  { key: "keyword_attributable",  label: "Keyword-attributable" },
+];
+
+const LEADS_SOURCE_GROUPS = [
+  { key: "",             label: "All sources" },
+  { key: "google_ads",   label: "Google Ads" },
+  { key: "other_paid",   label: "Other Paid" },
+  { key: "organic",      label: "Organic" },
+  { key: "offline",      label: "Offline / Other" },
+  { key: "unclassified", label: "Unclassified" },
+];
+
+// Operational WORKING statuses — deliberately not funnel stages.
+const LEADS_STATUS_LABELS = {
+  open_working: "Open — being worked",
+  sales_qualified_signal: "Sales-qualified signal",
+  deal_created_signal: "Deal-created signal",
+  disqualified: "Sales disqualified",
+  bad_fit: "Bad product fit",
+  contact_quality: "Contact quality",
+  no_response: "No response",
+  discarded: "Discarded",
+  reseller: "Reseller",
+  no_verdict: "No verdict yet",
+  unmapped: "Unmapped value",
+};
+
+const LEADS_PAGE_SIZE = 50;
+
+let _leadsView = LEADS_VIEW_OVERVIEW;
+let _leadsScope = "all_source";
+let _leadsSourceGroup = "";
+let _leadsStatus = "";
+let _leadsQuery = "";
+let _leadsPage = 1;
+let _leadsFunnel = null;
+let _leadsPendingStatus = null;
+
+/** Carry a retired page's filter intent into Leads (e.g. In Progress Leads). */
+function leadsSetPendingStatus(status) {
+  _leadsPendingStatus = status || null;
+}
+
+function leadsStageFor(event) {
+  return LEADS_STAGES.find((s) => s.event === event) || LEADS_STAGES[2];
+}
+
+/** Render a canonical count. null/undefined is Unavailable — NEVER 0. */
+function leadsCount(value) {
+  return (value === null || value === undefined) ? "—" : Number(value).toLocaleString();
+}
+
 async function loadLeads() {
-  renderPageDatasetFreshness("lead_quality");
-  const tableEl    = document.getElementById("leads-table-body");
-  const totalEl    = document.getElementById("leads-total");
-  const sqlsEl     = document.getElementById("leads-sqls");
-  const junkEl     = document.getElementById("leads-junk");
-  const progressEl = document.getElementById("leads-progress");
+  // A retired route may have requested a filter (In Progress Leads).
+  if (_leadsPendingStatus) {
+    _leadsStatus = _leadsPendingStatus;
+    _leadsView = "lead";
+    _leadsPendingStatus = null;
+  }
+  leadsRenderControls();
+  await leadsLoadFunnel();
+  leadsRenderTabs();
+  await leadsRenderActiveView();
+}
 
-  if (tableEl) tableEl.innerHTML =
-    `<p class="empty-state" style="padding:var(--space-5)">Loading lead quality data…</p>`;
+async function leadsLoadFunnel() {
+  const strip = document.getElementById("leads-funnel-strip");
+  const truth = document.getElementById("leads-truth-state");
+  if (strip) strip.innerHTML = `<p class="empty-state">Loading funnel…</p>`;
 
+  // The funnel headline and the contact rows MUST describe one population, so
+  // the Source selector is sent to the aggregate contract too. A page that
+  // showed "Source: Organic" above an all-source funnel would be lying.
+  const params = new URLSearchParams({
+    window: getRoasBusinessWindow(),
+    window_type: "business",
+    scope: _leadsScope,
+  });
+  if (_leadsSourceGroup) params.set("acquisition_group", _leadsSourceGroup);
   try {
-    const data  = await fetchJSON(`/api/leads?${evidenceWindowQuery()}`);
-    // PR-ADS-141: KPIs and the per-campaign breakdown come from COMPLETE
-    // server-side aggregates over the whole evidence window (deduped by contact),
-    // never a truncated row list — so All time is never silently incomplete.
-    const agg        = (data && data.aggregates) || { totals: {}, by_campaign: [] };
-    const totals     = agg.totals || {};
-    const byCampaign = agg.by_campaign || [];
-    const totalLeads = Number(totals.total || 0);
+    _leadsFunnel = await fetchJSON(`/api/crm-funnel?${params.toString()}`);
+  } catch (_) {
+    _leadsFunnel = null;
+  }
 
-    if (totalLeads === 0) {
-      if (tableEl) tableEl.innerHTML = buildEmptyState({
-        pageKey: "leads",
-        canonicalStatus: getPageCanonicalStatus("leads"),
-        rowsInWindow: 0,
-      });
-      [totalEl, sqlsEl, junkEl, progressEl].forEach((el) => {
-        if (el) el.textContent = "—";
-      });
-      return;
+  const rangeEl = document.getElementById("leads-range");
+  if (rangeEl && _leadsFunnel && _leadsFunnel.window) {
+    const w = _leadsFunnel.window;
+    rangeEl.textContent = w.start_date ? `${w.start_date} → ${w.end_date}` : `→ ${w.end_date}`;
+  }
+
+  if (truth) truth.innerHTML = leadsTruthStateHtml(_leadsFunnel);
+  if (strip) strip.innerHTML = leadsFunnelStripHtml(_leadsFunnel);
+}
+
+/**
+ * Compact truth banner: reconciliation state + historical bootstrap readiness.
+ * Truth state is visible but never blocks a usable page.
+ */
+function leadsTruthStateHtml(payload) {
+  if (!payload) {
+    return `<div class="mapping-notice mapping-notice--info">CRM funnel truth is unavailable. Numbers are withheld rather than shown as zero.</div>`;
+  }
+  const notes = [];
+  const recon = payload.reconciliation || {};
+  const sync = payload.sync || {};
+  const windowKey = (payload.window || {}).window_key;
+
+  if (payload.available === false) {
+    notes.push({ cls: "mapping-notice--info", text: "Canonical CRM contact store unavailable — counts are withheld, not zero." });
+  } else if (recon.status === "mismatch") {
+    notes.push({ cls: "mapping-notice--error", text: "Reconciliation required — funnel counts are withheld until the scope invariant holds." });
+  } else if (recon.status === "partial") {
+    const reasons = (recon.reasons || []).join(", ");
+    notes.push({ cls: "mapping-notice--info", text: `Partial evidence: ${escapeHtml(reasons || "some stage evidence is missing")}.` });
+  }
+
+  if (payload.campaign_identity_available === false) {
+    notes.push({ cls: "mapping-notice--info", text: "Google Ads campaign identity unavailable — campaign- and keyword-attributable scopes are unavailable (not zero)." });
+  }
+
+  const bootstrap = sync.bootstrap_status;
+  if (bootstrap && bootstrap !== "complete") {
+    const allTime = windowKey === "all_time";
+    notes.push({
+      cls: allTime ? "mapping-notice--error" : "mapping-notice--info",
+      text: `Historical CRM sync in progress (bootstrap: ${escapeHtml(bootstrap)}).` +
+            (allTime ? " All Time does not yet represent complete history." : ""),
+    });
+  }
+
+  if (!notes.length) return "";
+  return notes.map((n) => `<div class="mapping-notice ${n.cls}">${n.text}</div>`).join("");
+}
+
+function leadsFunnelStripHtml(payload) {
+  const events = (payload && payload.events) || {};
+  const available = payload && payload.available !== false;
+  const mismatch = ((payload || {}).reconciliation || {}).status === "mismatch";
+  const conversions = (payload && payload.conversions) || [];
+  const convByPair = {};
+  conversions.forEach((c) => { convByPair[`${c.from_event}->${c.to_event}`] = c; });
+
+  const cells = LEADS_STAGES.map((stage, i) => {
+    const block = events[stage.event] || {};
+    const count = (!available || mismatch) ? null : block.count;
+    const prev = i > 0 ? LEADS_STAGES[i - 1] : null;
+    const conv = prev ? convByPair[`${prev.event}->${stage.event}`] : null;
+
+    let convChip = "";
+    if (prev) {
+      // Only a cohort-safe rate is ever shown. Otherwise "—".
+      const ok = conv && conv.available && conv.basis === "cohort" && conv.rate_pct !== null;
+      convChip = ok
+        ? `<span class="dash-funnel__conv" title="Cohort-safe: of contacts entering ${escapeHtml(prev.label)} in this window, the share that later entered ${escapeHtml(stage.label)}">${conv.rate_pct}%</span>`
+        : `<span class="dash-funnel__conv dash-funnel__conv--muted" title="Cohort-safe conversion unavailable for this window">—</span>`;
     }
 
-    if (totalEl)    totalEl.textContent    = String(totalLeads);
-    if (sqlsEl)     sqlsEl.textContent     = String(Number(totals.qualified || 0));
-    if (junkEl)     junkEl.textContent     = String(Number(totals.junk || 0));
-    if (progressEl) progressEl.textContent = String(Number(totals.in_progress || 0));
+    const dateProp = block.event_date_property || "";
+    const statusNote = mismatch ? "Reconciliation required"
+      : (count === null ? "Unavailable" : escapeHtml(dateProp));
 
-    const thead = `
-      <thead>
-        <tr>
-          <th>Campaign</th>
-          <th class="td--num">Total</th>
-          <th class="td--num">SQL</th>
-          <th class="td--num">In Progress</th>
-          <th class="td--num">Junk</th>
-          <th class="td--num">Wrong Fit</th>
-          <th class="td--num">Unknown</th>
-          <th>Junk Rate</th>
-        </tr>
-      </thead>`;
+    return `
+      ${convChip}
+      <div class="dash-funnel__stage" data-funnel-event="${stage.event}">
+        <div class="dash-funnel__stage-label">${escapeHtml(stage.label)}</div>
+        <div class="dash-funnel__stage-value">${leadsCount(count)}</div>
+        <div class="dash-funnel__stage-sub" title="Event date: ${escapeHtml(dateProp)}">${statusNote}</div>
+      </div>`;
+  }).join("");
 
-    const tbody = byCampaign.map((g) => {
-      const total     = Number(g.total || 0);
-      const sql       = Number(g.qualified || 0);
-      const progress  = Number(g.in_progress || 0);
-      const junk      = Number(g.junk || 0);
-      const wrongFit  = Number(g.wrong_fit || 0);
-      const unknown   = Number(g.unknown || 0);
-      const junkPct = total > 0 ? Math.round((junk / total) * 100) : 0;
-      const barCls  = junkPct < uiThresholds.junk_rate.low_pct   ? "progress-bar__fill--low" :
-                      junkPct <= uiThresholds.junk_rate.high_pct ? "progress-bar__fill--mid" : "progress-bar__fill--high";
-      const junkCls = junkPct < uiThresholds.junk_rate.low_pct   ? "junk--low" :
-                      junkPct <= uiThresholds.junk_rate.high_pct ? "junk--mid" : "junk--high";
-      return `
-        <tr>
-          <td class="td--name">${escapeHtml(g.campaign_name || "(unknown)")}</td>
-          <td class="td--num">${total}</td>
-          <td class="td--num">${sql}</td>
-          <td class="td--num">${progress}</td>
-          <td class="td--num">${junk}</td>
-          <td class="td--num">${wrongFit}</td>
-          <td class="td--num">${unknown}</td>
-          <td>
-            <div style="display:flex;align-items:center;gap:8px;">
-              <div class="progress-bar" style="width:80px">
-                <div class="progress-bar__fill ${barCls}" style="width:${junkPct}%"></div>
-              </div>
-              <span class="${junkCls}" style="font-size:12px;font-weight:500;">${junkPct}%</span>
-            </div>
-          </td>
-        </tr>`;
-    }).join("");
+  const scopeLabel = (payload && payload.scope_label) || "All Sources";
+  // The active source filter is disclosed on the headline itself, so the
+  // funnel can never read as all-source while a group is selected.
+  const groupLabel = (payload && payload.acquisition_group_label) || "All sources";
+  return `<div class="dash-funnel" role="group" aria-label="CRM funnel">${cells}</div>
+    <p class="grace-note">Scope: ${escapeHtml(scopeLabel)} · Source: ${escapeHtml(groupLabel)} ·
+      Counts are stage-entry events, each on its own HubSpot date.</p>`;
+}
 
-    if (tableEl) tableEl.innerHTML =
-      `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
+function leadsRenderControls() {
+  const scopeSel = document.getElementById("leads-scope");
+  if (scopeSel && !scopeSel.options.length) {
+    scopeSel.innerHTML = LEADS_SCOPES.map(
+      (s) => `<option value="${s.key}">${escapeHtml(s.label)}</option>`).join("");
+    scopeSel.value = _leadsScope;
+    scopeSel.addEventListener("change", async (e) => {
+      _leadsScope = e.target.value; _leadsPage = 1;
+      await loadLeads();
+    });
+  }
+  const sourceSel = document.getElementById("leads-source");
+  if (sourceSel && !sourceSel.options.length) {
+    sourceSel.innerHTML = LEADS_SOURCE_GROUPS.map(
+      (g) => `<option value="${g.key}">${escapeHtml(g.label)}</option>`).join("");
+    sourceSel.value = _leadsSourceGroup;
+    sourceSel.addEventListener("change", async (e) => {
+      // Reloads the FUNNEL as well as the rows — one selected source, one
+      // population, everywhere on the page.
+      _leadsSourceGroup = e.target.value; _leadsPage = 1;
+      await leadsLoadFunnel();
+      await leadsRenderActiveView();
+    });
+  }
+  const statusSel = document.getElementById("leads-status");
+  if (statusSel && !statusSel.options.length) {
+    const opts = [`<option value="">All working statuses</option>`].concat(
+      Object.keys(LEADS_STATUS_LABELS).map(
+        (k) => `<option value="${k}">${escapeHtml(LEADS_STATUS_LABELS[k])}</option>`));
+    statusSel.innerHTML = opts.join("");
+    statusSel.addEventListener("change", async (e) => {
+      _leadsStatus = e.target.value; _leadsPage = 1;
+      await leadsRenderActiveView();
+    });
+  }
+  if (statusSel) statusSel.value = _leadsStatus;
 
-  } catch (_) {
-    if (tableEl) tableEl.innerHTML =
-      `<p class="empty-state" style="padding:var(--space-5)">Could not load lead quality data.</p>`;
+  const search = document.getElementById("leads-search");
+  if (search && !search.dataset.wired) {
+    search.dataset.wired = "1";
+    let t = null;
+    search.addEventListener("input", (e) => {
+      clearTimeout(t);
+      const value = e.target.value;
+      t = setTimeout(async () => {
+        _leadsQuery = value; _leadsPage = 1;
+        await leadsRenderActiveView();
+      }, 300);
+    });
+  }
+}
+
+function leadsRenderTabs() {
+  const el = document.getElementById("leads-tabs");
+  if (!el) return;
+  el.className = "search-terms-tabs";
+  const tabs = [{ key: LEADS_VIEW_OVERVIEW, label: "Overview" }]
+    .concat(LEADS_STAGES.map((s) => ({ key: s.event, label: s.tab })))
+    .concat([{ key: LEADS_VIEW_OTHER, label: "Disqualified / Other" }]);
+
+  el.innerHTML = tabs.map((t) => {
+    const active = t.key === _leadsView ? " active" : "";
+    // The operational view is visually distinct from the five funnel stages.
+    const extra = t.key === LEADS_VIEW_OTHER ? " search-terms-tab--muted" : "";
+    return `<button type="button" class="search-terms-tab${active}${extra}" role="tab" data-leads-tab="${t.key}">${escapeHtml(t.label)}</button>`;
+  }).join("");
+
+  el.querySelectorAll("[data-leads-tab]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      _leadsView = btn.getAttribute("data-leads-tab");
+      _leadsPage = 1;
+      leadsRenderTabs();
+      await leadsRenderActiveView();
+    });
+  });
+}
+
+async function leadsRenderActiveView() {
+  const controls = document.getElementById("leads-table-controls");
+  const pager = document.getElementById("leads-pagination");
+  leadsSyncControlVisibility();
+  if (_leadsView === LEADS_VIEW_OVERVIEW) {
+    if (controls) controls.hidden = true;
+    if (pager) pager.innerHTML = "";
+    leadsRenderOverview();
+    return;
+  }
+  if (controls) controls.hidden = false;
+  if (_leadsView === LEADS_VIEW_OTHER) {
+    if (pager) pager.innerHTML = "";
+    await leadsRenderOperational();
+    return;
+  }
+  await leadsRenderContacts(_leadsView);
+}
+
+/**
+ * Show only the filters the ACTIVE view can honour.
+ *
+ * The Disqualified / Other view is an aggregate breakdown BY working status, so
+ * a working-status filter would be circular and a company search has nothing
+ * per-contact to match. Both are hidden there rather than left visible and
+ * inert. Window, Scope and Source stay — they all genuinely filter that view.
+ */
+function leadsSyncControlVisibility() {
+  const operational = _leadsView === LEADS_VIEW_OTHER;
+  const statusControl = document.getElementById("leads-status-control");
+  const searchControl = document.getElementById("leads-search-control");
+  const note = document.getElementById("leads-controls-note");
+  if (statusControl) statusControl.hidden = operational;
+  if (searchControl) searchControl.hidden = operational;
+  if (note) {
+    note.hidden = !operational;
+    note.textContent = operational
+      ? "This view IS the working-status breakdown, so the status and company filters do not apply here. Window, scope and source do."
+      : "";
+  }
+}
+
+function leadsRenderOverview() {
+  const header = document.getElementById("leads-table-header");
+  const body = document.getElementById("leads-table-body");
+  if (header) header.textContent = "Funnel definitions";
+  if (!body) return;
+
+  const events = (_leadsFunnel && _leadsFunnel.events) || {};
+  const rows = LEADS_STAGES.map((stage) => {
+    const block = events[stage.event] || {};
+    const disclosure = stage.event === "customer"
+      ? "HubSpot lifecycle customers — NOT closed-won revenue customers."
+      : escapeHtml(block.definition || "");
+    return `<tr>
+      <td><strong>${escapeHtml(stage.label)}</strong></td>
+      <td>${leadsCount(block.count)}</td>
+      <td><code>${escapeHtml(block.event_date_property || "—")}</code></td>
+      <td>${disclosure}</td>
+    </tr>`;
+  }).join("");
+
+  body.innerHTML = `<table class="data-table">
+    <thead><tr><th>Stage</th><th>Count</th><th>Event date</th><th>Definition</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+async function leadsRenderOperational() {
+  const header = document.getElementById("leads-table-header");
+  const body = document.getElementById("leads-table-body");
+  if (header) header.textContent = "Working status — operational, not a funnel stage";
+  if (!body) return;
+  body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">Loading…</p>`;
+
+  // The Scope and Source selectors stay visible on this view, so both must
+  // actually filter it — and with the same semantics the funnel strip above
+  // uses, or these counts would describe a broader population than their own
+  // headline.
+  const params = new URLSearchParams({
+    window: getRoasBusinessWindow(),
+    window_type: "business",
+    event: "lead",
+    scope: _leadsScope,
+  });
+  if (_leadsSourceGroup) params.set("acquisition_group", _leadsSourceGroup);
+  let payload = null;
+  try {
+    payload = await fetchJSON(`/api/crm-funnel/operational-status?${params.toString()}`);
+  } catch (_) { payload = null; }
+
+  if (!payload || payload.available === false) {
+    const reason = payload && payload.reason === "campaign_identity_unavailable"
+      ? "Google Ads campaign identity is unavailable, so this attribution scope cannot be resolved. This is unavailable — not zero."
+      : "Working-status breakdown unavailable.";
+    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">${escapeHtml(reason)}</p>`;
+    return;
+  }
+  const counts = payload.counts || {};
+  const rows = Object.keys(LEADS_STATUS_LABELS).map((key) => `<tr>
+      <td>${escapeHtml(LEADS_STATUS_LABELS[key])}</td>
+      <td><code>${escapeHtml(key)}</code></td>
+      <td>${leadsCount(counts[key] === undefined ? 0 : counts[key])}</td>
+    </tr>`).join("");
+
+  body.innerHTML = `<table class="data-table">
+      <thead><tr><th>Working status</th><th>Category</th><th>Contacts</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    <p class="grace-note" style="padding: 0 var(--space-5) var(--space-4);">
+      These are MDR working statuses inside the MQL process — they do not define any funnel stage.
+      Counted over contacts whose Lead stage-entry date falls in the window.
+      Scope: ${escapeHtml(payload.scope_label || "All sources")} ·
+      Source: ${escapeHtml(payload.acquisition_group_label || "All sources")}.</p>`;
+}
+
+async function leadsRenderContacts(event) {
+  const stage = leadsStageFor(event);
+  const header = document.getElementById("leads-table-header");
+  const body = document.getElementById("leads-table-body");
+  const pager = document.getElementById("leads-pagination");
+  if (header) header.textContent = `${stage.label} — contacts that entered this stage in the window`;
+  if (!body) return;
+  body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">Loading contacts…</p>`;
+
+  const params = new URLSearchParams({
+    window: getRoasBusinessWindow(),
+    window_type: "business",
+    event,
+    scope: _leadsScope,
+    page: String(_leadsPage),
+    page_size: String(LEADS_PAGE_SIZE),
+  });
+  if (_leadsSourceGroup) params.set("acquisition_group", _leadsSourceGroup);
+  if (_leadsStatus) params.set("operational_status", _leadsStatus);
+  if (_leadsQuery) params.set("q", _leadsQuery);
+
+  let payload = null;
+  try {
+    payload = await fetchJSON(`/api/crm-funnel/contacts?${params.toString()}`);
+  } catch (_) { payload = null; }
+
+  if (!payload) {
+    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">Could not load contacts.</p>`;
+    if (pager) pager.innerHTML = "";
+    return;
+  }
+  if (payload.available === false) {
+    const reason = payload.reason === "campaign_identity_unavailable"
+      ? "Google Ads campaign identity is unavailable, so this attribution scope cannot be resolved. This is unavailable — not zero."
+      : "Canonical CRM contact store unavailable.";
+    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">${escapeHtml(reason)}</p>`;
+    if (pager) pager.innerHTML = "";
+    return;
+  }
+
+  const rows = payload.rows || [];
+  if (!rows.length) {
+    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">No contacts entered ${escapeHtml(stage.label)} in this window.</p>`;
+    if (pager) pager.innerHTML = "";
+    return;
+  }
+
+  const tbody = rows.map((r, i) => {
+    return `<tr class="clickable-row" data-leads-row="${i}" tabindex="0">
+      <td><strong>${escapeHtml(r.company || "—")}</strong></td>
+      <td>${escapeHtml(r.event_date || "—")}</td>
+      <td>${escapeHtml(r.lifecycle_stage_label || "—")}</td>
+      <td>${escapeHtml(LEADS_STATUS_LABELS[r.mql_status_category] || r.mql_status_category || "—")}</td>
+      <td>${escapeHtml(r.acquisition_group_label || sourceGroupLabel(r.acquisition_group))}</td>
+      <td>${leadsChannelPlatformHtml(r)}</td>
+      <td>${leadsCampaignCellHtml(r, "campaign")}</td>
+      <td>${leadsCampaignCellHtml(r, "keyword")}</td>
+      <td>${escapeHtml(r.country || "—")}</td>
+      <td>${r.has_gclid ? "Yes" : "No"}</td>
+    </tr>`;
+  }).join("");
+
+  body.innerHTML = `<table class="data-table">
+    <thead><tr>
+      <th>Company</th>
+      <th title="The selected stage-entry event date">${escapeHtml(stage.label)} date</th>
+      <th title="Current lifecycle stage — may be later than the selected event">Current stage</th>
+      <th>Working status</th>
+      <th>Source</th>
+      <th title="Canonical acquisition channel and platform">Channel / Platform</th>
+      <th title="Google Ads campaign — only shown where Google Ads semantics are proven">Campaign</th>
+      <th title="Google Ads keyword — only shown where Google Ads semantics are proven">Keyword</th>
+      <th>Country</th><th>GCLID</th>
+    </tr></thead>
+    <tbody>${tbody}</tbody></table>`;
+
+  body.querySelectorAll("[data-leads-row]").forEach((tr) => {
+    const open = () => leadsOpenDrawer(rows[Number(tr.getAttribute("data-leads-row"))], stage);
+    tr.addEventListener("click", open);
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
+  });
+
+  if (pager) {
+    const total = payload.total;
+    const from = (payload.page - 1) * payload.page_size + 1;
+    const to = from + rows.length - 1;
+    pager.innerHTML = `
+      <button type="button" class="btn btn--secondary" id="leads-prev" ${payload.page <= 1 ? "disabled" : ""}>Previous</button>
+      <span class="roas-window-range">${from}–${to}${total === null ? "" : ` of ${Number(total).toLocaleString()}`}</span>
+      <button type="button" class="btn btn--secondary" id="leads-next" ${payload.has_more ? "" : "disabled"}>Next</button>`;
+    const prev = document.getElementById("leads-prev");
+    const next = document.getElementById("leads-next");
+    if (prev) prev.addEventListener("click", async () => { _leadsPage = Math.max(1, _leadsPage - 1); await leadsRenderContacts(event); });
+    if (next) next.addEventListener("click", async () => { _leadsPage += 1; await leadsRenderContacts(event); });
+  }
+}
+
+function sourceGroupLabel(group) {
+  const found = LEADS_SOURCE_GROUPS.find((g) => g.key === group);
+  return found ? found.label : (group || "—");
+}
+
+/** Canonical acquisition channel + platform, from the shared source taxonomy. */
+function leadsChannelPlatformHtml(row) {
+  const channel = row.source_channel_label || "—";
+  const platform = row.source_platform_label || "—";
+  if (channel === platform) return escapeHtml(channel);
+  return `${escapeHtml(channel)} <span class="muted">· ${escapeHtml(platform)}</span>`;
+}
+
+/**
+ * Campaign / keyword cell.
+ *
+ * `hs_analytics_source_data_1` / `_2` are HubSpot Original Source Drill-Down
+ * fields. They mean "Google Ads campaign / keyword" ONLY for Paid Search
+ * contacts. For Organic, Paid Social, Email, Referral, Offline and Event
+ * contacts they hold different text entirely, so this NEVER labels that text
+ * Campaign or Keyword — the row's canonical source columns carry that evidence
+ * instead, and the neutral drill-down value is available in the drawer.
+ */
+function leadsCampaignCellHtml(row, field) {
+  if (row.campaign_available) return escapeHtml(row[field] || "—");
+  switch (row.campaign_semantics) {
+    case "not_google_ads_source":
+      return `<span class="muted" title="Not a Google Ads contact — HubSpot's source drill-down is not a Google Ads ${field}. See the Source and Channel / Platform columns.">Not applicable</span>`;
+    case "campaign_identity_unavailable":
+      return `<span class="muted" title="The Google Ads campaign-identity contract could not be consulted. Unavailable — not absent.">Unavailable</span>`;
+    case "campaign_identity_unresolved":
+      return `<span class="muted" title="This label did not resolve to a real Google Ads campaign identity.">Unresolved</span>`;
+    default:
+      return `<span class="muted">—</span>`;
+  }
+}
+
+/** Contact drawer — funnel history, current CRM state, acquisition evidence. */
+function leadsOpenDrawer(row, stage) {
+  if (!row) return;
+  const stageRows = LEADS_STAGES.map((s) => {
+    const value = (row.stage_dates || {})[s.event];
+    const cell = value
+      ? escapeHtml(value)
+      : `<span class="muted" title="HubSpot supplied no stage-entry timestamp">Unavailable — no HubSpot stage-entry evidence</span>`;
+    const isSelected = s.event === stage.event ? " selected-stage" : "";
+    return `<tr class="${isSelected}"><td>${escapeHtml(s.label)}</td><td>${cell}</td></tr>`;
+  }).join("");
+
+  // Google Ads campaign / keyword are shown ONLY where Google Ads semantics are
+  // proven. Everything else states why, and the neutral drill-down value below
+  // carries the contact's real source evidence without mislabelling it.
+  let attribution;
+  if (row.campaign_available) {
+    attribution = `<h4>Google Ads attribution</h4>
+      <table class="data-table"><tbody>
+        <tr><td>Campaign</td><td>${escapeHtml(row.campaign || "—")}</td></tr>
+        <tr><td>Keyword</td><td>${escapeHtml(row.keyword || "—")}</td></tr>
+      </tbody></table>`;
+  } else if (row.campaign_semantics === "not_google_ads_source") {
+    attribution = `<h4>Google Ads attribution</h4>
+      <p class="muted">Not applicable — this is not a Google Ads contact.
+      HubSpot's source drill-down for this contact is not a Google Ads campaign or
+      keyword, so it is reported above as canonical source evidence rather than
+      labelled as one.</p>`;
+  } else if (row.campaign_semantics === "campaign_identity_unresolved") {
+    attribution = `<h4>Google Ads attribution</h4>
+      <p class="muted">This contact's campaign label did not resolve to a real
+      Google Ads campaign identity, so no campaign or keyword is claimed.</p>`;
+  } else {
+    attribution = `<h4>Google Ads attribution</h4>
+      <p class="muted">Unavailable — the Google Ads campaign-identity contract
+      could not be consulted. Unavailable is not absent.</p>`;
+  }
+
+  const html = `
+    <h3>${escapeHtml(row.company || "Contact")}</h3>
+    <p class="grace-note">Selected event: <strong>${escapeHtml(stage.label)}</strong> on
+      ${escapeHtml(row.event_date || "—")} · Current lifecycle:
+      <strong>${escapeHtml(row.lifecycle_stage_label || "—")}</strong></p>
+
+    <h4>Funnel history</h4>
+    <table class="data-table"><tbody>${stageRows}</tbody></table>
+
+    <h4>Current CRM state</h4>
+    <table class="data-table"><tbody>
+      <tr><td>Lifecycle stage</td><td>${escapeHtml(row.lifecycle_stage_label || "—")}</td></tr>
+      <tr><td>MQL status</td><td>${escapeHtml(row.mql_status || "—")}</td></tr>
+      <tr><td>Working category</td><td>${escapeHtml(LEADS_STATUS_LABELS[row.mql_status_category] || row.mql_status_category || "—")}</td></tr>
+      <tr><td>Owner</td><td>${escapeHtml(row.owner_id || "—")}</td></tr>
+      <tr><td>HubSpot contact ID</td><td><code>${escapeHtml(row.contact_id || "—")}</code></td></tr>
+    </tbody></table>
+
+    <h4>Acquisition evidence</h4>
+    <table class="data-table"><tbody>
+      <tr><td>Acquisition group</td><td>${escapeHtml(row.acquisition_group_label || sourceGroupLabel(row.acquisition_group))}</td></tr>
+      <tr><td>Channel</td><td>${escapeHtml(row.source_channel_label || "—")}</td></tr>
+      <tr><td>Platform</td><td>${escapeHtml(row.source_platform_label || "—")}</td></tr>
+      <tr><td>Raw HubSpot source</td><td>${escapeHtml(row.acquisition_source_raw || "—")}</td></tr>
+      <tr><td title="HubSpot Original Source Drill-Down — a Google Ads campaign only for Paid Search contacts">Source detail</td><td>${escapeHtml(row.source_detail_raw || "—")}</td></tr>
+      <tr><td>Country</td><td>${escapeHtml(row.country || "—")}</td></tr>
+      <tr><td>GCLID</td><td>${row.has_gclid ? "Present" : "Absent"}</td></tr>
+    </tbody></table>
+    ${attribution}`;
+
+  const overlay = document.getElementById("leads-drawer-overlay");
+  const drawer = document.getElementById("leads-drawer");
+  const titleEl = document.getElementById("leads-drawer-title");
+  const bodyEl = document.getElementById("leads-drawer-body");
+  if (!overlay || !drawer || !bodyEl) return;
+  overlay.hidden = false; overlay.setAttribute("aria-hidden", "false");
+  drawer.hidden = false;
+  if (titleEl) titleEl.textContent = row.company || "Contact";
+  bodyEl.innerHTML = html;
+  overlay.onclick = closeLeadsDrawer;
+  const closeBtn = document.getElementById("leads-drawer-close-btn");
+  if (closeBtn) closeBtn.onclick = closeLeadsDrawer;
+  _leadsDrawerKeyHandler = (e) => { if (e.key === "Escape") closeLeadsDrawer(); };
+  document.addEventListener("keydown", _leadsDrawerKeyHandler);
+}
+
+let _leadsDrawerKeyHandler = null;
+
+function closeLeadsDrawer() {
+  const overlay = document.getElementById("leads-drawer-overlay");
+  const drawer = document.getElementById("leads-drawer");
+  if (overlay) { overlay.hidden = true; overlay.setAttribute("aria-hidden", "true"); }
+  if (drawer) { drawer.hidden = true; }
+  if (_leadsDrawerKeyHandler) {
+    document.removeEventListener("keydown", _leadsDrawerKeyHandler);
+    _leadsDrawerKeyHandler = null;
   }
 }
 
@@ -7821,7 +8393,9 @@ function renderSourceDrilldownRow(d) {
       <td>${drilldownValue(d.main_contact)}</td>
       <td>${drilldownValue(d.contact_id)}</td>
       <td>${drilldownValue(d.lifecycle_stage)}</td>
-      <td>${drilldownValue(d.status_category)}</td>
+      <!-- PR-ADS-153C: legacy operational classification, not canonical funnel
+           truth. Revenue by Source is migrated in a later PR. -->
+      <td title="Legacy operational classification (status_category) — not canonical funnel truth">${drilldownValue(d.status_category)}</td>
       <td>${drilldownValue(d.deal)}</td>
       <td>${drilldownValue(d.deal_id)}</td>
       <td>${amount}</td>
@@ -11273,97 +11847,10 @@ function kwDrawerSqlSection(s) {
     </div>`;
 }
 
-// ── In Progress Leads page ─────────────────────────────────────────────────
+// PR-ADS-153C: the In Progress Leads page is retired. Its concept is now the
+// `open_working` operational filter on the canonical Leads page, driven by
+// mql_status_category (which maps every OPEN - * status, including Connecting).
 
-// Explicit MDR workflow statuses shown on the In Progress Leads page.
-// OPEN - Connecting has status_category=unknown in the data model (backend
-// classification is not changed); it is included here because it is an active
-// work-queue status that MDR is still handling, not a final verdict.
-const ACTIVE_MDR_STATUSES = new Set([
-  "OPEN - Meeting Booked",
-  "OPEN - Pending Meeting",
-  "OPEN - Connecting",
-]);
-
-async function loadOpportunities() {
-  renderPageDatasetFreshness("in_progress_leads");
-  const el = document.getElementById("opps-body");
-  if (!el) return;
-
-  el.innerHTML = `<p class="empty-state">Loading in-progress leads…</p>`;
-
-  try {
-    const data  = await fetchJSON(`/api/leads?${evidenceWindowQuery()}`);
-
-    // Deduplicate by contact_id (same null-safe approach as loadLeads)
-    const seen = new Map();
-    for (const [index, lead] of (data.leads || []).entries()) {
-      const dedupeKey = hasValidContactId(lead)
-        ? `contact:${lead.contact_id}`
-        : `row:${index}`;
-      const existing = seen.get(dedupeKey);
-      if (!existing || lead.run_date > existing.run_date) {
-        seen.set(dedupeKey, lead);
-      }
-    }
-
-    // Filter by explicit MDR active statuses — includes OPEN - Connecting even
-    // though its status_category is "unknown" in the backend classification.
-    const inProgress = Array.from(seen.values())
-      .filter((l) => ACTIVE_MDR_STATUSES.has(l.mql_status));
-
-    if (inProgress.length === 0) {
-      el.innerHTML = `<p class="empty-state">No in-progress leads in the selected window.</p>`;
-      return;
-    }
-
-    // Group by mql_status
-    const booked     = inProgress.filter((l) => l.mql_status === "OPEN - Meeting Booked");
-    const pending    = inProgress.filter((l) => l.mql_status === "OPEN - Pending Meeting");
-    const connecting = inProgress.filter((l) => l.mql_status === "OPEN - Connecting");
-
-    const renderGroup = (title, leads) => {
-      if (leads.length === 0) return "";
-      return `
-        <p class="opp-group-title">${escapeHtml(title)} (${leads.length})</p>
-        <div class="opp-grid">
-          ${leads.map((l) => {
-            const cardTitle = l.company || l.keyword || l.country || "Unnamed lead";
-            const isConnecting = l.mql_status === "OPEN - Connecting";
-            return `
-            <div class="opp-card">
-              <div class="opp-card__company">${escapeHtml(cardTitle)}</div>
-              <div class="opp-card__meta">
-                <span class="opp-card__tag">${escapeHtml(l.mql_status || "In Progress")}</span>
-                ${isConnecting ? `<span class="opp-card__tag opp-card__tag--muted">No verdict yet</span>` : ""}
-                ${l.campaign_name ? `<span class="opp-card__tag">${escapeHtml(l.campaign_name)}</span>` : ""}
-                ${l.keyword ? `<span class="opp-card__tag">${escapeHtml(l.keyword)}</span>` : ""}
-                ${l.country ? `<span class="opp-card__tag">${escapeHtml(l.country)}</span>` : ""}
-              </div>
-              ${l.contact_id ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">ID: ${escapeHtml(l.contact_id)}</div>` : ""}
-            </div>`;
-          }).join("")}
-        </div>`;
-    };
-
-    // PR-ADS-141: the leads row list is a presentation-capped page. When the
-    // window holds more leads than were returned, disclose it — never imply the
-    // in-progress list is complete for All time.
-    const truncationNote = data.has_more
-      ? `<div class="evidence-status-chip evidence-status-chip--warning" style="margin-bottom:12px;display:inline-flex">`
-        + `Showing in-progress leads from the ${fmtCount(data.returned_count)} most recent of `
-        + `${fmtCount(data.total_count)} leads in this window — narrow the window for a complete list.</div>`
-      : "";
-
-    el.innerHTML = truncationNote
-                 + renderGroup("Meeting Booked", booked)
-                 + renderGroup("Pending Meeting", pending)
-                 + renderGroup("Connecting", connecting);
-
-  } catch (_) {
-    el.innerHTML = `<p class="empty-state">Could not load in-progress lead data.</p>`;
-  }
-}
 
 // ── Scheduler page ─────────────────────────────────────────────────────────
 
@@ -12119,7 +12606,7 @@ function datasetRelatedPage(source, dataset) {
     "google_ads_api/keyword_facts": { page: "keywords",    label: "Keyword Evidence" },
     "google_ads_api/geo":          { page: "geo",           label: "Country Performance" },
     "google_ads_api/campaigns":    { page: "campaigns",     label: "Campaigns"    },
-    "hubspot/contacts":     { page: "leads",         label: "Lead Quality" },
+    "hubspot/contacts":     { page: "leads",         label: "Leads" },
     "hubspot/deals":        { page: "deals",         label: "Deals"        },
     "gclid/matches":        { page: "gclid-attribution", label: "GCLID Attribution" },
   };
@@ -13121,6 +13608,10 @@ function _appendDrawerEvidenceSections(container, data, lq) {
         <p class="drawer-empty">No lead rows for this campaign in selected window.</p>
       </div>`;
   } else {
+    // PR-ADS-153C: this campaign-drawer evidence still reads the legacy
+    // /api/campaign-detail contract. It is a per-contact operational attribute,
+    // never a funnel count, and is disclosed as legacy pending Platform Evidence
+    // migration.
     const rlRows = recentLeads.map((l) => {
       const catCls = l.status_category === "qualified"   ? "junk--low"  :
                      l.status_category === "junk"        ? "junk--high" :
@@ -13131,7 +13622,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
           <td>${escapeHtml(l.country || "—")}</td>
           <td>${escapeHtml(l.keyword || "—")}</td>
           <td>${escapeHtml(l.mql_status || "—")}</td>
-          <td class="${catCls}">${escapeHtml(l.status_category || "—")}</td>
+          <td class="${catCls}" title="Legacy operational classification — not canonical funnel truth">${escapeHtml(l.status_category || "—")}</td>
           <td>${escapeHtml(l.run_date || "—")}</td>
         </tr>`;
     }).join("");
@@ -13862,6 +14353,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     btn.addEventListener("click", () => activateDashboardTab(btn.dataset.dashTab));
   });
 
+  // Wire up canonical Leads controls (business windows — PR-ADS-153C).
+  // The remaining Leads filters are wired by leadsRenderControls(); the window
+  // select is shared application state, so it is wired here like every other.
+  const leadsWindow = document.getElementById("leads-window");
+  if (leadsWindow) {
+    leadsWindow.value = getRoasBusinessWindow();
+    leadsWindow.addEventListener("change", handleBusinessWindowSelectChange);
+  }
+
   // Wire up ROAS by Campaign controls (business windows — PR-ADS-107A)
   const roasCampRefresh = document.getElementById("roas-campaigns-refresh-btn");
   const roasCampWindow  = document.getElementById("roas-campaigns-window");
@@ -14227,6 +14727,9 @@ function handleBusinessWindowSelectChange(e) {
   setRoasBusinessWindow(e.target.value);
   switch (_currentPage) {
     case "dashboard":       loadDashboardTab(); break;
+    // A new window is a new cohort — restart Leads paging at page 1 so the
+    // table can never show an offset that belonged to the previous window.
+    case "leads":           _leadsPage = 1; loadLeads(); break;
     case "roas-countries":  loadRoasCountries(); break;
     case "deals":           loadDeals();         break;
     case "revenue-health":  loadRevenueHealth(); break;

@@ -21,8 +21,7 @@ REQUIRED_ROUTE_KEYS = [
     "deals",
     "gclid-attribution",
     "waste",
-    "opportunities",
-    "roas-campaigns",
+        "roas-campaigns",
     "roas-countries",
     "unit-economics",
     "churn-input",
@@ -36,7 +35,6 @@ NEW_VISIBLE_LABELS = [
     "Countries",
     "Search Terms",
     "Flagged Waste Terms",
-    "In Progress Leads",
     "Data Runs",
     "System Status",
     "Admin Backfill",
@@ -49,8 +47,7 @@ NEW_VISIBLE_LABELS = [
 SIDEBAR_GROUPS = [
     "Command Center",
     "Platform Evidence",
-    "Lead Intelligence",
-    "Revenue &amp; Attribution",
+    "CRM &amp; Revenue",
     "Admin",
 ]
 
@@ -121,7 +118,7 @@ def test_old_duplicate_menu_items_removed():
 
 def test_revenue_attribution_section_exists():
     """Revenue & Attribution section must exist in the sidebar."""
-    assert "Revenue &amp; Attribution" in HTML
+    assert "CRM &amp; Revenue" in HTML
 
 
 def test_roas_pages_exist():

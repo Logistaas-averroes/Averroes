@@ -24,8 +24,9 @@ def _fn(name, span=2600):
 
 
 def _navigate():
-    # Span widened in PR-ADS-113 (added revenue-health admin role enforcement).
-    return _fn("function navigate(page, options)", span=3200)
+    # Span widened in PR-ADS-113 (revenue-health admin role enforcement) and
+    # again in PR-ADS-153C (retired-page redirect block).
+    return _fn("function navigate(page, options)", span=3800)
 
 
 def _section(page_id):
@@ -42,7 +43,8 @@ def test_revenue_pages_constant_includes_both_roas_pages():
     # the revenue-page set so the global ad-window bar is suppressed there too.
     # PR-ADS-134 rebuilt the Dashboard as the Executive Overview (business
     # windows, revenue truth), so it joined the clean revenue chrome as well.
-    assert 'REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source"]' in JS
+    # PR-ADS-153C: Leads is a CRM/business page and joined the clean revenue chrome.
+    assert 'REVENUE_PAGES = ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads"]' in JS
     assert "function isRevenuePage" in JS
 
 
@@ -212,4 +214,4 @@ def test_revenue_pages_list():
     m = re.search(r'REVENUE_PAGES = \[([^\]]*)\]', JS)
     assert m
     names = [n.strip().strip('"').strip("'") for n in m.group(1).split(",") if n.strip()]
-    assert names == ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source"]
+    assert names == ["dashboard", "roas-campaigns", "roas-countries", "deals", "revenue-health", "revenue-by-source", "leads"]

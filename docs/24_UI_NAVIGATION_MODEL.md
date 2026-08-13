@@ -21,8 +21,7 @@
 |-------|---------|-------|
 | **Command Center** | Daily operator pages | Dashboard, Action Queue, Reports |
 | **Platform Evidence** | Raw ad platform data and analytics (active source: **Google Ads API** — see PR-ADS-105; Windsor is legacy) | Campaigns, Search Terms, Keywords, Countries |
-| **Lead Intelligence** | Lead quality review and exception queues | Lead Quality, In Progress Leads, Flagged Waste Terms |
-| **Revenue & Attribution** | Revenue-truth ROAS, deal attribution, unit economics | Deals, ROAS by Campaign, ROAS by Country, GCLID Attribution, Unit Economics |
+| **CRM & Revenue** | Canonical CRM funnel plus revenue-truth ROAS, deal attribution, unit economics | Leads, Deals, ROAS by Campaign, ROAS by Country, Revenue by Source, GCLID Attribution, Unit Economics |
 | **Admin** | System operation, diagnostics, and configuration | Data Runs, System Status, Admin Backfill, Churn Input |
 
 ---
@@ -56,14 +55,13 @@ Placing them after Platform Evidence and Lead Intelligence creates a clear readi
 | Search Terms | `search-terms` | Platform Evidence |
 | Keywords | `keywords` | Platform Evidence |
 | Countries | `geo` | Platform Evidence |
-| Lead Quality | `leads` | Lead Intelligence |
-| In Progress Leads | `opportunities` | Lead Intelligence |
-| Flagged Waste Terms | `waste` | Lead Intelligence |
-| Deals | `deals` | Revenue & Attribution |
-| ROAS by Campaign | `roas-campaigns` | Revenue & Attribution |
-| ROAS by Country | `roas-countries` | Revenue & Attribution |
-| GCLID Attribution | `gclid-attribution` | Revenue & Attribution |
-| Unit Economics | `unit-economics` | Revenue & Attribution |
+| Leads | `leads` | CRM & Revenue |
+| Flagged Waste Terms | `waste` | Platform Evidence *(pending PR-ADS-153D consolidation)* |
+| Deals | `deals` | CRM & Revenue |
+| ROAS by Campaign | `roas-campaigns` | CRM & Revenue |
+| ROAS by Country | `roas-countries` | CRM & Revenue |
+| GCLID Attribution | `gclid-attribution` | CRM & Revenue |
+| Unit Economics | `unit-economics` | CRM & Revenue |
 | Data Runs | `scheduler` | Admin |
 | System Status | `health` | Admin |
 | Admin Backfill | `backfill` | Admin |
@@ -74,6 +72,21 @@ Placing them after Platform Evidence and Lead Intelligence creates a clear readi
 | Legacy Route | Resolves To |
 |-------------|-------------|
 | `ngrams` | `search-terms` (activates Patterns tab) |
+| `opportunities` | `leads` with the `open_working` working-status filter (PR-ADS-153C) |
+
+### PR-ADS-153C — Lead Intelligence retirement
+
+The **Lead Intelligence** group is removed. Lead Quality and In Progress Leads are
+retired as standalone pages and replaced by ONE canonical **Leads** page under
+CRM & Revenue:
+
+- **Lead Quality** kept the `leads` route key, so its old URL lands on the new
+  canonical page directly.
+- **In Progress Leads** (`opportunities`) redirects to `leads` and carries its
+  filter intent — that concept is now the `open_working` operational filter.
+- **Flagged Waste Terms** keeps its route, backend and durable evidence, and
+  moves under Platform Evidence until PR-ADS-153D consolidates it into Search
+  Terms + Action Queue.
 
 ---
 

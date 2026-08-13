@@ -23,7 +23,6 @@ REQUIRED_ROUTES = [
     "leads",
     "deals",
     "gclid-attribution",
-    "opportunities",
     "scheduler",
     "health",
     "backfill",
@@ -196,10 +195,15 @@ class TestBuildEmptyStateIntegration:
         )
 
     def test_build_empty_state_called_in_leads(self):
-        body = self._get_function_slice("async function loadLeads(")
-        assert "buildEmptyState(" in body, (
-            "loadLeads must call buildEmptyState() for its empty state"
-        )
+        """PR-ADS-153C: the canonical Leads page replaced the legacy empty state
+        with an explicit truth-state banner (unavailable / partial / mismatch /
+        bootstrap) plus per-view empty copy, so it no longer calls
+        buildEmptyState(). The stronger requirement is that it never renders a
+        missing count as zero."""
+        fn = self._get_function_slice("async function loadLeads()", window=600)
+        assert "leadsRenderActiveView" in fn
+        helper = APP_JS.split("function leadsCount(")[1].split("}")[0]
+        assert '"\u2014"' in helper or '"—"' in helper
 
     def test_build_empty_state_called_in_backfill(self):
         body = self._get_function_slice("function renderBackfillSummary(", window=2000)
@@ -341,6 +345,10 @@ class TestPageExplanationContainers:
         # "deals" was rebuilt into the Closed-Won revenue ledger in PR-ADS-113
         # and is now a clean revenue page without a page-explanation container
         # (same precedent as the ROAS pages in PR-ADS-110).
+        # "leads" was rebuilt into the canonical CRM funnel page in PR-ADS-153C
+        # and is now a clean business/CRM page without an inline explanation
+        # container (same precedent as "deals" and the ROAS pages); "opportunities"
+        # (In Progress Leads) was retired entirely.
         # "search-terms"/"ngrams" were rebuilt into the single Search Terms
         # evidence page in PR-ADS-144 — methodology moved into the Help drawer,
         # so the page carries no inline explanation container (same precedent
@@ -348,7 +356,7 @@ class TestPageExplanationContainers:
         key_pages = [
             "dashboard", "action-queue", "reports", "campaigns",
             "waste", "geo", "keywords",
-            "leads", "gclid-attribution", "opportunities",
+            "gclid-attribution",
             "scheduler", "health", "backfill", "historical-intelligence",
         ]
         for page in key_pages:

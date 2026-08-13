@@ -28,7 +28,8 @@ SERVER = open(os.path.join(ROOT, "api", "server.py"), encoding="utf-8").read()
 def _navigate_fn():
     idx = JS.find("function navigate(page, options)")
     assert idx != -1, "navigate(page, options) not found"
-    return JS[idx:idx + 2500]
+    # Span widened in PR-ADS-153C — navigate() grew a retired-page redirect block.
+    return JS[idx:idx + 3100]
 
 
 def test_navigate_hides_global_time_range_bar_on_roas_pages():

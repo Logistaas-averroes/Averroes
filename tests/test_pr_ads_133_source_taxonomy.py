@@ -500,7 +500,8 @@ def test_drawer_no_undefined_or_null_text():
 
 
 def test_window_change_reloads_source_page():
-    handler = _slice(JS, "function handleBusinessWindowSelectChange", span=500)
+    # span widened for PR-ADS-153C: the switch gained a canonical Leads case.
+    handler = _slice(JS, "function handleBusinessWindowSelectChange", span=700)
     assert 'case "revenue-by-source": loadRevenueBySource()' in handler
     loader = _slice(JS, "async function loadRevenueBySource", span=1400)
     assert "getRoasBusinessWindow()" in loader
