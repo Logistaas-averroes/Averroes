@@ -333,6 +333,23 @@ honour is hidden, not shown and ignored. The Disqualified / Other view *is* the
 working-status breakdown, so the working-status and company filters are removed
 there while window, scope and source — which do filter it — remain.
 
+"Remain" means they work. The operational breakdown consumes the identical scope
+contract, resolved by the identical function
+(`resolve_population_filters`) that serves the contact page:
+
+| Scope | Population |
+|---|---|
+| `all_source` | no scope constraint |
+| `google_ads_source` | the canonical Google Ads acquisition population |
+| `campaign_attributable` | the above AND a label proven to be a real Google Ads campaign identity |
+| `keyword_attributable` | the above AND a HubSpot keyword label present |
+
+`acquisition_group` intersects with the scope rather than replacing it. A narrow
+scope with no consultable identity contract is `available: false` with
+`counts: null` — the same unavailable-never-zero rule §4.1 applies to the funnel
+counts. Sharing the resolver is the mechanism, not a convention: it is what makes
+"same scope, same population" true by construction rather than by review.
+
 ### 13.2 Source classification uses the FULL contract
 
 Acquisition group comes from `analysis/source_classification.py`, the same module

@@ -395,6 +395,24 @@ def _append_source_pair_filter(where: list, params: list, source_pairs_in) -> No
     params.append([pair[1] for pair in source_pairs_in])
 
 
+# A HubSpot keyword label must be a real value, not an empty string.
+_KEYWORD_PRESENT_SQL = ("(hs_analytics_source_data_2 IS NOT NULL "
+                        "AND btrim(hs_analytics_source_data_2) <> '')")
+
+
+def _append_campaign_filter(where: list, params: list, campaigns_in) -> None:
+    """Constrain rows to campaign labels that resolved to a real Google Ads
+    campaign identity. ``None`` means no constraint; an EMPTY list filters
+    everything out rather than being ignored."""
+    if campaigns_in is None:
+        return
+    if not campaigns_in:
+        where.append("FALSE")
+        return
+    where.append("(hs_analytics_source_data_1 = ANY(%s))")
+    params.append([c for c in campaigns_in if c is not None])
+
+
 def fetch_funnel_contact_page(
     event: str,
     start: date | None,
@@ -438,17 +456,9 @@ def fetch_funnel_contact_page(
     params.extend([end, end])
 
     _append_source_pair_filter(where, params, source_pairs_in)
-
-    if campaigns_in is not None:
-        if campaigns_in:
-            where.append("(hs_analytics_source_data_1 = ANY(%s))")
-            params.append([c for c in campaigns_in if c is not None])
-        else:
-            where.append("FALSE")
-
+    _append_campaign_filter(where, params, campaigns_in)
     if require_keyword:
-        where.append("(hs_analytics_source_data_2 IS NOT NULL "
-                     "AND btrim(hs_analytics_source_data_2) <> '')")
+        where.append(_KEYWORD_PRESENT_SQL)
 
     if operational_status:
         where.append("(mql_status_category = %s)")
@@ -497,13 +507,19 @@ def fetch_funnel_contact_page(
 
 def fetch_operational_status_counts(
     event: str, start: date | None, end: date | None,
-    *, source_pairs_in: list | None = None) -> dict:
+    *, source_pairs_in: list | None = None,
+    campaigns_in: list | None = None,
+    require_keyword: bool = False) -> dict:
     """Counts by ``mql_status_category`` for one event window.
 
     Powers the Disqualified / Other view and the working-status filter without a
-    second full scan in the browser. ``source_pairs_in`` applies the SAME
-    pre-resolved acquisition-group allow-list the contact page uses, so the
-    Source selector filters this view too instead of decorating it.
+    second full scan in the browser.
+
+    ``source_pairs_in`` / ``campaigns_in`` / ``require_keyword`` are the SAME
+    pre-resolved allow-lists ``fetch_funnel_contact_page`` takes, produced by the
+    SAME resolver, so a named scope selects one population in both views. ``None``
+    means no constraint; an EMPTY list means the classifier matched nothing and
+    must filter everything out.
     """
     if event not in FUNNEL_EVENTS:
         raise ValueError(f"Unknown funnel event '{event}'")
@@ -516,6 +532,9 @@ def fetch_operational_status_counts(
     ]
     params: list = [start, end, end]
     _append_source_pair_filter(where, params, source_pairs_in)
+    _append_campaign_filter(where, params, campaigns_in)
+    if require_keyword:
+        where.append(_KEYWORD_PRESENT_SQL)
 
     try:
         with get_conn() as conn:

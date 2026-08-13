@@ -3625,10 +3625,25 @@ page renders them in a visually distinct view.
 |---|---|
 | `window` / `window_type` | `current_quarter` / `business` |
 | `event` | `lead` |
+| `scope` | `all_source` — same four named scopes as above |
 | `acquisition_group` | *(none)* — same values and same allow-list as above |
 
-`acquisition_group` applies the identical population filter, so a page that shows
-a Source selector beside this view genuinely filters it.
+`scope` and `acquisition_group` are translated into SQL filters by the SAME
+function the contact page uses (`resolve_population_filters`), so a named scope
+selects one population in both views and in the funnel strip above them:
+
+- `google_ads_source` — the canonical Google Ads acquisition population;
+- `campaign_attributable` — that population **and** a label that resolved to a
+  real Google Ads campaign identity;
+- `keyword_attributable` — the above **and** a HubSpot keyword label present.
+
+`acquisition_group` intersects with the scope rather than replacing it, so Scope
++ Source describe the same intersection everywhere they are both offered.
+
+A narrow scope whose campaign-identity contract cannot be consulted returns
+`available: false`, `counts: null`, `reason: "campaign_identity_unavailable"` —
+**never a zeroed breakdown**, which would read as a proven "no
+campaign-attributable contacts".
 
 ## Dashboard overview additions
 

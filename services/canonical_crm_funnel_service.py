@@ -744,6 +744,61 @@ def resolve_campaign_allowlist(raw_campaigns: list, resolver):
     return [label for label in raw_campaigns if resolver(label)[0]]
 
 
+def resolve_population_filters(scope: str, acquisition_group: str | None,
+                               resolver, repo) -> dict:
+    """The ONE translation of (scope × acquisition group) into SQL filters.
+
+    Every server-side read of the canonical contact store — the contact page and
+    the operational-status breakdown alike — routes through this function, so a
+    scope can never mean one population in one view and a different population in
+    the view beside it.
+
+    Semantics, identical to the named scopes the funnel counts use:
+
+      ``all_source``            no scope constraint
+      ``google_ads_source``     the canonical Google Ads acquisition population
+      ``campaign_attributable`` Google Ads population AND a label that resolved
+                                to a real Google Ads campaign identity
+      ``keyword_attributable``  the above AND a HubSpot keyword label present
+
+    ``acquisition_group`` intersects with the scope rather than replacing it, so
+    Scope + Source describe the same intersection wherever both are offered.
+    Selecting a non-Google group under a Google-only scope correctly yields an
+    empty allow-list (a proven zero), not an ignored filter.
+
+    Returns ``{source_pairs_in, campaigns_in, require_keyword}``.
+    """
+    facets = repo.fetch_distinct_facets()
+    source_pairs = facets.get("source_pairs") or []
+    raw_campaigns = facets.get("campaigns") or []
+
+    pairs_in = resolve_source_pair_allowlist(acquisition_group, source_pairs)
+    if scope == SCOPE_GOOGLE_ADS_SOURCE or scope in IDENTITY_DEPENDENT_SCOPES:
+        google_pairs = resolve_source_pair_allowlist(GROUP_GOOGLE_ADS, source_pairs)
+        pairs_in = (google_pairs if pairs_in is None
+                    else [p for p in pairs_in if p in set(google_pairs)])
+
+    campaigns_in = None
+    if scope in IDENTITY_DEPENDENT_SCOPES:
+        campaigns_in = resolve_campaign_allowlist(raw_campaigns, resolver)
+
+    return {
+        "source_pairs_in": pairs_in,
+        "campaigns_in": campaigns_in,
+        "require_keyword": scope == SCOPE_KEYWORD_ATTRIBUTABLE,
+    }
+
+
+def _identity_dependent_scope_unavailable(scope: str, identity_available: bool) -> bool:
+    """Is this scope unknowable because the identity contract was not consulted?
+
+    A narrow scope with no identity contract is UNAVAILABLE. Answering it with an
+    empty page or a zeroed breakdown would publish a proven zero for a population
+    nobody was able to measure.
+    """
+    return scope in IDENTITY_DEPENDENT_SCOPES and not identity_available
+
+
 def contacts(
     window_type: str,
     window_key: str,
@@ -782,7 +837,7 @@ def contacts(
 
     # A narrow scope with no identity contract is UNAVAILABLE — never an empty
     # page, which would read as a proven zero.
-    if scope in IDENTITY_DEPENDENT_SCOPES and not identity_available:
+    if _identity_dependent_scope_unavailable(scope, identity_available):
         return {
             "available": False,
             "reason": REASON_CAMPAIGN_IDENTITY_UNAVAILABLE,
@@ -797,25 +852,13 @@ def contacts(
             "campaign_identity_available": False,
         }
 
-    facets = repo.fetch_distinct_facets()
-    source_pairs = facets.get("source_pairs") or []
-    raw_campaigns = facets.get("campaigns") or []
-
-    pairs_in = resolve_source_pair_allowlist(acquisition_group, source_pairs)
-    if scope == SCOPE_GOOGLE_ADS_SOURCE or scope in IDENTITY_DEPENDENT_SCOPES:
-        google_pairs = resolve_source_pair_allowlist(GROUP_GOOGLE_ADS, source_pairs)
-        pairs_in = (google_pairs if pairs_in is None
-                    else [p for p in pairs_in if p in set(google_pairs)])
-
-    campaigns_in = None
-    if scope in IDENTITY_DEPENDENT_SCOPES:
-        campaigns_in = resolve_campaign_allowlist(raw_campaigns, resolver)
+    filters = resolve_population_filters(scope, acquisition_group, resolver, repo)
 
     fetched = repo.fetch_funnel_contact_page(
         event, start, end,
-        source_pairs_in=pairs_in,
-        campaigns_in=campaigns_in,
-        require_keyword=(scope == SCOPE_KEYWORD_ATTRIBUTABLE),
+        source_pairs_in=filters["source_pairs_in"],
+        campaigns_in=filters["campaigns_in"],
+        require_keyword=filters["require_keyword"],
         operational_status=operational_status,
         company_query=company_query,
         page=page,
@@ -906,6 +949,7 @@ def _contact_row_payload(row: dict, event: str, identity_available: bool,
 
 def operational_status_breakdown(
     window_type: str, window_key: str, *, event: str = EVENT_LEAD,
+    scope: str = SCOPE_ALL_SOURCE,
     acquisition_group: str | None = None,
     now: datetime | None = None) -> dict:
     """Counts by operational ``mql_status_category`` for one event window.
@@ -913,35 +957,58 @@ def operational_status_breakdown(
     These are WORKING statuses, not funnel stages — the Disqualified / Other view
     is deliberately kept distinct from the five canonical stages.
 
-    ``acquisition_group`` applies the SAME population filter as the funnel and
-    the contact rows, using the same pre-resolved pair allow-list, so the Source
-    selector means one thing everywhere on the page.
+    ``scope`` and ``acquisition_group`` go through ``resolve_population_filters``
+    — the SAME translation the contact page uses, and the same named-scope
+    semantics the funnel counts use. A view that keeps the Scope and Source
+    selectors visible must count the same population the funnel strip above it
+    counts; a working-status breakdown over a broader population than its own
+    headline is a different fact wearing the same label.
+
+    A narrow scope whose campaign-identity contract could not be consulted
+    returns ``available: false`` with ``counts: null`` — never a zeroed
+    breakdown, which would read as a proven "no campaign-attributable contacts".
     """
     if not is_valid_event(event):
         raise ValueError(f"Unknown funnel event '{event}'")
+    if scope not in ORDERED_SCOPES:
+        raise ValueError(f"Unknown scope '{scope}'")
     if acquisition_group is not None and acquisition_group not in ACQUISITION_GROUPS:
         raise ValueError(f"Unknown acquisition group '{acquisition_group}'")
     window = resolve_window_contract(window_type, window_key, now=now)
 
     from db import crm_funnel_repository as repo  # noqa: PLC0415
 
-    pairs_in = None
-    if acquisition_group:
-        facets = repo.fetch_distinct_facets()
-        pairs_in = resolve_source_pair_allowlist(
-            acquisition_group, facets.get("source_pairs") or [])
+    resolver, identity_available = _build_campaign_resolver(
+        window["start"], window["end"])
 
-    fetched = repo.fetch_operational_status_counts(
-        event, window["start"], window["end"], source_pairs_in=pairs_in)
-    return {
-        "available": bool(fetched.get("available")),
+    base = {
         "window": _window_payload(window),
         "event": event,
+        "scope": scope,
+        "scope_label": SCOPE_LABELS[scope],
         "acquisition_group": acquisition_group,
         "acquisition_group_label": (GROUP_LABELS[acquisition_group]
                                     if acquisition_group else "All sources"),
-        "counts": fetched.get("counts") if fetched.get("available") else None,
+        "campaign_identity_available": identity_available,
         "categories": list(ALL_MQL_CATEGORIES),
+    }
+
+    if _identity_dependent_scope_unavailable(scope, identity_available):
+        return {**base, "available": False, "counts": None,
+                "reason": REASON_CAMPAIGN_IDENTITY_UNAVAILABLE}
+
+    filters = resolve_population_filters(scope, acquisition_group, resolver, repo)
+    fetched = repo.fetch_operational_status_counts(
+        event, window["start"], window["end"],
+        source_pairs_in=filters["source_pairs_in"],
+        campaigns_in=filters["campaigns_in"],
+        require_keyword=filters["require_keyword"])
+    available = bool(fetched.get("available"))
+    return {
+        **base,
+        "available": available,
+        "counts": fetched.get("counts") if available else None,
+        "reason": None if available else fetched.get("reason"),
     }
 
 
@@ -1028,7 +1095,8 @@ __all__ = [
     "build", "build_populations", "build_conversions", "cohort_conversion",
     "contacts", "operational_status_breakdown",
     "source_taxonomy", "derive_acquisition_group", "campaign_identity",
-    "resolve_source_pair_allowlist", "ACQUISITION_GROUPS",
+    "resolve_source_pair_allowlist", "resolve_population_filters",
+    "ACQUISITION_GROUPS",
     "funnel_definitions", "event_definition", "scope_keys", "scopes_are_nested",
     "reconciliation_status",
 ]

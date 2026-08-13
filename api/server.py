@@ -8581,6 +8581,7 @@ def api_crm_funnel_operational_status(
     window: str = Query(default="current_quarter"),
     window_type: str = Query(default="business"),
     event: str = Query(default="lead"),
+    scope: str = Query(default="all_source"),
     acquisition_group: str | None = Query(default=None),
 ) -> dict[str, Any]:
     """Working-status breakdown (``mql_status_category``) for one event window.
@@ -8589,13 +8590,18 @@ def api_crm_funnel_operational_status(
     the Leads page keeps the Disqualified / Other view visually distinct from the
     five canonical lifecycle stages.
 
-    ``acquisition_group`` applies the same population filter as the funnel and
-    the contact page, so a visible Source selector genuinely filters this view.
+    ``scope`` and ``acquisition_group`` apply the same population filters as the
+    funnel and the contact page, resolved by the same function, so the visible
+    Scope and Source selectors genuinely filter this view and describe the same
+    population the funnel strip above it describes.
+
+    A narrow scope whose campaign-identity contract cannot be consulted returns
+    ``available: false`` with ``counts: null`` — never a zeroed breakdown.
     """
     try:
         from services import canonical_crm_funnel_service as crm_funnel  # noqa: PLC0415
         return crm_funnel.operational_status_breakdown(
-            window_type, window, event=event,
+            window_type, window, event=event, scope=scope,
             acquisition_group=acquisition_group)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

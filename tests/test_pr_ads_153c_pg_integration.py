@@ -628,3 +628,205 @@ def test_non_google_rows_from_sql_carry_no_campaign_or_keyword(pg):
         # The drill-down evidence is still returned — just not as a campaign.
         assert row["source_detail_raw"] == detail
         assert row["source_channel_label"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PR-ADS-153C follow-up — Disqualified / Other honours the Scope selector
+# ─────────────────────────────────────────────────────────────────────────────
+# The operational view keeps Scope visible, so its counts must describe the
+# same population the funnel strip above it describes — proven here against
+# real SQL, for every named scope.
+
+_SCOPE_FIXTURE = [
+    # (id, source, drill-down/campaign, keyword, mql_status)
+    ("kw",       "PAID_SEARCH",    "Brand - US", "tms",  "MQL"),
+    ("campaign", "PAID_SEARCH",    "Brand - US", None,   "CLOSED - Bad Fit"),
+    ("unsafe",   "PAID_SEARCH",    "(not set)",  "tms",  "MQL"),
+    ("organic",  "ORGANIC_SEARCH", "google",     "tms",  "MQL"),
+    ("offline",  "Offline Sources", "Events",    "tms",  "MQL"),
+]
+
+_SAFE_CAMPAIGN = "Brand - US"
+
+
+def _seed_scope_fixture():
+    return _seed([
+        _contact(cid, source=source, campaign=campaign,
+                 mql_status=status,
+                 entered_lead=f"2026-07-{5 + i:02d}T00:00:00Z",
+                 entered_sql=f"2026-07-{5 + i:02d}T00:00:00Z")
+        for i, (cid, source, campaign, _kw, status) in enumerate(_SCOPE_FIXTURE)
+    ])
+
+
+def _clear_keywords(*contact_ids):
+    """`_contact` always sets a keyword; blank it where the fixture says None."""
+    from db.connection import get_conn
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE hubspot_contact_funnel SET hs_analytics_source_data_2 = NULL "
+                "WHERE contact_id = ANY(%s)", (list(contact_ids),))
+        conn.commit()
+
+
+def _identity(monkeypatch, *, available=True):
+    """Pin the Google Ads campaign-identity contract for a deterministic test."""
+    from services import canonical_crm_funnel_service as funnel
+
+    def _resolver(label):
+        return (label == _SAFE_CAMPAIGN,
+                None if label == _SAFE_CAMPAIGN else "unsafe_campaign")
+
+    monkeypatch.setattr(funnel, "_build_campaign_resolver",
+                        lambda start, end: (_resolver, available))
+
+
+_ALL_SCOPES = ("all_source", "google_ads_source",
+               "campaign_attributable", "keyword_attributable")
+
+_EXPECTED_BY_SCOPE = {
+    "all_source": {"kw", "campaign", "unsafe", "organic", "offline"},
+    "google_ads_source": {"kw", "campaign", "unsafe"},
+    "campaign_attributable": {"kw", "campaign"},
+    "keyword_attributable": {"kw"},
+}
+
+
+@pytest.mark.parametrize("scope", _ALL_SCOPES)
+def test_operational_counts_match_the_canonical_population_for_each_scope(
+        pg, monkeypatch, scope):
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed_scope_fixture()
+    _clear_keywords("campaign")
+    _identity(monkeypatch)
+
+    breakdown = funnel.operational_status_breakdown(
+        "business", "current_quarter", scope=scope,
+        now=datetime(2026, 8, 15, tzinfo=timezone.utc))
+    assert breakdown["available"] is True
+    assert breakdown["scope"] == scope
+    assert sum(breakdown["counts"].values()) == len(_EXPECTED_BY_SCOPE[scope])
+
+
+def test_operational_scopes_are_progressively_narrower_subsets(pg, monkeypatch):
+    """all_source ⊇ google_ads_source ⊇ campaign ⊇ keyword, on real counts."""
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed_scope_fixture()
+    _clear_keywords("campaign")
+    _identity(monkeypatch)
+
+    totals = []
+    for scope in _ALL_SCOPES:
+        breakdown = funnel.operational_status_breakdown(
+            "business", "current_quarter", scope=scope,
+            now=datetime(2026, 8, 15, tzinfo=timezone.utc))
+        totals.append(sum(breakdown["counts"].values()))
+    assert totals == sorted(totals, reverse=True)
+    assert totals == [5, 3, 2, 1]
+
+
+@pytest.mark.parametrize("scope", _ALL_SCOPES)
+def test_operational_and_funnel_populations_use_identical_scope_semantics(
+        pg, monkeypatch, scope):
+    """The visible funnel strip and the working-status breakdown below it must
+    count exactly the same contacts under the same scope."""
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed_scope_fixture()
+    _clear_keywords("campaign")
+    _identity(monkeypatch)
+    now = datetime(2026, 8, 15, tzinfo=timezone.utc)
+
+    # The contact page is the row-level expression of the same population.
+    page = funnel.contacts("business", "current_quarter", event="lead",
+                           scope=scope, page_size=100, now=now)
+    breakdown = funnel.operational_status_breakdown(
+        "business", "current_quarter", scope=scope, now=now)
+
+    assert {r["contact_id"] for r in page["rows"]} == _EXPECTED_BY_SCOPE[scope]
+    assert sum(breakdown["counts"].values()) == page["total"]
+
+    # And the funnel aggregate's own scoped count agrees with both.
+    aggregate = funnel.build("business", "current_quarter", scope=scope, now=now)
+    assert aggregate["events"]["lead"]["count"] == page["total"]
+
+
+def test_operational_view_applies_scope_and_source_together(pg, monkeypatch):
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed_scope_fixture()
+    _clear_keywords("campaign")
+    _identity(monkeypatch)
+    now = datetime(2026, 8, 15, tzinfo=timezone.utc)
+
+    def _total(**kw):
+        return sum(funnel.operational_status_breakdown(
+            "business", "current_quarter", now=now, **kw)["counts"].values())
+
+    # Source alone.
+    assert _total(acquisition_group="organic") == 1
+    assert _total(acquisition_group="google_ads") == 3
+    # Scope alone.
+    assert _total(scope="google_ads_source") == 3
+    # Both — an intersection, not a replacement.
+    assert _total(scope="google_ads_source", acquisition_group="google_ads") == 3
+    assert _total(scope="campaign_attributable",
+                  acquisition_group="google_ads") == 2
+    # A contradictory pair is a proven zero, never an ignored filter.
+    assert _total(scope="google_ads_source", acquisition_group="organic") == 0
+
+
+def test_operational_scope_matches_the_contact_page_under_source_too(pg, monkeypatch):
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed_scope_fixture()
+    _clear_keywords("campaign")
+    _identity(monkeypatch)
+    now = datetime(2026, 8, 15, tzinfo=timezone.utc)
+
+    for scope in _ALL_SCOPES:
+        for group in (None, "google_ads", "organic", "other_paid"):
+            page = funnel.contacts("business", "current_quarter", event="lead",
+                                   scope=scope, acquisition_group=group,
+                                   page_size=100, now=now)
+            breakdown = funnel.operational_status_breakdown(
+                "business", "current_quarter", scope=scope,
+                acquisition_group=group, now=now)
+            assert sum(breakdown["counts"].values()) == page["total"], (scope, group)
+
+
+@pytest.mark.parametrize("scope", ["campaign_attributable", "keyword_attributable"])
+def test_identity_unavailable_makes_operational_scope_unavailable_not_zero(
+        pg, monkeypatch, scope):
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed_scope_fixture()
+    _identity(monkeypatch, available=False)
+
+    breakdown = funnel.operational_status_breakdown(
+        "business", "current_quarter", scope=scope,
+        now=datetime(2026, 8, 15, tzinfo=timezone.utc))
+    assert breakdown["available"] is False
+    assert breakdown["counts"] is None          # NOT {} and NOT zeros
+    assert breakdown["reason"] == "campaign_identity_unavailable"
+    assert breakdown["campaign_identity_available"] is False
+
+
+@pytest.mark.parametrize("scope", ["all_source", "google_ads_source"])
+def test_identity_outage_does_not_suppress_the_broad_operational_scopes(
+        pg, monkeypatch, scope):
+    """An attribution outage must not blank CRM truth that never needed it."""
+    from services import canonical_crm_funnel_service as funnel
+
+    _seed_scope_fixture()
+    _identity(monkeypatch, available=False)
+
+    breakdown = funnel.operational_status_breakdown(
+        "business", "current_quarter", scope=scope,
+        now=datetime(2026, 8, 15, tzinfo=timezone.utc))
+    assert breakdown["available"] is True
+    assert sum(breakdown["counts"].values()) == len(_EXPECTED_BY_SCOPE[scope])

@@ -6898,11 +6898,15 @@ async function leadsRenderOperational() {
   if (!body) return;
   body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">Loading…</p>`;
 
-  // The Source selector is visible on this view, so it must actually filter it.
+  // The Scope and Source selectors stay visible on this view, so both must
+  // actually filter it — and with the same semantics the funnel strip above
+  // uses, or these counts would describe a broader population than their own
+  // headline.
   const params = new URLSearchParams({
     window: getRoasBusinessWindow(),
     window_type: "business",
     event: "lead",
+    scope: _leadsScope,
   });
   if (_leadsSourceGroup) params.set("acquisition_group", _leadsSourceGroup);
   let payload = null;
@@ -6911,7 +6915,10 @@ async function leadsRenderOperational() {
   } catch (_) { payload = null; }
 
   if (!payload || payload.available === false) {
-    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">Working-status breakdown unavailable.</p>`;
+    const reason = payload && payload.reason === "campaign_identity_unavailable"
+      ? "Google Ads campaign identity is unavailable, so this attribution scope cannot be resolved. This is unavailable — not zero."
+      : "Working-status breakdown unavailable.";
+    body.innerHTML = `<p class="empty-state" style="padding: var(--space-5);">${escapeHtml(reason)}</p>`;
     return;
   }
   const counts = payload.counts || {};
@@ -6927,6 +6934,7 @@ async function leadsRenderOperational() {
     <p class="grace-note" style="padding: 0 var(--space-5) var(--space-4);">
       These are MDR working statuses inside the MQL process — they do not define any funnel stage.
       Counted over contacts whose Lead stage-entry date falls in the window.
+      Scope: ${escapeHtml(payload.scope_label || "All sources")} ·
       Source: ${escapeHtml(payload.acquisition_group_label || "All sources")}.</p>`;
 }
 

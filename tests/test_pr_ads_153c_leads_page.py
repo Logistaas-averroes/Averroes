@@ -907,5 +907,184 @@ def test_source_filter_actually_filters_the_operational_view():
 def test_operational_status_service_applies_the_same_allowlist():
     service = (_ROOT / "services" / "canonical_crm_funnel_service.py").read_text()
     fn = service.split("def operational_status_breakdown(")[1].split("\ndef ")[0]
-    assert "resolve_source_pair_allowlist(" in fn
-    assert "source_pairs_in=pairs_in" in fn
+    # Delegated to the one shared resolver rather than re-derived locally.
+    assert "resolve_population_filters(scope, acquisition_group" in fn
+    assert 'source_pairs_in=filters["source_pairs_in"]' in fn
+    resolver = service.split("def resolve_population_filters(")[1].split("\ndef ")[0]
+    assert "resolve_source_pair_allowlist(" in resolver
+
+
+# =============================================================================
+# PR-ADS-153C follow-up §5 — the operational view honours the Scope selector
+# =============================================================================
+# The Disqualified / Other view keeps Scope visible and says it applies. It must
+# therefore consume the SAME canonical scope contract as the funnel strip above
+# it, or its counts silently describe a broader population than their headline.
+
+def test_operational_status_accepts_and_validates_scope():
+    import inspect
+    signature = inspect.signature(funnel.operational_status_breakdown)
+    assert "scope" in signature.parameters
+    assert signature.parameters["scope"].default == funnel.SCOPE_ALL_SOURCE
+    with pytest.raises(ValueError):
+        funnel.operational_status_breakdown(
+            "business", "current_quarter", scope="not_a_scope")
+
+
+def test_operational_status_endpoint_exposes_scope():
+    block = _SERVER_PY.split('@app.get("/api/crm-funnel/operational-status")')[1]
+    block = block.split("@app.")[0]
+    assert re.search(r'scope:\s*str\s*=\s*Query\(default="all_source"\)', block)
+    assert "scope=scope" in block
+
+
+def test_frontend_sends_the_scope_to_the_operational_view():
+    fn = _APP_JS.split("async function leadsRenderOperational(")[1]
+    fn = fn.split("\nasync function ")[0]
+    assert "scope: _leadsScope" in fn
+    assert "scope_label" in fn
+
+
+def test_scope_change_reloads_the_operational_view_too():
+    controls = _APP_JS.split("function leadsRenderControls(")[1].split("\nfunction ")[0]
+    scope_handler = controls.split('document.getElementById("leads-scope")')[1]
+    scope_handler = scope_handler.split("sourceSel")[0]
+    # loadLeads() reloads the funnel AND re-renders whichever view is active.
+    assert "loadLeads()" in scope_handler
+    active = _APP_JS.split("async function leadsRenderActiveView(")[1].split("\n}")[0]
+    assert "leadsRenderOperational()" in active
+
+
+def test_operational_view_reports_unavailable_scope_not_zero_counts():
+    fn = _APP_JS.split("async function leadsRenderOperational(")[1]
+    fn = fn.split("\nasync function ")[0]
+    assert "campaign_identity_unavailable" in fn
+    assert "not zero" in fn
+
+
+# ── The shared resolver is the mechanism, not a convention ──────────────────
+def test_one_resolver_serves_both_the_contact_page_and_the_operational_view():
+    service = (_ROOT / "services" / "canonical_crm_funnel_service.py").read_text()
+    contacts_fn = service.split("\ndef contacts(")[1].split("\ndef ")[0]
+    operational_fn = service.split(
+        "\ndef operational_status_breakdown(")[1].split("\ndef ")[0]
+    for fn in (contacts_fn, operational_fn):
+        assert "resolve_population_filters(scope, acquisition_group" in fn
+    # Neither view re-derives the scope→SQL translation for itself.
+    for fn in (contacts_fn, operational_fn):
+        assert "resolve_campaign_allowlist(" not in fn
+
+
+class _FakeRepo:
+    """Distinct facets only — the pure part of the population-filter contract."""
+
+    SOURCE_PAIRS = [
+        ("PAID_SEARCH", "Brand - US"),
+        ("PAID_SEARCH", "(not set)"),
+        ("ORGANIC_SEARCH", "google"),
+        ("Offline Sources", "Events"),
+    ]
+
+    @staticmethod
+    def fetch_distinct_facets():
+        return {"available": True,
+                "source_pairs": list(_FakeRepo.SOURCE_PAIRS),
+                "campaigns": ["Brand - US", "(not set)", "google", "Events"]}
+
+
+def _resolver(label):
+    return (label == "Brand - US", None if label == "Brand - US" else "unsafe")
+
+
+def _filters(scope, group=None):
+    return funnel.resolve_population_filters(scope, group, _resolver, _FakeRepo)
+
+
+def test_all_source_scope_applies_no_scope_constraint():
+    filters = _filters(funnel.SCOPE_ALL_SOURCE)
+    assert filters["source_pairs_in"] is None
+    assert filters["campaigns_in"] is None
+    assert filters["require_keyword"] is False
+
+
+def test_google_ads_scope_restricts_to_the_google_ads_population():
+    filters = _filters(funnel.SCOPE_GOOGLE_ADS_SOURCE)
+    assert set(filters["source_pairs_in"]) == {
+        ("PAID_SEARCH", "Brand - US"), ("PAID_SEARCH", "(not set)")}
+    assert filters["campaigns_in"] is None
+    assert filters["require_keyword"] is False
+
+
+def test_campaign_scope_requires_a_proven_campaign_identity():
+    filters = _filters(funnel.SCOPE_CAMPAIGN_ATTRIBUTABLE)
+    assert set(filters["source_pairs_in"]) == {
+        ("PAID_SEARCH", "Brand - US"), ("PAID_SEARCH", "(not set)")}
+    assert filters["campaigns_in"] == ["Brand - US"]
+    assert filters["require_keyword"] is False
+
+
+def test_keyword_scope_requires_identity_and_keyword_evidence():
+    filters = _filters(funnel.SCOPE_KEYWORD_ATTRIBUTABLE)
+    assert filters["campaigns_in"] == ["Brand - US"]
+    assert filters["require_keyword"] is True
+
+
+def test_scope_filters_are_progressively_narrower():
+    """all_source ⊇ google_ads_source ⊇ campaign ⊇ keyword, as filters."""
+    all_source = _filters(funnel.SCOPE_ALL_SOURCE)
+    google = _filters(funnel.SCOPE_GOOGLE_ADS_SOURCE)
+    campaign = _filters(funnel.SCOPE_CAMPAIGN_ATTRIBUTABLE)
+    keyword = _filters(funnel.SCOPE_KEYWORD_ATTRIBUTABLE)
+
+    assert all_source["source_pairs_in"] is None  # unconstrained = widest
+    assert set(campaign["source_pairs_in"]) <= set(google["source_pairs_in"])
+    assert set(keyword["source_pairs_in"]) <= set(campaign["source_pairs_in"])
+    # Each step adds a constraint and never removes one.
+    assert google["campaigns_in"] is None and campaign["campaigns_in"] is not None
+    assert keyword["require_keyword"] and not campaign["require_keyword"]
+
+
+def test_scope_and_source_intersect_rather_than_replace_each_other():
+    both = _filters(funnel.SCOPE_GOOGLE_ADS_SOURCE, "google_ads")
+    assert set(both["source_pairs_in"]) == {
+        ("PAID_SEARCH", "Brand - US"), ("PAID_SEARCH", "(not set)")}
+    # A non-Google group under a Google-only scope is a proven zero, not an
+    # ignored filter.
+    contradiction = _filters(funnel.SCOPE_GOOGLE_ADS_SOURCE, "organic")
+    assert contradiction["source_pairs_in"] == []
+    # And Source alone still narrows an unconstrained scope.
+    organic = _filters(funnel.SCOPE_ALL_SOURCE, "organic")
+    assert organic["source_pairs_in"] == [("ORGANIC_SEARCH", "google")]
+
+
+def test_identity_unavailable_makes_narrow_operational_scopes_unavailable():
+    assert funnel._identity_dependent_scope_unavailable(  # noqa: SLF001
+        funnel.SCOPE_CAMPAIGN_ATTRIBUTABLE, False) is True
+    assert funnel._identity_dependent_scope_unavailable(  # noqa: SLF001
+        funnel.SCOPE_KEYWORD_ATTRIBUTABLE, False) is True
+    # The broad scopes are unaffected by an attribution outage.
+    assert funnel._identity_dependent_scope_unavailable(  # noqa: SLF001
+        funnel.SCOPE_ALL_SOURCE, False) is False
+    assert funnel._identity_dependent_scope_unavailable(  # noqa: SLF001
+        funnel.SCOPE_GOOGLE_ADS_SOURCE, False) is False
+
+
+def test_operational_repository_takes_the_same_filters_as_the_contact_page():
+    import inspect
+    from db import crm_funnel_repository as repo
+
+    counts_params = set(inspect.signature(
+        repo.fetch_operational_status_counts).parameters)
+    page_params = set(inspect.signature(repo.fetch_funnel_contact_page).parameters)
+    for shared in ("source_pairs_in", "campaigns_in", "require_keyword"):
+        assert shared in counts_params
+        assert shared in page_params
+
+
+def test_both_repository_queries_share_one_predicate_implementation():
+    repo_src = (_ROOT / "db" / "crm_funnel_repository.py").read_text()
+    for fn_name in ("fetch_funnel_contact_page", "fetch_operational_status_counts"):
+        fn = repo_src.split(f"def {fn_name}(")[1].split("\ndef ")[0]
+        assert "_append_source_pair_filter(where, params" in fn
+        assert "_append_campaign_filter(where, params" in fn
+        assert "_KEYWORD_PRESENT_SQL" in fn
