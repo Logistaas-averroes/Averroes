@@ -3541,3 +3541,75 @@ Never writes to HubSpot or Google Ads.
 |---|---|---|---|
 | `hubspot` | `contact_funnel` | `hubspot_contact_funnel` | `last_modified_at` |
 | `hubspot` | `lifecycle_events` | `hubspot_contact_funnel` | `latest_stage_entry_at` |
+
+
+---
+
+# PR-ADS-153C — Canonical Leads page contracts
+
+The Leads page consumes ONLY the canonical `/api/crm-funnel` family. No competing
+lead API was introduced.
+
+## `GET /api/crm-funnel/contacts`
+
+Read-only. Auth required. One **bounded, server-side paginated** page of the
+contacts behind a canonical funnel event.
+
+| Param | Default | Notes |
+|---|---|---|
+| `window` | `current_quarter` | business vocabulary |
+| `window_type` | `business` | |
+| `event` | `sql` | `lead` \| `mql` \| `sql` \| `opportunity` \| `customer` |
+| `scope` | `all_source` | `all_source` \| `google_ads_source` \| `campaign_attributable` \| `keyword_attributable` |
+| `acquisition_group` | *(none)* | `google_ads`, `other_paid`, `organic`, `offline`, `unclassified` |
+| `operational_status` | *(none)* | an `mql_status_category` value, e.g. `open_working` |
+| `q` | *(none)* | company substring search |
+| `page` / `page_size` | `1` / `50` | `page_size` capped at **100** |
+
+**Semantics**
+
+- Rows are contacts whose stage-entry date for `event` falls in the window —
+  **not** contacts currently at that lifecycle stage. A contact now at Customer is
+  still returned for the window it entered Sales Qualified Lead.
+- Ordering is `<event date> DESC, contact_id ASC` — newest relevant event first
+  and deterministic, so paging can neither repeat nor skip a row.
+- Filtering, ordering and the page slice all execute in PostgreSQL. Scope and
+  acquisition-group filters are applied as pre-resolved allow-lists derived from
+  the canonical Python classifiers, so the taxonomy is never duplicated in SQL.
+- A narrow scope whose campaign-identity contract cannot be consulted returns
+  `available: false` with `reason: "campaign_identity_unavailable"` and
+  `total: null` — **never an empty page**, which would read as a proven zero.
+- Each row carries the selected `event_date`, ALL five `stage_dates`, the current
+  `lifecycle_stage`, `mql_status` + `mql_status_category`, acquisition evidence
+  and a `has_gclid` boolean. `campaign` / `keyword` are `null` with
+  `campaign_available: false` when identity is unavailable.
+- **No email address is ever returned.**
+
+## `GET /api/crm-funnel/operational-status`
+
+Counts by `mql_status_category` for one event window. These are MDR **working**
+statuses inside the MQL process — they never define a funnel stage, and the Leads
+page renders them in a visually distinct view.
+
+| Param | Default |
+|---|---|
+| `window` / `window_type` | `current_quarter` / `business` |
+| `event` | `lead` |
+
+## Dashboard overview additions
+
+`GET /api/dashboard/overview` now also returns canonical CRM lifecycle counts:
+
+```jsonc
+"kpis": {
+  "lifecycle_leads": 128, "lifecycle_mqls": 41, "lifecycle_sqls": 12,
+  "lifecycle_opportunities": 5, "lifecycle_customers": 2,
+  "lifecycle_scope": "all_source",
+  // Revenue truth is UNCHANGED and remains a different fact:
+  "customers": 3,                 // closed-won deals (PR-ADS-153E owns this)
+  "sqls": 7, "sqls_scope": "campaign_attributable"
+},
+"lifecycle_funnel": { "conversions": [...], "coverage": {...}, "sync": {...} }
+```
+
+A lifecycle customer is **never** substituted for a revenue customer.

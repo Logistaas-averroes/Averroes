@@ -309,6 +309,18 @@ work, and deletes no historical evidence.
 
 ---
 
+## 13. Consuming surfaces (PR-ADS-153C)
+
+| Surface | What it reads |
+|---|---|
+| **Leads page** | `GET /api/crm-funnel` (funnel strip + definitions), `GET /api/crm-funnel/contacts` (server-side paginated rows), `GET /api/crm-funnel/operational-status` (working statuses). Default scope **All Sources** — it answers a CRM question, not an attribution one. |
+| **Dashboard funnel** | Canonical lifecycle Leads / MQLs / SQLs via `kpis.lifecycle_*`, with cohort-safe conversions. Customers and Closed-Won Revenue deliberately REMAIN on the revenue contract until PR-ADS-153E. |
+
+The Leads page never renders a narrower scope under a generic label, never
+divides unrelated period totals, and renders `—` for anything unavailable.
+
+---
+
 ## Related
 
 - `docs/audits/PR-ADS-153A-MINIMUM-VIABLE-TRUTH-AUDIT.md` — the audit that

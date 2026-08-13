@@ -34,6 +34,9 @@ _APP_JS_TEXT = _APP_JS.read_text(encoding="utf-8")
 
 # Known canonical freshness dataset keys (must match _KNOWN_DATASETS in server.py)
 KNOWN_DATASET_KEYS: set[str] = {
+    # PR-ADS-153B/153C — canonical CRM funnel spine consumed by the Leads page.
+    "hubspot/contact_funnel",
+    "hubspot/lifecycle_events",
     "google_ads_api/campaigns",
     "google_ads_api/canonical_spend",   # PR-ADS-143: canonical daily-spend freshness
     "google_ads_api/keywords",
@@ -53,10 +56,8 @@ EXPECTED_PAGES: set[str] = {
     "ngrams",
     "geo",
     "keywords",
-    "lead_quality",
     "deals",
     "gclid_attribution",
-    "in_progress_leads",
     "action_queue",
 }
 

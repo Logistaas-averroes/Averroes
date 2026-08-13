@@ -57,6 +57,7 @@ from datetime import date, datetime, timezone
 from analysis.crm_lifecycle import (
     EVENT_CUSTOMER,
     EVENT_DATE_COLUMN,
+    EVENT_LEAD,
     EVENT_HUBSPOT_PROPERTY,
     EVENT_LABELS,
     EVENT_MQL,
@@ -69,7 +70,9 @@ from analysis.crm_lifecycle import (
     is_known_stage,
     is_valid_event,
     normalize_lifecycle_stage,
+    stage_label,
 )
+from analysis.mql_status_taxonomy import ALL_CATEGORIES as ALL_MQL_CATEGORIES
 from analysis.source_classification import GROUP_GOOGLE_ADS, classify_source
 from services.canonical_contact_outcome_service import (
     STATUS_MISMATCH,
@@ -611,6 +614,197 @@ def build(
     }
 
 
+# ── PR-ADS-153C — server-side contact rows for the canonical Leads page ──────
+def resolve_source_allowlist(acquisition_group: str | None, raw_sources: list):
+    """Which raw ``hs_analytics_source`` values belong to an acquisition group.
+
+    The group classifier is pure Python, so it is applied ONCE to the small set
+    of distinct raw values held in the store and the matches become a SQL
+    allow-list. Filtering therefore stays server-side (so pagination is correct)
+    without re-implementing the taxonomy in SQL.
+
+    Returns ``None`` for "no constraint".
+    """
+    if not acquisition_group:
+        return None
+    return [raw for raw in raw_sources
+            if classify_source(raw, None) == acquisition_group]
+
+
+def resolve_campaign_allowlist(raw_campaigns: list, resolver):
+    """Which campaign labels resolve to a real Google Ads campaign identity.
+
+    Campaign attribution depends only on the campaign LABEL, never on the
+    individual contact, so the resolver runs once per distinct label.
+    """
+    return [label for label in raw_campaigns if resolver(label)[0]]
+
+
+def contacts(
+    window_type: str,
+    window_key: str,
+    *,
+    event: str = EVENT_SQL,
+    scope: str = SCOPE_ALL_SOURCE,
+    acquisition_group: str | None = None,
+    operational_status: str | None = None,
+    company_query: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    now: datetime | None = None,
+) -> dict:
+    """One bounded page of contacts for a funnel event. Read-only.
+
+    Rows are the contacts whose stage-entry date for ``event`` falls inside the
+    window — NOT the contacts currently at that lifecycle stage. A contact now at
+    Customer is still returned by the SQL view for the window it entered Sales
+    Qualified Lead.
+
+    Never returns an email address.
+    """
+    if scope not in ORDERED_SCOPES:
+        raise ValueError(f"Unknown scope '{scope}'")
+    if not is_valid_event(event):
+        raise ValueError(f"Unknown funnel event '{event}'")
+
+    window = resolve_window_contract(window_type, window_key, now=now)
+    start, end = window["start"], window["end"]
+
+    from db import crm_funnel_repository as repo  # noqa: PLC0415
+
+    resolver, identity_available = _build_campaign_resolver(start, end)
+
+    # A narrow scope with no identity contract is UNAVAILABLE — never an empty
+    # page, which would read as a proven zero.
+    if scope in IDENTITY_DEPENDENT_SCOPES and not identity_available:
+        return {
+            "available": False,
+            "reason": REASON_CAMPAIGN_IDENTITY_UNAVAILABLE,
+            "window": _window_payload(window),
+            "event": event,
+            "scope": scope,
+            "scope_label": SCOPE_LABELS[scope],
+            "rows": [],
+            "total": None,
+            "page": page,
+            "page_size": page_size,
+            "campaign_identity_available": False,
+        }
+
+    facets = repo.fetch_distinct_facets()
+    raw_sources = facets.get("sources") or []
+    raw_campaigns = facets.get("campaigns") or []
+
+    sources_in = resolve_source_allowlist(acquisition_group, raw_sources)
+    if scope == SCOPE_GOOGLE_ADS_SOURCE or scope in IDENTITY_DEPENDENT_SCOPES:
+        google_sources = resolve_source_allowlist(GROUP_GOOGLE_ADS, raw_sources)
+        sources_in = (google_sources if sources_in is None
+                      else [s for s in sources_in if s in set(google_sources)])
+
+    campaigns_in = None
+    if scope in IDENTITY_DEPENDENT_SCOPES:
+        campaigns_in = resolve_campaign_allowlist(raw_campaigns, resolver)
+
+    fetched = repo.fetch_funnel_contact_page(
+        event, start, end,
+        sources_in=sources_in,
+        campaigns_in=campaigns_in,
+        require_keyword=(scope == SCOPE_KEYWORD_ATTRIBUTABLE),
+        operational_status=operational_status,
+        company_query=company_query,
+        page=page,
+        page_size=page_size,
+    )
+
+    definition = event_definition(event)
+    return {
+        "available": bool(fetched.get("available")),
+        "window": _window_payload(window),
+        "event": event,
+        "event_label": definition["label"],
+        "event_date_property": definition["event_date_property"],
+        "event_date_column": definition["event_date_column"],
+        "scope": scope,
+        "scope_label": SCOPE_LABELS[scope],
+        "campaign_identity_available": identity_available,
+        "acquisition_group": acquisition_group,
+        "operational_status": operational_status,
+        "rows": [_contact_row_payload(r, event, identity_available)
+                 for r in (fetched.get("rows") or [])],
+        "total": fetched.get("total") if fetched.get("available") else None,
+        "page": fetched.get("page", page),
+        "page_size": fetched.get("page_size", page_size),
+        "has_more": fetched.get("has_more", False),
+        "order_by": fetched.get("order_by"),
+        "sync": _sync_state_block(),
+    }
+
+
+def _window_payload(window: dict) -> dict:
+    return {
+        "window_type": window["window_type"],
+        "window_key": window["window_key"],
+        "start_date": window["start_date"],
+        "end_date": window["end_date"],
+    }
+
+
+def _contact_row_payload(row: dict, event: str, identity_available: bool) -> dict:
+    """Admin-safe contact row. Company + HubSpot contact id only — NEVER email.
+
+    Campaign / keyword attribution is reported as ``None`` when the identity
+    contract could not be consulted, rather than echoing a raw label that has not
+    been resolved to a real Google Ads campaign.
+    """
+    stage_dates = {
+        e: _iso(row.get(EVENT_DATE_COLUMN[e])) for e in FUNNEL_EVENTS
+    }
+    group = derive_acquisition_group(row)
+    return {
+        "contact_id": row.get("contact_id"),
+        "company": row.get("company"),
+        "lifecycle_stage": normalize_lifecycle_stage(row.get("lifecycle_stage")),
+        "lifecycle_stage_label": stage_label(row.get("lifecycle_stage")),
+        "event_date": stage_dates.get(event),
+        "stage_dates": stage_dates,
+        "mql_status": row.get("mql_status"),
+        "mql_status_category": row.get("mql_status_category"),
+        "acquisition_group": group,
+        "acquisition_source_raw": row.get("hs_analytics_source"),
+        "campaign": row.get("hs_analytics_source_data_1") if identity_available else None,
+        "campaign_available": identity_available,
+        "keyword": row.get("hs_analytics_source_data_2") if identity_available else None,
+        "country": row.get("ip_country") or row.get("country"),
+        "owner_id": row.get("owner_id"),
+        "has_gclid": bool(row.get("has_gclid")),
+    }
+
+
+def operational_status_breakdown(
+    window_type: str, window_key: str, *, event: str = EVENT_LEAD,
+    now: datetime | None = None) -> dict:
+    """Counts by operational ``mql_status_category`` for one event window.
+
+    These are WORKING statuses, not funnel stages — the Disqualified / Other view
+    is deliberately kept distinct from the five canonical stages.
+    """
+    if not is_valid_event(event):
+        raise ValueError(f"Unknown funnel event '{event}'")
+    window = resolve_window_contract(window_type, window_key, now=now)
+
+    from db import crm_funnel_repository as repo  # noqa: PLC0415
+
+    fetched = repo.fetch_operational_status_counts(
+        event, window["start"], window["end"])
+    return {
+        "available": bool(fetched.get("available")),
+        "window": _window_payload(window),
+        "event": event,
+        "counts": fetched.get("counts") if fetched.get("available") else None,
+        "categories": list(ALL_MQL_CATEGORIES),
+    }
+
+
 def _build_campaign_resolver(start: date | None, end: date | None):
     """Reuse the canonical Google Ads campaign-identity resolver (PR-ADS-152 §2).
 
@@ -692,6 +886,7 @@ __all__ = [
     "ORDERED_SCOPES", "FUNNEL_EVENTS",
     "EVENT_MQL", "EVENT_SQL", "EVENT_OPPORTUNITY", "EVENT_CUSTOMER",
     "build", "build_populations", "build_conversions", "cohort_conversion",
+    "contacts", "operational_status_breakdown",
     "funnel_definitions", "event_definition", "scope_keys", "scopes_are_nested",
     "reconciliation_status",
 ]

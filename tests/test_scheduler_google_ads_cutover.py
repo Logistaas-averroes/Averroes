@@ -378,6 +378,12 @@ class TestNoUiFilesTouched:
             # unrelated to the google_ads_source data-source *adapter* this guard
             # protects against. Strip the scope field before checking.
             probe = content.replace("google_ads_source_sqls", "")
+            # PR-ADS-153B/153C: ``"google_ads_source"`` is also the canonical
+            # NAMED ATTRIBUTION SCOPE (keyword ≤ campaign ≤ google_ads_source ≤
+            # all_source) selected on the Leads page. Only the quoted scope
+            # literal is exempt — a bare or module-style reference to the adapter
+            # still fails this guard.
+            probe = probe.replace('"google_ads_source"', "")
             assert "google_ads_source" not in probe, (
                 f"UI file {path} must not reference google_ads_source"
             )

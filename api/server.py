@@ -8525,3 +8525,68 @@ def api_crm_funnel_sync(
     except Exception as exc:  # noqa: BLE001
         log.error("[api/crm-funnel/sync] failed: %s", exc)
         raise HTTPException(status_code=500, detail="contact funnel sync failed") from exc
+
+
+@app.get("/api/crm-funnel/contacts")
+def api_crm_funnel_contacts(
+    user: dict = Depends(require_auth),
+    window: str = Query(default="current_quarter"),
+    window_type: str = Query(default="business"),
+    event: str = Query(default="sql"),
+    scope: str = Query(default="all_source"),
+    acquisition_group: str | None = Query(default=None),
+    operational_status: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+) -> dict[str, Any]:
+    """One bounded page of contacts behind a canonical funnel event (PR-ADS-153C).
+
+    Rows are the contacts whose stage-entry date for ``event`` falls inside the
+    window — NOT the contacts currently at that lifecycle stage. A contact now at
+    Customer is still returned for the window it entered Sales Qualified Lead.
+
+    Filtering, ordering (newest event first) and the page slice are all applied in
+    PostgreSQL; the browser never receives more than one page. A narrow scope
+    whose campaign-identity contract cannot be consulted returns
+    ``available: false``, never an empty page that would read as a proven zero.
+
+    NEVER returns an email address — company and HubSpot contact id only.
+    """
+    try:
+        from services import canonical_crm_funnel_service as crm_funnel  # noqa: PLC0415
+        return crm_funnel.contacts(
+            window_type, window, event=event, scope=scope,
+            acquisition_group=acquisition_group,
+            operational_status=operational_status,
+            company_query=q, page=page, page_size=page_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/crm-funnel/contacts] failed: %s", exc)
+        raise HTTPException(status_code=500, detail="CRM funnel contacts unavailable") from exc
+
+
+@app.get("/api/crm-funnel/operational-status")
+def api_crm_funnel_operational_status(
+    user: dict = Depends(require_auth),
+    window: str = Query(default="current_quarter"),
+    window_type: str = Query(default="business"),
+    event: str = Query(default="lead"),
+) -> dict[str, Any]:
+    """Working-status breakdown (``mql_status_category``) for one event window.
+
+    These are OPERATIONAL statuses inside the MQL process, never funnel stages —
+    the Leads page keeps the Disqualified / Other view visually distinct from the
+    five canonical lifecycle stages.
+    """
+    try:
+        from services import canonical_crm_funnel_service as crm_funnel  # noqa: PLC0415
+        return crm_funnel.operational_status_breakdown(
+            window_type, window, event=event)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/crm-funnel/operational-status] failed: %s", exc)
+        raise HTTPException(status_code=500, detail="operational status unavailable") from exc

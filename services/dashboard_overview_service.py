@@ -908,6 +908,14 @@ def build_dashboard_overview(window: str = "current_quarter",
     _ga_source_display = (None if _recon_status == _canon.STATUS_MISMATCH
                           else sql_reconciliation.get("google_ads_source_sqls"))
 
+    # PR-ADS-153C §21/§22: CRM lifecycle metrics now come from the canonical
+    # HubSpot funnel (stage-entry events, each dated by its OWN
+    # hs_v2_date_entered_* timestamp) rather than the legacy contact-created-date
+    # proxy. REVENUE metrics (customers / closed-won revenue / ROAS) deliberately
+    # stay on their existing revenue contract until PR-ADS-153E — a lifecycle
+    # customer is NOT a revenue customer and must never be silently substituted.
+    lifecycle_funnel = _lifecycle_funnel_block(window, now=now)
+
     kpis = {
         # USD spend is strictly canonical: None whenever FX/coverage is unsafe.
         "google_ads_spend_usd": summary.get("spend_usd"),
@@ -931,6 +939,21 @@ def build_dashboard_overview(window: str = "current_quarter",
         "customers": customers,
         "sql_rate": _rate(summary.get("sqls"), summary.get("leads")),
         "customer_rate": _rate(customers, summary.get("leads")),
+
+        # ── PR-ADS-153C: canonical CRM lifecycle funnel ──────────────────────
+        # Each count is a stage-ENTRY event on its own event date. These are the
+        # values the Dashboard funnel strip renders; `sqls` above remains the
+        # explicitly-scoped campaign-attributable back-compat field.
+        "lifecycle_leads": lifecycle_funnel.get("lead"),
+        "lifecycle_mqls": lifecycle_funnel.get("mql"),
+        "lifecycle_sqls": lifecycle_funnel.get("sql"),
+        "lifecycle_opportunities": lifecycle_funnel.get("opportunity"),
+        # Named "lifecycle_customers", never "customers" — the revenue customer
+        # KPI above is a different fact (closed-won deals) owned by PR-ADS-153E.
+        "lifecycle_customers": lifecycle_funnel.get("customer"),
+        "lifecycle_scope": lifecycle_funnel.get("scope"),
+        "lifecycle_available": lifecycle_funnel.get("available"),
+        "lifecycle_status": lifecycle_funnel.get("status"),
     }
 
     return {
@@ -954,4 +977,59 @@ def build_dashboard_overview(window: str = "current_quarter",
         # google_ads_source_sqls equals the Revenue by Source Google Ads SQL count
         # (both read the one canonical population) — acceptance criterion #1.
         "sql_reconciliation": sql_reconciliation,
+        # PR-ADS-153C: canonical lifecycle funnel + cohort-safe conversions.
+        # A conversion is published only when the canonical service proves it is
+        # cohort-safe; unrelated period totals are never divided.
+        "lifecycle_funnel": lifecycle_funnel,
+    }
+
+
+def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
+    """Canonical CRM lifecycle funnel counts + cohort-safe conversions.
+
+    All-source scope: the Dashboard funnel answers a CRM question, so it is not
+    restricted to Google Ads. Attribution subsets remain available under their own
+    explicitly named KPIs.
+
+    Fails closed: when the canonical store is unreadable every count is None and
+    ``available`` is False — never zero.
+    """
+    empty = {e: None for e in ("lead", "mql", "sql", "opportunity", "customer")}
+    try:
+        from services import canonical_crm_funnel_service as _funnel  # noqa: PLC0415
+
+        payload = _funnel.build(
+            _funnel.WINDOW_BUSINESS, window,
+            scope=_funnel.SCOPE_ALL_SOURCE, now=now)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[dashboard_overview] canonical lifecycle funnel failed: %s", exc)
+        return {**empty, "available": False, "status": "unavailable",
+                "scope": "all_source", "conversions": None,
+                "definitions": None, "sync": None}
+
+    status = (payload.get("reconciliation") or {}).get("status")
+    available = bool(payload.get("available"))
+    events = payload.get("events") or {}
+
+    counts = {}
+    for event in empty:
+        block = events.get(event) or {}
+        # A mismatch must never render as a normal count.
+        counts[event] = None if (not available or status == "mismatch") else block.get("count")
+
+    return {
+        **counts,
+        "available": available,
+        "status": status,
+        "scope": payload.get("scope"),
+        "scope_label": payload.get("scope_label"),
+        "window": payload.get("window"),
+        "conversions": payload.get("conversions") if available else None,
+        "coverage": payload.get("coverage"),
+        "definitions": {e: {
+            "label": (events.get(e) or {}).get("label"),
+            "event_date_property": (events.get(e) or {}).get("event_date_property"),
+        } for e in empty},
+        "sync": payload.get("sync"),
+        "campaign_identity_available": payload.get("campaign_identity_available"),
     }
