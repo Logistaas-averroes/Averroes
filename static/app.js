@@ -1381,8 +1381,12 @@ function navigateToHash(page, options) {
     const wanted = raw.startsWith("#/ngrams") ? "patterns"
       : (_stPendingTab || (ST_TABS.includes(q.get("tab")) ? q.get("tab") : null));
     if (wanted && wanted !== "terms") {
+      // q.get() returns a DECODED value, so it must be re-encoded on the way
+      // back into the hash — a term containing a space, "&" or "%" would
+      // otherwise produce a malformed link or inject a second query param.
       const term = q.get("term");
-      hash = `${hash}?tab=${wanted}` + (term ? `&term=${term}` : "");
+      hash = `${hash}?tab=${wanted}` +
+        (term ? `&term=${encodeURIComponent(term)}` : "");
     }
   }
   if (window.location.hash !== hash) {
@@ -9499,10 +9503,12 @@ function loadSearchTermsEvidence() {
   }
   // An Action Queue link carries the term it wants investigated, so the queue
   // item lands on the row it is about rather than on a generic list.
+  // URLSearchParams.get() already decodes, so this value is used as-is.
+  // Decoding again would throw URIError on a legitimate term such as "100%".
   const focusTerm = hashParams.get("term");
   if (focusTerm) {
-    _flagFocusTerm = decodeURIComponent(focusTerm);
-    _flagFilters.q = _flagFocusTerm;
+    _flagFocusTerm = focusTerm;
+    _flagFilters.q = focusTerm;
   }
   // Campaign-drawer prefill (navigate("ngrams") with a campaign context).
   if (ngramsPrefill && ngramsPrefill.campaign) {

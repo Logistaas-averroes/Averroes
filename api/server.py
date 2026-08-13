@@ -4501,6 +4501,17 @@ def api_search_term_evidence_review(
 
     if not search_term or not str(search_term).strip():
         raise HTTPException(status_code=400, detail="search_term is required")
+    # campaign_key is HALF the durable identity. Every flagged row carries one
+    # (the canonical resolver always returns a non-empty key, including for
+    # unmapped and non-Google campaigns), so a missing one means the caller is
+    # not describing a real row. Accepting it would normalise to
+    # `unknown_campaign` and merge one decision across every campaign that ever
+    # triggered that query — silently mis-attributing a human judgement.
+    if not campaign_key or not str(campaign_key).strip():
+        raise HTTPException(
+            status_code=400,
+            detail=("campaign_key is required — a review decision must be keyed "
+                    "to one canonical campaign identity"))
     if not is_valid_review_state(review_state):
         raise HTTPException(
             status_code=400,

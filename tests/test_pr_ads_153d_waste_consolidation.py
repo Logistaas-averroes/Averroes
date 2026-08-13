@@ -896,3 +896,111 @@ def test_retirement_manifest_documents_every_touched_legacy_route():
     # And the touched tables are audited with their grain and status.
     for table in ("search_terms", "waste_terms", "search_term_review"):
         assert table in doc, table
+
+
+# =============================================================================
+# Review feedback (PR #156) — each fix pinned by a test
+# =============================================================================
+def test_deep_link_term_is_re_encoded_into_the_hash():
+    """URLSearchParams.get() returns a DECODED value, so writing it back raw
+    would break a term containing a space, "&" or "%" — or inject a second
+    query param."""
+    fn = _APP_JS.split("function navigateToHash(")[1].split("\n}")[0]
+    assert "encodeURIComponent(term)" in fn
+    assert "&term=${term}`" not in fn
+
+
+def test_focus_term_is_not_decoded_twice():
+    """A second decodeURIComponent throws URIError on a legitimate term such as
+    "100%", which would break the whole page load, not just the filter."""
+    fn = _APP_JS.split("function loadSearchTermsEvidence(")[1].split("\n}")[0]
+    assert "decodeURIComponent" not in fn
+    assert "_flagFocusTerm = focusTerm;" in fn
+
+
+def test_last_seen_sorts_most_recent_first(monkeypatch):
+    """Same direction as the Terms tab — "Last seen" must not mean opposite
+    things on two tabs of one page."""
+    _patch(monkeypatch, _agg([
+        _g("old", "Brand - UK", "1", spend=10.0, flagged=True, junk="student",
+           last=date(2026, 7, 1)),
+        _g("new", "Brand - UK", "1", spend=10.0, flagged=True, junk="student",
+           last=date(2026, 7, 20)),
+    ]), sql_attr=_no_attribution())
+    rows = _flagged(sort="last_seen")["rows"]
+    assert [r["search_term"] for r in rows] == ["new", "old"]
+
+
+def test_last_seen_sort_puts_unknown_dates_last(monkeypatch):
+    _patch(monkeypatch, _agg([
+        _g("known", "Brand - UK", "1", spend=10.0, flagged=True, junk="student",
+           last=date(2026, 7, 1)),
+        _g("unknown", "Brand - UK", "1", spend=10.0, flagged=True,
+           junk="student", last=None),
+    ]), sql_attr=_no_attribution())
+    rows = _flagged(sort="last_seen")["rows"]
+    assert rows[-1]["search_term"] == "unknown"
+
+
+def test_review_endpoint_requires_a_campaign_key():
+    """campaign_key is HALF the durable identity. Without it the decision would
+    normalise to `unknown_campaign` and merge across every campaign that ever
+    triggered the query."""
+    from fastapi import HTTPException
+
+    from api import server
+
+    for missing in (None, "", "   "):
+        with pytest.raises(HTTPException) as exc:
+            server.api_search_term_evidence_review(
+                payload={"search_term": "tms", "review_state": "keep",
+                         "campaign_key": missing},
+                user={"email": "x"})
+        assert exc.value.status_code == 400
+        assert "campaign_key" in str(exc.value.detail)
+
+
+def test_review_endpoint_still_rejects_bad_state_and_missing_term():
+    from fastapi import HTTPException
+
+    from api import server
+
+    with pytest.raises(HTTPException) as exc:
+        server.api_search_term_evidence_review(
+            payload={"campaign_key": "1", "review_state": "keep"},
+            user={"email": "x"})
+    assert exc.value.status_code == 400
+
+    with pytest.raises(HTTPException) as exc:
+        server.api_search_term_evidence_review(
+            payload={"campaign_key": "1", "search_term": "tms",
+                     "review_state": "deleted_from_google"},
+            user={"email": "x"})
+    assert exc.value.status_code == 400
+
+
+def test_review_store_outage_is_reported_as_unavailable(monkeypatch):
+    """An empty review map is ambiguous on its own — it means both "nobody has
+    reviewed anything" and "the store could not be read". Reporting the outage
+    as available would present it as a verified all-unreviewed state."""
+    import db.search_term_review_repository as review_repo
+
+    _patch(monkeypatch, _agg([
+        _g("tms", "Brand - UK", "1", spend=10.0, flagged=True, junk="student"),
+    ]), sql_attr=_no_attribution())
+    monkeypatch.setattr(review_repo, "fetch_reviews_for_identities",
+                        lambda ids: {"available": False, "rows": {}})
+
+    payload = _flagged()
+    assert payload["review_state_available"] is False
+    # The term still reads unreviewed, so it stays actionable rather than being
+    # silently dropped from the queue.
+    assert payload["rows"][0]["review_state"] == "unreviewed"
+    assert payload["rows"][0]["action_needed"] is True
+
+
+def test_review_store_available_is_reported_when_it_is(monkeypatch):
+    _patch(monkeypatch, _agg([
+        _g("tms", "Brand - UK", "1", spend=10.0, flagged=True, junk="student"),
+    ]), sql_attr=_no_attribution())
+    assert _flagged()["review_state_available"] is True

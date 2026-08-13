@@ -1682,6 +1682,16 @@ def _flagged_sort_key(sort: str):
     def _null_last(v):
         return (v is None, -(float(v)) if v is not None else 0)
 
+    def _desc_date(value):
+        """Descending sort key for an ISO-8601 date/timestamp string.
+
+        A string cannot be negated, so the zero-padded, fixed-width ISO digits
+        are read as one integer and negated — monotonic, and correct for both
+        ``2026-07-02`` and a full timestamp.
+        """
+        digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+        return -int(digits) if digits else 0
+
     def _term(u):
         return (u.get("search_term") or "").lower()
 
@@ -1689,8 +1699,10 @@ def _flagged_sort_key(sort: str):
         "priority": lambda u: (-int(u.get("priority_score") or 0), _term(u)),
         "spend": lambda u: (_null_last(u.get("spend_usd")), _term(u)),
         "clicks": lambda u: (-int(u.get("clicks") or 0), _term(u)),
+        # Most-recent first, nulls last — the same direction as the Terms tab,
+        # so "Last seen" cannot mean opposite things on two tabs of one page.
         "last_seen": lambda u: ((u.get("last_seen") is None),
-                                str(u.get("last_seen") or ""), _term(u)),
+                                _desc_date(u.get("last_seen")), _term(u)),
         "term": _term,
         "attributed_sqls": lambda u: (_null_last(u.get("attributed_sqls")), _term(u)),
     }
@@ -1769,7 +1781,7 @@ def build_flagged_search_terms(
 
     # Durable local decisions, joined by canonical identity — the SAME join the
     # Action Queue uses, so the two surfaces cannot disagree.
-    reviews = _fetch_reviews_for_units(flagged_units)
+    reviews, review_available = _fetch_reviews_for_units(flagged_units)
 
     rows_all = [_flagged_row(u, pop["aliases_by_id"],
                              reviews.get(unit_identity(u)), high_spend_usd)
@@ -1808,7 +1820,7 @@ def build_flagged_search_terms(
         "sql_attribution": _search_term_sql_block(sql_attr),
         "truth_state": _flagged_truth_state(pop, sql_attr, available=True),
         "annotation_join": pop.get("annotation_join") or {},
-        "review_state_available": reviews is not None,
+        "review_state_available": review_available,
         "canonical_fact_source": {
             "table": "search_terms",
             "grain": ("source_date + campaign_name + campaign_id + ad_group + "
@@ -1832,22 +1844,27 @@ def build_flagged_search_terms(
     }
 
 
-def _fetch_reviews_for_units(units: list) -> dict:
-    """Durable review rows for a set of canonical units, keyed by identity.
+def _fetch_reviews_for_units(units: list) -> tuple[dict, bool]:
+    """Durable review rows for a set of canonical units, plus AVAILABILITY.
 
-    A DB outage yields an empty map — every unit then reads ``unreviewed``, which
-    is the honest default: no decision is on record that we can see. It never
-    invents ``keep``, which would silently drop terms out of the Action Queue.
+    Returns ``(rows_by_identity, available)``. The two are reported separately
+    because an empty map is ambiguous on its own: it means both "nobody has
+    reviewed anything" and "the review store could not be read". Collapsing
+    them would let the page present an outage as a verified all-unreviewed
+    state (PR-ADS-153D §32 — unavailable is never a value).
+
+    On an outage every unit still reads ``unreviewed``: that keeps flagged terms
+    in the Action Queue, whereas inventing ``keep`` would silently drop work.
     """
     try:
         from db import search_term_review_repository as review_repo  # noqa: PLC0415
 
         fetched = review_repo.fetch_reviews_for_identities(
             [unit_identity(u) for u in units])
-        return fetched.get("rows") or {}
+        return (fetched.get("rows") or {}), bool(fetched.get("available"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[search-term-evidence] review state unavailable: %s", exc)
-        return {}
+        return {}, False
 
 
 def _filter_flagged_rows(rows: list, *, q=None, campaign=None, review_state=None,
