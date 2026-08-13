@@ -45,6 +45,8 @@ Protected endpoints (require authenticated session):
   GET  /api/datasets/freshness    — Per-dataset sync state / watermark from sync_state table (requires auth).
   GET  /api/search-terms          — Paginated search-term fact rows from search_terms table (requires auth).
   GET  /api/search-terms/ngrams   — Read-only n-gram analysis over stored search_terms (requires auth).
+  GET  /api/search-term-evidence/flagged — Canonical Flagged / Waste view over deduplicated search_terms facts (requires auth; PR-ADS-153D).
+  POST /api/search-term-evidence/review  — Record ONE local search-term review decision (local DB only; never a Google Ads mutation; PR-ADS-153D).
   GET  /api/gclid-attribution     — Paginated GCLID attribution rows from gclid_attribution table (requires auth).
   GET  /api/gclid-coverage        — GCLID coverage snapshots from gclid_coverage_snapshots table (requires auth).
   GET  /api/monitoring/status     — Read-only monitoring summary: stale/failure state per run type (requires auth).

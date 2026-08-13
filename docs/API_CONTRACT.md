@@ -410,8 +410,28 @@ When database is unavailable: `{ "days": 30, "deals": [], "db_unavailable": true
 
 ---
 
-#### `GET /api/waste?days=30`
-Waste search term rows for the last N days (max 500 rows, sorted by spend descending).
+#### `GET /api/waste?days=30` *(DEPRECATED — compatibility adapter, PR-ADS-153D)*
+
+> **Superseded by `GET /api/search-term-evidence/flagged`.** The standalone
+> Flagged Waste Terms page is retired; this route has NO first-party consumer and
+> is retained only so external/bookmarked API clients do not break. It is on the
+> PR-ADS-153G retirement list.
+>
+> It is no longer served from `waste_terms`. That table is `run_date`-grained
+> (one row per waste term **per run**), so the old implementation returned the
+> same term once per weekly run and multiplied its spend by the number of runs
+> that observed it. Rows now come from the canonical deduplicated `search_terms`
+> facts via the same service the flagged view uses, so re-ingesting a source-date
+> fact cannot change a number here.
+>
+> The response adds `canonical_source`, `annotation_source`, `superseded_by`,
+> `deprecation`, `kpis`, `truth_state` and per-row `term_identity` /
+> `flag_reason` / `review_state` / `attributed_sqls` /
+> `sql_attribution_status`. Legacy field names are preserved so existing clients
+> keep parsing; `run_date` now carries the last date Google Ads REPORTED the
+> term (the fact the field always implied) rather than an ingestion run date.
+
+Flagged search term rows for the last N days (max 500 rows, sorted by spend descending).
 
 **Auth:** Auth
 **Query params:** `days` (integer, default 30, max 365)
@@ -1762,6 +1782,92 @@ server-side filtering / sorting / pagination and complete-population KPIs.
   display name are never merged.
 - **DB unavailable:** same shape with `"db_unavailable": true`, null KPIs
   (never fabricated zeros) and `reconciliation_status: "unavailable"`.
+
+---
+
+#### `GET /api/search-term-evidence/flagged` *(PR-ADS-153D — Search Terms, Flagged tab)*
+
+**Auth:** Auth · **Read-only against every external platform:** Yes
+
+The canonical replacement for the retired standalone Flagged Waste Terms page.
+
+| Param | Default | Notes |
+|---|---|---|
+| `window` | `30d` | Evidence window: `7d\|14d\|30d\|60d\|180d\|all_time` (400 on unknown) |
+| `page` / `page_size` | `1` / `50` | `page_size` capped at 200 |
+| `q` | *(none)* | Contains filter on search term or campaign |
+| `campaign` | *(none)* | Canonical `campaign_key` (from facets) |
+| `review_state` | *(none)* | `unreviewed\|keep\|monitor\|exclude_candidate\|resolved` |
+| `flag_reason` | *(none)* | Canonical waste reason (from facets) |
+| `min_spend` | *(none)* | Minimum canonical term spend (USD) |
+| `sql_state` | *(none)* | `all\|has_sql\|known_zero\|unavailable` |
+| `sort` | `priority` | `priority\|spend\|clicks\|last_seen\|term\|attributed_sqls` |
+
+**What "flagged" means.** Durable evidence only — `search_terms.is_flagged_waste
+= true`, or safely campaign-scoped `waste_terms` classification. It is NEVER
+derived from `spend > 0 AND sqls = 0`, which would brand every term with merely
+unavailable attribution as waste.
+
+**Fact source.** Canonical `search_terms` rows deduplicated by
+`idx_search_terms_unique_fact`, merged at (search term × canonical campaign
+identity). `waste_terms` contributes classification annotations only and is never
+summed — the response states this in `canonical_fact_source` /
+`annotation_source`.
+
+**KPIs** (complete filtered population, never the returned page):
+
+| Key | Meaning |
+|---|---|
+| `flagged_terms` | Unique durable term identities currently flagged |
+| `flagged_spend_usd` | Canonical Google Ads spend for those terms (FX-verified subtotal) |
+| `sql_evidence` | **Search-term-attributable** lifecycle SQLs — `null` when nothing could be attributed, never `0` |
+| `review_needed` | Flagged terms with no finished local review decision |
+
+Also returned: `terms_with_proven_zero_sqls`, `terms_with_attribution_unavailable`,
+`sql_evidence_label`, `sql_evidence_available`.
+
+**Row shape** adds, on top of the standard term row: `term_identity`,
+`flag_reason` / `flag_reason_label` / `flag_reasons` / `flag_reason_unmapped` /
+`raw_junk_categories`, `flag_source`, `flag_confidence`, `first_flagged_at`,
+`latest_flagged_at`, `review_state` (+ label/help/`requires_action`/`is_decided`/
+`applied_to_google_ads`), `review_note`, `reviewed_at`, `reviewed_by`,
+`action_needed`, `priority_score`, `priority_band`, `priority_reasons`.
+
+**Truth state** (`truth_state.status`): `reconciled` · `partial` · `mismatch` ·
+`unavailable`. None is ever converted to zero. `annotation_join` reports
+`{annotation_rows, attached, legacy_unresolved}` — annotations too weakly
+identified to place on one canonical campaign are counted, never guessed.
+
+**SQL scope.** The canonical SQL event remains the HubSpot Sales Qualified Lead
+lifecycle entry dated by `hs_v2_date_entered_salesqualifiedlead`. This endpoint
+only ATTRIBUTES it, and always labels the count
+**Search-term-attributable SQLs**, because
+`search-term attributable ≤ campaign attributable ≤ Google Ads-source ≤ all source`.
+
+---
+
+#### `POST /api/search-term-evidence/review` *(PR-ADS-153D — local review decision)*
+
+**Auth:** Auth · **Writes:** local `search_term_review` table ONLY
+
+```jsonc
+// request
+{ "campaign_key": "1234567890", "search_term": "freight forwarder jobs",
+  "campaign_name": "Gulf", "review_state": "exclude_candidate", "note": null }
+```
+
+Records ONE human review decision against the canonical durable identity, so the
+Search Terms flagged view and the Action Queue read the same decision.
+
+`exclude_candidate` is a **local recommendation**. It is NOT evidence that a
+Google Ads negative keyword was applied — Averroes has no write path to Google
+Ads. The response carries `"google_ads_mutation": false` explicitly.
+
+Flag history (`first_flagged_at` / `latest_flagged_at` / reason) is NOT cleared
+by a decision: a resolved term stays auditable as historically flagged.
+
+**Errors:** 400 on a missing `search_term` or an unknown `review_state`;
+503 when the local review store is unavailable.
 
 ---
 

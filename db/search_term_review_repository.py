@@ -205,13 +205,17 @@ def record_flag_observations(observations: list) -> dict:
                                        obs.get("search_term"))
         if not identity["search_term_normalized"]:
             continue
+        flagged_at = obs.get("flagged_at")
         prepared.append((
             identity["term_identity"], identity["campaign_key"],
             identity["search_term_normalized"],
             obs.get("search_term_display") or obs.get("search_term"),
             obs.get("campaign_name_display"),
             identity["identity_rule_version"],
-            obs.get("flagged_at"), obs.get("reason"), obs.get("raw_reason"),
+            # One observation seeds BOTH ends of the history window; the
+            # LEAST/GREATEST merge below then only ever widens it.
+            flagged_at, flagged_at,
+            obs.get("reason"), obs.get("raw_reason"),
         ))
     if not prepared:
         return {"available": True, "written": 0}

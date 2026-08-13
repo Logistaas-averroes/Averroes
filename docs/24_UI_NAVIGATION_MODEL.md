@@ -21,8 +21,8 @@
 |-------|---------|-------|
 | **Command Center** | Daily operator pages | Dashboard, Action Queue, Reports |
 | **Platform Evidence** | Raw ad platform data and analytics (active source: **Google Ads API** — see PR-ADS-105; Windsor is legacy) | Campaigns, Search Terms, Keywords, Countries |
-| **CRM & Revenue** | Canonical CRM funnel plus revenue-truth ROAS, deal attribution, unit economics | Leads, Deals, ROAS by Campaign, ROAS by Country, Revenue by Source, GCLID Attribution, Unit Economics |
-| **Admin** | System operation, diagnostics, and configuration | Data Runs, System Status, Admin Backfill, Churn Input |
+| **CRM & Revenue** | Canonical CRM funnel plus revenue-truth ROAS, deal attribution, unit economics | Leads, Deals, ROAS by Campaign, ROAS by Country, Revenue by Source, Unit Economics |
+| **Admin** | System operation, diagnostics, and configuration | Data Runs, System Status, Revenue Health, Admin Backfill, GCLID Attribution, Churn Input |
 
 ---
 
@@ -31,11 +31,16 @@
 In the prior model, Deals and GCLID Attribution were buried in the generic "Evidence" group. This was incorrect from a doctrine perspective:
 
 - **Deals** are the source of revenue truth — they are the denominator for ROAS and LTV.
-- **GCLID Attribution** links platform spend to real revenue outcomes.
 - **ROAS by Campaign / Country** shows whether ad spend produces profitable customers.
 - **Unit Economics** answers: "Are we buying customers profitably?"
 
-These belong together because they all answer the same question: **Is the revenue reality positive?**
+GCLID Attribution was originally placed here for the same reason — it links
+platform spend to real revenue outcomes. PR-ADS-153D moved it to Admin: the
+LINKAGE is revenue truth, but the page itself is raw click-level forensics used
+to diagnose that linkage, not a destination an executive reads. Its output
+already reaches CRM & Revenue through ROAS and Revenue by Source.
+
+The remaining pages belong together because they all answer the same question: **Is the revenue reality positive?**
 
 Placing them after Platform Evidence and Lead Intelligence creates a clear reading order:
 1. What did the platform do? (Platform Evidence)
@@ -56,15 +61,14 @@ Placing them after Platform Evidence and Lead Intelligence creates a clear readi
 | Keywords | `keywords` | Platform Evidence |
 | Countries | `geo` | Platform Evidence |
 | Leads | `leads` | CRM & Revenue |
-| Flagged Waste Terms | `waste` | Platform Evidence *(pending PR-ADS-153D consolidation)* |
 | Deals | `deals` | CRM & Revenue |
 | ROAS by Campaign | `roas-campaigns` | CRM & Revenue |
 | ROAS by Country | `roas-countries` | CRM & Revenue |
-| GCLID Attribution | `gclid-attribution` | CRM & Revenue |
 | Unit Economics | `unit-economics` | CRM & Revenue |
 | Data Runs | `scheduler` | Admin |
 | System Status | `health` | Admin |
 | Admin Backfill | `backfill` | Admin |
+| GCLID Attribution | `gclid-attribution` | Admin *(forensics, PR-ADS-153D)* |
 | Churn Input | `churn-input` | Admin |
 
 ### Backward-Compatible Route Aliases
@@ -73,6 +77,7 @@ Placing them after Platform Evidence and Lead Intelligence creates a clear readi
 |-------------|-------------|
 | `ngrams` | `search-terms` (activates Patterns tab) |
 | `opportunities` | `leads` with the `open_working` working-status filter (PR-ADS-153C) |
+| `waste` | `search-terms` (activates Flagged tab) (PR-ADS-153D) |
 
 ### PR-ADS-153C — Lead Intelligence retirement
 
@@ -84,9 +89,27 @@ CRM & Revenue:
   canonical page directly.
 - **In Progress Leads** (`opportunities`) redirects to `leads` and carries its
   filter intent — that concept is now the `open_working` operational filter.
-- **Flagged Waste Terms** keeps its route, backend and durable evidence, and
-  moves under Platform Evidence until PR-ADS-153D consolidates it into Search
-  Terms + Action Queue.
+- **Flagged Waste Terms** kept its route, backend and durable evidence, and
+  moved under Platform Evidence until PR-ADS-153D consolidated it (below).
+
+### PR-ADS-153D — Search-term waste consolidation
+
+**Flagged Waste Terms** is retired as a standalone destination. Its nav item,
+page markup and loader are deleted; `#/waste` redirects to
+`#/search-terms?tab=flagged`, carrying the old page's intent rather than merely
+its URL. Investigation lives in Search Terms → Flagged; the actionable subset
+lives in the Action Queue.
+
+**N-Grams / Patterns** has one normal home — Search Terms → Patterns. `#/ngrams`
+already redirected there and still does; there is no everyday nav item for it.
+
+**GCLID Attribution** moves from CRM & Revenue to **Admin**. The PR-ADS-153A
+audit classified it as a forensic/diagnostic capability, not an everyday
+executive destination — the everyday CRM & Revenue section should not require
+users to inspect raw click-level attribution. Its route key, backend and
+attribution logic are unchanged; this is a navigation/ownership correction only.
+
+Full contract: `docs/34_SEARCH_TERM_WASTE_CONSOLIDATION.md`.
 
 ---
 
