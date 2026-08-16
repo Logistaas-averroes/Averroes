@@ -62,11 +62,12 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
-            tests/test_pr_ads_153e_a_pg_integration.py -q \
+            tests/test_pr_ads_153e_a_pg_integration.py \
+            tests/test_pr_ads_153e_a2_pg_integration.py -q \
             --junitxml=pg-results.xml
 
       # A skipped database suite is not merge evidence. If the cluster could not
@@ -80,17 +81,31 @@ jobs:
           suite = suite if suite.tag == "testsuite" else suite.find("testsuite")
           tests = int(suite.get("tests", 0))
           skipped = int(suite.get("skipped", 0))
+          cases = [c.get("classname", "") for c in suite.iter("testcase")]
+          modules = {c.rsplit(".", 1)[0] for c in cases if c}
           print(f"postgres tests={tests} skipped={skipped}")
+          print("modules: " + ", ".join(sorted(modules)))
           if tests == 0 or skipped:
               sys.exit("PostgreSQL integration tests did not run — a skipped "
                        "database suite is not acceptable merge evidence")
+          # Naming a suite in the pytest invocation does not prove it RAN: a
+          # module-level skipif silently contributes zero cases, and the count
+          # above would still look healthy from the other suites.
+          for required in ("tests.test_pr_ads_153d_pg_integration",
+                           "tests.test_pr_ads_153e_a_pg_integration",
+                           "tests.test_pr_ads_153e_a2_pg_integration"):
+              if required not in modules:
+                  sys.exit(f"{required} contributed no test cases — it was "
+                           "skipped or failed to collect, which is not "
+                           "acceptable merge evidence")
           PY
 
-      - name: Contract tests (153D + 153E-A)
+      - name: Contract tests (153D + 153E-A + 153E-A2)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_waste_consolidation.py \
-            tests/test_pr_ads_153e_a_revenue_ledger.py -q
+            tests/test_pr_ads_153e_a_revenue_ledger.py \
+            tests/test_pr_ads_153e_a2_cutover_gate.py -q
 
       - name: Full suite (known-failing-on-main deselected)
         run: |

@@ -240,6 +240,37 @@ there, instead of paging through the same first 5,000 deals forever. Deals a
 capped run never reached are not written at all — inventing `lookup_failed` rows
 for them would manufacture evidence of a failure that never happened.
 
+### Sync mode — declared, never inferred (PR-ADS-153E-A2)
+
+Every `record_sync_state` call names its mode. The two write different columns:
+
+| Column | `sync_mode="bootstrap"` | `sync_mode="incremental"` |
+|---|---|---|
+| `bootstrap_status` | `in_progress` → `complete` | untouched |
+| `bootstrap_started_at` | `COALESCE(existing, NOW())` | untouched |
+| `bootstrap_completed_at` | set once, only when proven | untouched |
+| `last_incremental_at` | **untouched** | `NOW()` |
+| `last_status` / `last_error` / counters | honest | honest |
+| watermark | existing checkpoint rules | existing checkpoint rules |
+
+`bootstrap_status` becomes `complete` only when the run **succeeded** *and*
+`proved_complete` — the connector reached the end of the result set and the run
+was not truncated by the lookup cap. "We stopped and nothing went wrong" is not
+proof that there was nothing left to read.
+
+Two monotonic guarantees:
+
+* a completed bootstrap is never downgraded — coverage once proven stays proven;
+* `bootstrap_completed_at` keeps its **first** value. Re-running the backfill
+  re-proves the same coverage; restamping it would push completion past the
+  incremental that already ran and silently revoke a passing gate until the next
+  daily sync.
+
+153E-A inferred the mode from `full_refresh and complete`, so an ordinary
+incremental left `bootstrap_status = not_started` while reporting
+`last_status = success`, and stamped `last_incremental_at` on bootstraps too —
+which made "an incremental succeeded after the bootstrap" unprovable.
+
 ---
 
 ## 9. Synchronization
@@ -269,8 +300,64 @@ are intact and still feed every production page. No page's visible totals change
 The gate before PR-ADS-153E-B may begin:
 
 ```
-python -m scripts.audit_canonical_revenue_truth --window current_quarter
+python -m scripts.audit_canonical_revenue_truth --all-windows --json
 ```
+
+`--all-windows` runs `current_quarter`, `last_quarter`, `last_6_months`, `ytd`
+and `all_time`. **One failing or unavailable window fails the whole command** —
+a green `current_quarter` is not permission to migrate a page that renders
+"all time". `--window` still runs exactly one; the two are mutually exclusive.
+
+### Coverage is part of the gate (PR-ADS-153E-A2)
+
+Reconciling what the ledger **holds** says nothing about what it is
+**missing**. A portal whose historical bootstrap had never run — one nightly
+incremental over the last 24 hours, reporting `success` — reconciled perfectly
+against the same 24 hours of legacy rows and returned `ok: true`. That was the
+signal 153E-B was going to read as permission to repoint the executive revenue
+and customer totals at a ledger holding one day of history.
+
+`ok: true` therefore also requires:
+
+| Requirement | Violation code |
+|---|---|
+| the sync-state read succeeded | `sync_state_unavailable` |
+| a sync-state row exists | `sync_state_missing` |
+| `bootstrap_status = complete` | `bootstrap_not_complete` |
+| both bootstrap timestamps exist | `bootstrap_timestamp_missing` |
+| completion is not before start | `bootstrap_timestamp_invalid` |
+| an incremental ran **after** completion | `post_bootstrap_incremental_missing` |
+| the last sync succeeded | `last_sync_not_successful` |
+| success was not recorded with an error | `last_sync_reported_success_with_error` |
+| stage coverage is readable | `stage_breakdown_unavailable` |
+
+Every violation carries a stable `code` beside its human message, exposed as
+`violation_codes` and `violation_details`, so a runbook keys off the reason
+rather than parsing English. An unreadable stage breakdown reports NULL, never
+`[]` — "could not read" is not "there is nothing there".
+
+### Operator bootstrap command
+
+```
+python -m scripts.backfill_canonical_deal_ledger              # resume (default)
+python -m scripts.backfill_canonical_deal_ledger --json --max-passes 40
+python -m scripts.backfill_canonical_deal_ledger --restart    # deliberate
+```
+
+Drives the bounded, resumable bootstrap to a **proven** completion. Exit 0
+requires both a pass reporting `status=success` and `complete=true`, *and* a
+re-read of the durable state showing `bootstrap_status = complete` — the first
+is the process's opinion, the second is what the gate will read tomorrow.
+
+Stops immediately on any pull, association, persistence or state-recording
+failure; bounded by `--max-passes`, so it can never loop indefinitely. It never
+escalates to `--restart` on its own: re-reading an entire portal is an
+operator's decision, not a program's reaction to a bad night. Counts, statuses
+and timestamps only — no deal names, contact names, emails or full GCLIDs,
+because this output goes into operator logs and PR evidence.
+
+There is no HTTP endpoint for it, and nothing triggers it on application
+startup.
 
 Exits non-zero on: duplicated `deal_id`; a row counted as won without
 `hs_is_closed_won = true`; an unknown currency contributing to USD revenue; a
@@ -350,6 +437,25 @@ customer/revenue totals reconcile; turns `gclid_attribution` into an attribution
 normal values; and deprecates legacy revenue routes without dropping historical
 evidence.
 
+**153E-B remains blocked** until the production evidence below passes. The gate
+is mechanical, not a judgement call:
+
+1. deploy the merge commit;
+2. `python -m scripts.backfill_canonical_deal_ledger` until it exits `0`
+   (re-run to resume; it is bounded and resumable);
+3. run one normal daily incremental sync **after** the bootstrap completes;
+4. `python -m scripts.audit_canonical_revenue_truth --all-windows --json`;
+5. require aggregate `ok: true` and exit code `0`;
+6. confirm the admin `GET /api/audit/revenue-truth` agrees for every window.
+
+Record only non-sensitive proof: deployed commit SHA, timestamps, bootstrap
+status, last incremental status, each window's pass/fail, aggregate counts and
+exit codes. Deal-level production identifiers do not go in a public PR.
+
+Expect the first production run to exit `1`. The gate is strict by design, and
+genuine backlog in the legacy ledgers will surface as itemized differences to
+triage rather than a clean pass.
+
 ---
 
 ## 12. Tables
@@ -388,3 +494,27 @@ remains active. Phase 2 / OCT remains blocked.
 - `docs/audits/PR-ADS-153A-MINIMUM-VIABLE-TRUTH-AUDIT.md` §9, §20, Q3–Q5
 - `docs/33_CANONICAL_CRM_FUNNEL.md` — lifecycle customers (a different grain)
 - `docs/34_SEARCH_TERM_WASTE_CONSOLIDATION.md` — the same doctrine applied to search terms
+
+---
+
+## Follow-up — 2026-08-16 (PR-ADS-153E-A2)
+
+**Status: unchanged — shadow mode.** This hardening PR is a safety interlock; it
+switches no consumer, changes no visible total, drops no legacy table and adds
+no external write path.
+
+What it changed, and why the original gate was not sufficient:
+
+* the 153E-A gate proved the ledger was *self-consistent and reconciled*, but
+  never that it was *complete*. A portal with no historical bootstrap passed;
+* sync mode is now declared rather than inferred, and bootstrap and incremental
+  runs write different columns (§9);
+* `bootstrap_started_at` / `bootstrap_completed_at` are populated for the first
+  time — the columns existed since 153E-A and were never written;
+* the audit requires complete, ordered bootstrap coverage plus a successful
+  incremental on top of it, with stable violation codes (§10);
+* `scripts/backfill_canonical_deal_ledger.py` drives the bounded bootstrap to a
+  proven completion;
+* `--all-windows` makes one failing window fail the whole gate.
+
+Read-only against every external platform. Phase 2 / OCT remains blocked.

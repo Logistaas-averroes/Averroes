@@ -699,13 +699,29 @@ def _diff(canonical_won, canonical_states, legacy_deals, *,
         label, expect_gclid_only=expect_gclid_only)
 
 
+# A coverage state that satisfies the PR-ADS-153E-A2 interlock, so these tests
+# isolate the DIFF violations rather than re-testing the bootstrap gate (which
+# has its own suite in tests/test_pr_ads_153e_a2_cutover_gate.py).
+_HEALTHY_SYNC_STATE = {
+    "available": True,
+    "row": {
+        "bootstrap_status": "complete",
+        "bootstrap_started_at": "2026-08-01T00:00:00+00:00",
+        "bootstrap_completed_at": "2026-08-01T01:00:00+00:00",
+        "last_incremental_at": "2026-08-02T00:00:00+00:00",
+        "last_status": "success",
+        "last_error": None,
+    },
+}
+
+
 def _gate(diff):
-    """Violations the gate raises for one diff, ignoring the ledger-health
-    checks that need a full summary."""
+    """Violation MESSAGES the gate raises for one diff, ignoring the
+    ledger-health checks that need a full summary."""
     from services import revenue_reconciliation_service as recon
 
-    return recon._check_invariants(
-        {}, {}, [diff], {"available": True, "row": {"last_status": "success"}})
+    return [f["message"] for f in recon._check_invariants(
+        {}, {}, [diff], _HEALTHY_SYNC_STATE, {"available": True, "rows": []})]
 
 
 def _won(deal_id, **kw):
@@ -962,9 +978,15 @@ def test_reconciliation_reads_canonical_identity_across_all_states():
 def test_18b_audit_exits_non_zero_on_failure_including_json():
     assert "EXIT_VALIDATION_FAILED = 1" in _AUDIT_PY
     main = _AUDIT_PY.split("def main(")[1]
-    # Every failure path returns the failure code, --json included.
-    assert main.count("return EXIT_VALIDATION_FAILED") >= 2
-    assert 'if args.json:\n        print(json.dumps(report, indent=2, default=str))\n        return exit_code' in main
+    # The exit code is computed once from the aggregate and returned on BOTH
+    # the JSON and human paths — --json cannot report a failure as a success.
+    assert ("exit_code = EXIT_OK if overall_ok else EXIT_VALIDATION_FAILED"
+            in main)
+    assert main.count("return exit_code") >= 2
+    # And a window that could not run at all is a failure, not an absence.
+    runner = _AUDIT_PY.split("def _audit_window(")[1].split("\ndef ")[0]
+    assert '"ok": False' in runner
+    assert "audit could not run" in runner
 
 
 def test_18c_audit_that_cannot_run_is_a_failure_not_a_pass():

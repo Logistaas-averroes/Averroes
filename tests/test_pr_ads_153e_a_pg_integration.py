@@ -486,7 +486,7 @@ def test_14e_failed_lookups_are_counted_in_sync_state_coverage(pg):
     """The preserved row must not make the failure invisible."""
     from db import deal_ledger_repository as repo
 
-    repo.record_sync_state(status="partial", association_failures=3,
+    repo.record_sync_state(sync_mode="incremental", status="partial", association_failures=3,
                            error="association_lookup_failed", deals_seen=10)
     state = repo.fetch_sync_state()["row"]
     assert state["association_failures"] == 3
@@ -670,12 +670,12 @@ def test_17_summary_equals_aggregation_of_ledger_rows(pg):
 def test_watermark_advances_only_on_success(pg):
     from db import deal_ledger_repository as repo
 
-    repo.record_sync_state(status="success", watermark=_T1, deals_seen=3)
+    repo.record_sync_state(sync_mode="incremental", status="success", watermark=_T1, deals_seen=3)
     assert repo.fetch_sync_state()["row"]["last_modified_watermark"].startswith(
         "2026-07-01")
 
     # A partial run must not move the watermark past deals it never read.
-    repo.record_sync_state(status="partial", watermark=_T2, deals_seen=1,
+    repo.record_sync_state(sync_mode="incremental", status="partial", watermark=_T2, deals_seen=1,
                            error="association_lookup_cap_reached")
     state = repo.fetch_sync_state()["row"]
     assert state["last_modified_watermark"].startswith("2026-07-01")
@@ -686,7 +686,7 @@ def test_watermark_advances_only_on_success(pg):
 def test_failed_sync_is_recorded_as_failed(pg):
     from db import deal_ledger_repository as repo
 
-    repo.record_sync_state(status="failed", error="pull_failed: boom")
+    repo.record_sync_state(sync_mode="incremental", status="failed", error="pull_failed: boom")
     state = repo.fetch_sync_state()["row"]
     assert state["last_status"] == "failed"
     assert state["deals_seen"] == 0     # zero rows AND an explicit failure
@@ -724,6 +724,21 @@ def _insert_legacy_source_row(deal_id, *, amount=1000.0,
         conn.commit()
 
 
+def _healthy_sync_state():
+    """Coverage that satisfies the PR-ADS-153E-A2 interlock.
+
+    A complete historical bootstrap, followed by a successful incremental. Both
+    halves are required: reconciling what the ledger holds says nothing about
+    what it is missing.
+    """
+    from db import deal_ledger_repository as repo
+
+    repo.record_sync_state(sync_mode="bootstrap", status="success",
+                           watermark=_T1, deals_seen=1, proved_complete=True)
+    repo.record_sync_state(sync_mode="incremental", status="success",
+                           watermark=_T2, deals_seen=1)
+
+
 def _healthy_ledger():
     """A fully reconciled shadow state.
 
@@ -736,7 +751,7 @@ def _healthy_ledger():
 
     repo.upsert_deal(_ledger_row("D1", gclid=None), associations=[_assoc("C1")])
     _insert_legacy_source_row("D1")
-    repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
+    _healthy_sync_state()
 
 
 def test_18_audit_passes_on_a_reconciled_ledger(pg):
@@ -773,7 +788,7 @@ def test_18c_audit_fails_when_a_failed_sync_is_the_latest_state(pg):
 
     _healthy_ledger()
     assert _run_audit() == 0
-    repo.record_sync_state(status="failed", error="pull_failed")
+    repo.record_sync_state(sync_mode="incremental", status="failed", error="pull_failed")
     assert _run_audit() == 1
 
 
@@ -787,7 +802,7 @@ def test_18d_audit_fails_when_an_unproven_currency_carries_revenue(pg):
                     currency_status="unavailable",
                     currency_reason="unknown_currency"),
         associations=[_assoc("C1")])
-    repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
+    _healthy_sync_state()
     assert _run_audit() == 1
 
 
@@ -798,7 +813,7 @@ def test_18e_audit_fails_when_a_failed_lookup_is_reported_as_unclassified(pg):
         _ledger_row("D_MISREPORTED", association_status="lookup_failed",
                     attribution_status="unclassified", primary_contact_id=None),
         associations=None, associations_observed=False)
-    repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
+    _healthy_sync_state()
     assert _run_audit() == 1
 
 
@@ -891,7 +906,7 @@ def test_a_gclid_won_deal_missing_from_the_legacy_gclid_ledger_fails(pg):
     repo.upsert_deal(_ledger_row("D_G", gclid="Cj0KEQ"),
                      associations=[_assoc("C1", gclid="Cj0KEQ")])
     _insert_legacy_source_row("D_G")
-    repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
+    _healthy_sync_state()
 
     report = build_revenue_reconciliation("all_time")
     diff = next(d for d in report["legacy_diffs"]
@@ -946,23 +961,23 @@ def test_sync_state_checkpoint_advances_the_watermark_on_a_capped_run(pg):
     move for a plain partial or a failure."""
     from db import deal_ledger_repository as repo
 
-    repo.record_sync_state(status="success", watermark=_T0, deals_seen=1)
+    repo.record_sync_state(sync_mode="incremental", status="success", watermark=_T0, deals_seen=1)
     assert repo.fetch_sync_state()["row"]["last_modified_watermark"].startswith(
         "2026-06-01")
 
     # A partial run with NO checkpoint leaves it alone.
-    repo.record_sync_state(status="partial", watermark=_T2, deals_seen=1)
+    repo.record_sync_state(sync_mode="incremental", status="partial", watermark=_T2, deals_seen=1)
     assert repo.fetch_sync_state()["row"]["last_modified_watermark"].startswith(
         "2026-06-01")
 
     # A partial run that cleanly processed a prefix DOES advance to it.
-    repo.record_sync_state(status="partial", watermark=_T1, deals_seen=1,
+    repo.record_sync_state(sync_mode="incremental", status="partial", watermark=_T1, deals_seen=1,
                            watermark_is_checkpoint=True)
     assert repo.fetch_sync_state()["row"]["last_modified_watermark"].startswith(
         "2026-07-01")
 
     # A failure never advances, checkpoint flag or not.
-    repo.record_sync_state(status="failed", watermark=_T2,
+    repo.record_sync_state(sync_mode="incremental", status="failed", watermark=_T2,
                            watermark_is_checkpoint=True, error="boom")
     assert repo.fetch_sync_state()["row"]["last_modified_watermark"].startswith(
         "2026-07-01")
@@ -993,7 +1008,7 @@ def test_unreadable_legacy_ledger_fails_the_audit(pg, ledger):
     )
 
     # No canonical won deals at all.
-    repo.record_sync_state(status="success", watermark=_T2, deals_seen=0)
+    _healthy_sync_state()
     assert _run_audit() == 0, "baseline: an empty but readable state reconciles"
 
     _drop_table(ledger)
@@ -1020,7 +1035,7 @@ def test_unreadable_legacy_ledger_fails_even_with_canonical_deals_present(pg):
 
     repo.upsert_deal(_ledger_row("D1", gclid=None), associations=[_assoc("C1")])
     _insert_legacy_source_row("D1")
-    repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
+    _healthy_sync_state()
     assert _run_audit() == 0
 
     _drop_table("gclid_attribution")
@@ -1043,7 +1058,7 @@ def test_legacy_amount_unavailable_is_itemized_and_fails_the_audit(pg):
                                  revenue_usd=100.0),
                      associations=[_assoc("C1")])
     _insert_legacy_source_row("D1", amount=None)
-    repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
+    _healthy_sync_state()
 
     report = build_revenue_reconciliation("all_time")
     diff = next(d for d in report["legacy_diffs"]
@@ -1075,7 +1090,7 @@ def test_a_matching_legacy_amount_still_reconciles(pg):
                                  revenue_usd=100.0),
                      associations=[_assoc("C1")])
     _insert_legacy_source_row("D1", amount=100.0)
-    repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
+    _healthy_sync_state()
 
     report = build_revenue_reconciliation("all_time")
     diff = next(d for d in report["legacy_diffs"]

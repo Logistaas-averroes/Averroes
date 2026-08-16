@@ -2,20 +2,28 @@
 """
 scripts/audit_canonical_revenue_truth.py
 
-PR-ADS-153E-A §8 — READ-ONLY shadow reconciliation gate for the canonical deal
-ledger.
+PR-ADS-153E-A §8 / PR-ADS-153E-A2 §5 — READ-ONLY reconciliation and COVERAGE
+gate for the canonical deal ledger.
 
     python -m scripts.audit_canonical_revenue_truth --window current_quarter
-    python -m scripts.audit_canonical_revenue_truth --window current_quarter --json
+    python -m scripts.audit_canonical_revenue_truth --all-windows --json
     echo $?      # 0 = reconciled, 1 = validation failed, 2 = usage error
 
 This is a MERGE and PRODUCTION gate, not a report. It exits non-zero whenever an
 invariant fails, and `--json` returns the same status — a machine-readable
 failure is still a failure.
 
-Every legacy-versus-canonical difference is itemized BY DEAL ID with a reason.
-"Totals differ" is not an acceptable output: the whole point of shadow mode is
-that PR-ADS-153E-B can only migrate consumers once each moving deal is explained.
+`--all-windows` is the production cutover gate: ONE failing or unavailable
+window fails the whole command. A green `current_quarter` is not permission to
+migrate a page that renders "all time".
+
+Two things must hold, and the second is what PR-ADS-153E-A2 added:
+
+  1. every legacy-versus-canonical difference is itemized BY DEAL ID with a
+     reason — "totals differ" is not an acceptable output;
+  2. the ledger's HISTORICAL COVERAGE is proven — a complete bootstrap with
+     ordered timestamps, and a successful incremental sync after it. Reconciling
+     what the ledger holds says nothing about what it is missing.
 
 Guarantees
 ----------
@@ -117,8 +125,12 @@ def _render(report: dict) -> None:
 
     # ── 2 ───────────────────────────────────────────────────────────────────
     _section("2. STAGE COVERAGE (open / lost / downgrade / churn are stored)")
-    stages = report.get("stage_breakdown") or []
-    if not stages:
+    stages = report.get("stage_breakdown")
+    if stages is None or not report.get("stage_breakdown_available", True):
+        # "Could not read" is not "there is nothing there".
+        print("    UNAVAILABLE — stage coverage could not be read.")
+        stages = []
+    elif not stages:
         print("    No deals in the ledger yet.")
     for row in stages[:20]:
         won = row.get("hs_is_closed_won")
@@ -158,26 +170,34 @@ def _render(report: dict) -> None:
                      diff.get("duplicate_legacy_rows") or [], ("rows_held",))
 
     # ── 4 ───────────────────────────────────────────────────────────────────
-    _section("4. SYNC COVERAGE")
+    _section("4. SYNC COVERAGE (the PR-ADS-153E-A2 cutover interlock)")
     state = report.get("sync_state")
     if not state:
-        print("    No deal sync has run yet.")
+        print("    No deal sync has run yet — coverage cannot be verified.")
     else:
-        for key in ("bootstrap_status", "last_status", "last_incremental_at",
-                    "last_modified_watermark", "deals_seen", "pages_fetched",
-                    "association_failures", "last_error"):
-            print(f"    {key:<44} {_fmt(state.get(key)):>10}")
+        for key in ("bootstrap_status", "bootstrap_started_at",
+                    "bootstrap_completed_at", "last_incremental_at",
+                    "last_status", "last_modified_watermark", "deals_seen",
+                    "pages_fetched", "association_failures", "last_error"):
+            print(f"    {key:<44} {_fmt(state.get(key)):>26}")
+        print()
+        print("    A complete bootstrap AND a later successful incremental are")
+        print("    both required. Reconciling what the ledger holds says")
+        print("    nothing about what it is missing.")
 
     # ── verdict ─────────────────────────────────────────────────────────────
     _section("VERDICT")
-    violations = report.get("violations") or []
-    if not violations:
-        print("  PASS — the canonical ledger is internally consistent and every")
-        print("  legacy difference is itemized above with a deal-level reason.")
+    details = report.get("violation_details") or [
+        {"code": "", "message": m} for m in (report.get("violations") or [])]
+    if not details:
+        print("  PASS — history is proven complete, an incremental has run on")
+        print("  top of it, the ledger is internally consistent, and every")
+        print("  legacy difference is itemized with a deal-level reason.")
     else:
-        print(f"  FAIL — {len(violations)} invariant violation(s):")
-        for v in violations:
-            print(f"    ✗ {v}")
+        print(f"  FAIL — {len(details)} invariant violation(s):")
+        for v in details:
+            code = f"[{v['code']}] " if v.get("code") else ""
+            print(f"    ✗ {code}{v['message']}")
 
     print()
     print("=" * 74)
@@ -186,58 +206,116 @@ def _render(report: dict) -> None:
     print("=" * 74)
 
 
+# The windows a production cutover must ALL pass. Named here rather than taken
+# from WINDOW_KEYS at random so a window added later is a deliberate decision
+# about what the gate covers, not a silent widening of it.
+GATE_WINDOWS = ("current_quarter", "last_quarter", "last_6_months", "ytd",
+                "all_time")
+
+
+def _audit_window(window: str) -> dict:
+    """Run one window. An audit that cannot RUN is a failed audit, never a pass."""
+    from services.revenue_reconciliation_service import (
+        build_revenue_reconciliation,
+    )
+
+    try:
+        report = build_revenue_reconciliation(window)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "available": False, "window": window,
+                "violations": [f"audit could not run: {exc}"],
+                "violation_codes": ["audit_could_not_run"]}
+
+    if not report.get("available"):
+        reason = report.get("reason", "unknown")
+        return {"ok": False, "available": False, "window": window,
+                "violations": [f"reconciliation unavailable: {reason}"],
+                "violation_codes": ["reconciliation_unavailable"]}
+    return report
+
+
 def main() -> int:
     from analysis.business_windows import WINDOW_KEYS
 
     parser = argparse.ArgumentParser(
-        description="Read-only PR-ADS-153E-A canonical revenue reconciliation gate")
-    parser.add_argument("--window", default="current_quarter",
-                        help=f"Business window ({'|'.join(WINDOW_KEYS)})")
+        description="Read-only canonical revenue reconciliation and coverage "
+                    "gate (PR-ADS-153E-A / PR-ADS-153E-A2)")
+    parser.add_argument("--window",
+                        help=f"One business window ({'|'.join(WINDOW_KEYS)}). "
+                             "Defaults to current_quarter.")
+    parser.add_argument("--all-windows", action="store_true",
+                        help="Run every gate window ("
+                             f"{', '.join(GATE_WINDOWS)}). ONE failing or "
+                             "unavailable window fails the whole command — "
+                             "this is the production cutover gate.")
     parser.add_argument("--json", action="store_true",
                         help="Machine-readable output (still exits non-zero on "
                              "failure)")
     args = parser.parse_args()
 
-    if args.window not in WINDOW_KEYS:
-        print(f"Unknown window {args.window!r}. Valid: {', '.join(WINDOW_KEYS)}",
+    if args.window and args.all_windows:
+        print("--window and --all-windows are mutually exclusive.",
+              file=sys.stderr)
+        return EXIT_USAGE
+
+    windows = list(GATE_WINDOWS) if args.all_windows else [
+        args.window or "current_quarter"]
+
+    unknown = [w for w in windows if w not in WINDOW_KEYS]
+    if unknown:
+        print(f"Unknown window {unknown[0]!r}. Valid: {', '.join(WINDOW_KEYS)}",
               file=sys.stderr)
         return EXIT_USAGE
 
     try:
         from db.connection import init_pool
-        from services.revenue_reconciliation_service import (
-            build_revenue_reconciliation,
-        )
 
         init_pool()
-        report = build_revenue_reconciliation(args.window)
     except Exception as exc:  # noqa: BLE001
-        # An audit that cannot run is a FAILED audit, never a pass.
-        failure = {"ok": False, "window": args.window,
-                   "violations": [f"audit could not run: {exc}"]}
+        failure = {"ok": False, "violations": [f"audit could not run: {exc}"]}
         if args.json:
             print(json.dumps(failure, indent=2))
         else:
             print(f"AUDIT FAILED — could not run: {exc}")
         return EXIT_VALIDATION_FAILED
 
-    if not report.get("available"):
-        reason = report.get("reason", "unknown")
-        failure = {"ok": False, "window": args.window,
-                   "violations": [f"reconciliation unavailable: {reason}"]}
-        if args.json:
-            print(json.dumps(failure, indent=2, default=str))
-        else:
-            print(f"AUDIT FAILED — reconciliation unavailable: {reason}")
-        return EXIT_VALIDATION_FAILED
-
-    exit_code = EXIT_OK if report.get("ok") else EXIT_VALIDATION_FAILED
+    reports = [_audit_window(w) for w in windows]
+    # Aggregate: EVERY window must pass. A single green window is not permission
+    # to migrate a page that renders "all time".
+    overall_ok = all(bool(r.get("ok")) for r in reports)
+    exit_code = EXIT_OK if overall_ok else EXIT_VALIDATION_FAILED
 
     if args.json:
-        print(json.dumps(report, indent=2, default=str))
+        if args.all_windows:
+            print(json.dumps({
+                "ok": overall_ok,
+                "windows": windows,
+                "failing_windows": [r["window"] for r in reports
+                                    if not r.get("ok")],
+                "results": {r["window"]: r for r in reports},
+            }, indent=2, default=str))
+        else:
+            print(json.dumps(reports[0], indent=2, default=str))
         return exit_code
 
-    _render(report)
+    for report in reports:
+        if not report.get("available"):
+            print(f"AUDIT FAILED [{report.get('window')}] — "
+                  + "; ".join(report.get("violations") or ["unavailable"]))
+            continue
+        _render(report)
+
+    if args.all_windows:
+        _section("ALL-WINDOW GATE")
+        for report in reports:
+            mark = "PASS" if report.get("ok") else "FAIL"
+            print(f"    {report.get('window'):<20} {mark}")
+        failing = [r["window"] for r in reports if not r.get("ok")]
+        print()
+        if failing:
+            print("  FAILING WINDOWS: " + ", ".join(failing))
+        print(f"  aggregate ok = {overall_ok}")
+
     print(f"exit={exit_code}")
     return exit_code
 

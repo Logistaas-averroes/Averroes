@@ -21,6 +21,11 @@ ignored. Out-of-order delivery is normal in a resumable backfill running beside
 an incremental sync, and without this guard a backfill would quietly revert a
 deal to a stale stage.
 
+**Coverage state is declared, not inferred** (PR-ADS-153E-A2). Every write names
+its ``sync_mode``; a bootstrap and an incremental touch different columns, and
+only a run that proved it read to the END of the result set may complete the
+bootstrap. See ``record_sync_state``.
+
 **Association evidence is never destroyed by a failure.** Associations are
 replaced only inside a transaction that observed them successfully. A failed
 lookup writes no associations at all and leaves the previous successful
@@ -45,6 +50,20 @@ LEDGER_TABLE = "hubspot_deal_ledger"
 ASSOCIATION_TABLE = "hubspot_deal_contact_association"
 SYNC_STATE_TABLE = "hubspot_deal_sync_state"
 SYNC_SCOPE = "deals"
+
+# ── Sync mode (PR-ADS-153E-A2) ───────────────────────────────────────────────
+# The mode is DECLARED by the caller, never inferred. 153E-A inferred "this was
+# a bootstrap" from `full_refresh and complete`, which meant an ordinary
+# incremental run could leave `bootstrap_status = not_started` while reporting
+# `last_status = success` — a state the cutover gate then read as healthy.
+SYNC_MODE_BOOTSTRAP = "bootstrap"
+SYNC_MODE_INCREMENTAL = "incremental"
+ALL_SYNC_MODES = (SYNC_MODE_BOOTSTRAP, SYNC_MODE_INCREMENTAL)
+
+# ── Bootstrap coverage states ────────────────────────────────────────────────
+BOOTSTRAP_NOT_STARTED = "not_started"
+BOOTSTRAP_IN_PROGRESS = "in_progress"
+BOOTSTRAP_COMPLETE = "complete"
 
 _LEDGER_COLUMNS = (
     "deal_id", "deal_name", "pipeline_id", "deal_stage_id", "deal_stage_label",
@@ -275,12 +294,47 @@ def _replace_associations(cur, deal_id: str, associations: list,
         )
 
 
-def record_sync_state(*, status: str, watermark=None, deals_seen: int = 0,
-                      pages_fetched: int = 0, association_failures: int = 0,
-                      error: str | None = None, batch_id=None,
-                      bootstrap_status: str | None = None,
-                      watermark_is_checkpoint: bool = False) -> dict:
+def record_sync_state(*, status: str, sync_mode: str, watermark=None,
+                      deals_seen: int = 0, pages_fetched: int = 0,
+                      association_failures: int = 0, error: str | None = None,
+                      batch_id=None, watermark_is_checkpoint: bool = False,
+                      proved_complete: bool = False) -> dict:
     """Record the outcome of a sync attempt.
+
+    Args:
+        sync_mode: ``bootstrap`` or ``incremental``. DECLARED, never inferred —
+            the two modes write different columns, and guessing is what let an
+            ordinary incremental run report success over a bootstrap that had
+            never happened.
+        proved_complete: True only when the connector proved it reached the END
+            of the result set. A bootstrap may be marked complete on no other
+            basis: "we stopped and nothing went wrong" is not proof that there
+            was nothing left to read.
+
+    Column semantics
+    ----------------
+    ================= ============================ ==========================
+    Column            bootstrap run                incremental run
+    ================= ============================ ==========================
+    bootstrap_status  in_progress → complete       untouched
+    bootstrap_started COALESCE(existing, NOW())    untouched
+    bootstrap_compl.  set once, when proven        untouched
+    last_incremental  UNTOUCHED                    NOW()
+    ================= ============================ ==========================
+
+    ``last_incremental_at`` is the load-bearing one. 153E-A stamped it on every
+    run including bootstraps, so it could not answer the question the cutover
+    gate actually asks: *did a normal incremental sync succeed AFTER the
+    historical bootstrap finished?*
+
+    Two monotonic guarantees:
+
+    * a completed bootstrap is never downgraded to ``in_progress`` or
+      ``not_started`` — coverage once proven stays proven;
+    * ``bootstrap_completed_at`` keeps its FIRST value. Re-running the backfill
+      (resume or ``--restart``) re-proves the same coverage; restamping it would
+      invalidate the "incremental after bootstrap" ordering and silently revoke
+      a passing gate until the next daily sync.
 
     The watermark advances on a fully successful sync, or — when
     ``watermark_is_checkpoint`` — to the end of a CLEANLY PROCESSED PREFIX of a
@@ -292,12 +346,39 @@ def record_sync_state(*, status: str, watermark=None, deals_seen: int = 0,
     A failed run, or a partial run with no clean prefix, leaves the watermark
     where it was.
 
-    Returns ``{available}``; ``available: False`` is a FAILURE the caller must
-    propagate rather than treat as a recorded success.
+    Returns ``{available, error}``; ``available: False`` is a FAILURE the caller
+    must propagate rather than treat as a recorded success.
     """
+    if sync_mode not in ALL_SYNC_MODES:
+        return _unavailable(reason="invalid_sync_mode",
+                            error=f"unknown sync_mode {sync_mode!r}")
+
+    is_bootstrap = sync_mode == SYNC_MODE_BOOTSTRAP
+    # Only a run that both SUCCEEDED and proved it read to the end may complete
+    # the bootstrap.
+    completes_bootstrap = bool(is_bootstrap and proved_complete
+                               and status == "success")
     advance = watermark is not None and (
         status == "success"
         or (status == "partial" and watermark_is_checkpoint))
+
+    params = {
+        "scope": SYNC_SCOPE,
+        "is_bootstrap": is_bootstrap,
+        "completes": completes_bootstrap,
+        "watermark": watermark if advance else None,
+        "advance": advance,
+        "status": status,
+        "error": error,
+        "deals_seen": int(deals_seen),
+        "pages": int(pages_fetched),
+        "assoc_failures": int(association_failures),
+        "batch_id": batch_id,
+        "in_progress": BOOTSTRAP_IN_PROGRESS,
+        "complete": BOOTSTRAP_COMPLETE,
+        "not_started": BOOTSTRAP_NOT_STARTED,
+    }
+
     try:
         with get_conn() as conn:
             if conn is None:
@@ -306,20 +387,54 @@ def record_sync_state(*, status: str, watermark=None, deals_seen: int = 0,
                 cur.execute(
                     f"""
                     INSERT INTO {SYNC_STATE_TABLE} (
-                        scope, bootstrap_status, last_modified_watermark,
-                        last_incremental_at, last_status, last_error,
+                        scope, bootstrap_status,
+                        bootstrap_started_at, bootstrap_completed_at,
+                        last_modified_watermark, last_incremental_at,
+                        last_status, last_error,
                         deals_seen, pages_fetched, association_failures,
                         last_batch_id, updated_at
-                    ) VALUES (%s, COALESCE(%s, 'not_started'), %s, NOW(), %s, %s,
-                              %s, %s, %s, %s, NOW())
+                    ) VALUES (
+                        %(scope)s,
+                        CASE WHEN %(is_bootstrap)s
+                             THEN CASE WHEN %(completes)s THEN %(complete)s
+                                       ELSE %(in_progress)s END
+                             ELSE %(not_started)s END,
+                        CASE WHEN %(is_bootstrap)s THEN NOW() ELSE NULL END,
+                        CASE WHEN %(completes)s THEN NOW() ELSE NULL END,
+                        %(watermark)s,
+                        CASE WHEN %(is_bootstrap)s THEN NULL ELSE NOW() END,
+                        %(status)s, %(error)s,
+                        %(deals_seen)s, %(pages)s, %(assoc_failures)s,
+                        %(batch_id)s, NOW())
                     ON CONFLICT (scope) DO UPDATE SET
-                        bootstrap_status = COALESCE(
-                            EXCLUDED.bootstrap_status,
-                            {SYNC_STATE_TABLE}.bootstrap_status),
-                        last_modified_watermark = CASE WHEN %s
+                        -- Never downgraded: coverage once proven stays proven.
+                        bootstrap_status = CASE
+                            WHEN NOT %(is_bootstrap)s
+                                THEN {SYNC_STATE_TABLE}.bootstrap_status
+                            WHEN {SYNC_STATE_TABLE}.bootstrap_status = %(complete)s
+                                THEN %(complete)s
+                            WHEN %(completes)s THEN %(complete)s
+                            ELSE %(in_progress)s END,
+                        -- The FIRST attempt's start time survives every retry.
+                        bootstrap_started_at = CASE
+                            WHEN NOT %(is_bootstrap)s
+                                THEN {SYNC_STATE_TABLE}.bootstrap_started_at
+                            ELSE COALESCE(
+                                {SYNC_STATE_TABLE}.bootstrap_started_at, NOW())
+                            END,
+                        bootstrap_completed_at = CASE
+                            WHEN %(completes)s THEN COALESCE(
+                                {SYNC_STATE_TABLE}.bootstrap_completed_at, NOW())
+                            ELSE {SYNC_STATE_TABLE}.bootstrap_completed_at END,
+                        last_modified_watermark = CASE WHEN %(advance)s
                             THEN EXCLUDED.last_modified_watermark
                             ELSE {SYNC_STATE_TABLE}.last_modified_watermark END,
-                        last_incremental_at  = NOW(),
+                        -- A bootstrap is NOT an incremental. Stamping this here
+                        -- is what made "an incremental succeeded after the
+                        -- bootstrap" unprovable.
+                        last_incremental_at = CASE WHEN %(is_bootstrap)s
+                            THEN {SYNC_STATE_TABLE}.last_incremental_at
+                            ELSE NOW() END,
                         last_status          = EXCLUDED.last_status,
                         last_error           = EXCLUDED.last_error,
                         deals_seen           = EXCLUDED.deals_seen,
@@ -330,10 +445,7 @@ def record_sync_state(*, status: str, watermark=None, deals_seen: int = 0,
                             {SYNC_STATE_TABLE}.last_batch_id),
                         updated_at           = NOW()
                     """,
-                    (SYNC_SCOPE, bootstrap_status,
-                     watermark if advance else None,
-                     status, error, int(deals_seen), int(pages_fetched),
-                     int(association_failures), batch_id, advance),
+                    params,
                 )
             conn.commit()
         return {"available": True, "error": None}

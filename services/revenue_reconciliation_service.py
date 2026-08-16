@@ -47,6 +47,22 @@ comparison is attempted. Unavailable is not an empty ledger: against an empty
 canonical won population the two are indistinguishable, and a broken read would
 otherwise report a perfectly reconciled zero.
 
+Coverage (PR-ADS-153E-A2)
+-------------------------
+Reconciling what the ledger HOLDS says nothing about what it is MISSING. A
+portal with no historical bootstrap at all — one nightly incremental over the
+last 24 hours, reporting `success` — reconciled perfectly against the same
+24 hours of legacy rows and passed the 153E-A gate. It would have handed the
+executive dashboards a ledger containing a day of history.
+
+So `ok: true` additionally requires: a sync-state row exists; the historical
+bootstrap is COMPLETE; its start and completion timestamps exist and are
+ordered; a successful INCREMENTAL ran after that completion; the last sync
+succeeded without recording an error; and stage coverage is readable.
+
+Every violation carries a stable `code` (see the `V_*` constants) alongside its
+human message, so a runbook can key off the reason rather than parse English.
+
 Read-only. No external API calls. Carries no contact names, emails or full
 GCLIDs — a GCLID is reported only as present/absent, because reconciliation
 output goes into CI logs.
@@ -97,6 +113,50 @@ _EXPECTED_AMOUNT_PREFIXES = ("canonical_currency_", "currency_resolution_differs
 def _is_expected(reason: str) -> bool:
     return (reason in EXPECTED_REASONS
             or any(str(reason).startswith(p) for p in _EXPECTED_AMOUNT_PREFIXES))
+
+
+# ── Stable violation codes (PR-ADS-153E-A2) ─────────────────────────────────
+# Machine-readable identities for every gate failure, so an operator runbook and
+# CI can key off the reason rather than parsing English.
+V_DEAL_ID_DUPLICATED = "canonical_deal_id_duplicated"
+V_WON_WITHOUT_PREDICATE = "won_without_hs_is_closed_won"
+V_UNPROVEN_CURRENCY_IN_TOTAL = "unproven_currency_in_usd_total"
+V_FAILED_LOOKUP_AS_CLASSIFICATION = "failed_lookup_reported_as_unclassified"
+V_ROWS_DISAGREE_WITH_SUMMARY = "rows_disagree_with_summary"
+V_CURRENCY_COMPLETENESS_MISREPORTED = "currency_completeness_misreported"
+V_LEGACY_LEDGER_UNAVAILABLE = "legacy_ledger_unavailable"
+V_LEGACY_DEAL_MISSING_FROM_CANONICAL = "legacy_deal_missing_from_canonical"
+V_UNEXPLAINED_DIFFERENCE = "unexplained_difference"
+# Coverage — the interlock this PR exists to add.
+V_SYNC_STATE_UNAVAILABLE = "sync_state_unavailable"
+V_SYNC_STATE_MISSING = "sync_state_missing"
+V_BOOTSTRAP_NOT_COMPLETE = "bootstrap_not_complete"
+V_BOOTSTRAP_TIMESTAMP_MISSING = "bootstrap_timestamp_missing"
+V_BOOTSTRAP_TIMESTAMP_INVALID = "bootstrap_timestamp_invalid"
+V_POST_BOOTSTRAP_INCREMENTAL_MISSING = "post_bootstrap_incremental_missing"
+V_LAST_SYNC_NOT_SUCCESSFUL = "last_sync_not_successful"
+V_LAST_SYNC_SUCCESS_WITH_ERROR = "last_sync_reported_success_with_error"
+V_STAGE_BREAKDOWN_UNAVAILABLE = "stage_breakdown_unavailable"
+
+
+def _violation(code: str, message: str) -> dict:
+    return {"code": code, "message": message}
+
+
+def _ts(value):
+    """Parse a repository ISO timestamp, or None. An unparseable one is UNKNOWN.
+
+    Never substituted with a default — a guessed timestamp would let the
+    ordering checks below pass on evidence that does not exist.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        from datetime import datetime  # noqa: PLC0415
+
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
 
 
 def _unavailable(reason: str) -> dict:
@@ -390,7 +450,8 @@ def build_revenue_reconciliation(window: str = "current_quarter",
                              "deal_source_attribution", expect_gclid_only=False),
     ]
 
-    violations = _check_invariants(summary, won_rows, diffs, sync_res)
+    findings = _check_invariants(summary, won_rows, diffs, sync_res, stages_res)
+    violations = [f["message"] for f in findings]
 
     return {
         "available": True,
@@ -413,11 +474,17 @@ def build_revenue_reconciliation(window: str = "current_quarter",
             "failed_associations": summary.get("failed_assoc"),
             "unknown_stage_deals": summary.get("unknown_stage"),
         },
-        "stage_breakdown": stages_res.get("rows") or [],
+        # NULL, not [], when the read failed — an unavailable breakdown must
+        # not render as "no deals in the ledger yet".
+        "stage_breakdown": (stages_res.get("rows") or []
+                            if stages_res.get("available") else None),
+        "stage_breakdown_available": bool(stages_res.get("available")),
         "sync_state": sync_res.get("row"),
         "legacy_diffs": diffs,
         "violations": violations,
-        "ok": not violations,
+        "violation_codes": sorted({f["code"] for f in findings}),
+        "violation_details": findings,
+        "ok": not findings,
         "governance": {
             "read_only": True, "external_writes": False,
             "shadow_mode": True,
@@ -428,23 +495,29 @@ def build_revenue_reconciliation(window: str = "current_quarter",
 
 
 def _check_invariants(summary: dict, won_rows: dict, diffs: list,
-                      sync_res: dict) -> list:
-    """Every condition that must fail the merge/production gate."""
+                      sync_res: dict, stages_res: dict | None = None) -> list:
+    """Every condition that must fail the merge/production gate.
+
+    Returns a list of ``{code, message}``. The code is the stable identity; the
+    message is for humans and may be reworded freely.
+    """
     violations: list = []
 
     # A duplicated primary key would mean the ledger lost its identity contract.
     total = summary.get("total_deals")
     distinct = summary.get("distinct_deals")
     if total is not None and distinct is not None and total != distinct:
-        violations.append(
-            f"canonical deal_id duplicated: {total} rows for {distinct} deals")
+        violations.append(_violation(
+            V_DEAL_ID_DUPLICATED,
+            f"canonical deal_id duplicated: {total} rows for {distinct} deals"))
 
     # Won population must be exactly hs_is_closed_won IS TRUE.
     not_won = [d for d, r in won_rows.items() if r.get("hs_is_closed_won") is not True]
     if not_won:
-        violations.append(
+        violations.append(_violation(
+            V_WON_WITHOUT_PREDICATE,
             f"{len(not_won)} row(s) counted as won without hs_is_closed_won=true: "
-            + ", ".join(sorted(not_won)[:5]))
+            + ", ".join(sorted(not_won)[:5])))
 
     # An unproven currency must never contribute to a USD total.
     from analysis.deal_currency import SUMMABLE_CURRENCY_STATUSES
@@ -453,32 +526,36 @@ def _check_invariants(summary: dict, won_rows: dict, diffs: list,
               if r.get("revenue_usd") is not None
               and r.get("currency_status") not in SUMMABLE_CURRENCY_STATUSES]
     if leaked:
-        violations.append(
+        violations.append(_violation(
+            V_UNPROVEN_CURRENCY_IN_TOTAL,
             f"{len(leaked)} deal(s) carry revenue_usd with an unproven currency: "
-            + ", ".join(sorted(leaked)[:5]))
+            + ", ".join(sorted(leaked)[:5])))
 
     # A failed association lookup must never be recorded as a classification.
     misreported = [d for d, r in won_rows.items()
                    if r.get("association_status") == "lookup_failed"
                    and r.get("attribution_status") == "unclassified"]
     if misreported:
-        violations.append(
+        violations.append(_violation(
+            V_FAILED_LOOKUP_AS_CLASSIFICATION,
             f"{len(misreported)} failed association lookup(s) reported as "
-            "unclassified: " + ", ".join(sorted(misreported)[:5]))
+            "unclassified: " + ", ".join(sorted(misreported)[:5])))
 
     # Row-level and summary-level truth must agree.
     if summary.get("won_deals") is not None and len(won_rows) != summary["won_deals"]:
-        violations.append(
+        violations.append(_violation(
+            V_ROWS_DISAGREE_WITH_SUMMARY,
             f"ledger rows ({len(won_rows)}) disagree with ledger summary "
-            f"({summary['won_deals']} won deals)")
+            f"({summary['won_deals']} won deals)"))
 
     proven = sum(1 for r in won_rows.values()
                  if r.get("currency_status") in SUMMABLE_CURRENCY_STATUSES)
     if summary.get("won_currency_proven") is not None \
             and proven != summary["won_currency_proven"]:
-        violations.append(
+        violations.append(_violation(
+            V_CURRENCY_COMPLETENESS_MISREPORTED,
             f"currency completeness misreported: {proven} rows proven vs "
-            f"{summary['won_currency_proven']} in summary")
+            f"{summary['won_currency_proven']} in summary"))
 
     for diff in diffs:
         # A legacy lineage we could not READ makes the reconciliation
@@ -488,19 +565,21 @@ def _check_invariants(summary: dict, won_rows: dict, diffs: list,
         # broken read would have waved PR-ADS-153E-B's cutover through.
         if not diff.get("available"):
             detail = diff.get("unavailable_detail")
-            violations.append(
+            violations.append(_violation(
+                V_LEGACY_LEDGER_UNAVAILABLE,
                 f"legacy ledger {diff['ledger']} unavailable — reconciliation "
                 "cannot be performed"
-                + (f" ({detail})" if detail else ""))
+                + (f" ({detail})" if detail else "")))
             continue
 
         # A deal the legacy ledger holds and the canonical does not hold at all
         # means the sync is incomplete.
         if diff.get("legacy_only"):
-            violations.append(
+            violations.append(_violation(
+                V_LEGACY_DEAL_MISSING_FROM_CANONICAL,
                 f"{len(diff['legacy_only'])} deal(s) present in "
                 f"{diff['ledger']} but missing from the canonical ledger: "
-                + ", ".join(r["deal_id"] for r in diff["legacy_only"][:5]))
+                + ", ".join(r["deal_id"] for r in diff["legacy_only"][:5])))
 
         # Every other difference must be EXPLAINED. An unexplained one is a deal
         # PR-ADS-153E-B would move on a live page with no reason to give.
@@ -514,18 +593,97 @@ def _check_invariants(summary: dict, won_rows: dict, diffs: list,
             for row in unexplained:
                 by_reason.setdefault(row["reason"], []).append(row["deal_id"])
             for reason, ids in sorted(by_reason.items()):
-                violations.append(
+                violations.append(_violation(
+                    V_UNEXPLAINED_DIFFERENCE,
                     f"{len(ids)} unexplained {category} difference(s) vs "
-                    f"{diff['ledger']} ({reason}): " + ", ".join(sorted(ids)[:5]))
+                    f"{diff['ledger']} ({reason}): "
+                    + ", ".join(sorted(ids)[:5])))
 
-    # Sync coverage must be complete and honest.
-    state = sync_res.get("row") or {}
+    # ── Stage coverage must be READABLE ─────────────────────────────────────
+    # An unreadable stage breakdown was previously flattened to `[]` and printed
+    # as "no deals in the ledger yet" — an unavailable read rendered as a fact.
+    if stages_res is not None and not stages_res.get("available"):
+        violations.append(_violation(
+            V_STAGE_BREAKDOWN_UNAVAILABLE,
+            "stage coverage unavailable — open/lost/downgrade/churn storage "
+            "cannot be verified"
+            + (f" ({stages_res.get('reason')})" if stages_res.get("reason")
+               else "")))
+
+    # ── Sync coverage must be COMPLETE, ORDERED and honest ──────────────────
+    # PR-ADS-153E-A checked only that the state read succeeded and that the last
+    # status was not a failure. That let a portal with NO historical bootstrap
+    # at all pass the gate: one nightly incremental over the last 24 hours
+    # reports `success`, and the ledger — holding a day of deals and calling
+    # itself reconciled — would have been handed to the executive dashboards.
     if not sync_res.get("available"):
-        violations.append("deal sync state unavailable")
-    elif state and state.get("last_status") not in (None, "success"):
-        violations.append(
-            f"last deal sync was {state.get('last_status')}"
-            + (f" ({state.get('last_error')})" if state.get("last_error") else ""))
+        violations.append(_violation(
+            V_SYNC_STATE_UNAVAILABLE,
+            "deal sync state unavailable — coverage cannot be verified"))
+        return violations
+
+    state = sync_res.get("row") or {}
+    if not state:
+        violations.append(_violation(
+            V_SYNC_STATE_MISSING,
+            "no deal sync has ever run — there is no coverage to verify"))
+        return violations
+
+    bootstrap_status = state.get("bootstrap_status")
+    started = _ts(state.get("bootstrap_started_at"))
+    completed = _ts(state.get("bootstrap_completed_at"))
+    incremental = _ts(state.get("last_incremental_at"))
+
+    if bootstrap_status != "complete":
+        violations.append(_violation(
+            V_BOOTSTRAP_NOT_COMPLETE,
+            f"historical bootstrap is {bootstrap_status or 'unknown'}, not "
+            "complete — the ledger holds an unknown fraction of history"))
+    else:
+        # Claimed complete: the timestamps must actually corroborate it.
+        missing = [name for name, value in (("bootstrap_started_at", started),
+                                            ("bootstrap_completed_at", completed))
+                   if value is None]
+        if missing:
+            violations.append(_violation(
+                V_BOOTSTRAP_TIMESTAMP_MISSING,
+                "bootstrap claims complete without " + " and ".join(missing)))
+        elif completed < started:
+            violations.append(_violation(
+                V_BOOTSTRAP_TIMESTAMP_INVALID,
+                f"bootstrap completed_at ({completed.isoformat()}) precedes "
+                f"started_at ({started.isoformat()})"))
+
+    # A successful INCREMENTAL after the bootstrap is what proves the ongoing
+    # pipeline works on top of the historical base — not just that a one-off
+    # backfill once ran.
+    if completed is None:
+        if bootstrap_status == "complete":
+            pass    # already reported as a missing timestamp above
+    elif incremental is None:
+        violations.append(_violation(
+            V_POST_BOOTSTRAP_INCREMENTAL_MISSING,
+            "no incremental sync has run since the bootstrap completed"))
+    elif incremental <= completed:
+        violations.append(_violation(
+            V_POST_BOOTSTRAP_INCREMENTAL_MISSING,
+            f"last incremental ({incremental.isoformat()}) is not after "
+            f"bootstrap completion ({completed.isoformat()})"))
+
+    last_status = state.get("last_status")
+    if last_status != "success":
+        violations.append(_violation(
+            V_LAST_SYNC_NOT_SUCCESSFUL,
+            f"last deal sync was {last_status or 'never recorded'}"
+            + (f" ({state.get('last_error')})" if state.get("last_error")
+               else "")))
+    elif state.get("last_error"):
+        # Success and an error message together is a contradiction, and the
+        # error is the half that is safe to believe.
+        violations.append(_violation(
+            V_LAST_SYNC_SUCCESS_WITH_ERROR,
+            "last deal sync claims success but recorded an error: "
+            f"{state.get('last_error')}"))
 
     return violations
 
