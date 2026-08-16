@@ -14,10 +14,19 @@
 >
 > * **153A–153D: merged.** Truth audit; canonical CRM funnel; canonical Leads
 >   experience; search-term waste consolidation.
-> * **153E-A: completed after merge.** Canonical deal ledger built and
->   reconciled in SHADOW MODE — see `docs/35_CANONICAL_REVENUE_LEDGER.md`. No
->   revenue consumer has been switched.
-> * **153E-B: next.** Revenue consumer cutover and Unit Economics migration.
+> * **153E-A: merged.** Canonical deal ledger built and reconciled in SHADOW
+>   MODE — see `docs/35_CANONICAL_REVENUE_LEDGER.md`. No revenue consumer has
+>   been switched.
+> * **153E-A2: cutover gate hardening.** The 153E-A gate proved the ledger was
+>   reconciled but never that it was COMPLETE — a portal with no historical
+>   bootstrap passed it. The audit now requires proven bootstrap coverage plus a
+>   successful incremental on top of it, and
+>   `scripts/backfill_canonical_deal_ledger.py` drives that bootstrap to a
+>   proven completion. Still shadow mode; still no consumer switched.
+> * **153E-B: blocked** until the production evidence in
+>   `docs/35_CANONICAL_REVENUE_LEDGER.md` §11 passes
+>   (`--all-windows` aggregate `ok: true`). Then: revenue consumer cutover and
+>   Unit Economics migration.
 > * **153F and 153G: remain.** Geo synchronization; legacy table/route deletion.
 > * **Phase 2 / OCT: blocked.** Offline conversion uploads are not started and
 >   are not authorized.

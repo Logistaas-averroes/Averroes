@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-153E-A — Canonical Deal Ledger Foundation (August 2026)
+**Last updated:** PR-ADS-153E-A2 — Canonical Revenue Cutover Gate Hardening (August 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -18,10 +18,19 @@
 >
 > * **153A–153D: merged.** Truth audit; canonical CRM funnel; canonical Leads
 >   experience; search-term waste consolidation.
-> * **153E-A: completed after merge.** Canonical deal ledger built and
->   reconciled in SHADOW MODE — see `docs/35_CANONICAL_REVENUE_LEDGER.md`. No
->   revenue consumer has been switched.
-> * **153E-B: next.** Revenue consumer cutover and Unit Economics migration.
+> * **153E-A: merged.** Canonical deal ledger built and reconciled in SHADOW
+>   MODE — see `docs/35_CANONICAL_REVENUE_LEDGER.md`. No revenue consumer has
+>   been switched.
+> * **153E-A2: cutover gate hardening.** The 153E-A gate proved the ledger was
+>   reconciled but never that it was COMPLETE — a portal with no historical
+>   bootstrap passed it. The audit now requires proven bootstrap coverage plus a
+>   successful incremental on top of it, and
+>   `scripts/backfill_canonical_deal_ledger.py` drives that bootstrap to a
+>   proven completion. Still shadow mode; still no consumer switched.
+> * **153E-B: blocked** until the production evidence in
+>   `docs/35_CANONICAL_REVENUE_LEDGER.md` §11 passes
+>   (`--all-windows` aggregate `ok: true`). Then: revenue consumer cutover and
+>   Unit Economics migration.
 > * **153F and 153G: remain.** Geo synchronization; legacy table/route deletion.
 > * **Phase 2 / OCT: blocked.** Offline conversion uploads are not started and
 >   are not authorized.
@@ -36,9 +45,10 @@
 |------|--------|-------|
 | `analysis/deal_truth.py` | Canonical won predicate + deal→contact resolver | **NEW in PR-ADS-153E-A** — `hs_is_closed_won` is the ONLY won rule (fails closed); one shared association resolver feeding GCLID/source/campaign/country, with `lookup_failed` distinct from `none`. Pure, no I/O |
 | `analysis/deal_currency.py` | Fail-closed revenue currency doctrine | **NEW in PR-ADS-153E-A** — `revenue_usd` only when proven (`verified_usd` / `converted` at close-date local FX); unknown currency stays NULL, never 0, never assumed USD. Pure, no I/O |
-| `db/deal_ledger_repository.py` | Canonical deal ledger persistence | **NEW in PR-ADS-153E-A** — idempotent by `deal_id`, monotonic on `hubspot_lastmodified_at`; a failed association lookup never destroys prior evidence |
+| `db/deal_ledger_repository.py` | Canonical deal ledger persistence | **NEW in PR-ADS-153E-A** — idempotent by `deal_id`, monotonic on `hubspot_lastmodified_at`; a failed association lookup never destroys prior evidence. **153E-A2:** sync mode is DECLARED (`bootstrap` / `incremental`), the two write different columns, and only a run that proved end-of-results completes the bootstrap |
 | `services/hubspot_deal_sync_service.py` | Deal ledger orchestration | **NEW in PR-ADS-153E-A** — SOLE writer of `hubspot_deal_ledger`. All stages, watermarked on `hs_lastmodifieddate` with overlap, resumable backfill. Read-only vs HubSpot |
-| `services/revenue_reconciliation_service.py` | Shadow reconciliation | **NEW in PR-ADS-153E-A** — canonical vs `gclid_attribution` vs `deal_source_attribution` at DEAL GRAIN; every difference itemized by deal id + reason. No PII |
+| `services/revenue_reconciliation_service.py` | Shadow reconciliation + cutover gate | **NEW in PR-ADS-153E-A** — canonical vs `gclid_attribution` vs `deal_source_attribution` at DEAL GRAIN; every difference itemized by deal id + reason. No PII. **153E-A2:** `ok: true` also requires proven bootstrap coverage and a later successful incremental, with stable violation codes |
+| `scripts/backfill_canonical_deal_ledger.py` | Operator historical bootstrap | **NEW in PR-ADS-153E-A2** — drives the bounded, resumable bootstrap to a completion proven in the DURABLE state. Bounded by `--max-passes`; stops on first failure; `--restart` is opt-in. No HTTP endpoint, no startup trigger, no PII in output |
 | `analysis/crm_lifecycle.py` | Canonical CRM lifecycle taxonomy | **NEW in PR-ADS-153B** — HubSpot Lifecycle Stage is the funnel spine. Funnel events (lead/mql/sql/opportunity/customer) each map to their own `hs_v2_date_entered_*` property. Pure, no I/O |
 | `analysis/mql_status_taxonomy.py` | The ONE `mql_status` mapping | **NEW in PR-ADS-153B** — replaces four divergent copies. Maps every live value incl. previously-unmapped `CLOSED - Bad Contact` / `CLOSED - No Response` / `RESELLER`; distinguishes `no_verdict` from `unmapped`. Operational dimension only — NOT a funnel definition |
 | `services/hubspot_contact_funnel_sync_service.py` | Canonical contact ingestion | **NEW in PR-ADS-153B** — SOLE writer of `hubspot_contact_funnel`. All-source, watermarked on `lastmodifieddate`, resumable, durable bootstrap state. Read-only vs HubSpot |
@@ -184,3 +194,53 @@ No files are currently in a broken state.
 - Meta Ads connector — Phase 4
 
 - PR-ADS-069: Sidebar UX Grouping & Page Rename — four sidebar groups, 9 label renames, route stability rule, navigation doc ✅ Complete
+
+---
+
+## Follow-up — 2026-08-16 (PR-ADS-153E-A2, Canonical Revenue Cutover Gate Hardening)
+
+Hardening only. No production consumer switched, no `static/` file touched, no
+visible KPI changed, no legacy table dropped, no external write path added.
+
+**The defect.** PR-ADS-153E-A's gate proved the canonical ledger was internally
+consistent and reconciled against both legacy lineages. It never proved the
+ledger was COMPLETE. `_check_invariants` accepted a successful `fetch_sync_state`
+that returned `row=None`, never required `bootstrap_status == "complete"`, and
+`bootstrap_started_at` / `bootstrap_completed_at` — columns that had existed
+since 153E-A — were never written by `record_sync_state` at all. A portal whose
+historical bootstrap had never run therefore passed: one nightly incremental
+over the last 24 hours reports `success`, reconciles perfectly against the same
+24 hours of legacy rows, and returns `ok: true`. That was the signal 153E-B was
+going to read as permission to repoint the executive revenue and customer
+totals at a ledger holding one day of history.
+
+**What changed.**
+
+* `db/deal_ledger_repository.py` — `record_sync_state` takes a required
+  `sync_mode`; bootstrap and incremental runs write different columns; a
+  completed bootstrap is never downgraded; the first start and completion
+  timestamps survive retries; only a run that PROVED end-of-results completes
+  the bootstrap.
+* `services/hubspot_deal_sync_service.py` — every state write on every exit
+  path names its mode, including the two early pull-failure returns.
+* `services/revenue_reconciliation_service.py` — coverage is a hard invariant,
+  and every violation carries a stable code.
+* `scripts/backfill_canonical_deal_ledger.py` — new operator CLI.
+* `scripts/audit_canonical_revenue_truth.py` — `--all-windows`.
+
+**Two follow-up blockers, fixed in review:**
+
+* the backfill CLI reported success whenever the durable row already said
+  `complete`, even when the current run had failed. `bootstrap_status` is
+  monotonic by design, so it answered "has a bootstrap ever worked?" rather than
+  "did this one?". It now requires proof from the current execution AND agreement
+  from the durable state;
+* `last_status` and `last_error` are shared between sync modes, so a bootstrap
+  rerun's `success` could validate a FAILED incremental's timestamp. A durable
+  `last_sync_mode` column (additive, idempotent migration, NULL fails closed)
+  now records which mode wrote them, and the audit requires the latest sync to
+  have been an incremental.
+
+**Status: shadow mode, unchanged.** 153E-B remains blocked until the production
+procedure in `docs/35_CANONICAL_REVENUE_LEDGER.md` §11 returns aggregate
+`ok: true`. Six-month read-only governance active. Phase 2 / OCT blocked.

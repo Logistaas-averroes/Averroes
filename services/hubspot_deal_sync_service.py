@@ -175,8 +175,12 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
         modified_since: ISO timestamp; ``None`` uses the stored watermark (minus
             the overlap). Ignored when ``full_refresh``.
         full_refresh: read every tracked deal regardless of watermark.
+        bootstrap: this run is a HISTORICAL BOOTSTRAP pass. Recorded as such in
+            the coverage state, whether it succeeds, partials or fails —
+            including on the early pull-failure paths, so a failed bootstrap can
+            never be filed as a failed incremental (or vice versa).
 
-    Returns ``{available, status, deals_seen, written, skipped_stale,
+    Returns ``{available, status, sync_mode, deals_seen, written, skipped_stale,
     association_failures, write_failures, pages, complete, watermark,
     watermark_is_checkpoint, error}`` where ``status`` is ``success`` |
     ``partial`` | ``failed``.
@@ -184,7 +188,12 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
     import connectors.hubspot_pull as hubspot  # noqa: PLC0415
     import db.deal_ledger_repository as ledger_repo  # noqa: PLC0415
 
-    result = {"available": True, "status": "failed", "deals_seen": 0,
+    # Declared once, here, and passed to EVERY state write on every exit path.
+    sync_mode = (ledger_repo.SYNC_MODE_BOOTSTRAP if bootstrap
+                 else ledger_repo.SYNC_MODE_INCREMENTAL)
+
+    result = {"available": True, "status": "failed", "sync_mode": sync_mode,
+              "deals_seen": 0,
               "written": 0, "skipped_stale": 0, "association_failures": 0,
               "write_failures": 0, "pages": 0, "complete": False,
               "watermark": None, "watermark_is_checkpoint": False,
@@ -214,8 +223,8 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
     except Exception as exc:  # noqa: BLE001
         log.error("[deal-sync] deal pull failed: %s", exc)
         result["error"] = f"pull_failed: {exc}"
-        ledger_repo.record_sync_state(status="failed", error=result["error"],
-                                      batch_id=batch_id)
+        ledger_repo.record_sync_state(status="failed", sync_mode=sync_mode,
+                                      error=result["error"], batch_id=batch_id)
         return result
 
     raw_deals = pull.get("deals") or []
@@ -224,8 +233,8 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
     result["deals_seen"] = len(raw_deals)
     if not pull.get("available"):
         result["error"] = pull.get("error") or "pull_unavailable"
-        ledger_repo.record_sync_state(status="failed", error=result["error"],
-                                      batch_id=batch_id)
+        ledger_repo.record_sync_state(status="failed", sync_mode=sync_mode,
+                                      error=result["error"], batch_id=batch_id)
         return result
 
     stage_map = getattr(hubspot, "DEAL_STAGE_MAP", {}) or {}
@@ -427,12 +436,14 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
     })
 
     state = ledger_repo.record_sync_state(
-        status=status, watermark=state_watermark,
+        status=status, sync_mode=sync_mode, watermark=state_watermark,
         watermark_is_checkpoint=is_checkpoint, deals_seen=len(normalized),
         pages_fetched=result["pages"], association_failures=association_failures,
         error=result["error"], batch_id=batch_id,
-        bootstrap_status=(("complete" if (complete and status == "success")
-                           else "in_progress") if bootstrap else None))
+        # `complete` is the connector's proof that pagination reached the END of
+        # the result set, AND that this run was not truncated by the lookup cap.
+        # Only that may complete the bootstrap.
+        proved_complete=complete)
     if not state.get("available"):
         # Coverage we could not record is coverage we cannot claim.
         result["status"] = "failed"
@@ -456,9 +467,13 @@ def backfill_deals(*, batch_id=None, restart: bool = False,
     through the same first 5,000 deals on every attempt — which is what made the
     previous implementation unable to finish a large portal at all.
 
-    ``restart=True`` ignores the checkpoint and re-reads everything. Safe, just
-    slower: the upsert is idempotent by ``deal_id`` and monotonic, so a repeat
-    pass cannot duplicate a deal or revert a newer state.
+    ``restart=True`` ignores the checkpoint and re-reads everything. It is an
+    explicit operator choice — slower and deliberate — and is never selected
+    automatically, least of all in response to an error.
+
+    ALWAYS records ``sync_mode="bootstrap"``, so a bootstrap pass never stamps
+    ``last_incremental_at`` and can never be mistaken for the post-bootstrap
+    incremental the cutover gate requires.
 
     Reads HubSpot read-only and writes only local PostgreSQL.
     """

@@ -3771,7 +3771,7 @@ A lifecycle customer is **never** substituted for a revenue customer.
 
 ---
 
-## `GET /api/audit/revenue-truth` *(PR-ADS-153E-A — canonical revenue reconciliation)*
+## `GET /api/audit/revenue-truth` *(PR-ADS-153E-A — canonical revenue reconciliation; coverage gate added in PR-ADS-153E-A2)*
 
 **Auth:** Admin · **Read-only against every external platform:** Yes
 
@@ -3785,6 +3785,27 @@ against both legacy revenue lineages, at DEAL GRAIN.
 **Shadow mode.** The canonical ledger is populated and reconciled but read by no
 production page until PR-ADS-153E-B. This endpoint changes no visible total.
 
+**`ok: true` requires proven COVERAGE, not just reconciliation** (PR-ADS-153E-A2).
+Reconciling what the ledger holds says nothing about what it is missing, so the
+gate additionally requires: a sync-state row; `bootstrap_status = complete`;
+both bootstrap timestamps present and ordered; a successful incremental sync
+AFTER bootstrap completion; a last sync that succeeded without recording an
+error; and a readable stage breakdown. Codes:
+`sync_state_unavailable`, `sync_state_missing`, `bootstrap_not_complete`,
+`bootstrap_timestamp_missing`, `bootstrap_timestamp_invalid`,
+`post_bootstrap_incremental_missing`, `last_sync_not_successful_incremental`,
+`last_sync_not_successful`, `last_sync_reported_success_with_error`,
+`stage_breakdown_unavailable`.
+
+`last_sync_not_successful_incremental` exists because `last_status` is shared
+between sync modes: a bootstrap rerun's `success` must not validate an
+incremental timestamp it never wrote. The mode is read from the durable
+`last_sync_mode` column, never inferred.
+
+The equivalent CLI is
+`python -m scripts.audit_canonical_revenue_truth --all-windows --json`, where a
+single failing window fails the whole command.
+
 Returns:
 
 * `canonical` — distinct deals, current closed-won deals, won **with** and
@@ -3794,10 +3815,19 @@ Returns:
   `amount_raw_total` (explicitly **not** a USD figure), ambiguous and failed
   associations;
 * `stage_breakdown` — proof that open / lost / downgrade / churn are stored;
+* `stage_breakdown_available` — `false` when the stage read FAILED. In that
+  case `stage_breakdown` is `null`, never `[]`: "could not read" is not "there
+  is nothing there";
 * `legacy_diffs` — per legacy ledger: `canonical_only`, `legacy_only`,
-  `amount_disagreement`, `duplicate_legacy_rows`, each itemized **by deal id
-  with a reason**;
-* `sync_state` — watermark, coverage, last status, association failures;
+  `won_disagreement`, `amount_disagreement`, `duplicate_legacy_rows`, each
+  itemized **by deal id with a reason** and an `expected` flag;
+* `sync_state` — bootstrap status, bootstrap start/completion timestamps,
+  `last_incremental_at`, `last_sync_mode` (which mode wrote `last_status`),
+  watermark, last status, association failures;
+* `violations` — human-readable gate failures;
+* `violation_codes` / `violation_details` — the same failures with STABLE
+  machine-readable codes (PR-ADS-153E-A2), so a runbook keys off the reason
+  rather than parsing English;
 * `violations` + `ok` — the invariant gate.
 
 Expected differences: `non_gclid_deal_excluded_by_legacy_ledger` and
