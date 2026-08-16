@@ -25,6 +25,13 @@ two ways to prove it:
 
 Anything else yields ``revenue_usd = None`` with an explicit status and reason.
 
+One parser, shared with persistence
+-----------------------------------
+``parse_monetary_value`` is the single monetary parser. The sync service uses it
+to normalize ``amount_raw`` and ``amount_in_home_currency`` before they reach the
+ledger's ``NUMERIC(18,2)`` columns, so currency resolution and persistence can
+never disagree about whether a deal has an amount (PR-ADS-153E-A3).
+
 Never do any of these:
   * treat ``amount_in_home_currency`` as USD without verifying the home currency;
   * coerce an unknown currency to zero (zero is a *claim* that the deal was
@@ -81,14 +88,55 @@ SUMMABLE_CURRENCY_STATUSES = frozenset({
 })
 
 
-def _decimal(value):
-    """Parse a monetary value, or None. An unparseable amount is NOT zero."""
-    if value is None or value == "":
+def parse_monetary_value(value):
+    """THE monetary parser. Returns a finite ``Decimal``, or ``None``.
+
+    ``None`` for every shape of "we do not have a number": ``None``, ``""``,
+    whitespace, unparseable text, and the non-finite Decimals ``NaN`` and
+    ``±Infinity`` — which ``Decimal()`` accepts happily and which are not money.
+
+    NEVER returns zero for missing input. Zero is a claim the deal was worth
+    nothing; ``None`` is the truth that we do not know.
+
+    Why this is shared (PR-ADS-153E-A3)
+    -----------------------------------
+    HubSpot returns ``""`` for an unset numeric property. Currency resolution
+    already read that as "no amount" and failed closed correctly — but the
+    ledger's own lineage columns were written from the RAW property, so the same
+    deal produced a valid `unavailable` currency verdict and then a
+    ``NUMERIC(18,2)`` insert of ``""``:
+
+        invalid input syntax for type numeric: ""
+
+    One deal in the production bootstrap did exactly that. The sync reported the
+    write failure honestly, kept its checkpoint and refused to complete — the
+    fail-closed path worked — but the deal could never be persisted. Currency
+    parsing and persistence must therefore agree by construction, which means
+    one parser used by both.
+
+    Pure: no DB, no network.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    if isinstance(value, bool):
+        # True/False are ints in Python. A boolean is not an amount.
         return None
     try:
-        return Decimal(str(value))
+        parsed = Decimal(str(value).strip())
     except (InvalidOperation, ValueError, TypeError):
         return None
+    # `Decimal("NaN")` and `Decimal("Infinity")` parse successfully and would
+    # reach the NUMERIC column. Neither is a monetary value.
+    if not parsed.is_finite():
+        return None
+    return parsed
+
+
+# Historical alias. Kept so the module's internal call sites read naturally;
+# `parse_monetary_value` is the name other modules import.
+_decimal = parse_monetary_value
 
 
 def _norm_currency(value) -> str | None:
@@ -240,5 +288,5 @@ __all__ = [
     "REASON_NO_AMOUNT", "REASON_UNKNOWN_CURRENCY",
     "REASON_HOME_CURRENCY_UNVERIFIED", "REASON_NO_CLOSE_DATE",
     "REASON_NO_FX_RATE",
-    "resolve_deal_currency", "is_summable",
+    "parse_monetary_value", "resolve_deal_currency", "is_summable",
 ]

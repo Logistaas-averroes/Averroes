@@ -1098,3 +1098,147 @@ def test_a_matching_legacy_amount_still_reconciles(pg):
     assert diff["amount_disagreement"] == []
     assert report["ok"] is True
     assert _run_audit() == 0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-153E-A3 — blank HubSpot monetary fields reach NUMERIC safely
+# ═════════════════════════════════════════════════════════════════════════════
+# The production bootstrap stopped with:
+#     invalid input syntax for type numeric: ""
+# after writing 569 rows and recording a clean checkpoint. Unit tests cannot
+# catch this: the normalizer's output looked fine in Python and only PostgreSQL
+# rejected it. These run against the real NUMERIC(18,2) columns.
+def _blank_amount_deal(deal_id="D_BLANK"):
+    """A HubSpot payload with unset numeric properties, exactly as returned."""
+    return {"id": deal_id, "properties": {
+        "dealname": f"Deal {deal_id}", "pipeline": "default",
+        "dealstage": "326093516", "hs_is_closed": "true",
+        "hs_is_closed_won": "true",
+        "createdate": "2026-05-01T00:00:00Z",
+        "closedate": "2026-07-10T00:00:00Z",
+        "hs_lastmodifieddate": "2026-07-11T00:00:00Z",
+        "amount": "", "amount_in_home_currency": "",
+        "deal_currency_code": ""}}
+
+
+def _run_sync_with(monkeypatch, deals):
+    """Drive the REAL sync service against a stubbed connector and live PG."""
+    import connectors.hubspot_pull as hubspot
+    import services.hubspot_deal_sync_service as svc
+
+    monkeypatch.setattr(hubspot, "pull_deals_for_ledger", lambda **_: {
+        "available": True, "complete": True, "pages": 1, "error": None,
+        "deals": deals})
+    monkeypatch.setattr(hubspot, "fetch_portal_home_currency",
+                        lambda: {"available": True, "home_currency_code": "USD",
+                                 "verified": True})
+    monkeypatch.setattr(hubspot, "fetch_deal_associations",
+                        lambda deal_id: {"deal_id": str(deal_id),
+                                         "contacts": [], "complete": True})
+    monkeypatch.setattr(svc, "_fx_rates_for", lambda *a, **k: {})
+    return svc.sync_deals(full_refresh=True)
+
+
+def test_a3_a_blank_amount_deal_persists_instead_of_failing_the_write(pg, monkeypatch):
+    """The production failure, reproduced end to end and fixed."""
+    from db import deal_ledger_repository as repo
+
+    result = _run_sync_with(monkeypatch, [_blank_amount_deal()])
+
+    # The write that used to fail now succeeds.
+    assert result["write_failures"] == 0, result.get("error")
+    assert result["written"] == 1
+    assert "numeric" not in (result.get("error") or "").lower()
+    assert result["status"] == "success"
+
+    row = repo.fetch_deal("D_BLANK")["row"]
+    assert row is not None, "the deal was skipped instead of persisted"
+    # NULL, not 0.00 — money we do not have is not money worth nothing.
+    assert row["amount_raw"] is None
+    assert row["amount_in_home_currency"] is None
+    assert row["revenue_usd"] is None
+    assert row["currency_status"] == "unavailable"
+    assert row["currency_reason"] == "no_amount"
+    # And it is still a won deal in the ledger.
+    assert row["hs_is_closed_won"] is True
+
+
+def test_a3_the_raw_empty_string_would_have_been_rejected_by_postgres(pg):
+    """Proves the column really is strict, so the test above is meaningful."""
+    import psycopg2
+
+    from db.connection import get_conn
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    "INSERT INTO hubspot_deal_ledger "
+                    "(deal_id, amount_raw) VALUES ('D_RAW_EMPTY', %s)", ("",))
+            except psycopg2.errors.InvalidTextRepresentation as exc:
+                assert "numeric" in str(exc)
+            else:
+                raise AssertionError(
+                    "NUMERIC accepted an empty string — this test no longer "
+                    "proves anything about the production failure")
+        conn.rollback()
+
+
+def test_a3_a_valid_amount_still_round_trips_unchanged(pg, monkeypatch):
+    """The control: normalization must not move a real number."""
+    from db import deal_ledger_repository as repo
+
+    deal = _blank_amount_deal("D_VALID")
+    deal["properties"].update({"amount": "1234.56",
+                               "amount_in_home_currency": "1234.56",
+                               "deal_currency_code": "USD"})
+
+    result = _run_sync_with(monkeypatch, [deal])
+    assert result["write_failures"] == 0
+    assert result["status"] == "success"
+
+    row = repo.fetch_deal("D_VALID")["row"]
+    assert row["amount_raw"] == 1234.56
+    assert row["amount_in_home_currency"] == 1234.56
+    assert row["revenue_usd"] == 1234.56
+    assert row["currency_status"] == "verified_usd"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "abc", "NaN", "Infinity"])
+def test_a3_every_unusable_amount_shape_persists_as_null(pg, monkeypatch, bad):
+    from db import deal_ledger_repository as repo
+
+    deal = _blank_amount_deal("D_SHAPE")
+    deal["properties"]["amount"] = bad
+    deal["properties"]["amount_in_home_currency"] = bad
+
+    result = _run_sync_with(monkeypatch, [deal])
+    assert result["write_failures"] == 0, f"{bad!r} broke the write"
+
+    row = repo.fetch_deal("D_SHAPE")["row"]
+    assert row["amount_raw"] is None
+    assert row["amount_in_home_currency"] is None
+    assert row["revenue_usd"] is None
+
+
+def test_a3_a_mixed_batch_persists_every_deal(pg, monkeypatch):
+    """The realistic production shape: most deals priced, one blank. Before the
+    fix the blank one failed the write and blocked the bootstrap."""
+    from db import deal_ledger_repository as repo
+
+    priced = _blank_amount_deal("D_PRICED")
+    priced["properties"].update({"amount": "500.00",
+                                 "amount_in_home_currency": "500.00",
+                                 "deal_currency_code": "USD"})
+    result = _run_sync_with(monkeypatch,
+                            [priced, _blank_amount_deal("D_UNPRICED")])
+
+    assert result["write_failures"] == 0
+    assert result["written"] == 2
+    assert result["status"] == "success"
+    assert repo.fetch_deal("D_PRICED")["row"]["revenue_usd"] == 500.0
+    assert repo.fetch_deal("D_UNPRICED")["row"]["revenue_usd"] is None
+    # The unpriced deal contributes nothing to the total, and is not a zero.
+    summary = repo.fetch_ledger_summary()["summary"]
+    assert summary["revenue_usd"] == 500.0
+    assert summary["won_currency_unavailable"] == 1

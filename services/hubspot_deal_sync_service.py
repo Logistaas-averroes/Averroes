@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from analysis.deal_currency import resolve_deal_currency
+from analysis.deal_currency import parse_monetary_value, resolve_deal_currency
 from analysis.deal_truth import (
     ASSOC_LOOKUP_FAILED,
     parse_hubspot_bool,
@@ -97,9 +97,20 @@ def _normalize_deal(raw: dict, stage_map: dict) -> dict:
         "deal_created_at": _iso_or_none(props.get("createdate")),
         "deal_close_date": _iso_or_none(props.get("closedate")),
         "hubspot_lastmodified_at": _iso_or_none(props.get("hs_lastmodifieddate")),
-        "amount_raw": props.get("amount"),
+        # Normalized through THE monetary parser, not copied verbatim
+        # (PR-ADS-153E-A3). These two land in NUMERIC(18,2) columns, and
+        # HubSpot returns "" for an unset numeric property — which PostgreSQL
+        # rejects with `invalid input syntax for type numeric: ""`. Currency
+        # resolution already read "" as "no amount" and failed closed
+        # correctly, so the same deal produced a valid `unavailable` verdict
+        # and then an unpersistable row. One parser keeps the verdict and the
+        # write in agreement by construction.
+        #
+        # None, never 0. Zero is a claim the deal was worth nothing.
+        "amount_raw": parse_monetary_value(props.get("amount")),
         "deal_currency_code": props.get("deal_currency_code"),
-        "amount_in_home_currency": props.get("amount_in_home_currency"),
+        "amount_in_home_currency": parse_monetary_value(
+            props.get("amount_in_home_currency")),
     }
 
 
