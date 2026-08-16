@@ -23,6 +23,8 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+from decimal import Decimal  # noqa: E402
+
 from analysis import deal_currency as currency  # noqa: E402
 from analysis import deal_truth as truth  # noqa: E402
 
@@ -270,6 +272,116 @@ def test_10d_the_service_hands_the_whole_rate_table_to_the_resolver():
     assert "fx_rates_by_currency=fx_by_currency" in fn
     # No per-deal rate map is chosen before the call.
     assert "rates = fx_by_currency.get" not in fn
+
+
+# =============================================================================
+# PR-ADS-153E-A3 — ONE monetary parser, shared with persistence
+# =============================================================================
+# Production evidence: the historical bootstrap stopped with
+#     invalid input syntax for type numeric: ""
+# HubSpot returns "" for an unset numeric property. Currency resolution already
+# read that as "no amount" and failed closed CORRECTLY — but the ledger's own
+# lineage columns were written from the RAW property, so the same deal produced
+# a valid `unavailable` verdict and then an unpersistable NUMERIC(18,2) insert.
+@pytest.mark.parametrize("blank", [None, "", " ", "   ", "\t", "\n", "\t \n"])
+def test_a3_blank_monetary_values_normalize_to_none(blank):
+    assert currency.parse_monetary_value(blank) is None
+
+
+@pytest.mark.parametrize("junk", ["abc", "1,000.00", "$500", "12.3.4", "--5",
+                                  "1e", object()])
+def test_a3_malformed_monetary_values_normalize_to_none(junk):
+    assert currency.parse_monetary_value(junk) is None
+
+
+@pytest.mark.parametrize("nonfinite", ["NaN", "nan", "-NaN", "Infinity",
+                                       "-Infinity", "inf", "-inf",
+                                       float("nan"), float("inf"),
+                                       float("-inf")])
+def test_a3_non_finite_values_normalize_to_none(nonfinite):
+    """`Decimal("NaN")` and `Decimal("Infinity")` PARSE. Neither is money, and
+    both would reach the NUMERIC column."""
+    assert currency.parse_monetary_value(nonfinite) is None
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("1000.50", "1000.50"), (1000.5, "1000.5"), ("  42  ", "42"),
+    ("0", "0"), (0, "0"), ("-3.25", "-3.25"), ("1e3", "1E+3"),
+    (Decimal("7.77"), "7.77"),
+])
+def test_a3_valid_amounts_survive_numerically(value, expected):
+    parsed = currency.parse_monetary_value(value)
+    assert parsed is not None
+    assert parsed == Decimal(expected)
+    assert parsed.is_finite()
+
+
+def test_a3_a_boolean_is_not_an_amount():
+    """True/False are ints in Python. `Decimal(True)` would be 1.00 of money."""
+    assert currency.parse_monetary_value(True) is None
+    assert currency.parse_monetary_value(False) is None
+
+
+def test_a3_missing_money_is_never_coerced_to_zero():
+    for blank in (None, "", "   ", "abc", float("nan")):
+        assert currency.parse_monetary_value(blank) is not Decimal("0")
+        assert currency.parse_monetary_value(blank) != 0
+        assert currency.parse_monetary_value(blank) is None
+    # And a real zero still parses as a real zero — the two are different facts.
+    assert currency.parse_monetary_value("0") == Decimal("0")
+
+
+def test_a3_the_normalizer_uses_the_shared_parser_for_both_columns():
+    fn = _SYNC_SERVICE_PY.split("def _normalize_deal(")[1].split("\ndef ")[0]
+    assert 'parse_monetary_value(props.get("amount"))' in fn
+    assert 'parse_monetary_value(\n            props.get("amount_in_home_currency"))' in fn
+    # The raw property must not reach the row verbatim any more.
+    assert '"amount_raw": props.get("amount")' not in fn
+    assert '"amount_in_home_currency": props.get("amount_in_home_currency")' not in fn
+
+
+def test_a3_blank_hubspot_amounts_produce_a_persistable_row():
+    """The exact production deal shape, through the real normalizer."""
+    import services.hubspot_deal_sync_service as svc
+
+    row = svc._normalize_deal(
+        {"id": "D_BLANK", "properties": {
+            "dealstage": "326093516", "hs_is_closed_won": "true",
+            "closedate": "2026-07-10T00:00:00Z",
+            "amount": "", "amount_in_home_currency": "",
+            "deal_currency_code": ""}},
+        {"326093516": "Deal Won / Payment Received"})
+
+    # NULL, not "" and not 0 — both NUMERIC columns are now writable.
+    assert row["amount_raw"] is None
+    assert row["amount_in_home_currency"] is None
+    assert row["deal_id"] == "D_BLANK"
+    # The deal is NOT skipped; it stays in the ledger with its won state.
+    assert row["hs_is_closed_won"] is True
+
+
+def test_a3_the_currency_verdict_is_unchanged_for_a_blank_amount():
+    """Doctrine preserved: no amount → unavailable/no_amount, never 0."""
+    out = currency.resolve_deal_currency(
+        amount_raw=None, amount_in_home_currency=None,
+        deal_currency_code="USD")
+    assert out["revenue_usd"] is None
+    assert out["currency_status"] == currency.CURRENCY_UNAVAILABLE
+    assert out["currency_reason"] == currency.REASON_NO_AMOUNT
+    # Identical verdict from the raw "" the connector actually returns.
+    from_blank = currency.resolve_deal_currency(
+        amount_raw="", amount_in_home_currency="", deal_currency_code="USD")
+    assert from_blank["currency_status"] == out["currency_status"]
+    assert from_blank["currency_reason"] == out["currency_reason"]
+
+
+def test_a3_a_valid_usd_amount_still_produces_the_same_revenue():
+    """The regression guard: normalization must not move a real number."""
+    for amount in ("1234.56", 1234.56, Decimal("1234.56")):
+        out = currency.resolve_deal_currency(amount_raw=amount,
+                                             deal_currency_code="USD")
+        assert out["revenue_usd"] == 1234.56
+        assert out["currency_status"] == currency.CURRENCY_VERIFIED_USD
 
 
 def test_11_missing_amount_remains_null():
