@@ -307,6 +307,7 @@ def test_an_incremental_before_any_bootstrap_leaves_it_not_started(pg):
     assert state["bootstrap_started_at"] is None
     assert state["bootstrap_completed_at"] is None
     assert state["last_status"] == "success"
+    assert state["last_sync_mode"] == "incremental"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -701,3 +702,178 @@ def test_backfill_cli_reports_failure_when_state_disagrees(pg, monkeypatch):
 
     assert out["ok"] is False
     assert "durable sync state" in out["reason"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# `last_sync_mode` — which mode wrote `last_status`
+# ═════════════════════════════════════════════════════════════════════════════
+def test_the_mode_is_recorded_on_every_write(pg):
+    _bootstrap(status="partial", proved=False, watermark_is_checkpoint=True)
+    assert _state()["last_sync_mode"] == "bootstrap"
+
+    _incremental(status="failed", error="pull_failed")
+    assert _state()["last_sync_mode"] == "incremental"
+
+    _bootstrap()
+    assert _state()["last_sync_mode"] == "bootstrap"
+
+
+def test_a_bootstrap_rerun_cannot_masquerade_as_post_bootstrap_proof(pg):
+    """The reachable sequence that passed before `last_sync_mode` existed.
+
+    Bootstrap completes at T0. The incremental FAILS at T1 — which still stamps
+    `last_incremental_at`, because the attempt happened. A bootstrap then reruns
+    successfully at T2: it preserves T0 and T1 and overwrites `last_status` with
+    `success`. The audit saw T1 > T0 and a success, and passed a history with no
+    successful incremental after the bootstrap anywhere in it.
+    """
+    from services.revenue_reconciliation_service import (
+        V_LAST_SYNC_NOT_INCREMENTAL, build_revenue_reconciliation,
+    )
+
+    _seed_reconciled_ledger()
+
+    _bootstrap()                                            # T0
+    completed_at = _state()["bootstrap_completed_at"]
+    time.sleep(0.05)
+    _incremental(status="failed", error="pull_failed: 503")  # T1, FAILED
+    incremental_at = _state()["last_incremental_at"]
+    time.sleep(0.05)
+    _bootstrap()                                            # T2, succeeds
+
+    state = _state()
+    # Every precondition the OLD gate checked is now satisfied...
+    assert state["bootstrap_status"] == "complete"
+    assert state["bootstrap_completed_at"] == completed_at
+    assert state["last_incremental_at"] == incremental_at
+    assert incremental_at > completed_at
+    assert state["last_status"] == "success"
+    # ...and the mode is what gives it away.
+    assert state["last_sync_mode"] == "bootstrap"
+
+    report = build_revenue_reconciliation("all_time")
+    assert report["ok"] is False
+    assert V_LAST_SYNC_NOT_INCREMENTAL in report["violation_codes"]
+    assert _run_audit("--window", "all_time") == 1
+
+
+def test_the_sequence_passes_only_after_another_successful_incremental(pg):
+    """The remedy, proven: run one more incremental and the gate opens."""
+    _seed_reconciled_ledger()
+    _bootstrap()
+    _incremental(status="failed", error="pull_failed: 503")
+    _bootstrap()
+    assert _run_audit("--window", "all_time") == 1
+
+    _incremental()
+    state = _state()
+    assert state["last_sync_mode"] == "incremental"
+    assert state["last_status"] == "success"
+    assert _run_audit("--window", "all_time") == 0
+    assert _run_audit("--all-windows") == 0
+
+
+def test_a_partial_incremental_fails(pg):
+    _seed_reconciled_ledger()
+    _bootstrap()
+    _incremental(status="partial", error="association_lookup_cap_reached")
+    assert _state()["last_sync_mode"] == "incremental"
+    assert _run_audit("--window", "all_time") == 1
+
+
+def test_an_incremental_with_success_and_an_error_fails(pg):
+    from services.revenue_reconciliation_service import (
+        V_LAST_SYNC_SUCCESS_WITH_ERROR, build_revenue_reconciliation,
+    )
+
+    _seed_reconciled_ledger()
+    _bootstrap()
+    _incremental(error="association_lookup_cap_reached")
+
+    report = build_revenue_reconciliation("all_time")
+    assert V_LAST_SYNC_SUCCESS_WITH_ERROR in report["violation_codes"]
+    assert _run_audit("--window", "all_time") == 1
+
+
+def test_a_null_sync_mode_on_an_existing_row_fails_closed(pg):
+    """Rows written before the column existed. NULL is not permission — the
+    gate stays shut until a real sync records the mode."""
+    from db.connection import get_conn
+    from services.revenue_reconciliation_service import (
+        V_LAST_SYNC_NOT_INCREMENTAL, build_revenue_reconciliation,
+    )
+
+    _seed_reconciled_ledger()
+    _bootstrap()
+    _incremental()
+    assert _run_audit("--window", "all_time") == 0
+
+    # Simulate a pre-migration row.
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE hubspot_deal_sync_state "
+                        "SET last_sync_mode = NULL")
+        conn.commit()
+
+    assert _state()["last_sync_mode"] is None
+    report = build_revenue_reconciliation("all_time")
+    assert V_LAST_SYNC_NOT_INCREMENTAL in report["violation_codes"]
+    assert _run_audit("--window", "all_time") == 1
+
+    # And one real incremental re-opens it.
+    _incremental()
+    assert _run_audit("--window", "all_time") == 0
+
+
+def test_an_unknown_sync_mode_value_fails(pg):
+    from db.connection import get_conn
+    from services.revenue_reconciliation_service import (
+        V_LAST_SYNC_NOT_INCREMENTAL, build_revenue_reconciliation,
+    )
+
+    _seed_reconciled_ledger()
+    _bootstrap()
+    _incremental()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE hubspot_deal_sync_state "
+                        "SET last_sync_mode = 'sideways'")
+        conn.commit()
+
+    report = build_revenue_reconciliation("all_time")
+    assert V_LAST_SYNC_NOT_INCREMENTAL in report["violation_codes"]
+
+
+def test_the_migration_adds_the_column_to_an_existing_table(pg):
+    """An existing database predating the column: the additive ALTER must add
+    it, leave the row's data intact, and leave the value NULL."""
+    from db.connection import get_conn
+    from db.schema import init_db
+
+    _bootstrap()
+    _incremental()
+    before = _state()
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE hubspot_deal_sync_state "
+                        "DROP COLUMN last_sync_mode")
+            cur.execute("SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'hubspot_deal_sync_state'")
+            cols = {r[0] for r in cur.fetchall()}
+        conn.commit()
+    assert "last_sync_mode" not in cols
+
+    init_db()   # idempotent; runs the ADD COLUMN IF NOT EXISTS migration
+
+    after = _state()
+    assert after["last_sync_mode"] is None, "the migration invented a value"
+    # Nothing else was disturbed.
+    for key in ("bootstrap_status", "bootstrap_started_at",
+                "bootstrap_completed_at", "last_incremental_at", "last_status"):
+        assert after[key] == before[key], key
+
+    # Running it twice more is still a no-op.
+    init_db()
+    init_db()
+    assert _state()["last_sync_mode"] is None

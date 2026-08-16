@@ -709,6 +709,7 @@ _HEALTHY_SYNC_STATE = {
         "bootstrap_started_at": "2026-08-01T00:00:00+00:00",
         "bootstrap_completed_at": "2026-08-01T01:00:00+00:00",
         "last_incremental_at": "2026-08-02T00:00:00+00:00",
+        "last_sync_mode": "incremental",
         "last_status": "success",
         "last_error": None,
     },

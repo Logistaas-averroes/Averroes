@@ -228,6 +228,19 @@ totals at a ledger holding one day of history.
 * `scripts/backfill_canonical_deal_ledger.py` — new operator CLI.
 * `scripts/audit_canonical_revenue_truth.py` — `--all-windows`.
 
+**Two follow-up blockers, fixed in review:**
+
+* the backfill CLI reported success whenever the durable row already said
+  `complete`, even when the current run had failed. `bootstrap_status` is
+  monotonic by design, so it answered "has a bootstrap ever worked?" rather than
+  "did this one?". It now requires proof from the current execution AND agreement
+  from the durable state;
+* `last_status` and `last_error` are shared between sync modes, so a bootstrap
+  rerun's `success` could validate a FAILED incremental's timestamp. A durable
+  `last_sync_mode` column (additive, idempotent migration, NULL fails closed)
+  now records which mode wrote them, and the audit requires the latest sync to
+  have been an incremental.
+
 **Status: shadow mode, unchanged.** 153E-B remains blocked until the production
 procedure in `docs/35_CANONICAL_REVENUE_LEDGER.md` §11 returns aggregate
 `ok: true`. Six-month read-only governance active. Phase 2 / OCT blocked.

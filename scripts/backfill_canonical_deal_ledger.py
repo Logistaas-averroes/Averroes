@@ -20,16 +20,27 @@ command, not a person running the same thing repeatedly and deciding by eye.
 
 What "success" means here
 -------------------------
-Exit 0 requires BOTH:
+    THIS execution proved completion   AND   the durable state agrees
 
-  * a pass that reported ``status == "success"`` AND ``complete == true`` — the
-    connector proved it reached the end of the result set;
+Exit 0 requires BOTH halves:
+
+  * a pass in THIS run that reported ``status == "success"`` and
+    ``complete == true``, with no association failures, no write failures and
+    no error — the connector proved it reached the end of the result set and
+    everything it read actually landed;
   * a re-read of the durable sync state showing ``bootstrap_status ==
-    "complete"``.
+    "complete"``, ``last_status == "success"`` and no ``last_error``.
 
-The second check is not redundant. The first is this process's opinion; the
-second is what the audit gate will actually read tomorrow. If they disagree,
-this command fails rather than reporting a completion the gate will not honour.
+Neither half is redundant. The first is this process's opinion; the second is
+what the audit gate will actually read tomorrow, and if they disagree this
+command fails rather than reporting a completion the gate will not honour.
+
+The first half is equally load-bearing in the other direction.
+``bootstrap_status`` is deliberately monotonic — coverage once proven stays
+proven — so checking only the durable state would let a run that died on its
+first pull exit 0 purely because someone completed a bootstrap last week. An
+operator asks this command "did the backfill work?", not "has one ever worked?".
+The reason string always names the pass that stopped and why.
 
 Failure posture
 ---------------
@@ -112,9 +123,37 @@ def _is_cap_only_pause(result: dict) -> bool:
     return "association_lookup_cap_reached" in (result.get("error") or "")
 
 
+def _pass_proves_completion(result: dict) -> bool:
+    """Did THIS pass prove the bootstrap finished?
+
+    Every clause matters. A pass that succeeded but lost associations, failed a
+    write, or carried an error did not establish complete coverage, and a pass
+    that never reached the end of the result set did not establish it either.
+    """
+    return bool(
+        result.get("status") == "success"
+        and result.get("complete") is True
+        and not result.get("association_failures")
+        and not result.get("write_failures")
+        and not result.get("error")
+    )
+
+
 def run(*, max_passes: int, max_association_lookups: int,
         restart: bool) -> dict:
-    """Drive the bounded bootstrap to a PROVEN completion, or stop and say why."""
+    """Drive the bounded bootstrap to a PROVEN completion, or stop and say why.
+
+    The contract is::
+
+        THIS execution proved completion   AND   the durable state agrees
+
+    It is emphatically NOT "this execution failed but an older bootstrap once
+    completed". `bootstrap_status` is deliberately monotonic — coverage once
+    proven stays proven — so reading it alone would let a run that failed on its
+    first pull report success purely because someone completed a bootstrap last
+    week. An operator asks this command "did the backfill work?", not "has one
+    ever worked?".
+    """
     from db.connection import init_pool
     from db.deal_ledger_repository import BOOTSTRAP_COMPLETE, fetch_sync_state
     from services.hubspot_deal_sync_service import backfill_deals
@@ -122,13 +161,16 @@ def run(*, max_passes: int, max_association_lookups: int,
     init_pool()
 
     passes: list = []
+    # Proof from THIS execution. Never seeded from durable state.
+    pass_proved_complete = False
     outcome = {"ok": False, "reason": "not_started", "passes": passes,
                "passes_run": 0, "max_passes": max_passes,
                "restart": restart,
                "max_association_lookups": max_association_lookups,
+               "pass_proved_complete": False,
                "bootstrap_status": None, "bootstrap_started_at": None,
                "bootstrap_completed_at": None, "last_status": None,
-               "last_error": None, "watermark": None,
+               "last_error": None, "last_sync_mode": None, "watermark": None,
                "deals_seen_total": 0, "written_total": 0}
 
     for index in range(1, max_passes + 1):
@@ -144,8 +186,22 @@ def run(*, max_passes: int, max_association_lookups: int,
         outcome["written_total"] += int(result.get("written") or 0)
         outcome["watermark"] = result.get("watermark") or outcome["watermark"]
 
-        if result.get("status") == "success" and result.get("complete"):
+        if _pass_proves_completion(result):
+            pass_proved_complete = True
+            outcome["pass_proved_complete"] = True
             outcome["reason"] = "bootstrap_pass_reported_complete"
+            break
+
+        if result.get("status") == "success" and result.get("complete"):
+            # Reached the end of the result set, but not cleanly. Coverage is
+            # only as good as the deals that actually landed.
+            outcome["reason"] = (
+                f"pass {index} reached the end of the result set but was not "
+                f"clean: {result.get('association_failures') or 0} association "
+                f"failure(s), {result.get('write_failures') or 0} write "
+                f"failure(s)"
+                + (f", error: {result.get('error')}" if result.get("error")
+                   else ""))
             break
 
         if _is_cap_only_pause(result):
@@ -177,16 +233,39 @@ def run(*, max_passes: int, max_association_lookups: int,
         "bootstrap_completed_at": row.get("bootstrap_completed_at"),
         "last_status": row.get("last_status"),
         "last_error": row.get("last_error"),
+        "last_sync_mode": row.get("last_sync_mode"),
     })
 
+    # ── This execution must have proven it ──────────────────────────────────
+    # Checked FIRST, and it never overwrites the reason the loop recorded. The
+    # operator needs "pass 3 stopped: failed (pull_failed: 503)", not a generic
+    # "not complete" that hides which pass died and why.
+    if not pass_proved_complete:
+        outcome["ok"] = False
+        return outcome
+
+    # ── And the durable state must agree ────────────────────────────────────
     if row.get("bootstrap_status") != BOOTSTRAP_COMPLETE:
         outcome["ok"] = False
-        if outcome["reason"] == "bootstrap_pass_reported_complete":
-            # The pass claimed completion and the durable state disagrees. The
-            # state is the half the audit gate will read, so it wins.
-            outcome["reason"] = (
-                "a pass reported complete but the durable sync state is "
-                f"{row.get('bootstrap_status') or 'unknown'}")
+        outcome["reason"] = (
+            "a pass proved completion but the durable sync state is "
+            f"{row.get('bootstrap_status') or 'unknown'}")
+        return outcome
+
+    # The durable record of that pass must itself be clean. A success the
+    # database recorded as failed, or alongside an error, is not a success.
+    if row.get("last_status") != "success":
+        outcome["ok"] = False
+        outcome["reason"] = (
+            "a pass proved completion but the durable last_status is "
+            f"{row.get('last_status') or 'unknown'}")
+        return outcome
+
+    if row.get("last_error"):
+        outcome["ok"] = False
+        outcome["reason"] = (
+            "a pass proved completion but the durable state recorded an "
+            f"error: {row.get('last_error')}")
         return outcome
 
     outcome["ok"] = True
@@ -222,15 +301,19 @@ def _render(outcome: dict) -> None:
     print(f"    {'rows written (all passes)':<36} "
           f"{_fmt(outcome.get('written_total'))}")
     print()
+    print(f"    {'this run proved completion':<36} "
+          f"{_fmt(outcome.get('pass_proved_complete'))}")
+    print()
     print("    ── durable sync state ──")
     for key in ("bootstrap_status", "bootstrap_started_at",
-                "bootstrap_completed_at", "last_status", "last_error"):
+                "bootstrap_completed_at", "last_status", "last_sync_mode",
+                "last_error"):
         print(f"    {key:<36} {_fmt(outcome.get(key))}")
 
     print()
     print("=" * 74)
     if outcome.get("ok"):
-        print("  COMPLETE — historical coverage is proven in the durable state.")
+        print("  COMPLETE — this run proved it AND the durable state agrees.")
         print("  Next: run ONE normal incremental sync, then")
         print("  python -m scripts.audit_canonical_revenue_truth --all-windows")
     else:

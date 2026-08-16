@@ -251,7 +251,27 @@ Every `record_sync_state` call names its mode. The two write different columns:
 | `bootstrap_completed_at` | set once, only when proven | untouched |
 | `last_incremental_at` | **untouched** | `NOW()` |
 | `last_status` / `last_error` / counters | honest | honest |
+| `last_sync_mode` | `bootstrap` | `incremental` |
 | watermark | existing checkpoint rules | existing checkpoint rules |
+
+`last_status` and `last_error` are **shared** between the two modes, so
+`last_sync_mode` records which one wrote them. Without it this sequence passed
+the gate with no successful incremental after the bootstrap anywhere in it:
+
+```
+T0  bootstrap completes                  bootstrap_completed_at = T0
+T1  incremental FAILS                    last_incremental_at   = T1
+                                         last_status           = failed
+T2  bootstrap reruns successfully        T0 and T1 preserved,
+                                         last_status           → success
+
+    audit sees T1 > T0 and success   →   PASS, wrongly
+```
+
+The mode is a durable fact, never inferred from timestamps or status text. It
+is added by an idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`; rows
+written before it existed hold NULL and **fail closed** until a real sync
+records a mode.
 
 `bootstrap_status` becomes `complete` only when the run **succeeded** *and*
 `proved_complete` — the connector reached the end of the result set and the run
@@ -327,6 +347,7 @@ and customer totals at a ledger holding one day of history.
 | both bootstrap timestamps exist | `bootstrap_timestamp_missing` |
 | completion is not before start | `bootstrap_timestamp_invalid` |
 | an incremental ran **after** completion | `post_bootstrap_incremental_missing` |
+| the most recent sync WAS an incremental | `last_sync_not_successful_incremental` |
 | the last sync succeeded | `last_sync_not_successful` |
 | success was not recorded with an error | `last_sync_reported_success_with_error` |
 | stage coverage is readable | `stage_breakdown_unavailable` |
@@ -344,10 +365,20 @@ python -m scripts.backfill_canonical_deal_ledger --json --max-passes 40
 python -m scripts.backfill_canonical_deal_ledger --restart    # deliberate
 ```
 
-Drives the bounded, resumable bootstrap to a **proven** completion. Exit 0
-requires both a pass reporting `status=success` and `complete=true`, *and* a
-re-read of the durable state showing `bootstrap_status = complete` — the first
-is the process's opinion, the second is what the gate will read tomorrow.
+Drives the bounded, resumable bootstrap to a **proven** completion. The contract
+is *this execution proved completion AND the durable state agrees* — never
+"this execution failed but an older bootstrap once completed".
+
+Exit 0 requires a pass **in this run** with `status=success`, `complete=true`,
+no association failures, no write failures and no error, *and* a re-read of the
+durable state showing `bootstrap_status = complete`, `last_status = success`
+and no `last_error`. The first half is the process's opinion; the second is what
+the gate will read tomorrow.
+
+Both halves are load-bearing. `bootstrap_status` is monotonic by design, so
+checking only the durable state would let a run that died on its first pull exit
+0 because someone completed a bootstrap last week. The failure reason always
+names the pass that stopped and why, in both JSON and human output.
 
 Stops immediately on any pull, association, persistence or state-recording
 failure; bounded by `--max-passes`, so it can never loop indefinitely. It never

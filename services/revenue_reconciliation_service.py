@@ -135,6 +135,7 @@ V_BOOTSTRAP_TIMESTAMP_MISSING = "bootstrap_timestamp_missing"
 V_BOOTSTRAP_TIMESTAMP_INVALID = "bootstrap_timestamp_invalid"
 V_POST_BOOTSTRAP_INCREMENTAL_MISSING = "post_bootstrap_incremental_missing"
 V_LAST_SYNC_NOT_SUCCESSFUL = "last_sync_not_successful"
+V_LAST_SYNC_NOT_INCREMENTAL = "last_sync_not_successful_incremental"
 V_LAST_SYNC_SUCCESS_WITH_ERROR = "last_sync_reported_success_with_error"
 V_STAGE_BREAKDOWN_UNAVAILABLE = "stage_breakdown_unavailable"
 
@@ -670,6 +671,23 @@ def _check_invariants(summary: dict, won_rows: dict, diffs: list,
             f"last incremental ({incremental.isoformat()}) is not after "
             f"bootstrap completion ({completed.isoformat()})"))
 
+    # The MODE that produced `last_status` is a durable fact, never inferred.
+    # `last_status` and `last_error` are shared between modes, so without it a
+    # bootstrap rerun's success validated an incremental timestamp it never
+    # wrote: bootstrap completes at T0, the incremental FAILS at T1, then a
+    # bootstrap reruns successfully at T2 — preserving T0 and T1, overwriting
+    # last_status. The ordering check saw T1 > T0 and a success, and passed a
+    # history containing no successful incremental after the bootstrap at all.
+    last_mode = state.get("last_sync_mode")
+    if last_mode != "incremental":
+        violations.append(_violation(
+            V_LAST_SYNC_NOT_INCREMENTAL,
+            "the most recent sync was "
+            + (f"a {last_mode}" if last_mode
+               else "recorded before sync mode was tracked")
+            + " — a successful INCREMENTAL is what proves the ongoing pipeline "
+              "works on top of the historical base"))
+
     last_status = state.get("last_status")
     if last_status != "success":
         violations.append(_violation(
@@ -695,5 +713,6 @@ __all__ = [
     "REASON_LEGACY_PREDICATE_FALSE_POSITIVE", "REASON_CANONICAL_WON_UNKNOWN",
     "REASON_CLOSE_DATE_OUTSIDE_WINDOW", "REASON_AMOUNT_PROVEN_BOTH_SIDES",
     "REASON_LEGACY_AMOUNT_UNAVAILABLE", "REASON_LEGACY_LEDGER_UNAVAILABLE",
+    "V_LAST_SYNC_NOT_INCREMENTAL",
     "build_revenue_reconciliation",
 ]

@@ -177,13 +177,18 @@ def _render(report: dict) -> None:
     else:
         for key in ("bootstrap_status", "bootstrap_started_at",
                     "bootstrap_completed_at", "last_incremental_at",
-                    "last_status", "last_modified_watermark", "deals_seen",
+                    "last_sync_mode", "last_status",
+                    "last_modified_watermark", "deals_seen",
                     "pages_fetched", "association_failures", "last_error"):
             print(f"    {key:<44} {_fmt(state.get(key)):>26}")
         print()
         print("    A complete bootstrap AND a later successful incremental are")
         print("    both required. Reconciling what the ledger holds says")
         print("    nothing about what it is missing.")
+        print()
+        print("    `last_sync_mode` says which mode wrote `last_status`. The")
+        print("    two are shared, so without it a bootstrap rerun's success")
+        print("    could validate an incremental timestamp it never wrote.")
 
     # ── verdict ─────────────────────────────────────────────────────────────
     _section("VERDICT")

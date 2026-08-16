@@ -3793,8 +3793,14 @@ AFTER bootstrap completion; a last sync that succeeded without recording an
 error; and a readable stage breakdown. Codes:
 `sync_state_unavailable`, `sync_state_missing`, `bootstrap_not_complete`,
 `bootstrap_timestamp_missing`, `bootstrap_timestamp_invalid`,
-`post_bootstrap_incremental_missing`, `last_sync_not_successful`,
-`last_sync_reported_success_with_error`, `stage_breakdown_unavailable`.
+`post_bootstrap_incremental_missing`, `last_sync_not_successful_incremental`,
+`last_sync_not_successful`, `last_sync_reported_success_with_error`,
+`stage_breakdown_unavailable`.
+
+`last_sync_not_successful_incremental` exists because `last_status` is shared
+between sync modes: a bootstrap rerun's `success` must not validate an
+incremental timestamp it never wrote. The mode is read from the durable
+`last_sync_mode` column, never inferred.
 
 The equivalent CLI is
 `python -m scripts.audit_canonical_revenue_truth --all-windows --json`, where a
@@ -3816,7 +3822,8 @@ Returns:
   `won_disagreement`, `amount_disagreement`, `duplicate_legacy_rows`, each
   itemized **by deal id with a reason** and an `expected` flag;
 * `sync_state` — bootstrap status, bootstrap start/completion timestamps,
-  `last_incremental_at`, watermark, last status, association failures;
+  `last_incremental_at`, `last_sync_mode` (which mode wrote `last_status`),
+  watermark, last status, association failures;
 * `violations` — human-readable gate failures;
 * `violation_codes` / `violation_details` — the same failures with STABLE
   machine-readable codes (PR-ADS-153E-A2), so a runbook keys off the reason

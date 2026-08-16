@@ -71,6 +71,7 @@ def _state(**overrides) -> dict:
         "last_incremental_at": _INCREMENTAL,
         "last_status": "success",
         "last_error": None,
+        "last_sync_mode": "incremental",
     }
     row.update(overrides)
     return {"available": True, "row": row}
@@ -131,6 +132,7 @@ def test_the_exact_153e_a_hole_a_successful_incremental_over_no_bootstrap():
         "last_incremental_at": _INCREMENTAL,
         "last_status": "success",
         "last_error": None,
+        "last_sync_mode": "incremental",
     }})
     assert recon.V_BOOTSTRAP_NOT_COMPLETE in codes
 
@@ -206,6 +208,87 @@ def test_success_recorded_alongside_an_error_fails():
     is the half that is safe to believe."""
     codes = _codes(_state(last_error="association_lookup_cap_reached"))
     assert recon.V_LAST_SYNC_SUCCESS_WITH_ERROR in codes
+
+
+# =============================================================================
+# The gate: the LATEST sync must have been an incremental
+# =============================================================================
+# `last_status` and `last_error` are shared between modes, and only
+# `last_sync_mode` records which one wrote them. Without it this sequence
+# passed with no successful incremental after the bootstrap anywhere in it:
+#
+#   T0  bootstrap completes                        (completed_at = T0)
+#   T1  incremental FAILS                          (last_incremental_at = T1,
+#                                                   last_status = failed)
+#   T2  bootstrap reruns successfully              (T0 and T1 preserved,
+#                                                   last_status → success)
+#
+#   audit sees T1 > T0 and last_status = success   → PASS, wrongly
+def test_a_bootstrap_rerun_cannot_validate_a_failed_incrementals_timestamp():
+    codes = _codes(_state(last_sync_mode="bootstrap"))
+    assert recon.V_LAST_SYNC_NOT_INCREMENTAL in codes, (
+        "a bootstrap rerun's success validated an incremental timestamp it "
+        "never wrote")
+
+
+def test_the_full_falsely_passing_sequence_is_rejected():
+    """The reachable sequence above, as the audit would actually read it."""
+    codes = _codes({"available": True, "row": {
+        "bootstrap_status": "complete",
+        "bootstrap_started_at": "2026-08-01T00:00:00+00:00",
+        "bootstrap_completed_at": "2026-08-01T04:00:00+00:00",   # T0
+        "last_incremental_at": "2026-08-02T03:00:00+00:00",      # T1, FAILED
+        "last_status": "success",        # written by the T2 bootstrap rerun
+        "last_error": None,
+        "last_sync_mode": "bootstrap",   # ...and this is what gives it away
+    }})
+    # Every other check passes: bootstrap complete, timestamps ordered,
+    # incremental timestamp after completion, status success.
+    assert codes == [recon.V_LAST_SYNC_NOT_INCREMENTAL]
+
+
+def test_a_missing_sync_mode_fails_closed():
+    """Rows written before the column existed. NULL is not permission."""
+    codes = _codes(_state(last_sync_mode=None))
+    assert recon.V_LAST_SYNC_NOT_INCREMENTAL in codes
+
+
+@pytest.mark.parametrize("mode", ["", "unknown", "sideways", "INCREMENTAL",
+                                  "Bootstrap"])
+def test_an_unrecognised_sync_mode_fails(mode):
+    assert recon.V_LAST_SYNC_NOT_INCREMENTAL in _codes(_state(last_sync_mode=mode))
+
+
+def test_the_mode_is_never_inferred_from_timestamps_or_status():
+    fn = _code_only(
+        _RECON_SERVICE_PY.split("def _check_invariants(")[1].split("\ndef ")[0])
+    assert 'last_mode = state.get("last_sync_mode")' in fn
+    assert 'last_mode != "incremental"' in fn
+
+
+def test_the_repository_records_the_mode_on_every_write():
+    fn = _LEDGER_REPO_PY.split("def record_sync_state(")[1].split("\ndef ")[0]
+    assert "last_status, last_error, last_sync_mode," in fn
+    assert "last_sync_mode       = EXCLUDED.last_sync_mode," in fn
+    assert '"sync_mode": sync_mode,' in fn
+    # And it is read back out.
+    read = _LEDGER_REPO_PY.split("def fetch_sync_state(")[1].split("\ndef ")[0]
+    assert "last_sync_mode" in read
+
+
+def test_the_migration_is_additive_and_idempotent():
+    schema = (_ROOT / "db" / "schema.py").read_text()
+    assert ("ALTER TABLE hubspot_deal_sync_state\n"
+            "  ADD COLUMN IF NOT EXISTS last_sync_mode TEXT;") in schema
+    # Nothing destructive anywhere near it.
+    for banned in ("DROP COLUMN", "DROP TABLE hubspot_deal_sync_state",
+                   "TRUNCATE hubspot_deal_sync_state"):
+        assert banned not in schema, banned
+
+
+def test_the_audit_surfaces_the_mode_in_diagnostics():
+    render = _AUDIT_PY.split("def _render(")[1].split("\ndef ")[0]
+    assert "last_sync_mode" in render
 
 
 # =============================================================================
@@ -425,12 +508,155 @@ def _install_cli(monkeypatch, results, *, state_row):
 _COMPLETE_ROW = {"bootstrap_status": "complete",
                  "bootstrap_started_at": _BOOT_START,
                  "bootstrap_completed_at": _BOOT_END,
-                 "last_status": "success", "last_error": None}
+                 "last_status": "success", "last_error": None,
+                 "last_sync_mode": "bootstrap"}
 _IN_PROGRESS_ROW = {"bootstrap_status": "in_progress",
                     "bootstrap_started_at": _BOOT_START,
                     "bootstrap_completed_at": None,
                     "last_status": "partial",
-                    "last_error": "association_lookup_cap_reached"}
+                    "last_error": "association_lookup_cap_reached",
+                    "last_sync_mode": "bootstrap"}
+
+
+# =============================================================================
+# The CLI reports THIS execution, not history
+# =============================================================================
+# `bootstrap_status` is monotonic by design: coverage once proven stays proven.
+# Reading it alone therefore lets a run that died on its first pull exit 0
+# purely because someone completed a bootstrap last week. Every case below has a
+# durable state that ALREADY says complete, and must still fail.
+def test_cli_failed_pull_fails_even_when_an_older_bootstrap_completed(monkeypatch):
+    from scripts import backfill_canonical_deal_ledger as cli
+
+    _install_cli(monkeypatch, [_broken("pull_failed: 503")],
+                 state_row=_COMPLETE_ROW)
+    out = cli.run(max_passes=5, max_association_lookups=5000, restart=False)
+
+    assert out["ok"] is False, (
+        "a failed run reported success because an OLD bootstrap was complete")
+    assert out["pass_proved_complete"] is False
+    # The original reason survives — an operator needs the failing pass, not a
+    # generic "not complete".
+    assert "pull_failed: 503" in out["reason"]
+    assert "pass 1 stopped" in out["reason"]
+
+
+def test_cli_association_failure_fails_even_when_durable_state_is_complete(
+        monkeypatch):
+    from scripts import backfill_canonical_deal_ledger as cli
+
+    lossy = _finished()
+    lossy["association_failures"] = 4
+    _install_cli(monkeypatch, [lossy], state_row=_COMPLETE_ROW)
+    out = cli.run(max_passes=5, max_association_lookups=5000, restart=False)
+
+    assert out["ok"] is False
+    assert out["pass_proved_complete"] is False
+    assert "association failure" in out["reason"]
+
+
+def test_cli_write_failure_fails_even_when_durable_state_is_complete(monkeypatch):
+    from scripts import backfill_canonical_deal_ledger as cli
+
+    lossy = _finished()
+    lossy["write_failures"] = 2
+    _install_cli(monkeypatch, [lossy], state_row=_COMPLETE_ROW)
+    out = cli.run(max_passes=5, max_association_lookups=5000, restart=False)
+
+    assert out["ok"] is False
+    assert out["pass_proved_complete"] is False
+    assert "write failure" in out["reason"]
+
+
+def test_cli_exhausted_passes_fails_even_when_durable_state_is_complete(
+        monkeypatch):
+    from scripts import backfill_canonical_deal_ledger as cli
+
+    _install_cli(monkeypatch, [_capped()], state_row=_COMPLETE_ROW)
+    out = cli.run(max_passes=3, max_association_lookups=5000, restart=False)
+
+    assert out["ok"] is False
+    assert out["pass_proved_complete"] is False
+    assert "exhausted --max-passes=3" in out["reason"]
+
+
+def test_cli_partial_without_checkpoint_fails_even_when_state_is_complete(
+        monkeypatch):
+    from scripts import backfill_canonical_deal_ledger as cli
+
+    stuck = _capped()
+    stuck["watermark_is_checkpoint"] = False
+    _install_cli(monkeypatch, [stuck], state_row=_COMPLETE_ROW)
+    out = cli.run(max_passes=5, max_association_lookups=5000, restart=False)
+
+    assert out["ok"] is False
+    assert out["pass_proved_complete"] is False
+
+
+def test_cli_succeeds_only_when_this_run_proved_it_and_state_agrees(monkeypatch):
+    from scripts import backfill_canonical_deal_ledger as cli
+
+    _install_cli(monkeypatch, [_capped(), _finished()],
+                 state_row=_COMPLETE_ROW)
+    out = cli.run(max_passes=5, max_association_lookups=5000, restart=False)
+
+    assert out["ok"] is True
+    assert out["pass_proved_complete"] is True
+    assert out["reason"] == "bootstrap_complete"
+
+
+def test_cli_fails_when_durable_last_status_is_not_success(monkeypatch):
+    """A completion the database recorded as failed is not a completion."""
+    from scripts import backfill_canonical_deal_ledger as cli
+
+    row = dict(_COMPLETE_ROW, last_status="failed",
+               last_error="sync_state_write_failed")
+    _install_cli(monkeypatch, [_finished()], state_row=row)
+    out = cli.run(max_passes=5, max_association_lookups=5000, restart=False)
+
+    assert out["ok"] is False
+    assert "durable last_status is failed" in out["reason"]
+
+
+def test_cli_fails_when_durable_state_recorded_an_error(monkeypatch):
+    from scripts import backfill_canonical_deal_ledger as cli
+
+    row = dict(_COMPLETE_ROW, last_error="association_lookup_cap_reached")
+    _install_cli(monkeypatch, [_finished()], state_row=row)
+    out = cli.run(max_passes=5, max_association_lookups=5000, restart=False)
+
+    assert out["ok"] is False
+    assert "recorded an error" in out["reason"]
+
+
+def test_cli_failure_reason_survives_into_json(monkeypatch, capsys):
+    from scripts import backfill_canonical_deal_ledger as cli
+
+    _install_cli(monkeypatch, [_broken("pull_failed: 503")],
+                 state_row=_COMPLETE_ROW)
+    monkeypatch.setattr(sys, "argv", ["backfill", "--json"])
+    code = cli.main()
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == cli.EXIT_FAILED
+    assert payload["ok"] is False
+    assert payload["pass_proved_complete"] is False
+    assert "pull_failed: 503" in payload["reason"]
+
+
+def test_cli_failure_reason_survives_into_human_output(monkeypatch, capsys):
+    from scripts import backfill_canonical_deal_ledger as cli
+
+    _install_cli(monkeypatch, [_broken("pull_failed: 503")],
+                 state_row=_COMPLETE_ROW)
+    monkeypatch.setattr(sys, "argv", ["backfill"])
+    code = cli.main()
+    out = capsys.readouterr().out
+
+    assert code == cli.EXIT_FAILED
+    assert "NOT COMPLETE" in out
+    assert "pull_failed: 503" in out
+    assert "this run proved completion" in out
 
 
 def test_cli_resumes_through_capped_passes_and_completes(monkeypatch):

@@ -370,6 +370,7 @@ def record_sync_state(*, status: str, sync_mode: str, watermark=None,
         "advance": advance,
         "status": status,
         "error": error,
+        "sync_mode": sync_mode,
         "deals_seen": int(deals_seen),
         "pages": int(pages_fetched),
         "assoc_failures": int(association_failures),
@@ -390,7 +391,7 @@ def record_sync_state(*, status: str, sync_mode: str, watermark=None,
                         scope, bootstrap_status,
                         bootstrap_started_at, bootstrap_completed_at,
                         last_modified_watermark, last_incremental_at,
-                        last_status, last_error,
+                        last_status, last_error, last_sync_mode,
                         deals_seen, pages_fetched, association_failures,
                         last_batch_id, updated_at
                     ) VALUES (
@@ -403,7 +404,7 @@ def record_sync_state(*, status: str, sync_mode: str, watermark=None,
                         CASE WHEN %(completes)s THEN NOW() ELSE NULL END,
                         %(watermark)s,
                         CASE WHEN %(is_bootstrap)s THEN NULL ELSE NOW() END,
-                        %(status)s, %(error)s,
+                        %(status)s, %(error)s, %(sync_mode)s,
                         %(deals_seen)s, %(pages)s, %(assoc_failures)s,
                         %(batch_id)s, NOW())
                     ON CONFLICT (scope) DO UPDATE SET
@@ -437,6 +438,10 @@ def record_sync_state(*, status: str, sync_mode: str, watermark=None,
                             ELSE NOW() END,
                         last_status          = EXCLUDED.last_status,
                         last_error           = EXCLUDED.last_error,
+                        -- Always recorded alongside last_status, so the pair is
+                        -- never separable: a status is meaningless without
+                        -- knowing which mode produced it.
+                        last_sync_mode       = EXCLUDED.last_sync_mode,
                         deals_seen           = EXCLUDED.deals_seen,
                         pages_fetched        = EXCLUDED.pages_fetched,
                         association_failures = EXCLUDED.association_failures,
@@ -466,7 +471,8 @@ def fetch_sync_state() -> dict:
                 cur.execute(
                     f"SELECT scope, bootstrap_status, bootstrap_started_at, "
                     f"bootstrap_completed_at, last_modified_watermark, "
-                    f"last_incremental_at, last_status, last_error, deals_seen, "
+                    f"last_incremental_at, last_status, last_error, "
+                    f"last_sync_mode, deals_seen, "
                     f"pages_fetched, association_failures, updated_at "
                     f"FROM {SYNC_STATE_TABLE} WHERE scope = %s", (SYNC_SCOPE,))
                 rows = [_normalise(r) for r in _rows_as_dicts(cur)]

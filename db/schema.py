@@ -1364,12 +1364,25 @@ CREATE TABLE IF NOT EXISTS hubspot_deal_sync_state (
   last_incremental_at       TIMESTAMPTZ,
   last_status               TEXT,                   -- success|partial|failed
   last_error                TEXT,
+  -- WHICH MODE produced last_status (PR-ADS-153E-A2). Without it, a bootstrap
+  -- rerun's `success` could validate an incremental timestamp it never wrote:
+  -- bootstrap completes at T0 → incremental FAILS at T1 → bootstrap reruns
+  -- successfully at T2, preserving T0 and T1 but overwriting last_status. The
+  -- audit then saw T1 > T0 and success, and passed — with no successful
+  -- incremental after the bootstrap anywhere in that history.
+  last_sync_mode            TEXT,                   -- bootstrap|incremental
   deals_seen                INTEGER DEFAULT 0,
   pages_fetched             INTEGER DEFAULT 0,
   association_failures      INTEGER DEFAULT 0,
   last_batch_id             INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
   updated_at                TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- PR-ADS-153E-A2 migration for databases created before `last_sync_mode`
+-- existed. Idempotent and additive; NULL on existing rows, which FAILS CLOSED
+-- in the audit until a real sync records the mode.
+ALTER TABLE hubspot_deal_sync_state
+  ADD COLUMN IF NOT EXISTS last_sync_mode TEXT;
 """
 
 
