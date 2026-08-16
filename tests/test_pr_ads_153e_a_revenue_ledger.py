@@ -322,22 +322,72 @@ def test_a3_a_boolean_is_not_an_amount():
     assert currency.parse_monetary_value(False) is None
 
 
-def test_a3_missing_money_is_never_coerced_to_zero():
-    for blank in (None, "", "   ", "abc", float("nan")):
-        assert currency.parse_monetary_value(blank) is not Decimal("0")
-        assert currency.parse_monetary_value(blank) != 0
-        assert currency.parse_monetary_value(blank) is None
-    # And a real zero still parses as a real zero — the two are different facts.
+@pytest.mark.parametrize("blank", [None, "", "   ", "abc", float("nan")])
+def test_a3_missing_money_is_never_coerced_to_zero(blank):
+    """Unknown and zero are different facts, in both directions."""
+    assert currency.parse_monetary_value(blank) is None
+    # A real zero is still a real zero — the parser does not flatten it to
+    # "missing" either.
     assert currency.parse_monetary_value("0") == Decimal("0")
+    assert currency.parse_monetary_value("0") is not None
 
 
-def test_a3_the_normalizer_uses_the_shared_parser_for_both_columns():
-    fn = _SYNC_SERVICE_PY.split("def _normalize_deal(")[1].split("\ndef ")[0]
-    assert 'parse_monetary_value(props.get("amount"))' in fn
-    assert 'parse_monetary_value(\n            props.get("amount_in_home_currency"))' in fn
-    # The raw property must not reach the row verbatim any more.
-    assert '"amount_raw": props.get("amount")' not in fn
-    assert '"amount_in_home_currency": props.get("amount_in_home_currency")' not in fn
+def _normalize_deal_assignments() -> dict:
+    """`{ledger column: ast expression}` for the dict `_normalize_deal` returns.
+
+    Parsed rather than string-matched: the guarantee is that both monetary
+    columns are built by calling the shared parser on the raw property, and a
+    reformat (Black wrapping, say) must not be able to fail that.
+    """
+    import ast
+
+    tree = ast.parse(_SYNC_SERVICE_PY)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_normalize_deal")
+    returned = next(n.value for n in ast.walk(fn) if isinstance(n, ast.Return))
+    assert isinstance(returned, ast.Dict), "_normalize_deal no longer returns a dict literal"
+    return {k.value: v for k, v in zip(returned.keys, returned.values)
+            if isinstance(k, ast.Constant)}
+
+
+@pytest.mark.parametrize("column,hubspot_property", [
+    ("amount_raw", "amount"),
+    ("amount_in_home_currency", "amount_in_home_currency"),
+])
+def test_a3_the_normalizer_uses_the_shared_parser_for_both_columns(
+        column, hubspot_property):
+    import ast
+
+    expr = _normalize_deal_assignments()[column]
+
+    # The value is a CALL to the shared parser...
+    assert isinstance(expr, ast.Call), (
+        f"{column} is not built by a call — the raw property may be reaching "
+        "the NUMERIC column verbatim")
+    assert isinstance(expr.func, ast.Name)
+    assert expr.func.id == "parse_monetary_value", (
+        f"{column} is normalized by {ast.unparse(expr.func)}, not the shared "
+        "monetary parser")
+
+    # ...applied to the right HubSpot property.
+    arg, = expr.args
+    assert ast.unparse(arg) == f'props.get(\'{hubspot_property}\')', (
+        f"{column} is parsed from {ast.unparse(arg)}")
+
+
+def test_a3_the_parser_is_imported_from_the_currency_module():
+    """One parser, not a local re-implementation that could drift."""
+    import ast
+
+    tree = ast.parse(_SYNC_SERVICE_PY)
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "analysis.deal_currency"
+        for alias in node.names
+    }
+    assert "parse_monetary_value" in imported
 
 
 def test_a3_blank_hubspot_amounts_produce_a_persistable_row():
