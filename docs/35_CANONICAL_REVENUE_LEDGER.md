@@ -298,7 +298,27 @@ Five categories, split by what an operator would actually have to do about them:
 | | | `canonical_close_date_outside_window` | ❌ |
 | `amount_disagreement` | same deal, different money | `canonical_currency_*`, `currency_resolution_differs:*` | ✅ the currency doctrine |
 | | | `both_ledgers_claim_a_proven_usd_amount` | ❌ |
+| | legacy holds the deal with **no** amount | `legacy_amount_unavailable` | ❌ |
 | `duplicate_legacy_rows` | one deal, several `gclid_attribution` rows | — | the legacy SHA1-key defect, reported |
+
+The two directions of a missing amount are deliberately different findings.
+Canonical NULL against a legacy figure is explained by the currency doctrine —
+canonical withholding what legacy asserted without proof. Canonical **proven**
+against a legacy NULL is not explained by anything: the cutover is about to
+publish a figure the outgoing ledger never carried, and it must be named.
+
+### An unreadable legacy lineage fails outright
+
+If `gclid_attribution` or `deal_source_attribution` cannot be read, the gate
+fails before any comparison is attempted, `legacy_deal_count` stays NULL rather
+than 0, and no difference is itemized at all — comparing against a ledger we
+could not read would report every canonical deal as absent from it, which is
+pure artefact.
+
+Unavailable is never an empty ledger. Against an empty canonical won population
+the two are indistinguishable — zero deals, zero differences, apparently
+reconciled — so a broken read would otherwise wave the cutover through on a
+reconciliation that never happened.
 
 Separating `legacy_only` from `won_disagreement` is why the gate reads canonical
 identity across **all** deal states (`fetch_deal_states`), unbounded by window

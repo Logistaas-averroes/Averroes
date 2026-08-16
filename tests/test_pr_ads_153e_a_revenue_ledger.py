@@ -687,13 +687,15 @@ def test_18_audit_flags_every_required_invariant(violation):
 # Reconciliation difference classes and their gate outcome
 # =============================================================================
 def _diff(canonical_won, canonical_states, legacy_deals, *,
-          label="gclid_attribution", expect_gclid_only=True, duplicates=None):
+          label="gclid_attribution", expect_gclid_only=True, duplicates=None,
+          legacy=None):
     from services import revenue_reconciliation_service as recon
 
     return recon._diff_against_legacy(
         canonical_won, canonical_states,
-        {"available": True, "deals": legacy_deals,
-         "duplicates": duplicates or []},
+        legacy if legacy is not None else {
+            "available": True, "deals": legacy_deals,
+            "duplicates": duplicates or []},
         label, expect_gclid_only=expect_gclid_only)
 
 
@@ -848,6 +850,98 @@ def test_diff_duplicate_legacy_rows_are_reported_and_windowed():
     dupe_query = _RECON_SERVICE_PY.split("rows_held")[1].split('"""')[0]
     assert "deal_close_date >= %s" in dupe_query
     assert "deal_close_date < %s" in dupe_query
+
+
+def test_diff_legacy_amount_unavailable_is_itemized_and_FAILS_the_gate():
+    """Legacy holds the deal with no money for it while canonical has proven an
+    amount. Skipping it silently would let the cutover move a figure nobody
+    could see move."""
+    from services import revenue_reconciliation_service as recon
+
+    diff = _diff({"D1": _won("D1", gclid="g", revenue_usd=100.0,
+                             currency_status="verified_usd")},
+                 {}, {"D1": _legacy("D1", deal_amount_usd=None)})
+    item, = diff["amount_disagreement"]
+    assert item["reason"] == recon.REASON_LEGACY_AMOUNT_UNAVAILABLE
+    assert item["canonical_usd"] == 100.0
+    assert item["legacy_usd"] is None
+    assert item["expected"] is False
+    assert _gate(diff)
+
+
+def test_diff_canonical_null_vs_legacy_amount_keeps_its_currency_reason():
+    """The mirror case stays where it was: canonical withholding is explained by
+    the currency doctrine, not by this new category."""
+    from services import revenue_reconciliation_service as recon
+
+    diff = _diff({"D1": _won("D1", gclid="g", revenue_usd=None,
+                             currency_status="unavailable",
+                             currency_reason="no_fx_rate_for_close_date")},
+                 {}, {"D1": _legacy("D1", deal_amount_usd=100.0)})
+    item, = diff["amount_disagreement"]
+    assert item["reason"] == "canonical_currency_no_fx_rate_for_close_date"
+    assert item["reason"] != recon.REASON_LEGACY_AMOUNT_UNAVAILABLE
+    assert item["expected"] is True
+    assert _gate(diff) == []
+
+
+def test_diff_both_amounts_null_is_not_a_difference():
+    diff = _diff({"D1": _won("D1", gclid="g", revenue_usd=None,
+                             currency_status="unavailable",
+                             currency_reason="no_amount")},
+                 {}, {"D1": _legacy("D1", deal_amount_usd=None)})
+    assert diff["amount_disagreement"] == []
+    assert _gate(diff) == []
+
+
+# ── An unreadable legacy lineage is never an empty one ──────────────────────
+def test_an_unavailable_legacy_ledger_FAILS_the_gate():
+    from services import revenue_reconciliation_service as recon
+
+    diff = _diff({}, {}, {}, legacy={"available": False,
+                                     "reason": "database_unavailable"})
+    assert diff["available"] is False
+    assert diff["reason"] == recon.REASON_LEGACY_LEDGER_UNAVAILABLE
+    violations = _gate(diff)
+    assert any("gclid_attribution unavailable" in v for v in violations), violations
+
+
+def test_an_unavailable_ledger_fails_even_with_no_canonical_won_deals():
+    """The dangerous case. Zero canonical won deals against an unreadable legacy
+    ledger produces zero differences — indistinguishable from a clean
+    reconciliation unless availability is checked on its own."""
+    for label in ("gclid_attribution", "deal_source_attribution"):
+        diff = _diff({}, {}, {}, label=label,
+                     expect_gclid_only=(label == "gclid_attribution"),
+                     legacy={"available": False, "reason": "connection refused"})
+        assert diff["canonical_only"] == []
+        assert diff["legacy_only"] == []
+        assert diff["won_disagreement"] == []
+        assert diff["amount_disagreement"] == []
+        violations = _gate(diff)
+        assert violations, f"{label}: an unreadable ledger reconciled cleanly"
+        assert f"{label} unavailable" in violations[0]
+        assert "connection refused" in violations[0]
+
+
+def test_an_unavailable_ledger_reports_no_deal_count_rather_than_zero():
+    """0 is a claim the legacy ledger is empty. We do not know that."""
+    diff = _diff({}, {}, {}, legacy={"available": False, "reason": "boom"})
+    assert diff["legacy_deal_count"] is None
+
+
+def test_an_unavailable_ledger_fabricates_no_canonical_only_findings():
+    """Comparing against a ledger we could not read would itemize every
+    canonical deal as absent from it — findings that are pure artefact."""
+    diff = _diff({"D1": _won("D1"), "D2": _won("D2")}, {}, {},
+                 legacy={"available": False, "reason": "boom"})
+    assert diff["canonical_only"] == []
+
+
+def test_audit_renderer_does_not_print_zeros_for_an_unreadable_ledger():
+    render = _AUDIT_PY.split("def _render(")[1].split("\ndef ")[0]
+    assert 'if not diff.get("available"):' in render
+    assert "no comparison performed" in render
 
 
 def test_reconciliation_reads_canonical_identity_across_all_states():

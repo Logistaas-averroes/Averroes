@@ -26,8 +26,10 @@ So this service itemizes:
     deal HubSpot says is not won; NOT expected when canonical simply does not
     know the won state, or dates the close outside the window.
   * **amount_disagreement** — same deal, different money. Expected when the
-    legacy unverified-USD assumption meets canonical fail-closed currency;
-    not expected when both sides claim a proven USD figure and still differ.
+    legacy unverified-USD assumption meets canonical fail-closed currency; not
+    expected when both sides claim a proven USD figure and still differ, or
+    when the legacy ledger holds the deal with NO amount at all while canonical
+    has proven one.
   * **duplicate_legacy_rows** — one deal held as several rows by
     `gclid_attribution`'s SHA1 attribution key, within the same window.
 
@@ -39,6 +41,11 @@ the gate unable to say which had happened.
 Every itemized difference carries ``expected``. The gate fails on every
 difference that is NOT expected — an unexplained difference is precisely what
 PR-ADS-153E-B cannot migrate through.
+
+A legacy lineage that could not be READ fails the gate outright, before any
+comparison is attempted. Unavailable is not an empty ledger: against an empty
+canonical won population the two are indistinguishable, and a broken read would
+otherwise report a perfectly reconciled zero.
 
 Read-only. No external API calls. Carries no contact names, emails or full
 GCLIDs — a GCLID is reported only as present/absent, because reconciliation
@@ -68,6 +75,9 @@ REASON_CANONICAL_WON_UNKNOWN = "canonical_won_state_unknown"
 REASON_CLOSE_DATE_OUTSIDE_WINDOW = "canonical_close_date_outside_window"
 # amount_disagreement
 REASON_AMOUNT_PROVEN_BOTH_SIDES = "both_ledgers_claim_a_proven_usd_amount"
+REASON_LEGACY_AMOUNT_UNAVAILABLE = "legacy_amount_unavailable"
+# ledger-level
+REASON_LEGACY_LEDGER_UNAVAILABLE = "legacy_ledger_unavailable"
 
 # The two differences this PR exists to produce. Everything else is unexplained
 # and fails the gate.
@@ -199,12 +209,28 @@ def _diff_against_legacy(canonical_won: dict, canonical_states: dict,
             in any state and any window. This is what separates "the sync missed
             this deal" from "the ledgers classify it differently".
     """
-    legacy_deals = legacy.get("deals") or {}
-    canonical_only, legacy_only, won_diff, amount_diff = [], [], [], []
-
     def _item(payload: dict) -> dict:
         payload["expected"] = _is_expected(payload["reason"])
         return payload
+
+    # ── The legacy ledger could not be READ ─────────────────────────────────
+    # Comparing against it now would be comparing against nothing, and every
+    # canonical deal would be itemized as "absent from legacy" — a fabricated
+    # finding. `legacy_deal_count` stays NULL rather than 0, because 0 is a
+    # claim the ledger is empty and we do not know that.
+    if not legacy.get("available"):
+        return {
+            "ledger": label,
+            "available": False,
+            "reason": REASON_LEGACY_LEDGER_UNAVAILABLE,
+            "unavailable_detail": legacy.get("reason"),
+            "legacy_deal_count": None,
+            "canonical_only": [], "legacy_only": [], "won_disagreement": [],
+            "amount_disagreement": [], "duplicate_legacy_rows": [],
+        }
+
+    legacy_deals = legacy.get("deals") or {}
+    canonical_only, legacy_only, won_diff, amount_diff = [], [], [], []
 
     for deal_id, row in canonical_won.items():
         if deal_id not in legacy_deals:
@@ -234,6 +260,17 @@ def _diff_against_legacy(canonical_won: dict, canonical_states: dict,
                 "legacy_usd": legacy_amount,
                 "canonical_currency_status": row.get("currency_status"),
                 "reason": f"canonical_currency_{row.get('currency_reason')}",
+            }))
+        elif canonical_amount is not None and legacy_amount is None:
+            # The legacy ledger holds the deal but no money for it. Silently
+            # skipping this was the mirror image of the fail-closed rule above:
+            # canonical is about to become the source of truth for an amount the
+            # outgoing ledger never carried, and nobody would see it move.
+            amount_diff.append(_item({
+                "deal_id": deal_id, "canonical_usd": canonical_amount,
+                "legacy_usd": None,
+                "canonical_currency_status": row.get("currency_status"),
+                "reason": REASON_LEGACY_AMOUNT_UNAVAILABLE,
             }))
         elif (canonical_amount is not None and legacy_amount is not None
               and abs(canonical_amount - legacy_amount) >= AMOUNT_TOLERANCE_USD):
@@ -443,9 +480,22 @@ def _check_invariants(summary: dict, won_rows: dict, diffs: list,
             f"currency completeness misreported: {proven} rows proven vs "
             f"{summary['won_currency_proven']} in summary")
 
-    # A deal the legacy ledger holds and the canonical does not hold at all
-    # means the sync is incomplete.
     for diff in diffs:
+        # A legacy lineage we could not READ makes the reconciliation
+        # meaningless, and it must fail loudly. Unavailable is NOT an empty
+        # ledger: with an empty canonical won population the two look identical
+        # — zero differences, apparently reconciled — which is exactly how a
+        # broken read would have waved PR-ADS-153E-B's cutover through.
+        if not diff.get("available"):
+            detail = diff.get("unavailable_detail")
+            violations.append(
+                f"legacy ledger {diff['ledger']} unavailable — reconciliation "
+                "cannot be performed"
+                + (f" ({detail})" if detail else ""))
+            continue
+
+        # A deal the legacy ledger holds and the canonical does not hold at all
+        # means the sync is incomplete.
         if diff.get("legacy_only"):
             violations.append(
                 f"{len(diff['legacy_only'])} deal(s) present in "
@@ -486,5 +536,6 @@ __all__ = [
     "REASON_WON_DEAL_MISSING_FROM_LEGACY", "REASON_MISSING_FROM_CANONICAL",
     "REASON_LEGACY_PREDICATE_FALSE_POSITIVE", "REASON_CANONICAL_WON_UNKNOWN",
     "REASON_CLOSE_DATE_OUTSIDE_WINDOW", "REASON_AMOUNT_PROVEN_BOTH_SIDES",
+    "REASON_LEGACY_AMOUNT_UNAVAILABLE", "REASON_LEGACY_LEDGER_UNAVAILABLE",
     "build_revenue_reconciliation",
 ]

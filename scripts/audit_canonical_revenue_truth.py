@@ -132,6 +132,14 @@ def _render(report: dict) -> None:
         print()
         print(f"  ── {diff.get('ledger')} "
               f"({'available' if diff.get('available') else 'UNAVAILABLE'}) ──")
+        if not diff.get("available"):
+            # No comparison was performed, so nothing below would mean anything.
+            # Printing zeros here would read as "reconciled".
+            print("    Could not be read"
+                  + (f": {diff.get('unavailable_detail')}"
+                     if diff.get("unavailable_detail") else "")
+                  + " — no comparison performed.")
+            continue
         print(f"    {'legacy deals in window':<44} "
               f"{_fmt(diff.get('legacy_deal_count')):>10}")
         _print_items("canonical-only (not in legacy)",

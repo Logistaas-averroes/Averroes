@@ -966,3 +966,120 @@ def test_sync_state_checkpoint_advances_the_watermark_on_a_capped_run(pg):
                            watermark_is_checkpoint=True, error="boom")
     assert repo.fetch_sync_state()["row"]["last_modified_watermark"].startswith(
         "2026-07-01")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# An unreadable legacy lineage is never an empty one
+# ═════════════════════════════════════════════════════════════════════════════
+def _drop_table(name):
+    from db.connection import get_conn
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE {name} CASCADE")
+        conn.commit()
+
+
+@pytest.mark.parametrize("ledger", ["gclid_attribution",
+                                    "deal_source_attribution"])
+def test_unreadable_legacy_ledger_fails_the_audit(pg, ledger):
+    """Against an EMPTY canonical won population, an unreadable legacy ledger
+    and a genuinely empty one produce identical output — zero differences. Only
+    an availability check tells them apart, and without it a broken read would
+    report a perfectly reconciled zero."""
+    from db import deal_ledger_repository as repo
+    from services.revenue_reconciliation_service import (
+        REASON_LEGACY_LEDGER_UNAVAILABLE, build_revenue_reconciliation,
+    )
+
+    # No canonical won deals at all.
+    repo.record_sync_state(status="success", watermark=_T2, deals_seen=0)
+    assert _run_audit() == 0, "baseline: an empty but readable state reconciles"
+
+    _drop_table(ledger)
+
+    report = build_revenue_reconciliation("all_time")
+    diff = next(d for d in report["legacy_diffs"] if d["ledger"] == ledger)
+    assert diff["available"] is False
+    assert diff["reason"] == REASON_LEGACY_LEDGER_UNAVAILABLE
+    # NULL, not 0 — 0 would be a claim the legacy ledger is empty.
+    assert diff["legacy_deal_count"] is None
+    assert diff["canonical_only"] == []
+    assert diff["legacy_only"] == []
+
+    assert report["ok"] is False
+    assert any(f"{ledger} unavailable" in v for v in report["violations"])
+
+    # And the CLI gate agrees, in both output modes.
+    assert _run_audit() == 1
+    assert _run_audit(json_mode=True) == 1
+
+
+def test_unreadable_legacy_ledger_fails_even_with_canonical_deals_present(pg):
+    from db import deal_ledger_repository as repo
+
+    repo.upsert_deal(_ledger_row("D1", gclid=None), associations=[_assoc("C1")])
+    _insert_legacy_source_row("D1")
+    repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
+    assert _run_audit() == 0
+
+    _drop_table("gclid_attribution")
+    assert _run_audit() == 1
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A legacy row holding the deal but no money for it
+# ═════════════════════════════════════════════════════════════════════════════
+def test_legacy_amount_unavailable_is_itemized_and_fails_the_audit(pg):
+    """Canonical proved USD 100; the legacy ledger holds the deal with a NULL
+    amount. Producing no difference at all would hide a figure the cutover is
+    about to move."""
+    from db import deal_ledger_repository as repo
+    from services.revenue_reconciliation_service import (
+        REASON_LEGACY_AMOUNT_UNAVAILABLE, build_revenue_reconciliation,
+    )
+
+    repo.upsert_deal(_ledger_row("D1", gclid=None, amount=100.0,
+                                 revenue_usd=100.0),
+                     associations=[_assoc("C1")])
+    _insert_legacy_source_row("D1", amount=None)
+    repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
+
+    report = build_revenue_reconciliation("all_time")
+    diff = next(d for d in report["legacy_diffs"]
+                if d["ledger"] == "deal_source_attribution")
+
+    item, = diff["amount_disagreement"]
+    assert item["deal_id"] == "D1"
+    assert item["canonical_usd"] == 100.0
+    assert item["legacy_usd"] is None
+    assert item["reason"] == REASON_LEGACY_AMOUNT_UNAVAILABLE
+    assert item["expected"] is False
+    # Not misfiled as the deal being absent from the legacy ledger.
+    assert diff["legacy_only"] == []
+    assert diff["canonical_only"] == []
+
+    assert report["ok"] is False
+    assert _run_audit() == 1
+
+
+def test_a_matching_legacy_amount_still_reconciles(pg):
+    """The control for the test above: the same shape with the amount present
+    produces no difference and passes."""
+    from db import deal_ledger_repository as repo
+    from services.revenue_reconciliation_service import (
+        build_revenue_reconciliation,
+    )
+
+    repo.upsert_deal(_ledger_row("D1", gclid=None, amount=100.0,
+                                 revenue_usd=100.0),
+                     associations=[_assoc("C1")])
+    _insert_legacy_source_row("D1", amount=100.0)
+    repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
+
+    report = build_revenue_reconciliation("all_time")
+    diff = next(d for d in report["legacy_diffs"]
+                if d["ledger"] == "deal_source_attribution")
+    assert diff["amount_disagreement"] == []
+    assert report["ok"] is True
+    assert _run_audit() == 0
