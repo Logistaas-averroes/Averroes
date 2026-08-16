@@ -21,6 +21,9 @@
 // PR-ADS-153C: "opportunities" (In Progress Leads) is retired as a page but is
 // kept in the registry so its old URL resolves to a redirect rather than a dead
 // route. "leads" is now the canonical CRM funnel page.
+// PR-ADS-153D: "waste" (Flagged Waste Terms) is retired the same way — the page
+// and its loader are deleted, and the key survives ONLY so #/waste resolves to
+// the redirect below instead of 404-ing an existing bookmark.
 const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ngrams", "geo", "keywords", "leads", "deals", "gclid-attribution", "opportunities", "scheduler", "health", "action-queue", "backfill", "historical-intelligence", "roas-campaigns", "roas-countries", "unit-economics", "churn-input", "revenue-health", "revenue-by-source"];
 
 // Retired pages that must still resolve. Each maps to its canonical destination
@@ -28,6 +31,10 @@ const PAGES = ["dashboard", "reports", "campaigns", "waste", "search-terms", "ng
 const RETIRED_PAGE_REDIRECTS = {
   // In Progress Leads == the open_working operational filter on Leads.
   opportunities: { page: "leads", status: "open_working" },
+  // PR-ADS-153D: Flagged Waste Terms == the Flagged view of Search Terms.
+  // The old page is deleted, not hidden — the redirect carries its INTENT
+  // (land on the flagged terms), which is what an old bookmark actually wanted.
+  waste: { page: "search-terms", tab: "flagged" },
 };
 
 // PR-ADS-110/113: Revenue & Attribution pages. These use business-revenue
@@ -135,7 +142,6 @@ const PAGE_DATASET_MAP = {
   // daily spend AND HubSpot contacts; the compact freshness reflects the worst of
   // the two, so it never shows fresh when HubSpot contacts are stale/failed.
   campaigns:         ["google_ads_api/canonical_spend", "hubspot/contacts"],
-  waste:             ["google_ads_api/search_terms"],   // waste_terms derived from search_terms
   search_terms:      ["google_ads_api/search_terms"],
   ngrams:            ["google_ads_api/search_terms"],   // n-grams derived from search_terms
   geo:               ["google_ads_api/geo"],
@@ -151,7 +157,7 @@ const PAGE_DATASET_MAP = {
 // Pages whose output is derived/computed from the source datasets above rather
 // than being a direct read of the synced table.  Strip copy uses "Derived from"
 // wording for these rather than "Dataset freshness:".
-const DERIVED_DATASET_PAGES = new Set(["ngrams", "waste"]);
+const DERIVED_DATASET_PAGES = new Set(["ngrams"]);
 
 // ── Page Explanations (PR-ADS-070) ────────────────────────────────────────
 //
@@ -206,14 +212,6 @@ const PAGE_EXPLANATIONS = {
     dependsOn: ["search_terms"],
     emptyMeans: "If Search Term Universe is empty or blocked, pattern analysis cannot run.",
     nextAction: "Fix Search Term Universe first."
-  },
-  waste: {
-    title: "Flagged Waste Terms",
-    purpose: "Search terms flagged for human review as potential wasted spend.",
-    source: "Analysis layer derived from Search Term Universe.",
-    dependsOn: ["search_terms", "waste_terms"],
-    emptyMeans: "This may mean no terms were flagged, or it may mean Search Term Universe is empty. Waste detection depends on Search Term Universe — if search-term data is unavailable, no waste verdict can be produced.",
-    nextAction: "Check System Status before assuming no waste exists."
   },
   geo: {
     title: "Country Performance",
@@ -391,13 +389,6 @@ const PAGE_HELP_CONTENT = {
     doNotAssume: "This is a snapshot of current pipeline state. It does not predict conversion probability.",
     checkNext: "Deals page for closed-won revenue, or Lead Quality for quality breakdown."
   },
-  waste: {
-    what: "Search terms flagged by waste detection as potential wasted spend. Grouped by junk signal and campaign evidence.",
-    source: "Analysis layer derived from Search Term Universe combined with HubSpot lead quality signals.",
-    howToUse: "Review flagged terms. Copy them for use as negative keywords in Google Ads (manual process). Filter by category or campaign.",
-    doNotAssume: "Flagged terms are candidates for human review, not confirmed waste. The system does not push negative keywords to Google Ads.",
-    checkNext: "Search Terms for full context, or Campaigns for spend impact."
-  },
   deals: {
     what: "HubSpot deal pipeline — stages, values, and campaign attribution for closed-won and in-progress deals.",
     source: "HubSpot CRM deals synced via the HubSpot connector.",
@@ -477,7 +468,6 @@ const PAGE_DEPENDENCIES = {
   "action-queue":          ["google_ads_api/campaigns", "google_ads_api/search_terms", "hubspot/contacts"],
   reports:                 ["google_ads_api/campaigns", "hubspot/contacts", "hubspot/deals"],
   campaigns:               ["google_ads_api/canonical_spend", "hubspot/contacts"],
-  waste:                   ["google_ads_api/search_terms"],
   "search-terms":          ["google_ads_api/search_terms"],
   ngrams:                  ["google_ads_api/search_terms"],
   geo:                     ["google_ads_api/geo"],
@@ -518,12 +508,15 @@ const EVIDENCE_WINDOWS = [
 const DEFAULT_EVIDENCE_WINDOW = "30d";
 
 // Routes that use the evidence window dropdown. (UI names differ from routes:
-// countries=geo, lead-quality=leads, in-progress-leads=opportunities,
-// flagged-waste-terms=waste.) N-Grams is derived Search Term evidence, so it
-// uses the same Evidence window dropdown (its request is window-driven).
+// countries=geo, lead-quality=leads, in-progress-leads=opportunities.)
+// N-Grams is derived Search Term evidence, so it uses the same Evidence window
+// dropdown (its request is window-driven).
 // PR-ADS-153C: Leads moved to business windows; In Progress Leads retired.
+// PR-ADS-153D: Flagged Waste Terms retired into Search Terms → Flagged, which
+// is served by the Search Terms page's own evidence window — the old page must
+// not leave a second window implementation behind.
 const EVIDENCE_PAGES = [
-  "campaigns", "search-terms", "ngrams", "keywords", "geo", "waste",
+  "campaigns", "search-terms", "ngrams", "keywords", "geo",
 ];
 
 function isEvidencePage(page) {
@@ -581,7 +574,6 @@ let ngramsPrefill = null;
 // Keyword / Waste page prefill (set when navigating from the campaign drawer,
 // PR-ADS-142). The loaders apply the campaign filter if the input exists.
 let keywordsPrefill = null;
-let wastePrefill = null;
 
 // Campaign drawer N-Gram drilldown state
 let drawerNgramRows = [];
@@ -1379,13 +1371,22 @@ function navigateToHash(page, options) {
     const tab = hashToDashTab(window.location.hash);
     if (tab !== "overview") hash = `${hash}?tab=${tab}`;
   }
-  // Same for the Search Terms Patterns deep link (#/search-terms?tab=patterns).
-  // The legacy #/ngrams route also lands on the Patterns tab (PR-ADS-144).
+  // Same for the Search Terms tab deep links (#/search-terms?tab=flagged and
+  // ?tab=patterns). The legacy #/ngrams route lands on Patterns (PR-ADS-144)
+  // and the retired #/waste route lands on Flagged (PR-ADS-153D), so both keep
+  // their destination through the hash rewrite.
   if (page === "search-terms") {
     const raw = window.location.hash || "";
-    const q = raw.split("?")[1] || "";
-    if (raw.startsWith("#/ngrams") || new URLSearchParams(q).get("tab") === "patterns") {
-      hash = `${hash}?tab=patterns`;
+    const q = new URLSearchParams(raw.split("?")[1] || "");
+    const wanted = raw.startsWith("#/ngrams") ? "patterns"
+      : (_stPendingTab || (ST_TABS.includes(q.get("tab")) ? q.get("tab") : null));
+    if (wanted && wanted !== "terms") {
+      // q.get() returns a DECODED value, so it must be re-encoded on the way
+      // back into the hash — a term containing a space, "&" or "%" would
+      // otherwise produce a malformed link or inject a second query param.
+      const term = q.get("term");
+      hash = `${hash}?tab=${wanted}` +
+        (term ? `&term=${encodeURIComponent(term)}` : "");
     }
   }
   if (window.location.hash !== hash) {
@@ -1408,6 +1409,7 @@ function navigate(page, options) {
   const retired = RETIRED_PAGE_REDIRECTS[page];
   if (retired) {
     if (retired.status) leadsSetPendingStatus(retired.status);
+    if (retired.tab) stSetPendingTab(retired.tab);
     navigate(retired.page, options);
     return;
   }
@@ -1521,7 +1523,6 @@ function loadPage(page) {
     case "dashboard":     loadDashboardTab();                       break;
     case "reports":       loadReports(); loadRevenueSnapshotHistory(); break;
     case "campaigns":     loadCampaigns();                          break;
-    case "waste":         loadWaste();                              break;
     case "search-terms":  loadSearchTermsEvidence();                break;
     case "geo":           loadGeo();                                break;
     case "keywords":      loadKeywords();      break;
@@ -1790,7 +1791,6 @@ function _datasetDisplayName(key) {
 function _derivedPageLabel(sectionKey) {
   const labels = {
     ngrams: "Derived from search terms",
-    waste:  "Derived from search terms",
   };
   return labels[sectionKey] || "Derived dataset";
 }
@@ -4748,8 +4748,8 @@ function renderCampSearchSignals(d) {
   }
   const linkTerms = dashCanNavigate("search-terms")
     ? '<a class="camp-signal-link" href="#/search-terms">Review in Search Terms →</a>' : "";
-  const linkWaste = dashCanNavigate("waste")
-    ? '<a class="camp-signal-link" href="#/waste">Open Flagged Waste Terms →</a>' : "";
+  const linkWaste = dashCanNavigate("search-terms")
+    ? '<a class="camp-signal-link" href="#/search-terms?tab=flagged">Open Flagged terms →</a>' : "";
   return `${header}
     <div class="camp-signal-grid">
       ${renderCampSignalList("Reviewed clean — not flagged waste", s.value_terms, "value")}
@@ -4791,7 +4791,6 @@ function wireCampDrawers(root, d) {
       ["roas-campaigns", "Open ROAS by Campaign"],
       ["keywords", "Open Keywords"],
       ["search-terms", "Open Search Terms"],
-      ["waste", "Open Flagged Waste Terms"],
       ["revenue-health", "Open Revenue Health"],
     ].filter(([page]) => dashCanNavigate(page))
       .map(([page, label]) => `<a class="camp-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
@@ -6302,245 +6301,16 @@ function wireCampaignEvidenceControls() {
   });
 }
 
-// ── Waste Terms page ───────────────────────────────────────────────────────
-
-let _wasteData = [];  // raw API response, reset on each load
-// PR-ADS-141: truncation metadata for the waste library ({total_count,
-// returned_count, truncated}) so the UI can disclose "Showing X of Y".
-let _wasteMeta = { total_count: 0, returned_count: 0, truncated: false };
-
-const JUNK_CATEGORY_LABELS = {
-  job_seeker:           "Job Seeker",
-  student:              "Student",
-  free_intent_english:  "Free Intent",
-  free_intent_spanish:  "Free Intent ES",
-  free_intent_arabic:   "Free Intent AR",
-  fraud:                "Fraud",
-};
-
-function formatJunkCategory(cat) {
-  if (!cat) return "—";
-  if (JUNK_CATEGORY_LABELS[cat]) return JUNK_CATEGORY_LABELS[cat];
-  // fallback: replace underscores with spaces and title-case
-  return cat.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function junkCategoryBadge(cat) {
-  const label = formatJunkCategory(cat);
-  const slug  = (cat || "unknown").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
-  return `<span class="junk-badge junk-badge--${escapeHtml(slug)}">${escapeHtml(label)}</span>`;
-}
-
-async function loadWaste() {
-  renderPageDatasetFreshness("waste");
-
-  const tableEl = document.getElementById("waste-table-body");
-  if (tableEl) tableEl.innerHTML =
-    `<p class="empty-state" style="padding:var(--space-5)">Loading waste terms…</p>`;
-
-  ["waste-kpi-spend", "waste-kpi-terms", "waste-kpi-campaigns", "waste-kpi-crm"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = "—";
-  });
-
-  try {
-    const data = await fetchJSON(`/api/waste?${evidenceWindowQuery()}`);
-    _wasteData = data.waste || [];
-    // PR-ADS-141: disclose truncation — the row list is a presentation-capped
-    // page, so All time never silently implies the complete waste library.
-    _wasteMeta = {
-      total_count:    Number(data.total_count != null ? data.total_count : _wasteData.length),
-      returned_count: Number(data.returned_count != null ? data.returned_count : _wasteData.length),
-      truncated:      data.truncated === true || data.has_more === true,
-    };
-
-    populateWasteFilters(_wasteData);
-    // PR-ADS-142: apply a campaign prefill from the campaign drawer, if present.
-    if (wastePrefill && wastePrefill.campaign) {
-      const sel = document.getElementById("waste-filter-campaign");
-      if (sel && Array.from(sel.options).some((o) => o.value === wastePrefill.campaign)) {
-        sel.value = wastePrefill.campaign;
-      }
-      wastePrefill = null;
-    }
-    renderWasteKPIs(_wasteData);
-    applyWasteFilters();
-
-  } catch (_) {
-    _wasteData = [];
-    _wasteMeta = { total_count: 0, returned_count: 0, truncated: false };
-    if (tableEl) tableEl.innerHTML =
-      `<p class="empty-state" style="padding:var(--space-5)">Could not load waste terms. Check API health or run status.</p>`;
-  }
-}
-
-function renderWasteKPIs(items) {
-  const totalSpend    = items.reduce((sum, t) => sum + (t.spend_usd || 0), 0);
-  const uniqueTerms   = new Set(
-    items.map((t) => (t.search_term || "").trim()).filter(Boolean)
-  ).size;
-  const uniqueCamps   = new Set(items.map((t) => t.campaign_name).filter(Boolean)).size;
-  const crmConfirmed  = items.reduce((sum, t) => sum + (t.crm_junk_confirmed || 0), 0);
-
-  const spendEl = document.getElementById("waste-kpi-spend");
-  const termsEl = document.getElementById("waste-kpi-terms");
-  const campsEl = document.getElementById("waste-kpi-campaigns");
-  const crmEl   = document.getElementById("waste-kpi-crm");
-
-  if (spendEl) spendEl.textContent = fmtDollar(totalSpend);
-  if (termsEl) termsEl.textContent = String(uniqueTerms);
-  if (campsEl) campsEl.textContent = String(uniqueCamps);
-  if (crmEl)   crmEl.textContent   = String(crmConfirmed);
-}
-
-function populateWasteFilters(items) {
-  const catSel  = document.getElementById("waste-filter-category");
-  const campSel = document.getElementById("waste-filter-campaign");
-
-  if (catSel) {
-    const cats = [...new Set(items.map((t) => t.junk_category).filter(Boolean))].sort();
-    catSel.innerHTML = `<option value="">All categories</option>` +
-      cats.map((c) =>
-        `<option value="${escapeHtml(c)}">${escapeHtml(formatJunkCategory(c))}</option>`
-      ).join("");
-  }
-
-  if (campSel) {
-    const camps = [...new Set(items.map((t) => t.campaign_name).filter(Boolean))].sort();
-    campSel.innerHTML = `<option value="">All campaigns</option>` +
-      camps.map((c) =>
-        `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`
-      ).join("");
-  }
-}
-
-// Threshold above which a spend cell gets the high-spend style
-const WASTE_HIGH_SPEND_USD = 100;
-
-function renderWasteTable(items) {
-  const tableEl = document.getElementById("waste-table-body");
-  if (!tableEl) return;
-
-  if (items.length === 0) {
-    if (_wasteData.length === 0) {
-      tableEl.innerHTML = buildEmptyState({
-        pageKey: "waste",
-        canonicalStatus: getPageCanonicalStatus("waste"),
-        rowsInWindow: 0,
-      });
-    } else {
-      tableEl.innerHTML = buildEmptyState({
-        pageKey: "waste",
-        filtersActive: true,
-      });
-    }
-    return;
-  }
-
-  const thead = `
-    <thead>
-      <tr>
-        <th>Search Term</th>
-        <th>Campaign</th>
-        <th class="td--num">Spend</th>
-        <th>Junk Category</th>
-        <th>Matched Pattern</th>
-        <th class="td--num">CRM Confirmed</th>
-        <th>Run Date</th>
-      </tr>
-    </thead>`;
-
-  // PR-ADS-141: disclose when the window holds more terms than were loaded.
-  const truncationNote = _wasteMeta.truncated
-    ? `<p class="deal-stage-note">Showing ${escapeHtml(fmtCount(_wasteMeta.returned_count))} of `
-      + `${escapeHtml(fmtCount(_wasteMeta.total_count))} waste terms in this window `
-      + `(highest spend first). Narrow the window for the complete library.</p>`
-    : "";
-
-  const tbody = items.map((t) => {
-    const highSpend = (t.spend_usd || 0) >= WASTE_HIGH_SPEND_USD;
-    return `
-      <tr${highSpend ? ' class="row--high-spend"' : ""}>
-        <td class="td--name">${escapeHtml(t.search_term || "—")}</td>
-        <td>${escapeHtml(t.campaign_name || "—")}</td>
-        <td class="td--num${highSpend ? " waste-spend--high" : ""}">${t.spend_usd != null ? fmtDollar(t.spend_usd) : "—"}</td>
-        <td>${t.junk_category ? junkCategoryBadge(t.junk_category) : "—"}</td>
-        <td class="waste-pattern">${escapeHtml(t.matched_pattern || "—")}</td>
-        <td class="td--num">${t.crm_junk_confirmed != null ? String(t.crm_junk_confirmed) : "—"}</td>
-        <td>${fmtDate(t.run_date)}</td>
-      </tr>`;
-  }).join("");
-
-  tableEl.innerHTML = truncationNote + `<table class="data-table">${thead}<tbody>${tbody}</tbody></table>`;
-}
-
-// Returns the currently visible (filtered) waste terms based on filter control state.
-function getFilteredWasteTerms() {
-  const searchInput = document.getElementById("waste-filter-search");
-  const catSel      = document.getElementById("waste-filter-category");
-  const campSel     = document.getElementById("waste-filter-campaign");
-
-  const search = searchInput ? searchInput.value.trim().toLowerCase() : "";
-  const cat    = catSel      ? catSel.value  : "";
-  const camp   = campSel     ? campSel.value : "";
-
-  let filtered = _wasteData;
-  if (search) {
-    filtered = filtered.filter((t) =>
-      (t.search_term     || "").toLowerCase().includes(search) ||
-      (t.campaign_name   || "").toLowerCase().includes(search) ||
-      (t.matched_pattern || "").toLowerCase().includes(search)
-    );
-  }
-  if (cat)  filtered = filtered.filter((t) => t.junk_category === cat);
-  if (camp) filtered = filtered.filter((t) => t.campaign_name === camp);
-  return filtered;
-}
-
-function applyWasteFilters() {
-  renderWasteTable(getFilteredWasteTerms());
-}
-
-function copyWasteTerms() {
-  const terms = getFilteredWasteTerms()
-    .map((t) => (t.search_term || "").trim())
-    .filter(Boolean);
-  if (terms.length === 0) return;
-
-  const text   = terms.join("\n");
-  const btn    = document.getElementById("waste-copy-btn");
-  const origHTML = btn ? btn.innerHTML : null;
-
-  const showFeedback = (success) => {
-    if (!btn) return;
-    btn.innerHTML = success
-      ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Copied!`
-      : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> Copy failed`;
-    btn.disabled = true;
-    setTimeout(() => {
-      if (btn && origHTML !== null) { btn.innerHTML = origHTML; btn.disabled = false; }
-    }, 2000);
-  };
-
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(
-      () => showFeedback(true),
-      () => showFeedback(false),
-    );
-  } else {
-    // Fallback for older browsers
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity  = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    let ok = false;
-    try { ok = document.execCommand("copy"); } catch (_) { /* ignore */ }
-    document.body.removeChild(ta);
-    showFeedback(ok);
-  }
-}
+// ── Flagged Waste Terms page — RETIRED (PR-ADS-153D) ───────────────────────
+// The standalone page is gone. Its investigation functionality lives in
+// Search Terms → Flagged, and its actionable subset lives in the Action Queue.
+// `#/waste` redirects there (see RETIRED_PAGE_REDIRECTS), so old links still
+// land on the equivalent view rather than a dead end.
+//
+// The old loader summed `waste_terms` run snapshots, which double-counted spend
+// across repeated runs; the canonical flagged view reads deduplicated
+// `search_terms` facts instead. Nothing here is preserved for compatibility —
+// keeping a hidden page alive purely for a URL is exactly what §5 forbids.
 
 // ── Lead Quality page ──────────────────────────────────────────────────────
 
@@ -9577,15 +9347,39 @@ function qualityScoreBadge(qs) {
   return `<span class="quality-score-badge ${cls}">${n.toFixed(1)}</span>`;
 }
 
-// ── Search Terms + Patterns evidence page (PR-ADS-144) ──────────────────────
-// One full-width decision-support page with two tabs (Terms | Patterns),
-// aligned with the Campaign Evidence design. Data comes from the
-// /api/search-term-evidence family: durable source_date-bounded selected-window
-// aggregates, tri-state review states, reported-search-term-spend semantics,
-// complete-population KPIs and server-side pagination. Strictly read-only —
-// nothing here adds negatives or writes to Google Ads / HubSpot.
+// ── Search Terms evidence page (PR-ADS-144, consolidated in PR-ADS-153D) ────
+// The ONE search-term investigation destination. Three tabs — All Terms,
+// Flagged, Patterns — aligned with the Campaign Evidence design. Data comes
+// from the /api/search-term-evidence family: durable source_date-bounded
+// selected-window aggregates, tri-state review states, reported-search-term-
+// spend semantics, complete-population KPIs and server-side pagination.
+//
+// PR-ADS-153D folded the retired standalone Flagged Waste Terms page in here as
+// the Flagged tab. It is not a copy of the old page: it reads the canonical
+// deduplicated `search_terms` facts (the old page summed `waste_terms` run
+// snapshots and multiplied spend by the number of runs that saw a term).
+//
+// The only write anywhere on this page is a LOCAL review decision. Nothing here
+// adds negatives or writes to Google Ads / HubSpot.
 
-let _stTab = "terms";               // terms | patterns
+let _stTab = "terms";               // terms | flagged | patterns
+const ST_TABS = ["terms", "flagged", "patterns"];
+// Tab requested by a redirect before the page module has rendered (e.g. the
+// retired #/waste route landing on Flagged).
+let _stPendingTab = null;
+
+function stSetPendingTab(tab) {
+  if (ST_TABS.includes(tab)) _stPendingTab = tab;
+}
+
+let _flagData = null;                // /api/search-term-evidence/flagged payload
+let _flagLoadState = "idle";
+let _flagFilters = { q: "", campaign: "", reviewState: "", reason: "",
+                     minSpend: "", sqlState: "", sort: "priority", page: 1 };
+let _flagReqId = 0;
+let _flagDebounceTimer = null;
+// Term to focus when arriving from an Action Queue link.
+let _flagFocusTerm = null;
 let _stData = null;                  // /api/search-term-evidence payload
 let _stLoadState = "idle";           // idle | loading | ok | db_unavailable | error
 let _stFilters = { q: "", campaign: "", state: "", junk: "", sqlState: "", minSpend: "", sort: "spend", page: 1 };
@@ -9690,13 +9484,31 @@ function stWindowLabel() {
 
 function loadSearchTermsEvidence() {
   renderPageDatasetFreshness("search_terms");
-  _stFilters.page = 1; // fresh page entry / window change → restart pagination
-  // Deep link: #/search-terms?tab=patterns (also produced by the #/ngrams alias).
+  _stFilters.page = 1;   // fresh page entry / window change → restart pagination
+  _flagFilters.page = 1;
+  // Deep links: #/search-terms?tab=patterns (also produced by the #/ngrams
+  // alias) and ?tab=flagged (also produced by the retired #/waste route).
   const rawHash = window.location.hash || "";
-  const hashQuery = (rawHash.split("?")[1] || "");
-  if (rawHash.startsWith("#/ngrams") ||
-      new URLSearchParams(hashQuery).get("tab") === "patterns") {
+  const hashParams = new URLSearchParams(rawHash.split("?")[1] || "");
+  const hashTab = hashParams.get("tab");
+  if (rawHash.startsWith("#/ngrams")) {
     _stTab = "patterns";
+  } else if (ST_TABS.includes(hashTab)) {
+    _stTab = hashTab;
+  }
+  // A redirect (e.g. #/waste → Flagged) sets the tab before this module runs.
+  if (_stPendingTab) {
+    _stTab = _stPendingTab;
+    _stPendingTab = null;
+  }
+  // An Action Queue link carries the term it wants investigated, so the queue
+  // item lands on the row it is about rather than on a generic list.
+  // URLSearchParams.get() already decodes, so this value is used as-is.
+  // Decoding again would throw URIError on a legitimate term such as "100%".
+  const focusTerm = hashParams.get("term");
+  if (focusTerm) {
+    _flagFocusTerm = focusTerm;
+    _flagFilters.q = focusTerm;
   }
   // Campaign-drawer prefill (navigate("ngrams") with a campaign context).
   if (ngramsPrefill && ngramsPrefill.campaign) {
@@ -9705,7 +9517,12 @@ function loadSearchTermsEvidence() {
     ngramsPrefill = null;
   }
   renderSearchTermsShell();
+  stLoadActiveTab();
+}
+
+function stLoadActiveTab() {
   if (_stTab === "patterns") loadPatternsTab();
+  else if (_stTab === "flagged") loadFlaggedTab();
   else loadTermsTab();
 }
 
@@ -9725,7 +9542,10 @@ function renderSearchTermsShell() {
     </header>
     <div class="search-terms-tabs" role="tablist" aria-label="Search Terms tabs">
       <button id="tab-btn-terms" class="search-terms-tab${_stTab === "terms" ? " active" : ""}"
-        role="tab" aria-selected="${_stTab === "terms"}" data-tab="terms" type="button">Terms</button>
+        role="tab" aria-selected="${_stTab === "terms"}" data-tab="terms" type="button">All Terms</button>
+      <button id="tab-btn-flagged" class="search-terms-tab${_stTab === "flagged" ? " active" : ""}"
+        role="tab" aria-selected="${_stTab === "flagged"}" data-tab="flagged" type="button"
+        title="Search terms flagged for human review by durable waste evidence">Flagged</button>
       <button id="tab-btn-patterns" class="search-terms-tab${_stTab === "patterns" ? " active" : ""}"
         role="tab" aria-selected="${_stTab === "patterns"}" data-tab="patterns" type="button">Patterns</button>
     </div>
@@ -9736,20 +9556,22 @@ function renderSearchTermsShell() {
 }
 
 function stActivateTab(tab) {
-  if (tab !== "terms" && tab !== "patterns") return;
+  if (!ST_TABS.includes(tab)) return;
   _stTab = tab;
   document.querySelectorAll(".search-terms-tab").forEach((t) => {
     const active = t.dataset.tab === tab;
     t.classList.toggle("active", active);
     t.setAttribute("aria-selected", String(active));
   });
+  // Switching tabs by hand clears an inbound term focus, so the filter cannot
+  // silently persist into a view the user did not ask for it in.
+  _flagFocusTerm = null;
   // Keep the deep link honest without triggering the router.
-  const newHash = tab === "patterns" ? "#/search-terms?tab=patterns" : "#/search-terms";
+  const newHash = tab === "terms" ? "#/search-terms" : `#/search-terms?tab=${tab}`;
   if (window.location.hash !== newHash) {
     history.replaceState(history.state, "", newHash);
   }
-  if (tab === "patterns") loadPatternsTab();
-  else loadTermsTab();
+  stLoadActiveTab();
 }
 
 // ── Terms tab ────────────────────────────────────────────────────────────────
@@ -10161,6 +9983,469 @@ function wireTermsControls() {
   });
 }
 
+// ── Flagged tab (PR-ADS-153D) ───────────────────────────────────────────────
+// Replaces the retired standalone Flagged Waste Terms page. A term is here
+// because DURABLE evidence flagged it — never because "spend > 0 and SQLs = 0",
+// which would brand every term with merely unavailable attribution as waste.
+//
+// All numbers come from /api/search-term-evidence/flagged, which reads the same
+// canonical deduplicated `search_terms` facts as the All Terms tab. The old
+// page read `waste_terms` run snapshots and multiplied spend by the number of
+// runs that had seen a term.
+
+const FLAG_REVIEW_ACTIONS = [
+  { state: "keep",              label: "Keep" },
+  { state: "monitor",           label: "Monitor" },
+  // Deliberately "candidate": Averroes has no write path to Google Ads and
+  // cannot know whether a negative keyword was ever applied.
+  { state: "exclude_candidate", label: "Exclude candidate" },
+  { state: "resolved",          label: "Resolved" },
+];
+
+const FLAG_REVIEW_LABELS = {
+  unreviewed: "Unreviewed",
+  keep: "Keep",
+  monitor: "Monitor",
+  exclude_candidate: "Exclude candidate",
+  resolved: "Resolved",
+};
+
+function flagBuildParams() {
+  const p = new URLSearchParams();
+  p.set("window", getEvidenceWindow());
+  p.set("page", String(_flagFilters.page));
+  p.set("page_size", "50");
+  p.set("sort", _flagFilters.sort || "priority");
+  if (_flagFilters.q) p.set("q", _flagFilters.q);
+  if (_flagFilters.campaign) p.set("campaign", _flagFilters.campaign);
+  if (_flagFilters.reviewState) p.set("review_state", _flagFilters.reviewState);
+  if (_flagFilters.reason) p.set("flag_reason", _flagFilters.reason);
+  if (_flagFilters.sqlState) p.set("sql_state", _flagFilters.sqlState);
+  if (_flagFilters.minSpend !== "" && _flagFilters.minSpend !== null) {
+    p.set("min_spend", String(_flagFilters.minSpend));
+  }
+  return p;
+}
+
+async function loadFlaggedTab() {
+  const reqId = ++_flagReqId;
+  _flagLoadState = "loading";
+  renderFlaggedTab();
+  try {
+    const data = await fetchJSON(`/api/search-term-evidence/flagged?${flagBuildParams().toString()}`);
+    if (reqId !== _flagReqId || _stTab !== "flagged") return;
+    _flagData = data;
+    _flagLoadState = data.db_unavailable ? "db_unavailable" : "ok";
+  } catch (err) {
+    if (reqId !== _flagReqId || _stTab !== "flagged") return;
+    console.error("flagged search terms load failed", err);
+    _flagLoadState = "error";
+  }
+  renderFlaggedTab();
+}
+
+function renderFlaggedTab() {
+  const body = document.getElementById("st-tab-body");
+  if (!body || _stTab !== "flagged") return;
+
+  if (_flagLoadState === "loading" && !_flagData) {
+    body.innerHTML = `<div class="evidence-empty-state">Loading flagged terms…</div>`;
+    return;
+  }
+  if (_flagLoadState === "db_unavailable") {
+    body.innerHTML = `<div class="evidence-empty-state">
+      Data unavailable — the search_terms source cannot be reached right now.
+      No metrics are shown because none can be verified.
+      <a href="#/health">Check System Status</a>.</div>`;
+    return;
+  }
+  if (_flagLoadState === "error") {
+    body.innerHTML = `<div class="evidence-empty-state">
+      Flagged terms could not be loaded. Retry, or check System Status.</div>`;
+    return;
+  }
+  if (!_flagData) return;
+
+  // PR-ADS-153D §32 — a quarantined (mismatch) payload must be UNRENDERABLE as
+  // normal decision data. We return before the KPI grid, the filters and the
+  // table shell are ever written, so there is no element for renderFlaggedTable
+  // or wireFlaggedControls to populate — the warning cannot end up sitting on
+  // top of numbers it is warning about.
+  if (_flagData.actionable === false) {
+    body.innerHTML = renderFlaggedQuarantine(_flagData);
+    return;
+  }
+
+  body.innerHTML = `
+    ${flagTruthNotice(_flagData)}
+    ${flagReviewOutageNotice(_flagData)}
+    ${renderFlaggedKPIs(_flagData.kpis)}
+    ${renderFlaggedFilters(_flagData.facets)}
+    ${flagFocusNotice()}
+    <div class="evidence-table-shell">
+      <div class="evidence-table-scroll" id="st-flagged-table"></div>
+      <div class="st-pagination" id="st-flagged-pagination"></div>
+    </div>
+    <p class="grace-note">Flag evidence comes from durable waste classification, never from
+      "spend with no SQLs". Review decisions are stored locally only — Averroes never adds
+      negative keywords or writes anything to Google Ads.</p>`;
+  renderFlaggedTable();
+  wireFlaggedControls();
+}
+
+// Diagnosis only. Deliberately renders no KPI card, no table, no filter and no
+// review control — there is nothing here a reader could act on.
+function renderFlaggedQuarantine(data) {
+  const q = data.quarantine || {};
+  const truth = data.truth_state || {};
+  const sample = (q.affected_terms_sample || [])
+    .map((t) => `<li><code>${escapeHtml(t)}</code></li>`).join("");
+  return `<div class="mapping-notice mapping-notice--error">
+      <strong>Reconciliation required — flagged metrics withheld.</strong>
+      <p>${escapeHtml(q.detail || "An internal invariant failed for this window.")}</p>
+      <p>Counts, rows, filters and review actions are unavailable for this window
+         because the flagged contract could not be explained. They are withheld
+         rather than shown as normal values.</p>
+      ${q.affected_term_count ? `<p>${fmtCount(q.affected_term_count)} affected term(s).</p>` : ""}
+      ${sample ? `<details><summary>Diagnostic sample</summary><ul>${sample}</ul></details>` : ""}
+      ${(truth.reasons || []).length
+        ? `<p class="grace-note">Invariant: ${escapeHtml((truth.reasons || []).join(", "))}</p>` : ""}
+      <p class="grace-note">No Action Queue item is created from quarantined evidence.</p>
+    </div>`;
+}
+
+// Truth state is disclosed, never silently downgraded into zeros.
+function flagTruthNotice(data) {
+  const truth = data.truth_state || {};
+  if (truth.status === "reconciled" || !truth.status) return "";
+  const reasons = (truth.reasons || []).join(", ");
+  if (truth.status === "mismatch") {
+    return `<div class="mapping-notice mapping-notice--error">Reconciliation required —
+      a flagged term carries no reason evidence (${escapeHtml(reasons)}). Counts are withheld
+      rather than shown as normal values.</div>`;
+  }
+  const join = data.annotation_join || {};
+  const unresolved = join.legacy_unresolved;
+  const extra = unresolved
+    ? ` ${fmtCount(unresolved)} historical waste annotation${unresolved === 1 ? "" : "s"} could not be
+        matched to one canonical campaign and are shown nowhere rather than guessed onto a term.`
+    : "";
+  return `<div class="mapping-notice mapping-notice--info">Partial evidence
+    (${escapeHtml(reasons)}).${extra}</div>`;
+}
+
+function flagReviewOutageNotice(data) {
+  if (data.review_state_available !== false) return "";
+  return `<div class="mapping-notice mapping-notice--info">
+    <strong>Review state unavailable.</strong> The local review store could not be read,
+    so no review decision can be shown or changed for these terms, and Review Needed is
+    withheld. This is not the same as "unreviewed" — no term has been resolved, reopened
+    or dismissed. Review actions are disabled until the store is readable again.</div>`;
+}
+
+function flagFocusNotice() {
+  if (!_flagFocusTerm) return "";
+  return `<p class="grace-note">Filtered to <strong>${escapeHtml(_flagFocusTerm)}</strong> from an
+    Action Queue link. <button type="button" class="revenue-filter-chip" id="flag-clear-focus">Show all flagged terms</button></p>`;
+}
+
+function renderFlaggedKPIs(kpis) {
+  if (!kpis) return "";
+  const val = (v) => (v === null || v === undefined) ? stUnavailable() : fmtCount(v);
+  const spend = (kpis.flagged_spend_usd === null || kpis.flagged_spend_usd === undefined)
+    ? stUnavailable() : stMoney(kpis.flagged_spend_usd);
+  // SQL evidence is unavailable, NOT zero, when nothing could be attributed.
+  const sqlCard = kpis.sql_evidence_available
+    ? stKpiCard(escapeHtml(kpis.sql_evidence_label || "Search-term-attributable SQLs"),
+        fmtCount(kpis.sql_evidence || 0),
+        `${fmtCount(kpis.terms_with_proven_zero_sqls || 0)} term(s) proven zero · ` +
+        `${fmtCount(kpis.terms_with_attribution_unavailable || 0)} unavailable`)
+    : stKpiCard(escapeHtml(kpis.sql_evidence_label || "Search-term-attributable SQLs"),
+        stUnavailable(),
+        "Search-term attribution could not be resolved — this is not zero");
+  const cards = [
+    stKpiCard("Flagged Terms", val(kpis.flagged_terms),
+      "Unique durable term identities currently flagged"),
+    stKpiCard("Flagged Spend", spend,
+      "Canonical Google Ads spend for those terms in this window"),
+    sqlCard,
+    stKpiCard("Review Needed", val(kpis.review_needed),
+      "Flagged terms with no final local review decision"),
+  ];
+  return `<div class="evidence-kpi-grid st-kpi-grid">${cards.join("")}</div>`;
+}
+
+function flagReasonOptions(facets, selected) {
+  const opts = [`<option value="">All flag reasons</option>`];
+  ((facets && facets.flag_reasons) || []).forEach((r) => {
+    opts.push(`<option value="${escapeHtml(r.reason)}"${r.reason === selected ? " selected" : ""}>` +
+      `${escapeHtml(r.reason_label || r.reason)}</option>`);
+  });
+  return opts.join("");
+}
+
+function flagReviewStateOptions(selected) {
+  const opts = [`<option value="">All review states</option>`];
+  Object.keys(FLAG_REVIEW_LABELS).forEach((k) => {
+    opts.push(`<option value="${k}"${k === selected ? " selected" : ""}>${escapeHtml(FLAG_REVIEW_LABELS[k])}</option>`);
+  });
+  return opts.join("");
+}
+
+// The minimum useful filter set (§20) — no control is carried over from the old
+// page merely because it existed there.
+function renderFlaggedFilters(facets) {
+  return `<div class="campaign-controls st-controls">
+    <input type="search" id="flag-q" class="waste-search-input" placeholder="Search flagged terms…"
+      value="${escapeHtml(_flagFilters.q)}" aria-label="Search flagged terms">
+    <select id="flag-campaign" class="waste-filter-select" aria-label="Filter by campaign">
+      ${stCampaignOptions(facets, _flagFilters.campaign)}
+    </select>
+    <select id="flag-review-state" class="waste-filter-select" aria-label="Filter by review state"
+      ${_flagData && _flagData.review_state_available === false ? "disabled title=\"Review store unavailable — filtering by review state would return a silently wrong subset\"" : ""}>
+      ${flagReviewStateOptions(_flagFilters.reviewState)}
+    </select>
+    <select id="flag-reason" class="waste-filter-select" aria-label="Filter by flag reason">
+      ${flagReasonOptions(facets, _flagFilters.reason)}
+    </select>
+    <select id="flag-sql-state" class="waste-filter-select" aria-label="Filter by SQL evidence">
+      <option value="">Any SQL evidence</option>
+      <option value="has_sql"${_flagFilters.sqlState === "has_sql" ? " selected" : ""}>Has attributable SQLs</option>
+      <option value="known_zero"${_flagFilters.sqlState === "known_zero" ? " selected" : ""}>Proven zero SQLs</option>
+      <option value="unavailable"${_flagFilters.sqlState === "unavailable" ? " selected" : ""}>Attribution unavailable</option>
+    </select>
+    <input type="number" id="flag-min-spend" class="waste-filter-select" min="0" step="1"
+      placeholder="Min spend" value="${escapeHtml(String(_flagFilters.minSpend))}"
+      aria-label="Minimum spend">
+    <select id="flag-sort" class="waste-filter-select" aria-label="Sort flagged terms">
+      <option value="priority"${_flagFilters.sort === "priority" ? " selected" : ""}>Priority</option>
+      <option value="spend"${_flagFilters.sort === "spend" ? " selected" : ""}>Spend</option>
+      <option value="clicks"${_flagFilters.sort === "clicks" ? " selected" : ""}>Clicks</option>
+      <option value="last_seen"${_flagFilters.sort === "last_seen" ? " selected" : ""}>Last seen</option>
+      <option value="term"${_flagFilters.sort === "term" ? " selected" : ""}>Term</option>
+    </select>
+  </div>`;
+}
+
+// Attribution evidence: an unavailable attribution renders as "—", never 0.
+function flagSqlCell(row) {
+  const status = row.sql_attribution_status;
+  if (status === "attributed") return fmtCount(row.attributed_sqls || 0);
+  if (status === "known_zero") {
+    return `<span title="Attribution available for this term and found no qualified SQL">0</span>`;
+  }
+  return `<span class="detail-unavailable" title="Search-term SQL attribution is unavailable for this term — this is not a proven zero">—</span>`;
+}
+
+function flagReasonCell(row) {
+  const label = escapeHtml(row.flag_reason_label || row.flag_reason || "—");
+  if (!row.flag_reason_unmapped) return label;
+  // An unrecognised rule value is surfaced, never folded silently into "Other".
+  const raw = (row.raw_junk_categories || []).join(", ");
+  return `<span class="campaign-status-badge campaign-status-badge--warn"
+    title="This flag reason is not in the shared taxonomy — raw value: ${escapeHtml(raw || "none")}">${label}</span>`;
+}
+
+// An unreadable review store is NOT "Unreviewed" — saying so would assert that
+// no human has decided, on evidence we do not have.
+function flagReviewCell(row) {
+  if (row.review_state_status === "unavailable" || row.review_state === null) {
+    return `<span class="detail-unavailable" title="${escapeHtml(row.review_state_help || "The local review store could not be read.")}">Review state unavailable</span>`;
+  }
+  return escapeHtml(FLAG_REVIEW_LABELS[row.review_state] || row.review_state || "—");
+}
+
+function flagPriorityCell(row) {
+  const band = row.priority_band || "low";
+  const why = (row.priority_reasons || [])
+    .map((r) => `${r.detail} (+${r.points})`).join("\n");
+  return `<span class="campaign-status-badge campaign-status-badge--${band === "high" ? "bad" : band === "medium" ? "warn" : "muted"}"
+    title="${escapeHtml(why || "No priority signals")}">${escapeHtml(band)} · ${Number(row.priority_score || 0)}</span>`;
+}
+
+function renderFlaggedTable() {
+  const host = document.getElementById("st-flagged-table");
+  if (!host || !_flagData) return;
+  const rows = _flagData.rows || [];
+  if (!rows.length) {
+    host.innerHTML = `<div class="evidence-empty-state">No flagged search terms match these filters
+      in this window. That is a real empty result for the selected filters — not a claim that no
+      waste exists.</div>`;
+    const pager = document.getElementById("st-flagged-pagination");
+    if (pager) pager.innerHTML = "";
+    return;
+  }
+
+  const body = rows.map((r, i) => `<tr class="clickable-row" data-flag-row="${i}" tabindex="0">
+      <td><strong>${escapeHtml(r.search_term || "—")}</strong></td>
+      <td>${escapeHtml(r.campaign_name || "—")}</td>
+      <td class="td--num">${stSpendCell(r)}</td>
+      <td class="td--num">${fmtCount(r.clicks || 0)}</td>
+      <td>${flagReasonCell(r)}</td>
+      <td class="td--num">${flagSqlCell(r)}</td>
+      <td>${flagReviewCell(r)}</td>
+      <td>${flagPriorityCell(r)}</td>
+      <td>${escapeHtml(r.first_flagged_at ? fmtDate(r.first_flagged_at) : "—")}</td>
+      <td>${escapeHtml(r.last_seen ? fmtDate(r.last_seen) : "—")}</td>
+    </tr>`).join("");
+
+  host.innerHTML = `<table class="data-table campaign-decision-table st-table">
+    <thead><tr>
+      <th>Search term</th>
+      <th>Campaign</th>
+      <th class="td--num">Spend</th>
+      <th class="td--num">Clicks</th>
+      <th title="Why this term is flagged, from the shared waste-reason taxonomy">Reason flagged</th>
+      <th class="td--num" title="Search-term-attributable lifecycle SQLs — a strict attribution subset">SQL evidence</th>
+      <th title="Local review decision — shared with the Action Queue">Review state</th>
+      <th title="Deterministic, explainable priority — hover for the exact components">Priority</th>
+      <th>First flagged</th>
+      <th title="Latest date Google Ads reported this term">Latest seen</th>
+    </tr></thead><tbody>${body}</tbody></table>`;
+
+  host.querySelectorAll("[data-flag-row]").forEach((tr) => {
+    const open = () => {
+      const row = rows[Number(tr.getAttribute("data-flag-row"))];
+      openFlaggedDrawer(row);
+    };
+    tr.addEventListener("click", open);
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
+  });
+
+  const pager = document.getElementById("st-flagged-pagination");
+  const pg = _flagData.pagination || {};
+  if (pager) {
+    const from = ((pg.page || 1) - 1) * (pg.page_size || 50) + 1;
+    const to = from + rows.length - 1;
+    pager.innerHTML = `
+      <button type="button" class="btn btn--secondary" id="flag-prev" ${(pg.page || 1) <= 1 ? "disabled" : ""}>Previous</button>
+      <span class="roas-window-range">${from}–${to}${pg.total_count === null || pg.total_count === undefined ? "" : ` of ${Number(pg.total_count).toLocaleString()}`}</span>
+      <button type="button" class="btn btn--secondary" id="flag-next" ${pg.has_more ? "" : "disabled"}>Next</button>`;
+    const prev = document.getElementById("flag-prev");
+    const next = document.getElementById("flag-next");
+    if (prev) prev.addEventListener("click", () => { _flagFilters.page = Math.max(1, _flagFilters.page - 1); loadFlaggedTab(); });
+    if (next) next.addEventListener("click", () => { _flagFilters.page += 1; loadFlaggedTab(); });
+  }
+}
+
+function wireFlaggedControls() {
+  const q = document.getElementById("flag-q");
+  if (q) {
+    q.addEventListener("input", (e) => {
+      clearTimeout(_flagDebounceTimer);
+      const value = e.target.value;
+      _flagDebounceTimer = setTimeout(() => {
+        _flagFilters.q = value; _flagFilters.page = 1; loadFlaggedTab();
+      }, 300);
+    });
+  }
+  const bind = (id, key) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("change", (e) => {
+      _flagFilters[key] = e.target.value; _flagFilters.page = 1; loadFlaggedTab();
+    });
+  };
+  bind("flag-campaign", "campaign");
+  bind("flag-review-state", "reviewState");
+  bind("flag-reason", "reason");
+  bind("flag-sql-state", "sqlState");
+  bind("flag-min-spend", "minSpend");
+  bind("flag-sort", "sort");
+
+  const clearFocus = document.getElementById("flag-clear-focus");
+  if (clearFocus) clearFocus.addEventListener("click", () => {
+    _flagFocusTerm = null; _flagFilters.q = ""; _flagFilters.page = 1; loadFlaggedTab();
+  });
+}
+
+// ── Flagged term drawer (§26) ───────────────────────────────────────────────
+// Google Ads evidence, CRM evidence, flag evidence and the local review
+// decision. No external mutation is offered anywhere in it.
+function openFlaggedDrawer(row) {
+  if (!row) return;
+  const body = openStDrawerShell(escapeHtml(row.search_term || "Search term"));
+  if (!body) return;
+
+  const sqlBlock = row.sql_attribution_status === "attributed"
+    ? `<tr><td>Attributable lifecycle SQLs</td><td>${fmtCount(row.attributed_sqls || 0)}</td></tr>`
+    : row.sql_attribution_status === "known_zero"
+      ? `<tr><td>Attributable lifecycle SQLs</td><td>0 <span class="muted">(attribution available, none found)</span></td></tr>`
+      : `<tr><td>Attributable lifecycle SQLs</td><td><span class="detail-unavailable">Unavailable — not zero</span></td></tr>`;
+
+  const reasons = (row.flag_reasons || []).map((r) =>
+    `<li>${escapeHtml(r.reason_label)}${r.raw_reason ? ` <span class="muted">(rule: ${escapeHtml(r.raw_reason)})</span>` : ""}` +
+    `${r.unmapped ? ` <span class="campaign-status-badge campaign-status-badge--warn">unmapped</span>` : ""}</li>`).join("");
+
+  const reviewDisabled = (_flagData && _flagData.review_actions_enabled === false)
+    || row.review_state_status === "unavailable";
+  const actions = reviewDisabled
+    ? `<p class="detail-unavailable">Review actions are unavailable — the local review
+         store could not be read. No decision can be recorded until it is readable again.</p>`
+    : FLAG_REVIEW_ACTIONS.map((a) =>
+        `<button type="button" class="btn btn--secondary" data-flag-review="${a.state}"
+          ${row.review_state === a.state ? "disabled" : ""}>${escapeHtml(a.label)}</button>`).join(" ");
+
+  body.innerHTML = `
+    <h4>Google Ads evidence</h4>
+    <table class="data-table"><tbody>
+      <tr><td>Spend</td><td>${stSpendCell(row)}</td></tr>
+      <tr><td>Clicks</td><td>${fmtCount(row.clicks || 0)}</td></tr>
+      <tr><td>Impressions</td><td>${fmtCount(row.impressions || 0)}</td></tr>
+      <tr><td>Campaign</td><td>${escapeHtml(row.campaign_name || "—")}</td></tr>
+      <tr><td>Source dates</td><td>${escapeHtml(row.first_seen ? fmtDate(row.first_seen) : "—")} → ${escapeHtml(row.last_seen ? fmtDate(row.last_seen) : "—")}</td></tr>
+    </tbody></table>
+
+    <h4>CRM evidence</h4>
+    <table class="data-table"><tbody>
+      ${sqlBlock}
+      <tr><td>Attribution scope</td><td>Search-term-attributable (a strict subset of campaign-attributable, Google Ads-source and all-source lifecycle SQLs)</td></tr>
+      <tr><td>Attribution status</td><td>${escapeHtml(row.sql_attribution_status || "unavailable")}</td></tr>
+    </tbody></table>
+
+    <h4>Flag evidence</h4>
+    <table class="data-table"><tbody>
+      <tr><td>Reasons</td><td><ul class="drawer-list">${reasons || "<li>—</li>"}</ul></td></tr>
+      <tr><td>Source</td><td>${escapeHtml(row.flag_source || "—")} <span class="muted">(${escapeHtml(row.flag_confidence || "—")})</span></td></tr>
+      <tr><td>First flagged</td><td>${escapeHtml(row.first_flagged_at ? fmtDate(row.first_flagged_at) : "—")}</td></tr>
+      <tr><td>Latest flagged</td><td>${escapeHtml(row.latest_flagged_at ? fmtDate(row.latest_flagged_at) : "—")}</td></tr>
+      <tr><td>Review state</td><td>${flagReviewCell(row)}</td></tr>
+    </tbody></table>
+
+    <h4>Action</h4>
+    <div class="drawer-actions" id="flag-review-actions">${actions}</div>
+    <p class="grace-note">${escapeHtml(row.review_state_help || "")}</p>
+    <p class="grace-note">Recording a decision writes to Averroes only. No negative keyword is
+      created, no campaign, keyword, bid or budget is changed, and nothing is sent to Google Ads.</p>`;
+
+  body.querySelectorAll("[data-flag-review]").forEach((btn) => {
+    btn.addEventListener("click", () => flagRecordReview(row, btn.getAttribute("data-flag-review")));
+  });
+}
+
+async function flagRecordReview(row, state) {
+  const host = document.getElementById("flag-review-actions");
+  if (host) host.innerHTML = `<span class="muted">Saving review decision…</span>`;
+  try {
+    await fetchJSON("/api/search-term-evidence/review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        campaign_key: row.campaign_key,
+        search_term: row.search_term,
+        campaign_name: row.campaign_name,
+        review_state: state,
+      }),
+    });
+    closeStDrawer();
+    loadFlaggedTab();
+  } catch (err) {
+    console.error("review decision failed", err);
+    if (host) {
+      host.innerHTML = `<span class="detail-unavailable">Could not save the review decision. Nothing was changed.</span>`;
+    }
+  }
+}
+
 // ── Patterns tab ─────────────────────────────────────────────────────────────
 
 function stBuildPatternParams() {
@@ -10553,7 +10838,9 @@ function renderStTermDrawer(body, data) {
   const linkWaste = document.getElementById("st-link-waste");
   if (linkWaste) linkWaste.addEventListener("click", () => {
     closeStDrawer();
-    navigate("waste", { updateHash: true });
+    _flagFilters.q = t.search_term;
+    _flagFilters.page = 1;
+    stActivateTab("flagged");
   });
   const linkPatterns = document.getElementById("st-link-patterns");
   if (linkPatterns) linkPatterns.addEventListener("click", () => {
@@ -10642,24 +10929,6 @@ function renderStPatternDrawer(body, data) {
       </tr></thead><tbody>${termRows || `<tr><td colspan="6">—</td></tr>`}</tbody></table>
       ${data.terms_truncated ? `<p class="drawer-source-note">Showing the top underlying terms by spend — the pattern has more terms than are listed here.</p>` : ""}
     </div>`;
-}
-
-function downloadWasteCSV() {
-  const items = getFilteredWasteTerms();
-  if (!items.length) return;
-  const headers = [
-    "Search Term", "Campaign", "Spend USD", "Junk Category",
-    "Matched Pattern", "CRM Junk Confirmed", "Run Date",
-  ];
-  const rows = items.map((t) => [
-    t.search_term, t.campaign_name, t.spend_usd,
-    t.junk_category || "", t.matched_pattern || "",
-    t.crm_junk_confirmed, t.run_date,
-  ]);
-  // PR-ADS-141: when the row list is a partial page, name the file so it never
-  // implies the complete waste library for the window.
-  const suffix = _wasteMeta.truncated ? `_partial_first${_wasteMeta.returned_count}` : "";
-  downloadCSV(`waste_terms_${getEvidenceWindow()}${suffix}.csv`, headers, rows);
 }
 
 // ── GCLID Attribution page ───────────────────────────────────────────────────
@@ -13931,9 +14200,13 @@ function _appendDrawerEvidenceSections(container, data, lq) {
   if (wasteFullBtn) {
     const _campName = _drawerOpenCampaign;
     wasteFullBtn.addEventListener("click", () => {
-      if (_campName) wastePrefill = { campaign: _campName };
+      // PR-ADS-153D: the standalone page is retired — go to the canonical
+      // Flagged view and carry the campaign the drawer was showing.
+      if (_campName) _flagFilters.campaign = _campName;
+      _flagFilters.page = 1;
       closeCampaignDrawer();
-      navigate("waste");
+      stSetPendingTab("flagged");
+      navigate("search-terms");
     });
   }
 }
@@ -14086,7 +14359,14 @@ function _renderActionQueueList() {
     btn.addEventListener("click", () => openCampaignDrawer(btn.dataset.campaign));
   });
   listEl.querySelectorAll(".queue-action-btn[data-navigate]").forEach((btn) => {
-    btn.addEventListener("click", () => navigate(btn.dataset.navigate));
+    btn.addEventListener("click", () => {
+      // A queue item may carry a deep link so the action lands on the row it is
+      // about (e.g. Search Terms → Flagged, focused on that term) rather than on
+      // a generic list. Setting the hash lets the normal router resolve it.
+      const deep = btn.dataset.navigateHash;
+      if (deep) { window.location.hash = deep; return; }
+      navigate(btn.dataset.navigate);
+    });
   });
 }
 
@@ -14129,15 +14409,20 @@ function _renderQueueItemCard(item) {
     actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-campaign="${escapeHtml(campaignName)}">Investigate campaign</button>`;
   } else if (linkAction === "navigate" && linkPage) {
     const navLabels = {
-      waste: "View Waste Terms", geo: "View Geo",
+      "search-terms": "View flagged term", geo: "View Geo",
       keywords: "View Keywords", scheduler: "View Scheduler",
     };
     const label = navLabels[linkPage] || "View";
-    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="${escapeHtml(linkPage)}">${escapeHtml(label)}</button>`;
+    // Deep link is accepted only when it targets the page the item already
+    // declared, so a payload can never redirect the button somewhere else.
+    const deep = typeof link.hash === "string" &&
+      link.hash.startsWith(`#/${linkPage}`) ? link.hash : "";
+    const deepAttr = deep ? ` data-navigate-hash="${escapeHtml(deep)}"` : "";
+    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="${escapeHtml(linkPage)}"${deepAttr}>${escapeHtml(label)}</button>`;
   } else if (type === "campaign_review" && item.campaign_name) {
     actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-campaign="${escapeHtml(item.campaign_name)}">Investigate campaign</button>`;
   } else if (type === "waste_review") {
-    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="waste">View Waste Terms</button>`;
+    actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="search-terms" data-navigate-hash="#/search-terms?tab=flagged">View flagged term</button>`;
   } else if (type === "geo_review") {
     actionBtn = `<button class="btn btn--secondary queue-action-btn" type="button" data-navigate="geo">View Geo</button>`;
   } else if (type === "keyword_review") {
@@ -14241,17 +14526,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (evidenceSelect) evidenceSelect.addEventListener("change", handleEvidenceWindowSelectChange);
 
   // Wire up waste filter controls
-  const wasteSearch  = document.getElementById("waste-filter-search");
-  const wasteCatSel  = document.getElementById("waste-filter-category");
-  const wasteCampSel = document.getElementById("waste-filter-campaign");
-  const wasteCopyBtn = document.getElementById("waste-copy-btn");
-  const wasteExportBtn = document.getElementById("waste-export-csv-btn");
-  if (wasteSearch)   wasteSearch.addEventListener("input",  applyWasteFilters);
-  if (wasteCatSel)   wasteCatSel.addEventListener("change", applyWasteFilters);
-  if (wasteCampSel)  wasteCampSel.addEventListener("change", applyWasteFilters);
-  if (wasteCopyBtn)  wasteCopyBtn.addEventListener("click", copyWasteTerms);
-  if (wasteExportBtn) wasteExportBtn.addEventListener("click", downloadWasteCSV);
-
   // Wire up geo search
   const geoSearch = document.getElementById("geo-search");
   if (geoSearch) geoSearch.addEventListener("input", applyGeoSearch);

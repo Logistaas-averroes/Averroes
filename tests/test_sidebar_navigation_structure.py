@@ -19,8 +19,6 @@ REQUIRED_ROUTE_KEYS = [
     "keywords",
     "leads",
     "deals",
-    "gclid-attribution",
-    "waste",
         "roas-campaigns",
     "roas-countries",
     "unit-economics",
@@ -28,13 +26,15 @@ REQUIRED_ROUTE_KEYS = [
     "scheduler",
     "health",
     "backfill",
+    # PR-ADS-153D: GCLID Attribution is forensic/admin, not an everyday
+    # CRM & Revenue destination, so it now sits with the other diagnostics.
+    "gclid-attribution",
 ]
 
 NEW_VISIBLE_LABELS = [
     "Keywords",
     "Countries",
     "Search Terms",
-    "Flagged Waste Terms",
     "Data Runs",
     "System Status",
     "Admin Backfill",

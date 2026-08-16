@@ -1159,6 +1159,56 @@ CREATE TABLE IF NOT EXISTS hubspot_contact_funnel_sync_state (
   last_error                TEXT,
   updated_at                TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- PR-ADS-153D: durable LOCAL review decisions for canonical search terms.
+--
+-- One row per durable search-term identity (analysis/search_term_identity.py):
+-- canonical campaign identity + normalized search term. Search Terms and the
+-- Action Queue read the SAME row, so a decision made on one surface is
+-- immediately true on the other — there is no second review-state system.
+--
+-- This table is a DECISION/ANNOTATION layer. It holds no spend, clicks or
+-- impressions and must never become a second Google Ads fact ledger: canonical
+-- metrics always come from `search_terms` (PR-ADS-153D §23).
+--
+-- `review_state = 'exclude_candidate'` is a LOCAL RECOMMENDATION ONLY. It is
+-- NOT evidence that a Google Ads negative keyword was applied — this system has
+-- no write path to Google Ads (§15, §16).
+--
+-- History is preserved: `first_flagged_at` / `latest_flagged_at` survive a
+-- resolution, so a term that no longer meets the current rule is still auditable
+-- as historically flagged (§25).
+CREATE TABLE IF NOT EXISTS search_term_review (
+  id                      SERIAL PRIMARY KEY,
+  term_identity           TEXT NOT NULL UNIQUE,   -- sha256 digest of the pair below
+  campaign_key            TEXT NOT NULL,          -- canonical campaign identity
+  search_term_normalized  TEXT NOT NULL,          -- normalized user query
+  search_term_display     TEXT,                   -- last-seen raw query, for humans
+  campaign_name_display   TEXT,                   -- last-seen campaign label
+  identity_rule_version   TEXT NOT NULL,
+
+  -- unreviewed | keep | monitor | exclude_candidate | resolved
+  review_state            TEXT NOT NULL DEFAULT 'unreviewed',
+  review_note             TEXT,
+  reviewed_by             TEXT,
+  reviewed_at             TIMESTAMPTZ,
+
+  -- Flag history (audit): set by the flagged-view writer, never cleared.
+  first_flagged_at        TIMESTAMPTZ,
+  latest_flagged_at       TIMESTAMPTZ,
+  latest_flag_reason      TEXT,                   -- canonical waste-reason id
+  latest_raw_reason       TEXT,                   -- raw junk_category, preserved
+
+  created_at              TIMESTAMPTZ DEFAULT NOW(),
+  updated_at              TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_term_review_state
+  ON search_term_review(review_state);
+CREATE INDEX IF NOT EXISTS idx_search_term_review_campaign
+  ON search_term_review(campaign_key);
+CREATE INDEX IF NOT EXISTS idx_search_term_review_flagged
+  ON search_term_review(latest_flagged_at DESC);
 """
 
 

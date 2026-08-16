@@ -45,6 +45,8 @@ Protected endpoints (require authenticated session):
   GET  /api/datasets/freshness    — Per-dataset sync state / watermark from sync_state table (requires auth).
   GET  /api/search-terms          — Paginated search-term fact rows from search_terms table (requires auth).
   GET  /api/search-terms/ngrams   — Read-only n-gram analysis over stored search_terms (requires auth).
+  GET  /api/search-term-evidence/flagged — Canonical Flagged / Waste view over deduplicated search_terms facts (requires auth; PR-ADS-153D).
+  POST /api/search-term-evidence/review  — Record ONE local search-term review decision (local DB only; never a Google Ads mutation; PR-ADS-153D).
   GET  /api/gclid-attribution     — Paginated GCLID attribution rows from gclid_attribution table (requires auth).
   GET  /api/gclid-coverage        — GCLID coverage snapshots from gclid_coverage_snapshots table (requires auth).
   GET  /api/monitoring/status     — Read-only monitoring summary: stale/failure state per run type (requires auth).
@@ -89,6 +91,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 import yaml
 
@@ -1125,57 +1128,84 @@ def api_waste(
         description="Evidence window: 7d|14d|30d|60d|180d|all_time (overrides days).",
     ),
 ) -> dict[str, Any]:
-    """Return waste term rows for the evidence window. Requires auth.
+    """COMPATIBILITY ADAPTER for the retired Flagged Waste Terms page.
 
-    PR-ADS-141: the row list is presentation-capped (_WASTE_ROW_LIMIT), so the
-    response discloses ``total_count`` / ``returned_count`` / ``has_more`` /
-    ``truncated`` — All-time results are never silently reported as complete.
-    Read-only.
+    PR-ADS-153D retired the standalone page; the canonical surface is
+    ``GET /api/search-term-evidence/flagged`` (UI: Search Terms → Flagged).
+    This route has NO first-party consumer left in the product and is retained
+    only so external/bookmarked API clients do not break. It is on the
+    PR-ADS-153G retirement list (see docs/34_SEARCH_TERM_WASTE_CONSOLIDATION.md).
+
+    Critically, it is no longer served from ``waste_terms``. That table is
+    ``run_date``-grained: one row per waste term PER RUN, so the old
+    implementation returned the same term once per weekly run and its
+    ``SUM(spend_usd)`` multiplied real spend by the number of runs that observed
+    it. Rows now come from the canonical deduplicated ``search_terms`` facts via
+    the same service the flagged view uses, so re-ingesting a source-date fact
+    cannot change any number here.
+
+    Requires auth. Read-only.
     """
     days, window_key = _resolve_evidence_window(window, days)
-    date_clause, date_params = _evidence_date_clause("run_date", days)
 
     def _empty():
         resp = _db_empty_response(days, "waste", window_key)
         resp.update({"total_count": 0, "returned_count": 0,
-                     "has_more": False, "truncated": False})
+                     "has_more": False, "truncated": False,
+                     "canonical_source": "search_terms",
+                     "superseded_by": "/api/search-term-evidence/flagged"})
         return resp
 
-    from db.connection import get_conn  # noqa: PLC0415
+    thresholds = _load_ui_thresholds()
+    high_spend = float((thresholds.get("spend") or {}).get("high_spend_usd")
+                       or _QUEUE_HIGH_SPEND_USD_DEFAULT)
     try:
-        with get_conn() as conn:
-            if conn is None:
-                return _empty()
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT search_term, campaign_name, spend_usd,
-                           junk_category, matched_pattern, crm_junk_confirmed, run_date
-                    FROM waste_terms
-                    WHERE {date_clause}
-                    ORDER BY spend_usd DESC NULLS LAST, run_date DESC
-                    LIMIT %s
-                    """,
-                    (*date_params, _WASTE_ROW_LIMIT),
-                )
-                rows = cur.fetchall()
-                cols = [d[0] for d in cur.description]
-                waste_out = [dict(zip(cols, row)) for row in rows]
-                for item in waste_out:
-                    if item.get("run_date"):
-                        item["run_date"] = str(item["run_date"])
-                    if item.get("spend_usd") is not None:
-                        item["spend_usd"] = float(item["spend_usd"])
-                # Complete count for the whole window (disclose truncation).
-                cur.execute(
-                    f"SELECT COUNT(*) FROM waste_terms WHERE {date_clause}",
-                    (*date_params,),
-                )
-                total_count = int((cur.fetchone() or (0,))[0] or 0)
+        from services.search_term_evidence_service import (  # noqa: PLC0415
+            build_flagged_search_terms,
+        )
+
+        payload = build_flagged_search_terms(
+            window_key, page=1, page_size=_WASTE_ROW_LIMIT, sort="spend",
+            high_spend_usd=high_spend)
     except Exception as exc:  # noqa: BLE001
-        log.error("[api/waste] database error: %s", exc, exc_info=True)
+        log.error("[api/waste] canonical flagged view failed: %s", exc, exc_info=True)
         return _empty()
 
+    if payload.get("db_unavailable"):
+        return _empty()
+    if payload.get("actionable") is False:
+        # Mismatch quarantine — withhold rows and KPIs rather than serve numbers
+        # the canonical view itself refuses to publish.
+        resp = _empty()
+        resp["truth_state"] = payload.get("truth_state")
+        resp["quarantine"] = payload.get("quarantine")
+        return resp
+
+    rows = payload.get("rows") or []
+    waste_out = [{
+        # Legacy field names preserved so existing clients keep parsing.
+        "search_term": r.get("search_term"),
+        "campaign_name": r.get("campaign_name"),
+        "spend_usd": r.get("spend_usd"),
+        "junk_category": r.get("flag_reason"),
+        "matched_pattern": (r.get("matched_patterns") or [None])[0],
+        "crm_junk_confirmed": r.get("crm_junk_confirmed"),
+        # Was the ingestion run date; now the last date the term was actually
+        # reported by Google Ads, which is the fact this field always implied.
+        "run_date": r.get("last_seen"),
+        # New, canonical fields.
+        "term_identity": r.get("term_identity"),
+        "clicks": r.get("clicks"),
+        "impressions": r.get("impressions"),
+        "flag_reason": r.get("flag_reason"),
+        "flag_reason_label": r.get("flag_reason_label"),
+        "review_state": r.get("review_state"),
+        "attributed_sqls": r.get("attributed_sqls"),
+        "sql_attribution_status": r.get("sql_attribution_status"),
+    } for r in rows]
+
+    pagination = payload.get("pagination") or {}
+    total_count = pagination.get("total_count")
     returned_count = len(waste_out)
     return {
         "days": days,
@@ -1183,8 +1213,15 @@ def api_waste(
         "waste": waste_out,
         "total_count": total_count,
         "returned_count": returned_count,
-        "has_more": total_count > returned_count,
-        "truncated": total_count > returned_count,
+        "has_more": bool(pagination.get("has_more")),
+        "truncated": bool(pagination.get("has_more")),
+        "kpis": payload.get("kpis"),
+        "truth_state": payload.get("truth_state"),
+        "canonical_source": "search_terms",
+        "annotation_source": "waste_terms (classification annotations only)",
+        "superseded_by": "/api/search-term-evidence/flagged",
+        "deprecation": ("Compatibility adapter for the retired Flagged Waste "
+                        "Terms page. Scheduled for removal in PR-ADS-153G."),
     }
 
 
@@ -2609,75 +2646,208 @@ def _build_campaign_queue_items(
     return items
 
 
+def _evidence_window_for_days(days: int) -> str:
+    """Map an Action Queue ``days`` lookback to the canonical evidence-window key.
+
+    The Action Queue and the Search Terms flagged view must describe the SAME
+    window, so the queue never invents its own lookback: it snaps to the nearest
+    canonical window that is not narrower than the requested range, which is the
+    only direction that cannot under-report evidence.
+    """
+    from analysis.evidence_windows import EVIDENCE_WINDOW_DAYS  # noqa: PLC0415
+
+    bounded = [(v, k) for k, v in EVIDENCE_WINDOW_DAYS.items() if v is not None]
+    for value, key in sorted(bounded):
+        if days <= value:
+            return key
+    return "all_time"
+
+
 def _build_waste_queue_items(
     cur,
     days: int,
     high_spend_usd: float,
 ) -> list[dict]:
-    """Build waste_review queue items from the waste_terms table (top 10 by spend)."""
-    cur.execute(
-        """
-        SELECT
-            search_term,
-            campaign_name,
-            SUM(spend_usd)          AS spend_usd,
-            junk_category,
-            SUM(crm_junk_confirmed) AS crm_junk_confirmed
-        FROM waste_terms
-        WHERE run_date >= NOW() - INTERVAL '1 day' * %s
-        GROUP BY search_term, campaign_name, junk_category
-        HAVING SUM(spend_usd) >= %s OR SUM(crm_junk_confirmed) > 0
-        ORDER BY spend_usd DESC NULLS LAST
-        LIMIT 10
-        """,
-        (days, high_spend_usd),
-    )
-    rows = cur.fetchall()
-    cols = [d[0] for d in cur.description]
+    """Search-term waste actions, built from the CANONICAL flagged view.
+
+    PR-ADS-153D §10/§18/§44. The previous implementation grouped ``waste_terms``
+    by ``(search_term, campaign_name, junk_category)`` over a ``run_date``
+    window, which produced two defects:
+
+      * ``SUM(spend_usd)`` added up one weekly snapshot per run, so a term
+        observed by five runs reported five times its real spend; and
+      * a term whose junk category changed between runs produced a SECOND queue
+        item for the same term.
+
+    Both are gone. Items now come from ``build_flagged_search_terms`` — the same
+    canonical population, spend and reason the Search Terms flagged view renders
+    — keyed by the durable search-term identity, so one durable term yields
+    exactly one queue item no matter how many times it was ingested or observed.
+
+    Terms whose local review state is a finished decision (``keep`` /
+    ``resolved``) carry no remaining action and are excluded; re-observing them
+    does not reopen them.
+
+    ``cur`` is accepted for call-site symmetry with the other queue builders but
+    is unused: the canonical service manages its own read-only connections.
+    """
+    del cur
+
+    try:
+        from services.search_term_evidence_service import (  # noqa: PLC0415
+            build_flagged_search_terms,
+        )
+
+        payload = build_flagged_search_terms(
+            _evidence_window_for_days(days),
+            page=1, page_size=_QUEUE_MAX_ITEMS, sort="priority",
+            high_spend_usd=high_spend_usd)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[action-queue] flagged search terms unavailable: %s", exc)
+        return []
+
+    if payload.get("db_unavailable"):
+        return []
+    if payload.get("actionable") is False:
+        # Quarantined (truth_state = mismatch) or otherwise non-actionable. The
+        # flagged contract could not be explained, so there is nothing here to
+        # ask a human to act on. The caller discloses this rather than showing
+        # an empty queue that reads as "no work" (§32).
+        log.warning("[action-queue] flagged population is not actionable (%s) — "
+                    "no waste actions produced",
+                    (payload.get("truth_state") or {}).get("status"))
+        return []
+
+    # PR-ADS-153D merge-blocker 3: when the local review store is unreadable we
+    # cannot tell which flagged terms still need action — a resolved or kept term
+    # would look identical to an unreviewed one. Returning an empty list here
+    # would read as "no waste work", and returning every flagged term would
+    # reopen decisions a human already made. So we return a single explicit
+    # DISCLOSURE item instead, and no actionable ones.
+    if payload.get("review_state_available") is False:
+        flagged_total = (payload.get("pagination") or {}).get("total_count")
+        return [{
+            "id": "waste-review-unavailable",
+            "type": "waste_review",
+            "severity": "medium",
+            "severity_score": 50,
+            "title": "Search-term waste actions unavailable",
+            "detail": (
+                "The local search-term review store could not be read, so "
+                "Averroes cannot tell which flagged terms still need action. "
+                + (f"{flagged_total} term(s) are currently flagged. "
+                   if flagged_total is not None else "")
+                + "This is NOT zero outstanding work — no term has been "
+                  "resolved, reopened or dismissed."),
+            "entity_label": "Search-term review store",
+            "entity_type": "review_store",
+            "campaign_name": "",
+            "source": "search_term_review (local review decisions)",
+            "evidence": {
+                "review_state_status": "unavailable",
+                "flagged_terms": flagged_total,
+                "actions_available": False,
+                "applied_to_google_ads": False,
+                "evidence_window": payload.get("window"),
+            },
+            "primary_link": {
+                "page": "search-terms",
+                "action": "navigate",
+                "hash": "#/search-terms?tab=flagged",
+            },
+        }]
+
     items: list[dict] = []
-    for row in rows:
-        r = dict(zip(cols, row))
-        spend = float(r["spend_usd"] or 0)
-        crm_confirmed = int(r["crm_junk_confirmed"] or 0)
-        category = (r["junk_category"] or "").lower()
-        term = r["search_term"] or ""
-        camp = r["campaign_name"] or ""
+    seen_identities: set[str] = set()
+    for row in (payload.get("rows") or []):
+        # action_needed is None during a review-store outage, which the branch
+        # above already handled; here it is a real True/False.
+        if not row.get("action_needed"):
+            continue
+        identity = row.get("term_identity")
+        if not identity:
+            # A row with no durable identity cannot be actioned or deduplicated.
+            log.error("[action-queue] flagged row without term_identity: %r",
+                      row.get("search_term"))
+            continue
+        if identity in seen_identities:
+            # PR-ADS-153D: NEVER silently skip. The flagged view guarantees one
+            # row per durable identity, so a repeat here is an invariant break,
+            # not a snapshot artefact — skipping it quietly is exactly how the
+            # queue used to hide a variant's spend. Surface it loudly.
+            log.error("[action-queue] duplicate durable identity %s for %r — "
+                      "the flagged population violated its one-row-per-identity "
+                      "invariant", identity, row.get("search_term"))
+            raise RuntimeError(
+                f"duplicate durable search-term identity {identity} in the "
+                "flagged population")
+        seen_identities.add(identity)
 
-        # Severity scoring
-        score = 30
-        if spend >= high_spend_usd:
-            score += 25
-        if crm_confirmed > 0:
-            score += 20
-        if category in _QUEUE_FRAUD_CATEGORIES:
-            score += 10
-        score = min(100, score)
+        term = row.get("search_term") or ""
+        camp = row.get("campaign_name") or ""
+        spend = row.get("spend_usd")
+        score = int(row.get("priority_score") or 0)
 
-        safe_id = term.replace(" ", "-").replace("/", "-")[:40]
-        detail = f"Waste term '{term}' has ${spend:.2f} spend"
-        if crm_confirmed > 0:
-            detail += f" and {crm_confirmed} CRM junk confirmed"
-        detail += ". Warrants review."
+        # Spend may be genuinely unavailable (unverified currency lineage). Say
+        # so rather than printing a fabricated $0.00.
+        spend_text = (f"${float(spend):,.2f} spend" if spend is not None
+                      else "spend unavailable (currency lineage unverified)")
+        detail = (f"Search term '{term}' is flagged ("
+                  f"{row.get('flag_reason_label') or 'reason unmapped'}) with "
+                  f"{spend_text}.")
+        sql_status = row.get("sql_attribution_status")
+        if sql_status == "known_zero":
+            detail += " Attribution available and found no qualified SQL."
+        elif sql_status == "attributed":
+            detail += (f" {int(row.get('attributed_sqls') or 0)} "
+                       "search-term-attributable SQL(s) recorded.")
+        else:
+            # §13 — unavailable attribution is disclosed, never reported as zero.
+            detail += (" Search-term SQL attribution is unavailable for this "
+                       "term — that is not a proven zero.")
+        detail += " Warrants review."
 
         items.append({
-            "id": _queue_id("waste-review", term, camp, r["junk_category"]),
+            # Stable across runs: derived from the durable identity, so the same
+            # term keeps the same queue-item id until it is resolved.
+            "id": f"waste-review-{identity[:24]}",
             "type": "waste_review",
             "severity": _queue_severity_label(score),
             "severity_score": score,
-            "title": f"Waste term warrants review: {term}",
+            "title": f"Flagged search term warrants review: {term}",
             "detail": detail,
             "entity_label": term,
-            "entity_type": "waste_term",
+            "entity_type": "search_term",
             "campaign_name": camp,
-            "source": "waste_terms table",
+            "source": "search_terms (canonical facts) + waste_terms annotations",
             "evidence": {
-                "spend_usd": round(spend, 2),
-                "crm_junk_confirmed": crm_confirmed,
-                "junk_category": r["junk_category"],
+                "term_identity": identity,
+                "spend_usd": spend,
+                "clicks": row.get("clicks"),
+                "flag_reason": row.get("flag_reason"),
+                "flag_reason_label": row.get("flag_reason_label"),
+                "flag_reason_unmapped": row.get("flag_reason_unmapped"),
+                "raw_junk_categories": row.get("raw_junk_categories"),
+                "crm_junk_confirmed": row.get("crm_junk_confirmed"),
+                "attributed_sqls": row.get("attributed_sqls"),
+                "sql_attribution_status": sql_status,
+                "sql_evidence_label": "Search-term-attributable SQLs",
+                "review_state": row.get("review_state"),
+                "review_state_label": row.get("review_state_label"),
+                "first_flagged_at": row.get("first_flagged_at"),
+                "latest_flagged_at": row.get("latest_flagged_at"),
+                "evidence_window": payload.get("window"),
+                "truth_state": (payload.get("truth_state") or {}).get("status"),
+                "priority_reasons": row.get("priority_reasons"),
+                # No local state ever implies a platform change was made.
+                "applied_to_google_ads": False,
             },
             "primary_link": {
-                "page": "waste",
+                # Lands on Search Terms → Flagged, focused on this term.
+                "page": "search-terms",
                 "action": "navigate",
+                "hash": ("#/search-terms?tab=flagged&term="
+                         + quote(term, safe="")),
             },
         })
     return items
@@ -4324,6 +4494,123 @@ def api_search_term_evidence(
         window, build_search_term_evidence, window,
         page=page, page_size=page_size, q=q, campaign=campaign, state=state,
         junk_category=junk_category, min_spend=min_spend, sort=sort, sql_state=sql_state)
+
+
+@app.get("/api/search-term-evidence/flagged")
+def api_search_term_evidence_flagged(
+    user: dict = Depends(require_auth),
+    window: str = Query(default="30d",
+                        description="Evidence window: 7d|14d|30d|60d|180d|all_time"),
+    page: int = Query(default=1, description="1-based page number"),
+    page_size: int = Query(default=50, description="Rows per page (1–200)"),
+    q: str = Query(default=None, description="Contains filter on term or campaign"),
+    campaign: str = Query(default=None, description="Canonical campaign_key filter"),
+    review_state: str = Query(
+        default=None,
+        description="Local review state: unreviewed|keep|monitor|exclude_candidate|resolved"),
+    flag_reason: str = Query(default=None,
+                             description="Canonical waste reason (from facets)"),
+    min_spend: float = Query(default=None, description="Minimum canonical term spend (USD)"),
+    sql_state: str = Query(default=None,
+                           description="Attributed-SQL state: all|has_sql|known_zero|unavailable"),
+    sort: str = Query(default="priority",
+                      description="priority|spend|clicks|last_seen|term|attributed_sqls"),
+) -> dict[str, Any]:
+    """Flagged / Waste view — the canonical replacement for the retired
+    standalone Flagged Waste Terms page (PR-ADS-153D).
+
+    A term appears here because DURABLE evidence says so (``is_flagged_waste``
+    or safely campaign-scoped ``waste_terms`` classification), never because
+    ``spend > 0 AND sqls = 0`` — a rule that would brand every term with merely
+    unavailable attribution as waste.
+
+    Every metric comes from canonical ``search_terms`` facts deduplicated by the
+    unique fact key, so repeated ingestion of the same source-date fact cannot
+    change a number here. ``waste_terms`` contributes classification annotations
+    only and is never summed. Requires auth. Read-only — no Google Ads mutation.
+    """
+    thresholds = _load_ui_thresholds()
+    high_spend = float((thresholds.get("spend") or {}).get("high_spend_usd")
+                       or _QUEUE_HIGH_SPEND_USD_DEFAULT)
+    from services.search_term_evidence_service import (  # noqa: PLC0415
+        build_flagged_search_terms,
+    )
+    return _search_term_evidence_call(
+        window, build_flagged_search_terms, window,
+        page=page, page_size=page_size, q=q, campaign=campaign,
+        review_state=review_state, flag_reason=flag_reason,
+        min_spend=min_spend, sql_state=sql_state, sort=sort,
+        high_spend_usd=high_spend)
+
+
+@app.post("/api/search-term-evidence/review")
+def api_search_term_evidence_review(
+    payload: dict[str, Any],
+    user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Record ONE local human review decision for a canonical search term.
+
+    Writes ONLY to the local ``search_term_review`` table, keyed by the
+    canonical durable identity, so the Search Terms flagged view and the Action
+    Queue read the same decision.
+
+    This is NOT a Google Ads write path. ``exclude_candidate`` records that a
+    reviewer recommends excluding the query; Averroes cannot and does not apply
+    negative keywords, edit campaigns, or change bids or budgets. Nothing is
+    sent to Google Ads or HubSpot by this endpoint.
+    """
+    from analysis.search_term_review_state import (  # noqa: PLC0415
+        REVIEW_STATES, is_valid_review_state,
+    )
+    from db import search_term_review_repository as review_repo  # noqa: PLC0415
+
+    campaign_key = (payload or {}).get("campaign_key")
+    search_term = (payload or {}).get("search_term")
+    review_state = (payload or {}).get("review_state")
+
+    if not search_term or not str(search_term).strip():
+        raise HTTPException(status_code=400, detail="search_term is required")
+    # campaign_key is HALF the durable identity. Every flagged row carries one
+    # (the canonical resolver always returns a non-empty key, including for
+    # unmapped and non-Google campaigns), so a missing one means the caller is
+    # not describing a real row. Accepting it would normalise to
+    # `unknown_campaign` and merge one decision across every campaign that ever
+    # triggered that query — silently mis-attributing a human judgement.
+    if not campaign_key or not str(campaign_key).strip():
+        raise HTTPException(
+            status_code=400,
+            detail=("campaign_key is required — a review decision must be keyed "
+                    "to one canonical campaign identity"))
+    if not is_valid_review_state(review_state):
+        raise HTTPException(
+            status_code=400,
+            detail=f"review_state must be one of: {', '.join(REVIEW_STATES)}")
+
+    try:
+        result = review_repo.upsert_review_decision(
+            campaign_key=campaign_key,
+            search_term=search_term,
+            review_state=review_state,
+            search_term_display=search_term,
+            campaign_name_display=(payload or {}).get("campaign_name"),
+            review_note=(payload or {}).get("note"),
+            reviewed_by=(user or {}).get("email") or (user or {}).get("username"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/search-term-evidence/review] failed: %s", exc)
+        raise HTTPException(status_code=500,
+                            detail="review state unavailable") from exc
+
+    if not result.get("available"):
+        raise HTTPException(status_code=503,
+                            detail="review state store unavailable")
+    return {
+        "ok": True,
+        "row": result.get("row"),
+        "google_ads_mutation": False,
+        "note": ("Local review state only. Averroes has no write path to Google "
+                 "Ads and never applies negative keywords."),
+    }
 
 
 @app.get("/api/search-term-evidence/term")

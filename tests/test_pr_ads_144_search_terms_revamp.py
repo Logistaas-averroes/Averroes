@@ -58,10 +58,13 @@ def _region(text, start_marker, end_marker):
     return text[i:j]
 
 
-# The new frontend module region (everything PR-ADS-144 renders).
+# The frontend module region (everything the Search Terms page renders).
+# PR-ADS-153D renamed the section header (the page consolidated the retired
+# Flagged Waste Terms page into a Flagged tab) and deleted downloadWasteCSV,
+# which used to mark the end of the region.
 ST_MODULE = _region(APP_JS,
-                    "// ── Search Terms + Patterns evidence page (PR-ADS-144)",
-                    "function downloadWasteCSV() {")
+                    "// ── Search Terms evidence page (PR-ADS-144, consolidated in PR-ADS-153D)",
+                    "// ── GCLID Attribution page ─")
 # The new server endpoints region.
 ST_SERVER = _region(SERVER,
                     "# PR-ADS-144 — Search Terms + Patterns evidence page endpoints",
@@ -1083,16 +1086,64 @@ def test_backend_is_read_only():
 
 
 def test_frontend_is_read_only():
+    """Read-only against every EXTERNAL platform.
+
+    PR-ADS-153D adds exactly one write: a LOCAL review decision posted to
+    /api/search-term-evidence/review. Every other request stays a GET, and no
+    request anywhere in the module targets Google Ads, HubSpot or Mailchimp.
+    """
     _assert_read_only(ST_MODULE, "frontend module")
-    # Only GET-style fetches — the module never posts anything.
-    assert "method:" not in ST_MODULE
+    # The module talks to this app only, never to a platform, and only through
+    # the shared fetch helper.
     assert 'fetch(' not in ST_MODULE.replace("fetchJSON(", "")
+
+    methods = re.findall(r'method:\s*"([A-Z]+)"', ST_MODULE)
+    assert methods == ["POST"], methods
+    posts = re.findall(r'fetchJSON\(\s*"([^"]+)"\s*,\s*\{', ST_MODULE)
+    assert posts == ["/api/search-term-evidence/review"], posts
+
+    # The one write is a local review decision — its payload carries no platform
+    # instruction of any kind.
+    body = _region(ST_MODULE, "async function flagRecordReview(", "\n}")
+    for forbidden in ("negative", "mutate", "pause", "budget", "bid"):
+        assert forbidden not in body.lower(), forbidden
 
 
 def test_no_write_verbs_in_new_endpoints():
-    assert "@app.post" not in ST_SERVER
+    """No mutation verbs except the ONE local review-state write.
+
+    PR-ADS-153D adds a durable LOCAL review decision (search_term_review), which
+    is an approved local-database write and the only POST allowed in this
+    region. It is not a write path to any external platform — that remains
+    categorically forbidden and is asserted below.
+    """
     assert "@app.put" not in ST_SERVER
     assert "@app.delete" not in ST_SERVER
+
+    posts = re.findall(r"@app\.post\(\"([^\"]+)\"\)", ST_SERVER)
+    assert posts == ["/api/search-term-evidence/review"], posts
+
+
+def test_the_only_write_endpoint_touches_local_state_only():
+    review = _region(ST_SERVER,
+                     '@app.post("/api/search-term-evidence/review")',
+                     '@app.get("/api/search-term-evidence/term")')
+    # Writes go to the local review repository and nowhere else.
+    assert "search_term_review_repository" in review
+    assert "upsert_review_decision" in review
+    # No external platform is CONTACTED, let alone mutated. Checked against the
+    # imports and calls, not the prose: the endpoint's docstring necessarily
+    # names Google Ads in order to state that it never writes to it.
+    imports = re.findall(r"^\s*(?:from|import)\s+([\w.]+)", review, re.M)
+    for module in imports:
+        assert not module.startswith("connectors"), module
+        assert not any(p in module.lower()
+                       for p in ("google", "hubspot", "mailchimp")), module
+    for call in ("mutate", "add_negative", "negative_keyword_operation",
+                 "requests.", "httpx."):
+        assert call not in review.lower(), call
+    # And the contract says so explicitly to any caller.
+    assert '"google_ads_mutation": False' in review
 
 
 # ════════════════ 12. Currency lineage (PR-ADS-144 §1) ════════════════

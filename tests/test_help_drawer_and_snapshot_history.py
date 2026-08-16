@@ -54,7 +54,6 @@ REQUIRED_HELP_PAGES = [
     "geo",
     "leads",
     "opportunities",
-    "waste",
     "deals",
     "roas-campaigns",
     "roas-countries",
@@ -101,11 +100,15 @@ def test_page_help_content_covers_all_pages():
 def test_help_content_has_all_fields():
     """Each PAGE_HELP_CONTENT entry must have all 5 required fields."""
     required_fields = ["what", "source", "howToUse", "doNotAssume", "checkNext"]
+    # PR-ADS-153D retired the standalone Flagged Waste Terms page, so there is
+    # one fewer help page. The count is derived from the page list this file
+    # already asserts rather than being a hand-maintained magic number.
+    expected = len(REQUIRED_HELP_PAGES)
     for field in required_fields:
-        # Count occurrences — should be at least 19 (one per page)
         count = JS.count(f"{field}:")
-        assert count >= 19, (
-            f"Field '{field}' appears only {count} times — expected at least 19 (one per help page)"
+        assert count >= expected, (
+            f"Field '{field}' appears only {count} times — expected at least "
+            f"{expected} (one per help page)"
         )
 
 

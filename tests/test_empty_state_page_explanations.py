@@ -15,7 +15,6 @@ REQUIRED_ROUTES = [
     "action-queue",
     "reports",
     "campaigns",
-    "waste",
     "search-terms",
     "ngrams",
     "geo",
@@ -173,10 +172,13 @@ class TestBuildEmptyStateIntegration:
             "renderTermsTable must call buildEmptyState() for its empty state"
         )
 
-    def test_build_empty_state_called_in_waste(self):
-        body = self._get_function_slice("function renderWasteTable(")
-        assert "buildEmptyState(" in body, (
-            "renderWasteTable must call buildEmptyState() for its empty state"
+    def test_flagged_table_has_an_honest_empty_state(self):
+        """PR-ADS-153D: renderWasteTable is gone with the standalone page. Its
+        replacement must still distinguish "no rows match these filters" from
+        "no waste exists" — the whole point of the original guard."""
+        body = self._get_function_slice("function renderFlaggedTable(")
+        assert "not a claim that no" in body, (
+            "renderFlaggedTable's empty state must not imply zero waste exists"
         )
 
     def test_build_empty_state_called_in_ngrams(self):
@@ -232,21 +234,24 @@ class TestSearchTermUniverseExplanation:
 
 
 class TestWasteTermsExplanation:
-    """Waste Terms explanation must reference Search Term Universe dependency."""
+    """PR-ADS-153D retired the standalone Flagged Waste Terms page.
 
-    def test_waste_depends_on_search_terms_in_explanations(self):
+    The dependency the old explanation described — waste evidence cannot exist
+    without search-term evidence — is now structural rather than documentary:
+    the flagged view IS a filter over the canonical search-term facts, so it
+    cannot be reached without them.
+    """
+
+    def test_waste_page_explanation_is_gone(self):
         block = extract_js_object_block(APP_JS, "PAGE_EXPLANATIONS")
         assert block is not None, "Could not extract PAGE_EXPLANATIONS block"
-        waste_entry = get_route_entry_slice(block, "waste")
-        assert waste_entry is not None, "No waste entry in PAGE_EXPLANATIONS"
-        assert "Search Term Universe" in waste_entry, (
-            "Waste PAGE_EXPLANATIONS entry must reference Search Term Universe"
+        assert get_route_entry_slice(block, "waste") is None, (
+            "PAGE_EXPLANATIONS must not describe a page that no longer exists"
         )
 
-    def test_waste_empty_state_mentions_dependency(self):
-        # PAGE_EXPLANATIONS["waste"].emptyMeans must include the dependency
-        assert "depends on Search Term Universe" in APP_JS, (
-            "Waste empty state must explain dependency on Search Term Universe"
+    def test_flagged_view_reads_the_canonical_search_term_source(self):
+        assert "/api/search-term-evidence/flagged" in APP_JS, (
+            "The Flagged view must read the canonical search-term contract"
         )
 
 
@@ -355,7 +360,7 @@ class TestPageExplanationContainers:
         # as "deals" above and the ROAS pages in PR-ADS-110).
         key_pages = [
             "dashboard", "action-queue", "reports", "campaigns",
-            "waste", "geo", "keywords",
+            "geo", "keywords",
             "gclid-attribution",
             "scheduler", "health", "backfill", "historical-intelligence",
         ]

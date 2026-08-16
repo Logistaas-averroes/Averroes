@@ -75,6 +75,19 @@ from typing import Any
 
 from analysis.evidence_windows import EvidenceWindowError  # noqa: F401 (re-export)
 from analysis.ngrams import build_ngrams, tokenize_search_term
+from analysis.search_term_identity import normalize_search_term, unit_identity
+from analysis.search_term_review_state import (
+    REVIEW_STATES as LOCAL_REVIEW_STATES,
+    STATE_UNREVIEWED as LOCAL_STATE_UNREVIEWED,
+    normalize_review_state,
+    requires_action,
+    review_state_payload,
+)
+from analysis.waste_reason_taxonomy import (
+    ALL_REASONS,
+    classify_reasons,
+    primary_reason,
+)
 # Same window boundary + account timezone as Campaign Evidence (PR-ADS-143) —
 # deliberately shared so the two evidence pages can never disagree on what
 # "last 30 days" means.
@@ -105,6 +118,18 @@ PATTERN_LENGTHS = (1, 2, 3)
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
+
+# ── Flagged / Waste view (PR-ADS-153D) ───────────────────────────────────────
+# Sorts offered by the flagged view. ``priority`` is the deterministic,
+# explainable ordering defined in ``_flagged_priority`` — never an opaque score.
+FLAGGED_SORTS = ("priority", "spend", "clicks", "last_seen", "term",
+                 "attributed_sqls")
+
+# Truth states, shared vocabulary with the rest of the canonical contracts.
+TRUTH_RECONCILED = "reconciled"
+TRUTH_PARTIAL = "partial"
+TRUTH_MISMATCH = "mismatch"
+TRUTH_UNAVAILABLE = "unavailable"
 DEFAULT_PATTERN_LIMIT = 100
 MAX_PATTERN_LIMIT = 500
 PATTERN_DRAWER_TERM_CAP = 100
@@ -133,6 +158,17 @@ PATTERN_OVERLAP_DISCLOSURE = (
     "multiple patterns, so pattern-row spend must never be summed into an "
     "account total. KPI spend is computed once per unique underlying term."
 )
+
+
+class SearchTermIdentityError(RuntimeError):
+    """One durable identity resolved to more than one row.
+
+    An internal invariant break, never a user input error: it means the
+    aggregation grain and the durable identity grain have diverged, so page
+    rows, KPI counts and Action Queue items can no longer be reconciled. Raised
+    rather than served, because serving it means publishing numbers that
+    contradict each other.
+    """
 
 
 class SearchTermQueryError(ValueError):
@@ -531,6 +567,22 @@ def _resolve_campaign_identity(campaign_id, campaign_label, spend_by_id,
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _representative_term(variants: set, normalized: str) -> str:
+    """The raw variant shown for a unit whose fact rows differ only by case or
+    whitespace (PR-ADS-153D §9).
+
+    Deterministic so the same population always renders the same label: prefer a
+    variant that already equals the normalized form, otherwise the
+    lexicographically first. The other variants are never discarded — they ride
+    along on the row as ``search_term_variants`` display evidence.
+    """
+    if not variants:
+        return normalized
+    if normalized in variants:
+        return normalized
+    return sorted(variants)[0]
+
+
 def _sum_opt(a, b):
     """None-aware sum: None + x = x; None + None = None (never fabricate 0)."""
     if a is None:
@@ -567,6 +619,9 @@ def _merge_group(unit: dict, g: dict) -> None:
     for k in ("junk_categories", "matched_patterns", "ad_groups", "keywords",
               "match_types"):
         unit[k].update(g.get(k) or [])
+    raw_term = g.get("search_term")
+    if raw_term:
+        unit["search_term_variants"].add(raw_term)
     if g.get("campaign_name"):
         unit["source_labels"].add(g["campaign_name"])
     if g.get("campaign_id") is not None and str(g["campaign_id"]).strip():
@@ -625,10 +680,17 @@ def _globally_ambiguous_norms(norm_to_ids: dict, aliases_by_id: dict) -> set:
 
 
 def _attach_waste_evidence(units: list, start, end, identity_by_label,
-                           aliases_by_id, norm_to_ids) -> None:
+                           aliases_by_id, norm_to_ids) -> dict:
     """Attach safely campaign-scoped ``waste_terms`` evidence to units so a term
     the weekly pipeline already confirmed shows as Flagged waste rather than
     Needs review (PR-ADS-145 §4). Mutates units in place.
+
+    Returns the JOIN CONTRACT outcome (PR-ADS-153D §24):
+    ``{available, annotation_rows, attached, legacy_unresolved}``. An annotation
+    row that could not be attributed to exactly one canonical campaign is
+    reported as ``legacy_unresolved`` — it is never guessed onto a unit, and
+    never silently dropped either, because a reviewer needs to know that
+    historical evidence exists which the current identifiers cannot place.
 
     Safety (no fuzzy, no cross-campaign borrowing). ``waste_terms`` rows key on
     (search_term, campaign_name) — they carry NO campaign_id — so evidence is
@@ -647,18 +709,32 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
     """
     import db.search_term_repository as st_repo  # noqa: PLC0415
 
-    terms = sorted({u["search_term"] for u in units if u.get("search_term")})
+    # Query by every raw variant (that is what waste_terms stores), but key the
+    # join on the NORMALIZED term so an annotation written against one casing
+    # still reaches the unit that merged all casings.
+    terms = sorted({v for u in units
+                    for v in (u.get("search_term_variants") or set()) if v}
+                   | {u["search_term"] for u in units if u.get("search_term")})
     if not terms:
-        return
+        return {"available": True, "annotation_rows": 0, "attached": 0,
+                "legacy_unresolved": 0}
     evidence = st_repo.fetch_waste_evidence_for_terms(terms)
     if not evidence.get("available"):
-        return
+        return {"available": False, "annotation_rows": None, "attached": 0,
+                "legacy_unresolved": None}
     # (search_term, norm(campaign_name)) → latest evidence row.
     ev_by_key: dict = {}
+    unresolved_keys: set = set()
     for r in (evidence.get("rows") or []):
         norm = normalize_campaign_name(r.get("campaign_name"))
         if norm:
-            ev_by_key[(r.get("search_term"), norm)] = r
+            ev_by_key[(normalize_search_term(r.get("search_term")), norm)] = r
+        else:
+            # No campaign label at all — the row can never be placed on a
+            # canonical campaign. Counted, never guessed.
+            unresolved_keys.add((r.get("search_term"), None, id(r)))
+    annotation_rows = len(evidence.get("rows") or [])
+    attached_keys: set = set()
 
     ambiguous_norms = _globally_ambiguous_norms(norm_to_ids, aliases_by_id)
 
@@ -667,7 +743,7 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
     # ambiguity denominator, but only mapped units are eligible for attachment.
     by_term: dict = {}
     for u in units:
-        by_term.setdefault(u["search_term"], []).append(u)
+        by_term.setdefault(u["search_term_normalized"], []).append(u)
 
     for term, term_units in by_term.items():
         for u in term_units:
@@ -688,12 +764,15 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
             if not unique_labels:
                 continue
             match = None
+            matched_key = None
             for lbl in sorted(unique_labels):
                 match = ev_by_key.get((term, lbl))
                 if match is not None:
+                    matched_key = (term, lbl)
                     break
             if match is None:
                 continue
+            attached_keys.add(matched_key)
             u["_waste_flag"] = True
             u["_waste_evidence"] = {
                 "junk_category": match.get("junk_category"),
@@ -702,6 +781,18 @@ def _attach_waste_evidence(units: list, start, end, identity_by_label,
                 "classification_date": match.get("run_date"),
                 "classification_source": "waste_terms (weekly waste detection)",
             }
+
+    # Every annotation row that no safe join could place. These are historical
+    # evidence whose stored identifiers are too weak to attribute to one
+    # canonical campaign — surfaced as a named count so the gap is visible.
+    legacy_unresolved = (len(set(ev_by_key.keys()) - attached_keys)
+                         + len(unresolved_keys))
+    return {
+        "available": True,
+        "annotation_rows": annotation_rows,
+        "attached": len(attached_keys),
+        "legacy_unresolved": legacy_unresolved,
+    }
 
 
 def _build_population(start, end) -> dict:
@@ -730,11 +821,22 @@ def _build_population(start, end) -> dict:
         status, key, display = _resolve_campaign_identity(
             g.get("campaign_id"), g.get("campaign_name"),
             spend_by_id, norm_to_ids, identity_by_label)
-        ukey = (term, key)
+        # PR-ADS-153D: the merge key is the NORMALIZED term, so the aggregation
+        # grain is exactly the durable identity grain. Grouping on the raw string
+        # while identifying on the normalized one made "Freight JOBS" and
+        # "freight jobs" two rows that shared one identity — the table showed two
+        # rows, the KPI counted one term, and the Action Queue kept one item
+        # carrying only one variant's spend.
+        norm_term = normalize_search_term(term)
+        ukey = (norm_term, key)
         unit = units.get(ukey)
         if unit is None:
             unit = units[ukey] = {
+                # Display label; the full raw set rides along in
+                # search_term_variants and is resolved once merging is done.
                 "search_term": term,
+                "search_term_normalized": norm_term,
+                "search_term_variants": set(),
                 "campaign_key": key,
                 "campaign_name": display,
                 "mapping_status": status,
@@ -763,7 +865,9 @@ def _build_population(start, end) -> dict:
         _, key, _ = _resolve_campaign_identity(
             d.get("campaign_id"), d.get("campaign_name"),
             spend_by_id, norm_to_ids, identity_by_label)
-        unit = units.get((term, key))
+        # Same normalized grain as the population above, so a day's cost for
+        # "Freight JOBS" lands on the same unit as "freight jobs".
+        unit = units.get((normalize_search_term(term), key))
         if unit is None:
             continue
         sd = d.get("source_date")
@@ -776,14 +880,16 @@ def _build_population(start, end) -> dict:
     # unproven legacy unit never poisons a verified unit (PR-ADS-145 §2).
     unit_list = list(units.values())
     for u in unit_list:
+        u["search_term"] = _representative_term(
+            u["search_term_variants"], u["search_term_normalized"])
         u["_provenance"] = _assess_currency_provenance(u)
     _fx_convert_population(unit_list, start, end)
 
     # Attach safely campaign-scoped waste_terms classification evidence so a
     # newly imported term that the weekly pipeline already confirmed shows as
     # Flagged waste rather than Needs review (PR-ADS-145 §4).
-    _attach_waste_evidence(unit_list, start, end, identity_by_label,
-                           aliases_by_id, norm_to_ids)
+    annotation_join = _attach_waste_evidence(
+        unit_list, start, end, identity_by_label, aliases_by_id, norm_to_ids)
 
     return {
         "available": True,
@@ -794,6 +900,9 @@ def _build_population(start, end) -> dict:
         "aliases_by_id": aliases_by_id,
         # Window-level three-state monetary picture (all units).
         "currency_info": _monetary_summary(unit_list),
+        # PR-ADS-153D §24 — how the durable waste ANNOTATIONS joined the
+        # canonical facts, including rows too weakly identified to place.
+        "annotation_join": annotation_join,
     }
 
 
@@ -848,8 +957,14 @@ def _unit_row(unit: dict, aliases_by_id: dict) -> dict:
                   else set(unit["source_labels"]))
     aliases = sorted(a for a in candidates - {display, None}
                      if normalize_campaign_name(a) != display_norm)
+    # Raw variants that merged into this unit, shown only when they differ from
+    # the display label — the evidence that nothing was silently collapsed.
+    variants = sorted(v for v in (unit.get("search_term_variants") or set())
+                      if v and v != unit["search_term"])
     return {
         "search_term": unit["search_term"],
+        "search_term_normalized": unit.get("search_term_normalized"),
+        "search_term_variants": variants,
         "campaign_key": unit["campaign_key"],
         "campaign_name": display,
         "mapping_status": unit["mapping_status"],
@@ -899,6 +1014,18 @@ def _unit_row(unit: dict, aliases_by_id: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _unit_matches_text(u: dict, needle: str) -> bool:
+    """Free-text match against the display term AND every raw variant, so a
+    search for the exact casing a user saw in Google Ads still finds the merged
+    unit."""
+    if needle in (u.get("search_term") or "").lower():
+        return True
+    if needle in (u.get("search_term_normalized") or ""):
+        return True
+    return any(needle in (v or "").lower()
+               for v in (u.get("search_term_variants") or set()))
+
+
 def _validate_filters(state, sort, valid_sorts) -> None:
     if state is not None and state not in REVIEW_STATES:
         raise SearchTermQueryError(
@@ -913,7 +1040,7 @@ def _filter_units(units, *, q=None, campaign=None, state=None,
     needle = (q or "").strip().lower()
     out = []
     for u in units:
-        if needle and needle not in u["search_term"].lower():
+        if needle and not _unit_matches_text(u, needle):
             continue
         if campaign and u["campaign_key"] != campaign:
             continue
@@ -942,7 +1069,7 @@ def _sort_units(units: list, sort: str) -> list:
         return None
 
     def base(u):
-        return (u["search_term"], u["campaign_key"])
+        return (u["search_term_normalized"], u["campaign_key"])
 
     keyers = {
         "spend": lambda u: (_null_last_desc(u["spend_usd"]),
@@ -964,8 +1091,12 @@ def _sort_units(units: list, sort: str) -> list:
 
 # ── HubSpot SQL attribution (PR-ADS-146C §5) ─────────────────────────────────
 def _st_unit_key(u: dict) -> str:
-    """Stable term × canonical-campaign key for SQL attribution."""
-    return f"{u.get('campaign_key')}\x00{u.get('search_term')}"
+    """Stable term × canonical-campaign key for SQL attribution.
+
+    Uses the NORMALIZED term so this key partitions the population exactly as
+    the durable identity does — two casings of one query can never be handed to
+    attribution as two separate units."""
+    return f"{u.get('campaign_key')}\x00{u.get('search_term_normalized')}"
 
 
 def _search_term_sql_attribution(pop: dict, start, end) -> dict:
@@ -1295,7 +1426,7 @@ def build_search_term_evidence(window: str, *, page: int = 1,
     coverage = _coverage_block(mon, pop["canonical"])
     kpis = {
         "reported_terms": len(filtered),
-        "unique_search_terms": len({u["search_term"] for u in filtered}),
+        "unique_search_terms": len({u["search_term_normalized"] for u in filtered}),
         # Verified Search-Term Spend — the FX-complete verified subtotal only.
         "verified_spend_usd": mon["verified_usd_spend"],
         "verified_spend_native": mon["verified_native_spend"],
@@ -1463,6 +1594,590 @@ def _facets(units: list) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Flagged / Waste view (PR-ADS-153D)
+# ─────────────────────────────────────────────────────────────────────────────
+# This REPLACES the standalone Flagged Waste Terms page. It is deliberately part
+# of this module rather than a new service, because the old page's core defect
+# was having a SECOND spend truth: it summed ``waste_terms`` rows across run
+# snapshots, so one term observed by five weekly runs counted five times and its
+# spend was multiplied by five.
+#
+# Here every metric comes from the SAME canonical population the Terms tab uses
+# — ``search_terms`` facts merged at (search term × canonical campaign) grain,
+# deduplicated by the unique fact index. ``waste_terms`` contributes ONLY
+# classification annotations (reason, matched rule, CRM-junk confirmation), and
+# never a number that is summed.
+
+
+def _flagged_priority(unit: dict, review_state: str, high_spend_usd: float,
+                      *, review_available: bool = True) -> dict:
+    """Deterministic, fully explainable review priority. No AI score.
+
+    Every component is a stated rule with a stated weight, and every applied
+    component is echoed back in ``reasons`` so the ordering can be justified to
+    the person being asked to act on it.
+
+    Deliberately NOT a component: unavailable SQL attribution. "We could not
+    check whether this term produced qualified outcomes" is not evidence of
+    waste, and letting it raise priority would launder an unknown into a signal
+    (§13). Only a PROVEN zero counts.
+    """
+    score = 0
+    reasons: list[dict] = []
+
+    def _add(points: int, code: str, detail: str) -> None:
+        nonlocal score
+        score += points
+        reasons.append({"code": code, "points": points, "detail": detail})
+
+    spend = unit.get("spend_usd")
+    if spend is not None:
+        spend = float(spend)
+        if spend >= high_spend_usd:
+            _add(40, "high_spend",
+                 f"Spend ${spend:,.2f} is at or above the ${high_spend_usd:,.2f} "
+                 "review threshold")
+        elif spend > 0:
+            # Proportional, capped, so a large term can never be out-ranked by
+            # an accumulation of trivial ones.
+            _add(min(20, int(spend * 20 / high_spend_usd)) if high_spend_usd else 0,
+                 "spend_magnitude", f"Spend ${spend:,.2f} in the selected window")
+
+    reason = primary_reason(unit.get("junk_categories"))
+    from analysis.waste_reason_taxonomy import (  # noqa: PLC0415
+        CLEAR_DISQUALIFYING_REASONS,
+    )
+    if reason["reason"] in CLEAR_DISQUALIFYING_REASONS:
+        _add(25, "clear_disqualifying_intent",
+             f"Flag reason '{reason['reason_label']}' is disqualifying on its face")
+
+    # Proven zero only. `known_zero` means attribution was available and found
+    # no qualified outcome; `unavailable` deliberately scores nothing.
+    if unit.get("sql_attribution_status") == "known_zero":
+        _add(15, "proven_zero_qualified_outcome",
+             "Attribution available for this term and found no qualified SQL")
+
+    rows = int(unit.get("row_count") or 0)
+    if rows >= 2:
+        _add(min(10, rows), "repeated_occurrences",
+             f"Observed on {rows} canonical fact rows in the window")
+
+    # Only when we can actually SEE that nobody has reviewed it. During a
+    # review-store outage we do not know, and scoring an unknown as "never
+    # reviewed" would promote terms a human had already dealt with.
+    if review_available and normalize_review_state(review_state) == LOCAL_STATE_UNREVIEWED:
+        _add(10, "never_reviewed", "No human decision recorded yet")
+
+    score = max(0, min(100, score))
+    band = "high" if score >= 60 else "medium" if score >= 30 else "low"
+    return {"priority_score": score, "priority_band": band,
+            "priority_reasons": reasons}
+
+
+def _flagged_row(unit: dict, aliases_by_id: dict, review: dict | None,
+                 high_spend_usd: float, *, review_available: bool = True) -> dict:
+    """One flagged-view row: canonical facts + annotation + local decision."""
+    base = _unit_row(unit, aliases_by_id)
+    identity = unit_identity(unit)
+    review = review or {}
+    state = (normalize_review_state(review.get("review_state"))
+             if review_available else None)
+    classification = _unit_classification(unit)
+    # Reason evidence must include the waste_terms ANNOTATION, not only the
+    # durable search_terms.junk_category. A term flagged purely by the weekly
+    # classification run has no durable category of its own, so reading the raw
+    # column alone rendered its reason as "unmapped" even though the annotation
+    # named it. _unit_classification is the one place that merges both.
+    raw_reasons = classification["junk_categories"]
+    reasons = classify_reasons(raw_reasons)
+    primary = primary_reason(raw_reasons)
+    priority = _flagged_priority({**unit, "junk_categories": set(raw_reasons)},
+                                 state, high_spend_usd,
+                                 review_available=review_available)
+
+    return {
+        **base,
+        "term_identity": identity,
+        # Why it is flagged — canonical vocabulary, raw evidence preserved.
+        "flag_reason": primary["reason"],
+        "flag_reason_label": primary["reason_label"],
+        "flag_reasons": reasons,
+        "flag_reason_unmapped": any(r["unmapped"] for r in reasons),
+        "raw_junk_categories": raw_reasons,
+        "flag_source": classification["classification_source"],
+        "flag_confidence": classification["confidence"],
+        # Flag history from the durable review record (§25). Absent history is
+        # None — never a fabricated timestamp.
+        "first_flagged_at": review.get("first_flagged_at"),
+        "latest_flagged_at": review.get("latest_flagged_at"),
+        # Local review decision, shared verbatim with the Action Queue.
+        **review_state_payload(state, available=review_available),
+        "review_note": review.get("review_note") if review_available else None,
+        "reviewed_at": review.get("reviewed_at") if review_available else None,
+        "reviewed_by": review.get("reviewed_by") if review_available else None,
+        # Action state: still flagged AND no finished human decision.
+        # None — not True — when the review store is unreadable: whether this
+        # term needs action is exactly what we could not determine, and
+        # defaulting to True would reopen resolved and kept terms.
+        "action_needed": requires_action(state) if review_available else None,
+        **priority,
+    }
+
+
+def _flagged_truth_state(pop: dict, sql_attr: dict, *, available: bool) -> dict:
+    """Truth state for the flagged view. Never collapses into zero.
+
+    reconciled  canonical facts present AND SQL attribution resolvable
+    partial     Google Ads facts present but CRM attribution incomplete, or
+                durable annotations exist that could not be safely joined
+    mismatch    an internal invariant failed
+    unavailable the canonical fact source could not be read
+    """
+    if not available:
+        return {"status": TRUTH_UNAVAILABLE,
+                "reasons": ["canonical_search_term_facts_unavailable"]}
+
+    reasons: list[str] = []
+    units = pop.get("units") or []
+    flagged = [u for u in units if _unit_state(u) == STATE_FLAGGED]
+
+    # Invariant: a flagged unit must carry classification evidence explaining it.
+    # A flag with no reason at all would be an unexplainable classification,
+    # which this page must never render as normal (§8).
+    unexplained = [u for u in flagged
+                   if not (u.get("junk_categories")
+                           or (u.get("_waste_evidence") or {}).get("junk_category"))]
+    if unexplained:
+        reasons.append(f"flagged_without_reason_evidence:{len(unexplained)}")
+    if reasons:
+        return {"status": TRUTH_MISMATCH, "reasons": reasons}
+
+    if not sql_attr.get("available"):
+        reasons.append("sql_attribution_unavailable")
+    join = pop.get("annotation_join") or {}
+    if join.get("available") is False:
+        reasons.append("waste_annotations_unavailable")
+    elif (join.get("legacy_unresolved") or 0) > 0:
+        reasons.append(f"legacy_unresolved_annotations:{join['legacy_unresolved']}")
+
+    if reasons:
+        return {"status": TRUTH_PARTIAL, "reasons": reasons}
+    return {"status": TRUTH_RECONCILED, "reasons": []}
+
+
+def _flagged_sort_key(sort: str):
+    def _null_last(v):
+        return (v is None, -(float(v)) if v is not None else 0)
+
+    def _desc_date(value):
+        """Descending sort key for an ISO-8601 date/timestamp string.
+
+        A string cannot be negated, so the zero-padded, fixed-width ISO digits
+        are read as one integer and negated — monotonic, and correct for both
+        ``2026-07-02`` and a full timestamp.
+        """
+        digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+        return -int(digits) if digits else 0
+
+    def _term(u):
+        return (u.get("search_term") or "").lower()
+
+    keyers = {
+        "priority": lambda u: (-int(u.get("priority_score") or 0), _term(u)),
+        "spend": lambda u: (_null_last(u.get("spend_usd")), _term(u)),
+        "clicks": lambda u: (-int(u.get("clicks") or 0), _term(u)),
+        # Most-recent first, nulls last — the same direction as the Terms tab,
+        # so "Last seen" cannot mean opposite things on two tabs of one page.
+        "last_seen": lambda u: ((u.get("last_seen") is None),
+                                _desc_date(u.get("last_seen")), _term(u)),
+        "term": _term,
+        "attributed_sqls": lambda u: (_null_last(u.get("attributed_sqls")), _term(u)),
+    }
+    return keyers.get(sort or "priority", keyers["priority"])
+
+
+def build_flagged_search_terms(
+    window: str, *, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE,
+    q: str | None = None, campaign: str | None = None,
+    review_state: str | None = None, flag_reason: str | None = None,
+    min_spend: float | None = None, sql_state: str | None = None,
+    sort: str = "priority", high_spend_usd: float = 100.0,
+    now: datetime | None = None) -> dict[str, Any]:
+    """The canonical Flagged / Waste view. Read-only.
+
+    A term appears here because DURABLE evidence says so — either
+    ``search_terms.is_flagged_waste = true`` or safely campaign-scoped
+    ``waste_terms`` evidence (the PR-ADS-145 §4 precedence). It is NEVER derived
+    from ``spend > 0 AND sqls = 0``: that rule would classify every term whose
+    attribution is merely unavailable as waste (§8, §13).
+
+    Every metric is the canonical ``search_terms`` fact, deduplicated by the
+    unique fact key — repeated ingestion of the same source-date fact cannot
+    change any number here (§10).
+
+    Raises ``EvidenceWindowError`` / ``SearchTermQueryError`` for bad input.
+    """
+    if sort not in FLAGGED_SORTS:
+        raise SearchTermQueryError(
+            f"Unsupported sort '{sort}'. Valid: {', '.join(FLAGGED_SORTS)}.")
+    if review_state is not None and review_state not in LOCAL_REVIEW_STATES:
+        raise SearchTermQueryError(
+            f"Unsupported review_state '{review_state}'. "
+            f"Valid: {', '.join(LOCAL_REVIEW_STATES)}.")
+    if flag_reason is not None and flag_reason not in ALL_REASONS:
+        raise SearchTermQueryError(
+            f"Unsupported flag_reason '{flag_reason}'. Valid: {', '.join(ALL_REASONS)}.")
+    if sql_state and sql_state not in TERM_SQL_STATES:
+        raise SearchTermQueryError(
+            f"Unsupported sql_state '{sql_state}'. Valid: {', '.join(TERM_SQL_STATES)}.")
+    try:
+        page = max(1, int(page))
+        page_size = max(1, min(MAX_PAGE_SIZE, int(page_size)))
+    except (TypeError, ValueError) as exc:
+        raise SearchTermQueryError("Invalid pagination.") from exc
+
+    start, end, base = _base(window, now)
+    pop = _build_population(start, end)
+
+    echo_filters = {
+        "q": q, "campaign": campaign, "review_state": review_state,
+        "flag_reason": flag_reason, "min_spend": min_spend,
+        "sql_state": sql_state, "sort": sort,
+    }
+
+    if not pop["available"]:
+        return {
+            **base, "view": "flagged", "db_unavailable": True,
+            "kpis": _empty_flagged_kpis(), "rows": [],
+            "pagination": {"total_count": None, "returned_count": 0,
+                           "page": page, "page_size": page_size,
+                           "has_more": False},
+            "facets": {"campaigns": [], "flag_reasons": [],
+                       "review_states": list(LOCAL_REVIEW_STATES)},
+            "filters": echo_filters,
+            "truth_state": _flagged_truth_state(pop, {}, available=False),
+            "annotation_join": pop.get("annotation_join") or {"available": False},
+        }
+
+    units = pop["units"]
+    sql_attr = _search_term_sql_attribution(pop, start, end)
+    _apply_search_term_sql(units, sql_attr)
+
+    # ── Mismatch quarantine (PR-ADS-153D §32) ────────────────────────────────
+    # A mismatch means an internal invariant failed, so NOTHING derived from
+    # this population can be trusted as a decision metric. Warning and then
+    # rendering the numbers anyway is worse than useless: the reader sees a
+    # caution they cannot act on next to figures that look authoritative.
+    #
+    # So the payload carries null KPIs, no actionable rows, and no facets or
+    # pagination the UI could operate. The evidence needed to DIAGNOSE the
+    # break travels in a separate `quarantine` block that the normal table and
+    # KPI renderers cannot consume.
+    truth_state = _flagged_truth_state(pop, sql_attr, available=True)
+    if truth_state["status"] == TRUTH_MISMATCH:
+        return _quarantined_flagged_payload(base, pop, truth_state, echo_filters,
+                                            page, page_size)
+
+    # The flagged population: durable evidence only.
+    flagged_units = [u for u in units if _unit_state(u) == STATE_FLAGGED]
+
+    # Durable local decisions, joined by canonical identity — the SAME join the
+    # Action Queue uses, so the two surfaces cannot disagree.
+    reviews, review_available = _fetch_reviews_for_units(flagged_units)
+
+    rows_all = [_flagged_row(u, pop["aliases_by_id"],
+                             reviews.get(unit_identity(u)), high_spend_usd,
+                             review_available=review_available)
+                for u in flagged_units]
+
+    # HARD INVARIANT (PR-ADS-153D §9). One row per durable identity, always.
+    # If the aggregation grain ever drifts from the identity grain again, the
+    # table, the KPI count and the Action Queue silently disagree — the table
+    # shows N rows, the KPI counts the identities, and the queue keeps one item
+    # carrying one variant's spend. Fail loudly here instead.
+    if len(rows_all) != len({r["term_identity"] for r in rows_all}):
+        raise SearchTermIdentityError(
+            "flagged population has %d rows but %d durable identities — the "
+            "aggregation grain and the identity grain have diverged"
+            % (len(rows_all), len({r["term_identity"] for r in rows_all})))
+
+    if review_state and not review_available:
+        raise SearchTermQueryError(
+            "review_state filter is unavailable — the local review store could "
+            "not be read, so filtering by review state would return a silently "
+            "wrong subset rather than an empty one")
+
+    filtered = _filter_flagged_rows(rows_all, q=q, campaign=campaign,
+                                    review_state=review_state,
+                                    flag_reason=flag_reason,
+                                    min_spend=min_spend, sql_state=sql_state)
+    ordered = sorted(filtered, key=_flagged_sort_key(sort))
+
+    # KPIs over the COMPLETE filtered population, never the returned page.
+    kpi_units = [u for u in flagged_units
+                 if unit_identity(u) in {r["term_identity"] for r in filtered}]
+    mon = _monetary_summary(kpi_units)
+    kpis = _flagged_kpis(filtered, mon, sql_attr,
+                         review_available=review_available)
+
+    total = len(ordered)
+    offset = (page - 1) * page_size
+    page_rows = ordered[offset:offset + page_size]
+
+    return {
+        **base,
+        "view": "flagged",
+        # Symmetric with the quarantine payload: one flag every consumer can
+        # check instead of each re-deriving whether the data may be acted on.
+        "actionable": True,
+        "filters_enabled": True,
+        # A review decision cannot be recorded against a store we cannot read.
+        "review_actions_enabled": review_available,
+        "kpis": kpis,
+        "rows": page_rows,
+        "pagination": {
+            "total_count": total, "returned_count": len(page_rows),
+            "page": page, "page_size": page_size,
+            "has_more": offset + len(page_rows) < total,
+        },
+        "facets": _flagged_facets(rows_all),
+        "filters": echo_filters,
+        "platform_date_field": "source_date",
+        "sql_date_field": "contact_created_at",
+        "sql_attribution": _search_term_sql_block(sql_attr),
+        "truth_state": truth_state,
+        "annotation_join": pop.get("annotation_join") or {},
+        "review_state_available": review_available,
+        "canonical_fact_source": {
+            "table": "search_terms",
+            "grain": ("source_date + campaign_name + campaign_id + ad_group + "
+                      "keyword + match_type + search_term"),
+            "dedup_key": "idx_search_terms_unique_fact",
+            "unit_grain": "search_term × canonical campaign identity",
+            "identity": "analysis/search_term_identity.term_identity_key",
+        },
+        "annotation_source": {
+            "table": "waste_terms",
+            "role": ("classification annotation only — reason, matched rule and "
+                     "CRM-junk confirmation. Never a source of spend, clicks or "
+                     "impressions."),
+        },
+        "governance": {
+            "read_only": True,
+            "google_ads_mutations": False,
+            "negative_keywords_applied": False,
+        },
+        "audit": _audit_block(base, pop, coverage_status="ok"),
+    }
+
+
+def _quarantined_flagged_payload(base, pop, truth_state, echo_filters,
+                                 page, page_size) -> dict[str, Any]:
+    """A mismatch response: diagnosis only, never decision metrics.
+
+    Every KPI is null and no row is returned, so there is nothing for the normal
+    UI to render and nothing for the Action Queue to action. The `quarantine`
+    block names what broke and lists the affected terms for an operator, in a
+    shape the KPI/table renderers do not read.
+
+    ``actionable`` is False so every downstream consumer — filters, pagination,
+    review buttons, queue construction — can refuse in one check rather than
+    each inventing its own rule.
+    """
+    units = pop.get("units") or []
+    flagged = [u for u in units if _unit_state(u) == STATE_FLAGGED]
+    unexplained = [u for u in flagged
+                   if not (u.get("junk_categories")
+                           or (u.get("_waste_evidence") or {}).get("junk_category"))]
+    return {
+        **base,
+        "view": "flagged",
+        "actionable": False,
+        "kpis": _empty_flagged_kpis(),
+        "rows": [],
+        "pagination": {"total_count": None, "returned_count": 0,
+                       "page": page, "page_size": page_size,
+                       "has_more": False},
+        # No facets: a filter built from quarantined data would imply the data
+        # behind it can be explored.
+        "facets": {"campaigns": [], "flag_reasons": [],
+                   "review_states": list(LOCAL_REVIEW_STATES)},
+        "filters": echo_filters,
+        "filters_enabled": False,
+        "review_actions_enabled": False,
+        "truth_state": truth_state,
+        "annotation_join": pop.get("annotation_join") or {},
+        "review_state_available": False,
+        "quarantine": {
+            "reason": "internal_invariant_failed",
+            "detail": ("Flagged terms carry no reason evidence, so the flagged "
+                       "contract cannot be explained. Counts, rows and actions "
+                       "are withheld rather than shown as normal values."),
+            "truth_reasons": truth_state.get("reasons") or [],
+            "affected_term_count": len(unexplained),
+            # Diagnostic sample for an operator — deliberately NOT a row shape,
+            # so it cannot be rendered as the normal table.
+            "affected_terms_sample": sorted(
+                {(u.get("search_term_normalized") or u.get("search_term") or "")
+                 for u in unexplained})[:20],
+        },
+        "governance": {
+            "read_only": True,
+            "google_ads_mutations": False,
+            "negative_keywords_applied": False,
+        },
+    }
+
+
+def _fetch_reviews_for_units(units: list) -> tuple[dict, bool]:
+    """Durable review rows for a set of canonical units, plus AVAILABILITY.
+
+    Returns ``(rows_by_identity, available)``. The two are reported separately
+    because an empty map is ambiguous on its own: it means both "nobody has
+    reviewed anything" and "the review store could not be read". Collapsing
+    them would let the page present an outage as a verified all-unreviewed
+    state (PR-ADS-153D §32 — unavailable is never a value).
+
+    On an outage NOTHING is inferred about any term's review state. Each row
+    reports ``review_state: None``, ``review_state_status: "unavailable"`` and
+    ``action_needed: None``; the ``never_reviewed`` priority component is not
+    applied; the review-state filter is refused rather than returning a silently
+    wrong subset; and review actions are disabled.
+
+    Existing decisions are therefore neither reopened nor treated as
+    ``unreviewed``. Defaulting an unreadable store to ``unreviewed`` would
+    silently resurrect terms a human had already resolved or kept, and inventing
+    ``keep`` would silently drop outstanding work — the Action Queue instead
+    emits one explicit disclosure item saying the review store could not be
+    read.
+    """
+    try:
+        from db import search_term_review_repository as review_repo  # noqa: PLC0415
+
+        fetched = review_repo.fetch_reviews_for_identities(
+            [unit_identity(u) for u in units])
+        return (fetched.get("rows") or {}), bool(fetched.get("available"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[search-term-evidence] review state unavailable: %s", exc)
+        return {}, False
+
+
+def _filter_flagged_rows(rows: list, *, q=None, campaign=None, review_state=None,
+                         flag_reason=None, min_spend=None, sql_state=None) -> list:
+    out = rows
+    if q:
+        needle = str(q).strip().lower()
+        out = [r for r in out
+               if needle in (r.get("search_term") or "").lower()
+               or needle in (r.get("campaign_name") or "").lower()]
+    if campaign:
+        out = [r for r in out if r.get("campaign_key") == campaign
+               or r.get("campaign_name") == campaign]
+    if review_state:
+        # Every row reports review_state None during an outage, so this filter
+        # would return an empty list that reads as a real "no terms in that
+        # state". The caller refuses the filter instead (see below).
+        out = [r for r in out if r.get("review_state") == review_state]
+    if flag_reason:
+        out = [r for r in out if r.get("flag_reason") == flag_reason]
+    if min_spend not in (None, ""):
+        threshold = float(min_spend)
+        # A unit whose spend is UNAVAILABLE is not proven to be below the
+        # threshold, so it is never silently filtered out by one.
+        out = [r for r in out if r.get("spend_usd") is None
+               or float(r["spend_usd"]) >= threshold]
+    if sql_state and sql_state != "all":
+        if sql_state == "has_sql":
+            out = [r for r in out if r.get("sql_attribution_status") == "attributed"
+                   and (r.get("attributed_sqls") or 0) > 0]
+        elif sql_state == "known_zero":
+            out = [r for r in out if r.get("sql_attribution_status") == "known_zero"]
+        elif sql_state == "unavailable":
+            out = [r for r in out if r.get("sql_attribution_status")
+                   in ("unavailable", "mapping_review", "partial_attribution")]
+    return out
+
+
+def _flagged_kpis(rows: list, mon: dict, sql_attr: dict,
+                  *, review_available: bool = True) -> dict:
+    """The four canonical flagged KPIs (§11). No vanity metrics.
+
+    ``sql_evidence`` is the sum of SAFELY ATTRIBUTED lifecycle SQLs only. When
+    no row has proven attribution it is ``None`` (Unavailable), never 0 — the
+    distinction between "no attributable SQLs" and "we could not attribute" is
+    the whole point of §13.
+    """
+    attributed = [r for r in rows if r.get("sql_attribution_status") == "attributed"]
+    known_zero = [r for r in rows if r.get("sql_attribution_status") == "known_zero"]
+    unavailable = [r for r in rows if r.get("sql_attribution_status")
+                   not in ("attributed", "known_zero")]
+    sql_evidence = (sum(int(r.get("attributed_sqls") or 0) for r in attributed)
+                    if (attributed or known_zero) else None)
+    return {
+        # Unique durable identities currently matching the flagged contract.
+        "flagged_terms": len({r["term_identity"] for r in rows}),
+        # Canonical Google Ads spend for those terms, FX-verified subtotal only.
+        "flagged_spend_usd": mon["verified_usd_spend"],
+        "flagged_spend_native": mon["verified_native_spend"],
+        "native_currency": mon["native_currency"],
+        "reporting_currency": mon["reporting_currency"],
+        "monetary": mon,
+        "monetary_status": mon["monetary_completeness_status"],
+        "clicks": sum(int(r.get("clicks") or 0) for r in rows),
+        # Search-term-attributable lifecycle SQLs — a strict attribution SUBSET,
+        # never a naked "SQLs" claim (§12).
+        "sql_evidence": sql_evidence,
+        "sql_evidence_label": "Search-term-attributable SQLs",
+        "sql_evidence_available": bool(attributed or known_zero),
+        "terms_with_attribution_unavailable": len(unavailable),
+        "terms_with_proven_zero_sqls": len(known_zero),
+        "sql_attribution_available": bool(sql_attr.get("available")),
+        # Flagged terms with no finished human decision. None — not 0 — when
+        # the review store is unreadable: "we could not check" is not "none".
+        "review_needed": (sum(1 for r in rows if r.get("action_needed"))
+                          if review_available else None),
+        "review_state_status": ("available" if review_available else "unavailable"),
+    }
+
+
+def _empty_flagged_kpis() -> dict:
+    return {
+        "flagged_terms": None, "flagged_spend_usd": None,
+        "flagged_spend_native": None, "native_currency": None,
+        "reporting_currency": "USD", "monetary": None, "monetary_status": None,
+        "clicks": None, "sql_evidence": None,
+        "sql_evidence_label": "Search-term-attributable SQLs",
+        "sql_evidence_available": False,
+        "terms_with_attribution_unavailable": None,
+        "terms_with_proven_zero_sqls": None,
+        "sql_attribution_available": False,
+        "review_needed": None,
+        "review_state_status": "unavailable",
+    }
+
+
+def _flagged_facets(rows: list) -> dict:
+    campaigns: dict = {}
+    reasons: dict = {}
+    for r in rows:
+        key = r.get("campaign_key")
+        if key and key not in campaigns:
+            campaigns[key] = {"campaign_key": key,
+                              "campaign_name": r.get("campaign_name"),
+                              "mapping_status": r.get("mapping_status")}
+        reason = r.get("flag_reason")
+        if reason:
+            reasons[reason] = {"reason": reason,
+                               "reason_label": r.get("flag_reason_label")}
+    return {
+        "campaigns": sorted(campaigns.values(),
+                            key=lambda c: (c["campaign_name"] or "").lower()),
+        "flag_reasons": sorted(reasons.values(), key=lambda r: r["reason"]),
+        "review_states": list(LOCAL_REVIEW_STATES),
+    }
+
+
 def build_search_term_export(window: str, *, q=None, campaign=None, state=None,
                              junk_category=None, min_spend=None, sort="spend",
                              sql_state=None, now: datetime | None = None) -> dict[str, Any]:
@@ -1509,8 +2224,11 @@ def build_search_term_drawer(window: str, term: str,
     if not pop["available"]:
         return {**base, "db_unavailable": True, "term": None}
 
+    # Match on the normalized term so a drawer opened from any raw variant (or
+    # an old bookmark carrying a different casing) resolves to the one unit.
+    norm_term = normalize_search_term(term)
     matches = [u for u in pop["units"]
-               if u["search_term"] == term
+               if u["search_term_normalized"] == norm_term
                and (campaign_key is None or u["campaign_key"] == campaign_key)]
     if not matches:
         return {**base, "db_unavailable": False, "_not_found": True, "term": None}
@@ -1522,7 +2240,12 @@ def build_search_term_drawer(window: str, term: str,
         # No campaign_key given and the term spans campaigns — merge a combined
         # view (facts only; identity block lists every campaign separately).
         unit = {
-            "search_term": term, "campaign_key": None,
+            "search_term": term,
+            "search_term_normalized": norm_term,
+            # Union of every campaign's raw variants for this term.
+            "search_term_variants": {v for m in matches
+                                     for v in (m.get("search_term_variants") or set())},
+            "campaign_key": None,
             "campaign_name": None, "mapping_status": "multiple",
             "spend_usd": None, "spend_raw": None,
             "clicks": 0, "impressions": 0,

@@ -258,6 +258,30 @@ def run_weekly_report():
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write after Step 3 failed: %s", db_exc)
 
+        # PR-ADS-153D: durable flag HISTORY. This runs AFTER the annotations
+        # land, so the canonical flagged population it reads already reflects
+        # this run's classification. History is derived from that population
+        # rather than from waste_terms directly, because waste_terms has no
+        # campaign_id — identities built from a raw campaign name would never
+        # match the ones Search Terms and the Action Queue compute.
+        #
+        # Local database only. No Google Ads, HubSpot or Mailchimp call, and no
+        # human review decision is ever modified by an observation.
+        try:
+            from services.search_term_flag_history_service import (  # noqa: PLC0415
+                record_flag_history,
+            )
+            history = record_flag_history()
+            if not history.get("available"):
+                log.warning("[weekly] flag history not recorded: %s",
+                            history.get("reason"))
+            else:
+                log.info("[weekly] recorded flag history for %d term(s)",
+                         history.get("written", 0))
+        except Exception as hist_exc:  # noqa: BLE001
+            # Never fail the weekly run over an audit-trail write.
+            log.error("[weekly] flag history step failed: %s", hist_exc)
+
         # Step 4: Lead quality analysis
         print("Step 4/6: Running lead quality analysis...")
         from analysis.core import run_lead_quality

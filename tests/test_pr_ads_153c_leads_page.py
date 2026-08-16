@@ -276,9 +276,15 @@ def test_leads_uses_business_windows_not_evidence_windows():
 
 
 def test_flagged_waste_terms_remains_reachable():
-    """§3 — the page keeps its route and backend for PR-ADS-153D."""
-    assert 'data-page="waste"' in _INDEX_HTML
-    assert 'id="page-waste"' in _INDEX_HTML
+    """PR-ADS-153C §3 held this page open FOR PR-ADS-153D, which has now
+    consolidated it. Reachability is what mattered, and it survives: the old
+    URL resolves to the canonical Flagged view rather than dead-ending."""
+    # The standalone page is gone — nav item, section markup and loader.
+    assert 'data-page="waste"' not in _INDEX_HTML
+    assert 'id="page-waste"' not in _INDEX_HTML
+    # But the route still resolves, to Search Terms → Flagged.
+    assert 'waste: { page: "search-terms", tab: "flagged" }' in _APP_JS
+    # And the API remains as a documented compatibility adapter for 153G.
     assert '@app.get("/api/waste")' in _SERVER_PY
 
 
