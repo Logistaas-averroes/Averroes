@@ -42,7 +42,7 @@ jobs:
           pip install pytest
 
       - name: Byte-compile every touched package
-        run: python -m compileall -q analysis api db scheduler services scripts tests
+        run: python -m compileall -q analysis api connectors db scheduler services scripts tests
 
       - name: Check static JS parses
         run: node --check static/app.js
@@ -62,9 +62,11 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PR-ADS-153D PostgreSQL integration tests
+      - name: PostgreSQL integration tests (153D + 153E-A)
         run: |
-          python -m pytest tests/test_pr_ads_153d_pg_integration.py -q \
+          python -m pytest \
+            tests/test_pr_ads_153d_pg_integration.py \
+            tests/test_pr_ads_153e_a_pg_integration.py -q \
             --junitxml=pg-results.xml
 
       # A skipped database suite is not merge evidence. If the cluster could not
@@ -84,8 +86,11 @@ jobs:
                        "database suite is not acceptable merge evidence")
           PY
 
-      - name: PR-ADS-153D contract tests
-        run: python -m pytest tests/test_pr_ads_153d_waste_consolidation.py -q
+      - name: Contract tests (153D + 153E-A)
+        run: |
+          python -m pytest \
+            tests/test_pr_ads_153d_waste_consolidation.py \
+            tests/test_pr_ads_153e_a_revenue_ledger.py -q
 
       - name: Full suite (known-failing-on-main deselected)
         run: |

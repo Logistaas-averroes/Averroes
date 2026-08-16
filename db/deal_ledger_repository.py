@@ -74,7 +74,11 @@ def _iso(value):
 def _normalise(row: dict) -> dict:
     for field in ("deal_created_at", "deal_close_date", "hubspot_lastmodified_at",
                   "source_fetched_at", "created_at", "updated_at",
-                  "last_observed_at", "reviewed_at"):
+                  "last_observed_at",
+                  # Sync-state timestamps — normalised here too so every value
+                  # this repository returns is a consistent ISO string.
+                  "last_modified_watermark", "last_incremental_at",
+                  "bootstrap_started_at", "bootstrap_completed_at"):
         if field in row:
             row[field] = _iso(row[field])
     for field in ("amount_raw", "amount_in_home_currency", "revenue_usd"):
@@ -340,6 +344,10 @@ def fetch_associations(deal_id: str) -> dict:
 def fetch_ledger_summary(start=None, end=None) -> dict:
     """Aggregate ledger facts for a window.
 
+    ``end`` is EXCLUSIVE, matching ``analysis.business_windows.get_window_bounds``
+    — an inclusive comparison here would pull in the first instant of the
+    following day and silently overlap adjacent quarters.
+
     ``won_*`` counts use ``hs_is_closed_won IS TRUE`` — never a stage label.
     ``revenue_usd`` is summed only over rows whose currency was PROVEN, and the
     rows that were excluded are reported alongside so the total is never mistaken
@@ -384,7 +392,7 @@ def fetch_ledger_summary(start=None, end=None) -> dict:
                                                                      AS unknown_stage
                     FROM {LEDGER_TABLE}
                     WHERE (%s::timestamptz IS NULL OR deal_close_date >= %s)
-                      AND (%s::timestamptz IS NULL OR deal_close_date <= %s)
+                      AND (%s::timestamptz IS NULL OR deal_close_date < %s)
                     """,
                     (summable, summable, summable, start, start, end, end),
                 )
@@ -401,7 +409,10 @@ def fetch_ledger_summary(start=None, end=None) -> dict:
 
 def fetch_ledger_rows(start=None, end=None, *, won_only: bool = False,
                       limit: int = 100000) -> dict:
-    """Deal-grain rows for reconciliation. Carries no contact PII."""
+    """Deal-grain rows for reconciliation. Carries no contact PII.
+
+    ``end`` is EXCLUSIVE (see ``fetch_ledger_summary``).
+    """
     try:
         with get_conn() as conn:
             if conn is None:
@@ -418,7 +429,7 @@ def fetch_ledger_rows(start=None, end=None, *, won_only: bool = False,
                            association_status, association_count
                     FROM {LEDGER_TABLE}
                     WHERE (%s::timestamptz IS NULL OR deal_close_date >= %s)
-                      AND (%s::timestamptz IS NULL OR deal_close_date <= %s)
+                      AND (%s::timestamptz IS NULL OR deal_close_date < %s)
                       AND (NOT %s OR hs_is_closed_won IS TRUE)
                     ORDER BY deal_id
                     LIMIT %s

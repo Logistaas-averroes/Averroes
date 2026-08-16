@@ -46,6 +46,7 @@ Protected endpoints (require authenticated session):
   GET  /api/search-terms          — Paginated search-term fact rows from search_terms table (requires auth).
   GET  /api/search-terms/ngrams   — Read-only n-gram analysis over stored search_terms (requires auth).
   GET  /api/search-term-evidence/flagged — Canonical Flagged / Waste view over deduplicated search_terms facts (requires auth; PR-ADS-153D).
+  GET  /api/audit/revenue-truth   — Admin-only canonical deal-ledger reconciliation vs legacy revenue ledgers (read-only; shadow mode; PR-ADS-153E-A).
   POST /api/search-term-evidence/review  — Record ONE local search-term review decision (local DB only; never a Google Ads mutation; PR-ADS-153D).
   GET  /api/gclid-attribution     — Paginated GCLID attribution rows from gclid_attribution table (requires auth).
   GET  /api/gclid-coverage        — GCLID coverage snapshots from gclid_coverage_snapshots table (requires auth).
@@ -8678,6 +8679,44 @@ def api_mailchimp_sync(request: Request, mode: str = "incremental") -> dict[str,
 
 
 # ── PR-ADS-152: Canonical SQL-truth reconciliation (admin, read-only) ─────────
+@app.get("/api/audit/revenue-truth")
+def api_audit_revenue_truth(
+    request: Request,
+    window: str = Query(default="current_quarter",
+                        description="Business window: current_quarter|last_quarter|"
+                                    "last_6_months|ytd|all_time"),
+) -> dict[str, Any]:
+    """Admin-only canonical revenue reconciliation (PR-ADS-153E-A §8).
+
+    The same shadow reconciliation the merge gate runs, exposed for operators:
+    the canonical deal ledger compared DEAL BY DEAL against `gclid_attribution`
+    and `deal_source_attribution`, with every difference carrying a reason.
+
+    Shadow mode — the canonical ledger is populated and reconciled but read by no
+    production page until PR-ADS-153E-B. Nothing here changes a visible total.
+
+    Read-only. No HubSpot, Google Ads or Mailchimp call, and no mutation of any
+    external platform. Exposes no contact names or email addresses; a GCLID is
+    reported only as present/absent.
+    """
+    check_admin_or_token(request)
+    from analysis.business_windows import WINDOW_KEYS  # noqa: PLC0415
+
+    if window not in WINDOW_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown window '{window}'. Valid: {', '.join(WINDOW_KEYS)}")
+    try:
+        from services.revenue_reconciliation_service import (  # noqa: PLC0415
+            build_revenue_reconciliation,
+        )
+        return build_revenue_reconciliation(window)
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/audit/revenue-truth] failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500,
+                            detail="revenue reconciliation unavailable") from exc
+
+
 @app.get("/api/audit/sql-truth")
 def api_audit_sql_truth(
     request: Request,
