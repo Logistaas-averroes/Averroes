@@ -3768,3 +3768,52 @@ campaign-attributable contacts".
 ```
 
 A lifecycle customer is **never** substituted for a revenue customer.
+
+---
+
+## `GET /api/audit/revenue-truth` *(PR-ADS-153E-A — canonical revenue reconciliation)*
+
+**Auth:** Admin · **Read-only against every external platform:** Yes
+
+Shadow reconciliation of the canonical deal ledger (`hubspot_deal_ledger`)
+against both legacy revenue lineages, at DEAL GRAIN.
+
+| Param | Default | Notes |
+|---|---|---|
+| `window` | `current_quarter` | Business window: `current_quarter`, `last_quarter`, `last_6_months`, `ytd`, `all_time` (400 on unknown) |
+
+**Shadow mode.** The canonical ledger is populated and reconciled but read by no
+production page until PR-ADS-153E-B. This endpoint changes no visible total.
+
+Returns:
+
+* `canonical` — distinct deals, current closed-won deals, won **with** and
+  **without** a GCLID (the second is the revenue the legacy GCLID ledger cannot
+  hold), unknown won-state, deals with no close date, unknown stages, proven vs
+  unavailable currency counts, `revenue_usd` (proven currency only) and
+  `amount_raw_total` (explicitly **not** a USD figure), ambiguous and failed
+  associations;
+* `stage_breakdown` — proof that open / lost / downgrade / churn are stored;
+* `legacy_diffs` — per legacy ledger: `canonical_only`, `legacy_only`,
+  `amount_disagreement`, `duplicate_legacy_rows`, each itemized **by deal id
+  with a reason**;
+* `sync_state` — watermark, coverage, last status, association failures;
+* `violations` + `ok` — the invariant gate.
+
+Expected differences: `non_gclid_deal_excluded_by_legacy_ledger` and
+`canonical_currency_*`. Never expected: `legacy_only` — it means the canonical
+sync missed a deal, and it fails the gate.
+
+**Privacy:** no contact names or email addresses; a GCLID is reported only as
+present/absent, because this output goes into CI logs.
+
+Same reconciliation as the CLI gate:
+
+```
+python -m scripts.audit_canonical_revenue_truth --window current_quarter
+```
+
+(exit 0 reconciled, 1 validation failed, 2 usage error; `--json` returns the same
+status.)
+
+Full doctrine: `docs/35_CANONICAL_REVENUE_LEDGER.md`.

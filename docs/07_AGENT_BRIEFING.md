@@ -5,6 +5,27 @@
 
 ---
 
+> ### ⚠️ Authoritative status (PR-ADS-153E-A, August 2026)
+>
+> This document's phase/status narrative below predates the PR-ADS-153A–D
+> sequence and is retained for its architectural content, not its status claims.
+> The current authority is
+> `docs/audits/PR-ADS-153A-MINIMUM-VIABLE-TRUTH-AUDIT.md` plus the merged PRs.
+>
+> * **153A–153D: merged.** Truth audit; canonical CRM funnel; canonical Leads
+>   experience; search-term waste consolidation.
+> * **153E-A: completed after merge.** Canonical deal ledger built and
+>   reconciled in SHADOW MODE — see `docs/35_CANONICAL_REVENUE_LEDGER.md`. No
+>   revenue consumer has been switched.
+> * **153E-B: next.** Revenue consumer cutover and Unit Economics migration.
+> * **153F and 153G: remain.** Geo synchronization; legacy table/route deletion.
+> * **Phase 2 / OCT: blocked.** Offline conversion uploads are not started and
+>   are not authorized.
+> * **Six-month read-only governance: ACTIVE.** No writes to Google Ads or
+>   HubSpot. See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md`.
+
+---
+
 ## What You Are Building
 
 A lean Google Ads signal correction engine for Logistaas. It reads data from Windsor.ai and HubSpot, analyses it using three simple functions, and produces a plain-language weekly report via Claude API.
@@ -27,7 +48,7 @@ A lean Google Ads signal correction engine for Logistaas. It reads data from Win
 
 | File | Status | Notes |
 |------|--------|-------|
-| `connectors/hubspot_pull.py` | ✅ Complete | Do not modify |
+| `connectors/hubspot_pull.py` | ✅ Complete | Extended by PR-ADS-153E-A with the read-only canonical deal-sync contract (all stages, `hs_is_closed_won`, currency trio, association labels). Change it only through a scoped PR |
 | `connectors/windsor_pull.py` | ✅ Complete | Do not modify |
 | `connectors/gclid_match.py` | ✅ Complete | Do not modify |
 | `analysis/core.py` | ✅ Complete | waste_detection, lead_quality, campaign_truth |

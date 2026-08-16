@@ -864,3 +864,42 @@ HubSpot-side cross-check (no DB): in HubSpot, filter contacts `lifecyclestage = 
 ---
 
 *End of PR-ADS-153A audit. No implementation was performed; no production data, Google Ads, HubSpot, or Mailchimp state was modified.*
+
+---
+
+## Follow-up status (appended — the audit above is historical and unmodified)
+
+**As of PR-ADS-153E-A, August 2026.**
+
+| Roadmap item | Status |
+|---|---|
+| PR-ADS-153A — Minimum Viable Truth audit | **Merged** (this document) |
+| PR-ADS-153B — Canonical CRM Funnel Truth | **Merged** |
+| PR-ADS-153C — Canonical Leads Experience | **Merged** |
+| PR-ADS-153D — Search-Term Waste Consolidation | **Merged** |
+| PR-ADS-153E-A — Canonical Deal Ledger Foundation | **Completed after merge** — shadow mode |
+| PR-ADS-153E-B — Revenue Consumer Cutover & Unit Economics Migration | **Next** |
+| PR-ADS-153F — Geo synchronization | Remains |
+| PR-ADS-153G — Legacy table / route deletion | Remains |
+| Phase 2 / OCT | **Blocked** — not started, not authorized |
+| Six-month read-only governance | **ACTIVE** |
+
+### §9 revenue findings — disposition
+
+| Finding | Status after 153E-A |
+|---|---|
+| [P0] Two disjoint ledgers | Canonical `hubspot_deal_ledger` built and reconciled at deal grain. **Consumers not yet switched** — that is 153E-B. |
+| [P0] Won-detection (`ILIKE`, won-label default) | **Fixed** in the canonical layer: `hs_is_closed_won` only, fails closed; the connector's unknown-stage→won default is removed. Legacy readers still carry the old predicate until 153E-B. |
+| [P0] Currency | **Fixed** in the canonical layer: `deal_currency_code` + `amount_in_home_currency` fetched, verified home currency required, close-date local FX, fail closed. |
+| [P1] Churn/Downgrade invisibility | **Fixed** — all nine stages synced and surfaced. No negative revenue invented. |
+| [P1] Ledger A dedup key | Canonical ledger is `deal_id`-keyed. `gclid_attribution` is unchanged and retained as a comparison source. |
+| [P1] `fetch_source_revenue` lacks a won-predicate | Unchanged — legacy reader, addressed at cutover. |
+| [P2] Chain C (local JSON) still live | Unchanged — Unit Economics migrates in 153E-B. |
+| [P2] Cross-grain `sql_to_customer_rate` | Unchanged — 153E-B. |
+
+Production checks Q3–Q5 are superseded for the canonical layer by
+`python -m scripts.audit_canonical_revenue_truth`, which reports the same
+two-ledger reconciliation, duplicate-row and stage-leakage evidence and exits
+non-zero on violation. The original queries remain valid for the legacy tables.
+
+Doctrine: `docs/35_CANONICAL_REVENUE_LEDGER.md`.

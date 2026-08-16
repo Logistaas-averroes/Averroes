@@ -117,6 +117,8 @@ class TestSummaryShape:
             "hubspot/contacts",
             "hubspot/contact_funnel",
             "hubspot/deals",
+            # PR-ADS-153E-A canonical deal ledger (shadow mode).
+            "hubspot/deal_ledger",
             "gclid/matches",
             "hubspot/source_classification",
             "google_ads/canonical_spend",
@@ -717,6 +719,18 @@ def _patch_all_datasets_success(
     monkeypatch.setattr(
         "services.hubspot_contact_funnel_sync_service.run_contact_funnel_sync",
         _contact_funnel_stub)
+
+    # PR-ADS-153E-A: canonical deal-ledger sync. Patched at the service seam for
+    # the same reasons as the contact-funnel stub above, and mirroring the
+    # source_pull failure mode so the all-fail scenario still fails it.
+    def _deal_ledger_stub(*a, **kw):
+        if source_pull:
+            source_pull()  # raises in the all-fail scenario
+        return {"available": True, "status": "success", "deals_seen": 0,
+                "written": 0, "skipped_stale": 0, "association_failures": 0,
+                "pages": 0, "complete": True, "watermark": None, "error": None}
+    monkeypatch.setattr(
+        "services.hubspot_deal_sync_service.sync_deals", _deal_ledger_stub)
     monkeypatch.setattr(
         "services.hubspot_contact_funnel_sync_service.get_bootstrap_mode",
         lambda: "incremental")
