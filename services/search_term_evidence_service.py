@@ -2039,8 +2039,18 @@ def _fetch_reviews_for_units(units: list) -> tuple[dict, bool]:
     them would let the page present an outage as a verified all-unreviewed
     state (PR-ADS-153D §32 — unavailable is never a value).
 
-    On an outage every unit still reads ``unreviewed``: that keeps flagged terms
-    in the Action Queue, whereas inventing ``keep`` would silently drop work.
+    On an outage NOTHING is inferred about any term's review state. Each row
+    reports ``review_state: None``, ``review_state_status: "unavailable"`` and
+    ``action_needed: None``; the ``never_reviewed`` priority component is not
+    applied; the review-state filter is refused rather than returning a silently
+    wrong subset; and review actions are disabled.
+
+    Existing decisions are therefore neither reopened nor treated as
+    ``unreviewed``. Defaulting an unreadable store to ``unreviewed`` would
+    silently resurrect terms a human had already resolved or kept, and inventing
+    ``keep`` would silently drop outstanding work — the Action Queue instead
+    emits one explicit disclosure item saying the review store could not be
+    read.
     """
     try:
         from db import search_term_review_repository as review_repo  # noqa: PLC0415

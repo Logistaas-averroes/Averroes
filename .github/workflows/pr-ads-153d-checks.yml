@@ -42,7 +42,7 @@ jobs:
           pip install pytest
 
       - name: Byte-compile every touched package
-        run: python -m compileall -q analysis api db services scripts tests
+        run: python -m compileall -q analysis api db scheduler services scripts tests
 
       - name: Check static JS parses
         run: node --check static/app.js
