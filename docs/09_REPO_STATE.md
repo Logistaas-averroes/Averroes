@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-153B — Canonical CRM Funnel Truth (August 2026)
+**Last updated:** PR-ADS-153E-A — Canonical Deal Ledger Foundation (August 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -9,10 +9,36 @@
 
 ---
 
+> ### ⚠️ Authoritative status (PR-ADS-153E-A, August 2026)
+>
+> This document's phase/status narrative below predates the PR-ADS-153A–D
+> sequence and is retained for its architectural content, not its status claims.
+> The current authority is
+> `docs/audits/PR-ADS-153A-MINIMUM-VIABLE-TRUTH-AUDIT.md` plus the merged PRs.
+>
+> * **153A–153D: merged.** Truth audit; canonical CRM funnel; canonical Leads
+>   experience; search-term waste consolidation.
+> * **153E-A: completed after merge.** Canonical deal ledger built and
+>   reconciled in SHADOW MODE — see `docs/35_CANONICAL_REVENUE_LEDGER.md`. No
+>   revenue consumer has been switched.
+> * **153E-B: next.** Revenue consumer cutover and Unit Economics migration.
+> * **153F and 153G: remain.** Geo synchronization; legacy table/route deletion.
+> * **Phase 2 / OCT: blocked.** Offline conversion uploads are not started and
+>   are not authorized.
+> * **Six-month read-only governance: ACTIVE.** No writes to Google Ads or
+>   HubSpot. See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md`.
+
+---
+
 ## Built and Verified (safe to call)
 
 | File | Module | Notes |
 |------|--------|-------|
+| `analysis/deal_truth.py` | Canonical won predicate + deal→contact resolver | **NEW in PR-ADS-153E-A** — `hs_is_closed_won` is the ONLY won rule (fails closed); one shared association resolver feeding GCLID/source/campaign/country, with `lookup_failed` distinct from `none`. Pure, no I/O |
+| `analysis/deal_currency.py` | Fail-closed revenue currency doctrine | **NEW in PR-ADS-153E-A** — `revenue_usd` only when proven (`verified_usd` / `converted` at close-date local FX); unknown currency stays NULL, never 0, never assumed USD. Pure, no I/O |
+| `db/deal_ledger_repository.py` | Canonical deal ledger persistence | **NEW in PR-ADS-153E-A** — idempotent by `deal_id`, monotonic on `hubspot_lastmodified_at`; a failed association lookup never destroys prior evidence |
+| `services/hubspot_deal_sync_service.py` | Deal ledger orchestration | **NEW in PR-ADS-153E-A** — SOLE writer of `hubspot_deal_ledger`. All stages, watermarked on `hs_lastmodifieddate` with overlap, resumable backfill. Read-only vs HubSpot |
+| `services/revenue_reconciliation_service.py` | Shadow reconciliation | **NEW in PR-ADS-153E-A** — canonical vs `gclid_attribution` vs `deal_source_attribution` at DEAL GRAIN; every difference itemized by deal id + reason. No PII |
 | `analysis/crm_lifecycle.py` | Canonical CRM lifecycle taxonomy | **NEW in PR-ADS-153B** — HubSpot Lifecycle Stage is the funnel spine. Funnel events (lead/mql/sql/opportunity/customer) each map to their own `hs_v2_date_entered_*` property. Pure, no I/O |
 | `analysis/mql_status_taxonomy.py` | The ONE `mql_status` mapping | **NEW in PR-ADS-153B** — replaces four divergent copies. Maps every live value incl. previously-unmapped `CLOSED - Bad Contact` / `CLOSED - No Response` / `RESELLER`; distinguishes `no_verdict` from `unmapped`. Operational dimension only — NOT a funnel definition |
 | `services/hubspot_contact_funnel_sync_service.py` | Canonical contact ingestion | **NEW in PR-ADS-153B** — SOLE writer of `hubspot_contact_funnel`. All-source, watermarked on `lastmodifieddate`, resumable, durable bootstrap state. Read-only vs HubSpot |

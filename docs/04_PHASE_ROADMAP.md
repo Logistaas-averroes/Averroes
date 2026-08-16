@@ -3,6 +3,27 @@
 
 ---
 
+> ### ⚠️ Authoritative status (PR-ADS-153E-A, August 2026)
+>
+> This document's phase/status narrative below predates the PR-ADS-153A–D
+> sequence and is retained for its architectural content, not its status claims.
+> The current authority is
+> `docs/audits/PR-ADS-153A-MINIMUM-VIABLE-TRUTH-AUDIT.md` plus the merged PRs.
+>
+> * **153A–153D: merged.** Truth audit; canonical CRM funnel; canonical Leads
+>   experience; search-term waste consolidation.
+> * **153E-A: completed after merge.** Canonical deal ledger built and
+>   reconciled in SHADOW MODE — see `docs/35_CANONICAL_REVENUE_LEDGER.md`. No
+>   revenue consumer has been switched.
+> * **153E-B: next.** Revenue consumer cutover and Unit Economics migration.
+> * **153F and 153G: remain.** Geo synchronization; legacy table/route deletion.
+> * **Phase 2 / OCT: blocked.** Offline conversion uploads are not started and
+>   are not authorized.
+> * **Six-month read-only governance: ACTIVE.** No writes to Google Ads or
+>   HubSpot. See `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md`.
+
+---
+
 ## Overview
 
 The system is built in four phases. Each phase extends the previous one. No phase begins until the previous phase has been validated.

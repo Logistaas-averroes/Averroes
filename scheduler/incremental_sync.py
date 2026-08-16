@@ -206,6 +206,16 @@ def run_daily_incremental_sync(
         run_id=run_id, date_from=date_from_deals, date_to=today, errors=errors,
     )
 
+    # ── hubspot/deal_ledger — PR-ADS-153E-A canonical deal ledger (shadow).
+    # Reads HubSpot read-only across ALL tracked pipeline stages and writes only
+    # the local canonical ledger. No page consumes it yet: 153E-A populates and
+    # reconciles it, 153E-B migrates consumers. Orchestration only — every won,
+    # currency, association and attribution decision lives in the service and
+    # its pure rule modules, never here.
+    datasets["hubspot/deal_ledger"] = _sync_deal_ledger(
+        run_id=run_id, errors=errors,
+    )
+
     # ── hubspot/source_classification — keep acquisition-source classification
     # current (PR-ADS-117): classify newly-created contacts (all sources) and
     # attribute recent closed-won deals. Read-only from HubSpot; local DB only.
@@ -628,6 +638,53 @@ def _sync_gclid_attribution(
                 error_message=str(exc)[:1000],
             )
         return {"status": "failed", "error": str(exc)[:500]}
+
+
+def _sync_deal_ledger(*, run_id, errors: list) -> dict:
+    """Orchestrate the PR-ADS-153E-A canonical deal-ledger sync.
+
+    Contains NO revenue, currency, won-state or attribution logic — it starts a
+    batch, calls the service, and records what happened. A failed or partial
+    sync is reported as failed/partial: it must never surface as a successful
+    zero-row result, because a silent revenue gap is worse than a loud failure.
+    """
+    batch_id = db_writers.start_sync_batch(
+        source="hubspot", dataset="deal_ledger", sync_type="daily",
+        run_id=run_id)
+    try:
+        from services.hubspot_deal_sync_service import sync_deals  # noqa: PLC0415
+
+        result = sync_deals(batch_id=batch_id)
+    except Exception as exc:  # noqa: BLE001
+        log.error("[incremental] deal ledger sync failed: %s", exc, exc_info=True)
+        errors.append(f"hubspot/deal_ledger: {exc}")
+        db_writers.finish_sync_batch(batch_id, status="failed",
+                                     error_message=str(exc))
+        return {"status": "failed", "error": str(exc), "rows": 0}
+
+    status = result.get("status") or "failed"
+    if status != "success":
+        errors.append(
+            f"hubspot/deal_ledger: {status} "
+            f"({result.get('error') or 'incomplete'}; "
+            f"{result.get('association_failures', 0)} association failure(s))")
+    # sync_batches accepts success|failed only, so a PARTIAL sync is recorded
+    # as failed with its reason — a partial run must never look successful.
+    db_writers.finish_sync_batch(
+        batch_id,
+        status=("success" if status == "success" else "failed"),
+        row_count=result.get("written", 0),
+        error_message=(result.get("error")
+                       or (None if status == "success" else status)))
+    return {
+        "status": status,
+        "rows": result.get("written", 0),
+        "deals_seen": result.get("deals_seen", 0),
+        "skipped_stale": result.get("skipped_stale", 0),
+        "association_failures": result.get("association_failures", 0),
+        "complete": result.get("complete", False),
+        "error": result.get("error"),
+    }
 
 
 def _sync_source_classification(
