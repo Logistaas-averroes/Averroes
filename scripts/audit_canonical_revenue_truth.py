@@ -67,10 +67,13 @@ def _print_items(label: str, items: list, fields: tuple) -> None:
     if not items:
         print(f"    {label:<44} {'0':>10}")
         return
-    print(f"    {label:<44} {len(items):>10}")
+    unexplained = sum(1 for i in items if i.get("expected") is False)
+    suffix = f"   ({unexplained} UNEXPLAINED)" if unexplained else ""
+    print(f"    {label:<44} {len(items):>10}{suffix}")
     for item in items[:_PRINT_CAP]:
         detail = "  ".join(f"{f}={_fmt(item.get(f))}" for f in fields)
-        print(f"      · deal {item.get('deal_id')}  {detail}")
+        mark = " " if item.get("expected") is not False else "!"
+        print(f"      {mark}· deal {item.get('deal_id')}  {detail}")
     if len(items) > _PRINT_CAP:
         print(f"      … {len(items) - _PRINT_CAP} more (complete list in --json)")
 
@@ -134,9 +137,12 @@ def _render(report: dict) -> None:
         _print_items("canonical-only (not in legacy)",
                      diff.get("canonical_only") or [],
                      ("has_gclid", "revenue_usd", "reason"))
-        _print_items("legacy-only (MISSING from canonical)",
+        _print_items("legacy-only (MISSING from canonical entirely)",
                      diff.get("legacy_only") or [],
                      ("legacy_usd", "legacy_stage_label", "reason"))
+        _print_items("won disagreement (held, classified differently)",
+                     diff.get("won_disagreement") or [],
+                     ("canonical_is_closed_won", "legacy_usd", "reason"))
         _print_items("amount disagreement",
                      diff.get("amount_disagreement") or [],
                      ("canonical_usd", "legacy_usd", "reason"))

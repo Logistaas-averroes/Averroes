@@ -1156,9 +1156,12 @@ if __name__ == "__main__":
 # Read-only, always: no HubSpot write, no Google Ads call of any kind, and no
 # fabricated GCLID or source value.
 
-# All stages the ledger tracks — open, won, lost, downgrade and churn. Derived
-# from the live stage map so a stage can never be tracked here and unlabelled
-# there.
+# The stages the map can LABEL — open, won, lost, downgrade and churn. This is a
+# display vocabulary, NOT a population filter: `pull_deals_for_ledger` reads
+# every deal by default and labels an unrecognised stage `Unknown stage (<id>)`.
+# Gating ingestion on this list would make the ledger silently incomplete the
+# moment someone adds a pipeline stage in HubSpot — the canonical ledger would
+# then be missing deals nobody could see were missing.
 ALL_TRACKED_DEAL_STAGES = list(DEAL_STAGE_MAP.keys())
 
 # Properties the canonical ledger needs. `hs_is_closed_won` is THE won
@@ -1176,6 +1179,82 @@ DEAL_LEDGER_PROPERTIES = [
     "deal_currency_code",
     "amount_in_home_currency",
 ]
+
+
+# Contact properties the canonical ledger's attribution evidence is built from.
+# This is a DEDICATED list, not a reuse of CONTACT_PROPERTIES: the ledger must
+# never read a contact's name or email address (PR-ADS-153E-A §13 — audit output
+# goes into CI logs), and the properties below are exactly the ones
+# ``services.hubspot_deal_sync_service._contact_evidence`` consumes.
+DEAL_ATTRIBUTION_CONTACT_PROPERTIES = [
+    "hs_google_click_id",          # GCLID, when HubSpot captured it directly
+    "hs_analytics_first_url",      # GCLID fallback, parsed from the first URL
+    "hs_analytics_source",         # Original Source
+    "hs_analytics_source_data_1",  # Campaign
+    "hs_analytics_source_data_2",  # Keyword
+    "ip_country",                  # Country, in the product's usual precedence
+    "country",
+]
+
+
+class ContactBatchReadError(RuntimeError):
+    """A batch contact read FAILED.
+
+    Raised rather than returning a partial mapping, so the caller can record a
+    lookup failure instead of writing an empty attribution that looks like a
+    successful "this contact has no source" observation.
+    """
+
+
+def pull_contact_attribution_properties(contact_ids: list) -> dict:
+    """Batch-read the attribution evidence for a set of contacts.
+
+    Returns ``{contact_id: {"id": contact_id, "properties": {...}}}`` — one
+    documented shape, with ``properties`` holding
+    ``DEAL_ATTRIBUTION_CONTACT_PROPERTIES``.
+
+    Deliberately SEPARATE from ``pull_contacts_by_ids``, which is the PR-ADS-115
+    lead-date reader and returns ``{contact_id: createdate}``. The two contracts
+    are not interchangeable, and treating one as the other is what produced an
+    attribute error on every deal that actually had a contact.
+
+    Contacts HubSpot does not return are simply absent from the mapping; the
+    caller compares requested against returned and treats a shortfall as a
+    lookup failure rather than as an empty successful attribution.
+
+    Raises ``ContactBatchReadError`` on API failure. Read-only — NEVER writes to
+    HubSpot.
+    """
+    if not contact_ids:
+        return {}
+    ids = [str(c) for c in contact_ids if c not in (None, "")]
+    if not ids:
+        return {}
+
+    client = get_client()
+    out: dict = {}
+    for i in range(0, len(ids), 100):   # HubSpot batch read: max 100 ids/call
+        batch = ids[i:i + 100]
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = client.crm.contacts.batch_api.read(
+                    batch_read_input_simple_public_object_id={
+                        "properties": DEAL_ATTRIBUTION_CONTACT_PROPERTIES,
+                        "inputs": [{"id": cid} for cid in batch],
+                    }
+                )
+                break
+            except (ApiException, requests.exceptions.RequestException) as exc:
+                if attempt < MAX_RETRIES:
+                    time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                    continue
+                raise ContactBatchReadError(
+                    f"contact attribution batch read failed: {exc}") from exc
+        for obj in (getattr(resp, "results", None) or []):
+            d = obj.to_dict() if hasattr(obj, "to_dict") else dict(obj)
+            cid = str(d.get("id"))
+            out[cid] = {"id": cid, "properties": d.get("properties") or {}}
+    return out
 
 
 class DealAssociationLookupError(RuntimeError):
@@ -1254,7 +1333,14 @@ def pull_deals_for_ledger(
     stages: list | None = None,
     page_limit: int | None = None,
 ) -> dict:
-    """Read every tracked deal, optionally only those modified since a watermark.
+    """Read EVERY deal, optionally only those modified since a watermark.
+
+    No stage filter is applied by default. A deal whose stage id is absent from
+    ``DEAL_STAGE_MAP`` is still ingested and labelled ``Unknown stage (<id>)``
+    downstream: the map is a display vocabulary, and filtering the population on
+    it would drop revenue for any stage added in HubSpot after this code was
+    written. Pass ``stages`` explicitly to narrow the read (tests, targeted
+    backfills).
 
     Incremental sync is driven by ``hs_lastmodifieddate``, NOT by creation
     recency: a deal created two years ago and closed today must be re-read today.
@@ -1264,13 +1350,19 @@ def pull_deals_for_ledger(
     must then record a PARTIAL sync rather than a successful zero-row result.
     """
     client = get_client()
-    wanted_stages = stages if stages is not None else ALL_TRACKED_DEAL_STAGES
 
-    filters = [{"propertyName": "dealstage", "operator": "IN",
-                "values": wanted_stages}]
+    filters = []
+    if stages:
+        filters.append({"propertyName": "dealstage", "operator": "IN",
+                        "values": list(stages)})
     if modified_since_ms is not None:
         filters.append({"propertyName": "hs_lastmodifieddate",
                         "operator": "GTE", "value": str(int(modified_since_ms))})
+    if not filters:
+        # The search API needs at least one predicate. `>= epoch 0` matches
+        # every deal, so this is a full read, not a narrowing.
+        filters.append({"propertyName": "hs_lastmodifieddate",
+                        "operator": "GTE", "value": "0"})
 
     deals: list = []
     pages = 0

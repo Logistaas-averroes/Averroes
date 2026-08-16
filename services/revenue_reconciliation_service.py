@@ -18,14 +18,27 @@ So this service itemizes:
     structurally excludes (PR-ADS-153A §9.2) — that exclusion is the whole
     reason this PR exists.
   * **legacy_only**     — a deal a legacy ledger has and the canonical ledger
-    does not. NOT expected: it means the canonical sync missed something.
-  * **won_disagreement** — the ledgers disagree about whether a deal is won.
-    Usually the legacy `ILIKE '%won%'` predicate or the old unknown-stage→won
-    default counting a non-won deal as revenue.
-  * **amount_disagreement** — same deal, different money. Usually the legacy
-    unverified-USD assumption versus canonical fail-closed currency.
+    does not hold AT ALL, in any state. Never expected: it means the canonical
+    sync missed something.
+  * **won_disagreement** — the canonical ledger HOLDS the deal, but it and the
+    legacy ledger disagree about whether it is won. Expected when the legacy
+    `ILIKE '%won%'` predicate or the old unknown-stage→won default counted a
+    deal HubSpot says is not won; NOT expected when canonical simply does not
+    know the won state, or dates the close outside the window.
+  * **amount_disagreement** — same deal, different money. Expected when the
+    legacy unverified-USD assumption meets canonical fail-closed currency;
+    not expected when both sides claim a proven USD figure and still differ.
   * **duplicate_legacy_rows** — one deal held as several rows by
-    `gclid_attribution`'s SHA1 attribution key.
+    `gclid_attribution`'s SHA1 attribution key, within the same window.
+
+Splitting `legacy_only` from `won_disagreement` is the point of the identity
+read: "the sync missed this deal" and "the two ledgers classify this deal
+differently" have completely different remediations, and collapsing them made
+the gate unable to say which had happened.
+
+Every itemized difference carries ``expected``. The gate fails on every
+difference that is NOT expected — an unexplained difference is precisely what
+PR-ADS-153E-B cannot migrate through.
 
 Read-only. No external API calls. Carries no contact names, emails or full
 GCLIDs — a GCLID is reported only as present/absent, because reconciliation
@@ -41,6 +54,39 @@ log = logging.getLogger(__name__)
 # Money below this is treated as equal — floating point and rounding differences
 # between lineages are not findings. Anything at or above it is itemized.
 AMOUNT_TOLERANCE_USD = 0.01
+
+# ── Difference reasons ───────────────────────────────────────────────────────
+# canonical_only
+REASON_NON_GCLID_EXCLUDED = "non_gclid_deal_excluded_by_legacy_ledger"
+REASON_GCLID_DEAL_MISSING_FROM_LEGACY = "gclid_won_deal_missing_from_legacy_ledger"
+REASON_WON_DEAL_MISSING_FROM_LEGACY = "canonical_won_deal_missing_from_legacy_ledger"
+# legacy_only
+REASON_MISSING_FROM_CANONICAL = "missing_from_canonical_ledger"
+# won_disagreement
+REASON_LEGACY_PREDICATE_FALSE_POSITIVE = "legacy_predicate_counted_non_won_deal"
+REASON_CANONICAL_WON_UNKNOWN = "canonical_won_state_unknown"
+REASON_CLOSE_DATE_OUTSIDE_WINDOW = "canonical_close_date_outside_window"
+# amount_disagreement
+REASON_AMOUNT_PROVEN_BOTH_SIDES = "both_ledgers_claim_a_proven_usd_amount"
+
+# The two differences this PR exists to produce. Everything else is unexplained
+# and fails the gate.
+EXPECTED_REASONS = frozenset({
+    # The defect being fixed: the GCLID ledger structurally cannot hold a deal
+    # with no click evidence.
+    REASON_NON_GCLID_EXCLUDED,
+    # Canonical withholds a value legacy asserted without proof, or converts one
+    # legacy read as USD. Prefixed reasons are matched separately.
+    REASON_LEGACY_PREDICATE_FALSE_POSITIVE,
+})
+
+# Amount differences explained by the currency doctrine itself.
+_EXPECTED_AMOUNT_PREFIXES = ("canonical_currency_", "currency_resolution_differs:")
+
+
+def _is_expected(reason: str) -> bool:
+    return (reason in EXPECTED_REASONS
+            or any(str(reason).startswith(p) for p in _EXPECTED_AMOUNT_PREFIXES))
 
 
 def _unavailable(reason: str) -> dict:
@@ -84,15 +130,27 @@ def _fetch_legacy_gclid_deals(start, end) -> dict:
                 cols = [d[0] for d in cur.description]
                 rows = [dict(zip(cols, r)) for r in cur.fetchall()]
 
+                # Bounded by the SAME window as the read above. An unbounded
+                # GROUP BY over the whole legacy table turns this audit into a
+                # full-table scan that grows without limit, and it would also
+                # report duplicates for deals outside the window being
+                # reconciled. The won predicate is deliberately NOT applied: a
+                # relabelled duplicate row can carry a different stage label, and
+                # excluding it would hide the very defect being counted.
                 cur.execute(
                     """
                     SELECT deal_id, COUNT(*) AS rows_held
                     FROM gclid_attribution
                     WHERE deal_id IS NOT NULL
+                      AND deal_close_date IS NOT NULL
+                      AND (%s::timestamptz IS NULL OR deal_close_date >= %s)
+                      AND (%s::timestamptz IS NULL OR deal_close_date < %s)
                     GROUP BY deal_id HAVING COUNT(*) > 1
                     ORDER BY 2 DESC LIMIT 200
-                    """)
-                dupes = [{"deal_id": r[0], "rows_held": int(r[1])}
+                    """,
+                    (start, start, end, end),
+                )
+                dupes = [{"deal_id": str(r[0]), "rows_held": int(r[1])}
                          for r in cur.fetchall()]
         return {"available": True,
                 "deals": {str(r["deal_id"]): r for r in rows},
@@ -130,54 +188,103 @@ def _fetch_legacy_source_deals(start, end) -> dict:
         return _unavailable(str(exc))
 
 
-def _diff_against_legacy(canonical_won: dict, legacy: dict, label: str,
+def _diff_against_legacy(canonical_won: dict, canonical_states: dict,
+                         legacy: dict, label: str,
                          *, expect_gclid_only: bool) -> dict:
-    """Itemize every difference between canonical and one legacy ledger."""
+    """Itemize every difference between canonical and one legacy ledger.
+
+    Args:
+        canonical_won: the canonical WON population for the window, by deal id.
+        canonical_states: canonical identity for every deal either side holds,
+            in any state and any window. This is what separates "the sync missed
+            this deal" from "the ledgers classify it differently".
+    """
     legacy_deals = legacy.get("deals") or {}
-    canonical_only, legacy_only, amount_diff = [], [], []
+    canonical_only, legacy_only, won_diff, amount_diff = [], [], [], []
+
+    def _item(payload: dict) -> dict:
+        payload["expected"] = _is_expected(payload["reason"])
+        return payload
 
     for deal_id, row in canonical_won.items():
         if deal_id not in legacy_deals:
-            canonical_only.append({
+            if expect_gclid_only and not row.get("gclid"):
+                # The defect this PR exists to fix: ledger A structurally cannot
+                # hold a deal with no click evidence.
+                reason = REASON_NON_GCLID_EXCLUDED
+            elif expect_gclid_only:
+                # A won deal that DOES carry a GCLID and is still absent is not
+                # explained by that structural exclusion. Something is wrong.
+                reason = REASON_GCLID_DEAL_MISSING_FROM_LEGACY
+            else:
+                reason = REASON_WON_DEAL_MISSING_FROM_LEGACY
+            canonical_only.append(_item({
                 "deal_id": deal_id,
                 "revenue_usd": _f(row.get("revenue_usd")),
                 "currency_status": row.get("currency_status"),
                 "has_gclid": bool(row.get("gclid")),
-                # The expected, designed-for difference: ledger A cannot hold a
-                # deal with no click evidence.
-                "reason": ("non_gclid_deal_excluded_by_legacy_ledger"
-                           if expect_gclid_only and not row.get("gclid")
-                           else "missing_from_legacy_ledger"),
-            })
+                "reason": reason,
+            }))
             continue
         legacy_amount = _f(legacy_deals[deal_id].get("deal_amount_usd"))
         canonical_amount = _f(row.get("revenue_usd"))
         if canonical_amount is None and legacy_amount is not None:
-            amount_diff.append({
+            amount_diff.append(_item({
                 "deal_id": deal_id, "canonical_usd": None,
                 "legacy_usd": legacy_amount,
+                "canonical_currency_status": row.get("currency_status"),
                 "reason": f"canonical_currency_{row.get('currency_reason')}",
-            })
+            }))
         elif (canonical_amount is not None and legacy_amount is not None
               and abs(canonical_amount - legacy_amount) >= AMOUNT_TOLERANCE_USD):
-            amount_diff.append({
+            # A converted amount legitimately differs from a figure legacy read
+            # as USD without checking. Two independently PROVEN USD amounts that
+            # still differ are not explained by the currency doctrine.
+            from analysis.deal_currency import CURRENCY_VERIFIED_USD  # noqa: PLC0415
+
+            status = row.get("currency_status")
+            amount_diff.append(_item({
                 "deal_id": deal_id, "canonical_usd": canonical_amount,
                 "legacy_usd": legacy_amount,
-                "reason": ("currency_resolution_differs:"
-                           f"{row.get('currency_status')}"),
-            })
+                "canonical_currency_status": status,
+                "reason": (REASON_AMOUNT_PROVEN_BOTH_SIDES
+                           if status == CURRENCY_VERIFIED_USD
+                           else f"currency_resolution_differs:{status}"),
+            }))
 
     for deal_id, row in legacy_deals.items():
-        if deal_id not in canonical_won:
-            legacy_only.append({
-                "deal_id": deal_id,
-                "legacy_usd": _f(row.get("deal_amount_usd")),
-                "legacy_stage": row.get("deal_stage"),
-                "legacy_stage_label": row.get("deal_stage_label"),
-                # Either the canonical sync missed it, or the legacy predicate
-                # counted something HubSpot does not consider won.
-                "reason": "legacy_won_not_canonical_won_or_missing_from_ledger",
-            })
+        if deal_id in canonical_won:
+            continue
+        state = canonical_states.get(deal_id)
+        base = {
+            "deal_id": deal_id,
+            "legacy_usd": _f(row.get("deal_amount_usd")),
+            "legacy_stage": row.get("deal_stage"),
+            "legacy_stage_label": row.get("deal_stage_label"),
+        }
+        if state is None:
+            # The canonical ledger has never seen this deal at all.
+            legacy_only.append(_item({**base,
+                                      "reason": REASON_MISSING_FROM_CANONICAL}))
+            continue
+        won = state.get("hs_is_closed_won")
+        if won is False:
+            # HubSpot's own boolean says not won. The legacy `ILIKE '%won%'`
+            # predicate and the unknown-stage→won default are exactly how a
+            # non-won deal became revenue.
+            reason = REASON_LEGACY_PREDICATE_FALSE_POSITIVE
+        elif won is None:
+            reason = REASON_CANONICAL_WON_UNKNOWN
+        else:
+            # Canonically won, but its close date puts it in a different window.
+            reason = REASON_CLOSE_DATE_OUTSIDE_WINDOW
+        won_diff.append(_item({
+            **base,
+            "canonical_is_closed_won": won,
+            "canonical_close_date": state.get("deal_close_date"),
+            "canonical_stage_label": state.get("deal_stage_label"),
+            "reason": reason,
+        }))
 
     return {
         "ledger": label,
@@ -185,6 +292,7 @@ def _diff_against_legacy(canonical_won: dict, legacy: dict, label: str,
         "legacy_deal_count": len(legacy_deals),
         "canonical_only": sorted(canonical_only, key=lambda r: r["deal_id"]),
         "legacy_only": sorted(legacy_only, key=lambda r: r["deal_id"]),
+        "won_disagreement": sorted(won_diff, key=lambda r: r["deal_id"]),
         "amount_disagreement": sorted(amount_diff, key=lambda r: r["deal_id"]),
         "duplicate_legacy_rows": legacy.get("duplicates") or [],
     }
@@ -222,11 +330,27 @@ def build_revenue_reconciliation(window: str = "current_quarter",
     legacy_gclid = _fetch_legacy_gclid_deals(start, end)
     legacy_source = _fetch_legacy_source_deals(start, end)
 
+    # Canonical IDENTITY for every legacy deal not already in the won population
+    # — across ALL states and windows. Without this read the gate cannot tell a
+    # deal the sync missed from a deal the two ledgers merely classify
+    # differently, and would report both as "missing from canonical".
+    lookup_ids = {
+        did
+        for legacy in (legacy_gclid, legacy_source)
+        for did in (legacy.get("deals") or {})
+        if did not in won_rows
+    }
+    states_res = ledger_repo.fetch_deal_states(lookup_ids)
+    if not states_res.get("available"):
+        return {"available": False, "window": window,
+                "reason": "canonical_deal_states_unavailable"}
+    canonical_states = states_res.get("rows") or {}
+
     diffs = [
-        _diff_against_legacy(won_rows, legacy_gclid, "gclid_attribution",
-                             expect_gclid_only=True),
-        _diff_against_legacy(won_rows, legacy_source, "deal_source_attribution",
-                             expect_gclid_only=False),
+        _diff_against_legacy(won_rows, canonical_states, legacy_gclid,
+                             "gclid_attribution", expect_gclid_only=True),
+        _diff_against_legacy(won_rows, canonical_states, legacy_source,
+                             "deal_source_attribution", expect_gclid_only=False),
     ]
 
     violations = _check_invariants(summary, won_rows, diffs, sync_res)
@@ -319,13 +443,30 @@ def _check_invariants(summary: dict, won_rows: dict, diffs: list,
             f"currency completeness misreported: {proven} rows proven vs "
             f"{summary['won_currency_proven']} in summary")
 
-    # A deal the legacy ledger holds and the canonical does not means the sync
-    # is incomplete — the one difference direction that is never expected.
+    # A deal the legacy ledger holds and the canonical does not hold at all
+    # means the sync is incomplete.
     for diff in diffs:
         if diff.get("legacy_only"):
             violations.append(
                 f"{len(diff['legacy_only'])} deal(s) present in "
-                f"{diff['ledger']} but missing from the canonical ledger")
+                f"{diff['ledger']} but missing from the canonical ledger: "
+                + ", ".join(r["deal_id"] for r in diff["legacy_only"][:5]))
+
+        # Every other difference must be EXPLAINED. An unexplained one is a deal
+        # PR-ADS-153E-B would move on a live page with no reason to give.
+        for category in ("canonical_only", "won_disagreement",
+                         "amount_disagreement"):
+            unexplained = [r for r in (diff.get(category) or [])
+                           if not r.get("expected")]
+            if not unexplained:
+                continue
+            by_reason: dict = {}
+            for row in unexplained:
+                by_reason.setdefault(row["reason"], []).append(row["deal_id"])
+            for reason, ids in sorted(by_reason.items()):
+                violations.append(
+                    f"{len(ids)} unexplained {category} difference(s) vs "
+                    f"{diff['ledger']} ({reason}): " + ", ".join(sorted(ids)[:5]))
 
     # Sync coverage must be complete and honest.
     state = sync_res.get("row") or {}
@@ -339,4 +480,11 @@ def _check_invariants(summary: dict, won_rows: dict, diffs: list,
     return violations
 
 
-__all__ = ["AMOUNT_TOLERANCE_USD", "build_revenue_reconciliation"]
+__all__ = [
+    "AMOUNT_TOLERANCE_USD", "EXPECTED_REASONS",
+    "REASON_NON_GCLID_EXCLUDED", "REASON_GCLID_DEAL_MISSING_FROM_LEGACY",
+    "REASON_WON_DEAL_MISSING_FROM_LEGACY", "REASON_MISSING_FROM_CANONICAL",
+    "REASON_LEGACY_PREDICATE_FALSE_POSITIVE", "REASON_CANONICAL_WON_UNKNOWN",
+    "REASON_CLOSE_DATE_OUTSIDE_WINDOW", "REASON_AMOUNT_PROVEN_BOTH_SIDES",
+    "build_revenue_reconciliation",
+]

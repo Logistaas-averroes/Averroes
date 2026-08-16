@@ -25,9 +25,14 @@ in 153E-A the ledger is populated and reconciled but read by no page.
 
 Failure posture
 ---------------
-A failed or partial sync is reported AS failed/partial and does not advance the
-watermark. It must never look like a successful zero-row result — that is how a
-silent revenue gap starts.
+A failed or partial sync is reported AS failed/partial. It must never look like
+a successful zero-row result — that is how a silent revenue gap starts. This
+covers PERSISTENCE too: a database write that fails is a failed sync, not a
+sync that happened to write nothing.
+
+The watermark advances only over deals that were fully processed AND committed.
+A capped run checkpoints at the end of that clean prefix so the next run resumes
+after it, instead of reprocessing the first page forever.
 """
 
 from __future__ import annotations
@@ -52,7 +57,9 @@ WATERMARK_OVERLAP_MINUTES = 15
 
 # Cap the association lookups a single run performs, so one enormous backfill
 # page cannot hold the scheduler indefinitely. Reaching the cap yields a PARTIAL
-# sync (disclosed), never a silently truncated success.
+# sync (disclosed), never a silently truncated success — and it CHECKPOINTS at
+# the last fully committed deal so the next run resumes there. Deals arrive in
+# ascending hs_lastmodifieddate order, which is what makes that prefix safe.
 DEFAULT_MAX_ASSOCIATION_LOOKUPS = 5000
 
 
@@ -126,7 +133,15 @@ def _contact_evidence(contact_props: dict, association: dict) -> dict:
 
 
 def _fx_rates_for(currencies: set, start_iso: str | None, end_iso: str | None) -> dict:
-    """Local close-date FX rates per currency. Never fetches externally."""
+    """``{CURRENCY: {iso_date: rate}}`` from the LOCAL fx_rates table.
+
+    Handed to ``resolve_deal_currency`` whole, so that module can look up the
+    rate map for the currency an amount is actually in. The service deliberately
+    does not pre-select a map: doing so is what let a GBP amount be converted at
+    the home currency's rate when GBP rates were missing.
+
+    Never fetches externally.
+    """
     from datetime import date as _date
 
     import db.revenue_repository as revenue_repo  # noqa: PLC0415
@@ -153,7 +168,7 @@ def _fx_rates_for(currencies: set, start_iso: str | None, end_iso: str | None) -
 
 def sync_deals(*, modified_since=None, stages=None, batch_id=None,
                max_association_lookups: int = DEFAULT_MAX_ASSOCIATION_LOOKUPS,
-               full_refresh: bool = False) -> dict:
+               full_refresh: bool = False, bootstrap: bool = False) -> dict:
     """Synchronize deals into the canonical ledger.
 
     Args:
@@ -162,15 +177,18 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
         full_refresh: read every tracked deal regardless of watermark.
 
     Returns ``{available, status, deals_seen, written, skipped_stale,
-    association_failures, pages, complete, watermark, error}`` where ``status``
-    is ``success`` | ``partial`` | ``failed``.
+    association_failures, write_failures, pages, complete, watermark,
+    watermark_is_checkpoint, error}`` where ``status`` is ``success`` |
+    ``partial`` | ``failed``.
     """
     import connectors.hubspot_pull as hubspot  # noqa: PLC0415
     import db.deal_ledger_repository as ledger_repo  # noqa: PLC0415
 
     result = {"available": True, "status": "failed", "deals_seen": 0,
               "written": 0, "skipped_stale": 0, "association_failures": 0,
-              "pages": 0, "complete": False, "watermark": None, "error": None}
+              "write_failures": 0, "pages": 0, "complete": False,
+              "watermark": None, "watermark_is_checkpoint": False,
+              "error": None}
 
     # ── Resolve the incremental window ──────────────────────────────────────
     since_ms = None
@@ -234,49 +252,70 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
 
     lookups = 0
     association_failures = 0
+    write_failures = 0
     written = 0
     skipped_stale = 0
     watermark = None
+    # The end of the contiguous prefix of deals that were fully resolved AND
+    # committed. Safe to resume from precisely because the read is sorted
+    # ascending by hs_lastmodifieddate.
+    checkpoint = None
+    prefix_clean = True
     truncated = False
+    first_write_error = None
 
     for deal in normalized:
         deal_id = deal["deal_id"]
 
+        # The cap ends this run; it does not turn the remaining deals into
+        # failed lookups. Writing `lookup_failed` rows for deals we never even
+        # attempted would manufacture evidence of a failure that never happened.
+        if lookups >= max_association_lookups:
+            truncated = True
+            break
+
         # ── Associations ────────────────────────────────────────────────────
         lookup_failed = False
         contacts: list = []
-        if lookups >= max_association_lookups:
-            truncated = True
+        lookups += 1
+        try:
+            assoc = hubspot.fetch_deal_associations(deal_id)
+            raw_assocs = assoc.get("contacts") or []
+            if raw_assocs:
+                contact_ids = [str(a["contact_id"]) for a in raw_assocs]
+                try:
+                    # DEDICATED attribution reader. `pull_contacts_by_ids` is the
+                    # PR-ADS-115 lead-date reader and returns createdate strings;
+                    # its contract is not this one.
+                    by_id = hubspot.pull_contact_attribution_properties(
+                        contact_ids) or {}
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[deal-sync] contact attribution read failed "
+                                "for %s: %s", deal_id, exc)
+                    lookup_failed = True
+                    by_id = {}
+                missing = [c for c in contact_ids if c not in by_id]
+                if missing and not lookup_failed:
+                    # An incomplete batch is a lookup failure, not a set of
+                    # contacts that happen to have no source.
+                    log.warning("[deal-sync] contact attribution incomplete for "
+                                "%s: %d of %d contact(s) missing", deal_id,
+                                len(missing), len(contact_ids))
+                    lookup_failed = True
+                if not lookup_failed:
+                    contacts = [
+                        _contact_evidence(
+                            (by_id.get(str(a["contact_id"])) or {}).get(
+                                "properties") or {},
+                            a)
+                        for a in raw_assocs
+                    ]
+        except Exception as exc:  # noqa: BLE001
+            # Includes DealAssociationLookupError. A failure is NOT an empty
+            # result — the ledger keeps its previous evidence.
+            log.warning("[deal-sync] association lookup failed for %s: %s",
+                        deal_id, exc)
             lookup_failed = True
-        else:
-            lookups += 1
-            try:
-                assoc = hubspot.fetch_deal_associations(deal_id)
-                raw_assocs = assoc.get("contacts") or []
-                if raw_assocs:
-                    contact_ids = [a["contact_id"] for a in raw_assocs]
-                    props_by_id = {}
-                    try:
-                        props_by_id = hubspot.pull_contacts_by_ids(contact_ids) or {}
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("[deal-sync] contact props failed for %s: %s",
-                                    deal_id, exc)
-                        lookup_failed = True
-                    if not lookup_failed:
-                        contacts = [
-                            _contact_evidence(
-                                (props_by_id.get(str(a["contact_id"])) or {}).get(
-                                    "properties",
-                                    props_by_id.get(str(a["contact_id"])) or {}),
-                                a)
-                            for a in raw_assocs
-                        ]
-            except Exception as exc:  # noqa: BLE001
-                # Includes DealAssociationLookupError. A failure is NOT an empty
-                # result — the ledger keeps its previous evidence.
-                log.warning("[deal-sync] association lookup failed for %s: %s",
-                            deal_id, exc)
-                lookup_failed = True
 
         if lookup_failed:
             association_failures += 1
@@ -285,10 +324,9 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
         evidence = primary_contact_evidence(contacts, resolution)
 
         # ── Currency ────────────────────────────────────────────────────────
-        ccy = (deal.get("deal_currency_code") or "").upper() or None
-        rates = fx_by_currency.get(ccy, {}) if ccy else {}
-        if not rates and home.get("verified") and home.get("home_currency_code"):
-            rates = fx_by_currency.get(str(home["home_currency_code"]).upper(), {})
+        # The WHOLE rate table is passed through. The currency module selects the
+        # amount source and its matching rate map together, so a missing GBP rate
+        # can never be substituted with the home currency's.
         currency = resolve_deal_currency(
             amount_raw=deal.get("amount_raw"),
             deal_currency_code=deal.get("deal_currency_code"),
@@ -296,7 +334,7 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
             home_currency_code=home.get("home_currency_code"),
             home_currency_verified=bool(home.get("verified")),
             close_date_iso=_close_date_iso(deal.get("deal_close_date")),
-            fx_rates=rates,
+            fx_rates_by_currency=fx_by_currency,
         )
 
         row = {
@@ -326,6 +364,18 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
             row, associations=contacts,
             # A failed lookup writes NO associations, preserving prior evidence.
             associations_observed=not lookup_failed)
+
+        # A persistence failure is a SYNC failure. Counting it as zero rows
+        # written and moving on is how a run reports success while the ledger
+        # silently loses a deal.
+        write_ok = bool(write.get("available"))
+        if not write_ok:
+            write_failures += 1
+            if first_write_error is None:
+                first_write_error = (write.get("error") or write.get("reason")
+                                     or "ledger_write_failed")
+            log.error("[deal-sync] ledger write failed for %s: %s",
+                      deal_id, first_write_error)
         written += int(write.get("written") or 0)
         skipped_stale += int(write.get("skipped_stale") or 0)
 
@@ -333,39 +383,87 @@ def sync_deals(*, modified_since=None, stages=None, batch_id=None,
         if modified and (watermark is None or str(modified) > str(watermark)):
             watermark = modified
 
+        # The resume checkpoint only extends while EVERY deal so far was fully
+        # resolved and committed. Once one is not, the prefix is closed: moving
+        # past a deal whose associations we never read would strand it.
+        if write_ok and not lookup_failed and prefix_clean:
+            if modified and (checkpoint is None or str(modified) > str(checkpoint)):
+                checkpoint = modified
+        elif not (write_ok and not lookup_failed):
+            prefix_clean = False
+
     complete = bool(pull.get("complete")) and not truncated
-    status = "success" if complete and association_failures == 0 else "partial"
+    status = "success" if (complete and association_failures == 0
+                           and write_failures == 0) else "partial"
     if not pull.get("complete"):
         status = "partial"
+    # Nothing persisted at all: the run learned nothing durable, so it is failed
+    # rather than partially successful.
+    if write_failures and written == 0 and skipped_stale == 0:
+        status = "failed"
+
+    errors = [e for e in (
+        pull.get("error"),
+        "association_lookup_cap_reached" if truncated else None,
+        (f"ledger_write_failed:{first_write_error}" if write_failures else None),
+    ) if e]
+
+    # On success the watermark is the run's maximum. Otherwise it may only
+    # advance to the clean prefix — and only when the run was cut short cleanly
+    # rather than by a failure.
+    if status == "success":
+        state_watermark, is_checkpoint = watermark, False
+    elif status == "partial" and checkpoint is not None:
+        state_watermark, is_checkpoint = checkpoint, True
+    else:
+        state_watermark, is_checkpoint = None, False
 
     result.update({
         "status": status, "written": written, "skipped_stale": skipped_stale,
-        "association_failures": association_failures, "complete": complete,
-        "watermark": watermark,
-        "error": pull.get("error") or ("association_lookup_cap_reached"
-                                       if truncated else None),
+        "association_failures": association_failures,
+        "write_failures": write_failures, "complete": complete,
+        "watermark": state_watermark, "watermark_is_checkpoint": is_checkpoint,
+        "error": "; ".join(errors) if errors else None,
     })
 
-    ledger_repo.record_sync_state(
-        status=status, watermark=watermark, deals_seen=len(normalized),
+    state = ledger_repo.record_sync_state(
+        status=status, watermark=state_watermark,
+        watermark_is_checkpoint=is_checkpoint, deals_seen=len(normalized),
         pages_fetched=result["pages"], association_failures=association_failures,
         error=result["error"], batch_id=batch_id,
-        bootstrap_status="complete" if (full_refresh and complete) else None)
+        bootstrap_status=(("complete" if (complete and status == "success")
+                           else "in_progress") if bootstrap else None))
+    if not state.get("available"):
+        # Coverage we could not record is coverage we cannot claim.
+        result["status"] = "failed"
+        result["error"] = "; ".join(
+            errors + [f"sync_state_write_failed:{state.get('error') or state.get('reason')}"])
 
     log.info("[deal-sync] status=%s seen=%d written=%d stale_skipped=%d "
-             "assoc_failures=%d", status, len(normalized), written,
-             skipped_stale, association_failures)
+             "assoc_failures=%d write_failures=%d", result["status"],
+             len(normalized), written, skipped_stale, association_failures,
+             write_failures)
     return result
 
 
-def backfill_deals(*, batch_id=None) -> dict:
-    """Resumable historical backfill over every tracked deal state.
+def backfill_deals(*, batch_id=None, restart: bool = False,
+                   max_association_lookups: int = DEFAULT_MAX_ASSOCIATION_LOOKUPS
+                   ) -> dict:
+    """Resumable historical backfill over every deal state.
 
-    Reads HubSpot read-only and writes only local PostgreSQL. Safe to re-run:
-    the ledger upsert is idempotent by ``deal_id`` and monotonic, so a repeat
+    RESUMES by default. A pass that hits the association cap checkpoints at its
+    last committed deal, so the next call picks up from there instead of paging
+    through the same first 5,000 deals on every attempt — which is what made the
+    previous implementation unable to finish a large portal at all.
+
+    ``restart=True`` ignores the checkpoint and re-reads everything. Safe, just
+    slower: the upsert is idempotent by ``deal_id`` and monotonic, so a repeat
     pass cannot duplicate a deal or revert a newer state.
+
+    Reads HubSpot read-only and writes only local PostgreSQL.
     """
-    return sync_deals(full_refresh=True, batch_id=batch_id)
+    return sync_deals(full_refresh=restart, bootstrap=True, batch_id=batch_id,
+                      max_association_lookups=max_association_lookups)
 
 
 __all__ = [

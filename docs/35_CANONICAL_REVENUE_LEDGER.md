@@ -101,6 +101,10 @@ Rules:
   amount in an unknown currency.
 * Conversion uses the existing local `fx_rates` contract — the same fail-closed
   posture spend already uses. **Services never fetch FX externally.**
+* An amount is converted **only** at its own currency's rate. The resolver
+  receives the whole `{currency: {date: rate}}` table and selects the amount
+  source and its rate map together, so a missing GBP rate can never be filled in
+  with the home currency's EUR rate. Missing rate → `unavailable`.
 * An unknown currency **never becomes zero**. Zero is a claim the deal was worth
   nothing; NULL is the truth that we do not know.
 * Currencies are never mixed inside one total. `amount_raw_total` is reported
@@ -134,11 +138,37 @@ An **ambiguous** deal stays in the ledger and contributes NO attribution evidenc
 to its row, while the bridge retains every candidate so the conflict is
 explainable.
 
-A **failed lookup** is categorically distinct from a successful lookup that found
-nothing. `lookup_failed` → `unavailable`, never `unclassified` (a conclusion we
-did not reach), and the write path leaves the previous successful associations
-completely untouched. Losing attribution because an API call timed out would
-silently move revenue between sources.
+### Contact evidence is read by a dedicated connector function
+
+`pull_contact_attribution_properties` returns
+`{contact_id: {"id": …, "properties": {…}}}` and reads only the seven
+attribution properties — no names, no email addresses. It is deliberately
+separate from `pull_contacts_by_ids`, the PR-ADS-115 lead-date reader that
+returns `{contact_id: createdate}`; the two contracts are not interchangeable.
+
+A contact HubSpot does not return is **missing evidence**, not a contact with no
+source: an incomplete batch is treated as a lookup failure.
+
+### A failed lookup
+
+Categorically distinct from a successful lookup that found nothing.
+`lookup_failed` → `unavailable`, never `unclassified` (a conclusion we did not
+reach). Losing attribution because an API call timed out would silently move
+revenue between sources, so on an EXISTING row the write path preserves every
+association-derived field:
+
+`primary_contact_id` · `association_count` · `association_status` ·
+`association_reason` · `gclid` · `campaign_name_raw` · `keyword_raw` ·
+`country_raw` · `source_primary_raw` · `source_detail_raw` ·
+`acquisition_group` · `attribution_status` · `attribution_reason`
+
+Deal facts read successfully in the same run — stage, amount, currency,
+last-modified — still update. The bridge is untouched. The failed attempt is
+counted in `hubspot_deal_sync_state.association_failures` and reported by the
+audit, so preservation never hides it.
+
+A deal with **no previous row** has nothing to preserve, so `lookup_failed` /
+`unavailable` is stored.
 
 ---
 
@@ -160,8 +190,14 @@ that was invisible.
 
 ## 7. Stage handling
 
-All nine pipeline stages are synced: Proposal, In Trials, Pricing Acceptance,
-Invoice Agreement Sent, Unresponsive, **Won**, Lost, **Downgrade**, **Churn**.
+Every deal is synced, in every stage. `DEAL_STAGE_MAP` labels the nine known
+stages — Proposal, In Trials, Pricing Acceptance, Invoice Agreement Sent,
+Unresponsive, **Won**, Lost, **Downgrade**, **Churn** — but it is a **display
+vocabulary, not a population filter**. Ingestion applies no stage filter at all;
+a stage id the map does not know is stored and labelled `Unknown stage (<id>)`.
+Gating the read on the map would make the ledger silently incomplete the moment
+someone adds a pipeline stage in HubSpot.
+
 Previously only Won was fetched, so open pipeline was invisible and churn could
 never reverse a customer.
 
@@ -183,9 +219,26 @@ For this PR:
 | `association_status = lookup_failed` | we learned nothing | recorded as unclassified, or allowed to erase prior evidence |
 | `hs_is_closed_won IS NULL` | HubSpot did not say | treated as won |
 | sync `partial` / `failed` | incomplete read | reported as a successful zero-row result |
+| a ledger write that FAILED | nothing was persisted | counted as "zero rows written" and passed over |
 
-The sync watermark advances **only** on a fully successful run, so a partial run
-re-reads its range rather than skipping deals it never saw.
+**Persistence fails closed.** `upsert_deal` and `record_sync_state` return
+`available: False` on a database error, the sync inspects every result, and a
+run with any write failure reports `partial` — or `failed`, when nothing
+persisted at all. Coverage that could not be recorded is coverage the run does
+not get to claim. The scheduler marks the batch failed accordingly.
+
+### Watermark
+
+Advances on a fully successful run, or to a **clean prefix checkpoint**. Deals
+are read ascending by `hs_lastmodifieddate`, so the last deal that was both
+fully resolved and committed is a safe resume point; the prefix closes at the
+first association failure or write failure. A failed run never advances.
+
+That checkpoint is what makes `backfill_deals()` finishable: the association-
+lookup cap ends a pass at its last committed deal and the next pass resumes
+there, instead of paging through the same first 5,000 deals forever. Deals a
+capped run never reached are not written at all — inventing `lookup_failed` rows
+for them would manufacture evidence of a failure that never happened.
 
 ---
 
@@ -195,8 +248,9 @@ re-reads its range rather than skipping deals it never saw.
 |---|---|
 | Incremental driver | `hs_lastmodifieddate` with a 15-minute overlap — never creation recency. A deal created two years ago and closed today must be re-read today. |
 | Ordering | ascending by last-modified, so a retried page cannot skip records |
-| Replay safety | monotonic: an older observation cannot overwrite newer state |
-| Backfill | `backfill_deals()` — resumable, idempotent, all stages |
+| Replay safety | monotonic: an older observation cannot overwrite newer state, and an UNKNOWN incoming timestamp cannot overwrite a known one |
+| Atomicity | the association bridge is replaced only when the ledger update was actually applied — a stale replay changes neither |
+| Backfill | `backfill_deals()` — resumable via the checkpoint, idempotent, every stage |
 | Scheduler role | orchestration only; **no** revenue, currency, won-state or attribution logic |
 | Flag of failure | a failed sync is recorded `failed`, added to `errors`, and its batch marked failed |
 
@@ -227,15 +281,34 @@ reported; a deal present in a legacy ledger but missing from canonical.
 Also exposed read-only at `GET /api/audit/revenue-truth` (admin).
 
 Every legacy-versus-canonical difference is itemized **by deal id with a
-reason**. "Totals differ" is not an acceptable output — the cutover must be able
-to explain each deal that moves.
+reason**, and carries `expected`. "Totals differ" is not an acceptable output —
+the cutover must be able to explain each deal that moves, so **the gate fails on
+every difference that is not expected.**
 
-Expected differences (not failures):
+Five categories, split by what an operator would actually have to do about them:
 
-* `non_gclid_deal_excluded_by_legacy_ledger` — the defect this PR exists to fix;
-* `canonical_currency_*` — canonical withholds where legacy assumed USD.
+| Category | Meaning | Reason | Expected |
+|---|---|---|---|
+| `canonical_only` | canonical won, legacy has no row | `non_gclid_deal_excluded_by_legacy_ledger` | ✅ the defect being fixed |
+| | | `gclid_won_deal_missing_from_legacy_ledger` | ❌ the GCLID ledger *can* hold it and does not |
+| | | `canonical_won_deal_missing_from_legacy_ledger` | ❌ `deal_source_attribution` is deal-keyed and has no excuse |
+| `legacy_only` | canonical has **no row at all**, in any state | `missing_from_canonical_ledger` | ❌ the sync missed a deal |
+| `won_disagreement` | canonical **holds** the deal, the ledgers classify it differently | `legacy_predicate_counted_non_won_deal` | ✅ the legacy `ILIKE '%won%'` false positive |
+| | | `canonical_won_state_unknown` | ❌ |
+| | | `canonical_close_date_outside_window` | ❌ |
+| `amount_disagreement` | same deal, different money | `canonical_currency_*`, `currency_resolution_differs:*` | ✅ the currency doctrine |
+| | | `both_ledgers_claim_a_proven_usd_amount` | ❌ |
+| `duplicate_legacy_rows` | one deal, several `gclid_attribution` rows | — | the legacy SHA1-key defect, reported |
 
-Never expected: `legacy_only`. That means the canonical sync missed a deal.
+Separating `legacy_only` from `won_disagreement` is why the gate reads canonical
+identity across **all** deal states (`fetch_deal_states`), unbounded by window
+and won-state. "The sync missed this deal" and "the two ledgers classify this
+deal differently" have completely different remediations; collapsing them left
+the gate unable to say which had happened.
+
+The duplicate-row scan is bounded by the same window as the rest of the
+reconciliation — an unbounded `GROUP BY` over the whole legacy table both scans
+without limit and reports deals outside the window being reconciled.
 
 ---
 

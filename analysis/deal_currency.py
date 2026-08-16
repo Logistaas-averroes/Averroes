@@ -30,6 +30,10 @@ Never do any of these:
   * coerce an unknown currency to zero (zero is a *claim* that the deal was
     worth nothing);
   * mix currencies inside one total;
+  * convert an amount at a DIFFERENT currency's rate. The amount source and its
+    rate map are selected together, from one ``{currency: {date: rate}}`` table,
+    so borrowing the home-currency rate for a deal-currency amount is not
+    something this module can express;
   * fetch FX from an external service (spend already proved the local contract
     works — services must not reach the network for rates).
 
@@ -108,7 +112,7 @@ def resolve_deal_currency(
     home_currency_code=None,
     home_currency_verified: bool = False,
     close_date_iso: str | None = None,
-    fx_rates: dict | None = None,
+    fx_rates_by_currency: dict | None = None,
 ) -> dict:
     """Resolve one deal's canonical USD revenue, or explain why it cannot be.
 
@@ -121,13 +125,16 @@ def resolve_deal_currency(
             positively confirmed. Without this, ``amount_in_home_currency`` is
             an amount in an UNKNOWN currency and must not be read as USD.
         close_date_iso: ``YYYY-MM-DD`` — the FX date for a conversion.
-        fx_rates: ``{iso_date: rate}`` mapping the deal currency to USD, from
-            the LOCAL fx_rates table. Never fetched here.
+        fx_rates_by_currency: ``{CURRENCY: {iso_date: rate}}`` — LOCAL
+            currency→USD rates. The map for the currency the amount is actually
+            denominated in is the ONLY map that may convert it; a missing entry
+            yields ``unavailable``, never a neighbouring currency's rate.
 
     Returns ``{revenue_usd, currency_status, currency_reason,
     currency_rule_version, fx_rate_used, fx_rate_date, resolved_currency}``.
     """
-    rates = fx_rates or {}
+    rates_by_ccy = {str(k).upper(): (v or {})
+                    for k, v in (fx_rates_by_currency or {}).items()}
     deal_ccy = _norm_currency(deal_currency_code)
     home_ccy = _norm_currency(home_currency_code)
 
@@ -194,10 +201,15 @@ def resolve_deal_currency(
     if not close_date_iso:
         return _unavailable(REASON_NO_CLOSE_DATE, resolved=convert_ccy)
 
-    rate = rates.get(str(close_date_iso))
+    # The rate map is looked up BY the currency the amount is denominated in.
+    # There is deliberately no fallback to any other currency's map: converting
+    # a GBP amount at a EUR rate produces a number that looks like revenue and
+    # is simply wrong.
+    rate = (rates_by_ccy.get(convert_ccy) or {}).get(str(close_date_iso))
     if rate is None:
         # Same fail-closed posture as spend: a missing daily rate withholds the
-        # value rather than converting at a neighbouring day's rate.
+        # value rather than converting at a neighbouring day's — or another
+        # currency's — rate.
         return _unavailable(REASON_NO_FX_RATE, resolved=convert_ccy)
 
     try:

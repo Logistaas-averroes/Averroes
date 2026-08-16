@@ -24,7 +24,10 @@ deal to a stale stage.
 **Association evidence is never destroyed by a failure.** Associations are
 replaced only inside a transaction that observed them successfully. A failed
 lookup writes no associations at all and leaves the previous successful
-observation standing.
+observation standing — on the bridge AND on the ledger row, whose
+association-derived columns are excluded from the update entirely. Only the
+lookup OUTCOME columns move, so the row reports honestly that this attempt
+learned nothing without pretending the deal suddenly has no campaign or GCLID.
 
 No external API calls. No writes to HubSpot, Google Ads or Mailchimp.
 """
@@ -55,6 +58,25 @@ _LEDGER_COLUMNS = (
     "source_primary_raw", "source_detail_raw", "acquisition_group",
     "attribution_status", "attribution_reason",
     "sync_batch_id", "source_fetched_at", "created_at", "updated_at",
+)
+
+# Columns whose value is DERIVED FROM the deal→contact association lookup. When
+# that lookup fails the sync service has no evidence for any of them and passes
+# NULLs; writing those NULLs would erase a GCLID, campaign or country we had
+# already proven and silently move revenue between sources on the next read.
+# They are therefore dropped from the ON CONFLICT update when the lookup was not
+# observed, exactly as the association bridge is left untouched.
+#
+# The failed ATTEMPT is not lost by preserving them: it is counted in
+# ``hubspot_deal_sync_state.association_failures`` and surfaced by the audit. A
+# deal with no previous row still records `lookup_failed` / `unavailable`,
+# because on INSERT there is nothing to preserve.
+_ASSOCIATION_DERIVED_COLUMNS = (
+    "primary_contact_id", "association_count",
+    "association_status", "association_reason",
+    "gclid", "campaign_name_raw", "keyword_raw", "country_raw",
+    "source_primary_raw", "source_detail_raw", "acquisition_group",
+    "attribution_status", "attribution_reason",
 )
 
 
@@ -104,24 +126,44 @@ def upsert_deal(deal: dict, *, associations: list | None = None,
         deal: a normalized ledger row (see ``_LEDGER_COLUMNS``).
         associations: every observed deal→contact association.
         associations_observed: False when the association lookup FAILED. The
-            bridge is then left completely untouched, preserving the last
-            successful evidence.
+            bridge is then left completely untouched, and the ledger row's
+            association-derived columns (``_ASSOCIATION_DERIVED_COLUMNS``) are
+            excluded from the update, preserving the last successful evidence.
+            Deal facts read successfully in the same run — stage, amount,
+            currency, last-modified — still update.
 
     Monotonic: the update is skipped when the incoming
-    ``hubspot_lastmodified_at`` is strictly older than the stored one.
+    ``hubspot_lastmodified_at`` is older than the stored one, OR when it is
+    unknown and the stored one is known. An unknown timestamp is not evidence of
+    recency, so it may only write a NEW row (or one whose stored timestamp is
+    itself unknown).
 
-    Returns ``{available, written, skipped_stale}``. Never raises.
+    Atomic: the association bridge is replaced ONLY when the ledger update was
+    actually applied. A stale replay therefore leaves the row AND the bridge
+    untouched — replacing associations from an observation the ledger just
+    rejected as old would reintroduce exactly the out-of-order corruption the
+    guard exists to prevent.
+
+    Returns ``{available, written, skipped_stale, error}``. Never raises — but
+    ``available: False`` is a FAILURE the caller must propagate, not a quiet
+    zero-row success.
     """
     deal_id = deal.get("deal_id")
     if not deal_id:
         return {"available": False, "reason": "missing_deal_id", "written": 0,
-                "skipped_stale": 0}
+                "skipped_stale": 0, "error": "missing_deal_id"}
 
     values = [deal.get(col) for col in _LEDGER_COLUMNS
               if col not in ("created_at", "updated_at")]
     insert_cols = [c for c in _LEDGER_COLUMNS if c not in ("created_at", "updated_at")]
     placeholders = ", ".join(["%s"] * len(insert_cols))
     updatable = [c for c in insert_cols if c != "deal_id"]
+    if not associations_observed:
+        # The lookup failed: we observed none of this evidence, so we do not get
+        # to overwrite it. (On INSERT the NULLs are still written — nothing prior
+        # existed to preserve.)
+        updatable = [c for c in updatable
+                     if c not in _ASSOCIATION_DERIVED_COLUMNS]
     set_clause = ",\n                            ".join(
         f"{c} = EXCLUDED.{c}" for c in updatable)
 
@@ -140,28 +182,35 @@ def upsert_deal(deal: dict, *, associations: list | None = None,
                             updated_at = NOW()
                     -- MONOTONIC GUARD. An older replay (a backfill running
                     -- beside an incremental sync, a retried page) must not
-                    -- revert a deal to a stale stage or amount. Unknown
-                    -- timestamps on either side fall through to "apply", so a
-                    -- deal with no modification date is still writable.
+                    -- revert a deal to a stale stage or amount.
+                    --
+                    -- A stored NULL means we never knew the deal's modification
+                    -- time, so anything is at least as good — apply.
+                    -- An INCOMING NULL, however, is NOT permission to overwrite
+                    -- a known timestamp: "we don't know when this was modified"
+                    -- cannot outrank "we know it was modified on Tuesday".
                     WHERE {LEDGER_TABLE}.hubspot_lastmodified_at IS NULL
-                       OR EXCLUDED.hubspot_lastmodified_at IS NULL
-                       OR EXCLUDED.hubspot_lastmodified_at
-                          >= {LEDGER_TABLE}.hubspot_lastmodified_at
+                       OR (EXCLUDED.hubspot_lastmodified_at IS NOT NULL
+                           AND EXCLUDED.hubspot_lastmodified_at
+                               >= {LEDGER_TABLE}.hubspot_lastmodified_at)
                     RETURNING deal_id
                     """,
                     tuple(values),
                 )
                 applied = cur.fetchone() is not None
 
-                if associations_observed:
+                # Associations follow the ledger row. If the row was rejected as
+                # stale, this observation is stale too and must not replace the
+                # bridge.
+                if applied and associations_observed:
                     _replace_associations(cur, str(deal_id), associations or [],
                                           deal.get("sync_batch_id"))
             conn.commit()
         return {"available": True, "written": 1 if applied else 0,
-                "skipped_stale": 0 if applied else 1}
+                "skipped_stale": 0 if applied else 1, "error": None}
     except Exception as exc:  # noqa: BLE001
         log.error("upsert_deal failed for %s: %s", deal_id, exc)
-        return _unavailable(written=0, skipped_stale=0)
+        return _unavailable(written=0, skipped_stale=0, error=str(exc))
 
 
 def _replace_associations(cur, deal_id: str, associations: list,
@@ -229,14 +278,26 @@ def _replace_associations(cur, deal_id: str, associations: list,
 def record_sync_state(*, status: str, watermark=None, deals_seen: int = 0,
                       pages_fetched: int = 0, association_failures: int = 0,
                       error: str | None = None, batch_id=None,
-                      bootstrap_status: str | None = None) -> dict:
+                      bootstrap_status: str | None = None,
+                      watermark_is_checkpoint: bool = False) -> dict:
     """Record the outcome of a sync attempt.
 
-    The watermark advances ONLY on a fully successful sync. A partial or failed
-    run leaves it where it was, so the next run re-reads the same range rather
-    than skipping past deals it never saw.
+    The watermark advances on a fully successful sync, or — when
+    ``watermark_is_checkpoint`` — to the end of a CLEANLY PROCESSED PREFIX of a
+    capped run. Deals are read in ascending ``hs_lastmodifieddate`` order, so a
+    checkpoint at the last fully committed deal skips nothing: it is the
+    difference between a capped backfill that resumes and one that reprocesses
+    its first page forever.
+
+    A failed run, or a partial run with no clean prefix, leaves the watermark
+    where it was.
+
+    Returns ``{available}``; ``available: False`` is a FAILURE the caller must
+    propagate rather than treat as a recorded success.
     """
-    advance = status == "success" and watermark is not None
+    advance = watermark is not None and (
+        status == "success"
+        or (status == "partial" and watermark_is_checkpoint))
     try:
         with get_conn() as conn:
             if conn is None:
@@ -275,10 +336,10 @@ def record_sync_state(*, status: str, watermark=None, deals_seen: int = 0,
                      int(association_failures), batch_id, advance),
                 )
             conn.commit()
-        return {"available": True}
+        return {"available": True, "error": None}
     except Exception as exc:  # noqa: BLE001
         log.error("record_sync_state failed: %s", exc)
-        return _unavailable()
+        return _unavailable(error=str(exc))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -441,6 +502,41 @@ def fetch_ledger_rows(start=None, end=None, *, won_only: bool = False,
     except Exception as exc:  # noqa: BLE001
         log.warning("fetch_ledger_rows failed: %s", exc)
         return _unavailable(rows=[])
+
+
+def fetch_deal_states(deal_ids) -> dict:
+    """Canonical IDENTITY for a specific set of deals, across every state.
+
+    Unbounded by window and by won-state on purpose. It answers one question the
+    windowed won-population read cannot: does the canonical ledger hold this deal
+    AT ALL? Without it, a deal the canonical sync genuinely missed and a deal it
+    holds but classifies differently are indistinguishable — and only the first
+    means the sync is incomplete.
+    """
+    ids = sorted({str(d) for d in (deal_ids or []) if d not in (None, "")})
+    if not ids:
+        return {"available": True, "rows": {}}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows={})
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT deal_id, hs_is_closed, hs_is_closed_won,
+                           deal_close_date, deal_stage_id, deal_stage_label,
+                           revenue_usd, currency_status, currency_reason
+                    FROM {LEDGER_TABLE}
+                    WHERE deal_id = ANY(%s)
+                    """,
+                    (ids,),
+                )
+                rows = [_normalise(r) for r in _rows_as_dicts(cur)]
+        return {"available": True,
+                "rows": {str(r["deal_id"]): r for r in rows}}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("fetch_deal_states failed: %s", exc)
+        return _unavailable(rows={})
 
 
 def fetch_stage_breakdown() -> dict:

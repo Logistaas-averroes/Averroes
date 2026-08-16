@@ -104,11 +104,14 @@ class _PgCluster:
         self.url = None
 
     def start(self):
-        r = _run(["sudo", "-u", "postgres", os.path.join(_PG_BIN, "initdb"),
+        # Every sudo here passes -n for the same reason the skip probe does: a
+        # password-protected sudo must fail immediately, not block the suite on
+        # an invisible prompt with no tty to answer it.
+        r = _run(["sudo", "-n", "-u", "postgres", os.path.join(_PG_BIN, "initdb"),
                   "-D", self.data, "-A", "trust", "-E", "UTF8"])
         if r.returncode != 0:
             raise RuntimeError(f"initdb failed: {r.stderr}")
-        r = _run(["sudo", "-u", "postgres", os.path.join(_PG_BIN, "pg_ctl"),
+        r = _run(["sudo", "-n", "-u", "postgres", os.path.join(_PG_BIN, "pg_ctl"),
                   "-D", self.data, "-l", os.path.join(self.tmp, "log"), "-w",
                   "-o", f"-p {self.port} -k {self.tmp} -h 127.0.0.1", "start"])
         if r.returncode != 0:
@@ -134,7 +137,7 @@ class _PgCluster:
         return psycopg2.connect(self.url)
 
     def stop(self):
-        _run(["sudo", "-u", "postgres", os.path.join(_PG_BIN, "pg_ctl"),
+        _run(["sudo", "-n", "-u", "postgres", os.path.join(_PG_BIN, "pg_ctl"),
               "-D", self.data, "-w", "stop"])
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -335,6 +338,65 @@ def test_15_older_replay_cannot_overwrite_newer_state(pg):
     assert row["deal_stage_label"] == "Deal Won / Payment Received"
 
 
+def test_15c_a_stale_replay_leaves_the_ASSOCIATION_BRIDGE_untouched(pg):
+    """The bridge follows the ledger row. Replacing associations from an
+    observation the ledger just rejected as old reintroduces exactly the
+    out-of-order corruption the monotonic guard exists to prevent."""
+    from db import deal_ledger_repository as repo
+
+    repo.upsert_deal(_ledger_row("D1", modified=_T2),
+                     associations=[_assoc("C1", campaign_name_raw="Brand - UK")])
+
+    stale = repo.upsert_deal(
+        _ledger_row("D1", modified=_T0, primary_contact_id="C2"),
+        associations=[_assoc("C2", campaign_name_raw="Old Campaign")])
+
+    assert stale["skipped_stale"] == 1
+    rows = repo.fetch_associations("D1")["rows"]
+    assert [r["contact_id"] for r in rows] == ["C1"], (
+        "a stale replay replaced the association bridge")
+    assert rows[0]["campaign_name_raw"] == "Brand - UK"
+
+
+def test_15d_an_unknown_timestamp_cannot_overwrite_a_known_one(pg):
+    """"We don't know when this was modified" cannot outrank "we know it was
+    modified on Tuesday"."""
+    from db import deal_ledger_repository as repo
+
+    repo.upsert_deal(_ledger_row("D1", modified=_T2, won=True),
+                     associations=[_assoc("C1")])
+
+    nulled = repo.upsert_deal(
+        _ledger_row("D1", modified=None, won=False, stage_id="379124201",
+                    stage_label="Lost Deal"),
+        associations=[_assoc("C1")])
+
+    assert nulled["skipped_stale"] == 1
+    assert nulled["written"] == 0
+    row = repo.fetch_deal("D1")["row"]
+    assert row["hs_is_closed_won"] is True
+    assert row["deal_stage_label"] == "Deal Won / Payment Received"
+
+
+def test_15e_an_unknown_timestamp_still_writes_a_new_row(pg):
+    """A deal HubSpot never gave a modification date for must still be
+    ingestible — the guard withholds overwrites, not the deal itself."""
+    from db import deal_ledger_repository as repo
+
+    first = repo.upsert_deal(_ledger_row("D_NEW", modified=None),
+                             associations=[_assoc("C1")])
+    assert first["written"] == 1
+    assert repo.fetch_deal("D_NEW")["row"]["deal_id"] == "D_NEW"
+
+    # Both sides unknown: still writable, since neither is evidence of recency.
+    again = repo.upsert_deal(
+        _ledger_row("D_NEW", modified=None, stage_label="Churn Deal",
+                    stage_id="379124203", won=False),
+        associations=[_assoc("C1")])
+    assert again["written"] == 1
+    assert repo.fetch_deal("D_NEW")["row"]["deal_stage_label"] == "Churn Deal"
+
+
 def test_15b_newer_state_is_applied(pg):
     from db import deal_ledger_repository as repo
 
@@ -354,23 +416,81 @@ def test_15b_newer_state_is_applied(pg):
 def test_14_failed_association_lookup_preserves_earlier_evidence(pg):
     from db import deal_ledger_repository as repo
 
-    repo.upsert_deal(_ledger_row("D1"),
-                     associations=[_assoc("C1", campaign_name_raw="Brand - UK")])
+    repo.upsert_deal(
+        _ledger_row("D1", gclid="Cj0KEQ", campaign="Brand - UK", country="AE"),
+        associations=[_assoc("C1", gclid="Cj0KEQ",
+                             campaign_name_raw="Brand - UK")])
     assert _count("hubspot_deal_contact_association") == 1
 
-    # A later sync whose association lookup FAILED.
-    repo.upsert_deal(
-        _ledger_row("D1", modified=_T2, primary_contact_id=None,
-                    association_count=None, association_status="lookup_failed",
-                    attribution_status="unavailable"),
-        associations=None, associations_observed=False)
+    # A later sync whose association lookup FAILED. This is EXACTLY the row the
+    # sync service builds in that case: `primary_contact_evidence` returns an
+    # all-None evidence block, so every association-derived column arrives NULL.
+    # The deal facts (stage, amount, currency) were read successfully and must
+    # still update; the evidence must not.
+    failed = _ledger_row("D1", modified=_T2, amount=2500.0, revenue_usd=2500.0,
+                         primary_contact_id=None, association_count=None,
+                         association_status="lookup_failed",
+                         attribution_status="unavailable",
+                         gclid=None, campaign=None, country=None,
+                         acquisition_group=None)
+    failed["source_primary_raw"] = None
+    failed["source_detail_raw"] = None
+    repo.upsert_deal(failed, associations=None, associations_observed=False)
 
     rows = repo.fetch_associations("D1")["rows"]
     assert len(rows) == 1, "prior association evidence was destroyed"
     assert rows[0]["contact_id"] == "C1"
     assert rows[0]["campaign_name_raw"] == "Brand - UK"
-    # The ledger honestly reports that this attempt learned nothing.
-    assert repo.fetch_deal("D1")["row"]["association_status"] == "lookup_failed"
+
+    row = repo.fetch_deal("D1")["row"]
+    # The LEDGER ROW keeps its evidence too — not just the bridge. Zeroing these
+    # would move the deal out of Google Ads on the next read purely because an
+    # API call timed out.
+    assert row["gclid"] == "Cj0KEQ", "a failed lookup erased the ledger GCLID"
+    assert row["campaign_name_raw"] == "Brand - UK"
+    assert row["country_raw"] == "AE"
+    assert row["acquisition_group"] == "google_ads"
+    assert row["source_primary_raw"] == "PAID_SEARCH"
+    assert row["primary_contact_id"] == "C1"
+    assert row["association_count"] == 1
+    # Including the verdict itself: the row still describes the last conclusion
+    # actually REACHED. The failed attempt is recorded in sync-state coverage,
+    # not by demoting an established attribution to "unavailable".
+    assert row["association_status"] == "resolved"
+    assert row["attribution_status"] == "attributed"
+    # ...while deal facts read successfully in the same run DID update.
+    assert row["amount_raw"] == 2500.0
+    assert row["revenue_usd"] == 2500.0
+
+
+def test_14d_a_first_ever_failed_lookup_is_recorded_as_lookup_failed(pg):
+    """There is nothing to preserve on a brand-new row, so the failure is
+    stored — the audit must be able to see deals we have never resolved."""
+    from db import deal_ledger_repository as repo
+
+    repo.upsert_deal(
+        _ledger_row("D_NEVER", primary_contact_id=None, association_count=None,
+                    association_status="lookup_failed",
+                    attribution_status="unavailable", gclid=None, campaign=None,
+                    country=None, acquisition_group=None),
+        associations=None, associations_observed=False)
+
+    row = repo.fetch_deal("D_NEVER")["row"]
+    assert row["association_status"] == "lookup_failed"
+    assert row["attribution_status"] == "unavailable"
+    assert row["gclid"] is None
+    assert repo.fetch_associations("D_NEVER")["rows"] == []
+
+
+def test_14e_failed_lookups_are_counted_in_sync_state_coverage(pg):
+    """The preserved row must not make the failure invisible."""
+    from db import deal_ledger_repository as repo
+
+    repo.record_sync_state(status="partial", association_failures=3,
+                           error="association_lookup_failed", deals_seen=10)
+    state = repo.fetch_sync_state()["row"]
+    assert state["association_failures"] == 3
+    assert state["last_status"] == "partial"
 
 
 def test_14b_successful_empty_observation_does_clear_associations(pg):
@@ -589,10 +709,33 @@ def _run_audit(window="all_time", *, json_mode=False):
         sys.argv = old
 
 
+def _insert_legacy_source_row(deal_id, *, amount=1000.0,
+                              close_date="2026-07-10T00:00:00+00:00"):
+    from db.connection import get_conn
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO deal_source_attribution "
+                "(deal_id, acquisition_group, attribution_status, "
+                " deal_close_date, deal_amount_usd) "
+                "VALUES (%s, 'google_ads', 'attributed', %s, %s)",
+                (deal_id, close_date, amount))
+        conn.commit()
+
+
 def _healthy_ledger():
+    """A fully reconciled shadow state.
+
+    The deal has no GCLID, so its absence from `gclid_attribution` is the
+    EXPECTED structural difference. It IS present in `deal_source_attribution`,
+    which is deal-keyed and has no such excuse — a canonical won deal missing
+    from that ledger is unexplained and fails the gate.
+    """
     from db import deal_ledger_repository as repo
 
     repo.upsert_deal(_ledger_row("D1", gclid=None), associations=[_assoc("C1")])
+    _insert_legacy_source_row("D1")
     repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
 
 
@@ -608,16 +751,21 @@ def test_18b_audit_fails_when_a_legacy_deal_is_missing_from_canonical(pg):
     from db.connection import get_conn
 
     _healthy_ledger()
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO deal_source_attribution "
-                "(deal_id, acquisition_group, attribution_status, "
-                " deal_close_date, deal_amount_usd) "
-                "VALUES ('D_LEGACY_ONLY', 'google_ads', 'attributed', "
-                "        '2026-07-10T00:00:00+00:00', 500)")
-        conn.commit()
+    assert _run_audit() == 0
+    _insert_legacy_source_row("D_LEGACY_ONLY", amount=500)
     assert _run_audit() == 1
+
+    # And it is reported as MISSING, not as a classification disagreement.
+    from services.revenue_reconciliation_service import (
+        REASON_MISSING_FROM_CANONICAL, build_revenue_reconciliation,
+    )
+    report = build_revenue_reconciliation("all_time")
+    diff = next(d for d in report["legacy_diffs"]
+                if d["ledger"] == "deal_source_attribution")
+    assert [r["deal_id"] for r in diff["legacy_only"]] == ["D_LEGACY_ONLY"]
+    assert diff["legacy_only"][0]["reason"] == REASON_MISSING_FROM_CANONICAL
+    assert diff["won_disagreement"] == []
+    assert get_conn is not None   # the fixture's connection factory is live
 
 
 def test_18c_audit_fails_when_a_failed_sync_is_the_latest_state(pg):
@@ -697,3 +845,124 @@ def test_reconciliation_is_shadow_mode(pg):
     assert gov["shadow_mode"] is True
     assert gov["read_only"] is True
     assert gov["external_writes"] is False
+
+
+def test_won_disagreement_is_separated_from_a_missing_deal(pg):
+    """A deal the canonical ledger HOLDS but classifies as lost is a
+    classification disagreement, not a gap in the sync. Reporting it as
+    "missing from canonical" sends an operator hunting a bug that is not there.
+    """
+    from db import deal_ledger_repository as repo
+    from services.revenue_reconciliation_service import (
+        REASON_LEGACY_PREDICATE_FALSE_POSITIVE, build_revenue_reconciliation,
+    )
+
+    _healthy_ledger()
+    # Canonically NOT won, but held — and the legacy source ledger counts it.
+    repo.upsert_deal(
+        _ledger_row("D_LOST", won=False, stage_id="379124201",
+                    stage_label="Lost Deal"),
+        associations=[_assoc("C2")])
+    _insert_legacy_source_row("D_LOST", amount=750)
+
+    report = build_revenue_reconciliation("all_time")
+    diff = next(d for d in report["legacy_diffs"]
+                if d["ledger"] == "deal_source_attribution")
+
+    assert diff["legacy_only"] == [], "a held deal was reported as missing"
+    item, = diff["won_disagreement"]
+    assert item["deal_id"] == "D_LOST"
+    assert item["canonical_is_closed_won"] is False
+    assert item["reason"] == REASON_LEGACY_PREDICATE_FALSE_POSITIVE
+    # The legacy predicate's false positives are the known, expected defect.
+    assert item["expected"] is True
+    assert report["ok"] is True
+    assert _run_audit() == 0
+
+
+def test_a_gclid_won_deal_missing_from_the_legacy_gclid_ledger_fails(pg):
+    """Absent WITHOUT the structural excuse: the GCLID ledger can hold this deal
+    and does not."""
+    from db import deal_ledger_repository as repo
+    from services.revenue_reconciliation_service import (
+        REASON_GCLID_DEAL_MISSING_FROM_LEGACY, build_revenue_reconciliation,
+    )
+
+    repo.upsert_deal(_ledger_row("D_G", gclid="Cj0KEQ"),
+                     associations=[_assoc("C1", gclid="Cj0KEQ")])
+    _insert_legacy_source_row("D_G")
+    repo.record_sync_state(status="success", watermark=_T2, deals_seen=1)
+
+    report = build_revenue_reconciliation("all_time")
+    diff = next(d for d in report["legacy_diffs"]
+                if d["ledger"] == "gclid_attribution")
+    item, = diff["canonical_only"]
+    assert item["reason"] == REASON_GCLID_DEAL_MISSING_FROM_LEGACY
+    assert item["expected"] is False
+    assert report["ok"] is False
+    assert _run_audit() == 1
+
+
+def test_duplicate_legacy_rows_are_counted_only_inside_the_window(pg):
+    from datetime import datetime, timezone
+
+    from db import deal_ledger_repository as repo
+    from db.connection import get_conn
+    from services.revenue_reconciliation_service import (
+        build_revenue_reconciliation,
+    )
+
+    _healthy_ledger()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            for i, close in enumerate(("2026-07-10T00:00:00+00:00",
+                                       "2026-07-10T00:00:00+00:00",
+                                       "2019-01-01T00:00:00+00:00",
+                                       "2019-01-01T00:00:00+00:00")):
+                cur.execute(
+                    "INSERT INTO gclid_attribution "
+                    "(attribution_key, deal_id, deal_amount_usd, "
+                    " deal_close_date, deal_stage, deal_stage_label, gclid, "
+                    " created_at) "
+                    "VALUES (%s, %s, 100, %s, '326093516', "
+                    "        'Deal Won / Payment Received', 'g', NOW())",
+                    (f"key{i}", "D_DUP" if i < 2 else "D_OLD_DUP", close))
+        conn.commit()
+
+    # A window that contains only the 2026 pair.
+    q3 = build_revenue_reconciliation(
+        "current_quarter", now=datetime(2026, 7, 15, tzinfo=timezone.utc))
+    diff = next(d for d in q3["legacy_diffs"]
+                if d["ledger"] == "gclid_attribution")
+    dupes = {d["deal_id"] for d in diff["duplicate_legacy_rows"]}
+    assert dupes == {"D_DUP"}, (
+        "the duplicate scan is unwindowed and reported deals outside the "
+        f"reconciled window: {dupes}")
+    assert repo.fetch_sync_state()["available"] is True
+
+
+def test_sync_state_checkpoint_advances_the_watermark_on_a_capped_run(pg):
+    """A capped backfill must be able to resume. The watermark still refuses to
+    move for a plain partial or a failure."""
+    from db import deal_ledger_repository as repo
+
+    repo.record_sync_state(status="success", watermark=_T0, deals_seen=1)
+    assert repo.fetch_sync_state()["row"]["last_modified_watermark"].startswith(
+        "2026-06-01")
+
+    # A partial run with NO checkpoint leaves it alone.
+    repo.record_sync_state(status="partial", watermark=_T2, deals_seen=1)
+    assert repo.fetch_sync_state()["row"]["last_modified_watermark"].startswith(
+        "2026-06-01")
+
+    # A partial run that cleanly processed a prefix DOES advance to it.
+    repo.record_sync_state(status="partial", watermark=_T1, deals_seen=1,
+                           watermark_is_checkpoint=True)
+    assert repo.fetch_sync_state()["row"]["last_modified_watermark"].startswith(
+        "2026-07-01")
+
+    # A failure never advances, checkpoint flag or not.
+    repo.record_sync_state(status="failed", watermark=_T2,
+                           watermark_is_checkpoint=True, error="boom")
+    assert repo.fetch_sync_state()["row"]["last_modified_watermark"].startswith(
+        "2026-07-01")
