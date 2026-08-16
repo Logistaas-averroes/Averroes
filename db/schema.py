@@ -1209,6 +1209,167 @@ CREATE INDEX IF NOT EXISTS idx_search_term_review_campaign
   ON search_term_review(campaign_key);
 CREATE INDEX IF NOT EXISTS idx_search_term_review_flagged
   ON search_term_review(latest_flagged_at DESC);
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- PR-ADS-153E-A — CANONICAL DEAL LEDGER (additive, shadow mode)
+-- ══════════════════════════════════════════════════════════════════════════
+-- The ONE revenue population. Every synced HubSpot deal lands here exactly
+-- once, keyed by `deal_id` — the durable HubSpot identity — regardless of
+-- whether it has a GCLID, a campaign mapping, an associated contact, a country
+-- or a classified acquisition source.
+--
+-- Why this table exists (PR-ADS-153A §9.2): revenue was split across three
+-- incompatible lineages. `gclid_attribution` keys on a SHA1 attribution hash,
+-- not the deal, and structurally excludes non-GCLID revenue.
+-- `deal_source_attribution` is deal-keyed but carries no lifecycle or currency
+-- contract. A local JSON chain feeds Unit Economics with no dedup at all. Two
+-- pages could therefore report different customer and revenue totals for the
+-- same window, by construction.
+--
+-- Doctrine encoded here:
+--   * WON is `hs_is_closed_won` — the authoritative HubSpot boolean. Stage
+--     labels are display evidence and must NEVER decide whether a deal is won.
+--     A missing boolean fails CLOSED (not won).
+--   * ATTRIBUTION is nullable EVIDENCE. Its absence never removes a deal from
+--     all-source revenue truth.
+--   * CURRENCY is fail-closed. `revenue_usd` is populated only when the
+--     currency is proven; otherwise it stays NULL with an explicit status and
+--     reason. Never coerced to zero, never silently assumed USD.
+--   * ALL relevant pipeline stages are stored (open / lost / downgrade /
+--     churn), so open pipeline is visible and churn evidence is never erased.
+--
+-- SHADOW MODE: this ledger is populated and reconciled here but consumes
+-- nothing. `gclid_attribution`, `deal_source_attribution` and the legacy
+-- `deals` snapshot are deliberately left intact as comparison sources until
+-- PR-ADS-153E-B migrates consumers and PR-ADS-153G retires them.
+CREATE TABLE IF NOT EXISTS hubspot_deal_ledger (
+  -- Durable HubSpot identity. NOT a hash, NOT a contact, NOT a GCLID.
+  deal_id                  TEXT PRIMARY KEY,
+  deal_name                TEXT,
+
+  -- Lifecycle / stage evidence (display only — never the won predicate).
+  pipeline_id              TEXT,
+  deal_stage_id            TEXT,
+  deal_stage_label         TEXT,
+  hs_is_closed             BOOLEAN,
+  hs_is_closed_won         BOOLEAN,           -- THE canonical won predicate
+
+  deal_created_at          TIMESTAMPTZ,
+  deal_close_date          TIMESTAMPTZ,
+  hubspot_lastmodified_at  TIMESTAMPTZ,       -- drives incremental sync + replay guard
+
+  -- Currency lineage, persisted separately so a USD claim is always provable.
+  amount_raw               NUMERIC(18,2),     -- deal amount in its own currency
+  deal_currency_code       TEXT,
+  amount_in_home_currency  NUMERIC(18,2),     -- HubSpot portal home currency
+  home_currency_code       TEXT,              -- VERIFIED home currency, if known
+  revenue_usd              NUMERIC(18,2),     -- NULL unless currency is proven
+  currency_status          TEXT,              -- verified_usd|converted|unavailable|...
+  currency_reason          TEXT,
+
+  -- Association evidence (resolved by the ONE shared resolver).
+  primary_contact_id       TEXT,
+  association_count        INTEGER,
+  association_status       TEXT,              -- resolved|ambiguous|none|lookup_failed
+  association_reason       TEXT,
+
+  -- Attribution evidence — nullable by design.
+  gclid                    TEXT,
+  campaign_name_raw        TEXT,
+  keyword_raw              TEXT,
+  country_raw              TEXT,
+  source_primary_raw       TEXT,
+  source_detail_raw        TEXT,
+  acquisition_group        TEXT,
+  attribution_status       TEXT,              -- attributed|ambiguous|unclassified|unavailable
+  attribution_reason       TEXT,
+
+  sync_batch_id            INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  source_fetched_at        TIMESTAMPTZ,
+  created_at               TIMESTAMPTZ DEFAULT NOW(),
+  updated_at               TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_deal_ledger_close_date
+  ON hubspot_deal_ledger(deal_close_date);
+CREATE INDEX IF NOT EXISTS idx_deal_ledger_lastmodified
+  ON hubspot_deal_ledger(hubspot_lastmodified_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deal_ledger_stage
+  ON hubspot_deal_ledger(deal_stage_id);
+CREATE INDEX IF NOT EXISTS idx_deal_ledger_won
+  ON hubspot_deal_ledger(hs_is_closed_won);
+CREATE INDEX IF NOT EXISTS idx_deal_ledger_campaign
+  ON hubspot_deal_ledger(campaign_name_raw);
+CREATE INDEX IF NOT EXISTS idx_deal_ledger_acquisition_group
+  ON hubspot_deal_ledger(acquisition_group);
+CREATE INDEX IF NOT EXISTS idx_deal_ledger_currency_status
+  ON hubspot_deal_ledger(currency_status);
+
+-- Deal -> contact association bridge. EVERY association is retained, including
+-- for deals whose primary contact could not be chosen: an ambiguous deal keeps
+-- all of its candidates so a human can see exactly why it is ambiguous.
+--
+-- Association evidence is NEVER deleted or replaced by an incomplete or failed
+-- HubSpot lookup (PR-ADS-153E-A §4/§6). A failed lookup marks the SYNC attempt
+-- incomplete and leaves the last successful observation standing — losing
+-- attribution because an API call timed out would silently move revenue between
+-- sources.
+CREATE TABLE IF NOT EXISTS hubspot_deal_contact_association (
+  id                       SERIAL PRIMARY KEY,
+  deal_id                  TEXT NOT NULL,
+  contact_id               TEXT NOT NULL,
+
+  association_type_id      TEXT,
+  association_label        TEXT,
+
+  -- Was this contact selected as the deal's primary, and why.
+  is_primary               BOOLEAN DEFAULT FALSE,
+  primary_selection_reason TEXT,
+
+  -- Per-contact attribution evidence, kept so a conflict is explainable.
+  gclid                    TEXT,
+  campaign_name_raw        TEXT,
+  keyword_raw              TEXT,
+  country_raw              TEXT,
+  source_primary_raw       TEXT,
+  source_detail_raw        TEXT,
+  acquisition_group        TEXT,
+
+  -- Last batch in which this association was SUCCESSFULLY observed.
+  last_observed_batch_id   INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  last_observed_at         TIMESTAMPTZ,
+  created_at               TIMESTAMPTZ DEFAULT NOW(),
+  updated_at               TIMESTAMPTZ DEFAULT NOW(),
+
+  CONSTRAINT uq_deal_contact_association UNIQUE (deal_id, contact_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_deal_assoc_deal
+  ON hubspot_deal_contact_association(deal_id);
+CREATE INDEX IF NOT EXISTS idx_deal_assoc_contact
+  ON hubspot_deal_contact_association(contact_id);
+CREATE INDEX IF NOT EXISTS idx_deal_assoc_primary
+  ON hubspot_deal_contact_association(deal_id, is_primary);
+
+-- Sync watermark / coverage for the canonical deal ledger. Completeness is
+-- explicit rather than inferred from "some rows exist": a failed sync must be
+-- visible AS failed, never as a successful zero-row result.
+CREATE TABLE IF NOT EXISTS hubspot_deal_sync_state (
+  id                        SERIAL PRIMARY KEY,
+  scope                     TEXT NOT NULL UNIQUE,   -- 'deals'
+  bootstrap_status          TEXT NOT NULL DEFAULT 'not_started',
+  bootstrap_started_at      TIMESTAMPTZ,
+  bootstrap_completed_at    TIMESTAMPTZ,
+  last_modified_watermark   TIMESTAMPTZ,
+  last_incremental_at       TIMESTAMPTZ,
+  last_status               TEXT,                   -- success|partial|failed
+  last_error                TEXT,
+  deals_seen                INTEGER DEFAULT 0,
+  pages_fetched             INTEGER DEFAULT 0,
+  association_failures      INTEGER DEFAULT 0,
+  last_batch_id             INTEGER REFERENCES sync_batches(id) ON DELETE SET NULL,
+  updated_at                TIMESTAMPTZ DEFAULT NOW()
+);
 """
 
 

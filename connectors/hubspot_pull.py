@@ -517,7 +517,12 @@ def _normalise_won_deal(deal_dict: dict) -> dict:
         "deal_close_date": props.get("closedate") or None,
         "deal_amount_usd": props.get("amount"),
         "deal_stage": stage or None,
-        "deal_stage_label": DEAL_STAGE_MAP.get(stage, "Deal Won / Payment Received"),
+        # PR-ADS-153E-A: an UNKNOWN stage id stays explicitly unknown. Labelling
+        # it "Deal Won / Payment Received" (the previous default) meant an
+        # unrecognised stage that slipped past the filter was read as revenue by
+        # the downstream `deal_stage_label ILIKE '%won%'` predicate.
+        "deal_stage_label": DEAL_STAGE_MAP.get(stage) or (
+            f"Unknown stage ({stage})" if stage else "Unknown stage"),
     }
 
 
@@ -1135,3 +1140,208 @@ if __name__ == "__main__":
     logger.info("Junk indicators found: %d", len(summary["junk_indicators"]))
 
     save_output(contacts, deals, summary)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR-ADS-153E-A — CANONICAL DEAL SYNC (read-only)
+# ═══════════════════════════════════════════════════════════════════════════
+# The previous deal pulls fetched ONLY the won stage and only a handful of
+# properties, so open pipeline was invisible, churn could never reverse a
+# customer, and revenue carried no currency provenance (PR-ADS-153A §9.1/§9.3).
+#
+# This contract fetches EVERY relevant pipeline stage with the authoritative
+# won boolean, the full currency trio, and all associated contacts with their
+# association labels.
+#
+# Read-only, always: no HubSpot write, no Google Ads call of any kind, and no
+# fabricated GCLID or source value.
+
+# All stages the ledger tracks — open, won, lost, downgrade and churn. Derived
+# from the live stage map so a stage can never be tracked here and unlabelled
+# there.
+ALL_TRACKED_DEAL_STAGES = list(DEAL_STAGE_MAP.keys())
+
+# Properties the canonical ledger needs. `hs_is_closed_won` is THE won
+# predicate; the currency trio is what makes a USD claim provable.
+DEAL_LEDGER_PROPERTIES = [
+    "dealname",
+    "pipeline",
+    "dealstage",
+    "hs_is_closed",
+    "hs_is_closed_won",
+    "createdate",
+    "closedate",
+    "hs_lastmodifieddate",
+    "amount",
+    "deal_currency_code",
+    "amount_in_home_currency",
+]
+
+
+class DealAssociationLookupError(RuntimeError):
+    """A deal's association lookup FAILED.
+
+    Raised so the caller can tell a failure apart from a successful lookup that
+    legitimately found no contacts. Collapsing the two would let a transient API
+    error silently erase a deal's attribution (PR-ADS-153E-A §6 rule 4).
+    """
+
+
+def fetch_deal_associations(deal_id) -> dict:
+    """Every contact associated with a deal, with association labels.
+
+    Returns ``{deal_id, contacts: [{contact_id, association_type_id,
+    association_label}], complete: True}``.
+
+    Raises ``DealAssociationLookupError`` when the lookup could not be
+    completed. An empty ``contacts`` list therefore ALWAYS means "HubSpot says
+    this deal has no associated contacts", never "we could not find out".
+    """
+    if not deal_id:
+        raise DealAssociationLookupError("deal_id is required")
+
+    url = (f"{HUBSPOT_API_BASE_URL}/crm/v4/objects/deals/{deal_id}"
+           f"/associations/contacts")
+    headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+    contacts: list = []
+    after = None
+    last_exc = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            contacts = []
+            after = None
+            while True:
+                params = {"limit": 100}
+                if after:
+                    params["after"] = after
+                resp = requests.get(url, headers=headers, params=params, timeout=30)
+                if resp.status_code == 429 and attempt < MAX_RETRIES:
+                    raise requests.exceptions.RequestException("rate limited")
+                resp.raise_for_status()
+                payload = resp.json() or {}
+                for row in (payload.get("results") or []):
+                    contact_id = row.get("toObjectId") or row.get("id")
+                    if contact_id is None:
+                        continue
+                    types = row.get("associationTypes") or []
+                    first = types[0] if types else {}
+                    contacts.append({
+                        "contact_id": str(contact_id),
+                        "association_type_id": (
+                            str(first.get("typeId")) if first.get("typeId") is not None
+                            else None),
+                        "association_label": first.get("label"),
+                    })
+                paging = (payload.get("paging") or {}).get("next") or {}
+                after = paging.get("after")
+                if not after:
+                    break
+            return {"deal_id": str(deal_id), "contacts": contacts, "complete": True}
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            last_exc = exc
+            if attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+
+    raise DealAssociationLookupError(
+        f"association lookup failed for deal {deal_id}: {last_exc}")
+
+
+def pull_deals_for_ledger(
+    *,
+    modified_since_ms: int | None = None,
+    stages: list | None = None,
+    page_limit: int | None = None,
+) -> dict:
+    """Read every tracked deal, optionally only those modified since a watermark.
+
+    Incremental sync is driven by ``hs_lastmodifieddate``, NOT by creation
+    recency: a deal created two years ago and closed today must be re-read today.
+
+    Returns ``{available, complete, deals, pages, error}``.
+    ``complete`` is False when pagination was cut short by an error — the caller
+    must then record a PARTIAL sync rather than a successful zero-row result.
+    """
+    client = get_client()
+    wanted_stages = stages if stages is not None else ALL_TRACKED_DEAL_STAGES
+
+    filters = [{"propertyName": "dealstage", "operator": "IN",
+                "values": wanted_stages}]
+    if modified_since_ms is not None:
+        filters.append({"propertyName": "hs_lastmodifieddate",
+                        "operator": "GTE", "value": str(int(modified_since_ms))})
+
+    deals: list = []
+    pages = 0
+    after = None
+    consecutive_failures = 0
+
+    while True:
+        try:
+            response = client.crm.deals.search_api.do_search(
+                public_object_search_request={
+                    "filterGroups": [{"filters": filters}],
+                    "properties": DEAL_LEDGER_PROPERTIES,
+                    # Stable ordering so a resumed/retried page cannot silently
+                    # skip records.
+                    "sorts": [{"propertyName": "hs_lastmodifieddate",
+                               "direction": "ASCENDING"}],
+                    "limit": 100,
+                    "after": after,
+                }
+            )
+        except ApiException as exc:
+            if exc.status == 429 and consecutive_failures < MAX_RETRIES:
+                consecutive_failures += 1
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (consecutive_failures - 1)))
+                continue
+            logger.error("HubSpot deal ledger pull failed on page %d: %s", pages, exc)
+            # Partial, and SAID to be partial.
+            return {"available": True, "complete": False, "deals": deals,
+                    "pages": pages, "error": str(exc)}
+
+        consecutive_failures = 0
+        pages += 1
+        for d in (response.results or []):
+            deals.append(d.to_dict())
+
+        if page_limit is not None and pages >= page_limit:
+            return {"available": True, "complete": False, "deals": deals,
+                    "pages": pages, "error": "page_limit_reached"}
+
+        if response.paging and response.paging.next:
+            after = response.paging.next.after
+        else:
+            break
+
+    logger.info("Pulled %d deals for the canonical ledger across %d page(s)",
+                len(deals), pages)
+    return {"available": True, "complete": True, "deals": deals,
+            "pages": pages, "error": None}
+
+
+def fetch_portal_home_currency() -> dict:
+    """The HubSpot portal's home currency, so `amount_in_home_currency` can be
+    trusted as USD only when it provably is.
+
+    Returns ``{available, home_currency_code, verified}``. ``verified`` is True
+    only when HubSpot positively reported the account's currency — this is the
+    check whose absence made every revenue figure an unverified USD claim
+    (PR-ADS-153A §9.3).
+    """
+    url = f"{HUBSPOT_API_BASE_URL}/account-info/v3/details"
+    headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        code = (resp.json() or {}).get("companyCurrency")
+        if not code:
+            return {"available": True, "home_currency_code": None, "verified": False}
+        return {"available": True, "home_currency_code": str(code).upper(),
+                "verified": True}
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        logger.warning("Could not verify HubSpot home currency: %s", exc)
+        # Unknown, and never assumed. Downstream currency resolution fails
+        # closed rather than reading home amounts as USD.
+        return {"available": False, "home_currency_code": None, "verified": False}
