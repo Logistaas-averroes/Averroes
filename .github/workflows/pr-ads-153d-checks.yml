@@ -1,0 +1,108 @@
+# CI gate for the Averroes test suite.
+#
+# Added in PR-ADS-153D because the repository had no workflows at all, so no PR
+# ever carried a check run or status context — every merge decision rested on a
+# suite result pasted into a description by hand.
+#
+# Two known tests (tests/test_search_terms_followup_fixes.py, the two
+# empty-search-term scheduler cases) fail on `main` in a sandboxed environment
+# because they reach the Google Ads connector. They are DESELECTED from the
+# blocking job — so a green check means "this branch introduced no failures" —
+# and then run in a separate, clearly-labelled non-blocking job so their state
+# stays visible instead of being quietly dropped.
+
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  suite:
+    name: Test suite (excluding known-failing-on-main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Byte-compile every touched package
+        run: python -m compileall -q analysis api db services scripts tests
+
+      - name: Check static JS parses
+        run: node --check static/app.js
+
+      - name: Check for whitespace errors
+        run: git diff --check "$(git merge-base HEAD origin/main || echo HEAD~1)" HEAD
+
+      # PostgreSQL 16 ships on the ubuntu-latest image. The integration suite
+      # spins up its own throwaway cluster as the unprivileged `postgres` user.
+      - name: Confirm PostgreSQL server binaries are present
+        run: |
+          ls -d /usr/lib/postgresql/*/bin
+          sudo -n -u postgres true
+
+      - name: PR-ADS-153D PostgreSQL integration tests
+        run: |
+          python -m pytest tests/test_pr_ads_153d_pg_integration.py -q \
+            --junitxml=pg-results.xml
+
+      # A skipped database suite is not merge evidence. If the cluster could not
+      # start, the harness skips the whole module — which would otherwise look
+      # like a pass. Fail loudly instead.
+      - name: Assert the PostgreSQL tests actually ran
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          suite = ET.parse("pg-results.xml").getroot()
+          suite = suite if suite.tag == "testsuite" else suite.find("testsuite")
+          tests = int(suite.get("tests", 0))
+          skipped = int(suite.get("skipped", 0))
+          print(f"postgres tests={tests} skipped={skipped}")
+          if tests == 0 or skipped:
+              sys.exit("PostgreSQL integration tests did not run — a skipped "
+                       "database suite is not acceptable merge evidence")
+          PY
+
+      - name: PR-ADS-153D contract tests
+        run: python -m pytest tests/test_pr_ads_153d_waste_consolidation.py -q
+
+      - name: Full suite (known-failing-on-main deselected)
+        run: |
+          python -m pytest -q \
+            --deselect "tests/test_search_terms_followup_fixes.py::test_daily_empty_search_terms_marks_success_not_success_empty" \
+            --deselect "tests/test_search_terms_followup_fixes.py::test_weekly_empty_search_terms_marks_success_not_success_empty"
+
+  known-failing:
+    name: Known-failing on main (informational, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Run the two tests that also fail on main
+        run: |
+          echo "These reach the Google Ads connector and fail on main in a"
+          echo "sandboxed environment. Reported, not hidden — and NOT counted"
+          echo "as evidence that this branch is green."
+          python -m pytest tests/test_search_terms_followup_fixes.py -q

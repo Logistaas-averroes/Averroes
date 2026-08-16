@@ -581,3 +581,339 @@ def test_legacy_waste_route_no_longer_double_counts(pg):
             cur.execute("SELECT SUM(spend_usd) FROM waste_terms")
             assert float(cur.fetchone()[0]) == 200.0   # the old page's claim
     assert _totals()["spend"] == 40.0                  # the canonical truth
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Merge-blocker 4 (PR #156) — flag history has a PRODUCTION write path, and
+# out-of-order observations cannot rewrite newer evidence
+# ═════════════════════════════════════════════════════════════════════════════
+# Before: record_flag_observations was only ever called by tests, so in a real
+# deployment first_flagged_at / latest_flagged_at / latest_flag_reason /
+# latest_raw_reason stayed NULL forever. And an older replay overwrote the
+# latest-* fields, because they used a plain COALESCE(EXCLUDED, existing).
+# After: the weekly waste-analysis run records history through the canonical
+# flagged population, and latest-* only moves forward in time.
+
+_T0 = datetime(2026, 6, 1, tzinfo=timezone.utc)      # oldest
+_T1 = datetime(2026, 7, 1, tzinfo=timezone.utc)
+_T2 = datetime(2026, 8, 1, tzinfo=timezone.utc)      # newest
+
+
+def _observe(when, reason, raw, *, term="freight jobs", campaign_key="1",
+             display=None):
+    from db import search_term_review_repository as repo
+
+    return repo.record_flag_observations([{
+        "campaign_key": campaign_key, "search_term": term,
+        "search_term_display": display or term,
+        "campaign_name_display": "Brand - UK",
+        "flagged_at": when, "reason": reason, "raw_reason": raw}])
+
+
+def _history(term="freight jobs", campaign_key="1"):
+    from analysis.search_term_identity import term_identity_key
+    from db import search_term_review_repository as repo
+
+    return repo.fetch_review(term_identity_key(campaign_key, term))["row"]
+
+
+# ── 1. Newer observation followed by an older replay ────────────────────────
+def test_older_replay_widens_history_but_keeps_the_newer_reason(pg):
+    _observe(_T2, "job_seeker", "job_seeker")
+    _observe(_T0, "low_commercial_intent", "informational")
+
+    row = _history()
+    assert row["first_flagged_at"].startswith("2026-06-01")   # window widened
+    assert row["latest_flagged_at"].startswith("2026-08-01")  # not moved back
+    # The reason still belongs to the NEWEST observation.
+    assert row["latest_flag_reason"] == "job_seeker"
+    assert row["latest_raw_reason"] == "job_seeker"
+
+
+def test_older_replay_does_not_overwrite_newer_display_evidence(pg):
+    _observe(_T2, "job_seeker", "job_seeker", display="Freight JOBS (new)")
+    _observe(_T0, "informational", "informational", display="freight jobs (old)")
+    assert _history()["search_term_display"] == "Freight JOBS (new)"
+
+
+# ── 2. Older observation followed by a newer one ────────────────────────────
+def test_newer_observation_advances_the_latest_fields(pg):
+    _observe(_T0, "informational", "informational")
+    _observe(_T2, "job_seeker", "job_seeker")
+
+    row = _history()
+    assert row["first_flagged_at"].startswith("2026-06-01")
+    assert row["latest_flagged_at"].startswith("2026-08-01")
+    assert row["latest_flag_reason"] == "job_seeker"
+
+
+def test_equal_timestamp_observation_updates_the_reason(pg):
+    """Same instant is treated as at-least-as-new, so a corrected reason for the
+    same observation still lands."""
+    _observe(_T1, "informational", "informational")
+    _observe(_T1, "job_seeker", "job_seeker")
+    assert _history()["latest_flag_reason"] == "job_seeker"
+
+
+# ── 3. The same observation repeated ────────────────────────────────────────
+def test_repeated_identical_observation_is_idempotent(pg):
+    from db.connection import get_conn
+
+    for _ in range(5):
+        _observe(_T1, "job_seeker", "job_seeker")
+
+    row = _history()
+    assert row["first_flagged_at"].startswith("2026-07-01")
+    assert row["latest_flagged_at"].startswith("2026-07-01")
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM search_term_review")
+            assert cur.fetchone()[0] == 1
+
+
+# ── 4. Resolved before another observation ──────────────────────────────────
+def test_observation_after_resolution_never_reopens_the_review(pg):
+    from db import search_term_review_repository as repo
+
+    _observe(_T0, "job_seeker", "job_seeker")
+    repo.upsert_review_decision(campaign_key="1", search_term="freight jobs",
+                                review_state="resolved", reviewed_by="tester")
+    _observe(_T2, "job_seeker", "job_seeker")
+
+    row = _history()
+    assert row["review_state"] == "resolved"
+    assert row["reviewed_by"] == "tester"
+    # History still advanced — the audit trail is live, the decision is not.
+    assert row["latest_flagged_at"].startswith("2026-08-01")
+
+
+def test_observation_after_keep_never_reopens_the_review(pg):
+    from db import search_term_review_repository as repo
+
+    repo.upsert_review_decision(campaign_key="1", search_term="freight jobs",
+                                review_state="keep")
+    _observe(_T2, "job_seeker", "job_seeker")
+    assert _history()["review_state"] == "keep"
+
+
+# ── 5. Historical backfill without reopening the review ─────────────────────
+def test_backfill_widens_history_without_reopening_a_decision(pg):
+    from db import search_term_review_repository as repo
+
+    _observe(_T2, "job_seeker", "job_seeker")
+    repo.upsert_review_decision(campaign_key="1", search_term="freight jobs",
+                                review_state="resolved")
+    # A backfill replays much older evidence.
+    _observe(_T0, "job_seeker", "job_seeker")
+
+    row = _history()
+    assert row["review_state"] == "resolved"
+    assert row["first_flagged_at"].startswith("2026-06-01")
+    assert row["latest_flagged_at"].startswith("2026-08-01")
+
+
+# ── The production write path itself ────────────────────────────────────────
+def test_weekly_run_populates_flag_history_from_canonical_facts(pg):
+    """The gap this blocker names: history must be written by production code,
+    not only by tests."""
+    from services.search_term_flag_history_service import record_flag_history
+
+    _write_facts([_fact(spend=200.0)])
+    _flag_all_waste()
+
+    result = record_flag_history("all_time")
+    assert result["available"] is True
+    assert result["observed"] == 1
+    assert result["written"] == 1
+
+    row = _history(term="freight forwarder jobs")
+    assert row is not None
+    assert row["first_flagged_at"] is not None
+    assert row["latest_flagged_at"] is not None
+    assert row["latest_flag_reason"] == "job_seeker"
+    assert row["latest_raw_reason"] == "job_seeker"
+    # Untouched by an observation.
+    assert row["review_state"] == "unreviewed"
+
+
+def test_history_identity_matches_the_page_and_the_queue(pg):
+    """History keyed off a raw campaign name would never join. It must use the
+    same canonical identity the flagged view computes."""
+    from services.search_term_flag_history_service import record_flag_history
+
+    _write_facts([_fact(spend=200.0)])
+    _flag_all_waste()
+    record_flag_history("all_time")
+
+    row = _flagged()["rows"][0]
+    stored = _history(term="freight forwarder jobs",
+                      campaign_key=row["campaign_key"])
+    assert stored is not None
+    assert stored["term_identity"] == row["term_identity"]
+    # And the page now surfaces the history it wrote.
+    assert _flagged()["rows"][0]["first_flagged_at"] is not None
+
+
+def test_recording_history_twice_changes_nothing(pg):
+    from services.search_term_flag_history_service import record_flag_history
+
+    _write_facts([_fact(spend=200.0)])
+    _flag_all_waste()
+    record_flag_history("all_time")
+    before = _history(term="freight forwarder jobs")
+    record_flag_history("all_time")
+    after = _history(term="freight forwarder jobs")
+
+    assert before["first_flagged_at"] == after["first_flagged_at"]
+    assert before["latest_flagged_at"] == after["latest_flagged_at"]
+    assert before["latest_flag_reason"] == after["latest_flag_reason"]
+
+
+def test_backfill_is_safe_after_a_decision_exists(pg):
+    from db import search_term_review_repository as repo
+    from services.search_term_flag_history_service import backfill_flag_history
+
+    _write_facts([_fact(spend=200.0)])
+    _flag_all_waste()
+    row = _flagged()["rows"][0]
+    repo.upsert_review_decision(campaign_key=row["campaign_key"],
+                                search_term="freight forwarder jobs",
+                                review_state="keep")
+
+    assert backfill_flag_history()["available"] is True
+    stored = _history(term="freight forwarder jobs",
+                      campaign_key=row["campaign_key"])
+    assert stored["review_state"] == "keep"
+    assert stored["first_flagged_at"] is not None
+
+
+def test_history_is_not_recorded_from_a_quarantined_population(pg):
+    """A population whose own contract cannot be explained must not write
+    unexplainable evidence into a durable audit table."""
+    from db.connection import get_conn
+    from services.search_term_flag_history_service import record_flag_history
+
+    _write_facts([_fact(spend=200.0)])
+    # Flagged with NO reason evidence → truth_state mismatch.
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE search_terms SET is_flagged_waste = TRUE, "
+                        "junk_category = NULL, matched_pattern = NULL")
+        conn.commit()
+
+    result = record_flag_history("all_time")
+    assert result["available"] is False
+    assert result["reason"] == "population_quarantined"
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM search_term_review")
+            assert cur.fetchone()[0] == 0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Merge-blocker 5 (PR #156) — the production audit is a real merge gate
+# ═════════════════════════════════════════════════════════════════════════════
+# Before: the script always exited 0, and it inspected the queue only AFTER the
+# queue had already silently collapsed duplicate identities.
+# After: it audits the COMPLETE flagged population pre-dedup and exits non-zero
+# on every reconciliation failure — including with --json.
+
+def _run_audit(window="all_time", *, json_mode=False):
+    """Invoke the audit exactly as a deploy check would, capturing its exit."""
+    import importlib
+
+    audit = importlib.import_module("scripts.audit_search_term_waste_truth")
+    importlib.reload(audit)
+    argv = ["audit", "--window", window] + (["--json"] if json_mode else [])
+    old = sys.argv
+    sys.argv = argv
+    try:
+        return audit.main()
+    finally:
+        sys.argv = old
+
+
+def test_audit_passes_on_reconciled_data(pg):
+    from services.search_term_flag_history_service import record_flag_history
+
+    _write_facts([_fact(spend=200.0)])
+    _flag_all_waste()
+    record_flag_history("all_time")
+
+    assert _run_audit() == 0
+    assert _run_audit(json_mode=True) == 0
+
+
+def test_audit_fails_when_flag_history_was_never_persisted(pg):
+    """Flagged terms with no durable history means the production writer is not
+    running — exactly the gap merge-blocker 4 named."""
+    _write_facts([_fact(spend=200.0)])
+    _flag_all_waste()
+    # Deliberately do NOT record history.
+    assert _run_audit() == 1
+
+
+def test_audit_fails_on_a_mismatch_population(pg):
+    from db.connection import get_conn
+
+    _write_facts([_fact(spend=200.0)])
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE search_terms SET is_flagged_waste = TRUE, "
+                        "junk_category = NULL, matched_pattern = NULL")
+        conn.commit()
+    assert _run_audit() == 1
+
+
+def test_audit_fails_when_the_review_store_is_unavailable(pg, monkeypatch):
+    import db.search_term_review_repository as repo
+    from services.search_term_flag_history_service import record_flag_history
+
+    _write_facts([_fact(spend=200.0)])
+    _flag_all_waste()
+    record_flag_history("all_time")
+    assert _run_audit() == 0            # healthy first
+
+    monkeypatch.setattr(repo, "fetch_reviews_for_identities",
+                        lambda ids: {"available": False, "rows": {}})
+    assert _run_audit() == 1
+
+
+def test_audit_fails_on_duplicate_identities_before_queue_dedup(pg, monkeypatch):
+    """The queue collapses duplicates, so auditing it alone would miss this.
+    The gate must inspect the complete flagged population first."""
+    import services.search_term_evidence_service as svc
+    from services.search_term_flag_history_service import record_flag_history
+
+    _write_facts([_fact(spend=200.0)])
+    _flag_all_waste()
+    record_flag_history("all_time")
+
+    real = svc.build_flagged_search_terms
+
+    def _duplicated(window, **kw):
+        payload = real(window, **kw)
+        payload["rows"] = payload["rows"] + payload["rows"]
+        return payload
+
+    monkeypatch.setattr(svc, "build_flagged_search_terms", _duplicated)
+    assert _run_audit() == 1
+
+
+def test_audit_json_mode_also_exits_non_zero(pg):
+    _write_facts([_fact(spend=200.0)])
+    _flag_all_waste()          # flagged, but no history recorded
+    assert _run_audit(json_mode=True) == 1
+
+
+def test_audit_computes_identities_with_the_shared_contract(pg):
+    """Not by concatenating SQL strings — a delimiter-joined key is not the
+    identity the product uses, so it could agree here and disagree everywhere
+    else."""
+    source = (Path(__file__).resolve().parents[1]
+              / "scripts" / "audit_search_term_waste_truth.py").read_text()
+    assert "from analysis.search_term_identity import term_identity_key" in source
+    canonical = source.split("def _canonical_facts(")[1].split("\ndef ")[0]
+    assert "term_identity_key(" in canonical
+    # No delimiter-concatenated identity in the identity query.
+    assert "|| '|' ||" not in canonical

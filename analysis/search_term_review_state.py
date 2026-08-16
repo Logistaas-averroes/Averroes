@@ -124,11 +124,40 @@ def is_decided(review_state) -> bool:
     return normalize_review_state(review_state) in DECIDED_REVIEW_STATES
 
 
-def review_state_payload(review_state) -> dict:
-    """Self-describing review state for an API payload."""
+# Reported when the durable review store cannot be read. This is NOT a state a
+# term can be in — it is the absence of knowledge about the state, and it must
+# never collapse into `unreviewed` (PR-ADS-153D §32: unavailable is never a
+# value). Collapsing it would assert "no human has decided this" on evidence we
+# do not have, and would reopen terms a human had already resolved or kept.
+REVIEW_STATUS_AVAILABLE = "available"
+REVIEW_STATUS_UNAVAILABLE = "unavailable"
+
+
+def review_state_payload(review_state, *, available: bool = True) -> dict:
+    """Self-describing review state for an API payload.
+
+    ``available=False`` means the durable review store could not be read. The
+    payload then reports ``review_state: None`` and ``action_needed: None``
+    rather than guessing — a caller cannot mistake an outage for a decision, and
+    a resolved term cannot be reopened by an unreadable database.
+    """
+    if not available:
+        return {
+            "review_state": None,
+            "review_state_status": REVIEW_STATUS_UNAVAILABLE,
+            "review_state_label": "Review state unavailable",
+            "review_state_help": (
+                "The local review store could not be read, so no review "
+                "decision can be shown or changed for this term. This is not "
+                "the same as unreviewed."),
+            "requires_action": None,
+            "is_decided": None,
+            "applied_to_google_ads": False,
+        }
     state = normalize_review_state(review_state)
     return {
         "review_state": state,
+        "review_state_status": REVIEW_STATUS_AVAILABLE,
         "review_state_label": REVIEW_STATE_LABELS[state],
         "review_state_help": REVIEW_STATE_HELP[state],
         "requires_action": state in ACTIONABLE_REVIEW_STATES,
@@ -145,6 +174,7 @@ __all__ = [
     "STATE_EXCLUDE_CANDIDATE", "STATE_RESOLVED",
     "REVIEW_STATES", "REVIEW_STATE_LABELS", "REVIEW_STATE_HELP",
     "ACTIONABLE_REVIEW_STATES", "DECIDED_REVIEW_STATES",
+    "REVIEW_STATUS_AVAILABLE", "REVIEW_STATUS_UNAVAILABLE",
     "FORBIDDEN_APPLIED_PHRASES",
     "is_valid_review_state", "normalize_review_state",
     "requires_action", "is_decided", "review_state_payload",

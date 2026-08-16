@@ -190,9 +190,15 @@ def record_flag_observations(observations: list) -> dict:
     Each observation is ``{campaign_key, search_term, flagged_at, reason,
     raw_reason, search_term_display, campaign_name_display}``.
 
-    Idempotent and monotonic:
+    Idempotent, monotonic, and ORDER-INDEPENDENT:
       * ``first_flagged_at`` only ever moves EARLIER (LEAST);
       * ``latest_flagged_at`` only ever moves LATER (GREATEST);
+      * the LATEST-* fields (reason, raw reason, display labels) are updated
+        ONLY when the incoming observation is at or after the stored latest
+        timestamp. Replaying an old observation may therefore widen the history
+        window backwards, but it can never overwrite the reason or the display
+        evidence belonging to a NEWER observation — a backfill must not rewrite
+        what the most recent run actually saw;
       * ``review_state`` is never touched — observing a flag again must not
         reopen a decision a human already made (§44).
 
@@ -238,12 +244,7 @@ def record_flag_observations(observations: list) -> dict:
                     ) VALUES (%s, %s, %s, %s, %s, %s, '{STATE_UNREVIEWED}',
                               %s, %s, %s, %s, NOW(), NOW())
                     ON CONFLICT (term_identity) DO UPDATE SET
-                        search_term_display   = COALESCE(
-                            EXCLUDED.search_term_display,
-                            {REVIEW_TABLE}.search_term_display),
-                        campaign_name_display = COALESCE(
-                            EXCLUDED.campaign_name_display,
-                            {REVIEW_TABLE}.campaign_name_display),
+                        -- History window only ever WIDENS.
                         first_flagged_at = LEAST(
                             COALESCE({REVIEW_TABLE}.first_flagged_at,
                                      EXCLUDED.first_flagged_at),
@@ -254,12 +255,46 @@ def record_flag_observations(observations: list) -> dict:
                                      EXCLUDED.latest_flagged_at),
                             COALESCE(EXCLUDED.latest_flagged_at,
                                      {REVIEW_TABLE}.latest_flagged_at)),
-                        latest_flag_reason = COALESCE(
-                            EXCLUDED.latest_flag_reason,
-                            {REVIEW_TABLE}.latest_flag_reason),
-                        latest_raw_reason  = COALESCE(
-                            EXCLUDED.latest_raw_reason,
-                            {REVIEW_TABLE}.latest_raw_reason),
+                        -- LATEST-* fields belong to the newest observation. An
+                        -- older replay (a backfill, an out-of-order run) widens
+                        -- the window above but must NOT overwrite the reason or
+                        -- display evidence the newest run actually recorded.
+                        latest_flag_reason = CASE
+                            WHEN {REVIEW_TABLE}.latest_flagged_at IS NULL
+                              OR EXCLUDED.latest_flagged_at IS NULL
+                              OR EXCLUDED.latest_flagged_at
+                                 >= {REVIEW_TABLE}.latest_flagged_at
+                            THEN COALESCE(EXCLUDED.latest_flag_reason,
+                                          {REVIEW_TABLE}.latest_flag_reason)
+                            ELSE {REVIEW_TABLE}.latest_flag_reason
+                        END,
+                        latest_raw_reason = CASE
+                            WHEN {REVIEW_TABLE}.latest_flagged_at IS NULL
+                              OR EXCLUDED.latest_flagged_at IS NULL
+                              OR EXCLUDED.latest_flagged_at
+                                 >= {REVIEW_TABLE}.latest_flagged_at
+                            THEN COALESCE(EXCLUDED.latest_raw_reason,
+                                          {REVIEW_TABLE}.latest_raw_reason)
+                            ELSE {REVIEW_TABLE}.latest_raw_reason
+                        END,
+                        search_term_display = CASE
+                            WHEN {REVIEW_TABLE}.latest_flagged_at IS NULL
+                              OR EXCLUDED.latest_flagged_at IS NULL
+                              OR EXCLUDED.latest_flagged_at
+                                 >= {REVIEW_TABLE}.latest_flagged_at
+                            THEN COALESCE(EXCLUDED.search_term_display,
+                                          {REVIEW_TABLE}.search_term_display)
+                            ELSE {REVIEW_TABLE}.search_term_display
+                        END,
+                        campaign_name_display = CASE
+                            WHEN {REVIEW_TABLE}.latest_flagged_at IS NULL
+                              OR EXCLUDED.latest_flagged_at IS NULL
+                              OR EXCLUDED.latest_flagged_at
+                                 >= {REVIEW_TABLE}.latest_flagged_at
+                            THEN COALESCE(EXCLUDED.campaign_name_display,
+                                          {REVIEW_TABLE}.campaign_name_display)
+                            ELSE {REVIEW_TABLE}.campaign_name_display
+                        END,
                         updated_at = NOW()
                     """,
                     prepared,

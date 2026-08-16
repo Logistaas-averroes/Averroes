@@ -1173,6 +1173,13 @@ def api_waste(
 
     if payload.get("db_unavailable"):
         return _empty()
+    if payload.get("actionable") is False:
+        # Mismatch quarantine — withhold rows and KPIs rather than serve numbers
+        # the canonical view itself refuses to publish.
+        resp = _empty()
+        resp["truth_state"] = payload.get("truth_state")
+        resp["quarantine"] = payload.get("quarantine")
+        return resp
 
     rows = payload.get("rows") or []
     waste_out = [{
@@ -2701,17 +2708,79 @@ def _build_waste_queue_items(
 
     if payload.get("db_unavailable"):
         return []
+    if payload.get("actionable") is False:
+        # Quarantined (truth_state = mismatch) or otherwise non-actionable. The
+        # flagged contract could not be explained, so there is nothing here to
+        # ask a human to act on. The caller discloses this rather than showing
+        # an empty queue that reads as "no work" (§32).
+        log.warning("[action-queue] flagged population is not actionable (%s) — "
+                    "no waste actions produced",
+                    (payload.get("truth_state") or {}).get("status"))
+        return []
+
+    # PR-ADS-153D merge-blocker 3: when the local review store is unreadable we
+    # cannot tell which flagged terms still need action — a resolved or kept term
+    # would look identical to an unreviewed one. Returning an empty list here
+    # would read as "no waste work", and returning every flagged term would
+    # reopen decisions a human already made. So we return a single explicit
+    # DISCLOSURE item instead, and no actionable ones.
+    if payload.get("review_state_available") is False:
+        flagged_total = (payload.get("pagination") or {}).get("total_count")
+        return [{
+            "id": "waste-review-unavailable",
+            "type": "waste_review",
+            "severity": "medium",
+            "severity_score": 50,
+            "title": "Search-term waste actions unavailable",
+            "detail": (
+                "The local search-term review store could not be read, so "
+                "Averroes cannot tell which flagged terms still need action. "
+                + (f"{flagged_total} term(s) are currently flagged. "
+                   if flagged_total is not None else "")
+                + "This is NOT zero outstanding work — no term has been "
+                  "resolved, reopened or dismissed."),
+            "entity_label": "Search-term review store",
+            "entity_type": "review_store",
+            "campaign_name": "",
+            "source": "search_term_review (local review decisions)",
+            "evidence": {
+                "review_state_status": "unavailable",
+                "flagged_terms": flagged_total,
+                "actions_available": False,
+                "applied_to_google_ads": False,
+                "evidence_window": payload.get("window"),
+            },
+            "primary_link": {
+                "page": "search-terms",
+                "action": "navigate",
+                "hash": "#/search-terms?tab=flagged",
+            },
+        }]
 
     items: list[dict] = []
     seen_identities: set[str] = set()
     for row in (payload.get("rows") or []):
+        # action_needed is None during a review-store outage, which the branch
+        # above already handled; here it is a real True/False.
         if not row.get("action_needed"):
             continue
         identity = row.get("term_identity")
-        # Belt-and-braces: the durable identity is unique by construction, so a
-        # repeat here would be a real invariant break, not a snapshot artefact.
-        if not identity or identity in seen_identities:
+        if not identity:
+            # A row with no durable identity cannot be actioned or deduplicated.
+            log.error("[action-queue] flagged row without term_identity: %r",
+                      row.get("search_term"))
             continue
+        if identity in seen_identities:
+            # PR-ADS-153D: NEVER silently skip. The flagged view guarantees one
+            # row per durable identity, so a repeat here is an invariant break,
+            # not a snapshot artefact — skipping it quietly is exactly how the
+            # queue used to hide a variant's spend. Surface it loudly.
+            log.error("[action-queue] duplicate durable identity %s for %r — "
+                      "the flagged population violated its one-row-per-identity "
+                      "invariant", identity, row.get("search_term"))
+            raise RuntimeError(
+                f"duplicate durable search-term identity {identity} in the "
+                "flagged population")
         seen_identities.add(identity)
 
         term = row.get("search_term") or ""

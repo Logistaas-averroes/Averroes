@@ -54,6 +54,20 @@ service has always merged at, promoted out of a private helper into a shared,
 documented module so the flagged view, the review record and the Action Queue
 item provably describe one thing.
 
+**The aggregation grain IS the identity grain.** Units merge on
+`(normalize_search_term(search_term), campaign_key)` — not on the raw string.
+This was a merge blocker on PR #156: grouping on the raw term while identifying
+on the normalized one made `Freight JOBS` and `freight jobs` two rows sharing one
+identity, so the table showed 2 rows, pagination said 2, the KPI counted 1 term,
+and the Action Queue kept a single item carrying only one variant's spend ($20 of
+$30). Every raw variant is preserved on the row as `search_term_variants`, and
+the display label is deterministic (the variant equal to the normalized form,
+else the lexicographically first).
+
+The service asserts `len(rows) == len({row["term_identity"] for row in rows})`
+and raises `SearchTermIdentityError` rather than serving a population whose rows,
+KPIs and queue items cannot be reconciled.
+
 **Why ad group is evidence, not identity.** The canonical FACT key includes ad
 group, keyword and match type (`idx_search_terms_unique_fact`) — that is the
 grain of one ingested row, and it is what makes ingestion idempotent. The
@@ -174,10 +188,35 @@ to review priority.
 |---|---|
 | `reconciled` | Canonical facts present and SQL attribution resolvable |
 | `partial` | Facts present but CRM attribution incomplete, or annotations could not be safely joined |
-| `mismatch` | A flagged term carries no reason evidence — counts are withheld, not rendered as normal |
+| `mismatch` | A flagged term carries no reason evidence — the payload is QUARANTINED (below) |
 | `unavailable` | The canonical fact source could not be read |
 
 None of these is ever converted into zero.
+
+### Mismatch is quarantined, not annotated
+
+Warning about untrustworthy numbers and then rendering them is worse than
+useless. On `mismatch` the payload carries `actionable: false`, null KPIs, no
+rows, no facets, `filters_enabled: false` and `review_actions_enabled: false`.
+The evidence needed to DIAGNOSE the break travels in a separate `quarantine`
+block whose shape the KPI and table renderers cannot consume, and the frontend
+returns before those elements are ever written — so the caution can never end up
+sitting on top of the figures it is cautioning about. The Action Queue and the
+`/api/waste` adapter both refuse a non-actionable payload.
+
+### A review-store outage is not "unreviewed"
+
+If `search_term_review` cannot be read, rows report `review_state: null`,
+`review_state_status: "unavailable"` and `action_needed: null`; Review Needed is
+withheld; the `never_reviewed` priority component is not applied; the
+review-state filter is refused rather than returning a silently wrong subset; and
+review actions are disabled.
+
+The Action Queue emits ONE explicit disclosure item instead of an empty list —
+an empty list reads as "no outstanding work", and returning every flagged term
+would reopen decisions a human already made. Defaulting an outage to
+`unreviewed` would have done exactly that: silently resurrect resolved and kept
+terms.
 
 ---
 
@@ -355,7 +394,36 @@ search-term waste belongs in the Action Queue.
 
 ---
 
-## 16. Governance (§3, §16, §46)
+## 16. The audit is a merge gate
+
+`scripts/audit_search_term_waste_truth.py` exits **non-zero** on any of:
+
+* a duplicate `term_identity` in the COMPLETE flagged population — audited
+  BEFORE the Action Queue deduplicates, because auditing after the dedup would
+  hide exactly the defect the gate exists to catch;
+* row count, KPI count and pagination total disagreeing;
+* the page and the queue disagreeing on a term's spend or reason;
+* `truth_state = mismatch`;
+* canonical facts or the local review store unavailable;
+* no durable flag history persisted while flagged terms exist (i.e. the weekly
+  write path is not running);
+* the queue reporting review state unavailable while presenting as empty;
+* any database error — an audit that cannot run is a FAILED audit, never a pass.
+
+`--json` returns the same non-zero status. Durable identities are computed with
+the shared `analysis.search_term_identity` contract, never by concatenating SQL
+strings: a delimiter-joined key is not the identity the product uses, so it could
+agree in the audit and disagree everywhere else.
+
+CI: `.github/workflows/pr-ads-153d-checks.yml` runs the suite, the PostgreSQL
+integration tests (failing loudly if they SKIP — a skipped database suite is not
+merge evidence), `compileall`, `node --check` and `git diff --check`. The two
+`test_search_terms_followup_fixes.py` cases that fail on `main` are deselected
+from the blocking job and run in a separate, clearly-labelled non-blocking job.
+
+---
+
+## 17. Governance (§3, §16, §46)
 
 Read-only against every external platform. Allowed: Google Ads GET/read through
 existing ingestion, local PostgreSQL reads/writes, and local review-state

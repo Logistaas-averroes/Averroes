@@ -993,10 +993,12 @@ def test_review_store_outage_is_reported_as_unavailable(monkeypatch):
 
     payload = _flagged()
     assert payload["review_state_available"] is False
-    # The term still reads unreviewed, so it stays actionable rather than being
-    # silently dropped from the queue.
-    assert payload["rows"][0]["review_state"] == "unreviewed"
-    assert payload["rows"][0]["action_needed"] is True
+    # PR #156 merge-blocker 3: an outage is NOT "unreviewed". Both the state and
+    # the action verdict are null, because "we could not read the store" is
+    # exactly what we do not know.
+    assert payload["rows"][0]["review_state"] is None
+    assert payload["rows"][0]["review_state_status"] == "unavailable"
+    assert payload["rows"][0]["action_needed"] is None
 
 
 def test_review_store_available_is_reported_when_it_is(monkeypatch):
@@ -1004,3 +1006,495 @@ def test_review_store_available_is_reported_when_it_is(monkeypatch):
         _g("tms", "Brand - UK", "1", spend=10.0, flagged=True, junk="student"),
     ]), sql_attr=_no_attribution())
     assert _flagged()["review_state_available"] is True
+
+
+# =============================================================================
+# Merge-blocker 1 (PR #156) — aggregation grain MUST equal the identity grain
+# =============================================================================
+# Before: _build_population grouped on the RAW search term while the durable
+# identity normalized case and whitespace. "Freight JOBS" and "freight jobs"
+# became two rows sharing ONE identity, so the table showed 2 rows and
+# pagination said 2, the KPI counted 1 term, and the Action Queue kept a single
+# item carrying only one variant's spend ($20 of $30). Every surface disagreed.
+#
+# After: units merge on (normalize_search_term, campaign_key) — the identity
+# grain itself — and every raw variant is preserved as display evidence.
+
+def _flagged_variant_case():
+    return _agg([
+        _g("Freight JOBS", "Brand - UK", "1", spend=10.0, clicks=1,
+           impressions=10, flagged=True, junk="job_seeker"),
+        _g("freight jobs", "Brand - UK", "1", spend=20.0, clicks=2,
+           impressions=20, flagged=True, junk="job_seeker"),
+    ])
+
+
+def test_case_variants_reconcile_across_every_surface(monkeypatch):
+    """The exact reported reproduction, asserted end to end."""
+    from api import server
+
+    _patch(monkeypatch, _flagged_variant_case(), sql_attr=_no_attribution())
+    payload = _flagged()
+
+    assert len(payload["rows"]) == 1
+    assert payload["pagination"]["total_count"] == 1
+    assert payload["kpis"]["flagged_terms"] == 1
+    assert payload["kpis"]["flagged_spend_usd"] == 30.0
+    assert payload["rows"][0]["spend_usd"] == 30.0
+
+    items = server._build_waste_queue_items(None, 30, 100.0)  # noqa: SLF001
+    assert len(items) == 1
+    assert items[0]["evidence"]["spend_usd"] == 30.0
+    assert items[0]["evidence"]["term_identity"] == payload["rows"][0]["term_identity"]
+
+
+def test_row_count_always_equals_identity_count(monkeypatch):
+    """The hard invariant, stated as the spec states it."""
+    _patch(monkeypatch, _flagged_variant_case(), sql_attr=_no_attribution())
+    rows = _flagged()["rows"]
+    assert len(rows) == len({row["term_identity"] for row in rows})
+
+
+def test_identity_divergence_raises_instead_of_serving(monkeypatch):
+    """If the grain ever drifts again, the page must fail loudly rather than
+    publish rows, KPIs and queue items that contradict each other."""
+    import services.search_term_evidence_service as svc
+
+    _patch(monkeypatch, _flagged_variant_case(), sql_attr=_no_attribution())
+    # Force the old (raw-term) grain back.
+    monkeypatch.setattr(svc, "normalize_search_term", lambda v: str(v or ""))
+    with pytest.raises(svc.SearchTermIdentityError):
+        _flagged()
+
+
+def test_variants_aggregate_clicks_and_impressions(monkeypatch):
+    _patch(monkeypatch, _flagged_variant_case(), sql_attr=_no_attribution())
+    row = _flagged()["rows"][0]
+    assert row["clicks"] == 3
+    assert row["impressions"] == 30
+
+
+def test_repeated_whitespace_variants_merge(monkeypatch):
+    _patch(monkeypatch, _agg([
+        _g("freight  jobs", "Brand - UK", "1", spend=10.0, flagged=True,
+           junk="job_seeker"),
+        _g("freight jobs", "Brand - UK", "1", spend=20.0, flagged=True,
+           junk="job_seeker"),
+        _g(" freight jobs ", "Brand - UK", "1", spend=5.0, flagged=True,
+           junk="job_seeker"),
+    ]), sql_attr=_no_attribution())
+    payload = _flagged()
+    assert len(payload["rows"]) == 1
+    assert payload["kpis"]["flagged_terms"] == 1
+    assert payload["rows"][0]["spend_usd"] == 35.0
+
+
+def test_unicode_nfkc_variants_merge(monkeypatch):
+    """NFKC-equivalent forms are the same query — the identity says so, so the
+    aggregation must too. U+FF46 FULLWIDTH LATIN SMALL LETTER F normalizes to
+    an ASCII "f"."""
+    assert identity.normalize_search_term("ｆreight jobs") == "freight jobs"
+    _patch(monkeypatch, _agg([
+        _g("ｆreight jobs", "Brand - UK", "1", spend=10.0, flagged=True,
+           junk="job_seeker"),
+        _g("freight jobs", "Brand - UK", "1", spend=20.0, flagged=True,
+           junk="job_seeker"),
+    ]), sql_attr=_no_attribution())
+    payload = _flagged()
+    assert len(payload["rows"]) == 1
+    assert payload["rows"][0]["spend_usd"] == 30.0
+
+
+def test_punctuation_variants_stay_distinct(monkeypatch):
+    """Punctuation is NOT normalized — Google Ads reports these separately and a
+    reviewer may judge them differently, so merging would destroy a real fact."""
+    _patch(monkeypatch, _agg([
+        _g("logistics software", "Brand - UK", "1", spend=10.0, flagged=True,
+           junk="student"),
+        _g("logistics-software", "Brand - UK", "1", spend=20.0, flagged=True,
+           junk="student"),
+    ]), sql_attr=_no_attribution())
+    payload = _flagged()
+    assert len(payload["rows"]) == 2
+    assert payload["kpis"]["flagged_terms"] == 2
+    assert len({r["term_identity"] for r in payload["rows"]}) == 2
+
+
+def test_same_normalized_term_in_two_campaigns_stays_two_units(monkeypatch):
+    _patch(monkeypatch, _agg([
+        _g("Freight JOBS", "Brand - UK", "1", spend=10.0, flagged=True,
+           junk="job_seeker"),
+        _g("freight jobs", "Gulf", "2", spend=20.0, flagged=True,
+           junk="job_seeker"),
+    ]), sql_attr=_no_attribution())
+    payload = _flagged()
+    assert len(payload["rows"]) == 2
+    assert payload["kpis"]["flagged_terms"] == 2
+    by_campaign = {r["campaign_name"]: r["spend_usd"] for r in payload["rows"]}
+    assert by_campaign["Brand - UK"] == 10.0
+    assert by_campaign["Gulf"] == 20.0
+
+
+def test_raw_variants_are_preserved_as_display_evidence(monkeypatch):
+    """Nothing is silently collapsed — the merged variants stay visible."""
+    _patch(monkeypatch, _flagged_variant_case(), sql_attr=_no_attribution())
+    row = _flagged()["rows"][0]
+    assert row["search_term_normalized"] == "freight jobs"
+    # The display label is deterministic, and the other casing rides along.
+    assert row["search_term"] == "freight jobs"
+    assert "Freight JOBS" in row["search_term_variants"]
+
+
+def test_representative_term_is_deterministic(monkeypatch):
+    """No variant equals the normalized form → lexicographically first wins,
+    so the same population always renders the same label."""
+    _patch(monkeypatch, _agg([
+        _g("Freight JOBS", "Brand - UK", "1", spend=10.0, flagged=True,
+           junk="job_seeker"),
+        _g("FREIGHT Jobs", "Brand - UK", "1", spend=20.0, flagged=True,
+           junk="job_seeker"),
+    ]), sql_attr=_no_attribution())
+    first = _flagged()["rows"][0]
+    second = _flagged()["rows"][0]
+    assert first["search_term"] == second["search_term"] == "FREIGHT Jobs"
+    assert first["search_term_normalized"] == "freight jobs"
+
+
+def test_free_text_filter_finds_a_merged_unit_by_any_raw_variant(monkeypatch):
+    _patch(monkeypatch, _flagged_variant_case(), sql_attr=_no_attribution())
+    assert len(_flagged(q="Freight JOBS")["rows"]) == 1
+    assert len(_flagged(q="freight jobs")["rows"]) == 1
+
+
+def test_waste_annotation_joins_across_a_casing_difference(monkeypatch):
+    """An annotation written against one casing must reach the merged unit."""
+    _patch(monkeypatch, _agg([
+        _g("Freight JOBS", "Brand - UK", "1", spend=10.0, unreviewed=True),
+    ]), waste_rows=[
+        {"search_term": "freight jobs", "campaign_name": "Brand - UK",
+         "junk_category": "job_seeker", "matched_pattern": "jobs",
+         "crm_junk_confirmed": 1, "run_date": "2026-07-01"},
+    ], sql_attr=_no_attribution())
+    payload = _flagged()
+    assert payload["kpis"]["flagged_terms"] == 1
+    assert payload["rows"][0]["flag_reason"] == "job_seeker"
+    assert (payload["annotation_join"]["legacy_unresolved"] or 0) == 0
+
+
+def test_action_queue_refuses_to_silently_drop_a_duplicate_identity(monkeypatch):
+    """The queue must never quietly skip a repeat — that is how a variant's
+    spend went missing. A duplicate is an invariant break and raises."""
+    import services.search_term_evidence_service as svc
+    from api import server
+
+    _patch(monkeypatch, _flagged_variant_case(), sql_attr=_no_attribution())
+    real = svc.build_flagged_search_terms          # capture BEFORE patching
+
+    def _duplicated(window, **kw):
+        payload = real(window, **kw)
+        payload["rows"] = payload["rows"] + payload["rows"]   # forced break
+        return payload
+
+    monkeypatch.setattr(svc, "build_flagged_search_terms", _duplicated)
+    with pytest.raises(RuntimeError, match="duplicate durable"):
+        server._build_waste_queue_items(None, 30, 100.0)  # noqa: SLF001
+
+
+# =============================================================================
+# Merge-blocker 2 (PR #156) — mismatch data must never render as trustworthy
+# =============================================================================
+# Before: truth_state = "mismatch" returned populated KPIs and rows, and the UI
+# printed a warning that counts were withheld immediately above the counts.
+# After: the payload is quarantined — null KPIs, no rows, no facets, filters and
+# review actions disabled, and a separate diagnostic block the normal renderers
+# cannot consume.
+
+def _mismatch_population():
+    """A durably flagged term carrying NO reason evidence — the invariant break
+    the flagged contract is defined to reject."""
+    return _agg([
+        _g("mystery term", "Brand - UK", "1", spend=250.0, clicks=9,
+           flagged=True, junk=None),
+    ])
+
+
+def test_flagged_with_no_reason_evidence_reports_mismatch(monkeypatch):
+    _patch(monkeypatch, _mismatch_population(), sql_attr=_no_attribution())
+    payload = _flagged()
+    assert payload["truth_state"]["status"] == "mismatch"
+    assert any(r.startswith("flagged_without_reason_evidence")
+               for r in payload["truth_state"]["reasons"])
+
+
+def test_mismatch_exposes_no_kpi_row_or_action_count(monkeypatch):
+    from api import server
+
+    _patch(monkeypatch, _mismatch_population(), sql_attr=_no_attribution())
+    payload = _flagged()
+
+    assert payload["actionable"] is False
+    assert payload["rows"] == []
+    assert payload["pagination"]["total_count"] is None
+    assert payload["pagination"]["returned_count"] == 0
+    for key, value in payload["kpis"].items():
+        # Descriptive labels/status strings are not decision metrics.
+        if key in ("sql_evidence_label", "reporting_currency",
+                   "review_state_status"):
+            continue
+        assert value in (None, False), f"{key} leaked a value on mismatch: {value!r}"
+
+    # And no action is manufactured from it.
+    assert server._build_waste_queue_items(None, 30, 100.0) == []  # noqa: SLF001
+
+
+def test_mismatch_disables_filters_pagination_and_review_actions(monkeypatch):
+    _patch(monkeypatch, _mismatch_population(), sql_attr=_no_attribution())
+    payload = _flagged()
+    assert payload["filters_enabled"] is False
+    assert payload["review_actions_enabled"] is False
+    assert payload["facets"]["campaigns"] == []
+    assert payload["facets"]["flag_reasons"] == []
+    assert payload["pagination"]["has_more"] is False
+
+
+def test_mismatch_carries_a_separate_diagnostic_block(monkeypatch):
+    """Diagnosis must be possible without the normal UI being able to render
+    it as decision data."""
+    _patch(monkeypatch, _mismatch_population(), sql_attr=_no_attribution())
+    q = _flagged()["quarantine"]
+    assert q["reason"] == "internal_invariant_failed"
+    assert q["affected_term_count"] == 1
+    assert "mystery term" in q["affected_terms_sample"]
+    # The sample is plain strings, not row objects the table renderer accepts.
+    assert all(isinstance(t, str) for t in q["affected_terms_sample"])
+
+
+def test_mismatch_filters_cannot_be_used_to_page_around_the_quarantine(monkeypatch):
+    _patch(monkeypatch, _mismatch_population(), sql_attr=_no_attribution())
+    for kwargs in ({"q": "mystery"}, {"page": 2}, {"sort": "spend"},
+                   {"min_spend": 1}, {"review_state": "unreviewed"}):
+        payload = _flagged(**kwargs)
+        assert payload["rows"] == [], kwargs
+        assert payload["kpis"]["flagged_terms"] is None, kwargs
+
+
+def test_legacy_waste_adapter_also_withholds_mismatch_data(monkeypatch):
+    from api import server
+
+    _patch(monkeypatch, _mismatch_population(), sql_attr=_no_attribution())
+    out = server.api_waste(user={"e": "x"}, days=30, window="30d")
+    assert out["waste"] == []
+    assert out["total_count"] == 0
+    assert out["truth_state"]["status"] == "mismatch"
+    assert out["quarantine"]["reason"] == "internal_invariant_failed"
+
+
+def test_frontend_returns_before_writing_kpi_or_table_elements():
+    """Structural, not cosmetic: the quarantine branch returns BEFORE the KPI
+    grid and table shell exist, so there is no element for the table renderer to
+    populate — the warning can never sit on top of the numbers."""
+    fn = _APP_JS.split("function renderFlaggedTab(")[1].split("\nfunction ")[0]
+    quarantine_at = fn.index("_flagData.actionable === false")
+    kpis_at = fn.index("renderFlaggedKPIs(")
+    table_at = fn.index('id="st-flagged-table"')
+    assert quarantine_at < kpis_at < table_at
+    branch = fn[quarantine_at:fn.index("body.innerHTML = `\n    ${flagTruthNotice")]
+    assert "return;" in branch
+
+    quarantine = _APP_JS.split("function renderFlaggedQuarantine(")[1].split("\nfunction ")[0]
+    for banned in ("dash-kpi-card", "st-flagged-table", "renderFlaggedKPIs",
+                   "renderFlaggedFilters", "data-flag-review"):
+        assert banned not in quarantine, banned
+
+
+def test_healthy_payload_is_marked_actionable(monkeypatch):
+    _patch(monkeypatch, _agg([
+        _g("tms", "Brand - UK", "1", spend=10.0, flagged=True, junk="student"),
+    ]), sql_attr=_no_attribution())
+    payload = _flagged()
+    assert payload["actionable"] is True
+    assert payload["filters_enabled"] is True
+    assert payload["review_actions_enabled"] is True
+    assert payload["truth_state"]["status"] != "mismatch"
+
+
+# =============================================================================
+# Merge-blocker 3 (PR #156) — a review-store outage is not "unreviewed"
+# =============================================================================
+# Before: an unreadable search_term_review defaulted every row to `unreviewed`,
+# which added the never_reviewed priority component and reintroduced resolved
+# and kept terms into the Action Queue. An outage silently undid human
+# decisions.
+# After: review_state is null with an explicit `unavailable` status,
+# action_needed is null, Review Needed is withheld, review controls are
+# disabled, and the queue DISCLOSES the outage instead of returning an empty
+# list that reads as "no work".
+
+def _outage(monkeypatch, agg, **kw):
+    import db.search_term_review_repository as review_repo
+
+    _patch(monkeypatch, agg, **kw)
+    monkeypatch.setattr(review_repo, "fetch_reviews_for_identities",
+                        lambda ids: {"available": False, "rows": {},
+                                     "reason": "database_unavailable"})
+
+
+def _flagged_one():
+    return _agg([_g("freight jobs", "Brand - UK", "1", spend=200.0,
+                    flagged=True, junk="job_seeker")])
+
+
+def test_outage_reports_null_state_not_unreviewed(monkeypatch):
+    _outage(monkeypatch, _flagged_one(), sql_attr=_no_attribution())
+    row = _flagged()["rows"][0]
+    assert row["review_state"] is None
+    assert row["review_state_status"] == "unavailable"
+    assert row["review_state_label"] == "Review state unavailable"
+    assert row["action_needed"] is None
+    assert row["requires_action"] is None
+    assert row["is_decided"] is None
+
+
+def test_outage_withholds_review_needed_rather_than_reporting_zero(monkeypatch):
+    _outage(monkeypatch, _flagged_one(), sql_attr=_no_attribution())
+    kpis = _flagged()["kpis"]
+    assert kpis["review_needed"] is None
+    assert kpis["review_state_status"] == "unavailable"
+
+
+def test_outage_does_not_add_the_never_reviewed_priority_component(monkeypatch):
+    """Scoring an unknown as "never reviewed" would promote terms a human had
+    already dealt with."""
+    _outage(monkeypatch, _flagged_one(), sql_attr=_no_attribution())
+    row = _flagged()["rows"][0]
+    codes = {r["code"] for r in row["priority_reasons"]}
+    assert "never_reviewed" not in codes
+
+
+def test_outage_disables_review_actions_and_the_review_filter(monkeypatch):
+    from services.search_term_evidence_service import SearchTermQueryError
+
+    _outage(monkeypatch, _flagged_one(), sql_attr=_no_attribution())
+    payload = _flagged()
+    assert payload["review_actions_enabled"] is False
+    assert payload["review_state_available"] is False
+    # Filtering would return an empty list that reads as a real "no terms in
+    # that state" — refuse it instead.
+    with pytest.raises(SearchTermQueryError, match="review_state filter"):
+        _flagged(review_state="unreviewed")
+
+
+def test_outage_queue_discloses_rather_than_returning_an_empty_list(monkeypatch):
+    """An empty waste-action list would be read as zero outstanding work."""
+    from api import server
+
+    _outage(monkeypatch, _flagged_one(), sql_attr=_no_attribution())
+    items = server._build_waste_queue_items(None, 30, 100.0)  # noqa: SLF001
+    assert len(items) == 1
+    item = items[0]
+    assert item["id"] == "waste-review-unavailable"
+    assert item["evidence"]["review_state_status"] == "unavailable"
+    assert item["evidence"]["actions_available"] is False
+    assert "NOT zero outstanding work" in item["detail"]
+    # It is a disclosure, not an action against a term.
+    assert item["entity_type"] == "review_store"
+
+
+def test_outage_never_reopens_a_resolved_or_kept_term(monkeypatch):
+    """The whole point: an unreadable store must not resurrect decided terms as
+    actionable queue items."""
+    from api import server
+
+    _outage(monkeypatch, _flagged_one(), sql_attr=_no_attribution())
+    items = server._build_waste_queue_items(None, 30, 100.0)  # noqa: SLF001
+    # Exactly one disclosure item, and no per-term action for anything.
+    assert [i["entity_type"] for i in items] == ["review_store"]
+    assert not any(i["evidence"].get("term_identity") for i in items)
+
+
+def test_frontend_says_unavailable_not_unreviewed():
+    fn = _APP_JS.split("function flagReviewCell(")[1].split("\nfunction ")[0]
+    assert '"unavailable"' in fn
+    assert "Review state unavailable" in fn
+    # It must not fall through to the Unreviewed label on a null state.
+    assert "review_state === null" in fn
+
+
+def test_frontend_disables_review_controls_during_an_outage():
+    filters = _APP_JS.split("function renderFlaggedFilters(")[1].split("\nfunction ")[0]
+    assert "review_state_available === false" in filters
+    assert "disabled" in filters
+
+    drawer = _APP_JS.split("function openFlaggedDrawer(")[1].split("\nasync function ")[0]
+    assert "review_actions_enabled === false" in drawer
+    assert "Review actions are unavailable" in drawer
+
+    notice = _APP_JS.split("function flagReviewOutageNotice(")[1].split("\nfunction ")[0]
+    assert "not the same as" in notice
+
+
+def test_review_state_payload_never_collapses_an_outage_into_a_state():
+    available = review.review_state_payload("resolved")
+    outage = review.review_state_payload("resolved", available=False)
+    assert available["review_state"] == "resolved"
+    assert outage["review_state"] is None
+    assert outage["review_state_status"] == "unavailable"
+    assert outage["requires_action"] is None
+    # And it still never implies a platform change.
+    assert outage["applied_to_google_ads"] is False
+
+
+# =============================================================================
+# Merge-blocker 4 (PR #156) — flag history must be WIRED, not merely writable
+# =============================================================================
+_WEEKLY_PY = (_ROOT / "scheduler" / "weekly.py").read_text()
+_HISTORY_SERVICE_PY = (
+    _ROOT / "services" / "search_term_flag_history_service.py").read_text()
+
+
+def test_flag_history_is_called_from_the_weekly_analysis_run():
+    """Before this fix record_flag_observations had no caller outside tests, so
+    a real deployment left every history column NULL forever."""
+    assert "record_flag_history" in _WEEKLY_PY
+    assert "search_term_flag_history_service" in _WEEKLY_PY
+    # It runs AFTER the annotations land, so it reads a population that already
+    # reflects this run's classification.
+    assert (_WEEKLY_PY.index("write_waste_terms")
+            < _WEEKLY_PY.index("record_flag_history"))
+
+
+def test_flag_history_is_never_written_from_a_get_endpoint():
+    """A read path must not mutate the durable audit table."""
+    for name in ("record_flag_history", "backfill_flag_history",
+                 "record_flag_observations"):
+        assert name not in _SERVICE_PY, f"{name} reachable from the read service"
+    # And no GET handler calls it.
+    for block in _SERVER_PY.split("@app.get(")[1:]:
+        handler = block.split("@app.")[0]
+        assert "record_flag_history" not in handler
+        assert "record_flag_observations" not in handler
+
+
+def test_flag_history_service_writes_only_local_state():
+    imports = re.findall(r"^\s*(?:from|import)\s+([\w.]+)", _HISTORY_SERVICE_PY,
+                         re.M)
+    for module in imports:
+        assert not module.startswith("connectors"), module
+        assert not any(p in module.lower()
+                       for p in ("google", "hubspot", "mailchimp")), module
+    for call in ("mutate", "requests.", "httpx.", "add_negative"):
+        assert call not in _HISTORY_SERVICE_PY.lower(), call
+
+
+def test_flag_history_dates_observations_by_evidence_not_wall_clock():
+    """flagged_at is the term's last_seen SOURCE DATE, which is what makes a
+    backfill truthful and replays deterministic."""
+    fn = _HISTORY_SERVICE_PY.split("def _observations_from_rows(")[1].split("\ndef ")[0]
+    assert '"flagged_at": row.get("last_seen")' in fn
+    assert "datetime.now" not in fn and "utcnow" not in fn
+
+
+def test_flag_history_skips_rows_without_a_full_durable_identity():
+    fn = _HISTORY_SERVICE_PY.split("def _observations_from_rows(")[1].split("\ndef ")[0]
+    assert "if not term or not campaign_key:" in fn
+    assert "continue" in fn

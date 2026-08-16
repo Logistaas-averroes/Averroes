@@ -10066,8 +10066,19 @@ function renderFlaggedTab() {
   }
   if (!_flagData) return;
 
+  // PR-ADS-153D §32 — a quarantined (mismatch) payload must be UNRENDERABLE as
+  // normal decision data. We return before the KPI grid, the filters and the
+  // table shell are ever written, so there is no element for renderFlaggedTable
+  // or wireFlaggedControls to populate — the warning cannot end up sitting on
+  // top of numbers it is warning about.
+  if (_flagData.actionable === false) {
+    body.innerHTML = renderFlaggedQuarantine(_flagData);
+    return;
+  }
+
   body.innerHTML = `
     ${flagTruthNotice(_flagData)}
+    ${flagReviewOutageNotice(_flagData)}
     ${renderFlaggedKPIs(_flagData.kpis)}
     ${renderFlaggedFilters(_flagData.facets)}
     ${flagFocusNotice()}
@@ -10080,6 +10091,27 @@ function renderFlaggedTab() {
       negative keywords or writes anything to Google Ads.</p>`;
   renderFlaggedTable();
   wireFlaggedControls();
+}
+
+// Diagnosis only. Deliberately renders no KPI card, no table, no filter and no
+// review control — there is nothing here a reader could act on.
+function renderFlaggedQuarantine(data) {
+  const q = data.quarantine || {};
+  const truth = data.truth_state || {};
+  const sample = (q.affected_terms_sample || [])
+    .map((t) => `<li><code>${escapeHtml(t)}</code></li>`).join("");
+  return `<div class="mapping-notice mapping-notice--error">
+      <strong>Reconciliation required — flagged metrics withheld.</strong>
+      <p>${escapeHtml(q.detail || "An internal invariant failed for this window.")}</p>
+      <p>Counts, rows, filters and review actions are unavailable for this window
+         because the flagged contract could not be explained. They are withheld
+         rather than shown as normal values.</p>
+      ${q.affected_term_count ? `<p>${fmtCount(q.affected_term_count)} affected term(s).</p>` : ""}
+      ${sample ? `<details><summary>Diagnostic sample</summary><ul>${sample}</ul></details>` : ""}
+      ${(truth.reasons || []).length
+        ? `<p class="grace-note">Invariant: ${escapeHtml((truth.reasons || []).join(", "))}</p>` : ""}
+      <p class="grace-note">No Action Queue item is created from quarantined evidence.</p>
+    </div>`;
 }
 
 // Truth state is disclosed, never silently downgraded into zeros.
@@ -10100,6 +10132,15 @@ function flagTruthNotice(data) {
     : "";
   return `<div class="mapping-notice mapping-notice--info">Partial evidence
     (${escapeHtml(reasons)}).${extra}</div>`;
+}
+
+function flagReviewOutageNotice(data) {
+  if (data.review_state_available !== false) return "";
+  return `<div class="mapping-notice mapping-notice--info">
+    <strong>Review state unavailable.</strong> The local review store could not be read,
+    so no review decision can be shown or changed for these terms, and Review Needed is
+    withheld. This is not the same as "unreviewed" — no term has been resolved, reopened
+    or dismissed. Review actions are disabled until the store is readable again.</div>`;
 }
 
 function flagFocusNotice() {
@@ -10160,7 +10201,8 @@ function renderFlaggedFilters(facets) {
     <select id="flag-campaign" class="waste-filter-select" aria-label="Filter by campaign">
       ${stCampaignOptions(facets, _flagFilters.campaign)}
     </select>
-    <select id="flag-review-state" class="waste-filter-select" aria-label="Filter by review state">
+    <select id="flag-review-state" class="waste-filter-select" aria-label="Filter by review state"
+      ${_flagData && _flagData.review_state_available === false ? "disabled title=\"Review store unavailable — filtering by review state would return a silently wrong subset\"" : ""}>
       ${flagReviewStateOptions(_flagFilters.reviewState)}
     </select>
     <select id="flag-reason" class="waste-filter-select" aria-label="Filter by flag reason">
@@ -10204,6 +10246,15 @@ function flagReasonCell(row) {
     title="This flag reason is not in the shared taxonomy — raw value: ${escapeHtml(raw || "none")}">${label}</span>`;
 }
 
+// An unreadable review store is NOT "Unreviewed" — saying so would assert that
+// no human has decided, on evidence we do not have.
+function flagReviewCell(row) {
+  if (row.review_state_status === "unavailable" || row.review_state === null) {
+    return `<span class="detail-unavailable" title="${escapeHtml(row.review_state_help || "The local review store could not be read.")}">Review state unavailable</span>`;
+  }
+  return escapeHtml(FLAG_REVIEW_LABELS[row.review_state] || row.review_state || "—");
+}
+
 function flagPriorityCell(row) {
   const band = row.priority_band || "low";
   const why = (row.priority_reasons || [])
@@ -10232,7 +10283,7 @@ function renderFlaggedTable() {
       <td class="td--num">${fmtCount(r.clicks || 0)}</td>
       <td>${flagReasonCell(r)}</td>
       <td class="td--num">${flagSqlCell(r)}</td>
-      <td>${escapeHtml(FLAG_REVIEW_LABELS[r.review_state] || r.review_state || "—")}</td>
+      <td>${flagReviewCell(r)}</td>
       <td>${flagPriorityCell(r)}</td>
       <td>${escapeHtml(r.first_flagged_at ? fmtDate(r.first_flagged_at) : "—")}</td>
       <td>${escapeHtml(r.last_seen ? fmtDate(r.last_seen) : "—")}</td>
@@ -10325,9 +10376,14 @@ function openFlaggedDrawer(row) {
     `<li>${escapeHtml(r.reason_label)}${r.raw_reason ? ` <span class="muted">(rule: ${escapeHtml(r.raw_reason)})</span>` : ""}` +
     `${r.unmapped ? ` <span class="campaign-status-badge campaign-status-badge--warn">unmapped</span>` : ""}</li>`).join("");
 
-  const actions = FLAG_REVIEW_ACTIONS.map((a) =>
-    `<button type="button" class="btn btn--secondary" data-flag-review="${a.state}"
-      ${row.review_state === a.state ? "disabled" : ""}>${escapeHtml(a.label)}</button>`).join(" ");
+  const reviewDisabled = (_flagData && _flagData.review_actions_enabled === false)
+    || row.review_state_status === "unavailable";
+  const actions = reviewDisabled
+    ? `<p class="detail-unavailable">Review actions are unavailable — the local review
+         store could not be read. No decision can be recorded until it is readable again.</p>`
+    : FLAG_REVIEW_ACTIONS.map((a) =>
+        `<button type="button" class="btn btn--secondary" data-flag-review="${a.state}"
+          ${row.review_state === a.state ? "disabled" : ""}>${escapeHtml(a.label)}</button>`).join(" ");
 
   body.innerHTML = `
     <h4>Google Ads evidence</h4>
@@ -10352,7 +10408,7 @@ function openFlaggedDrawer(row) {
       <tr><td>Source</td><td>${escapeHtml(row.flag_source || "—")} <span class="muted">(${escapeHtml(row.flag_confidence || "—")})</span></td></tr>
       <tr><td>First flagged</td><td>${escapeHtml(row.first_flagged_at ? fmtDate(row.first_flagged_at) : "—")}</td></tr>
       <tr><td>Latest flagged</td><td>${escapeHtml(row.latest_flagged_at ? fmtDate(row.latest_flagged_at) : "—")}</td></tr>
-      <tr><td>Review state</td><td>${escapeHtml(FLAG_REVIEW_LABELS[row.review_state] || row.review_state || "—")}</td></tr>
+      <tr><td>Review state</td><td>${flagReviewCell(row)}</td></tr>
     </tbody></table>
 
     <h4>Action</h4>
