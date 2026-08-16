@@ -214,12 +214,18 @@ GATE_WINDOWS = ("current_quarter", "last_quarter", "last_6_months", "ytd",
 
 
 def _audit_window(window: str) -> dict:
-    """Run one window. An audit that cannot RUN is a failed audit, never a pass."""
-    from services.revenue_reconciliation_service import (
-        build_revenue_reconciliation,
-    )
+    """Run one window. An audit that cannot RUN is a failed audit, never a pass.
 
+    The import is INSIDE the try on purpose: a broken dependency raises at
+    import time, and letting that escape would crash the process instead of
+    reporting a failed window — turning a gate failure into an absence of a
+    result, and taking the whole --all-windows aggregation with it.
+    """
     try:
+        from services.revenue_reconciliation_service import (  # noqa: PLC0415
+            build_revenue_reconciliation,
+        )
+
         report = build_revenue_reconciliation(window)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "available": False, "window": window,

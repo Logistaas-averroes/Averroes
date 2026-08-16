@@ -81,10 +81,15 @@ jobs:
           suite = suite if suite.tag == "testsuite" else suite.find("testsuite")
           tests = int(suite.get("tests", 0))
           skipped = int(suite.get("skipped", 0))
-          cases = [c.get("classname", "") for c in suite.iter("testcase")]
-          modules = {c.rsplit(".", 1)[0] for c in cases if c}
+          # `classname` is the MODULE path for module-level test functions
+          # (`tests.test_x`) and module+class for class-based ones
+          # (`tests.test_x.TestY`). Match on the module prefix so both forms
+          # count — stripping the last component assumed a class was always
+          # present and collapsed every module to "tests".
+          classnames = {c.get("classname", "") for c in suite.iter("testcase")}
+          classnames.discard("")
           print(f"postgres tests={tests} skipped={skipped}")
-          print("modules: " + ", ".join(sorted(modules)))
+          print("modules: " + ", ".join(sorted(classnames)))
           if tests == 0 or skipped:
               sys.exit("PostgreSQL integration tests did not run — a skipped "
                        "database suite is not acceptable merge evidence")
@@ -94,7 +99,8 @@ jobs:
           for required in ("tests.test_pr_ads_153d_pg_integration",
                            "tests.test_pr_ads_153e_a_pg_integration",
                            "tests.test_pr_ads_153e_a2_pg_integration"):
-              if required not in modules:
+              if not any(cn == required or cn.startswith(required + ".")
+                         for cn in classnames):
                   sys.exit(f"{required} contributed no test cases — it was "
                            "skipped or failed to collect, which is not "
                            "acceptable merge evidence")

@@ -747,6 +747,43 @@ def test_an_unknown_window_is_a_usage_error(monkeypatch, capsys):
     assert "Unknown window" in capsys.readouterr().err
 
 
+def test_an_import_failure_is_a_failed_window_not_a_crash(monkeypatch, capsys):
+    """A broken dependency raises at IMPORT time. Letting that escape would
+    crash the process instead of reporting a failed window — turning a gate
+    failure into an absence of a result, and taking the aggregate with it."""
+    import builtins
+
+    import db.connection as connection
+    from scripts import audit_canonical_revenue_truth as audit
+
+    real_import = builtins.__import__
+
+    def _explode(name, *args, **kwargs):
+        if name == "services.revenue_reconciliation_service":
+            raise ImportError("cannot import name 'build_revenue_reconciliation'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(connection, "init_pool", lambda *a, **k: None)
+    monkeypatch.setattr(builtins, "__import__", _explode)
+    monkeypatch.setattr(sys, "argv", ["audit", "--all-windows", "--json"])
+
+    code = audit.main()
+    monkeypatch.undo()
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == audit.EXIT_VALIDATION_FAILED
+    assert payload["ok"] is False
+    assert payload["failing_windows"] == list(audit.GATE_WINDOWS)
+
+
+def test_the_window_runner_imports_inside_its_try():
+    fn = _AUDIT_PY.split("def _audit_window(")[1].split("\ndef ")[0]
+    body = fn.split("try:")[1]
+    assert "from services.revenue_reconciliation_service import" in body, (
+        "the import sits outside the try, so an ImportError crashes the CLI "
+        "instead of being reported as a failed audit")
+
+
 def test_an_audit_that_cannot_run_is_a_failure(monkeypatch, capsys):
     from scripts import audit_canonical_revenue_truth as audit
 
