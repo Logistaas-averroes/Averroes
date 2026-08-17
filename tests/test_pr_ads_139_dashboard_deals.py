@@ -31,6 +31,10 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_legacy_deal_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -102,16 +106,26 @@ WON_ROWS = [
     {"campaign_name": None, "country": None,
      "deal_id": "d4", "deal_amount_usd": 4000.0, "match_status": "unknown"},
 ]
+# PR-ADS-153E-B: one canonical row set now feeds BOTH the deal table and the
+# source breakdown, so the source fields live on the deal rows themselves. They
+# reproduce the old SRC_REVENUE truth exactly (all three deals Google Ads,
+# 29,000 + 4,000) — the fixture is unified, not changed.
 DEAL_ROWS = [
     {"deal_id": "d1", "company": "Acme", "country": "United States", "campaign_name": "Global Competitors",
      "deal_close_date": "2026-06-14", "deal_amount_usd": 18000.0, "deal_stage_label": "Deal Won",
-     "match_status": "matched", "match_source": "gclid"},
+     "match_status": "matched", "match_source": "gclid",
+     "acquisition_group": "google_ads", "attribution_status": "attributed",
+     "source_primary_raw": "Paid Search", "source_detail_raw": "google"},
     {"deal_id": "d2", "company": "Blue", "country": "United States", "campaign_name": "Global Competitors",
      "deal_close_date": "2026-05-23", "deal_amount_usd": 11000.0, "deal_stage_label": "Deal Won",
-     "match_status": "matched", "match_source": "gclid"},
+     "match_status": "matched", "match_source": "gclid",
+     "acquisition_group": "google_ads", "attribution_status": "attributed",
+     "source_primary_raw": "Paid Search", "source_detail_raw": "google"},
     {"deal_id": "d4", "company": "Ghost", "country": None, "campaign_name": None,
      "deal_close_date": "2026-06-19", "deal_amount_usd": 4000.0, "deal_stage_label": "won",
-     "match_status": "unknown", "match_source": None},
+     "match_status": "unknown", "match_source": None,
+     "acquisition_group": "google_ads", "attribution_status": "attributed",
+     "source_primary_raw": "Paid Search", "source_detail_raw": "google"},
 ]
 SRC_LEADS = (
     [{"acquisition_group": "google_ads", "status_category": "qualified",
@@ -173,7 +187,9 @@ def _patch_durable(monkeypatch, *, deals=None, sql_leads=None, revenue_connected
                         lambda s, e: {"available": True, "chunks": [{"chunk_start": "2026-01-01", "chunk_end": "2026-12-31", "status": "verified"}]})
     monkeypatch.setattr(repo, "fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr(repo, "revenue_integration_connected", lambda: revenue_connected)
-    monkeypatch.setattr(repo, "fetch_revenue_deals", lambda s, e: dict(ledger))
+    # PR-ADS-153E-B: the closed-won population is the canonical deal ledger.
+    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(dl),
+                           available=ledger_available)
     monkeypatch.setattr(repo, "fetch_source_leads", lambda s, e: {"available": True, "rows": list(SRC_LEADS)})
     monkeypatch.setattr(repo, "fetch_source_revenue", lambda s, e: {"available": True, "rows": list(SRC_REVENUE)})
     monkeypatch.setattr(repo, "fetch_sql_lead_details", lambda s, e: dict(sl) if sl is not None else {"available": False, "rows": []})
@@ -270,7 +286,10 @@ def test_read_only_and_conversion_value_never_used(monkeypatch):
     out = _deals(monkeypatch)
     assert out["read_only"] is True
     assert out["google_ads_conversion_value_used"] is False
-    assert out["source_truth"] == "hubspot_deal_pipeline_truth"
+    # PR-ADS-153E-B: the deal population is the canonical ledger.
+    assert out["source_truth"] == "hubspot_deal_ledger"
+    assert out["revenue_scope"] == "all_source"
+    assert out["legacy_fallback_used"] is False
 
 
 def test_kpis_closed_won_and_sqls(monkeypatch):
@@ -352,7 +371,9 @@ def test_no_roas_field_anywhere(monkeypatch):
 def test_null_amount_stays_unavailable_not_zero(monkeypatch):
     deals = DEAL_ROWS[:2] + [dict(DEAL_ROWS[2], deal_amount_usd=None)]
     out = _deals(monkeypatch, deals=deals)
-    ghost = next(d for d in out["deals"] if d["company"] == "Ghost")
+    # The canonical ledger names the DEAL; `company` (the contact's employer) is
+    # not a ledger field and is explicitly Unavailable.
+    ghost = next(d for d in out["deals"] if d["deal_name"] == "Ghost")
     assert ghost["amount_usd"] is None  # never a lowered $0
     assert ghost["status"] == "Amount unavailable"
 
@@ -375,7 +396,7 @@ def test_source_breakdown_closed_won_no_open_pipeline(monkeypatch):
     assert "google_ads" in by
     g = by["google_ads"]
     assert g["sqls"] == 23
-    assert g["closed_won_customers"] == 2
+    assert g["closed_won_customers"] == 3
     assert g["closed_won_revenue_usd"] == 33000.0
     # Open pipeline is not durable → Unavailable for every source.
     for r in out["source_breakdown"]:
@@ -453,7 +474,9 @@ def test_null_amount_withholds_aggregate_revenue(monkeypatch):
     assert "closed_won_revenue_usd" in {u["metric"] for u in out["unavailable"]}
     gc = next(r for r in out["campaign_breakdown"] if r["campaign_name"] == "Global Competitors")
     assert gc["closed_won_revenue_usd"] is None
-    assert gc["closed_won_customers"] == 2  # customers survive
+    # All three fixture deals now carry the same campaign, and one canonical row
+    # set feeds both the table and the breakdown — so the campaign holds 3.
+    assert gc["closed_won_customers"] == 3  # customers survive
 
 
 def test_funnel_none_count_is_unavailable_not_no_activity(monkeypatch):
@@ -487,8 +510,8 @@ def test_deal_ledger_outage_blanks_deal_proof(monkeypatch):
     def deal_view(view="deal", window=WINDOW, now=None):
         from services.revenue_decision_mart import build_revenue_decision_mart as real
         return real(view=view, window=window, now=now)
-    # Force the ledger status to database_unavailable by making fetch_revenue_deals unavailable.
-    monkeypatch.setattr(repo, "fetch_revenue_deals", lambda s, e: {"available": False, "rows": []})
+    # Force the ledger status to unavailable by making the canonical read fail.
+    patch_canonical_ledger(monkeypatch, [], available=False)
     from services.dashboard_deals_service import build_dashboard_deals
     out = build_dashboard_deals(WINDOW, now=NOW)
     assert out["deal_proof_available"] is False

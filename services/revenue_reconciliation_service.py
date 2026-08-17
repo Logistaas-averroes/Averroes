@@ -611,6 +611,23 @@ def _check_invariants(summary: dict, won_rows: dict, diffs: list,
             + (f" ({stages_res.get('reason')})" if stages_res.get("reason")
                else "")))
 
+    violations.extend(check_sync_coverage(sync_res))
+    return violations
+
+
+def check_sync_coverage(sync_res: dict) -> list:
+    """Is the canonical ledger's COVERAGE good enough to be believed?
+
+    Split out of ``_check_invariants`` in PR-ADS-153E-B so the audit and the
+    production read contract (``services.canonical_revenue_service``) apply one
+    implementation of the same rule. A page must not be able to render revenue
+    from a ledger the merge gate would have rejected, and a second copy of these
+    conditions would drift from this one the first time either changed.
+
+    Returns a list of ``{code, message}`` — empty means coverage is proven.
+    """
+    violations: list = []
+
     # ── Sync coverage must be COMPLETE, ORDERED and honest ──────────────────
     # PR-ADS-153E-A checked only that the state read succeeded and that the last
     # status was not a failure. That let a portal with NO historical bootstrap
@@ -713,6 +730,11 @@ __all__ = [
     "REASON_LEGACY_PREDICATE_FALSE_POSITIVE", "REASON_CANONICAL_WON_UNKNOWN",
     "REASON_CLOSE_DATE_OUTSIDE_WINDOW", "REASON_AMOUNT_PROVEN_BOTH_SIDES",
     "REASON_LEGACY_AMOUNT_UNAVAILABLE", "REASON_LEGACY_LEDGER_UNAVAILABLE",
+    "V_SYNC_STATE_UNAVAILABLE", "V_SYNC_STATE_MISSING",
+    "V_BOOTSTRAP_NOT_COMPLETE", "V_BOOTSTRAP_TIMESTAMP_MISSING",
+    "V_BOOTSTRAP_TIMESTAMP_INVALID", "V_POST_BOOTSTRAP_INCREMENTAL_MISSING",
+    "V_LAST_SYNC_NOT_SUCCESSFUL", "V_LAST_SYNC_SUCCESS_WITH_ERROR",
     "V_LAST_SYNC_NOT_INCREMENTAL",
+    "check_sync_coverage",
     "build_revenue_reconciliation",
 ]

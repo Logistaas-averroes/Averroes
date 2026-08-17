@@ -22,6 +22,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_legacy_deal_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -201,10 +205,13 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
         lambda cid=None: {"available": True, "mappings": []},
     )
     monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)
-    monkeypatch.setattr(
-        repo, "fetch_revenue_deals",
-        lambda s, e: {"available": True, "rows": list(DEAL_ROWS)},
-    )
+    # PR-ADS-153E-B: every revenue read in the mart now goes through the
+    # canonical deal ledger, so ONE fixture drives the campaign rows, the deal
+    # ledger and the source breakdown — which is exactly the property the mart
+    # audit exists to verify. A test overriding `won_rows` (the campaign-shaped
+    # fixture) therefore drives that one ledger too.
+    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(
+        won_rows if won_rows is not None else DEAL_ROWS))
     monkeypatch.setattr(
         repo, "fetch_source_leads",
         lambda s, e: {"available": True, "rows": list(SOURCE_LEAD_ROWS)},

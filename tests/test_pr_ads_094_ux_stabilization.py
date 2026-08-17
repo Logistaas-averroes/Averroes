@@ -128,7 +128,9 @@ def test_unit_economics_uses_global_window_fallback():
     start = JS.find("function loadUnitEconomics")
     assert start != -1, "loadUnitEconomics function not found"
     ue_section = JS[start:start + 500]
-    assert "getCurrentWindowParam()" in ue_section
+    # PR-ADS-153E-B: Unit Economics resolves a BUSINESS window (the shared
+    # resolver every other revenue page uses), not a rolling ad-style day window.
+    assert "getRoasBusinessWindow()" in ue_section
 
 
 # ── Help Drawer Fixes ──────────────────────────────────────────────────────
@@ -180,7 +182,8 @@ def test_unit_economics_dropdown_has_sync_attr():
     """Unit economics window dropdown must have data-sync-window-select."""
     match = re.search(r'<select[^>]*id="unit-economics-window"[^>]*>', HTML)
     assert match, "unit-economics-window select not found"
-    assert "data-sync-window-select" in match.group(0)
+    # PR-ADS-153E-B: it syncs with the BUSINESS-window selector instead.
+    assert "data-business-window-select" in match.group(0)
 
 
 def test_update_window_controls_syncs_dropdowns():

@@ -12,7 +12,12 @@ from unittest.mock import patch
 
 import pytest
 
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    canonical_ledger_patch, from_legacy_deal_rows,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -54,7 +59,7 @@ def _audit(window="current_quarter", grain=None, pollution=None, rev=None):
     spend_obj = {"available": True, "rows": [], "coverage_start": None, "coverage_end": None}
     with patch("db.revenue_repository.fetch_lead_date_grain_health", return_value=grain), \
          patch("db.revenue_repository.fetch_campaign_pollution_report", return_value=pollution), \
-         patch("db.revenue_repository.fetch_won_revenue", return_value=rev), \
+         canonical_ledger_patch(from_legacy_deal_rows(rev.get("rows") or [])), \
          patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend_obj), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=lead_obj), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
@@ -77,7 +82,8 @@ def test_audit_date_grain_health_fields():
     dg = _audit()["date_grain_health"]
     assert dg["spend_date_field"] == "geo.run_date"
     assert dg["lead_date_field_current"] == "leads.contact_created_at"
-    assert dg["deal_date_field"] == "gclid_attribution.deal_close_date"
+    # PR-ADS-153E-B: revenue is windowed by the CANONICAL deal close date.
+    assert dg["deal_date_field"] == "hubspot_deal_ledger.deal_close_date"
     assert dg["spend_window_safe"] is True
     assert dg["revenue_window_safe"] is True
 
@@ -155,7 +161,7 @@ def _make_admin_cookie():
 def _patched_audit_repo():
     with patch("db.revenue_repository.fetch_lead_date_grain_health", return_value=_grain(False)), \
          patch("db.revenue_repository.fetch_campaign_pollution_report", return_value=_pollution(True)), \
-         patch("db.revenue_repository.fetch_won_revenue", return_value={"available": True, "rows": [], "coverage_start": None, "coverage_end": None}), \
+         canonical_ledger_patch([]), \
          patch("db.revenue_repository.fetch_campaign_country_spend", return_value={"available": True, "rows": [], "coverage_start": None, "coverage_end": None}), \
          patch("db.revenue_repository.fetch_lead_quality", return_value={"available": True, "rows": [], "event_date_safe": False, "lead_event_date_field_available": True, "missing_contact_created_at_count": 0, "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0}), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):

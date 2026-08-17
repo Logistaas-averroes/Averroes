@@ -47,7 +47,9 @@ from datetime import datetime, timezone
 
 from analysis.business_windows import resolve_window
 from analysis.source_classification import GROUP_LABELS
+from analysis import revenue_scope
 from db import revenue_repository as repo
+from services import canonical_revenue_service as canonical_revenue
 from services.revenue_decision_mart import build_revenue_decision_mart
 from services.source_attribution_service import build_revenue_by_source, _section_bucket
 
@@ -114,29 +116,39 @@ def _deal_row(deal: dict) -> dict:
     amount = deal.get("deal_amount_usd")
     amount_usd = _round2(amount) if amount is not None else None
     status = STATUS_REVENUE_PROVEN if amount_usd is not None else STATUS_AMOUNT_UNAVAILABLE
-    match = _norm(deal.get("match_status"))
-    attribution_status = ("attributed" if match not in ("", "unknown", "unmatched", "none")
-                          else "needs_review")
     return {
         "deal_id": deal.get("deal_id"),
-        "deal_name": None,          # deal title is not persisted → Unavailable
-        "company": deal.get("company"),
+        # PR-ADS-153E-B: the canonical ledger DOES store the deal's own name, and
+        # does not store the associated contact's employer. `company` therefore
+        # becomes explicitly Unavailable rather than being filled with a deal name
+        # under a "Company" heading.
+        "deal_name": deal.get("deal_name"),
+        "company": None,            # contact employer is not on the ledger
         "company_id": None,         # not persisted → Unavailable
         "main_contact": None,       # not persisted → Unavailable
-        "contact_id": None,         # not on the closed-won ledger fetch → Unavailable
+        "contact_id": deal.get("primary_contact_id"),
         "amount_usd": amount_usd,
+        # Why an amount is missing — "we never got a number" and "we could not
+        # prove the currency" are different problems with different fixes.
+        "currency_status": deal.get("currency_status"),
+        "currency_reason": deal.get("currency_reason"),
         "stage": deal.get("deal_stage_label"),
         "stage_group": "Closed Won",
         "status": status,
-        "created_date": None,       # deal_created_at is never populated → Unavailable
+        "created_date": deal.get("deal_created_at"),
         "close_date": deal.get("deal_close_date"),
         "age_days": None,           # requires a create date → Unavailable
         "days_to_close": None,      # requires a create date → Unavailable
-        "source_group": None,       # deal rows carry no source group → Unavailable
-        "source_detail": None,
+        "source_group": deal.get("acquisition_group"),
+        "source_detail": deal.get("source_detail_raw"),
         "campaign_name": deal.get("campaign_name"),
         "country": deal.get("country"),
-        "attribution_status": attribution_status,
+        # Canonical attribution evidence, not a GCLID match-status heuristic.
+        # `ambiguous` stays visible as itself — it is never resolved to
+        # "attributed" by picking whichever contact the API returned first.
+        "attribution_status": deal.get("attribution_status") or "needs_review",
+        "attribution_scope": deal.get("attribution_scope"),
+        "association_status": deal.get("association_status"),
     }
 
 
@@ -590,22 +602,27 @@ def build_dashboard_deals(window: str = "current_quarter",
     start = _parse_iso_date(window_block.get("start_date"))
     end = _parse_iso_date(window_block.get("end_date"))
 
-    # Read the RAW closed-won deal ledger (not the mart deal rows): the mart coerces
-    # a null deal amount to $0 via _safe_float, which would fabricate a $0. The raw
-    # fetch preserves a null amount so a missing amount renders "Unavailable".
-    deals_ledger = repo.fetch_revenue_deals(start, end)
-    ledger_available = bool(deals_ledger.get("available"))
-    won_deal_rows = deals_ledger.get("rows") or []
+    # PR-ADS-153E-B: the closed-won population is the canonical deal ledger at
+    # `all_source` scope. The legacy `gclid_attribution` read structurally
+    # excluded every won deal without a GCLID — 124 of 180 in production — so the
+    # Deals page was showing about a third of the business under a total-customers
+    # heading. Fail-closed: an unreadable or unproven ledger makes the deal proof
+    # unavailable rather than falling back to the narrower population.
+    canonical = canonical_revenue.load_won_deals(window, now=now)
+    ledger_available = bool(canonical.get("available"))
+    won_deal_rows = (canonical_revenue.canonical_deal_rows(
+        canonical, revenue_scope.SCOPE_ALL_SOURCE) if ledger_available else [])
+    canonical_totals = (canonical_revenue.summarize_deals(
+        canonical.get("deals"), revenue_scope.SCOPE_ALL_SOURCE)
+        if ledger_available else None)
 
-    # Null-amount detection from the raw ledger: the canonical aggregators (mart,
-    # by-source) sum a null deal amount as $0, so any aggregate holding a null-amount
-    # closed-won deal must have its revenue WITHHELD, never a lowered / fabricated $0.
+    # Unknown-amount detection: an aggregate holding a deal whose currency could
+    # not be proven must WITHHOLD its revenue, never show a lowered / fabricated $0.
     amount_unknown = any(d.get("deal_amount_usd") is None for d in won_deal_rows)
     null_amount_campaigns = {_norm(d.get("campaign_name")) for d in won_deal_rows
                              if d.get("deal_amount_usd") is None and d.get("campaign_name")}
-    src_revenue = repo.fetch_source_revenue(start, end)
     null_amount_groups = {_section_bucket(r.get("acquisition_group"))
-                          for r in (src_revenue.get("rows") or [])
+                          for r in won_deal_rows
                           if r.get("deal_amount_usd") is None}
 
     # Per-source + per-campaign closed-won pipeline (canonical, read-only).
@@ -640,12 +657,23 @@ def build_dashboard_deals(window: str = "current_quarter",
         "window": window_block,
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "read_only": True,
-        "source_truth": "hubspot_deal_pipeline_truth",
+        "source_truth": canonical_revenue.CANONICAL_SOURCE,
         "google_ads_conversion_value_used": False,
         # Structural truth: open opportunity / lost / aging stage data is NOT durable.
         "pipeline_stage_data_available": False,
         "pipeline_stage_reason": OPEN_PIPELINE_REASON,
         "deal_proof_available": bool(revenue_connected and ledger_available),
+        # PR-ADS-153E-B response metadata: which population these deals are, and
+        # how complete it is.
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "revenue_available": ledger_available,
+        "revenue_unavailable_reason": (None if ledger_available
+                                       else canonical.get("reason")),
+        "revenue_violation_codes": canonical.get("violation_codes") or [],
+        "as_of": canonical.get("as_of"),
+        "canonical_totals": canonical_totals,
+        "legacy_fallback_used": False,
         "kpis": kpis,
         "period_change": period_change,
         "funnel": funnel,

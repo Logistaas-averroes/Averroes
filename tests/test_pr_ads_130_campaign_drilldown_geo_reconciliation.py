@@ -23,6 +23,10 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_legacy_deal_rows, patch_canonical_ledger,
+)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -59,10 +63,14 @@ DEAL_DETAIL_ROWS = [
 ]
 
 
-def _patch_details(monkeypatch, rows=None):
+def _patch_details(monkeypatch, rows=None, *, available=True):
     import db.revenue_repository as repo
-    monkeypatch.setattr(repo, "fetch_campaign_deal_details",
-                        lambda s, e: {"available": True, "rows": list(rows if rows is not None else DEAL_DETAIL_ROWS)})
+    # PR-ADS-153E-B: the campaign drilldown reads the canonical deal ledger at
+    # the SAME scope the campaign row was aggregated at.
+    patch_canonical_ledger(
+        monkeypatch,
+        from_legacy_deal_rows(rows if rows is not None else DEAL_DETAIL_ROWS),
+        available=available)
     # Identity map: canonical campaigns from the spend set (auto-links), no manual maps.
     monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: {
         "available": True, "customer_id": "111",
@@ -96,7 +104,10 @@ def test_detail_rows_have_required_fields(monkeypatch):
         assert key in d, f"detail row missing {key}"
     # The populated deal carries the real HubSpot record ids we DO store.
     top = next(x for x in details if x["deal_record_id"] == "555111")
-    assert top["company_name"] == "Vracht Free Zone"
+    # PR-ADS-153E-B: the canonical ledger names the DEAL and holds no company
+    # record, so `company_name` is Unavailable and `deal_name` carries identity.
+    assert top["company_name"] is None
+    assert top["deal_name"] == "Vracht Free Zone"
     assert top["main_contact_record_id"] == "987654321"
     assert top["deal_amount_usd"] == 51400.0
     # GCLID is masked, never shown in full.
@@ -135,12 +146,14 @@ def test_missing_deal_amount_is_null_not_zero(monkeypatch):
 
 
 def test_campaign_detail_db_unavailable_is_reported(monkeypatch):
-    import db.revenue_repository as repo
-    monkeypatch.setattr(repo, "fetch_campaign_deal_details", lambda s, e: {"available": False})
+    _patch_details(monkeypatch, rows=[], available=False)
     from services.revenue_attribution_service import build_campaign_deal_details
     out = build_campaign_deal_details("ytd", "Mexico, Chile, Colombia")
     assert out["details"] == []
-    assert out["source_health"]["status"] == "database_unavailable"
+    # PR-ADS-153E-B: the reason names the canonical read, and nothing falls back.
+    assert out["revenue_available"] is False
+    assert out["legacy_fallback_used"] is False
+    assert out["source_health"]["status"] == "canonical_ledger_unreadable"
 
 
 # Test 4 — frontend has an expandable campaign row control

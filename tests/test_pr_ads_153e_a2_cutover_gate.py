@@ -260,8 +260,10 @@ def test_an_unrecognised_sync_mode_fails(mode):
 
 
 def test_the_mode_is_never_inferred_from_timestamps_or_status():
+    # PR-ADS-153E-B moved the sync-coverage checks into `check_sync_coverage`,
+    # shared with the production read contract. Same rule, one implementation.
     fn = _code_only(
-        _RECON_SERVICE_PY.split("def _check_invariants(")[1].split("\ndef ")[0])
+        _RECON_SERVICE_PY.split("def check_sync_coverage(")[1].split("\ndef ")[0])
     assert 'last_mode = state.get("last_sync_mode")' in fn
     assert 'last_mode != "incremental"' in fn
 
@@ -1076,6 +1078,13 @@ def test_the_governance_block_still_says_shadow_mode():
 
 
 # ── Consumer boundary — nothing is switched in this PR ──────────────────────
+# PR-ADS-153E-B corrects two stale entries: `revenue_decision_mart_service.py`
+# has never existed (the module is `revenue_decision_mart.py`), so that row was
+# silently skipped, and the migrated Unit Economics path is
+# `canonical_unit_economics_service.py`. `unit_economics_service.py` is NOT
+# listed: it is the aggregation helper for the legacy ROAS SNAPSHOT reports,
+# which stay on their own retired lineage until PR-ADS-153G and are reachable
+# only from routes already marked deprecated.
 CONSUMER_MODULES = [
     "services/dashboard_overview_service.py",
     "services/dashboard_revenue_service.py",
@@ -1084,18 +1093,28 @@ CONSUMER_MODULES = [
     "services/dashboard_deals_service.py",
     "services/dashboard_channels_service.py",
     "services/revenue_attribution_service.py",
-    "services/unit_economics_service.py",
-    "services/revenue_decision_mart_service.py",
+    "services/source_attribution_service.py",
+    "services/canonical_unit_economics_service.py",
+    "services/revenue_decision_mart.py",
 ]
 
 
-def test_no_production_consumer_reads_the_canonical_ledger():
+def test_no_production_consumer_reads_the_canonical_ledger_directly():
+    """Superseded in part by PR-ADS-153E-B: consumers DO read the ledger now.
+
+    What survives — and is the half that mattered — is that no consumer reads it
+    DIRECTLY. Every one goes through `services.canonical_revenue_service`, so
+    won status, currency rules, window bounds and scope are decided once. Nine
+    consumers each opening `deal_ledger_repository` would be nine chances to
+    disagree, which is the defect this sequence exists to remove.
+    """
     for module in CONSUMER_MODULES:
         path = _ROOT / module
         if not path.exists():
             continue
-        assert "hubspot_deal_ledger" not in path.read_text(), module
-        assert "deal_ledger_repository" not in path.read_text(), module
+        text = path.read_text()
+        assert "deal_ledger_repository" not in text, module
+        assert "canonical_revenue_service" in text, module
 
 
 def test_no_external_mutation_path_is_introduced():

@@ -1,4 +1,4 @@
-# 35 — Canonical Revenue Ledger (PR-ADS-153E-A)
+# 35 — Canonical Revenue Ledger (PR-ADS-153E-A / A2 / A3 / B)
 
 One deal ledger. One won predicate. One currency doctrine. One association rule.
 
@@ -496,9 +496,9 @@ triage rather than a clean pass.
 | `hubspot_deal_ledger` | `deal_id` | `db/deal_ledger_repository` | **Canonical** (new) | Keep |
 | `hubspot_deal_contact_association` | `(deal_id, contact_id)` | same | Evidence bridge (new) | Keep |
 | `hubspot_deal_sync_state` | `scope` | same | Coverage (new) | Keep |
-| `gclid_attribution` | SHA1 attribution key | `db/writers.write_gclid_attribution` | Legacy — comparison source | Retire after 153E-B |
-| `deal_source_attribution` | `deal_id` | `services/source_attribution_service` | Legacy — comparison source | Retire after 153E-B |
-| `deals` | run snapshot | `db/writers.write_deals` | Legacy snapshot | Retire after 153E-B |
+| `gclid_attribution` | SHA1 attribution key | `db/writers.write_gclid_attribution` | Legacy — comparison only since 153E-B | Retire in 153G |
+| `deal_source_attribution` | `deal_id` | `services/source_attribution_service` | Legacy — comparison only since 153E-B | Retire in 153G |
+| `deals` | run snapshot | `db/writers.write_deals` | Legacy snapshot | Retire in 153G |
 
 **No table is dropped in this PR.**
 
@@ -549,3 +549,163 @@ What it changed, and why the original gate was not sufficient:
 * `--all-windows` makes one failing window fail the whole gate.
 
 Read-only against every external platform. Phase 2 / OCT remains blocked.
+
+
+---
+
+## Follow-up — 2026-08-17 (PR-ADS-153E-B) — CONSUMER CUTOVER COMPLETE
+
+**Status: shadow mode is over.** Every production revenue consumer now reads the
+canonical deal ledger through one shared contract. The production gate in §11
+passed before this PR was written: bootstrap complete, 0 write failures, 0
+association failures, all-window audit exit `0`, and `available: true` /
+`ok: true` / `violation_codes: []` for all five business windows.
+
+### 14. The shared canonical revenue read contract
+
+Exactly one module reads canonical revenue, and every page reads it through
+that one.
+
+| Module | Responsibility |
+|---|---|
+| `analysis/revenue_scope.py` | The attribution-scope lattice. Pure. |
+| `services/canonical_revenue_service.py` | THE read contract: window, won predicate, revenue value, currency safety, scope filtering, fail-closed readiness, response metadata. |
+| `db/deal_ledger_repository.fetch_won_deals` | The single production SQL read. `hs_is_closed_won IS TRUE`, window applied with an EXCLUSIVE upper bound. |
+| `db/deal_ledger_repository.fetch_won_state_counts` | Deals whose won state is UNKNOWN, reported separately — never folded into won or lost. |
+
+Consumers do not re-derive won status, deal identity, the revenue event date,
+the revenue value, currency safety, window bounds or the population. A consumer
+importing `db.deal_ledger_repository` directly fails CI.
+
+### 15. The scope lattice
+
+```
+all_source  ⊇  google_ads_source  ⊇  campaign_attributable  ⊇  gclid_attributable
+```
+
+Membership is **nested by construction**: each level re-tests the level above it
+and adds one predicate, so a narrower scope can never contain more than the
+population it is a subset of. `check_lattice` re-proves the ordering on computed
+aggregates, and the guard is itself tested against an inverted input.
+
+| Scope | Predicate (in addition to the wider scope) |
+|---|---|
+| `all_source` | every won deal in the window |
+| `google_ads_source` | a GCLID, or an unambiguous Google Ads acquisition group |
+| `campaign_attributable` | a usable campaign identifier (HubSpot pseudo-campaigns like `(direct)` do not count) |
+| `gclid_attributable` | a GCLID |
+
+`ambiguous` attribution is not attribution: a deal whose contacts disagree stays
+in `all_source`, enters no narrower scope, and is reported as a coverage gap.
+
+The rule this encodes is **not** "every page shows the same number". It is:
+
+> same metric + same business window + same **scope** = same result, everywhere.
+
+### 16. Consumer / source ownership matrix
+
+| Page / consumer | Revenue source | Scope | Spend source |
+|---|---|---|---|
+| Dashboard Overview | canonical ledger (via mart) | `all_source` | canonical Google Ads |
+| Dashboard Revenue | canonical ledger | `all_source` | canonical Google Ads |
+| Dashboard Deals | canonical ledger | `all_source` | — |
+| Dashboard Channels | canonical ledger | `all_source` | canonical Google Ads |
+| Revenue by Source | canonical ledger | `all_source` | canonical Google Ads |
+| Dashboard Campaigns | canonical ledger | `all_source` proof rows; campaign rows campaign-scoped | canonical Google Ads |
+| Dashboard Countries | canonical ledger | `all_source` proof rows; country rows Google-Ads-scoped | canonical Google Ads geo |
+| ROAS by Campaign | canonical ledger | `campaign_attributable` | canonical Google Ads |
+| ROAS by Country | canonical ledger | `google_ads_source` | canonical Google Ads geo |
+| Campaign mapping workbench | canonical ledger | `google_ads_source` | canonical Google Ads |
+| Unit Economics | canonical ledger | `all_source` business totals; `campaign_attributable` for CAC/ROAS | canonical Google Ads |
+| Revenue Decision Mart | canonical ledger | `all_source` totals; `campaign_attributable` ROAS numerator | canonical Google Ads |
+
+**Ownership stays split.** Google Ads owns spend, clicks, impressions, search
+terms, advertising geography and campaign identifiers. HubSpot, through the
+canonical deal ledger, owns lifecycle state, SQLs, deals, won status, close date
+and revenue. Google Ads attribution never defines the population of won deals or
+total business revenue: 124 of 180 won deals in production have no GCLID at all.
+
+### 17. Response metadata
+
+Every migrated revenue response carries its provenance: `source`, `scope`,
+`window`, `window_start`, `window_end`, `as_of`, `available`, `won_deals`,
+`revenue_usd`, `currency_unavailable_deals`, `ambiguous_associations`,
+`failed_associations`, `attribution_coverage` (per-scope counts, revenue and
+percentages), and `legacy_fallback_used: false`.
+
+An advertising view additionally carries the whole scope ladder, so attributed
+revenue can be read as the subset it is — and the size of the gap is visible
+rather than inferred.
+
+### 18. Fail-closed, with no silent fallback
+
+When the ledger is unreadable, or its coverage does not satisfy the same
+readiness gate the merge audit applies (`check_sync_coverage`, now shared by the
+audit and the read contract), every migrated consumer returns an explicit
+unavailable state with a reason, the violation codes, the scope and the
+freshness. Counts are `null`, never `0`.
+
+There is **no** fallback to `gclid_attribution`, `deal_source_attribution`,
+local JSON, Windsor or an ad-hoc HubSpot read. Each of those holds a DIFFERENT
+population, so a fallback would silently change what "total revenue" means
+mid-incident — reintroducing the contradiction this sequence removed. An honest
+outage is recoverable; a quiet population swap is not even detectable.
+
+The local-JSON diagnostic fallback in `revenue_attribution_service` survives for
+SPEND and lead shape only; every revenue-derived metric on that path is blanked
+with a stated reason.
+
+### 19. Two field renames, both deliberate
+
+* **`company` → `deal_name`.** The legacy `company` column was the associated
+  CONTACT's employer, joined in from `gclid_attribution`. The canonical ledger is
+  keyed on the deal and holds no company record at all, so `company` is now
+  explicitly Unavailable and the deal's own name is shown. Putting a deal name
+  under a "Company" heading would be a fabricated label.
+* **`match_status` / `match_source` → `attribution_scope`.** Those described how
+  a click id was matched to a campaign, which says nothing about whether a deal
+  is won or what it was worth. Attribution evidence is now the ordered scope the
+  deal qualifies for, plus `attribution_status` and `acquisition_group`.
+
+### 20. Unit Economics
+
+The last consumer of the third lineage. It no longer reads
+`data/attributed_deals.json` or `data/campaign_performance.json` (Windsor), and
+it no longer uses rolling ad-style day windows — `GET /api/reports/unit-economics`
+takes a BUSINESS window and rejects `60d` with a 400.
+
+`LTV/CAC`, `payback_months` and `avg_deal_mrr` are **withheld with a stated
+reason**: they need per-deal recurring revenue, which is not on the canonical
+ledger, and the local JSON that carried it is not an admissible source. CAC,
+average deal value and ROAS are fully canonical. An LTV/CAC derived from a file
+nobody maintains is worse than an explicit "not available yet", because only one
+of the two can be acted on safely.
+
+### 21. Rollback
+
+Rollback is a **code deployment rollback only** — revert the merge commit.
+
+Do NOT destroy canonical ledger records, sync state, reconciliation evidence or
+legacy comparison history. If production verification fails, revert consumer
+routing and preserve every diagnostic. The legacy tables are still written and
+still readable, so a revert restores the previous behaviour with no data work.
+
+### 22. Production verification after deploy
+
+1. `python -m scripts.audit_canonical_revenue_truth --all-windows --json` →
+   aggregate `ok: true`, exit `0`.
+2. `GET /api/audit/revenue-truth` for all five windows → `available: true`,
+   `ok: true`, `violation_codes: []`.
+3. For one window, confirm the headline agreement the cutover exists to produce:
+   Dashboard Revenue, Dashboard Deals, Revenue by Source and the mart top-line
+   report the SAME `won_deals` and `revenue_usd` at `all_source` scope.
+4. Confirm every ROAS view declares a narrower `revenue_scope` and shows its
+   attribution coverage beside the attributed figure.
+5. Confirm `legacy_fallback_used` is `false` on every revenue response.
+
+### 23. What remains
+
+* **PR-ADS-153F** — canonical geography synchronization.
+* **PR-ADS-153G** — retirement of the legacy tables and routes, after the
+  observation period. Nothing is dropped before then.
+* **Phase 2 / OCT remains blocked.** No external write path exists or is added.

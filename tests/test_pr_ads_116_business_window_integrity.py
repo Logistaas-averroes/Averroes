@@ -19,6 +19,10 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_legacy_deal_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -100,7 +104,7 @@ def _spy_repo(monkeypatch):
              "excluded_pseudo_campaign_count": 0}
 
     def cap(name, ret):
-        def _f(start, end, *a, **k):
+        def _f(start=None, end=None, *a, **k):
             seen[name] = (start, end)
             return ret
         return _f
@@ -108,7 +112,13 @@ def _spy_repo(monkeypatch):
     try:
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", cap("spend", empty))
         monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", cap("leads", leads))
-        monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", cap("revenue", empty))
+        # PR-ADS-153E-B: revenue is read from the canonical deal ledger, so the
+        # window bounds are captured THERE. The canonical read is the one that
+        # must share the selected window with spend and leads now.
+        patch_canonical_ledger(monkeypatch, [])
+        import db.deal_ledger_repository as ledger_repo
+        monkeypatch.setattr(ledger_repo, "fetch_won_deals",
+                            cap("revenue", {"available": True, "rows": []}))
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda *a, **k: {"available": True, "datasets": {}})
         monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: False)
     except (ImportError, AttributeError) as exc:
@@ -129,7 +139,13 @@ def test_all_sources_share_selected_window(monkeypatch):
     expect = (date(2026, 1, 1), date(2026, 3, 31))
     assert seen["spend"] == expect
     assert seen["leads"] == expect
-    assert seen["revenue"] == expect
+    # PR-ADS-153E-B: the canonical revenue read takes UTC datetimes with an
+    # EXCLUSIVE upper bound (`analysis.business_windows.get_window_bounds`), so
+    # 2026-01-01 .. 2026-03-31 inclusive is [2026-01-01, 2026-04-01). Same
+    # window, expressed in the canonical convention.
+    rev_start, rev_end = seen["revenue"]
+    assert rev_start.date() == date(2026, 1, 1)
+    assert rev_end.date() == date(2026, 4, 1)
 
 
 def test_current_quarter_uses_its_own_window(monkeypatch):
@@ -140,7 +156,7 @@ def test_current_quarter_uses_its_own_window(monkeypatch):
     assert out["window"]["start_date"] == "2026-04-01"
     # Current Quarter excludes Q1 — the source bounds start in April, not January.
     assert seen["spend"][0] == date(2026, 4, 1)
-    assert seen["revenue"][0] == date(2026, 4, 1)
+    assert seen["revenue"][0].date() == date(2026, 4, 1)
 
 
 def test_response_window_matches_selected_key(monkeypatch):

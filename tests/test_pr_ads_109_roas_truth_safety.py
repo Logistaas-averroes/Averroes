@@ -10,6 +10,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    canonical_ledger_patch, from_legacy_deal_rows,
+)
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 import db.revenue_repository as repo
@@ -56,7 +60,7 @@ def _build(spend_rows, revenue_rows, lead_rows=None, safe=True):
                 "chunks": [{"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified"}]}
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=_leads(lead_rows, safe)), \
-         patch("db.revenue_repository.fetch_won_revenue", return_value=rev), \
+         canonical_ledger_patch(from_legacy_deal_rows(rev.get("rows") or [])), \
          patch("db.revenue_repository.fetch_canonical_campaign_spend", return_value=_canonical(spend_rows)), \
          patch("db.revenue_repository.fetch_spend_coverage", return_value=coverage), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
@@ -78,7 +82,9 @@ def test_roas_null_when_revenue_not_wired():
         spend_rows=[{"campaign_name": "gulf", "country": "SA", "spend": 1000.0}],
         revenue_rows=[],  # not wired
     )
-    assert r["revenue_attribution_status"] == "not_wired_or_no_closed_won"
+    # PR-ADS-153E-B: a READABLE ledger with no campaign-attributable deals is a
+    # different fact from "revenue not wired", and the status now says which.
+    assert r["revenue_attribution_status"] == "no_campaign_attributable_deals_in_window"
     gulf = _by(r["campaigns"], "campaign_name", "gulf")
     assert gulf["roas"] is None  # null, not 0
     assert r["summary"]["roas"] is None
@@ -94,7 +100,7 @@ def test_roas_zero_when_revenue_available_but_campaign_has_none():
             {"campaign_name": "gulf", "country": "SA", "deal_id": "d1", "deal_amount_usd": 5000.0, "match_status": "matched"},
         ],
     )
-    assert r["revenue_attribution_status"] == "gclid_attribution_db"
+    assert r["revenue_attribution_status"] == "hubspot_deal_ledger"
     waste = _by(r["campaigns"], "campaign_name", "waste")
     assert waste["roas"] == 0.0  # revenue source available, this campaign truly earned 0
     gulf = _by(r["campaigns"], "campaign_name", "gulf")

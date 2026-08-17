@@ -47,7 +47,9 @@ import logging
 from datetime import datetime, timezone
 
 from analysis.business_windows import resolve_window
+from analysis import revenue_scope
 from db import revenue_repository as repo
+from services import canonical_revenue_service as canonical_revenue
 from services.country_codes import get_country_code
 from services.revenue_decision_mart import build_revenue_decision_mart
 
@@ -233,26 +235,35 @@ def _deal_proof_row(deal: dict, attribution_status: str) -> dict:
     amount = deal.get("deal_amount_usd")
     return {
         "deal_id": deal.get("deal_id"),
-        "company": deal.get("company"),
+        # PR-ADS-153E-B: the ledger stores the deal's own name and no company
+        # field, so `company` is honestly Unavailable rather than mislabelled.
+        "deal_name": deal.get("deal_name"),
+        "company": None,
         "company_id": None,
         "main_contact": None,
-        "contact_id": None,
-        "deal": None,
+        "contact_id": deal.get("primary_contact_id"),
+        "deal": deal.get("deal_name"),
         "amount_usd": _round2(amount) if amount is not None else None,
+        "currency_status": deal.get("currency_status"),
         "close_date": deal.get("deal_close_date"),
         "campaign_name": deal.get("campaign_name"),
         "country": deal.get("country"),
         "attribution_status": attribution_status,
+        "attribution_scope": deal.get("attribution_scope"),
     }
 
 
 def _deal_attribution(deal: dict, *, residual: bool) -> str:
+    """PR-ADS-153E-B: canonical attribution state, not a GCLID match heuristic.
+
+    ``ambiguous`` — contacts that disagree about the acquisition source — stays
+    visible as ``needs_review`` rather than being resolved by picking one.
+    """
     if residual:
         return "no_country"
-    match = _norm(deal.get("match_status"))
-    if match in ("", "unknown", "unmatched", "none"):
-        return "needs_review"
-    return "attributed"
+    return ("attributed"
+            if (deal.get("attribution_status") or "").strip().lower() == "attributed"
+            else "needs_review")
 
 
 def _group_deals_by_country(deals_rows: list) -> tuple[dict, set, list, bool]:
@@ -855,10 +866,18 @@ def _assemble(window: str, now: datetime | None) -> dict:
     geo_available = bool(geo.get("available"))
     geo_maps = _geo_spend_by_country(geo)
 
-    deals = repo.fetch_revenue_deals(start, end)
-    deal_proof_available = bool(deals.get("available"))
+    # PR-ADS-153E-B: the deals proving each country row come from the canonical
+    # ledger at `all_source` scope. Deals that map to NO country keep their place
+    # in the explicit residual bucket — they are never dropped to make the named
+    # country rows reconcile, and a won deal with no advertising attribution is
+    # still part of the business.
+    canonical = canonical_revenue.load_won_deals(window, now=now)
+    deal_proof_available = bool(canonical.get("available"))
+    deal_rows = (canonical_revenue.canonical_deal_rows(
+        canonical, revenue_scope.SCOPE_ALL_SOURCE)
+        if deal_proof_available else [])
     (deals_by_key, unknown_amount_keys,
-     residual_deals, residual_amount_unknown) = _group_deals_by_country(deals.get("rows") or [])
+     residual_deals, residual_amount_unknown) = _group_deals_by_country(deal_rows)
 
     country_rows = _build_country_rows(
         mart_real_rows, geo_maps, geo_available, deals_by_key, unknown_amount_keys,
@@ -878,6 +897,13 @@ def _assemble(window: str, now: datetime | None) -> dict:
         "kpis": kpis,
         "country_roas_unblockable": country_roas_unblockable,
         "deal_proof_available": deal_proof_available,
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "revenue_unavailable_reason": (None if deal_proof_available
+                                       else canonical.get("reason")),
+        "revenue_violation_codes": canonical.get("violation_codes") or [],
+        "as_of": canonical.get("as_of"),
+        "legacy_fallback_used": False,
     }
 
 
@@ -938,6 +964,15 @@ def build_dashboard_countries(window: str = "current_quarter",
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "read_only": True,
         "source_truth": "revenue_decision_mart_country_view",
+        # PR-ADS-153E-B: geography and spend stay Google Ads; the closed-won
+        # deals behind every country row are the canonical ledger.
+        "revenue_source": core["revenue_source"],
+        "revenue_scope": core["revenue_scope"],
+        "revenue_available": deal_proof_available,
+        "revenue_unavailable_reason": core["revenue_unavailable_reason"],
+        "revenue_violation_codes": core["revenue_violation_codes"],
+        "as_of": core["as_of"],
+        "legacy_fallback_used": False,
         "google_ads_conversion_value_used": False,
         # Closed-won deal PROOF availability (separate from mart revenue truth):
         # false when the deal ledger could not be read, so drawers must not claim

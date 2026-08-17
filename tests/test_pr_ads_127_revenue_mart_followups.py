@@ -23,6 +23,8 @@ import sys
 
 import pytest
 
+from tests.canonical_ledger_fixtures import patch_canonical_ledger  # noqa: E402
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -41,14 +43,15 @@ def _slice(marker, span=1600):
 
 def test_mart_deal_view_surfaces_ledger_status(monkeypatch):
     import test_pr_ads_125_revenue_decision_mart as t125
-    import db.revenue_repository as repo
     t125._patch_durable(monkeypatch)
-    # Deal-ledger-specific outage: the gclid_attribution read is unavailable while
-    # spend/leads (the attribution core) stay reachable.
-    monkeypatch.setattr(repo, "fetch_revenue_deals", lambda s, e: {"available": False})
+    # PR-ADS-153E-B: the deal-ledger outage is now an outage of the CANONICAL
+    # ledger, while spend/leads (the attribution core) stay reachable.
+    patch_canonical_ledger(monkeypatch, [], available=False)
     from services.revenue_decision_mart import build_revenue_decision_mart
     mart = build_revenue_decision_mart(view="deal", window=t125.WINDOW, now=t125.NOW)
-    assert mart["data_health"]["deal_ledger_status"] == "database_unavailable"
+    # PR-ADS-153E-B: the status names the canonical ledger, so an operator can
+    # tell a canonical-read failure from a generic database outage.
+    assert mart["data_health"]["deal_ledger_status"] == "canonical_ledger_unreadable"
     assert mart["rows"] == []
     # The ledger summary is withheld (no fabricated zero ledger).
     assert (mart["ledger_summary"] or {}).get("won_revenue") is None

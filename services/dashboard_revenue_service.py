@@ -13,11 +13,16 @@ disagree on a window or a comparison:
     (view="campaign")                / won revenue) and readiness (is the revenue
                                       integration connected?). The mart is the
                                       authoritative window total.
-  - repo.fetch_revenue_deals       -> the closed-won deal ledger ROWS (windowed by
-                                      deal_close_date), read raw so a missing deal
-                                      amount stays null (never coerced to $0):
-                                      the revenue trend, breakdowns, deal
-                                      concentration, and top-deal proof rows.
+  - canonical_revenue_service      -> the closed-won deal ROWS from the canonical
+    (PR-ADS-153E-B)                   deal ledger at `all_source` scope, windowed
+                                      by the canonical deal close date. A deal
+                                      whose currency was never proven keeps a null
+                                      amount (never coerced to $0): the revenue
+                                      trend, breakdowns, deal concentration, and
+                                      top-deal proof rows. Replaces
+                                      repo.fetch_revenue_deals, which read
+                                      `gclid_attribution` and therefore held only
+                                      the GCLID-attributable subset of revenue.
   - build_revenue_by_source        -> the revenue-by-source breakdown (PR-ADS-133
                                       taxonomy; only Google Ads is spend-connected).
   - repo.fetch_lead_daily_series   -> per-day paid SQL counts (contact_created_at)
@@ -42,8 +47,10 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timezone
 
+from analysis import revenue_scope
 from analysis.business_windows import resolve_window
 from db import revenue_repository as repo
+from services import canonical_revenue_service as canonical_revenue
 from services.revenue_decision_mart import build_revenue_decision_mart
 from services.source_attribution_service import build_revenue_by_source
 
@@ -84,13 +91,18 @@ def _deal_amount(deal: dict):
 
 
 def _attribution_status(deal: dict, *, has_group: bool) -> str:
-    """Coarse attribution state for a ledger row — never fabricated."""
-    if not has_group:
-        return "unattributed"
-    match = (deal.get("match_status") or "").strip().lower()
-    if match in ("", "unknown", "unmatched", "none"):
-        return "ambiguous"
-    return "attributed"
+    """Attribution state for a canonical ledger row — never fabricated.
+
+    PR-ADS-153E-B: this reports the ledger's OWN ``attribution_status``, which
+    the shared association resolver decided from every contact on the deal. It
+    used to be inferred from ``gclid_attribution.match_status`` — a field about
+    how a click was matched to a campaign, which said nothing about whether the
+    deal's source was known. ``ambiguous`` is preserved as itself.
+    """
+    status = (deal.get("attribution_status") or "").strip().lower()
+    if status in ("attributed", "ambiguous", "unclassified"):
+        return status
+    return "attributed" if has_group else "unattributed"
 
 
 def _avg_deal_value(revenue_usd, customers):
@@ -439,19 +451,25 @@ def _build_top_deals(deal_rows: list, *, revenue_connected: bool) -> list:
         campaign = (deal.get("campaign_name") or "").strip() or None
         country = (deal.get("country") or "").strip() or None
         out.append({
-            "company": deal.get("company") or None,
+            # The canonical ledger carries the DEAL's name and not the associated
+            # contact's employer, so `company` is explicitly Unavailable rather
+            # than filled with something that is not a company.
+            "deal_name": deal.get("deal_name") or None,
+            "company": None,
             "company_id": None,
             "main_contact": None,
-            "contact_id": None,
-            "deal": None,
+            "contact_id": deal.get("primary_contact_id") or None,
+            "deal": deal.get("deal_name") or None,
             "deal_id": deal.get("deal_id") or None,
             "amount_usd": _round2(_deal_amount(deal)),  # null stays null, never $0
+            "currency_status": deal.get("currency_status"),
             "close_date": deal.get("deal_close_date"),
             "campaign": campaign,
-            "source": None,  # acquisition group not carried on the deal ledger
+            "source": deal.get("acquisition_group"),
             "country": country,
             "attribution_status": _attribution_status(deal, has_group=bool(campaign)),
-            "attribution_reason": (deal.get("match_source") or None),
+            "attribution_reason": (deal.get("attribution_reason") or None),
+            "attribution_scope": deal.get("attribution_scope"),
         })
     return out
 
@@ -683,9 +701,20 @@ def build_dashboard_revenue(window: str = "current_quarter",
     # mart remains the authoritative window total; these rows are the proof.
     start_date = date.fromisoformat(resolved["start_date"]) if resolved.get("start_date") else None
     end_date = date.fromisoformat(resolved["end_date"])
-    ledger = repo.fetch_revenue_deals(start_date, end_date)
-    ledger_status = "available" if ledger.get("available") else "database_unavailable"
-    deal_rows = ledger.get("rows") or []
+    # PR-ADS-153E-B: the closed-won population is the canonical deal ledger at
+    # `all_source` scope — the same rows, through the same contract, that the
+    # Deals, Channels and Revenue-by-Source pages read. `gclid_attribution` held
+    # only GCLID-bearing deals, so this page's "total revenue" excluded every
+    # won deal that arrived without a click id.
+    canonical = canonical_revenue.load_won_deals(window, now=now)
+    ledger_status = ("available" if canonical.get("available")
+                     else (canonical.get("reason") or "database_unavailable"))
+    deal_rows = (canonical_revenue.canonical_deal_rows(
+        canonical, revenue_scope.SCOPE_ALL_SOURCE)
+        if canonical.get("available") else [])
+    canonical_totals = (canonical_revenue.summarize_deals(
+        canonical.get("deals"), revenue_scope.SCOPE_ALL_SOURCE)
+        if canonical.get("available") else None)
 
     revenue_connected = bool(readiness.get("revenue_integration_connected"))
     revenue_ready = revenue_connected and ledger_status == "available"
@@ -761,6 +790,16 @@ def build_dashboard_revenue(window: str = "current_quarter",
         "decision_cards": decision_cards,
         "readiness": readiness,
         "unavailable": unavailable,
-        "source_truth": "revenue_decision_mart",
+        "source_truth": canonical_revenue.CANONICAL_SOURCE,
+        # PR-ADS-153E-B response metadata.
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "revenue_available": bool(canonical.get("available")),
+        "revenue_unavailable_reason": (None if canonical.get("available")
+                                       else canonical.get("reason")),
+        "revenue_violation_codes": canonical.get("violation_codes") or [],
+        "as_of": canonical.get("as_of"),
+        "canonical_totals": canonical_totals,
+        "legacy_fallback_used": False,
         "google_ads_conversion_value_used": False,
     }
