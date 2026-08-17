@@ -110,12 +110,27 @@ def _as_of(sync_row: dict | None):
             or sync_row.get("bootstrap_completed_at"))
 
 
+def _iso(value):
+    """Render a window bound as ISO-8601, or ``None``.
+
+    `str()` on a timezone-aware datetime yields a SPACE-separated timestamp
+    (``2026-04-01 00:00:00+00:00``), which is not ISO-8601 and is not what every
+    other service in the product emits. A client parsing window bounds with a
+    strict ISO parser would reject it, so the boundary is formatted properly
+    here rather than left for each consumer to normalise differently.
+    """
+    if value is None:
+        return None
+    isoformat = getattr(value, "isoformat", None)
+    return isoformat() if callable(isoformat) else str(value)
+
+
 def _window_block(window, start, end, resolved) -> dict:
     return {
         "window": window,
         "window_label": (resolved or {}).get("label"),
-        "window_start": str(start) if start is not None else None,
-        "window_end": str(end) if end is not None else None,
+        "window_start": _iso(start),
+        "window_end": _iso(end),
         "window_is_closed": (resolved or {}).get("is_closed_window"),
     }
 

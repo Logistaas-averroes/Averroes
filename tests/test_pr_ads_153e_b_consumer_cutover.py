@@ -469,6 +469,87 @@ def test_13_no_migrated_consumer_falls_back_to_a_legacy_ledger(monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# §13b-§13d — review follow-ups (Copilot, PR #160)
+# ─────────────────────────────────────────────────────────────────────────────
+def test_13b_window_bounds_are_iso_8601_not_str_of_a_datetime(monkeypatch):
+    """`str(datetime)` yields a SPACE separator, which is not ISO-8601.
+
+    `window_start` / `window_end` are part of the published response contract,
+    so a strict ISO parser on the client must be able to read them.
+    """
+    patch_canonical_ledger(monkeypatch, POPULATION)
+    out = canonical_revenue.get_revenue_snapshot(WINDOW, now=NOW)
+    for key in ("window_start", "window_end"):
+        value = out[key]
+        assert value and "T" in value, (key, value)
+        assert " " not in value, (key, value)
+        # Round-trips through a strict parser.
+        assert datetime.fromisoformat(value).tzinfo is not None
+
+    # The unavailable response uses the same formatting.
+    patch_canonical_ledger(monkeypatch, [], available=False)
+    down = canonical_revenue.get_revenue_snapshot(WINDOW, now=NOW)
+    for key in ("window_start", "window_end"):
+        assert down[key] is None or "T" in down[key]
+
+
+def test_13c_channel_trend_bounds_are_explicit_utc_datetimes(monkeypatch):
+    """A DATE cast to `timestamptz` resolves against the SESSION time zone.
+
+    On a non-UTC session that shifts the window by hours and mis-buckets deals
+    that closed near a boundary, so the bounds must already be UTC datetimes
+    before they reach the ledger read.
+    """
+    from datetime import date, timezone
+
+    import db.deal_ledger_repository as ledger_repo
+    from services import dashboard_channels_service as channels
+
+    seen = []
+
+    def _capture(start=None, end=None):
+        seen.append((start, end))
+        return {"available": True, "rows": []}
+
+    patch_canonical_ledger(monkeypatch, [])
+    monkeypatch.setattr(ledger_repo, "fetch_won_deals", _capture)
+
+    channels._canonical_daily_revenue(date(2026, 4, 1), date(2026, 6, 30))
+    (start, end), = seen
+    for bound in (start, end):
+        assert isinstance(bound, datetime), bound
+        assert bound.tzinfo is not None and bound.utcoffset().total_seconds() == 0
+    assert start.date() == date(2026, 4, 1)
+    # Inclusive 30 June becomes the EXCLUSIVE 1 July bound.
+    assert end.date() == date(2026, 7, 1)
+    assert timezone.utc
+
+
+def test_13d_source_drilldown_fails_closed_when_the_ledger_is_unreadable(monkeypatch):
+    """An empty deals section reads as "no deals", not as an outage.
+
+    With contacts readable and the ledger down, the drawer previously rendered
+    a healthy-looking shell with zero deals in it.
+    """
+    import db.revenue_repository as repo
+    from services.source_attribution_service import build_source_platform_detail
+
+    monkeypatch.setattr(repo, "fetch_source_contact_details",
+                        lambda s, e: {"available": True, "rows": []})
+    patch_canonical_ledger(monkeypatch, [], available=False)
+
+    out = build_source_platform_detail(
+        WINDOW, "google_ads", "paid_search", "google_ads", now=NOW)
+    assert out["revenue_available"] is False
+    assert out["revenue_unavailable_reason"]
+    assert out["legacy_fallback_used"] is False
+    assert out["source_health"]["status"] != "ready"
+    # Counts are withheld, not zeroed — 0 would be a claim about the bucket.
+    assert out["summary"]["deals"] is None
+    assert out["deals"] == [] and out["rows"] == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # §14-§15 — ownership stays where it belongs
 # ─────────────────────────────────────────────────────────────────────────────
 def test_14_google_ads_spend_still_comes_from_the_google_ads_canonical_path():

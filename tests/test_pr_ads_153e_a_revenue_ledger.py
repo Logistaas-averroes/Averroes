@@ -1496,8 +1496,24 @@ def test_admin_audit_endpoint_is_read_only_and_admin_gated():
         assert banned not in fn.lower(), banned
 
 
-def test_no_frontend_change_in_this_backend_pr():
-    """§9: static/ belongs to a separate frontend PR."""
+def test_frontend_changes_are_confined_to_the_migrated_revenue_surfaces():
+    """Superseded by PR-ADS-153E-B, in the same way as the consumer guards.
+
+    153E-A asserted `static/` was untouched because it was a SHADOW-mode backend
+    PR: with no consumer switched, any frontend change would have been unrelated
+    scope. 153E-B switches the consumers, so two frontend changes are part of the
+    cutover and cannot be avoided:
+
+      * Unit Economics moves to the shared BUSINESS-window selector, because its
+        rolling day windows gave the page a period no other revenue page shared;
+      * migrated deal tables render `deal_name`, because the canonical ledger is
+        keyed on the deal and has no company record — `company` would otherwise
+        render a fabricated label.
+
+    What the guard still enforces is that the frontend change stayed inside
+    those two files. A revenue cutover has no business editing anything else in
+    `static/`.
+    """
     import subprocess
 
     diff = subprocess.run(
@@ -1505,8 +1521,8 @@ def test_no_frontend_change_in_this_backend_pr():
         cwd=str(_ROOT), capture_output=True, text=True)
     if diff.returncode != 0:
         pytest.skip("git diff unavailable")
-    changed = [f for f in diff.stdout.split() if f.startswith("static/")]
-    assert changed == [], changed
+    changed = {f for f in diff.stdout.split() if f.startswith("static/")}
+    assert changed <= {"static/app.js", "static/index.html"}, sorted(changed)
 
 
 # ── Privacy (§8) ────────────────────────────────────────────────────────────

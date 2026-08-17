@@ -415,7 +415,14 @@ def test_detail_db_unavailable_reported(monkeypatch):
     from services.source_attribution_service import build_source_platform_detail
     out = build_source_platform_detail("ytd", "organic", "organic_social", "linkedin")
     assert out["rows"] == [] and out["contacts"] == [] and out["deals"] == []
-    assert out["source_health"]["status"] == "database_unavailable"
+    # PR-ADS-153E-B: the status names the CANONICAL read that failed, so an
+    # operator can tell a canonical outage from a generic database outage. The
+    # drilldown fails closed on the deal side rather than rendering an empty
+    # deals section that would read as "this bucket has no deals".
+    assert out["source_health"]["status"] == "canonical_ledger_unreadable"
+    assert out["revenue_available"] is False
+    assert out["legacy_fallback_used"] is False
+    assert out["summary"]["deals"] is None
 
 
 def test_detail_query_is_read_only():

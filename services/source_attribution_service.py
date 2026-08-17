@@ -614,13 +614,32 @@ def build_source_platform_detail(window: str, source_group: str, source_channel:
             if canonical.get("available") else []),
     }
     contacts_fetch = repo.fetch_source_contact_details(start, end)
-    if not deals_fetch.get("available") and not contacts_fetch.get("available"):
+    # Fail closed on the DEAL side specifically. Rendering an empty deals
+    # section because the ledger was unreadable — while the contacts section
+    # loads and the drawer otherwise looks healthy — reads as "this bucket has
+    # no deals", which is a far stronger claim than "we could not read them".
+    # An unreadable canonical ledger makes the whole drilldown unavailable, with
+    # the reason named, and no legacy ledger is consulted in its place.
+    if not deals_fetch.get("available") or not contacts_fetch.get("available"):
+        unreadable_ledger = not deals_fetch.get("available")
         return {
             "window": resolved, "source_group": source_group,
             "source_channel": source_channel, "source_platform": source_platform,
             "contacts": [], "deals": [], "rows": [],
-            "summary": {"contacts": 0, "sqls": 0, "deals": 0},
-            "source_health": {"status": "database_unavailable"},
+            # Counts are NULL, not 0 — see above.
+            "summary": {"contacts": None, "sqls": None, "deals": None},
+            "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+            "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+            "revenue_available": not unreadable_ledger,
+            "revenue_unavailable_reason": (canonical.get("reason")
+                                           if unreadable_ledger else None),
+            "revenue_violation_codes": (canonical.get("violation_codes") or []
+                                        if unreadable_ledger else []),
+            "as_of": canonical.get("as_of"),
+            "legacy_fallback_used": False,
+            "source_health": {
+                "status": (canonical.get("reason") or "canonical_ledger_unreadable")
+                if unreadable_ledger else "database_unavailable"},
             "generated_at": generated_at,
         }
 
@@ -644,6 +663,11 @@ def build_source_platform_detail(window: str, source_group: str, source_channel:
         "contacts": contacts,
         "deals": deals,
         "rows": deals,   # backward-compatible alias
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "revenue_available": True,
+        "as_of": canonical.get("as_of"),
+        "legacy_fallback_used": False,
         "summary": {
             "contacts": len(contacts),
             "sqls": sum(1 for c in contacts if c.get("is_sql")),

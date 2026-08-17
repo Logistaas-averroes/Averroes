@@ -445,19 +445,41 @@ def _bucket_label(bstart, bucket: str) -> str:
     return f"{bstart.day} {bstart.strftime('%b')}"
 
 
+def _utc_midnight(day):
+    """A plain ``date`` as an explicit UTC midnight datetime, or ``None``.
+
+    The ledger read casts its bounds to ``timestamptz``, and PostgreSQL resolves
+    a DATE → timestamptz cast using the SESSION time zone. On a server whose
+    session is not UTC that silently shifts the window by hours and mis-buckets
+    deals that closed near a boundary — the trend and the KPI above it would
+    then disagree about the same quarter. Passing an explicit UTC datetime makes
+    the bound mean the same thing regardless of session settings, matching
+    ``analysis.business_windows.get_window_bounds``.
+    """
+    from datetime import datetime, time, timezone  # noqa: PLC0415
+
+    if day is None:
+        return None
+    if isinstance(day, datetime):
+        return day if day.tzinfo else day.replace(tzinfo=timezone.utc)
+    return datetime.combine(day, time.min, tzinfo=timezone.utc)
+
+
 def _canonical_daily_revenue(start_key, end_key) -> dict:
     """Canonical won deals for a date range, carrying a per-day ``close_date``.
 
     The bounds arrive as inclusive dates from the resolved window block, so the
     upper bound is converted to the EXCLUSIVE bound the ledger read expects —
-    the same convention ``analysis.business_windows.get_window_bounds`` uses.
+    the same convention ``analysis.business_windows.get_window_bounds`` uses —
+    and both are expressed as explicit UTC datetimes (see ``_utc_midnight``).
     """
     from datetime import timedelta  # noqa: PLC0415
 
     if end_key is None:
         return {"available": False, "rows": []}
     base = canonical_revenue.load_won_deals(
-        start=start_key, end=end_key + timedelta(days=1))
+        start=_utc_midnight(start_key),
+        end=_utc_midnight(end_key + timedelta(days=1)))
     if not base.get("available"):
         return {"available": False, "rows": [], "reason": base.get("reason")}
     rows = []
