@@ -628,6 +628,12 @@ def build_source_platform_detail(window: str, source_group: str, source_channel:
             "contacts": [], "deals": [], "rows": [],
             # Counts are NULL, not 0 — see above.
             "summary": {"contacts": None, "sqls": None, "deals": None},
+            # Contact evidence is a DIFFERENT source (the classification
+            # tables) and may still be readable. It is reported as its own
+            # availability flag rather than merged into the drawer's status, so
+            # a reader can see that one half is readable without the response
+            # ever implying the revenue half is healthy.
+            "contact_evidence_available": bool(contacts_fetch.get("available")),
             "revenue_source": canonical_revenue.CANONICAL_SOURCE,
             "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
             "revenue_available": not unreadable_ledger,

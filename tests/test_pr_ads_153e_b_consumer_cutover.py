@@ -493,6 +493,23 @@ def test_13b_window_bounds_are_iso_8601_not_str_of_a_datetime(monkeypatch):
         assert down[key] is None or "T" in down[key]
 
 
+def test_13b2_iso_emission_handles_date_datetime_string_and_none():
+    """`.isoformat()` for real temporals; strings pass through untouched."""
+    from datetime import date as _date
+
+    assert canonical_revenue._iso(datetime(2026, 4, 1, tzinfo=timezone.utc)) == \
+        "2026-04-01T00:00:00+00:00"
+    assert canonical_revenue._iso(_date(2026, 4, 1)) == "2026-04-01"
+    assert canonical_revenue._iso(None) is None
+    # An already-serialized value is NOT re-parsed and re-formatted — doing so
+    # could silently rewrite an offset we were handed.
+    already = "2026-04-01T00:00:00+05:00"
+    assert canonical_revenue._iso(already) == already
+    # And the offset is never dropped.
+    assert "+00:00" in canonical_revenue._iso(
+        datetime(2026, 4, 1, tzinfo=timezone.utc))
+
+
 def test_13c_channel_trend_bounds_are_explicit_utc_datetimes(monkeypatch):
     """A DATE cast to `timestamptz` resolves against the SESSION time zone.
 
@@ -525,6 +542,44 @@ def test_13c_channel_trend_bounds_are_explicit_utc_datetimes(monkeypatch):
     assert timezone.utc
 
 
+def test_13c2_the_contract_normalizes_bounds_so_no_consumer_can_recreate_it(monkeypatch):
+    """The fix lives at the ONE boundary every consumer passes through.
+
+    Fixing only the channel service would leave the next consumer free to hand
+    a bare `date` straight into a `timestamptz` comparison. `load_won_deals`
+    normalizes whatever it is given, so the defect cannot be reintroduced from
+    a call site.
+    """
+    from datetime import date as _date
+
+    import db.deal_ledger_repository as ledger_repo
+
+    seen = []
+
+    def _capture(start=None, end=None):
+        seen.append((start, end))
+        return {"available": True, "rows": []}
+
+    patch_canonical_ledger(monkeypatch, [])
+    monkeypatch.setattr(ledger_repo, "fetch_won_deals", _capture)
+
+    # Every shape a careless caller might use.
+    for start, end in ((_date(2026, 4, 1), _date(2026, 7, 1)),
+                       (datetime(2026, 4, 1), datetime(2026, 7, 1)),
+                       ("2026-04-01", "2026-07-01"),
+                       ("2026-04-01T00:00:00+00:00", "2026-07-01T00:00:00+00:00")):
+        seen.clear()
+        canonical_revenue.load_won_deals(start=start, end=end, now=NOW)
+        (got_start, got_end), = seen
+        for bound in (got_start, got_end):
+            assert isinstance(bound, datetime), bound
+            assert bound.tzinfo is not None
+            assert bound.utcoffset().total_seconds() == 0
+        # Every shape resolves to the SAME instant.
+        assert got_start == datetime(2026, 4, 1, tzinfo=timezone.utc)
+        assert got_end == datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+
 def test_13d_source_drilldown_fails_closed_when_the_ledger_is_unreadable(monkeypatch):
     """An empty deals section reads as "no deals", not as an outage.
 
@@ -538,6 +593,14 @@ def test_13d_source_drilldown_fails_closed_when_the_ledger_is_unreadable(monkeyp
                         lambda s, e: {"available": True, "rows": []})
     patch_canonical_ledger(monkeypatch, [], available=False)
 
+    # Any legacy revenue provider being reached at all is a failure.
+    def _forbidden(*a, **k):  # pragma: no cover - only runs on a regression
+        raise AssertionError("the drilldown reached for a legacy revenue provider")
+
+    for name in ("fetch_source_deal_details", "fetch_source_revenue",
+                 "fetch_revenue_deals", "fetch_won_revenue"):
+        monkeypatch.setattr(repo, name, _forbidden)
+
     out = build_source_platform_detail(
         WINDOW, "google_ads", "paid_search", "google_ads", now=NOW)
     assert out["revenue_available"] is False
@@ -546,7 +609,15 @@ def test_13d_source_drilldown_fails_closed_when_the_ledger_is_unreadable(monkeyp
     assert out["source_health"]["status"] != "ready"
     # Counts are withheld, not zeroed — 0 would be a claim about the bucket.
     assert out["summary"]["deals"] is None
+    assert out["summary"]["contacts"] is None and out["summary"]["sqls"] is None
     assert out["deals"] == [] and out["rows"] == []
+    # The full quarantine metadata a reader needs to act on.
+    for key in ("revenue_source", "revenue_scope", "window", "as_of",
+                "revenue_violation_codes"):
+        assert key in out, key
+    # Contact evidence comes from a DIFFERENT source and is labelled as its own
+    # availability, never merged into a healthy-looking overall status.
+    assert out["contact_evidence_available"] is True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -834,6 +905,118 @@ def test_an_unknown_scope_is_an_error_not_a_silent_widening():
 # ─────────────────────────────────────────────────────────────────────────────
 # Frontend: no page renders an unavailable revenue figure as $0
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# §18 — permanent frontend contract (replaces the retired 153E-A diff guard)
+#
+# 153E-A carried `test_no_frontend_change_in_this_backend_pr`, a TRANSIENT scope
+# guard: it diffed the branch against `origin/main` and forbade any `static/`
+# change. That was right for a shadow-mode backend PR and wrong forever after —
+# it would fail every future PR that has to display the canonical contract. It is
+# retired here and replaced by these behavioural tests, which assert what the
+# frontend must DO rather than which files it may touch.
+# ─────────────────────────────────────────────────────────────────────────────
+_JS = (_ROOT / "static" / "app.js").read_text()
+_HTML = (_ROOT / "static" / "index.html").read_text()
+
+
+def _js_function(name, span=3000):
+    i = _JS.find(name)
+    assert i != -1, f"{name} not found in app.js"
+    return _JS[i:i + span]
+
+
+def test_18_unit_economics_uses_business_windows_not_the_rolling_60d_contract():
+    select = re.search(r'<select[^>]*id="unit-economics-window"[^>]*>.*?</select>',
+                       _HTML, re.S).group(0)
+    for window in ("current_quarter", "last_quarter", "last_6_months", "ytd",
+                   "all_time"):
+        assert window in select, window
+    # The retired rolling day windows must be gone from the control entirely.
+    for day_window in ("7d", "14d", "30d", "60d", "90d", "365d"):
+        assert f'value="{day_window}"' not in select, day_window
+    assert "data-business-window-select" in select
+
+
+def test_18b_frontend_sends_the_business_window_and_an_explicit_scope():
+    loader = _js_function("async function loadUnitEconomics")
+    assert "getRoasBusinessWindow()" in loader
+    assert "/api/reports/unit-economics?window=" in loader
+    # The scope is sent explicitly — an advertising CAC/ROAS must never be
+    # computed at an unstated population.
+    assert "scope=" in loader
+    assert "UNIT_ECONOMICS_SCOPE" in loader
+    assert 'UNIT_ECONOMICS_SCOPE = "campaign_attributable"' in _JS
+
+
+def test_18c_the_window_selector_is_wired_to_the_business_window_handler():
+    """A business key fed to the DAY-window handler silently reverts the page."""
+    wiring = _js_function('ueWindow  = document.getElementById', span=700)
+    assert 'ueWindow.addEventListener("change", handleBusinessWindowSelectChange)' \
+        in wiring
+    assert "handleSyncedWindowSelectChange" not in wiring
+    # And that handler must reload Unit Economics rather than ROAS by Campaign.
+    handler = _js_function("function handleBusinessWindowSelectChange")
+    assert 'case "unit-economics":' in handler
+
+
+def test_18d_deal_rows_prefer_the_canonical_deal_name():
+    # The canonical ledger names the DEAL; `company` (the contact's employer) is
+    # not a ledger field, so every migrated deal surface prefers `deal_name`.
+    assert _JS.count("deal_name || ") >= 3, "deal tables must prefer deal_name"
+    assert '["deal_name", "Deal name"]' in _JS
+
+
+def test_18e_unavailable_revenue_renders_unavailable_never_zero():
+    renderer = _js_function("function renderUnitEconomicsPage")
+    assert "Unavailable" in renderer
+    assert "revenue_available" in renderer
+    # No hard-coded zero standing in for a withheld figure.
+    assert "|| 0)" not in renderer, "a withheld metric must not default to 0"
+    assert 'fmtMoney(0)' not in renderer
+
+
+def test_18f_attribution_views_disclose_their_narrower_revenue_scope():
+    disclosure = _js_function("function renderRevenueScopeDisclosure")
+    assert "attributed_revenue_scope" in disclosure
+    assert "revenue_scope" in disclosure
+    # It must say the attributed figure is a SUBSET, not the business total.
+    assert "subset" in disclosure.lower()
+    # And it must actually be rendered on the ROAS by Campaign page.
+    page = _js_function("function renderRoasCampaignsPage", span=4000)
+    assert "renderRevenueScopeDisclosure(data)" in page
+
+
+def test_18g_no_frontend_revenue_path_implies_the_retired_windsor_lineage():
+    """Scoped to the REVENUE paths, deliberately.
+
+    "Windsor" still appears in page-explanation copy on the GCLID-attribution
+    and System Status pages, where it describes a legacy ad-platform source
+    honestly. Banning the word globally would be a guard against vocabulary
+    rather than behaviour, and would fail for the wrong reason. What must be
+    true is that no revenue SURFACE reads or implies that lineage.
+    """
+    for banned in ("campaign_performance.json", "attributed_deals.json"):
+        assert banned not in _JS.lower(), banned
+
+    for fn in ("async function loadUnitEconomics",
+               "function renderUnitEconomicsPage",
+               "function renderRevenueScopeDisclosure"):
+        body = _js_function(fn).lower()
+        for banned in ("windsor", "campaign_performance", "attributed_deals"):
+            assert banned not in body, f"{fn}: {banned}"
+
+    # The live Unit Economics page calls the canonical endpoint and nothing else.
+    loader = _js_function("async function loadUnitEconomics")
+    assert "/api/reports/unit-economics" in loader
+    for retired in ("/api/reports/roas/campaigns", "/api/reports/roas/countries"):
+        assert retired not in loader, retired
+
+    # Metrics the canonical ledger cannot support are shown as withheld.
+    renderer = _js_function("function renderUnitEconomicsPage")
+    if "LTV/CAC" in renderer:
+        assert "Unavailable" in renderer
+
+
 def test_unit_economics_page_uses_business_windows_and_renders_unavailable():
     html = (_ROOT / "static" / "index.html").read_text()
     js = (_ROOT / "static" / "app.js").read_text()

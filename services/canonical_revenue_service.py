@@ -58,6 +58,7 @@ Read-only. No writes to HubSpot, Google Ads, Mailchimp or the database.
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, time, timezone
 
 from analysis.deal_currency import (
     CURRENCY_UNAVAILABLE,
@@ -121,8 +122,55 @@ def _iso(value):
     """
     if value is None:
         return None
+    if isinstance(value, str):
+        # Already serialized upstream — returned untouched. Re-parsing and
+        # re-formatting it could silently rewrite an offset we were handed.
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     isoformat = getattr(value, "isoformat", None)
     return isoformat() if callable(isoformat) else str(value)
+
+
+def _utc_bound(value):
+    """Normalize a window bound to a timezone-aware UTC datetime, or ``None``.
+
+    The ledger read casts its bounds to ``timestamptz``, and PostgreSQL resolves
+    a DATE (or a naive TIMESTAMP) against the SESSION time zone. On a server
+    whose session is not UTC that silently shifts the window by hours and moves
+    deals that closed near a boundary into the wrong period — two pages reading
+    "the same" quarter would then disagree.
+
+    Normalizing HERE, at the one contract boundary every consumer goes through,
+    is what stops the defect being recreated: a caller may hand in a ``date``, a
+    naive ``datetime`` or an ISO string, and the ledger still receives an
+    explicit UTC instant. A caller passing bounds it resolved itself gets the
+    same treatment as one using ``get_window_bounds``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                value = datetime.combine(date.fromisoformat(text), time.min)
+            except ValueError:
+                # Unparseable: hand it back untouched rather than inventing an
+                # instant. The read will fail loudly instead of silently
+                # selecting the wrong population.
+                return value
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, date):
+        # A bare date means MIDNIGHT UTC on that date, in both bound positions.
+        # The caller owns the inclusive/exclusive contract; this only fixes the
+        # instant it refers to.
+        return datetime.combine(value, time.min, tzinfo=timezone.utc)
+    return value
 
 
 def _window_block(window, start, end, resolved) -> dict:
@@ -206,6 +254,10 @@ def load_won_deals(window=None, *, start=None, end=None, now=None,
                                detail=f"unknown business window '{window}'")
         resolved = resolve_window(window, now=now)
         start, end = get_window_bounds(window, now=now)
+
+    # Normalize BEFORE anything else reads or reports the bounds, so the value
+    # the ledger is queried with is the value the response advertises.
+    start, end = _utc_bound(start), _utc_bound(end)
 
     sync_res = ledger_repo.fetch_sync_state()
     as_of = _as_of(sync_res.get("row"))

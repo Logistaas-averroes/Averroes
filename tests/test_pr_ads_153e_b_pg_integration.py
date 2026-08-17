@@ -199,6 +199,56 @@ def test_window_upper_bound_is_exclusive_so_quarters_do_not_overlap(pg):
     assert last_q["won_deals"] + current_q["won_deals"] == 2
 
 
+def test_the_session_timezone_cannot_change_the_selected_population(pg):
+    """A DATE cast to `timestamptz` resolves against the SESSION time zone.
+
+    This is the defect Copilot caught: on a server whose session is not UTC, a
+    bare date bound silently shifts the window by hours and moves edge deals
+    between periods. The contract now normalizes bounds to explicit UTC
+    instants, so the SAME rows come back whatever the session is set to.
+    """
+    from datetime import date, timedelta
+
+    _sync_state(pg)
+    # Deals straddling a quarter boundary, at the instants a shift would move.
+    _insert(pg, "just-inside", close_date="2026-04-01T00:30:00+00:00", revenue_usd=10.0)
+    _insert(pg, "just-before", close_date="2026-03-31T23:30:00+00:00", revenue_usd=20.0)
+    _insert(pg, "just-after", close_date="2026-07-01T00:30:00+00:00", revenue_usd=40.0)
+
+    import db.connection as connection
+
+    def _population(session_tz):
+        with connection.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SET TIME ZONE '{session_tz}'")
+            conn.commit()
+        base = canonical_revenue.load_won_deals(
+            start=date(2026, 4, 1), end=date(2026, 6, 30) + timedelta(days=1))
+        assert base["available"] is True
+        return sorted(d["deal_id"] for d in base["deals"])
+
+    utc = _population("UTC")
+    assert utc == ["just-inside"], utc
+    # Sessions either side of UTC, chosen to expose an off-by-hours shift.
+    for tz in ("America/Los_Angeles", "Asia/Tokyo", "Pacific/Kiritimati"):
+        assert _population(tz) == utc, tz
+
+
+def test_a_deal_exactly_on_each_boundary_lands_on_the_right_side(pg):
+    """Inclusive start, EXCLUSIVE end — asserted at the exact instants."""
+    from datetime import datetime as _dt
+
+    _sync_state(pg)
+    _insert(pg, "at-start", close_date="2026-04-01T00:00:00+00:00", revenue_usd=1.0)
+    _insert(pg, "at-end", close_date="2026-07-01T00:00:00+00:00", revenue_usd=2.0)
+
+    base = canonical_revenue.load_won_deals(
+        start=_dt(2026, 4, 1, tzinfo=timezone.utc),
+        end=_dt(2026, 7, 1, tzinfo=timezone.utc))
+    ids = sorted(d["deal_id"] for d in base["deals"])
+    assert ids == ["at-start"], ids
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # §3 — unproven currency survives the round trip as NULL
 # ─────────────────────────────────────────────────────────────────────────────

@@ -14688,7 +14688,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const ueRefresh = document.getElementById("unit-economics-refresh-btn");
   const ueWindow  = document.getElementById("unit-economics-window");
   if (ueRefresh) ueRefresh.addEventListener("click", loadUnitEconomics);
-  if (ueWindow)  ueWindow.addEventListener("change", handleSyncedWindowSelectChange);
+  // PR-ADS-153E-B: the selector now carries a BUSINESS window, so it must go to
+  // the business-window handler. Leaving it on the day-window handler fed a
+  // business key into `parseInt("current_quarter")` and silently reverted the page.
+  if (ueWindow)  ueWindow.addEventListener("change", handleBusinessWindowSelectChange);
 
   // Wire up Churn Input form
   const churnForm = document.getElementById("churn-input-form");
@@ -15010,6 +15013,9 @@ function handleBusinessWindowSelectChange(e) {
     case "deals":           loadDeals();         break;
     case "revenue-health":  loadRevenueHealth(); break;
     case "revenue-by-source": loadRevenueBySource(); break;
+    // PR-ADS-153E-B: Unit Economics now shares this selector, so it must reload
+    // ITSELF — falling through to the default reloaded ROAS by Campaign instead.
+    case "unit-economics":  loadUnitEconomics(); break;
     default:                loadRoasCampaigns();
   }
 }
@@ -15527,6 +15533,26 @@ function renderSpendCoverageNotice(sh) {
     </div>`;
 }
 
+// PR-ADS-153E-B: an ADVERTISING view must say which population its revenue was
+// measured over, and must not read as the company total. The mart carries both:
+// `summary.revenue_scope` is the all-source business scope, and
+// `summary.attributed_revenue_scope` is the narrower scope the ROAS numerator
+// used. Showing them together is what stops attributed revenue being mistaken
+// for total business revenue.
+function renderRevenueScopeDisclosure(data) {
+  const summary = (data && data.summary) || {};
+  const attributed = summary.attributed_revenue_scope;
+  if (!attributed) return "";
+  const business = summary.revenue_scope || "all_source";
+  const money = (v) => (v === null || v === undefined ? "Unavailable" : fmtMoney(v));
+  return `<p class="grace-note" data-revenue-scope="${escapeHtml(attributed)}">
+      Revenue scope: <strong>${escapeHtml(attributed)}</strong> —
+      ${money(summary.attributed_won_revenue_usd)} attributed to campaigns, out of
+      ${money(summary.won_revenue_usd)} across <strong>${escapeHtml(business)}</strong>.
+      Attributed revenue is a subset of total business revenue, not the same figure.
+    </p>`;
+}
+
 function renderRoasCampaignsPage() {
   const kpiGrid = document.getElementById("roas-campaigns-kpis");
   const tableBody = document.getElementById("roas-campaigns-table-body");
@@ -15565,6 +15591,7 @@ function renderRoasCampaignsPage() {
     ${renderMartDiagnostics(data)}
     ${renderRoasCampaignFilters()}
     ${renderRoasCampaignTable(filtered, spendIncomplete)}
+    ${renderRevenueScopeDisclosure(data)}
     <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads canonical spend powers ROAS; HubSpot closed-won deals provide revenue.</p>
   `;
 }
@@ -16653,6 +16680,11 @@ document.addEventListener("click", (e) => {
 let unitEconomicsData = null;
 let unitEconomicsStatus = "idle";
 
+// PR-ADS-153E-B: the advertising scope Unit Economics computes CAC / ROAS at.
+// Sent explicitly so the page can never be read as a company-wide total: the
+// business figures beside it are `all_source`, and the two must stay labelled.
+const UNIT_ECONOMICS_SCOPE = "campaign_attributable";
+
 async function loadUnitEconomics() {
   // PR-ADS-153E-B: business window, not a rolling day window.
   const window_ = getRoasBusinessWindow();
@@ -16662,7 +16694,10 @@ async function loadUnitEconomics() {
   if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading unit economics…</p>';
 
   try {
-    const res = await fetch(`/api/reports/unit-economics?window=${window_}`, { credentials: "same-origin" });
+    const res = await fetch(
+      `/api/reports/unit-economics?window=${encodeURIComponent(window_)}` +
+      `&scope=${encodeURIComponent(UNIT_ECONOMICS_SCOPE)}`,
+      { credentials: "same-origin" });
     if (!res.ok) {
       unitEconomicsStatus = "error";
       if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load unit economics.</p>';
