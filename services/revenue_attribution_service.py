@@ -1251,12 +1251,16 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # dates / campaigns missing geo / incomplete FX/coverage stay BLOCKED.
     country_residual = {"eligible": False, "residual_native": None,
                         "residual_pct": None, "reason": None}
+    _country_missing_geo_dates: list = []
+    _country_campaigns_missing_geo: list = []
     if canonical_geo_country and country_spend_reconciled is False:
         from services.google_ads_geo_sync_service import (  # noqa: PLC0415
             _geo_reconciliation_detail, evaluate_country_residual,
         )
         _geo_detail = _geo_reconciliation_detail(
             start_date, end_date, canonical_total, geo_total_for_recon, "mismatch")
+        _country_missing_geo_dates = _geo_detail.get("missing_geo_dates") or []
+        _country_campaigns_missing_geo = _geo_detail.get("campaigns_missing_geo") or []
         country_residual = evaluate_country_residual(
             canonical_total, geo_total_for_recon, _geo_detail,
             coverage_complete=coverage_complete, fx_complete=fx_complete,
@@ -1268,14 +1272,26 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # comparison alone cannot produce (it cannot tell "never fetched" from
     # "fetched, genuinely zero").
     country_gap_reason = country_residual.get("reason")
+    # Scoped to THIS window's canonical spend customer — coverage is an
+    # account-scoped fact, and reading it unscoped would let one account's
+    # verified history declare another account's window covered.
     try:
-        from services.google_ads_geo_sync_service import analyze_geo_coverage  # noqa: PLC0415
-        _geo_ledger = analyze_geo_coverage(start_date, end_date)
-    except Exception:  # noqa: BLE001 — evidence must never break the contract
+        from services.google_ads_geo_sync_service import (  # noqa: PLC0415
+            analyze_geo_coverage, configured_customer_id,
+        )
+        _geo_customer = canonical_customer_id or configured_customer_id()
+        _geo_ledger = analyze_geo_coverage(_geo_customer, start_date, end_date)
+    except Exception:  # noqa: BLE001 — coverage must never crash the contract
         _geo_ledger = {"available": False, "complete": False,
                        "missing_ranges": [], "failed_chunks": []}
+    # PR-ADS-153F blocker 1: durable geo coverage is a MANDATORY input, not
+    # side evidence. Its whole purpose is to separate "fetched and genuinely
+    # zero" from "never fetched", and a gate that reads it but does not require
+    # it discards exactly that distinction — a window whose geo was never
+    # synced would reconcile against a total it should not have trusted.
+    geo_coverage_ok = bool(_geo_ledger.get("available") and _geo_ledger.get("complete"))
     country_spend_trusted = (
-        campaign_spend_trusted and canonical_geo_country
+        campaign_spend_trusted and canonical_geo_country and geo_coverage_ok
         and (country_spend_reconciled is True or country_residual_eligible))
     # Country spend expressed in the ROAS currency: when trusted + FX complete, use
     # the per-day-FX USD carried on the canonical geo rows; otherwise native
@@ -1504,13 +1520,18 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         "geo_country_source": geo_country_source,
         "campaign_spend_total": canonical_total,
         "country_spend_reconciled": country_spend_reconciled,
-        # PR-ADS-153F durable geo coverage evidence (never a new gate; evidence).
+        # PR-ADS-153F: durable geo coverage is a MANDATORY gate input. Every
+        # field the shared gate needs is published here, so the mart derives the
+        # same verdict from the same facts rather than from a subset.
         "country_gap_reason": country_gap_reason,
         "geo_coverage_status": ("complete" if _geo_ledger.get("complete")
                                 else "incomplete" if _geo_ledger.get("available")
                                 else "unavailable"),
         "geo_coverage_missing_ranges": _geo_ledger.get("missing_ranges") or [],
         "failed_geo_dates": _geo_ledger.get("failed_chunks") or [],
+        "country_geo_rows_available": bool(canonical_geo_country),
+        "missing_geo_dates": list(_country_missing_geo_dates or []),
+        "campaigns_missing_geo": list(_country_campaigns_missing_geo or []),
         # PR-ADS-129: exact geo↔canonical variance for the Country blocked card.
         "country_geo_total": country_geo_total_native,
         "country_spend_variance": country_spend_variance_native,

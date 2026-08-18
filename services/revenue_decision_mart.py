@@ -170,9 +170,24 @@ def _spend_truth_block(core: dict) -> dict:
     # same status independently, and the audit below used a stricter bar than
     # Dashboard Countries — so one window could be ready on one page and blocked
     # on another. Same states, same ordering, one implementation.
-    country_spend_status = geo_gate.resolve_country_spend_status(
+    #
+    # PR-ADS-153F blocker 1: the gate takes ALL its inputs. Passing only the
+    # reconciliation verdict let two unproven totals that happened to agree
+    # become `verified` while campaign coverage, FX or geo coverage was
+    # incomplete — matching numbers are not evidence when the inputs behind them
+    # were never established.
+    country_spend_status, country_gap_codes = geo_gate.resolve_country_spend_status(
         reconciled=health.get("country_spend_reconciled"),
         residual_eligible=bool(health.get("country_residual_eligible")),
+        campaign_spend_readable=(health.get("spend_source") is not None),
+        campaign_coverage_complete=(health.get("spend_coverage_status") == "complete"),
+        fx_complete=(health.get("fx_coverage_status") == "complete"),
+        geo_readable=bool(health.get("country_geo_rows_available", True)),
+        geo_coverage_readable=(health.get("geo_coverage_status") != "unavailable"),
+        geo_coverage_complete=(health.get("geo_coverage_status") == "complete"),
+        geo_failed_chunks=health.get("failed_geo_dates") or [],
+        missing_geo_dates=health.get("missing_geo_dates") or [],
+        campaigns_missing_geo=health.get("campaigns_missing_geo") or [],
     )
     country_roas_unblockable = geo_gate.country_geo_ready(country_spend_status)
 
@@ -197,6 +212,7 @@ def _spend_truth_block(core: dict) -> dict:
         # a blocked country view can say WHICH ranges are missing or failed
         # rather than only that the totals differ.
         "geo_coverage_status": health.get("geo_coverage_status"),
+        "country_gap_codes": country_gap_codes,
         "geo_coverage_missing_ranges": health.get("geo_coverage_missing_ranges") or [],
         "failed_geo_dates": health.get("failed_geo_dates") or [],
         "country_gap_reason": health.get("country_gap_reason"),

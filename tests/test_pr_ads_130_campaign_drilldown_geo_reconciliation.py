@@ -205,6 +205,14 @@ def _geo(monkeypatch, *, geo_total, canonical_total=69991.91, breakdown=None):
         {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified",
          "rows_written": 10, "cost_micros_total": 5_000_000}]})
     monkeypatch.setattr(repo, "fetch_fx_coverage", lambda s, e, c: {"complete": True})
+    # PR-ADS-153F: the durable geo coverage ledger is a MANDATORY gate input, so
+    # a fixture describing a healthy account has to prove the range was actually
+    # fetched rather than only supplying totals for it.
+    monkeypatch.setattr(repo, "fetch_geo_coverage", lambda c, s, e: {
+        "available": True, "chunks": [
+            {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01",
+             "status": "verified", "rows_written": 13516,
+             "cost_micros_total": 5_000_000, "country_count": 191}]})
     default_breakdown = {
         "available": True,
         "daily": [
@@ -225,12 +233,25 @@ def _geo(monkeypatch, *, geo_total, canonical_total=69991.91, breakdown=None):
     return build_geo_reconciliation("ytd")
 
 
-# Test 1/2 — mismatch above tolerance stays blocked; sync does not fake verify
+# Test 1/2 — mismatch above tolerance never reports a fake reconcile
 def test_geo_mismatch_stays_blocked(monkeypatch):
     out = _geo(monkeypatch, geo_total=67287.91)  # 3.86% below canonical
     assert out["status"] == "mismatch"
     assert out["reconciled"] is False
-    assert out["country_roas_unblockable"] is False
+    # PR-ADS-153F: `country_roas_unblockable` is now the SHARED readiness
+    # predicate rather than a private, stricter one. The default fixture here is
+    # the PR-ADS-131 by-design residual — geo below campaign spend with complete
+    # coverage, complete FX, geo spend on every campaign-spend day and for every
+    # spending campaign — which the mart and Dashboard Countries already
+    # published as decision-ready with an explicit residual bucket. This field
+    # disagreeing with them about the same window was the defect.
+    #
+    # The strict reconciliation verdict is unchanged and nothing loosened: the
+    # tolerance still rejects 3.86%, `reconciled` is still False, and the
+    # genuinely-missing-geo cases below still block outright.
+    from services.google_ads_geo_sync_service import country_geo_ready
+    assert out["country_spend_status"] == "reconciled_with_residual"
+    assert out["country_roas_unblockable"] is country_geo_ready(out["country_spend_status"])
 
 
 # Test 3 — audit exposes totals, variance, tolerance, reason, next_action

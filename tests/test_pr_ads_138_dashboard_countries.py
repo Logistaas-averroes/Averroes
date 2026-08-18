@@ -135,8 +135,18 @@ DEAL_ROWS = [
 ]
 
 
+# PR-ADS-153F: the durable geo coverage ledger is a MANDATORY gate input, so a
+# fixture describing a healthy account must prove the window was fetched — not
+# merely supply totals for it. Tests wanting the never-fetched case pass
+# `geo_coverage=[]`.
+GEO_COVERAGE_COMPLETE = [
+    {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified",
+     "rows_written": 13516, "cost_micros_total": 5_000_000, "country_count": 191},
+]
+
+
 def _patch_durable(monkeypatch, *, canonical=None, geo_by_country=None, deals=None,
-                   revenue_connected=True):
+                   revenue_connected=True, geo_coverage=None):
     import db.revenue_repository as repo
 
     canon = canonical if canonical is not None else CANONICAL
@@ -160,6 +170,11 @@ def _patch_durable(monkeypatch, *, canonical=None, geo_by_country=None, deals=No
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_by_country", lambda s, e: dict(geo))
     monkeypatch.setattr(repo, "fetch_spend_coverage",
                         lambda s, e: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
+    monkeypatch.setattr(repo, "fetch_geo_coverage",
+                        lambda c, s, e: {"available": True,
+                                         "chunks": list(GEO_COVERAGE_COMPLETE
+                                                        if geo_coverage is None
+                                                        else geo_coverage)})
     monkeypatch.setattr(repo, "fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr(repo, "revenue_integration_connected", lambda: revenue_connected)
     # PR-ADS-153E-B: closed-won proof deals come from the canonical deal ledger.

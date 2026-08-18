@@ -155,8 +155,19 @@ CANONICAL_FX_INCOMPLETE = {
 }
 
 
+# PR-ADS-153F: the durable geo coverage ledger is a MANDATORY input to the
+# country readiness gate, so the shared "healthy account" fixture has to prove
+# the window was actually fetched. Before this, a fixture supplied matching geo
+# totals for a range nobody had ever synced — two agreeing numbers with nothing
+# behind them. Tests that want the unfetched case pass `geo_coverage=[]`.
+GEO_COVERAGE_COMPLETE = [
+    {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified",
+     "rows_written": 13516, "cost_micros_total": 5_000_000, "country_count": 191},
+]
+
+
 def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
-                   geo_total=None, geo_by_country=None):
+                   geo_total=None, geo_by_country=None, geo_coverage=None):
     """Patch the durable repository so every revenue service reads one dataset."""
     import db.revenue_repository as repo
 
@@ -199,6 +210,12 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
     monkeypatch.setattr(
         repo, "fetch_spend_coverage",
         lambda s, e: {"available": True, "chunks": list(chunks)},
+    )
+    monkeypatch.setattr(
+        repo, "fetch_geo_coverage",
+        lambda c, s, e: {"available": True,
+                         "chunks": list(GEO_COVERAGE_COMPLETE if geo_coverage is None
+                                        else geo_coverage)},
     )
     monkeypatch.setattr(
         repo, "fetch_campaign_identity",

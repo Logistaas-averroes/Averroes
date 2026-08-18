@@ -819,9 +819,15 @@ def _build_unavailable(kpis: dict, spend_truth: dict, period_change: dict,
         geo_ok = geo_gate.country_geo_ready(spend_truth.get("country_spend_status"))
         fx_ok = spend_truth.get("fx_status") == "verified"
         usd_present = kpis.get("verified_spend_usd") is not None
+        # PR-ADS-153F §8: name the ACTUAL gap. The gate is holistic now, so
+        # `unavailable` covers an unreadable baseline, incomplete FX and a geo
+        # range nobody fetched alike — telling all three operators to "re-run
+        # geo sync" would send two of them to fix the wrong thing.
+        gap_reason = geo_gate.describe_geo_gap(spend_truth.get("country_gap_codes"))
         if not geo_ok:
-            roas_reason = ("Geo ROAS requires Google Ads geographic spend that reconciles "
-                           "with the canonical campaign spend — it does not for this window.")
+            roas_reason = gap_reason or (
+                "Geo ROAS requires Google Ads geographic spend that reconciles "
+                "with the canonical campaign spend — it does not for this window.")
         elif not fx_ok or not usd_present:
             roas_reason = ("Geo ROAS requires verified FX / USD spend; native GBP spend is "
                            "shown instead.")

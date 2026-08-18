@@ -155,12 +155,12 @@ def test_a_never_fetched_range_is_missing_not_zero(pg):
     w.upsert_geo_coverage(CUSTOMER, "2026-04-01", "2026-04-30", "verified",
                           rows_written=0, cost_micros_total=0)
 
-    covered = analyze_geo_coverage(date(2026, 4, 1), date(2026, 4, 30))
+    covered = analyze_geo_coverage(CUSTOMER, date(2026, 4, 1), date(2026, 4, 30))
     assert covered["available"] is True
     assert covered["complete"] is True          # fetched, genuinely zero spend
     assert covered["missing_days"] == 0
 
-    uncovered = analyze_geo_coverage(date(2026, 4, 1), date(2026, 5, 31))
+    uncovered = analyze_geo_coverage(CUSTOMER, date(2026, 4, 1), date(2026, 5, 31))
     assert uncovered["complete"] is False       # May was never fetched
     assert uncovered["missing_days"] == 31
     assert uncovered["missing_ranges"] == [{"start": "2026-05-01", "end": "2026-05-31"}]
@@ -175,14 +175,14 @@ def test_a_failed_chunk_keeps_the_window_incomplete_until_repaired(pg):
     w.upsert_geo_coverage(CUSTOMER, "2026-05-01", "2026-05-31", "failed",
                           error_message="rate limited")
 
-    before = analyze_geo_coverage(date(2026, 4, 1), date(2026, 5, 31))
+    before = analyze_geo_coverage(CUSTOMER, date(2026, 4, 1), date(2026, 5, 31))
     assert before["complete"] is False
     assert before["failed_chunks"] == [{"chunk_start": "2026-05-01",
                                         "chunk_end": "2026-05-31"}]
 
     w.upsert_geo_coverage(CUSTOMER, "2026-05-01", "2026-05-31", "verified",
                           rows_written=15)
-    after = analyze_geo_coverage(date(2026, 4, 1), date(2026, 5, 31))
+    after = analyze_geo_coverage(CUSTOMER, date(2026, 4, 1), date(2026, 5, 31))
     assert after["complete"] is True
     assert after["failed_chunks"] == []
 
@@ -192,7 +192,8 @@ def test_the_repository_round_trips_the_chunk_diagnostics(pg):
     w.upsert_geo_coverage(CUSTOMER, "2026-03-01", "2026-03-31", "failed",
                           error_message="boom", sync_run_id="run-9")
 
-    chunks = repo.fetch_geo_coverage(date(2026, 3, 1), date(2026, 3, 31))["chunks"]
+    chunks = repo.fetch_geo_coverage(CUSTOMER, date(2026, 3, 1),
+                                     date(2026, 3, 31))["chunks"]
     assert len(chunks) == 1
     assert chunks[0]["status"] == "failed"
     assert chunks[0]["error_message"] == "boom"
@@ -319,3 +320,238 @@ def test_coverage_and_sync_state_are_separate_customers_apart(pg):
 
     assert w.try_claim_geo_sync_lease("acct-A") == "acquired"
     assert w.try_claim_geo_sync_lease("acct-B") == "acquired"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BLOCKER 2 — the range is REPLACED, atomically
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _geo_row(customer, spend_date, criterion, campaign="c1", micros=1_000_000):
+    return {"customer_id": customer, "currency_code": "GBP",
+            "country_criterion_id": criterion, "country_code": "GB",
+            "country_name": "United Kingdom", "campaign_id": campaign,
+            "spend_date": spend_date, "cost_micros": micros}
+
+
+def test_a_row_google_stops_reporting_is_removed_by_the_refresh(pg):
+    """The seven-day rolling refresh only works if refresh means REPLACE.
+
+    Google restates recent spend. A merge-only write cannot express "this row no
+    longer exists", so the stale row would survive and the chunk would then be
+    certified over spend Google no longer reports.
+    """
+    w = _writers()
+    w.replace_geo_daily_spend_chunk(CUSTOMER, "2026-04-01", "2026-04-30", [
+        _geo_row(CUSTOMER, "2026-04-10", "2826"),
+        _geo_row(CUSTOMER, "2026-04-11", "2840"),
+    ])
+    assert _rows(pg, "SELECT COUNT(*) AS n FROM google_ads_geo_daily_spend "
+                     "WHERE customer_id = %s", (CUSTOMER,))[0]["n"] == 2
+
+    # The restated response no longer contains the second row.
+    out = w.replace_geo_daily_spend_chunk(CUSTOMER, "2026-04-01", "2026-04-30", [
+        _geo_row(CUSTOMER, "2026-04-10", "2826"),
+    ])
+    assert out["replaced"] is True
+    assert out["deleted"] == 2 and out["written"] == 1
+
+    remaining = _rows(pg, "SELECT spend_date, country_criterion_id "
+                          "FROM google_ads_geo_daily_spend WHERE customer_id = %s",
+                      (CUSTOMER,))
+    assert len(remaining) == 1
+    assert remaining[0]["country_criterion_id"] == "2826"
+
+
+def test_a_genuinely_empty_response_empties_the_range(pg):
+    """An empty response is a real answer, and must be expressible.
+
+    This is the worst case for a merge-only writer: it writes nothing, every
+    stale row survives, and the chunk is still marked verified.
+    """
+    w = _writers()
+    w.replace_geo_daily_spend_chunk(CUSTOMER, "2026-05-01", "2026-05-31",
+                                    [_geo_row(CUSTOMER, "2026-05-09", "2826")])
+    out = w.replace_geo_daily_spend_chunk(CUSTOMER, "2026-05-01", "2026-05-31", [])
+    assert out["replaced"] is True          # explicit success, not a silent zero
+    assert out["deleted"] == 1 and out["written"] == 0
+    assert _rows(pg, "SELECT COUNT(*) AS n FROM google_ads_geo_daily_spend "
+                     "WHERE customer_id = %s", (CUSTOMER,))[0]["n"] == 0
+
+
+def test_a_failed_replacement_preserves_the_previously_committed_range(pg):
+    """Validation happens BEFORE the delete, and the whole thing is one
+    transaction — so a bad response cannot leave the range emptied."""
+    from db.writers import GeoRangeReplacementError
+
+    w = _writers()
+    w.replace_geo_daily_spend_chunk(CUSTOMER, "2026-06-01", "2026-06-30", [
+        _geo_row(CUSTOMER, "2026-06-10", "2826"),
+        _geo_row(CUSTOMER, "2026-06-11", "2840"),
+    ])
+
+    # A row belonging to another account.
+    with pytest.raises(GeoRangeReplacementError):
+        w.replace_geo_daily_spend_chunk(CUSTOMER, "2026-06-01", "2026-06-30", [
+            _geo_row("other-account", "2026-06-12", "2826")])
+    # A row outside the requested range.
+    with pytest.raises(GeoRangeReplacementError):
+        w.replace_geo_daily_spend_chunk(CUSTOMER, "2026-06-01", "2026-06-30", [
+            _geo_row(CUSTOMER, "2026-07-01", "2826")])
+
+    kept = _rows(pg, "SELECT spend_date FROM google_ads_geo_daily_spend "
+                     "WHERE customer_id = %s ORDER BY spend_date", (CUSTOMER,))
+    assert len(kept) == 2, "a rejected replacement must not empty the range"
+
+
+def test_a_failed_replacement_does_not_verify_new_coverage(pg):
+    """No coverage row is written before the replacement commits."""
+    from db.writers import GeoRangeReplacementError
+    from services.google_ads_geo_sync_service import analyze_geo_coverage
+
+    w = _writers()
+    with pytest.raises(GeoRangeReplacementError):
+        w.replace_geo_daily_spend_chunk(CUSTOMER, "2026-08-01", "2026-08-31", [
+            _geo_row("someone-else", "2026-08-02", "2826")])
+
+    assert _rows(pg, "SELECT COUNT(*) AS n FROM google_ads_geo_coverage "
+                     "WHERE customer_id = %s AND chunk_start = %s",
+                 (CUSTOMER, "2026-08-01"))[0]["n"] == 0
+    cov = analyze_geo_coverage(CUSTOMER, date(2026, 8, 1), date(2026, 8, 31))
+    assert cov["complete"] is False
+
+
+def test_the_replacement_only_touches_its_own_customer_and_range(pg):
+    w = _writers()
+    w.replace_geo_daily_spend_chunk("acct-A", "2026-04-01", "2026-04-30",
+                                    [_geo_row("acct-A", "2026-04-10", "2826")])
+    w.replace_geo_daily_spend_chunk("acct-B", "2026-04-01", "2026-04-30",
+                                    [_geo_row("acct-B", "2026-04-10", "2826")])
+    # Replacing A's range must leave B's rows untouched.
+    w.replace_geo_daily_spend_chunk("acct-A", "2026-04-01", "2026-04-30", [])
+    assert _rows(pg, "SELECT COUNT(*) AS n FROM google_ads_geo_daily_spend "
+                     "WHERE customer_id = 'acct-B'")[0]["n"] == 1
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BLOCKER 3 — coverage is account-scoped
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_verified_coverage_for_one_customer_cannot_cover_another(pg):
+    from services.google_ads_geo_sync_service import analyze_geo_coverage
+
+    w = _writers()
+    w.upsert_geo_coverage("acct-A", "2026-04-01", "2026-04-30", "verified",
+                          rows_written=10)
+
+    assert analyze_geo_coverage("acct-A", date(2026, 4, 1), date(2026, 4, 30))["complete"] is True
+    b = analyze_geo_coverage("acct-B", date(2026, 4, 1), date(2026, 4, 30))
+    assert b["complete"] is False, "account A's coverage must not cover account B"
+    assert b["missing_days"] == 30
+
+
+def test_one_customer_cannot_cause_another_to_skip_its_fetch(pg):
+    from services.google_ads_geo_sync_service import _verified_chunk_keys
+
+    w = _writers()
+    w.upsert_geo_coverage("acct-A", "2026-04-01", "2026-04-30", "verified",
+                          rows_written=10)
+
+    a_keys, a_ok = _verified_chunk_keys("acct-A", date(2026, 4, 1), date(2026, 4, 30))
+    b_keys, b_ok = _verified_chunk_keys("acct-B", date(2026, 4, 1), date(2026, 4, 30))
+    assert a_ok and b_ok
+    assert "2026-04-01:2026-04-30" in a_keys
+    assert b_keys == set(), "account B must still fetch a range it never fetched"
+
+
+def test_failed_chunks_and_missing_ranges_are_isolated_per_customer(pg):
+    from services.google_ads_geo_sync_service import analyze_geo_coverage
+
+    w = _writers()
+    w.upsert_geo_coverage("acct-A", "2026-05-01", "2026-05-31", "failed",
+                          error_message="A failed")
+    w.upsert_geo_coverage("acct-B", "2026-05-01", "2026-05-31", "verified",
+                          rows_written=4)
+
+    a = analyze_geo_coverage("acct-A", date(2026, 5, 1), date(2026, 5, 31))
+    b = analyze_geo_coverage("acct-B", date(2026, 5, 1), date(2026, 5, 31))
+    assert a["failed_chunks"] and a["complete"] is False
+    assert b["failed_chunks"] == [] and b["complete"] is True
+
+
+def test_coverage_reads_require_a_customer(pg):
+    """No account means no answer — never a silent "nothing is covered"."""
+    repo = _repo()
+    out = repo.fetch_geo_coverage("", date(2026, 4, 1), date(2026, 4, 30))
+    assert out["available"] is False
+    assert out["reason"] == "customer_id_required"
+    assert repo.fetch_geo_sync_state("")["available"] is False
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BLOCKER 4 — the lease is owner-fenced
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_an_expired_worker_cannot_release_the_newer_workers_lease(pg):
+    """Expiry is RECOVERY; the token is OWNERSHIP.
+
+    Worker A overruns, worker B legitimately reclaims — and A, still running,
+    must not be able to stamp its terminal status over B's live run.
+    """
+    import psycopg2
+
+    w = _writers()
+    assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="A", lease_token="tok-A") == "acquired"
+    with psycopg2.connect(pg.url) as conn, conn.cursor() as cur:
+        cur.execute("UPDATE google_ads_geo_sync_state "
+                    "SET last_started_at = NOW() - INTERVAL '5 hours' "
+                    "WHERE customer_id = %s", (CUSTOMER,))
+    assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="B", lease_token="tok-B") == "acquired"
+
+    # A finishes late and tries to release / record terminal state.
+    assert w.release_geo_sync_lease(CUSTOMER, status="failed", lease_token="tok-A") is False
+    assert w.upsert_geo_sync_state(CUSTOMER, lease_token="tok-A",
+                                   last_status="success",
+                                   checkpoint_date=date(2026, 1, 1)) is False
+
+    row = _rows(pg, "SELECT last_status, last_run_id, lease_token, checkpoint_date "
+                    "FROM google_ads_geo_sync_state WHERE customer_id = %s",
+                (CUSTOMER,))[0]
+    assert row["last_status"] == "running"      # B still owns it
+    assert row["last_run_id"] == "B"
+    assert row["lease_token"] == "tok-B"
+    assert row["checkpoint_date"] is None       # A's checkpoint never landed
+
+
+def test_the_owner_can_record_its_terminal_state(pg):
+    w = _writers()
+    w.try_claim_geo_sync_lease(CUSTOMER, run_id="A", lease_token="tok-A")
+    assert w.upsert_geo_sync_state(CUSTOMER, lease_token="tok-A",
+                                   last_status="success",
+                                   checkpoint_date=date(2026, 6, 30)) is True
+    row = _rows(pg, "SELECT last_status, checkpoint_date FROM google_ads_geo_sync_state "
+                    "WHERE customer_id = %s", (CUSTOMER,))[0]
+    assert row["last_status"] == "success"
+    assert row["checkpoint_date"] == date(2026, 6, 30)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Additive integrity constraints
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_the_schema_rejects_rows_the_readers_would_misinterpret(pg):
+    """The writers already enforce these; stating them in the schema means a
+    migration or a manual fix cannot quietly produce a row that lies."""
+    import psycopg2
+
+    bad = [
+        ("INSERT INTO google_ads_geo_coverage (customer_id, chunk_start, chunk_end, status) "
+         "VALUES ('x', '2026-01-01', '2026-01-31', 'probably_fine')"),
+        ("INSERT INTO google_ads_geo_coverage (customer_id, chunk_start, chunk_end, status) "
+         "VALUES ('x', '2026-02-28', '2026-02-01', 'verified')"),
+        ("INSERT INTO google_ads_geo_sync_state (customer_id, scope, last_status) "
+         "VALUES ('x', 'geo_daily_spend', 'probably_done')"),
+    ]
+    for sql in bad:
+        with psycopg2.connect(pg.url) as conn, conn.cursor() as cur:
+            with pytest.raises(psycopg2.errors.CheckViolation):
+                cur.execute(sql)

@@ -19,6 +19,7 @@ replacement.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import date, datetime, timezone
 
 from analysis import country_identity
@@ -180,12 +181,6 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
     else:
         status = "mismatch"
 
-    # Country ROAS is unblockable only when ALL three gates pass. This mirrors the
-    # revenue-attribution rule and is reported so the UI never loosens it.
-    country_roas_unblockable = bool(
-        canonical_available and coverage_complete and fx_complete and status == "reconciled"
-    )
-
     # PR-ADS-129: explain WHY the totals differ, from per-day + per-campaign data.
     breakdown = _geo_reconciliation_detail(
         start, end, canonical_total, geo_total, status)
@@ -201,21 +196,36 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
         canonical_total, geo_total, breakdown,
         coverage_complete=coverage_complete, fx_complete=fx_complete,
         geo_has_rows=geo_has_rows, reconciled=(status == "reconciled"))
-    # PR-ADS-153F: derived by THE shared gate, not by a local expression. The
-    # ordering it encodes is unchanged (a safe residual outranks a plain
-    # mismatch; an unreadable source is unavailable, never a mismatch).
-    country_spend_status = resolve_country_spend_status(
+    # PR-ADS-153F: the durable geo coverage ledger is a MANDATORY input to the
+    # gate, not side evidence. It is the only thing that can tell "never
+    # fetched" from "fetched and genuinely zero", so a status derived without it
+    # can call a never-synced window verified purely because two unproven totals
+    # happened to agree.
+    geo_ledger = analyze_geo_coverage(customer_id, start, end)
+
+    # Derived by THE shared gate over ALL of its inputs, not by a local
+    # expression. Ordering is unchanged (a safe residual outranks a plain
+    # mismatch; an unproven input is unavailable, never a mismatch).
+    country_spend_status, country_gap_codes = resolve_country_spend_status(
         reconciled=(True if status == "reconciled"
                     else None if status in ("unavailable", "no_geo_data") else False),
         residual_eligible=residual["eligible"],
+        campaign_spend_readable=canonical_available,
+        campaign_coverage_complete=coverage_complete,
+        fx_complete=fx_complete,
+        geo_readable=geo_available and geo_has_rows,
+        geo_coverage_readable=bool(geo_ledger.get("available")),
+        geo_coverage_complete=bool(geo_ledger.get("complete")),
+        geo_failed_chunks=geo_ledger.get("failed_chunks") or [],
+        missing_geo_dates=breakdown.get("missing_geo_dates") or [],
+        campaigns_missing_geo=breakdown.get("campaigns_missing_geo") or [],
     )
-
-    # PR-ADS-153F: durable coverage evidence from the geo ledger. This is
-    # EVIDENCE, not a new blocking condition — the gate above is unchanged. It
-    # answers "which ranges were never fetched, and which failed", which the
-    # spend-comparison heuristics (`missing_geo_dates`) cannot distinguish from
-    # "fetched and genuinely zero".
-    geo_ledger = analyze_geo_coverage(start, end)
+    # ONE verdict, published under both names. These previously disagreed by
+    # construction: this flag meant "reconciles perfectly" while the mart's
+    # identically-named field meant "geo_ready", so the same window could be
+    # unblockable on one surface and not on the other. Both are now the shared
+    # predicate over the shared status.
+    country_roas_unblockable = country_geo_ready(country_spend_status)
 
     return {
         "window": window,
@@ -262,8 +272,11 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
         "geo_coverage_complete": bool(geo_ledger.get("complete")),
         "geo_coverage_missing_ranges": geo_ledger.get("missing_ranges", []),
         "failed_geo_dates": geo_ledger.get("failed_chunks", []),
-        "geo_ready": country_geo_ready(country_spend_status),
+        "geo_ready": country_roas_unblockable,
         "geo_accepted_states": sorted(GEO_ACCEPTED_STATES),
+        # The machine reasons behind a blocked verdict — including the mandatory
+        # inputs that were never proven, which a totals comparison cannot name.
+        "geo_gap_codes": country_gap_codes,
         "unmapped_location_spend_native": breakdown.get("unmapped_geo_native"),
         "unknown_location_spend_native": breakdown.get("unknown_country_spend_native"),
         "unknown_country_spend_native": breakdown.get("unknown_country_spend_native"),
@@ -438,15 +451,18 @@ def evaluate_country_residual(canonical_total, geo_total, detail, *,
     return out
 
 
-def _verified_chunk_keys(start: date, end: date) -> tuple[set, bool]:
-    """Chunk keys already proven verified in the durable geo coverage ledger.
+def _verified_chunk_keys(customer_id: str, start: date, end: date) -> tuple[set, bool]:
+    """Chunk keys already proven verified for THIS customer.
 
     Returns ``(keys, ledger_readable)``. When the ledger cannot be read the set
     is empty AND ``ledger_readable`` is False — the caller must then re-fetch
     everything rather than assume nothing was covered, because "unreadable" and
     "nothing covered" are different facts and only one of them is safe to skip on.
+
+    ``customer_id`` is mandatory: without it, account A's verified chunk would
+    make this run skip a range account B has never fetched.
     """
-    coverage = repo.fetch_geo_coverage(start, end)
+    coverage = repo.fetch_geo_coverage(customer_id, start, end)
     if not coverage.get("available"):
         return set(), False
     return (
@@ -457,22 +473,25 @@ def _verified_chunk_keys(start: date, end: date) -> tuple[set, bool]:
     )
 
 
-def analyze_geo_coverage(start: date | None, end: date) -> dict:
-    """Geo coverage completeness over a window, via the SHARED analyzer.
+def analyze_geo_coverage(customer_id: str, start: date | None, end: date) -> dict:
+    """Geo coverage completeness over a window, for ONE customer.
 
     PR-ADS-153F. Deliberately reuses
     ``services.google_ads_spend_service.analyze_coverage`` rather than
     reimplementing day arithmetic: campaign coverage and geo coverage now answer
     "is this window covered" with ONE implementation, so they cannot drift into
     disagreeing about the same dates.
+
+    ``customer_id`` is mandatory. Combining chunks across accounts would let one
+    account's history declare another's window covered.
     """
     from services.google_ads_spend_service import analyze_coverage  # noqa: PLC0415
 
-    ledger = repo.fetch_geo_coverage(start, end)
+    ledger = repo.fetch_geo_coverage(customer_id, start, end)
     if not ledger.get("available"):
         return {"available": False, "complete": False, "missing_days": None,
                 "missing_ranges": [], "failed_chunks": [], "verified_chunks": [],
-                "reason": "geo_coverage_ledger_unavailable"}
+                "reason": ledger.get("reason") or "geo_coverage_ledger_unavailable"}
     result = analyze_coverage(start, end, ledger.get("chunks", []))
     result["available"] = True
     return result
@@ -519,26 +538,105 @@ GEO_GAP_CAMPAIGN_WITHOUT_GEO = "campaign_spend_without_geo"
 GEO_GAP_BY_DESIGN_RESIDUAL = "geo_report_does_not_reconcile_by_design"
 GEO_GAP_TOTALS_DIFFER = "totals_differ"
 
+# Mandatory-input gap codes. A window can reconcile perfectly and still be
+# unusable because one of its inputs was never proven — these say which.
+GEO_GAP_CAMPAIGN_SPEND_UNREADABLE = "campaign_spend_unreadable"
+GEO_GAP_CAMPAIGN_COVERAGE_INCOMPLETE = "campaign_coverage_incomplete"
+GEO_GAP_FX_COVERAGE_INCOMPLETE = "fx_coverage_incomplete"
+GEO_GAP_GEO_ROWS_UNREADABLE = "geo_rows_unreadable"
+GEO_GAP_GEO_COVERAGE_UNREADABLE = "geo_coverage_ledger_unreadable"
+GEO_GAP_GEO_COVERAGE_INCOMPLETE = "geo_coverage_incomplete"
+GEO_GAP_GEO_CHUNKS_FAILED = "geo_coverage_has_failed_chunks"
+
 
 def resolve_country_spend_status(*, reconciled, residual_eligible,
-                                 geo_readable=True) -> str:
-    """Derive the ONE canonical country-spend status.
+                                 campaign_spend_readable=True,
+                                 campaign_coverage_complete=True,
+                                 fx_complete=True,
+                                 geo_readable=True,
+                                 geo_coverage_readable=True,
+                                 geo_coverage_complete=True,
+                                 geo_failed_chunks=(),
+                                 missing_geo_dates=(),
+                                 campaigns_missing_geo=()) -> tuple[str, list]:
+    """Derive the ONE canonical country-spend status, over ALL its inputs.
 
-    ``reconciled`` is tri-state on purpose: ``True`` (within the unchanged
+    Returns ``(status, gap_codes)``.
+
+    PR-ADS-153F blocker 1. This previously took only ``reconciled`` and
+    ``residual_eligible``, so a perfectly matching pair of totals became
+    ``verified`` even when campaign coverage was incomplete, FX was incomplete,
+    or geo had never been fetched at all. Matching totals are not evidence of a
+    trustworthy denominator when the inputs behind them were never proven —
+    two unproven numbers can agree.
+
+    EVERY mandatory input must hold before either accepted state is reachable:
+
+      * canonical campaign spend readable (the reconciliation baseline),
+      * canonical campaign coverage complete,
+      * FX coverage complete (USD reporting),
+      * canonical geo rows readable,
+      * the durable geo coverage ledger readable AND complete, with no failed
+        chunks.
+
+    The geo ledger is a BLOCKING input, not side evidence. Separating "fetched
+    and genuinely zero" from "never fetched" is its entire purpose; a gate that
+    reads it without requiring it throws that distinction away at exactly the
+    moment it matters.
+
+    ``reconciled`` stays tri-state: ``True`` (within the unchanged
     ``SPEND_VARIANCE_TOLERANCE``), ``False`` (measured and outside it), or
     ``None`` (not measurable). ``None`` is NOT ``False`` — an unmeasured
     reconciliation is unavailable, never a mismatch, because reporting a
     mismatch would assert a comparison nobody performed.
+
+    Nothing here loosens anything: the accepted states and the PR-ADS-131
+    residual eligibility rules are unchanged, and this only adds preconditions.
     """
+    gaps: list = []
+    if not campaign_spend_readable:
+        gaps.append(GEO_GAP_CAMPAIGN_SPEND_UNREADABLE)
+    if not campaign_coverage_complete:
+        gaps.append(GEO_GAP_CAMPAIGN_COVERAGE_INCOMPLETE)
+    if not fx_complete:
+        gaps.append(GEO_GAP_FX_COVERAGE_INCOMPLETE)
     if not geo_readable:
-        return GEO_STATUS_UNAVAILABLE
+        gaps.append(GEO_GAP_GEO_ROWS_UNREADABLE)
+    if not geo_coverage_readable:
+        gaps.append(GEO_GAP_GEO_COVERAGE_UNREADABLE)
+    elif not geo_coverage_complete:
+        gaps.append(GEO_GAP_GEO_COVERAGE_INCOMPLETE)
+    if geo_failed_chunks:
+        gaps.append(GEO_GAP_GEO_CHUNKS_FAILED)
+
+    if gaps:
+        # An unproven input is UNAVAILABLE, never a mismatch: a mismatch claims
+        # a comparison was performed and disagreed, which is a different — and
+        # more alarming — statement than "we never established this".
+        return GEO_STATUS_UNAVAILABLE, gaps
+
     if reconciled is True:
-        return GEO_STATUS_VERIFIED
+        return GEO_STATUS_VERIFIED, []
+
     if residual_eligible:
-        return GEO_STATUS_RECONCILED_WITH_RESIDUAL
+        # Belt and braces over the PR-ADS-131 predicate: the safe residual is
+        # only safe when nothing is missing on either side. `evaluate_country_
+        # residual` already refuses in these cases; asserting it here too means
+        # a future caller cannot reach the accepted state by passing
+        # `residual_eligible=True` without those checks.
+        if missing_geo_dates:
+            return GEO_STATUS_MISMATCH, [GEO_GAP_MISSING_DATES]
+        if campaigns_missing_geo:
+            return GEO_STATUS_MISMATCH, [GEO_GAP_CAMPAIGN_WITHOUT_GEO]
+        return GEO_STATUS_RECONCILED_WITH_RESIDUAL, []
+
     if reconciled is False:
-        return GEO_STATUS_MISMATCH
-    return GEO_STATUS_UNAVAILABLE
+        gap = (GEO_GAP_MISSING_DATES if missing_geo_dates
+               else GEO_GAP_CAMPAIGN_WITHOUT_GEO if campaigns_missing_geo
+               else GEO_GAP_TOTALS_DIFFER)
+        return GEO_STATUS_MISMATCH, [gap]
+
+    return GEO_STATUS_UNAVAILABLE, []
 
 
 def country_geo_ready(country_spend_status) -> bool:
@@ -548,6 +646,73 @@ def country_geo_ready(country_spend_status) -> bool:
     string itself, so no page can quietly adopt a stricter or looser bar.
     """
     return country_spend_status in GEO_ACCEPTED_STATES
+
+
+# One sentence per gap code, so every surface names the SAME cause in the same
+# words. PR-ADS-153F blocker 1 made the gate holistic, which means one status
+# (`unavailable`) now stands for several very different causes — an unreadable
+# baseline, incomplete FX, a geo range nobody ever fetched. Collapsing those
+# into a single "geo does not reconcile" sentence would answer the operator's
+# real question ("what do I fix?") with the wrong instruction.
+GEO_GAP_MESSAGES = {
+    GEO_GAP_CAMPAIGN_SPEND_UNREADABLE:
+        "Geo ROAS requires canonical campaign spend as its reconciliation baseline — "
+        "that spend could not be read for this window.",
+    GEO_GAP_CAMPAIGN_COVERAGE_INCOMPLETE:
+        "Geo ROAS requires complete canonical campaign spend coverage — part of this "
+        "window was never fetched or failed, so the baseline is incomplete.",
+    GEO_GAP_FX_COVERAGE_INCOMPLETE:
+        "Geo ROAS requires verified FX / USD spend; native spend is shown instead.",
+    GEO_GAP_GEO_ROWS_UNREADABLE:
+        "Geo ROAS requires canonical Google Ads geographic spend — those rows could "
+        "not be read for this window.",
+    GEO_GAP_GEO_COVERAGE_UNREADABLE:
+        "Geo ROAS requires the durable geo coverage ledger — it could not be read, so "
+        "'never fetched' cannot be told apart from 'fetched and genuinely zero'.",
+    GEO_GAP_GEO_COVERAGE_INCOMPLETE:
+        "Geo ROAS requires proven geographic coverage — part of this window was never "
+        "synced, so country spend would understate silently. Run the geo backfill.",
+    GEO_GAP_GEO_CHUNKS_FAILED:
+        "Geo ROAS is withheld — one or more geographic sync chunks in this window "
+        "failed and were never repaired. Re-run the geo sync.",
+    GEO_GAP_MISSING_DATES:
+        "Geo ROAS is withheld — some days with campaign spend have no geographic "
+        "spend at all, which is missing data rather than unattributed spend.",
+    GEO_GAP_CAMPAIGN_WITHOUT_GEO:
+        "Geo ROAS is withheld — some campaigns that spent have no geographic spend "
+        "at all, which is missing data rather than unattributed spend.",
+    GEO_GAP_TOTALS_DIFFER:
+        "Geo ROAS requires Google Ads geographic spend that reconciles with the "
+        "canonical campaign spend — it does not for this window.",
+}
+
+_GEO_GAP_PRIORITY = (
+    GEO_GAP_CAMPAIGN_SPEND_UNREADABLE,
+    GEO_GAP_CAMPAIGN_COVERAGE_INCOMPLETE,
+    GEO_GAP_GEO_ROWS_UNREADABLE,
+    GEO_GAP_GEO_COVERAGE_UNREADABLE,
+    GEO_GAP_GEO_COVERAGE_INCOMPLETE,
+    GEO_GAP_GEO_CHUNKS_FAILED,
+    GEO_GAP_MISSING_DATES,
+    GEO_GAP_CAMPAIGN_WITHOUT_GEO,
+    GEO_GAP_FX_COVERAGE_INCOMPLETE,
+    GEO_GAP_TOTALS_DIFFER,
+)
+
+
+def describe_geo_gap(gap_codes) -> str | None:
+    """The operator-facing sentence for a set of gap codes, or None if there are none.
+
+    Ordered by what has to be repaired FIRST, not by the order the gate happened
+    to append them: an unreadable baseline has to be fixed before an FX gap is
+    even worth looking at. FX sits late because it is the one gap that still
+    leaves native-currency spend usable on the page.
+    """
+    codes = set(gap_codes or ())
+    for code in _GEO_GAP_PRIORITY:
+        if code in codes:
+            return GEO_GAP_MESSAGES[code]
+    return None
 
 
 def build_country_truth_disclosure(spend_truth: dict, window_block: dict | None = None,
@@ -601,8 +766,12 @@ def build_country_truth_disclosure(spend_truth: dict, window_block: dict | None 
         "reconciliation_tolerance": spend_truth.get("country_spend_tolerance"),
         "geo_ready": ready,
         "geo_accepted_states": sorted(GEO_ACCEPTED_STATES),
-        "gap_codes": ([] if ready else [c for c in (spend_truth.get("country_gap_reason"),)
-                                        if c]),
+        # Machine reasons behind a blocked verdict — the gate's own codes when it
+        # supplied them, falling back to the reconciliation reason. A ready
+        # verdict has no gaps by definition.
+        "gap_codes": ([] if ready else list(
+            spend_truth.get("country_gap_codes")
+            or [c for c in (spend_truth.get("country_gap_reason"),) if c])),
         # Residual — amount, count, and whether it was ACCEPTED as safe.
         "residual_accepted": status == GEO_STATUS_RECONCILED_WITH_RESIDUAL,
         "residual_label": country_identity.RESIDUAL_LABEL,
@@ -690,19 +859,27 @@ def run_google_ads_geo_sync(
     # runs writing the same coverage rows is the unsafe one.
     lease_held = False
     if require_lease:
-        lease = db_writers.try_claim_geo_sync_lease(customer_id, run_id=job_id)
+        # A unique fence for THIS run, generated even when no job id was supplied
+        # (a manual trigger). Expiry recovers a dead worker's lease; the token is
+        # what proves ownership when a slow worker wakes up after that recovery.
+        lease_token = f"{job_id or 'manual'}:{uuid.uuid4().hex}"
+        lease = db_writers.try_claim_geo_sync_lease(
+            customer_id, run_id=job_id, lease_token=lease_token)
         lease_held = lease == "acquired"
-        if lease == "unavailable":
-            # The lease store is unreachable. Proceeding is the safer error: the
-            # writes below either land or fail loudly, whereas skipping would let
-            # geo go stale with nothing reporting why — the exact invisibility
-            # this PR exists to remove.
-            log.warning("[geo_sync] lease store unavailable — running without a lease")
-        if lease == "held":
+        if lease in ("held", "unavailable"):
+            reason = ("another_geo_sync_is_running" if lease == "held"
+                      else "lease_store_unavailable")
+            # FAIL CLOSED on BOTH. `unavailable` used to proceed without a lease,
+            # on the theory that a visible stale run beat a silent skip. That was
+            # wrong: with no database this run cannot persist geo rows, coverage
+            # or state either, so proceeding buys no visibility whatsoever — it
+            # only spends Google Ads quota and risks an uncoordinated concurrent
+            # fetch. Not starting leaves the range uncovered, which the gate
+            # already reports as blocked.
             skipped = {
                 "status": "skipped_locked", "dry_run": dry_run,
                 "date_from": start.isoformat(), "date_to": end.isoformat(),
-                "reason": "another_geo_sync_is_running",
+                "reason": reason,
                 "customer_id": customer_id,
                 "started_at": started_at, "finished_at": started_at,
                 "summary": {"chunks_verified": 0, "chunks_failed": 0,
@@ -711,7 +888,7 @@ def run_google_ads_geo_sync(
             }
             state.update({"running": False, "phase": "skipped_locked",
                           "finished_at": started_at, "latest": skipped})
-            log.warning("[geo_sync] lease not acquired — another run is in progress")
+            log.warning("[geo_sync] lease not acquired (%s) — not starting", reason)
             return skipped
 
     summary = {"chunks_verified": 0, "chunks_failed": 0, "chunks_skipped": 0,
@@ -722,7 +899,8 @@ def run_google_ads_geo_sync(
     seen_countries: set = set()
 
     already_verified, ledger_readable = (
-        _verified_chunk_keys(start, end) if (resume and not dry_run) else (set(), True))
+        _verified_chunk_keys(customer_id, start, end)
+        if (resume and not dry_run) else (set(), True))
     if resume and not dry_run and not ledger_readable:
         log.warning("[geo_sync] coverage ledger unreadable — re-fetching the full range")
 
@@ -748,19 +926,23 @@ def run_google_ads_geo_sync(
             chunks_detail=chunks_detail, errors=errors, seen_countries=seen_countries,
             already_verified=already_verified, resume=resume, started_at=started_at,
             emit=_emit, db_writers=db_writers, relativedelta=relativedelta,
+            lease_token=(lease_token if lease_held else None),
         )
     except BaseException:
         # An unexpected failure must not leave the lease held until it expires —
         # that would block the next scheduled run for the whole lease window.
+        # Fenced, so a stale worker cannot release a newer worker's lease.
         if lease_held:
-            db_writers.release_geo_sync_lease(customer_id, status="failed")
+            db_writers.release_geo_sync_lease(customer_id, status="failed",
+                                              lease_token=lease_token)
         state.update({"running": False, "phase": "failed"})
         raise
 
 
 def _run_chunks(*, start, end, chunk_months, dry_run, job_id, customer_id, state,
                 summary, chunks_detail, errors, seen_countries, already_verified,
-                resume, started_at, emit, db_writers, relativedelta) -> dict:
+                resume, started_at, emit, db_writers, relativedelta,
+                lease_token=None) -> dict:
     """The chunk loop for :func:`run_google_ads_geo_sync`.
 
     Split out only so the caller can hold the durable lease across it and release
@@ -798,14 +980,26 @@ def _run_chunks(*, start, end, chunk_months, dry_run, job_id, customer_id, state
             chunk["rows"] = len(rows)
             chunk["cost_micros"] = micros
             if not dry_run:
-                written = db_writers.upsert_geo_daily_spend(rows, sync_run_id=job_id)
-                # Fail closed: a successful READ that did not persist must not be
-                # recorded as covered. Without this, a write outage would quietly
-                # produce verified-but-empty ranges the gate would treat as real.
-                if rows and written != len(rows):
+                # PR-ADS-153F blocker 2: REPLACE the range, do not merge into it.
+                # Google restates recent spend, so a row present in an earlier
+                # fetch and absent from this one must disappear. A merge-only
+                # write leaves it behind and the chunk is then certified over a
+                # denominator Google no longer reports. The replacement is one
+                # transaction and raises on failure, so a chunk can only be
+                # marked verified after the new range has actually committed.
+                replaced = db_writers.replace_geo_daily_spend_chunk(
+                    customer_id, cursor.isoformat(), chunk_to.isoformat(),
+                    rows, sync_run_id=job_id)
+                if not replaced.get("replaced"):
+                    raise GeoPersistenceError("geo range replacement did not commit")
+                written = int(replaced.get("written") or 0)
+                if written != len(rows):
                     raise GeoPersistenceError(
-                        f"geo upsert wrote {written}/{len(rows)} rows")
+                        f"geo replacement wrote {written}/{len(rows)} rows")
+                chunk["rows_deleted"] = replaced.get("deleted")
                 summary["rows_written"] += written
+                summary["rows_deleted"] = summary.get("rows_deleted", 0) + int(
+                    replaced.get("deleted") or 0)
                 # Only NOW is the chunk provably covered.
                 if not db_writers.upsert_geo_coverage(
                         customer_id, cursor.isoformat(), chunk_to.isoformat(),
@@ -846,7 +1040,7 @@ def _run_chunks(*, start, end, chunk_months, dry_run, job_id, customer_id, state
     # a run that skipped every chunk because they were already verified is
     # complete, and a run that verified every chunk it attempted is still
     # incomplete if an earlier failed chunk remains unrepaired.
-    coverage = analyze_geo_coverage(start, end) if not dry_run else {
+    coverage = analyze_geo_coverage(customer_id, start, end) if not dry_run else {
         "available": False, "complete": False, "reason": "dry_run"}
     coverage_complete = bool(coverage.get("complete"))
 
@@ -870,7 +1064,19 @@ def _run_chunks(*, start, end, chunk_months, dry_run, job_id, customer_id, state
         if status == "success" and coverage_complete:
             state_fields["checkpoint_date"] = end
             state_fields["last_successful_completed_at"] = datetime.now(tz=timezone.utc)
-        db_writers.upsert_geo_sync_state(customer_id, **state_fields)
+        # FENCED on the lease token: a worker whose lease expired and was
+        # reclaimed writes nothing here rather than stamping its stale terminal
+        # state (and possibly its checkpoint) over the run that owns the lease now.
+        persisted = db_writers.upsert_geo_sync_state(
+            customer_id, lease_token=lease_token, **state_fields)
+        if not persisted:
+            # A run with no durable terminal state has no evidence it happened —
+            # its checkpoint did not move and its freshness was not published.
+            # Reporting success would be a claim nothing can back up.
+            status = "failed"
+            errors.append("terminal geo sync state could not be persisted "
+                          "(lease lost or state store unavailable)")
+            log.error("[geo_sync] terminal state not persisted — reporting failed")
 
     result = {
         "status": status, "dry_run": dry_run,

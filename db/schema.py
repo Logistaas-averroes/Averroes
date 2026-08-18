@@ -1451,9 +1451,49 @@ CREATE TABLE IF NOT EXISTS google_ads_geo_sync_state (
   rows_written                  INTEGER NOT NULL DEFAULT 0,
   last_error                    TEXT,
   last_run_id                   TEXT,
+  -- PR-ADS-153F: the lease FENCING token. Expiry alone is not ownership: if
+  -- worker A overruns the lease window and worker B legitimately reclaims it,
+  -- A can still be running and would otherwise overwrite B's state on finish.
+  -- Terminal writes are conditioned on this token, so a stale worker's write
+  -- simply matches nothing.
+  lease_token                   TEXT,
   updated_at                    TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (customer_id, scope)
 );
+
+-- Existing databases: add the fencing token if the table predates it.
+ALTER TABLE google_ads_geo_sync_state ADD COLUMN IF NOT EXISTS lease_token TEXT;
+
+-- PR-ADS-153F additive integrity constraints. Each is a rule the writers
+-- already enforce; stating it in the schema means a future writer, a migration
+-- or a manual fix cannot quietly produce a row the readers would misinterpret.
+-- Added NOT VALID-free because both tables are new in this PR and hold no rows
+-- that could violate them.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_geo_coverage_status') THEN
+    ALTER TABLE google_ads_geo_coverage
+      ADD CONSTRAINT ck_geo_coverage_status
+      CHECK (status IN ('verified', 'failed'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_geo_coverage_range') THEN
+    ALTER TABLE google_ads_geo_coverage
+      ADD CONSTRAINT ck_geo_coverage_range
+      CHECK (chunk_start <= chunk_end);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_geo_sync_state_status') THEN
+    ALTER TABLE google_ads_geo_sync_state
+      ADD CONSTRAINT ck_geo_sync_state_status
+      CHECK (last_status IS NULL
+             OR last_status IN ('running', 'success', 'partial', 'failed'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_geo_sync_state_range') THEN
+    ALTER TABLE google_ads_geo_sync_state
+      ADD CONSTRAINT ck_geo_sync_state_range
+      CHECK (requested_start IS NULL OR requested_end IS NULL
+             OR requested_start <= requested_end);
+  END IF;
+END $$;
 """
 
 

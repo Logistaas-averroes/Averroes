@@ -125,9 +125,15 @@ production unique key is a destructive migration.
 
 ### The rules the ledger enforces
 
-* A chunk is marked `verified` **only after its rows are durably written**. A
-  successful read that did not persist raises `GeoPersistenceError` and is
-  recorded `failed`.
+* **A refresh REPLACES its range; it does not merge into it.**
+  `replace_geo_daily_spend_chunk` validates every row (right customer, inside
+  the range), deletes the range and inserts the new response in ONE transaction.
+  A merge-only write cannot express "this row no longer exists", so a
+  country/campaign/day Google restates away would keep its old row and the chunk
+  would then be certified over spend Google no longer reports. An **empty**
+  response is an explicit success: the range genuinely becomes empty.
+* A chunk is marked `verified` **only after that replacement commits**. A read
+  that did not persist raises and is recorded `failed`.
 * A `failed` write **never demotes** a chunk that is already `verified`, so a
   transient API error during recovery cannot erase proven coverage. The reverse
   (repairing a failed chunk) does work.
@@ -143,30 +149,56 @@ production unique key is a destructive migration.
 * An unreadable coverage ledger causes a **full re-fetch**, never a skip:
   "unreadable" and "nothing covered" are different facts and only one is safe to
   skip on.
+* **Coverage is account-scoped.** Every coverage read takes a mandatory
+  `customer_id`. Reading the ledger unscoped would let account A's verified
+  chunks make account B look covered, and let A's history skip a fetch B never
+  performed.
 
 The daily lookback re-fetches the last 7 days on every run because Google Ads
 restates recent spend — so a daily chunk is never "already verified", while
 historical months are.
 
-### The run lease
+**A seven-day refresh does not bootstrap history.** On a fresh coverage ledger
+it cannot prove `current_quarter`, `last_quarter`, `last_6_months`, `ytd` or
+`all_time`; those windows correctly stay blocked until history is covered. Run
+`scripts/backfill_canonical_geo.py` once after deployment (see §9). It delegates
+to the same sync function, so it shares one implementation of the lease, the
+range replacement, the coverage ledger and the checkpoint — and it exits
+non-zero unless the ledger itself proves the requested range covered.
+
+### The run lease — fails closed, fenced by token
 
 Render runs more than one instance and the manual recovery trigger can fire at
 any moment, so the overlap guard is a durable conditional `UPDATE`, not a
-process-local flag. It is tri-state on purpose:
+process-local flag. It is tri-state, and **two of the three states stop the
+run before any Google Ads call**:
 
 | Result | Behaviour |
 |---|---|
-| `acquired` | This worker owns the lease and proceeds. |
-| `held` | Another run owns it. This run refuses to start — the range stays uncovered, the gate keeps Country ROAS blocked, and the next run picks it up. |
-| `unavailable` | The lease store is unreachable. The run **proceeds without a lease**. |
+| `acquired` | This worker owns the lease and proceeds, carrying a unique fencing token. |
+| `held` | Another run owns it → `skipped_locked`. **Zero Google Ads fetches.** |
+| `unavailable` | The lease store is unreachable → `skipped_locked`. **Zero Google Ads fetches.** |
 
-The third state is deliberately not folded into `held`: treating an unreachable
-lease store as "someone else is running" would turn a transient database blip
-into a silently skipped sync, and invisible geo staleness is the defect this PR
-exists to remove. Concurrent runs are idempotent upserts over the same rows and
-the ledger refuses to demote a verified chunk, so a duplicate fetch is a bounded
-cost; unbounded staleness is not. A stale lease expires after 120 minutes so a
-worker that died mid-run cannot block geo sync forever.
+An earlier revision let an `unavailable` lease store proceed without a lease, on
+the argument that a visible stale run beat a silent skip. **That was wrong.**
+With the store unreachable the run cannot persist geo rows, coverage or state
+either — so proceeding buys no visibility at all; it only spends Google Ads
+quota and risks an uncoordinated concurrent fetch. Not starting leaves the range
+uncovered, which the gate already reports as blocked, and the next run picks it
+up.
+
+**Expiry is recovery; the token is ownership.** A stale lease expires after 120
+minutes so a worker that died mid-run cannot block geo sync forever. But expiry
+alone is not safe: if worker A overruns the window and worker B legitimately
+reclaims the lease, A may still be running. Every terminal write — run state,
+checkpoint, release — is therefore fenced on
+`(customer_id, scope, lease_token, last_status = 'running')`, so a stale worker
+matches no row and silently no-ops instead of overwriting the newer run.
+
+If terminal state cannot be persisted at all, the run reports **failed**. A run
+with no durable state has no evidence it happened: its checkpoint did not move
+and its freshness was not published, so reporting success would be a claim
+nothing can back up.
 
 ---
 
@@ -253,18 +285,53 @@ consumers previously answered the same question with their own code, and the
 mart's page-difference audit used a stricter bar (`== "verified"`) than the pages
 it audits.
 
+### Mandatory inputs — matching totals are not enough
+
+**Every one of these must hold before either accepted state is reachable:**
+
+| Input | Why it is mandatory |
+|---|---|
+| canonical campaign spend readable | it is the reconciliation baseline |
+| canonical campaign coverage complete | an unproven baseline cannot certify anything |
+| FX coverage complete | required before any USD geo figure is safe |
+| canonical geo rows readable | there is nothing to reconcile otherwise |
+| durable geo coverage readable **and** complete, with no failed chunks | the only thing that separates "fetched and genuinely zero" from "never fetched" |
+
+Two unproven numbers can agree. Before this was enforced, a perfectly matching
+pair of totals became `verified` even when campaign coverage was incomplete, FX
+was incomplete, or geo had never been fetched at all — so agreement was being
+read as evidence about inputs nobody had established.
+
+The geo coverage ledger is therefore a **blocking input, not side evidence**. A
+gate that reads it without requiring it discards its entire purpose at exactly
+the moment that purpose matters.
+
 ### Truth table
 
 | `country_spend_status` | Condition | Country ROAS |
 |---|---|---|
-| `verified` | Geo reconciles with canonical campaign spend within `SPEND_VARIANCE_TOLERANCE` | **Shown** |
-| `reconciled_with_residual` | The PR-ADS-131 safe-residual predicate passes | **Shown**, with an explicit residual bucket |
-| `mismatch` | Totals differ for any other reason | **Withheld** (`null`, never `$0`) |
-| `unavailable` | Geo or campaign spend could not be read; reconciliation not measurable | **Withheld** |
+| `verified` | **all mandatory inputs hold** AND geo reconciles with canonical campaign spend within `SPEND_VARIANCE_TOLERANCE` | **Shown** |
+| `reconciled_with_residual` | **all mandatory inputs hold** AND the PR-ADS-131 safe-residual predicate passes (no missing geo dates, no campaigns without geo) | **Shown**, with an explicit residual bucket |
+| `mismatch` | inputs hold, but totals differ for a reason that is not the by-design residual | **Withheld** (`null`, never `$0`) |
+| `unavailable` | a mandatory input is unreadable or incomplete, or reconciliation is not measurable | **Withheld** |
 
 `reconciled` is tri-state: `True`, `False`, or `None`. `None` is **not** `False`
 — an unmeasured reconciliation is `unavailable`, never a `mismatch`, because
-reporting a mismatch would assert a comparison nobody performed.
+reporting a mismatch would assert a comparison nobody performed. For the same
+reason an **unproven input** is `unavailable` rather than a mismatch: "we never
+established this" and "we compared and they disagreed" are different — and
+differently alarming — statements.
+
+Blocked responses carry machine `gap_codes` naming which input failed:
+`campaign_spend_unreadable`, `campaign_coverage_incomplete`,
+`fx_coverage_incomplete`, `geo_rows_unreadable`,
+`geo_coverage_ledger_unreadable`, `geo_coverage_incomplete`,
+`geo_coverage_has_failed_chunks`, plus the reconciliation reasons below.
+
+`geo_ready`, `country_roas_unblockable`, `country_roas_available`,
+`country_decision_ready` and `country_truth.reconciliation_status` are ONE
+verdict published under several names — all derived from this predicate over
+this status, so they cannot contradict one another.
 
 ### Safe residual eligibility (PR-ADS-131 — unchanged)
 
@@ -280,8 +347,25 @@ All of these must hold:
 
 ### Stable gap reasons
 
+Reconciliation outcomes:
 `missing_geo_dates` · `campaign_spend_without_geo` ·
 `geo_report_does_not_reconcile_by_design` · `totals_differ`
+
+Mandatory-input failures (every one of these yields `unavailable`, never
+`mismatch` — nobody performed a comparison, so nothing disagreed):
+`campaign_spend_unreadable` · `campaign_coverage_incomplete` ·
+`fx_coverage_incomplete` · `geo_rows_unreadable` ·
+`geo_coverage_ledger_unreadable` · `geo_coverage_incomplete` ·
+`geo_coverage_has_failed_chunks`
+
+Because one status now stands for several very different causes, each code
+carries its own operator sentence in `GEO_GAP_MESSAGES`, and
+`describe_geo_gap(codes)` picks the one to repair **first**. FX ranks last among
+the blocking gaps: it is the only one that still leaves native-currency spend
+usable on the page, so it is never the headline while the spend baseline itself
+cannot be read. Dashboard Countries publishes that sentence as the `geo_roas`
+unavailability reason, so "re-run the geo sync" is only ever shown to the
+operator who actually needs to.
 
 ### Explicitly unchanged
 
@@ -329,22 +413,34 @@ dataset is never rendered as "no country activity".
 Run after merge and Render deployment. Record only aggregate, non-sensitive
 proof — no production deal IDs, contact information, tokens or raw GCLIDs.
 
-1. Confirm Render is running the exact merge SHA.
-2. Allow the scheduled run, or trigger one canonical incremental geo run.
-3. Confirm the run completed with no missing expected ranges, no failed chunks,
-   no database write failures, durable coverage complete and healthy freshness.
-4. Inspect the geo audit/reconciliation response for every supported business
-   window.
-5. For a freshly covered window, confirm the missing-date query is empty.
-6. Compare Dashboard Countries, ROAS by Country, the country drilldown and the
-   mart for the same window and revenue scope: same canonical country key set,
-   same known-country revenue, same residual, same availability verdict.
-7. Confirm `legacy_fallback_used: false`; that invalid countries are not
-   presented as valid ISO codes; that blank-country revenue is present in the
-   residual; that known countries plus residual reconcile; and that no external
-   mutation occurred.
+**The order matters.** A seven-day incremental run cannot prove any of the
+business windows on a fresh coverage ledger, so the historical bootstrap comes
+first.
 
-The exact commands are listed in the pull request body.
+1. **Confirm Render is running the exact merge SHA.**
+2. **Run the historical geo bootstrap** —
+   `python -m scripts.backfill_canonical_geo --json`. It is resumable: completed
+   chunks are skipped, so re-running after a partial result continues from the
+   missing or failed work only. It exits non-zero unless the ledger itself
+   proves the requested range covered.
+3. **Prove the daily incremental step** — `python -m scheduler.incremental_sync`,
+   then confirm the `google_ads/canonical_geo` dataset reports success.
+4. **Query the durable ledgers** for run state, checkpoint, and any chunk not
+   recorded `verified`.
+5. **Inspect reconciliation for every supported business window** —
+   `current_quarter`, `last_quarter`, `last_6_months`, `ytd`, `all_time`. These
+   are the only keys `analysis.business_windows.WINDOW_KEYS` accepts; any other
+   value is a 400.
+6. **Confirm the missing-date query is empty** for a freshly covered window.
+7. **Compare the four country surfaces** for the same window and revenue scope:
+   same canonical country key set, same known-country revenue, same residual,
+   same availability verdict.
+8. **Confirm** `legacy_fallback_used: false`; that invalid countries are not
+   presented as valid ISO codes; that blank-country revenue is present in the
+   residual; and that known countries plus residual reconcile.
+9. **Confirm no external mutation occurred.**
+
+The exact commands, one per block, are in the pull request body.
 
 ---
 

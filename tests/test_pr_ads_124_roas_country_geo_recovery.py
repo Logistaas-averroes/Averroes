@@ -215,16 +215,27 @@ def test_geo_connector_is_read_only():
 
 
 def test_geo_sync_service_writes_only_local_geo_table():
-    # The only write is the local canonical geo upsert; never Google Ads/HubSpot.
-    assert "upsert_geo_daily_spend" in SVC_SRC
+    # The only spend write is the local canonical geo table; never Google Ads /
+    # HubSpot. PR-ADS-153F blocker 2 replaced the row-by-row upsert with an
+    # atomic per-chunk REPLACE (delete + insert in one transaction), because a
+    # refresh that only merges can never drop a row Google has since withdrawn.
+    # The write TARGET is unchanged — this guard follows the call, not the name.
+    assert "replace_geo_daily_spend_chunk" in SVC_SRC
     # No mutate/external-write calls (the doctrine docstring may NAME HubSpot to
     # say it is never written — so check for write CALLS, not the word).
     for forbidden in ("mutate", "Mutate", "hubspot_pull", "write_deals", "upsert_deal"):
         assert forbidden not in SVC_SRC
-    assert "import db.writers" in SVC_SRC and "upsert_geo_daily_spend" in SVC_SRC
+    assert "import db.writers" in SVC_SRC
     # The schema/writer target only the local canonical geo table.
     assert "CREATE TABLE IF NOT EXISTS google_ads_geo_daily_spend" in SCHEMA
-    assert "def upsert_geo_daily_spend" in WRITERS
+    assert "def replace_geo_daily_spend_chunk" in WRITERS
+    # …and the replacement itself only ever touches that one local table.
+    i = WRITERS.find("def replace_geo_daily_spend_chunk")
+    body = WRITERS[i:WRITERS.find("\ndef ", i + 1)]
+    assert "DELETE FROM google_ads_geo_daily_spend" in body
+    assert "INSERT INTO google_ads_geo_daily_spend" in body
+    for other in ("hubspot_deal_ledger", "campaign_performance", "search_terms"):
+        assert other not in body
 
 
 def test_geo_connector_raises_on_error_not_verified_empty():
@@ -254,8 +265,23 @@ def test_geo_sync_resolves_country_codes_onto_rows(monkeypatch):
     svc = _load_geo()
     monkeypatch.setattr("db.revenue_repository.fetch_account_time_zone", lambda: "Europe/London")
     captured = {}
-    monkeypatch.setattr("db.writers.upsert_geo_daily_spend",
-                        lambda rows, sync_run_id=None: captured.setdefault("rows", rows) or len(rows))
+    # PR-ADS-153F blocker 2: the sync writes each chunk through the atomic
+    # replacement, so that is where the resolved rows now arrive.
+
+    def _capture(customer_id, chunk_start, chunk_end, rows, sync_run_id=None):
+        captured.setdefault("rows", rows)
+        return {"replaced": True, "deleted": 0, "written": len(rows)}
+
+    monkeypatch.setattr("db.writers.replace_geo_daily_spend_chunk", _capture)
+    # PR-ADS-153F blocker 4: a real (non-dry) run now FAILS CLOSED unless it
+    # holds the sync lease, so a test exercising the write path has to grant one.
+    # With no lease store reachable the run cannot record coverage, checkpoints
+    # or failures — proceeding anyway would write geo rows nothing can vouch for.
+    import db.writers as _w
+    monkeypatch.setattr(_w, "try_claim_geo_sync_lease", lambda *a, **k: "acquired")
+    monkeypatch.setattr(_w, "release_geo_sync_lease", lambda *a, **k: True)
+    monkeypatch.setattr(_w, "upsert_geo_sync_state", lambda *a, **k: True)
+    monkeypatch.setattr(_w, "upsert_geo_coverage", lambda *a, **k: True)
     monkeypatch.setattr(svc, "fetch_geo_daily", lambda a, b: {"rows": [
         {"customer_id": "1", "country_criterion_id": "2826", "campaign_id": "9",
          "spend_date": a, "cost_micros": 5_000_000}]})
@@ -304,7 +330,8 @@ def _geo_by_country(rows):
 
 
 def _patch_revattr(monkeypatch, *, canonical, geo_daily, country_rows, revenue_rows,
-                   coverage=None, geo_country=None, legacy_spend=None):
+                   coverage=None, geo_country=None, legacy_spend=None,
+                   geo_coverage=None):
     leads = {"available": True, "rows": [], "event_date_safe": True,
              "lead_event_date_field_available": True, "missing_contact_created_at_count": 0,
              "excluded_non_paid_count": 0, "excluded_pseudo_campaign_count": 0,
@@ -315,7 +342,17 @@ def _patch_revattr(monkeypatch, *, canonical, geo_daily, country_rows, revenue_r
              "coverage_start": "2026-01-01", "coverage_end": "2026-06-30"}
     revenue = {"available": True, "rows": revenue_rows, "coverage_start": None, "coverage_end": None}
     cov = coverage or [{"chunk_start": "2026-01-01", "chunk_end": "2026-06-30", "status": "verified"}]
+    # PR-ADS-153F: the durable GEO coverage ledger is a mandatory input to the
+    # country readiness gate. It is a separate ledger from campaign spend
+    # coverage above — proving campaign spend was fetched says nothing about
+    # whether geographic_view ever was.
+    geo_cov = (geo_coverage if geo_coverage is not None
+               else [{"chunk_start": "2026-01-01", "chunk_end": "2026-06-30",
+                      "status": "verified", "rows_written": 130,
+                      "cost_micros_total": 10_000_000_000, "country_count": 2}])
     try:
+        monkeypatch.setattr("db.revenue_repository.fetch_geo_coverage",
+                            lambda c, s, e: {"available": True, "chunks": list(geo_cov)})
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", lambda s, e: spend)
         monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda s, e: leads)
         monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", lambda s, e: revenue)
