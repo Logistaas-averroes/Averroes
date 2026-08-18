@@ -362,3 +362,40 @@ Full doctrine: `docs/35_CANONICAL_REVENUE_LEDGER.md`.
 All frontend pages use `data-page` route keys that are stable identifiers. Visible labels may be changed for UX clarity without affecting routing or data references.
 
 See `docs/24_UI_NAVIGATION_MODEL.md` for the full navigation model and rename map.
+
+---
+
+## Country geography — canonical since PR-ADS-153F
+
+**Country identity is `analysis/country_identity.py`.** Every consumer groups on
+`country_key(name, code)`, which returns `code:XX` for a supported ISO 3166-1
+alpha-2 country and `unknown` for everything else. A country NAME is a display
+label and a resolution input — never a join key. A two-letter token is not a
+country code: only codes in `SUPPORTED_COUNTRIES` resolve, so `"XX"` and a
+truncated label become the residual rather than a country.
+
+**Canonical tables**
+
+| Table | Holds |
+|---|---|
+| `google_ads_geo_daily_spend` | Per-country daily spend read from Google Ads `geographic_view`. The Country ROAS denominator. |
+| `google_ads_geo_coverage` | Per-chunk fetch ledger (`verified`/`failed`) — distinguishes "never fetched" from "fetched, genuinely zero". |
+| `google_ads_geo_sync_state` | Run status, resume checkpoint, last successful completion, and the cross-instance run lease. |
+
+**Dataset key:** `(google_ads, canonical_geo)`, from `services/dataset_keys.py`.
+Writers and the freshness configuration import it rather than spelling it, which
+is what let `canonical_spend`'s key drift from its writer before PR-ADS-153F.
+
+**Ownership stays split.** Google Ads `geographic_view` answers *where
+advertising spend occurred*; HubSpot contact country answers *the CRM geography
+of the associated contact*. They are different facts about different entities,
+joined at reporting grain on the shared key. The join is estimate-grade and is
+disclosed as such in `country_truth.estimate_grade_note` on every country
+response.
+
+**Residual:** key `unknown`, label `Unknown / Unattributed country`. It carries
+the Google Ads spend shortfall AND the revenue whose CRM country could not be
+identified. Nothing is dropped, nothing is spread across real countries, and
+`Sum(known country rows) + eligible residual = the canonical scope total`.
+
+Full doctrine: `docs/36_CANONICAL_COUNTRY_GEOGRAPHY.md`.

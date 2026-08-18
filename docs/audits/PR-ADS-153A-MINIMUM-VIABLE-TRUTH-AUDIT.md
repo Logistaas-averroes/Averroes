@@ -903,3 +903,56 @@ two-ledger reconciliation, duplicate-row and stage-leakage evidence and exits
 non-zero on violation. The original queries remain valid for the legacy tables.
 
 Doctrine: `docs/35_CANONICAL_REVENUE_LEDGER.md`.
+
+---
+
+## Follow-up — PR-ADS-153F, August 2026
+
+*This section records what has since been built. The audit's findings above are
+its own record and are not rewritten.*
+
+### §1.4 "Country truth is blocked by a missing owner, not by a wrong gate" — resolved
+
+The audit's diagnosis held exactly. Every item in it has been addressed, and the
+gate it defended was not touched:
+
+| Audit finding | Resolution |
+|---|---|
+| Nothing schedules `run_google_ads_geo_sync`; its only non-test caller is the admin endpoint | `google_ads/canonical_geo` is now a step in `run_daily_incremental_sync`, ordered canonical spend → FX → geo → reconciliation. The manual trigger is preserved for recovery and now shares a durable run lease with the scheduler. |
+| Geo has no coverage ledger, no freshness entry, no resume | `google_ads_geo_coverage` (per-chunk `verified`/`failed`, rows, micros, error, run id) and `google_ads_geo_sync_state` (status, resume checkpoint, last successful completion, lease). A `canonical_geo` freshness entry and System Status pipeline node now exist. |
+| `geographic_view` structurally omits unlocatable spend; the PR-ADS-131 residual path handles it correctly | Unchanged. The safe-residual predicate and its eligibility rules are untouched; `reconciled_with_residual` remains the only route to accepting a shortfall. |
+| Three different country-join rules coexist; blank-country revenue is silently dropped from ROAS by Country but preserved on Dashboard Countries | `analysis/country_identity.py` is now the single contract. All country consumers group on `country_key`. Blank, invalid and unresolved geography lands in one residual carrying BOTH the geo spend shortfall and the unidentifiable revenue, so the two pages reconcile. |
+| `_CODE_TO_NAME` missing 11 codes; any 2-letter token accepted as a valid ISO code | One registry drives both directions, so forward/backward drift is unrepresentable. Only supported codes resolve; `"XX"` is now the residual, not a country. |
+
+### §1.7 "canonical spend's freshness key is broken" — resolved for spend and geo
+
+`canonical_spend`'s freshness config expected `google_ads_api` while its writer
+stamped `google_ads`, leaving the ROAS denominator with no freshness signal.
+Both keys now come from `services/dataset_keys.py`, which writers and the
+freshness configuration import rather than spell.
+
+The same audit noted "same class of bug for `fx`, `gclid_matches`,
+`source_classification`". Those three are the inverse case — real writers with no
+freshness config at all — and are **not** addressed by PR-ADS-153F. They remain
+open.
+
+Separately, three configured datasets were found to have no durable source at
+all and were removed (`ngrams`, `historical_intelligence`,
+`mailchimp_attribution`); two that had a real table and a real writer but no sync
+batch were connected (`waste_terms`, `gclid_coverage_snapshots`); and
+`api/server.py`'s hand-listed dataset registry — a fourth copy that had already
+drifted — is now derived from the freshness configuration.
+
+### Still open from this audit
+
+* §1.5 window vocabularies and the two resolvers for the same evidence-window key.
+* §1.6 Lead Intelligence retirement.
+* §1.7 the legacy `campaigns` grain corruption, `GET /api/geo` run-id
+  double-counting, the remaining Windsor dependency in the daily sync, and the
+  process-local scheduler concurrency guards (geo now has a durable lease; the
+  other jobs do not).
+* §1.8 route orphans and duplicate implementations.
+* Legacy table and route retirement — **PR-ADS-153G**, which must not start
+  before PR-ADS-153F production verification passes.
+
+Detail: `docs/36_CANONICAL_COUNTRY_GEOGRAPHY.md`.

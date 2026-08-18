@@ -3906,3 +3906,101 @@ python -m scripts.audit_canonical_revenue_truth --window current_quarter
 status.)
 
 Full doctrine: `docs/35_CANONICAL_REVENUE_LEDGER.md`.
+
+---
+
+## Country responses — `country_truth` (PR-ADS-153F, August 2026)
+
+Every country surface — `GET /api/dashboard/countries`, the country view of the
+Revenue Decision Mart, ROAS by Country and the country drilldown — now publishes
+ONE shared disclosure block, built by
+`services.google_ads_geo_sync_service.build_country_truth_disclosure`. It is
+assembled centrally so two pages cannot disclose different things about the same
+window.
+
+```jsonc
+"country_truth": {
+  // Sources and scope — ownership stays split and stated.
+  "revenue_source": "hubspot_deal_ledger",
+  "revenue_scope": "all_source",
+  "spend_source": "google_ads_api",
+  "geo_spend_source": "google_ads_geo_daily_spend",
+  "geo_spend_grain": "customer_id, campaign_id, country_criterion_id, spend_date",
+  "country_identity_contract": "analysis.country_identity",
+  "estimate_grade_note": "…different facts about different entities…",
+
+  // Window — the resolver key AND the exact instants it resolved to.
+  "window": {
+    "key": "current_quarter",
+    "start_date": "2026-04-01",
+    "end_date": "2026-06-22",
+    "start_utc": "2026-04-01T00:00:00+00:00",
+    "end_utc_exclusive": "2026-06-23T00:00:00+00:00",
+    "bounds": "inclusive_start_exclusive_end_utc",
+    "timezone": "Europe/London"
+  },
+
+  // Freshness, coverage, reconciliation.
+  "as_of": "2026-06-22T03:00:00+00:00",
+  "geo_coverage_status": "complete",          // complete | incomplete | unavailable
+  "geo_coverage_missing_ranges": [],
+  "geo_failed_ranges": [],
+  "campaign_spend_coverage_status": "complete",
+  "fx_status": "verified",
+  "reconciliation_status": "reconciled_with_residual",
+  "reconciliation_tolerance": 0.02,
+  "geo_ready": true,
+  "geo_accepted_states": ["reconciled_with_residual", "verified"],
+  "gap_codes": [],
+
+  // Residual — amount, and whether it was ACCEPTED as structurally safe.
+  "residual_accepted": true,
+  "residual_key": "unknown",
+  "residual_label": "Unknown / Unattributed country",
+  "residual_spend_native": 500.0,
+  "residual_spend_usd": 650.0,
+  "residual_spend_pct": 0.5,
+
+  // Revenue availability, stated separately from spend availability.
+  "revenue_available": true,
+  "revenue_unavailable_reason": null,
+  "revenue_violation_codes": [],
+  "legacy_fallback_used": false
+}
+```
+
+**Exact UTC bounds are published, not only calendar dates.** Dates alone leave
+the day-boundary convention implicit, which is exactly where timezone-dependent
+population differences hide. The upper bound is always EXCLUSIVE.
+
+### Country row identity
+
+Country rows carry `country_key` (the join identity), `country_code` (the
+resolved ISO alpha-2, `null` for the residual), `country` (the display label),
+`country_status` (`valid` | `unknown` | `invalid` | `residual`) and
+`is_residual`.
+
+**Join on `country_key`, never on `country`.** Labels are presentation and may
+change; identity may not. `"UAE"` and `"United Arab Emirates"` are the same row.
+
+### Blocked country views
+
+When geo coverage or reconciliation is unsafe the response reports
+`geo_ready: false` with a stable `reconciliation_status`, machine `gap_codes`
+(`missing_geo_dates`, `campaign_spend_without_geo`,
+`geo_report_does_not_reconcile_by_design`, `totals_differ`) and the missing /
+failed range evidence. Affected metrics are `null` — never `0`, never a
+fabricated `0.00x` ROAS — and an empty dataset is never rendered as "no country
+activity". There is no fallback to Windsor, legacy geo calculations, local JSON
+or ad-hoc queries.
+
+### `POST /api/google-ads-geo-sync/run` — unchanged, now leased
+
+The manual recovery trigger is preserved. It now claims the same durable run
+lease the scheduler uses, so a manual run started while the scheduled one is in
+flight returns `status: "skipped_locked"` with
+`reason: "another_geo_sync_is_running"` rather than racing it. Refusing to start
+is the safe outcome: the range stays uncovered, the gate keeps Country ROAS
+blocked, and the next run picks it up.
+
+Full doctrine: `docs/36_CANONICAL_COUNTRY_GEOGRAPHY.md`.

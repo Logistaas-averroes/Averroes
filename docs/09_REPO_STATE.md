@@ -309,3 +309,61 @@ mid-incident.
 
 Rollback is a code deployment rollback only. Canonical records, sync state,
 reconciliation evidence and legacy comparison history are all preserved.
+
+---
+
+## PR-ADS-153F — Canonical country geography (August 2026)
+
+Country truth had no owner. Nothing scheduled `run_google_ads_geo_sync` — its
+only caller was an admin endpoint a human had to click — so canonical geo went
+stale the moment the window advanced, and with no coverage ledger, no resume and
+no freshness entry, that staleness was invisible on every health surface. The
+ROAS by Country gate was blocking correctly for a reason nothing could report.
+
+**Built**
+
+* `analysis/country_identity.py` — THE country identity contract. One registry
+  drives both name→code and code→label, so the eleven codes that resolved
+  forward but had no label are unrepresentable. A two-letter token is no longer
+  a country code. Unidentifiable geography resolves to an explicit residual with
+  a status and reason, never to a guess and never to nothing.
+* `services/dataset_keys.py` — the one `(source, dataset)` registry that writers
+  and freshness configuration both import.
+* `google_ads_geo_coverage` + `google_ads_geo_sync_state` — additive per-chunk
+  coverage, per-range failure evidence, a resume checkpoint, and a durable
+  cross-instance run lease.
+
+**Changed**
+
+* The daily incremental sync runs canonical spend → FX → geo → reconciliation,
+  in that order, and the manual recovery trigger is preserved.
+* A chunk is `verified` only after its rows land; a `failed` write never demotes
+  a verified chunk; completeness is re-read from the ledger rather than inferred
+  from a run's own counters, so a partial run cannot publish complete coverage or
+  healthy freshness.
+* Dashboard Countries, ROAS by Country, the country drilldown, the mart, geo
+  reconciliation and Revenue Health all join on ONE canonical key. Blank, invalid
+  and unresolved geography lands in one residual carrying BOTH the Google Ads
+  spend shortfall and the unidentifiable revenue, so known rows plus residual
+  reconcile on both sides.
+* One `country_geo_ready` predicate replaces three readiness bars; the mart's
+  page-difference audit no longer applies a stricter bar than the pages it
+  audits.
+* `canonical_spend`'s freshness key corrected to what its writer stamps (the
+  PR-ADS-153A §1.7 finding). Three phantom freshness datasets removed (`ngrams`,
+  `historical_intelligence`, `mailchimp_attribution` — no table, no writer); two
+  real ones connected to real sync batches (`waste_terms`,
+  `gclid_coverage_snapshots`); `api/server.py`'s hand-listed dataset registry is
+  now derived.
+
+**Unchanged, deliberately.** `SPEND_VARIANCE_TOLERANCE`, business-window
+definitions, FX doctrine, revenue scope definitions, won-deal doctrine and the
+PR-ADS-131 safe-residual eligibility rules. The gate was never the defect;
+loosening it would have hidden the missing owner rather than fixing it.
+
+**Not in this PR.** No legacy table or route deletion (PR-ADS-153G), no OCT, no
+external mutation of any kind. Rollback is a code deployment rollback only —
+geo rows, coverage state, failure history, checkpoints and reconciliation
+evidence are all retained.
+
+Full doctrine: `docs/36_CANONICAL_COUNTRY_GEOGRAPHY.md`.
