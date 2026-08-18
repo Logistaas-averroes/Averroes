@@ -39,7 +39,7 @@ is the whole point of the mart: one brain, one truth, four renderings.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from analysis.business_windows import resolve_window
 from analysis import country_identity, revenue_scope
@@ -89,16 +89,28 @@ def _window_block(core: dict) -> dict:
     # used the same inclusive-start / exclusive-end UTC bounds — dates alone
     # leave the day-boundary convention implicit, which is exactly where
     # timezone-dependent population differences hide.
+    #
+    # The instants are DERIVED from the dates this window already resolved to,
+    # not recomputed from the window key. Calling `get_window_bounds(key)` again
+    # would re-resolve against the current clock, so a mart built with an
+    # explicit `now` (a deterministic run, a previous-period comparison) could
+    # disclose bounds for a different window than the one it actually used —
+    # publishing a second answer to a question that already has one, which is
+    # the defect class this whole programme exists to remove.
     start_utc = end_utc = None
     key = resolved.get("key")
-    if key:
-        try:
-            from analysis.business_windows import get_window_bounds  # noqa: PLC0415
-            s_dt, e_dt = get_window_bounds(key)
-            start_utc = s_dt.isoformat() if s_dt else None
-            end_utc = e_dt.isoformat() if e_dt else None
-        except Exception:  # noqa: BLE001 — disclosure must never break the mart
-            logger.warning("window bounds unavailable for key=%s", key)
+    try:
+        if resolved.get("start_date"):
+            start_utc = datetime.fromisoformat(
+                str(resolved["start_date"])).replace(tzinfo=timezone.utc).isoformat()
+        if resolved.get("end_date"):
+            # The upper bound is EXCLUSIVE: the start of the day after end_date,
+            # matching analysis.business_windows.get_window_bounds.
+            end_dt = datetime.fromisoformat(str(resolved["end_date"])).replace(
+                tzinfo=timezone.utc) + timedelta(days=1)
+            end_utc = end_dt.isoformat()
+    except (TypeError, ValueError):  # disclosure must never break the mart
+        logger.warning("window bounds unavailable for key=%s", key)
     return {
         "key": key,
         "label": resolved.get("label"),

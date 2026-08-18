@@ -383,15 +383,25 @@ def run_weekly_report():
                     sync_type="weekly", date_from=window_start,
                     date_to=window_end, run_id=run_id,
                 )
-                db_writers.write_gclid_coverage_snapshot(
+                # The snapshot is stamped with its OWN batch, and that batch is
+                # finished with the REAL outcome. Attributing the row to the
+                # attribution batch would break the linkage the ledger exists to
+                # provide, and reporting success unconditionally would make this
+                # dataset healthy-looking on a failed insert — the same "looks
+                # monitored, reports nothing true" defect this PR removes.
+                cov_written = db_writers.write_gclid_coverage_snapshot(
                     run_id=run_id,
                     coverage=coverage,
-                    sync_batch_id=gclid_batch_id or None,
+                    sync_batch_id=cov_batch_id or None,
                 )
                 if cov_batch_id:
                     db_writers.finish_sync_batch(
-                        batch_id=cov_batch_id, status="success", row_count=1,
-                        last_source_date=window_end,
+                        batch_id=cov_batch_id,
+                        status="success" if cov_written else "failed",
+                        row_count=cov_written,
+                        last_source_date=window_end if cov_written else None,
+                        error_message=(None if cov_written else
+                                       "gclid coverage snapshot wrote 0 rows"),
                     )
 
                 if gclid_batch_id:

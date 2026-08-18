@@ -813,6 +813,58 @@ def test_23b_the_country_disclosure_publishes_the_exact_utc_bounds():
     assert block["window"]["bounds"] == "inclusive_start_exclusive_end_utc"
 
 
+def test_23c_the_disclosed_bounds_come_from_the_window_the_mart_actually_used():
+    """Review follow-up: the bounds are DERIVED, never re-resolved.
+
+    Recomputing them from the window key would re-resolve against the current
+    clock, so a mart built with an explicit `now` — a deterministic run, or a
+    previous-period comparison — could disclose bounds for a different window
+    than the one it used. That is a second answer to a question that already has
+    one, which is the defect class this programme exists to remove.
+    """
+    from services.revenue_decision_mart import _window_block
+
+    # A window resolved in the PAST. If the block re-resolved `key` against the
+    # clock it would return today's YTD, not this one.
+    block = _window_block({"window": {"key": "ytd", "label": "Year to date",
+                                      "start_date": "2024-01-01",
+                                      "end_date": "2024-03-31"}})
+    assert block["start_utc"] == "2024-01-01T00:00:00+00:00"
+    assert block["end_utc_exclusive"] == "2024-04-01T00:00:00+00:00"
+
+    # And for a live window the derived instants equal the resolver's, so the
+    # two can never disagree.
+    from analysis.business_windows import resolve_window
+
+    resolved = resolve_window("current_quarter", now=NOW)
+    derived = _window_block({"window": resolved})
+    s_dt, e_dt = get_window_bounds("current_quarter", now=NOW)
+    assert derived["start_utc"] == s_dt.isoformat()
+    assert derived["end_utc_exclusive"] == e_dt.isoformat()
+
+
+def test_9b_the_coverage_snapshot_batch_records_its_own_real_outcome():
+    """Review follow-up: a connected dataset must not report a comfortable lie.
+
+    The `(gclid, coverage_snapshots)` batch was finished as `success` with
+    `row_count=1` regardless of what the writer returned, and the snapshot row
+    was stamped with the ATTRIBUTION batch's id — so the dataset this PR set out
+    to make honest would have reported healthy on a failed insert, and its rows
+    would not have been linked to the batch that produced them.
+    """
+    for rel in ("scheduler/weekly.py", "scheduler/monthly.py"):
+        src = (_ROOT / rel).read_text()
+        i = src.index("dataset=\"coverage_snapshots\"")
+        block = src[i:i + 1400]
+        # The snapshot is linked to ITS OWN batch.
+        assert "sync_batch_id=cov_batch_id" in block, rel
+        assert "sync_batch_id=gclid_batch_id" not in block, rel
+        # And the batch carries the real outcome, not a hard-coded success.
+        assert "cov_written = db_writers.write_gclid_coverage_snapshot" in block, rel
+        assert 'status="success" if cov_written else "failed"' in block, rel
+        assert "row_count=cov_written" in block, rel
+
+
 def test_24_unavailable_country_metrics_are_null_never_zero():
     """Unavailable and zero are different states, and must stay different."""
     block = geo.build_country_truth_disclosure(
