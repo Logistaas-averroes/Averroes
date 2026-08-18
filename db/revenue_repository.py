@@ -1399,6 +1399,86 @@ def fetch_spend_coverage(start: date | None, end: date) -> dict:
         return {"available": False, "chunks": []}
 
 
+def fetch_geo_coverage(start: date | None, end: date) -> dict:
+    """Verified/failed canonical GEO chunks intersecting the window. Read-only.
+
+    PR-ADS-153F. Shaped EXACTLY like :func:`fetch_spend_coverage` so the same
+    ``services.google_ads_spend_service.analyze_coverage`` computes geo
+    completeness — one implementation of "is this window covered", not two.
+
+    ``available: False`` means the ledger could not be read, which is NOT the
+    same as "no chunks": an unreadable ledger must never be presented as an
+    empty-but-healthy one.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "chunks": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT chunk_start, chunk_end, status, rows_written,
+                           cost_micros_total, country_count, error_message,
+                           sync_run_id, updated_at
+                    FROM google_ads_geo_coverage
+                    WHERE chunk_end >= COALESCE(%s::date, chunk_end) AND chunk_start <= %s
+                    ORDER BY chunk_start
+                    """,
+                    (start, end),
+                )
+                chunks = []
+                for r in _rows_as_dicts(cur):
+                    chunks.append({
+                        "chunk_start": _as_date(r.get("chunk_start")),
+                        "chunk_end": _as_date(r.get("chunk_end")),
+                        "status": r.get("status"),
+                        "rows_written": r.get("rows_written"),
+                        "cost_micros_total": int(r.get("cost_micros_total") or 0),
+                        "country_count": int(r.get("country_count") or 0),
+                        "error_message": r.get("error_message"),
+                        "sync_run_id": r.get("sync_run_id"),
+                    })
+            return {"available": True, "chunks": chunks}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_geo_coverage failed: %s", exc)
+        return {"available": False, "chunks": []}
+
+
+def fetch_geo_sync_state(customer_id: str | None = None,
+                         scope: str = "geo_daily_spend") -> dict:
+    """Durable canonical geo sync run/checkpoint state (PR-ADS-153F). Read-only.
+
+    Returns {available, row}. ``available: False`` is an unreadable store, not
+    an absent run — the geo readiness gate must be able to tell those apart.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "row": None, "reason": "db_unavailable"}
+            with conn.cursor() as cur:
+                if customer_id:
+                    cur.execute(
+                        """
+                        SELECT * FROM google_ads_geo_sync_state
+                        WHERE customer_id = %s AND scope = %s
+                        """,
+                        (customer_id, scope),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT * FROM google_ads_geo_sync_state
+                        WHERE scope = %s ORDER BY updated_at DESC LIMIT 1
+                        """,
+                        (scope,),
+                    )
+                rows = _rows_as_dicts(cur)
+            return {"available": True, "row": rows[0] if rows else None}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_geo_sync_state failed: %s", exc)
+        return {"available": False, "row": None, "reason": "db_unavailable"}
+
+
 def fetch_geo_spend_total(start: date | None, end: date) -> dict:
     """Total legacy geo-table spend for the window (for reconciliation). Read-only."""
     try:

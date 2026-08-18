@@ -1292,9 +1292,14 @@ def test_freshness_config_columns_exist_in_the_schema():
 
 
 def test_new_datasets_are_listed_as_known_for_placeholder_freshness():
-    source = (_ROOT / "api" / "server.py").read_text()
-    assert '("hubspot", "contact_funnel")' in source
-    assert '("hubspot", "lifecycle_events")' in source
+    # PR-ADS-153F: the freshness endpoint derives its known (source, dataset)
+    # pairs from DATASET_FRESHNESS_CONFIG instead of a hand-listed literal in
+    # api/server.py, so this asserts on the pairs themselves.
+    from api.server import _known_dataset_pairs
+
+    pairs = _known_dataset_pairs()
+    assert ("hubspot", "contact_funnel") in pairs
+    assert ("hubspot", "lifecycle_events") in pairs
 
 
 # =============================================================================

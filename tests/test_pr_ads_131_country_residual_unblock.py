@@ -120,7 +120,7 @@ def test_residual_row_is_added(monkeypatch):
     residual = _residual_rows(mart)
     assert len(residual) == 1
     row = residual[0]
-    assert row["country"] == "Unattributed / No Country"
+    assert row["country"] == "Unknown / Unattributed country"
     assert row["is_residual"] is True
     assert row["country_code"] is None
     # Not a real country: no leads/revenue, decision "unattributed".
@@ -241,9 +241,9 @@ def test_frontend_residual_warning_and_row():
     warn = JS[i:i + 900]
     assert "Country spend includes an unattributed residual" in warn
     assert "could not be assigned to a country" in warn
-    # The table styles the residual row: "Unattributed / No Country" + "Residual" badge.
+    # The table styles the residual row: "Unknown / Unattributed country" + "Residual" badge.
     tbl = JS[JS.find("function renderRoasCountryTable"):JS.find("function renderRoasCountryTable") + 2400]
-    assert "Unattributed / No Country" in tbl
+    assert "Unknown / Unattributed country" in tbl
     assert "Residual" in tbl
     assert "revenue-residual-row" in tbl
     # Revenue Health shows the "Reconciled with residual" audit state.

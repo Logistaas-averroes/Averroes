@@ -3213,30 +3213,27 @@ def api_action_queue(
 # ---------------------------------------------------------------------------
 
 # Known source/dataset pairs — returned as placeholders when sync_state is empty.
-_KNOWN_DATASETS: list[tuple[str, str]] = [
-    # PR-ADS-105: Platform Evidence datasets are sourced from the Google Ads API
-    # directly (scheduler cutover landed in PR-ADS-104). Windsor is legacy only.
-    ("google_ads_api", "campaigns"),
-    ("google_ads_api", "keywords"),
-    ("google_ads_api", "keyword_facts"),
-    ("google_ads_api", "search_terms"),
-    ("google_ads_api", "geo"),
-    ("hubspot", "contacts"),
-    ("hubspot", "deals"),
-    # PR-ADS-153B canonical CRM funnel truth
-    ("hubspot", "contact_funnel"),
-    ("hubspot", "lifecycle_events"),
-    ("gclid",   "matches"),
-    ("gclid",   "coverage_snapshots"),
-    ("analysis", "waste_terms"),
-    ("computed", "ngrams"),
-    ("analysis", "historical_intelligence"),
-    # PR-ADS-151: Mailchimp read-only email-marketing datasets.
-    ("mailchimp", "campaigns"),
-    ("mailchimp", "reports"),
-    ("mailchimp", "audiences"),
-    ("mailchimp", "attribution"),
-]
+#
+# PR-ADS-153F: DERIVED from services.freshness_service.DATASET_FRESHNESS_CONFIG
+# rather than hand-listed here. This was a fourth hand-maintained copy of the
+# dataset registry (alongside the freshness config, the System Status pipeline
+# map and the source rollup), and it had already drifted: it still listed
+# `(computed, ngrams)`, `(analysis, historical_intelligence)` and
+# `(mailchimp, attribution)`, none of which any writer stamps, so the endpoint
+# emitted permanent "never run" placeholders for datasets that do not exist.
+# Deriving the list means adding or retiring a dataset is one edit, in the place
+# that owns it.
+def _known_dataset_pairs() -> list[tuple[str, str]]:
+    from services.freshness_service import DATASET_FRESHNESS_CONFIG  # noqa: PLC0415
+
+    seen: list[tuple[str, str]] = []
+    for cfg in DATASET_FRESHNESS_CONFIG.values():
+        pair = (cfg.get("source"), cfg.get("dataset"))
+        if all(pair) and pair not in seen:
+            seen.append(pair)
+    return seen
+
+
 _SAFE_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -3394,7 +3391,7 @@ def api_datasets_freshness(user: dict = Depends(require_auth), days: int = 60) -
     datasets: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
-    for source, dataset in _KNOWN_DATASETS:
+    for source, dataset in _known_dataset_pairs():
         key = (source, dataset)
         seen.add(key)
         if key in db_map:
@@ -7284,7 +7281,7 @@ async def get_dashboard_countries(
     country has real attributed spend, FX and revenue are safe, and geo
     reconciliation is unblockable, never from the Google Ads conversion value.
     The unattributed geo residual and closed-won revenue that maps to no country
-    are preserved in an explicit "Unattributed / No Country" bucket — never
+    are preserved in an explicit "Unknown / Unattributed country" bucket — never
     distributed across real countries, never mapped, never given a ROAS.
 
     Uses business windows (current_quarter | last_quarter | last_6_months | ytd

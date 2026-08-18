@@ -251,12 +251,30 @@ def run_weekly_report():
         from analysis.core import run_waste_detection
         waste_output = run_waste_detection()
 
-        # Write waste terms to database
+        # Write waste terms to database.
+        # PR-ADS-153F: wrapped in a real sync batch. `waste_terms` has always had
+        # a durable table and a real writer, but nothing stamped an
+        # `(analysis, waste_terms)` batch — so its freshness entry matched no
+        # sync_state row and the dataset reported "never run" forever while the
+        # table filled up normally. A freshness row without a writer is not
+        # evidence; this makes the writer real rather than deleting the row.
+        waste_batch_id = db_writers.start_sync_batch(
+            source="analysis", dataset="waste_terms", sync_type="weekly",
+            run_id=run_id,
+        )
         try:
             if run_id is not None and waste_output:
                 db_writers.write_waste_terms(run_id, waste_output.get("confirmed_waste_items", []))
+            if waste_batch_id:
+                db_writers.finish_sync_batch(
+                    batch_id=waste_batch_id, status="success",
+                    row_count=len((waste_output or {}).get("confirmed_waste_items", [])))
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write after Step 3 failed: %s", db_exc)
+            if waste_batch_id:
+                db_writers.finish_sync_batch(
+                    batch_id=waste_batch_id, status="failed",
+                    error_message=str(db_exc)[:1000])
 
         # PR-ADS-153D: durable flag HISTORY. This runs AFTER the annotations
         # land, so the canonical flagged population it reads already reflects
@@ -355,11 +373,26 @@ def run_weekly_report():
                         "GCLID attribution persistence wrote 0 rows for non-empty match output"
                     )
 
+                # PR-ADS-153F: the coverage snapshot gets its OWN sync batch under
+                # the key its freshness config reads, `(gclid, coverage_snapshots)`.
+                # The table and the writer have always existed; nothing ever
+                # stamped that key, so the dataset reported "never run" forever
+                # while snapshots accumulated normally.
+                cov_batch_id = db_writers.start_sync_batch(
+                    source="gclid", dataset="coverage_snapshots",
+                    sync_type="weekly", date_from=window_start,
+                    date_to=window_end, run_id=run_id,
+                )
                 db_writers.write_gclid_coverage_snapshot(
                     run_id=run_id,
                     coverage=coverage,
                     sync_batch_id=gclid_batch_id or None,
                 )
+                if cov_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=cov_batch_id, status="success", row_count=1,
+                        last_source_date=window_end,
+                    )
 
                 if gclid_batch_id:
                     db_writers.finish_sync_batch(

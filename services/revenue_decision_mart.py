@@ -42,9 +42,10 @@ import logging
 from datetime import datetime, timezone
 
 from analysis.business_windows import resolve_window
-from analysis import revenue_scope
+from analysis import country_identity, revenue_scope
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
+from services import google_ads_geo_sync_service as geo_gate
 from services.revenue_attribution_service import (
     build_revenue_attribution,
     build_revenue_deals,
@@ -83,11 +84,29 @@ def _round2(value):
 def _window_block(core: dict) -> dict:
     """Canonical window block: resolver key/dates plus the reporting timezone."""
     resolved = core.get("window") or {}
+    # PR-ADS-153F: publish the EXACT instants the window resolved to, not only
+    # its calendar dates. A consumer comparing two pages needs to see that both
+    # used the same inclusive-start / exclusive-end UTC bounds — dates alone
+    # leave the day-boundary convention implicit, which is exactly where
+    # timezone-dependent population differences hide.
+    start_utc = end_utc = None
+    key = resolved.get("key")
+    if key:
+        try:
+            from analysis.business_windows import get_window_bounds  # noqa: PLC0415
+            s_dt, e_dt = get_window_bounds(key)
+            start_utc = s_dt.isoformat() if s_dt else None
+            end_utc = e_dt.isoformat() if e_dt else None
+        except Exception:  # noqa: BLE001 — disclosure must never break the mart
+            logger.warning("window bounds unavailable for key=%s", key)
     return {
-        "key": resolved.get("key"),
+        "key": key,
         "label": resolved.get("label"),
         "start_date": resolved.get("start_date"),
         "end_date": resolved.get("end_date"),
+        "start_utc": start_utc,
+        "end_utc_exclusive": end_utc,
+        "bounds": "inclusive_start_exclusive_end_utc",
         "timezone": _account_timezone(),
         "is_closed_window": resolved.get("is_closed_window"),
         "notes": resolved.get("notes"),
@@ -133,16 +152,17 @@ def _spend_truth_block(core: dict) -> dict:
     # SAFE unblock — reconciled_with_residual, distinct from a plain verified
     # reconcile and from a blocking mismatch. The residual is surfaced as an explicit
     # bucket, never distributed across countries, never loosening tolerance.
-    reconciled = health.get("country_spend_reconciled")
-    if reconciled is True:
-        country_spend_status = "verified"
-    elif health.get("country_residual_eligible"):
-        country_spend_status = "reconciled_with_residual"
-    elif reconciled is False:
-        country_spend_status = "mismatch"
-    else:
-        country_spend_status = "unavailable"
-    country_roas_unblockable = country_spend_status in ("verified", "reconciled_with_residual")
+    #
+    # PR-ADS-153F: derived by THE shared gate rather than re-implemented here.
+    # This block and services/google_ads_geo_sync_service used to compute the
+    # same status independently, and the audit below used a stricter bar than
+    # Dashboard Countries — so one window could be ready on one page and blocked
+    # on another. Same states, same ordering, one implementation.
+    country_spend_status = geo_gate.resolve_country_spend_status(
+        reconciled=health.get("country_spend_reconciled"),
+        residual_eligible=bool(health.get("country_residual_eligible")),
+    )
+    country_roas_unblockable = geo_gate.country_geo_ready(country_spend_status)
 
     return {
         "native_currency": native_currency,
@@ -161,6 +181,13 @@ def _spend_truth_block(core: dict) -> dict:
         "campaign_spend_coverage_status": health.get("campaign_spend_coverage_status"),
         "campaign_spend_coverage_reason": health.get("campaign_spend_coverage_reason"),
         "spend_coverage_detail": health.get("spend_coverage_detail") or {},
+        # PR-ADS-153F: durable geo coverage evidence + the machine gap reason, so
+        # a blocked country view can say WHICH ranges are missing or failed
+        # rather than only that the totals differ.
+        "geo_coverage_status": health.get("geo_coverage_status"),
+        "geo_coverage_missing_ranges": health.get("geo_coverage_missing_ranges") or [],
+        "failed_geo_dates": health.get("failed_geo_dates") or [],
+        "country_gap_reason": health.get("country_gap_reason"),
         # PR-ADS-129: exact geo↔canonical variance so the Country blocked card shows
         # real totals (campaign vs geo, variance, tolerance) — never fabricated.
         "campaign_spend_total": native_spend,
@@ -175,7 +202,7 @@ def _spend_truth_block(core: dict) -> dict:
         "country_residual_usd": _round2(health.get("country_residual_usd")),
         "country_residual_pct": health.get("country_residual_pct"),
         "country_residual_label": (
-            "Unattributed / No Country"
+            country_identity.RESIDUAL_LABEL
             if country_spend_status == "reconciled_with_residual" else None),
         "country_residual_reason": (
             "Google Ads geographic view does not assign this spend to a country."
@@ -309,7 +336,7 @@ def _diagnostics(core: dict, view: str, spend_truth: dict) -> list:
             "code": "country_spend_residual",
             "message": (
                 "Country ROAS is shown with an explicit "
-                f"'Unattributed / No Country' residual of {res_native} {cur}"
+                f"'{country_identity.RESIDUAL_LABEL}' residual of {res_native} {cur}"
                 f"{'' if res_pct is None else f' ({res_pct}%)'} — Google Ads assigned "
                 "most spend to countries, and this shortfall is spend the geographic "
                 "view does not assign to any country. The residual is surfaced, never "
@@ -361,7 +388,7 @@ def _readiness_block(core: dict, spend_truth: dict) -> dict:
     # verified OR reconciled-with-residual (real country rows + explicit residual).
     country_decision_ready = bool(
         spend_decision_ready
-        and spend_truth["country_spend_status"] in ("verified", "reconciled_with_residual")
+        and geo_gate.country_geo_ready(spend_truth["country_spend_status"])
     )
 
     return {
@@ -470,10 +497,25 @@ def build_revenue_decision_mart(
         _canon.WINDOW_BUSINESS, window, _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
         now=now, consumer_count=summary.get("sqls"))
 
+    window_block = _window_block(core)
+    core_health = core.get("source_health") or {}
     return {
         "view": view,
-        "window": _window_block(core),
+        "window": window_block,
         "spend_truth": spend_truth,
+        # PR-ADS-153F §8: the shared country-truth disclosure, present on the
+        # country view so ROAS by Country and Dashboard Countries disclose the
+        # SAME facts — sources, scope, exact UTC bounds, freshness, coverage,
+        # reconciliation, residual, and whether the residual was accepted.
+        "country_truth": (geo_gate.build_country_truth_disclosure(
+            spend_truth, window_block,
+            revenue_source=canonical_revenue.CANONICAL_SOURCE,
+            revenue_scope=revenue_scope.SCOPE_ALL_SOURCE,
+            revenue_available=core_health.get("revenue_available", True),
+            revenue_reason=core_health.get("revenue_unavailable_reason"),
+            revenue_violation_codes=core_health.get("revenue_violation_codes"),
+            as_of=core_health.get("revenue_as_of"),
+        ) if view == "country" else None),
         "summary": summary,
         # PR-ADS-152: canonical SQL-scope reconciliation metadata (§7). The mart's
         # ``summary.sqls`` is the campaign-attributable subset, not every Google
@@ -529,7 +571,14 @@ def _difference_reasons(page_key: str, spend_truth: dict, *, status: str) -> lis
     if status == "pass":
         return []
     reasons: list = []
-    if page_key == "roas_by_country" and spend_truth["country_spend_status"] != "verified":
+    # PR-ADS-153F: the audit uses THE shared gate. It previously demanded
+    # `== "verified"`, a stricter bar than every page it audits, so a window that
+    # Dashboard Countries and the mart both accepted as
+    # `reconciled_with_residual` was still reported here as differing "because
+    # of geo reconciliation" — an explanation for a difference that the accepted
+    # state does not cause.
+    if page_key == "roas_by_country" and not geo_gate.country_geo_ready(
+            spend_truth["country_spend_status"]):
         reasons.append("different_geo_reconciliation")
     if page_key == "revenue_by_source":
         # PR-ADS-140: Revenue by Source now reads the SAME canonical campaign-daily

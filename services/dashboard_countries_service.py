@@ -21,7 +21,7 @@ countries. It composes canonical read-only contracts:
   - fetch_revenue_deals                           -> the closed-won deal ledger
       (per-deal null-safe amounts) for drawer proof, null-amount detection, and
       to preserve closed-won revenue that maps to NO country under an explicit
-      "Unattributed / No Country" residual — never forced onto a country.
+      "Unknown / Unattributed country" residual — never forced onto a country.
 
 Truth rules (unchanged, never loosened):
   - Google Ads API = spend truth (native GBP). HubSpot closed-won = revenue truth
@@ -50,7 +50,9 @@ from analysis.business_windows import resolve_window
 from analysis import revenue_scope
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
-from services.country_codes import get_country_code
+from analysis import country_identity
+from analysis.country_identity import get_country_code
+from services import google_ads_geo_sync_service as geo_gate
 from services.revenue_decision_mart import build_revenue_decision_mart
 
 # Reuse the Overview tab's pure window/delta helpers (PR-ADS-134/135/136/137).
@@ -74,9 +76,11 @@ STATUS_FX_UNAVAILABLE = "FX unavailable"
 STATUS_GEO_REVIEW = "Geo attribution needs review"
 STATUS_NO_SPEND = "No spend in window"
 
-# The residual is NOT a country. This label is the canonical mart label so the
-# dashboard, the mart, and ROAS-by-Country never disagree on what it is called.
-RESIDUAL_LABEL = "Unattributed / No Country"
+# The residual is NOT a country. PR-ADS-153F: the label now comes from the ONE
+# country identity contract, so the dashboard, the mart, ROAS by Country and the
+# drilldown cannot disagree about what the residual is called — the previous
+# copy of this string here was a second place the name could drift.
+RESIDUAL_LABEL = country_identity.RESIDUAL_LABEL
 
 
 # ── Region mapping (presentation grouping only) ──────────────────────────────
@@ -150,20 +154,22 @@ def _norm(label) -> str:
 
 
 def _country_key(country_name, country_code) -> str | None:
-    """Canonical join key for a country (ISO code first, else normalised name).
+    """Canonical join key for a country, via the ONE shared identity contract.
 
-    Returns None for a country that resolves to nothing (blank / unknown /
-    unattributed) — that revenue is preserved in the residual bucket, never
-    forced onto a real country.
+    PR-ADS-153F: this used to be ISO-code-first with a ``name:<normalized>``
+    fallback, while ROAS by Country keyed on a bare lowercased string and the
+    drilldown used a third rule. Three key spaces meant the same window could
+    produce different country rows on pages that claim to describe the same
+    thing, so the rule now lives in ``analysis.country_identity`` and every
+    consumer calls it.
+
+    Returns None for geography that is not an identified country, which this
+    page's callers already treat as "goes to the residual bucket, never forced
+    onto a real country". The residual key itself is
+    ``analysis.country_identity.RESIDUAL_KEY``.
     """
-    code = (country_code or "").strip().upper()
-    if code:
-        return f"code:{code}"
-    norm = _norm(country_name)
-    if norm and norm not in ("unknown", "none", "n/a", "unattributed",
-                             "unattributed / no country"):
-        return f"name:{norm}"
-    return None
+    identity = country_identity.resolve(name=country_name, code=country_code)
+    return identity.key if identity.is_country else None
 
 
 def _roas(won, usd_spend):
@@ -200,26 +206,36 @@ def _merge_spend(existing: dict | None, entry: dict) -> dict:
 
 
 def _geo_spend_by_country(geo_result: dict) -> dict:
-    """Map canonical Google Ads geo spend rows by ISO country_code AND name.
+    """Map canonical Google Ads geo spend rows by CANONICAL country key.
 
     Each entry carries native (GBP) spend, USD spend (None on any FX gap for that
     country), and FX completeness — the only per-country native/USD split.
+
+    PR-ADS-153F: one map keyed on ``analysis.country_identity.country_key``,
+    replacing the previous by_code AND by_name pair. Two maps meant a caller had
+    to decide which to try first, and a row present in one but not the other
+    produced a different answer depending on that order — a second country join
+    rule hiding inside a lookup helper.
+
+    Geo spend whose country cannot be identified is kept under
+    ``residual``: it is real Google Ads spend and must stay in the account
+    total, but it is not evidence about any particular market.
     """
-    by_code: dict = {}
-    by_name: dict = {}
+    by_key: dict = {}
+    residual: dict | None = None
     for r in (geo_result.get("rows") or []):
         entry = {
             "native": r.get("spend"),
             "usd": r.get("spend_usd"),
             "fx_complete": bool(r.get("fx_complete")),
         }
-        code = (r.get("country_code") or "").strip().upper()
-        if code:
-            by_code[code] = _merge_spend(by_code.get(code), entry)
-        name = _norm(r.get("country_name"))
-        if name:
-            by_name[name] = _merge_spend(by_name.get(name), entry)
-    return {"by_code": by_code, "by_name": by_name}
+        identity = country_identity.resolve(name=r.get("country_name"),
+                                            code=r.get("country_code"))
+        if identity.is_country:
+            by_key[identity.key] = _merge_spend(by_key.get(identity.key), entry)
+        else:
+            residual = _merge_spend(residual, entry)
+    return {"by_key": by_key, "residual": residual}
 
 
 # ── Closed-won deal proof (grouped by country; residual preserved) ────────────
@@ -340,9 +356,11 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
     for m in mart_real_rows or []:
         country_name = m.get("country") or "Unknown"
         country_code = m.get("country_code")
-        code_key = (country_code or "").strip().upper()
-        spend = (geo_maps["by_code"].get(code_key)
-                 or geo_maps["by_name"].get(_norm(country_name)))
+        # PR-ADS-153F: ONE lookup on the canonical key. The mart row and the geo
+        # row now resolve through the same contract, so a country cannot be
+        # matched by name on one page and by code on another.
+        key = _country_key(country_name, country_code)
+        spend = geo_maps["by_key"].get(key) if key else None
         if spend is not None:
             native_spend = spend.get("native")
             usd_spend = spend.get("usd")
@@ -362,7 +380,6 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
             usd_spend = None
             fx_complete = False
 
-        key = _country_key(country_name, country_code)
         amount_unknown = key is not None and key in unknown_amount_keys
         if not revenue_connected:
             # Customers AND revenue come from the revenue integration → unknown.
@@ -386,10 +403,15 @@ def _build_country_rows(mart_real_rows: list, geo_maps: dict, geo_available: boo
             sqls=m.get("sqls"), customers=customers, won_revenue=won,
             attribution_status=attribution_status)
 
+        # PR-ADS-153F: the row publishes the canonical key and the canonical code
+        # resolved from it, so an API consumer joins on identity rather than on a
+        # display label. `country_name` stays the presentation label.
+        identity = country_identity.resolve(name=country_name, code=country_code)
         rows.append({
-            "country_code": country_code,
-            "country_name": country_name,
-            "region": _region_for_code(country_code),
+            "country_key": key,
+            "country_code": identity.code if identity.is_country else country_code,
+            "country_name": identity.label if identity.is_country else country_name,
+            "region": _region_for_code(identity.code if identity.is_country else country_code),
             "spend_native": native_spend,
             "native_currency": native_currency,
             "spend_usd": usd_spend,
@@ -433,7 +455,7 @@ def _residual_gap(total, real_rows: list, key: str):
 def _build_residual(summary: dict, real_rows: list, spend_truth: dict,
                     mart_residual_row: dict | None, residual_amount_unknown: bool,
                     revenue_connected: bool) -> dict:
-    """The explicit 'Unattributed / No Country' bucket — the CANONICAL residual.
+    """The explicit 'Unknown / Unattributed country' bucket — the CANONICAL residual.
 
     Residual customers / revenue / SQLs are derived from the canonical Revenue
     Decision Mart (its window TOTAL minus the sum of the real country rows), NOT
@@ -679,7 +701,7 @@ def _build_decision_cards(country_rows: list, residual: dict, kpis: dict,
         })
 
     # Investigate — geo attribution review, or revenue that maps to no country.
-    geo_ok = spend_truth.get("country_spend_status") in ("verified", "reconciled_with_residual")
+    geo_ok = geo_gate.country_geo_ready(spend_truth.get("country_spend_status"))
     residual_rev = residual.get("won_revenue_usd")
     residual_customers = residual.get("customers")
     if not geo_ok:
@@ -773,7 +795,7 @@ def _build_truth_status(spend_truth: dict, readiness: dict,
     # Residual isolation is a first-class truth: it is "ready" whenever the geo
     # spend is unblockable (the residual is captured, never spread); otherwise the
     # residual cannot be cleanly isolated.
-    residual = "ready" if country_spend in ("verified", "reconciled_with_residual") else "partial"
+    residual = "ready" if geo_gate.country_geo_ready(country_spend) else "partial"
 
     return {
         "spend": spend,
@@ -794,7 +816,7 @@ def _build_unavailable(kpis: dict, spend_truth: dict, period_change: dict,
         out.append({"metric": "verified_spend_usd",
                     "reason": "USD spend requires verified FX; native GBP spend is shown instead."})
     if kpis.get("geo_roas") is None:
-        geo_ok = spend_truth.get("country_spend_status") in ("verified", "reconciled_with_residual")
+        geo_ok = geo_gate.country_geo_ready(spend_truth.get("country_spend_status"))
         fx_ok = spend_truth.get("fx_status") == "verified"
         usd_present = kpis.get("verified_spend_usd") is not None
         if not geo_ok:
@@ -904,6 +926,19 @@ def _assemble(window: str, now: datetime | None) -> dict:
         "revenue_violation_codes": canonical.get("violation_codes") or [],
         "as_of": canonical.get("as_of"),
         "legacy_fallback_used": False,
+        # PR-ADS-153F §8: the shared disclosure block — sources, scope, exact UTC
+        # window bounds, freshness, coverage, reconciliation, residual and
+        # whether the residual was accepted. Built by the geo gate so this page
+        # and ROAS by Country disclose the SAME facts in the same shape.
+        "country_truth": geo_gate.build_country_truth_disclosure(
+            spend_truth, window_block,
+            revenue_source=canonical_revenue.CANONICAL_SOURCE,
+            revenue_scope=revenue_scope.SCOPE_ALL_SOURCE,
+            revenue_available=deal_proof_available,
+            revenue_reason=canonical.get("reason"),
+            revenue_violation_codes=canonical.get("violation_codes"),
+            as_of=canonical.get("as_of"),
+        ),
     }
 
 

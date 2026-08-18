@@ -264,14 +264,18 @@ def test_waste_terms_derivable_when_search_terms_fresh():
     statuses = {
         "search_terms": CanonicalFreshnessStatus.FRESH_WITH_DATA,
         "waste_terms": CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE,
-        "ngrams": CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE,
     }
     impacts = compute_page_impact(statuses)
     waste = next(i for i in impacts if i["page"] == "Waste")
-    ngram = next(i for i in impacts if i["page"] == "Ngrams")
     assert waste["status"] == PAGE_STATUS_ACTION_NEEDED
     assert waste["status"] != PAGE_STATUS_BLOCKED
-    assert ngram["status"] == PAGE_STATUS_ACTION_NEEDED
+    # PR-ADS-153F: the N-Gram page's impact now tracks search_terms, its only
+    # real dependency — "ngrams" is not a dataset and has no status of its own.
+    # With search_terms fresh the page is healthy, so it contributes no impact
+    # entry at all; what matters is that it is never reported as blocked by a
+    # dataset that does not exist.
+    ngram = next((i for i in impacts if i["page"] == "Ngrams"), None)
+    assert ngram is None or ngram["status"] != PAGE_STATUS_BLOCKED
 
 
 def test_gclid_attribution_not_blocked_when_only_coverage_not_run():

@@ -292,12 +292,28 @@ def run_monthly_report():
         waste_output = run_waste_detection()
         log.info("Step 3/6 END: Waste detection complete")
 
-        # Write waste terms to database
+        # Write waste terms to database.
+        # PR-ADS-153F: wrapped in a real `(analysis, waste_terms)` sync batch —
+        # see the matching comment in scheduler/weekly.py. The freshness config
+        # for this dataset has always existed; until now nothing stamped the key
+        # it reads, so it could only ever report "never run".
+        waste_batch_id = db_writers.start_sync_batch(
+            source="analysis", dataset="waste_terms", sync_type="monthly",
+            run_id=run_id,
+        )
         try:
             if run_id is not None and waste_output:
                 db_writers.write_waste_terms(run_id, waste_output.get("confirmed_waste_items", []))
+            if waste_batch_id:
+                db_writers.finish_sync_batch(
+                    batch_id=waste_batch_id, status="success",
+                    row_count=len((waste_output or {}).get("confirmed_waste_items", [])))
         except Exception as db_exc:  # noqa: BLE001
             log.error("DB write after Step 3 failed: %s", db_exc)
+            if waste_batch_id:
+                db_writers.finish_sync_batch(
+                    batch_id=waste_batch_id, status="failed",
+                    error_message=str(db_exc)[:1000])
 
     except Exception as e:
         log.error(f"Step 3/6 FAILED: Waste detection error — {e}")
@@ -405,11 +421,26 @@ def run_monthly_report():
                         "GCLID attribution persistence wrote 0 rows for non-empty match output"
                     )
 
+                # PR-ADS-153F: the coverage snapshot gets its OWN sync batch under
+                # the key its freshness config reads, `(gclid, coverage_snapshots)`.
+                # The table and the writer have always existed; nothing ever
+                # stamped that key, so the dataset reported "never run" forever
+                # while snapshots accumulated normally.
+                cov_batch_id = db_writers.start_sync_batch(
+                    source="gclid", dataset="coverage_snapshots",
+                    sync_type="monthly", date_from=window_start,
+                    date_to=window_end, run_id=run_id,
+                )
                 db_writers.write_gclid_coverage_snapshot(
                     run_id=run_id,
                     coverage=coverage,
                     sync_batch_id=gclid_batch_id or None,
                 )
+                if cov_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=cov_batch_id, status="success", row_count=1,
+                        last_source_date=window_end,
+                    )
 
                 if gclid_batch_id:
                     db_writers.finish_sync_batch(
