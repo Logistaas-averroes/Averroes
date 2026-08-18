@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-153E-A2 — Canonical Revenue Cutover Gate Hardening (August 2026)
+**Last updated:** PR-ADS-153E-B — Canonical Revenue Consumer Cutover (August 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -9,7 +9,7 @@
 
 ---
 
-> ### ⚠️ Authoritative status (PR-ADS-153E-A, August 2026)
+> ### ⚠️ Authoritative status (PR-ADS-153E-B, August 2026)
 >
 > This document's phase/status narrative below predates the PR-ADS-153A–D
 > sequence and is retained for its architectural content, not its status claims.
@@ -26,12 +26,21 @@
 >   bootstrap passed it. The audit now requires proven bootstrap coverage plus a
 >   successful incremental on top of it, and
 >   `scripts/backfill_canonical_deal_ledger.py` drives that bootstrap to a
->   proven completion. Still shadow mode; still no consumer switched.
-> * **153E-B: blocked** until the production evidence in
->   `docs/35_CANONICAL_REVENUE_LEDGER.md` §11 passes
->   (`--all-windows` aggregate `ok: true`). Then: revenue consumer cutover and
->   Unit Economics migration.
+>   proven completion.
+> * **153E-A3: merged.** Blank HubSpot monetary fields are normalized by one
+>   shared parser before persistence, so currency resolution and the ledger's
+>   `NUMERIC` columns can never disagree about whether a deal has an amount.
+> * **153E-B: consumer cutover DONE.** The production gate passed
+>   (`--all-windows` aggregate `ok: true`, 0 write failures, 0 association
+>   failures), and every revenue consumer now reads the canonical deal ledger
+>   through ONE shared contract (`services/canonical_revenue_service.py`) at an
+>   explicit attribution scope
+>   (`all_source ≥ google_ads_source ≥ campaign_attributable ≥ gclid_attributable`).
+>   Unit Economics is off local JSON / Windsor and on business windows. Shadow
+>   mode is over — see `docs/35_CANONICAL_REVENUE_LEDGER.md` §14–§23.
 > * **153F and 153G: remain.** Geo synchronization; legacy table/route deletion.
+>   No legacy table is dropped by 153E-B; they remain written and readable for
+>   the observation period.
 > * **Phase 2 / OCT: blocked.** Offline conversion uploads are not started and
 >   are not authorized.
 > * **Six-month read-only governance: ACTIVE.** No writes to Google Ads or
@@ -48,6 +57,9 @@
 | `db/deal_ledger_repository.py` | Canonical deal ledger persistence | **NEW in PR-ADS-153E-A** — idempotent by `deal_id`, monotonic on `hubspot_lastmodified_at`; a failed association lookup never destroys prior evidence. **153E-A2:** sync mode is DECLARED (`bootstrap` / `incremental`), the two write different columns, and only a run that proved end-of-results completes the bootstrap |
 | `services/hubspot_deal_sync_service.py` | Deal ledger orchestration | **NEW in PR-ADS-153E-A** — SOLE writer of `hubspot_deal_ledger`. All stages, watermarked on `hs_lastmodifieddate` with overlap, resumable backfill. Read-only vs HubSpot |
 | `services/revenue_reconciliation_service.py` | Shadow reconciliation + cutover gate | **NEW in PR-ADS-153E-A** — canonical vs `gclid_attribution` vs `deal_source_attribution` at DEAL GRAIN; every difference itemized by deal id + reason. No PII. **153E-A2:** `ok: true` also requires proven bootstrap coverage and a later successful incremental, with stable violation codes |
+| `analysis/revenue_scope.py` | Attribution-scope lattice | **NEW in PR-ADS-153E-B** — `all_source ≥ google_ads_source ≥ campaign_attributable ≥ gclid_attributable`, nested BY CONSTRUCTION so a narrower scope can never exceed the population it subsets. Pure, no I/O |
+| `services/canonical_revenue_service.py` | THE canonical revenue read contract | **NEW in PR-ADS-153E-B** — the ONLY module that reads canonical revenue. Owns the won predicate, the revenue event date, currency safety, business-window bounds, scope filtering, fail-closed readiness and the response metadata. No consumer may read `deal_ledger_repository` directly (CI-enforced) |
+| `services/canonical_unit_economics_service.py` | Unit Economics on canonical sources | **NEW in PR-ADS-153E-B** — canonical Google Ads spend + canonical deal ledger, business windows, declared scope. LTV/CAC and payback are WITHHELD with a reason (recurring revenue is not canonical) rather than computed from the retired local-JSON chain |
 | `scripts/backfill_canonical_deal_ledger.py` | Operator historical bootstrap | **NEW in PR-ADS-153E-A2** — drives the bounded, resumable bootstrap to a completion proven in the DURABLE state. Bounded by `--max-passes`; stops on first failure; `--restart` is opt-in. No HTTP endpoint, no startup trigger, no PII in output |
 | `analysis/crm_lifecycle.py` | Canonical CRM lifecycle taxonomy | **NEW in PR-ADS-153B** — HubSpot Lifecycle Stage is the funnel spine. Funnel events (lead/mql/sql/opportunity/customer) each map to their own `hs_v2_date_entered_*` property. Pure, no I/O |
 | `analysis/mql_status_taxonomy.py` | The ONE `mql_status` mapping | **NEW in PR-ADS-153B** — replaces four divergent copies. Maps every live value incl. previously-unmapped `CLOSED - Bad Contact` / `CLOSED - No Response` / `RESELLER`; distinguishes `no_verdict` from `unmapped`. Operational dimension only — NOT a funnel definition |
@@ -244,3 +256,56 @@ totals at a ledger holding one day of history.
 **Status: shadow mode, unchanged.** 153E-B remains blocked until the production
 procedure in `docs/35_CANONICAL_REVENUE_LEDGER.md` §11 returns aggregate
 `ok: true`. Six-month read-only governance active. Phase 2 / OCT blocked.
+
+
+---
+
+## Follow-up — 2026-08-17 (PR-ADS-153E-B, Canonical Revenue Consumer Cutover)
+
+**Status: shadow mode is over.** Every production revenue consumer now reads the
+canonical deal ledger through one shared contract. No legacy table was dropped,
+no external write path was added, and Phase 2 / OCT remains blocked.
+
+**The defect.** Three revenue lineages each called their output "closed-won
+revenue": `gclid_attribution` (GCLID-bearing deals only, keyed on an attribution
+hash), `deal_source_attribution` (all closed-won deals, no currency contract) and
+a local Windsor/JSON chain (Unit Economics). The same quarter produced different
+customer counts and different revenue on different pages, and nothing in the
+product said which population any number described. In production the size of
+the error is concrete: 124 of 180 won deals have no GCLID, so a dashboard
+sourcing "total revenue" from GCLID evidence was showing about a third of the
+business.
+
+**What changed.**
+
+* `analysis/revenue_scope.py` — the explicit scope lattice. Membership is nested
+  by construction, so the ordering is a property of the code rather than a
+  convention callers are asked to respect.
+* `services/canonical_revenue_service.py` — one read contract. Consumers no
+  longer re-derive won status, deal identity, the revenue event date, the
+  revenue value, currency safety, window bounds or the population.
+* `services/revenue_reconciliation_service.check_sync_coverage` — extracted from
+  `_check_invariants` so the merge audit and the production read path apply ONE
+  implementation of the readiness rule. A page can no longer render revenue from
+  a ledger the gate would have rejected.
+* `db/deal_ledger_repository.fetch_won_deals` / `fetch_won_state_counts` — the
+  single production SQL read (`hs_is_closed_won IS TRUE`, EXCLUSIVE upper bound)
+  plus a separate count of deals whose won state is UNKNOWN.
+* Eleven consumer modules migrated; Unit Economics moved to business windows and
+  off Windsor entirely.
+* Two honest renames: legacy `company` (the associated contact's employer)
+  becomes `deal_name`, and `match_status`/`match_source` become
+  `attribution_scope`.
+* A CI contract guard (`tests/test_pr_ads_153e_b_consumer_cutover.py`) fails the
+  build if a migrated module calls a retired legacy revenue provider or names a
+  legacy revenue table in SQL. The guard is AST-based and is itself tested
+  against a synthetic regression, in both directions.
+
+**Fail-closed.** An unreadable or coverage-unproven ledger yields an explicit
+unavailable response — reason, violation codes, scope, freshness — with counts
+`null` rather than `0`. There is no fallback to any legacy lineage, because each
+holds a different population and a fallback would silently redefine "revenue"
+mid-incident.
+
+Rollback is a code deployment rollback only. Canonical records, sync state,
+reconciliation evidence and legacy comparison history are all preserved.

@@ -22,6 +22,10 @@ from datetime import date, datetime
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_legacy_deal_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -131,6 +135,9 @@ def _patch_revattr(monkeypatch, *, canonical, coverage, revenue_rows, geo_rows=N
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", lambda s, e: spend)
         monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda s, e: leads)
         monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", lambda s, e: revenue)
+        # PR-ADS-153E-B: closed-won revenue is read from the canonical deal
+        # ledger, so the same fixture rows are stubbed there.
+        patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
         monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
         monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
@@ -295,7 +302,8 @@ def test_mapping_review_unmatched_has_no_zero_spend(monkeypatch):
         {"campaign_name": "mexico,chile", "deal_amount_usd": 500.0},  # no GA candidate
     ]}
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
-    monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", lambda s, e: revenue)
+    # PR-ADS-153E-B: the workbench reads label revenue from the canonical ledger.
+    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
     review = idsvc.build_mapping_review("current_quarter", now=_at("2026-06-22"))
     by_label = {r["hubspot_campaign_label"]: r for r in review["rows"]}

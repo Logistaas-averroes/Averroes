@@ -48,7 +48,9 @@ import logging
 from datetime import datetime, timezone
 
 from analysis.business_windows import resolve_window
+from analysis import revenue_scope
 from db import revenue_repository as repo
+from services import canonical_revenue_service as canonical_revenue
 from services.revenue_decision_mart import build_revenue_decision_mart
 
 # Reuse the Overview tab's pure window/delta helpers (PR-ADS-134/135/136).
@@ -126,25 +128,38 @@ def _deal_proof_row(deal: dict, attribution_status: str) -> dict:
     amount = deal.get("deal_amount_usd")
     return {
         "deal_id": deal.get("deal_id"),
-        "company": deal.get("company"),
+        # PR-ADS-153E-B: the canonical ledger stores the deal's own name and no
+        # company field; `company` is honestly Unavailable rather than filled
+        # with a deal name under a Company heading.
+        "deal_name": deal.get("deal_name"),
+        "company": None,
         "company_id": None,
         "main_contact": None,
-        "contact_id": None,
-        "deal": None,
+        "contact_id": deal.get("primary_contact_id"),
+        "deal": deal.get("deal_name"),
         "amount_usd": _round2(amount) if amount is not None else None,
+        "currency_status": deal.get("currency_status"),
         "close_date": deal.get("deal_close_date"),
         "country": deal.get("country"),
         "attribution_status": attribution_status,
+        "attribution_scope": deal.get("attribution_scope"),
     }
 
 
 def _deal_attribution_status(deal: dict, mapped: bool) -> str:
+    """Attribution state for a canonical deal on a campaign row.
+
+    PR-ADS-153E-B: uses the ledger's own ``attribution_status`` — decided once by
+    the shared association resolver — instead of inferring it from a GCLID
+    match_status. A deal whose contacts disagree stays ``ambiguous`` and is never
+    silently promoted to attributed.
+    """
     if not mapped:
         return "unattributed"
-    match = _norm(deal.get("match_status"))
-    if match in ("", "unknown", "unmatched", "none"):
+    status = (deal.get("attribution_status") or "").strip().lower()
+    if status == "ambiguous":
         return "ambiguous"
-    return "attributed"
+    return "attributed" if status == "attributed" else "ambiguous"
 
 
 def _group_deals_by_campaign(deals_rows: list, label_to_canonical: dict) -> tuple[dict, set]:
@@ -648,6 +663,22 @@ def _build_unavailable(kpis: dict, spend_truth: dict, keyword_themes: dict,
     return out
 
 
+def _previous_window_deals(prev_key, prev_now) -> dict:
+    """Canonical won deals for the PREVIOUS window, for the comparison baseline.
+
+    Same contract, same scope, same window resolver as the current period — a
+    delta between two differently-defined populations is not a delta.
+    """
+    base = canonical_revenue.load_won_deals(prev_key, now=prev_now)
+    if not base.get("available"):
+        return {"available": False, "rows": []}
+    return {
+        "available": True,
+        "rows": canonical_revenue.canonical_deal_rows(
+            base, revenue_scope.SCOPE_ALL_SOURCE),
+    }
+
+
 def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     """Previous-period deltas via a shifted canonical mart build. Never a fake 0%."""
     ref = _previous_window_reference(window, now)
@@ -658,8 +689,7 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     try:
         prev_mart = build_revenue_decision_mart(view="campaign", window=prev_key, now=prev_now)
         pw = prev_mart.get("window") or {}
-        prev_deals = repo.fetch_revenue_deals(
-            _parse_iso_date(pw.get("start_date")), _parse_iso_date(pw.get("end_date")))
+        prev_deals = _previous_window_deals(prev_key, prev_now)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Dashboard campaigns previous-period build failed: %s", exc)
         return {"available": False, "label": label, "note": note, "metrics": {},
@@ -670,8 +700,8 @@ def _build_period_change(window: str, now: datetime, kpis: dict) -> dict:
     # The mart summary counts a null-amount deal as $0; if the previous window had
     # ANY unknown deal amount, its revenue total is not a trustworthy baseline —
     # withhold it (No comparison) rather than measuring against a lowered $0.
-    prev_amount_unknown = any(d.get("deal_amount_usd") is None
-                              for d in (prev_deals.get("rows") or []))
+    prev_amount_unknown = (not prev_deals.get("available")) or any(
+        d.get("deal_amount_usd") is None for d in (prev_deals.get("rows") or []))
     prev_rev = ps.get("won_revenue_usd") if (connected and not prev_amount_unknown) else None
     prev_cust = ps.get("customers") if connected else None
     metrics = {
@@ -722,10 +752,19 @@ def build_dashboard_campaigns(window: str = "current_quarter",
     # The closed-won deal ledger backs drawer PROOF, null-amount detection, and the
     # Unattributed bucket. If it is unavailable we must NOT imply a campaign has no
     # deals — the mart revenue can stay canonical, but client/deal proof is withheld.
-    deals = repo.fetch_revenue_deals(start, end)
-    deal_proof_available = bool(deals.get("available"))
+    # PR-ADS-153E-B: proof deals come from the canonical ledger at `all_source`
+    # scope. Deliberately the WIDEST scope on a Google Ads page: a won deal that
+    # maps to no canonical campaign is not dropped to make the campaign rows look
+    # complete — it lands in the explicit Unattributed bucket, which is both the
+    # coverage gap and the operator's mapping worklist. The campaign ROWS remain
+    # campaign-scoped; only the residual is wider.
+    canonical = canonical_revenue.load_won_deals(window, now=now)
+    deal_proof_available = bool(canonical.get("available"))
+    deal_rows = (canonical_revenue.canonical_deal_rows(
+        canonical, revenue_scope.SCOPE_ALL_SOURCE)
+        if deal_proof_available else [])
     deals_by_key, unknown_amount_keys = _group_deals_by_campaign(
-        deals.get("rows") or [], label_to_canonical)
+        deal_rows, label_to_canonical)
 
     campaign_rows = _build_campaign_rows(mart_rows, spend_maps, deals_by_key,
                                          unknown_amount_keys, native_currency)
@@ -757,6 +796,17 @@ def build_dashboard_campaigns(window: str = "current_quarter",
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "read_only": True,
         "source_truth": "revenue_decision_mart_campaign_view",
+        # PR-ADS-153E-B: spend/campaign identity remain Google Ads; the closed-won
+        # deals behind every campaign row are the canonical ledger.
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "revenue_available": deal_proof_available,
+        "revenue_unavailable_reason": (None if deal_proof_available
+                                       else canonical.get("reason")),
+        "revenue_violation_codes": canonical.get("violation_codes") or [],
+        "as_of": canonical.get("as_of"),
+        "attribution_coverage": canonical_revenue.get_scope_ladder(base=canonical),
+        "legacy_fallback_used": False,
         "google_ads_conversion_value_used": False,
         # Closed-won deal PROOF availability (separate from mart revenue truth):
         # false when the deal ledger could not be read, so drawers must not claim

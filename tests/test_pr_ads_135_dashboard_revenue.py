@@ -35,6 +35,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_legacy_deal_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -182,8 +186,9 @@ def _patch_durable(monkeypatch, *, won_rows=None, deal_rows=None, canonical=None
     monkeypatch.setattr(repo, "fetch_campaign_identity",
                         lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)
-    monkeypatch.setattr(repo, "fetch_revenue_deals",
-                        lambda s, e: {"available": True, "rows": list(deals)})
+    # PR-ADS-153E-B: the closed-won population is the canonical deal ledger, so
+    # the same fixture deals are stubbed there instead of on the legacy read.
+    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(deals))
     monkeypatch.setattr(repo, "fetch_source_leads",
                         lambda s, e: {"available": True, "rows": list(SOURCE_LEAD_ROWS)})
     monkeypatch.setattr(repo, "fetch_source_revenue",
@@ -280,7 +285,12 @@ def test_revenue_from_hubspot_closed_won_only(monkeypatch):
     assert k["customers"] == 4
     assert k["largest_deal_usd"] == 18000.0
     assert out["google_ads_conversion_value_used"] is False
-    assert out["source_truth"] == "revenue_decision_mart"
+    # PR-ADS-153E-B: closed-won revenue is the canonical deal ledger, read at
+    # `all_source` scope through the shared contract.
+    assert out["source_truth"] == "hubspot_deal_ledger"
+    assert out["revenue_source"] == "hubspot_deal_ledger"
+    assert out["revenue_scope"] == "all_source"
+    assert out["legacy_fallback_used"] is False
     assert out["read_only"] is True
     assert "conversion value" in SERVICE.lower()
     assert "google_ads_conversion_value_used" in SERVICE
@@ -566,9 +576,13 @@ def test_top_deals_amount_null_stays_null_not_zero(monkeypatch):
 def test_top_deals_contact_fields_are_unavailable_not_fabricated(monkeypatch):
     out = _revenue(monkeypatch)
     d = out["top_deals"][0]
-    # Not durably stored on the deal ledger -> null -> UI shows Unavailable.
-    for field in ("company_id", "main_contact", "contact_id", "deal", "source"):
+    # Not durably stored on the canonical ledger -> null -> UI shows Unavailable.
+    # PR-ADS-153E-B moved `deal` (the deal's own name) into the STORED set and
+    # `company` (the associated contact's employer) out of it: the ledger is
+    # keyed on the deal and holds no company record at all.
+    for field in ("company", "company_id", "main_contact"):
         assert d[field] is None, f"{field} must be null (Unavailable), not fabricated"
+    assert d["deal_name"], "the canonical ledger stores the deal's own name"
     # Real fields are present.
     assert d["deal_id"] and d["amount_usd"] is not None and d["close_date"]
     reasons = {u["metric"] for u in out["unavailable"]}

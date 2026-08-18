@@ -145,8 +145,16 @@ def test_snapshot_service_rejects_invalid_window():
             assert "Invalid window" in str(exc)
 
 
-def test_snapshot_and_live_endpoint_use_shared_unit_economics_helper():
-    """Snapshot service and live endpoint both use shared helper."""
+def test_live_unit_economics_is_canonical_and_snapshots_stay_legacy():
+    """PR-ADS-153E-B split these two deliberately.
+
+    The LIVE Unit Economics endpoint was migrated to the canonical deal ledger
+    and canonical Google Ads spend. The ROAS SNAPSHOT reports are a deprecated
+    historical lineage (local JSON + Windsor) retired in PR-ADS-153G, so they
+    keep their own aggregation helper. Sharing a helper between them is no
+    longer the goal — the two describe different populations, and pretending
+    otherwise is exactly the defect 153E removed.
+    """
     import services.roas_snapshot_service as snapshot_service
     import inspect
 
@@ -159,7 +167,10 @@ def test_snapshot_and_live_endpoint_use_shared_unit_economics_helper():
         server_source = f.read()
 
     snapshot_source = inspect.getsource(snapshot_service)
-    assert "compute_unit_economics_summary" in server_source
+    # The live endpoint reads the canonical contract, not the legacy helper.
+    assert "canonical_unit_economics_service" in server_source
+    assert "build_unit_economics" in server_source
+    # The snapshot lineage is untouched and still self-contained.
     assert "compute_unit_economics_summary" in snapshot_source
 
 

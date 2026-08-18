@@ -3181,31 +3181,90 @@ All route paths follow the repo convention and are mounted under `/api/...`.
 
 **Auth:** Auth (any authenticated session)
 
+**PR-ADS-153E-B — canonical sources only.** Advertising cost is the canonical
+Google Ads spend truth; customers and revenue are the canonical HubSpot deal
+ledger, read through `services/canonical_revenue_service.py`. The retired
+local-JSON / Windsor chain is no longer consulted and there is no fallback to
+it: an unreadable or coverage-unproven ledger returns explicit unavailable
+metrics with a reason.
+
+**Windows are BUSINESS windows.** The old rolling day windows cut a B2B sales
+cycle in half and gave this page a period no other page shared.
+
 **Query params:**
-| Param  | Type   | Default | Description |
-|--------|--------|---------|-------------|
-| window | string | `60d`   | Time window. Valid: `7d`, `14d`, `30d`, `60d`, `90d`, `365d` |
+| Param  | Type   | Default            | Description |
+|--------|--------|--------------------|-------------|
+| window | string | `current_quarter`  | Business window. Valid: `current_quarter`, `last_quarter`, `last_6_months`, `ytd`, `all_time` |
+| scope  | string | `campaign_attributable` | Attribution scope for CAC / ROAS. Valid: `all_source`, `google_ads_source`, `campaign_attributable`, `gclid_attributable` |
 
 **Validation (400):**
-- Invalid `window` values return HTTP 400 with:
-  - `"detail": "Invalid window. Valid values: 7d, 14d, 30d, 60d, 90d, 365d"`
+- Invalid `window` → `"detail": "Invalid window. Unit economics uses business windows: current_quarter, last_quarter, last_6_months, ytd, all_time"`
+- Invalid `scope` → `"detail": "Invalid scope. Valid values: all_source, google_ads_source, campaign_attributable, gclid_attributable"`
+
+**Two labelled populations.** `business` is `all_source` — the company.
+`advertising` is the selected scope, and is the only one CAC / ROAS may be
+computed on: dividing all-source revenue by Google Ads spend would credit
+advertising with revenue it did not produce.
+
+**Withheld, never estimated.** `ltv_to_cac`, `payback_months` and
+`avg_deal_mrr` need per-deal recurring revenue, which is not on the canonical
+ledger. They are returned as `null` with a reason in `unavailable[]` rather than
+computed from the source this PR removed.
 
 **Response (200):**
 ```json
 {
-  "window": "60d",
-  "generated_at": "2026-05-27T10:00:00+00:00",
-  "overall": {
-    "ltv_to_cac": 1.4,
-    "payback_months": 26.0,
-    "avg_deal_acv": 4977,
-    "avg_deal_mrr": 184,
-    "monthly_churn_rate_used": 0.03,
-    "verdict": "HOLD"
+  "window": {"key": "current_quarter", "label": "Current Quarter",
+             "start_date": "2026-04-01", "end_date": "2026-06-22"},
+  "generated_at": "2026-08-17T10:00:00+00:00",
+  "read_only": true,
+  "source": "hubspot_deal_ledger",
+  "spend_source": "canonical_google_ads_api",
+  "revenue_available": true,
+  "as_of": "2026-08-17T03:00:00+00:00",
+  "scope": "campaign_attributable",
+  "business_total_scope": "all_source",
+  "business": {
+    "scope": "all_source",
+    "won_deals": 42,
+    "revenue_usd": 512000.0,
+    "revenue_deals": 40,
+    "currency_unavailable_deals": 2,
+    "currency_complete": false,
+    "ambiguous_associations": 1,
+    "failed_associations": 0,
+    "avg_deal_value_usd": 12800.0
   },
-  "by_campaign": []
+  "advertising": {
+    "scope": "campaign_attributable",
+    "customers": 11,
+    "won_deals": 11,
+    "revenue_usd": 96000.0,
+    "spend_usd": 13000.0,
+    "spend_state": "verified",
+    "cac": 1181.82,
+    "roas": 7.38,
+    "avg_deal_value_usd": 8727.27,
+    "ltv_to_cac": null,
+    "payback_months": null,
+    "avg_deal_mrr": null
+  },
+  "attribution_coverage": {"scopes": {"all_source": {}, "google_ads_source": {},
+                                      "campaign_attributable": {}, "gclid_attributable": {}},
+                           "lattice_violations": []},
+  "by_campaign": [],
+  "unavailable": [{"metric": "ltv_to_cac", "reason": "Recurring revenue (MRR/ARR) is not part of the canonical deal ledger..."}],
+  "legacy_fallback_used": false,
+  "windsor_used": false,
+  "google_ads_conversion_value_used": false
 }
 ```
+
+**Unavailable (200, fail-closed):** when the canonical ledger is unreadable or
+its coverage is unproven, `revenue_available` is `false`,
+`revenue_unavailable_reason` names the cause, `revenue_violation_codes` carries
+the machine-readable gate codes, and `business` / `advertising` are `null`. No
+legacy revenue source is consulted.
 
 ---
 

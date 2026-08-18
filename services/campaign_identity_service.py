@@ -297,6 +297,27 @@ def _safe_known_campaigns(customer_id) -> dict:
         return {"campaigns": []}
 
 
+def _canonical_label_revenue(window, now) -> dict:
+    """Canonical Google-Ads-scoped won deals, in the row shape this module reads.
+
+    Returns ``{available, rows}``. Unavailable is propagated rather than replaced
+    with an empty row set: an empty result would tell an admin that every label
+    earned nothing, which is a much stronger claim than "we could not read the
+    ledger".
+    """
+    from analysis import revenue_scope  # noqa: PLC0415
+    from services import canonical_revenue_service as canonical_revenue  # noqa: PLC0415
+
+    base = canonical_revenue.load_won_deals(window, now=now)
+    if not base.get("available"):
+        return {"available": False, "rows": [], "reason": base.get("reason")}
+    return {
+        "available": True,
+        "rows": canonical_revenue.canonical_deal_rows(
+            base, revenue_scope.SCOPE_GOOGLE_ADS_SOURCE),
+    }
+
+
 def build_mapping_review(window: str, now: datetime | None = None) -> dict:
     """Admin mapping-workbench payload (PR-ADS-119 / PR-ADS-120b).
 
@@ -311,7 +332,12 @@ def build_mapping_review(window: str, now: datetime | None = None) -> dict:
     end = _date(resolved["end_date"])
 
     canonical = repo.fetch_canonical_campaign_spend(start, end)
-    revenue = repo.fetch_won_revenue(start, end)
+    # PR-ADS-153E-B: the revenue attached to each external campaign label comes
+    # from the canonical deal ledger at `google_ads_source` scope — wide enough to
+    # include a Google Ads deal whose label has not been mapped yet (mapping it is
+    # the whole point of this workbench), and narrow enough that non-advertising
+    # revenue never appears beside a Google Ads campaign candidate.
+    revenue = _canonical_label_revenue(window, now)
     customer_id = canonical.get("customer_id")
     identity = repo.fetch_campaign_identity(customer_id)
     leads = _safe_lead_quality(start, end)
@@ -339,7 +365,14 @@ def build_mapping_review(window: str, now: datetime | None = None) -> dict:
         if not label:
             continue
         entry = rev_by_label.setdefault(label, {"revenue": 0.0, "deals": set()})
-        entry["revenue"] += float(r.get("deal_amount_usd") or 0.0)
+        # A deal whose currency was never proven contributes no money but is
+        # still a customer; `or 0.0` used to bill it as $0 against the label.
+        amount = r.get("deal_amount_usd")
+        if amount is None:
+            entry["revenue_unavailable_deals"] = entry.get(
+                "revenue_unavailable_deals", 0) + 1
+        else:
+            entry["revenue"] += float(amount)
         deal_id = r.get("deal_id")
         if deal_id is not None:
             entry["deals"].add(deal_id)

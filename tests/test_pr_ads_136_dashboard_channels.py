@@ -39,6 +39,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_source_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -171,13 +175,24 @@ SOURCE_REV_DAILY = [
 
 
 def _patch_durable(monkeypatch, *, canonical=None, revenue_connected=True,
-                   source_rev=None, source_rev_daily=None, lead_daily=None):
+                   source_rev=None, source_rev_daily=None, lead_daily=None,
+                   ledger_available=True):
     import db.revenue_repository as repo
 
     canon = canonical if canonical is not None else CANONICAL
     src_rev = source_rev if source_rev is not None else SOURCE_REV_ROWS
     src_rev_daily = source_rev_daily if source_rev_daily is not None else SOURCE_REV_DAILY
     ld = lead_daily if lead_daily is not None else SOURCE_LEAD_DAILY
+
+    # PR-ADS-153E-B: the channel mix and the channel TREND now read ONE canonical
+    # row set instead of two legacy tables that could disagree. A test overriding
+    # either legacy shape therefore drives the same ledger; when a test overrides
+    # the daily shape (which carries close dates) that one wins, because the
+    # trend is the part that needs them.
+    ledger_source = source_rev_daily if source_rev_daily is not None else (
+        src_rev if source_rev is not None else SOURCE_REV_DAILY)
+    patch_canonical_ledger(monkeypatch, from_source_rows(ledger_source),
+                           available=ledger_available)
 
     monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "Europe/London")
     monkeypatch.setattr(repo, "fetch_campaign_country_spend",
@@ -518,29 +533,24 @@ def test_roas_available_iff_roas_is_a_real_number(monkeypatch):
         assert row["roas"] is None and row["roas_available"] is False
 
 
-def test_unverifiable_raw_revenue_fails_closed(monkeypatch):
-    # The second (unknown-amount detection) fetch_source_revenue call failing must
-    # not let a possibly-understated total render as complete — fail closed.
-    import db.revenue_repository as repo
-    _patch_durable(monkeypatch)
-    state = {"n": 0}
-
-    def flaky(s, e):
-        state["n"] += 1
-        # 1st call (inside build_revenue_by_source) succeeds; 2nd (detection) fails.
-        return ({"available": True, "rows": list(SOURCE_REV_ROWS)} if state["n"] == 1
-                else {"available": False, "rows": []})
-
-    monkeypatch.setattr(repo, "fetch_source_revenue", flaky)
-    from services.dashboard_channels_service import build_dashboard_channels
-    out = build_dashboard_channels(WINDOW, now=NOW)
+def test_unreadable_canonical_ledger_fails_closed(monkeypatch):
+    # PR-ADS-153E-B: an unreadable canonical ledger must not fall back to
+    # `deal_source_attribution`. That table holds a different population, so a
+    # fallback would silently redefine the page mid-incident. Every revenue and
+    # customer figure goes Unavailable instead — and nothing renders $0.
+    out = _channels(monkeypatch, ledger_available=False)
     for c in out["channel_mix"]:
-        assert c["won_revenue_usd"] is None, "revenue must be Unavailable when amounts unverifiable"
+        assert c["won_revenue_usd"] is None, "revenue must be Unavailable, never $0"
         assert c["roas"] is None
     for p in out["platform_matrix"]:
         assert p["won_revenue_usd"] is None and p["roas"] is None
-    # Counts still survive (they don't depend on the amount).
-    assert any((c["customers"] or 0) > 0 for c in out["channel_mix"])
+    assert out["kpis"]["closed_won_revenue_usd"] is None
+    # The page states WHY, and states that no legacy ledger was consulted.
+    from services.source_attribution_service import build_revenue_by_source
+    src = build_revenue_by_source(WINDOW, now=NOW)
+    assert src["revenue_available"] is False
+    assert src["revenue_unavailable_reason"]
+    assert src["legacy_fallback_used"] is False
 
 
 def test_group_disagree_deal_not_force_credited_to_google(monkeypatch):

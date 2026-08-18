@@ -28,6 +28,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_legacy_deal_rows, patch_canonical_ledger,
+)
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JS = open(os.path.join(ROOT, "static", "app.js"), encoding="utf-8").read()
 HTML = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
@@ -62,7 +66,8 @@ def _load_revattr():
 
 def _patch_review(monkeypatch, *, canonical, revenue, identity=None, known=None, leads=None):
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
-    monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", lambda s, e: revenue)
+    # PR-ADS-153E-B: label revenue comes from the canonical deal ledger.
+    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity",
                         lambda cid=None: identity or {"available": True, "mappings": []})
     monkeypatch.setattr("db.revenue_repository.fetch_all_known_campaigns",
@@ -184,7 +189,7 @@ def test_candidate_pool_scoped_to_customer(monkeypatch):
         return {"available": True, "campaigns": []}
 
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
-    monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", lambda s, e: revenue)
+    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda s, e: {"available": True, "rows": []})
     monkeypatch.setattr("db.revenue_repository.fetch_all_known_campaigns", _known)
@@ -334,7 +339,7 @@ def _patch_revattr(monkeypatch, *, canonical, coverage, revenue_rows, identity=N
     revenue = {"available": True, "rows": revenue_rows, "coverage_start": None, "coverage_end": None}
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", lambda s, e: spend)
     monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda s, e: leads)
-    monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", lambda s, e: revenue)
+    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
     monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
     monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)

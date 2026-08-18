@@ -16,6 +16,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    canonical_ledger_patch, from_legacy_deal_rows,
+)
+
 import db.revenue_repository as repo
 import db.writers as writers
 import services.revenue_attribution_service as svc
@@ -162,7 +166,7 @@ def _rev(rows=None):
 def _build(window="current_quarter", leads=None, spend=None, rev=None):
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend or _spend()), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=leads or _leads()), \
-         patch("db.revenue_repository.fetch_won_revenue", return_value=rev or _rev()), \
+         canonical_ledger_patch(from_legacy_deal_rows((rev or _rev()).get("rows") or [])), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         return build_revenue_attribution(window, now=NOW)
 
@@ -203,7 +207,7 @@ def test_windows_differ_when_event_dates_differ():
 
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=_spend()), \
          patch("db.revenue_repository.fetch_lead_quality", side_effect=fake_leads), \
-         patch("db.revenue_repository.fetch_won_revenue", return_value=_rev()), \
+         canonical_ledger_patch(from_legacy_deal_rows(_rev().get("rows") or [])), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         cq = build_revenue_attribution("current_quarter", now=NOW)["summary"]["leads"]
         at = build_revenue_attribution("all_time", now=NOW)["summary"]["leads"]
@@ -220,7 +224,7 @@ def test_service_passes_event_window_dates_to_repo():
 
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=_spend()), \
          patch("db.revenue_repository.fetch_lead_quality", side_effect=fake_leads), \
-         patch("db.revenue_repository.fetch_won_revenue", return_value=_rev()), \
+         canonical_ledger_patch(from_legacy_deal_rows(_rev().get("rows") or [])), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         build_revenue_attribution("current_quarter", now=NOW)
     assert captured["start"] == date(2026, 4, 1)

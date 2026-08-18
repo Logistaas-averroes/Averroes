@@ -19,7 +19,12 @@ from unittest.mock import patch
 
 import pytest
 
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    canonical_ledger_patch, from_legacy_deal_rows,
+)
 
 import services.revenue_attribution_service as svc
 from services.revenue_attribution_service import (
@@ -56,7 +61,10 @@ def _lead_rows():
 
 def _revenue_rows():
     return [
-        {"campaign_name": "gulf", "country": "Saudi Arabia", "deal_id": "d1", "deal_amount_usd": 10000.0, "match_status": "matched"},
+        # PR-ADS-153E-B: "matched" meant a GCLID matched a click, so the canonical
+        # equivalent is a deal that actually carries a GCLID — which is what puts
+        # it in the narrowest `gclid_attributable` scope.
+        {"campaign_name": "gulf", "country": "Saudi Arabia", "deal_id": "d1", "deal_amount_usd": 10000.0, "match_status": "matched", "gclid": "gclid-d1"},
         {"campaign_name": "gulf", "country": "Saudi Arabia", "deal_id": "d2", "deal_amount_usd": 5000.0, "match_status": "url_fallback"},
         {"campaign_name": "europa", "country": "France", "deal_id": "d3", "deal_amount_usd": 2000.0, "match_status": "unmatched"},
     ]
@@ -110,7 +118,7 @@ def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
     geo_total_obj, geo_country_obj = _geo_from_spend(spend_rows)
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend_obj), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=leads_obj), \
-         patch("db.revenue_repository.fetch_won_revenue", return_value=revenue_obj), \
+         canonical_ledger_patch(from_legacy_deal_rows(revenue_obj.get("rows") or [])), \
          patch("db.revenue_repository.fetch_canonical_campaign_spend", return_value=canonical_obj), \
          patch("db.revenue_repository.fetch_spend_coverage", return_value=coverage_obj), \
          patch("db.revenue_repository.fetch_geo_daily_spend_total", return_value=geo_total_obj), \
@@ -154,7 +162,7 @@ def _db_unavailable():
     return (
         patch("db.revenue_repository.fetch_campaign_country_spend", return_value=dict(unavail, table="geo")),
         patch("db.revenue_repository.fetch_lead_quality", return_value=dict(unavail, table="leads")),
-        patch("db.revenue_repository.fetch_won_revenue", return_value=dict(unavail, table="gclid_attribution")),
+        canonical_ledger_patch([], available=False),
         patch("db.revenue_repository.fetch_sync_state", return_value={"available": False, "datasets": {}}),
     )
 
@@ -174,8 +182,9 @@ def test_db_path_used_when_database_available():
     assert result["source_health"]["mode"] == "database"
     assert result["campaign_spend_source_status"] == "db"
     assert result["spend_source"] == "google_ads_api"
-    assert result["revenue_source"] == "hubspot_closed_won"
-    assert set(result["db_tables_used"]) == {"geo", "leads", "gclid_attribution"}
+    # PR-ADS-153E-B: revenue provenance names the canonical ledger.
+    assert result["revenue_source"] == "hubspot_deal_ledger"
+    assert set(result["db_tables_used"]) == {"geo", "leads", "hubspot_deal_ledger"}
 
 
 def test_local_json_missing_does_not_mean_empty_when_db_has_data():
@@ -195,7 +204,7 @@ def test_db_campaign_rows():
     assert gulf["customers"] == 2
     assert gulf["won_revenue"] == 15000
     assert gulf["roas"] == 15.0
-    assert gulf["confidence"] == "high"   # matched + url_fallback -> tier_1 dominant
+    assert gulf["confidence"] == "high"   # gclid + campaign scope -> tier_1 dominant
     assert gulf["verdict"] == "winner"
 
 
@@ -232,8 +241,8 @@ def test_source_health_present_with_all_keys():
 
 def test_attribution_status_is_durable_gclid_when_revenue_present():
     result = _build_db()
-    assert result["attribution_source_status"] == "gclid_attribution_db"
-    assert result["source_health"]["attribution_status"] == "gclid_attribution_db"
+    assert result["attribution_source_status"] == "hubspot_deal_ledger"
+    assert result["source_health"]["attribution_status"] == "hubspot_deal_ledger"
 
 
 # ── source-missing vs no-revenue ─────────────────────────────────────────────
@@ -289,7 +298,7 @@ def test_business_window_passed_to_db_query():
 
     with patch("db.revenue_repository.fetch_campaign_country_spend", side_effect=fake_spend), \
          patch("db.revenue_repository.fetch_lead_quality", return_value={"available": True, "rows": []}), \
-         patch("db.revenue_repository.fetch_won_revenue", return_value={"available": True, "rows": [], "coverage_start": None, "coverage_end": None}), \
+         canonical_ledger_patch([]), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         build_revenue_attribution("current_quarter", now=NOW)
     assert captured["start"] == date(2026, 4, 1)   # Q2 start
@@ -305,7 +314,7 @@ def test_all_time_passes_none_start_to_db():
 
     with patch("db.revenue_repository.fetch_campaign_country_spend", side_effect=fake_spend), \
          patch("db.revenue_repository.fetch_lead_quality", return_value={"available": True, "rows": []}), \
-         patch("db.revenue_repository.fetch_won_revenue", return_value={"available": True, "rows": [], "coverage_start": None, "coverage_end": None}), \
+         canonical_ledger_patch([]), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         build_revenue_attribution("all_time", now=NOW)
     assert captured["start"] is None
@@ -370,11 +379,16 @@ def test_no_infinity_or_nan_anywhere():
                 assert not math.isnan(value)
 
 
-def test_match_status_confidence_mapping():
-    assert svc._match_status_to_tier("matched") == "tier_1_gclid"
-    assert svc._match_status_to_tier("url_fallback") == "tier_2_source_tag"
-    assert svc._match_status_to_tier("unmatched") == "tier_3_spend_weighted"
-    assert svc._match_status_to_tier(None) == "tier_3_spend_weighted"
+def test_attribution_scope_confidence_mapping():
+    # PR-ADS-153E-B: confidence is derived from the canonical attribution SCOPE
+    # (analysis.revenue_scope), an ordered statement about how strong the
+    # evidence is — not from `gclid_attribution.match_status`, which described
+    # how a click id was joined to a campaign.
+    assert svc._scope_to_tier("gclid_attributable") == "tier_1_gclid"
+    assert svc._scope_to_tier("campaign_attributable") == "tier_2_source_tag"
+    assert svc._scope_to_tier("google_ads_source") == "tier_3_spend_weighted"
+    assert svc._scope_to_tier("all_source") == "tier_3_spend_weighted"
+    assert svc._scope_to_tier(None) == "tier_3_spend_weighted"
 
 
 def test_confidence_from_tiers_labels():

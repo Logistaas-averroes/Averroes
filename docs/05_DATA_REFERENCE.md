@@ -301,6 +301,7 @@ view of all data pipelines, combining canonical freshness semantics with depende
 | gclid_attribution | gclid | — | — |
 | gclid_coverage_snapshots | gclid | — | — |
 | historical_intelligence | analysis | — | — |
+| hubspot_deal_ledger | hubspot | — | every revenue page |
 
 ### Source Groupings
 
@@ -313,6 +314,46 @@ view of all data pipelines, combining canonical freshness semantics with depende
 | computed | Computed Layer | ngrams |
 
 Service logic: `services/system_status_service.py`
+
+---
+
+## Revenue truth — where each number comes from (PR-ADS-153E-B)
+
+**One source per fact.** Google Ads owns advertising delivery; HubSpot, through
+the canonical deal ledger, owns the business outcome. Google Ads attribution
+never defines the population of won deals or total business revenue — in
+production, 124 of 180 won deals carry no GCLID at all.
+
+| Fact | Owner | Table / module |
+|------|-------|----------------|
+| Spend, clicks, impressions, search terms, advertising geography, campaign identifiers | Google Ads | `google_ads_campaign_daily_spend`, `google_ads_geo_daily_spend`, `search_terms`, `keywords` |
+| Lifecycle state, SQLs | HubSpot | `contact_source_classification`, `canonical_contact_outcome_service` |
+| Won status, close date, deal revenue, currency provenance, deal→contact attribution | HubSpot | `hubspot_deal_ledger` + `hubspot_deal_contact_association` |
+| Ledger coverage / freshness | local | `hubspot_deal_sync_state` |
+
+**The one revenue read path.** Production pages do not query
+`hubspot_deal_ledger` themselves:
+
+```
+page service
+  └── services/canonical_revenue_service.py      ← THE contract
+        ├── analysis/business_windows.py         ← window bounds (end EXCLUSIVE)
+        ├── analysis/revenue_scope.py            ← the scope lattice
+        ├── analysis/deal_currency.py            ← which amounts may be summed
+        └── db/deal_ledger_repository.fetch_won_deals   ← hs_is_closed_won IS TRUE
+```
+
+**Scope is part of every revenue answer:**
+`all_source ≥ google_ads_source ≥ campaign_attributable ≥ gclid_attributable`.
+Same metric + same business window + same scope = the same result on every page.
+
+**Legacy, comparison-only since PR-ADS-153E-B** (still written, retired in
+PR-ADS-153G): `gclid_attribution`, `deal_source_attribution`, `deals`, and the
+local `data/attributed_deals.json` / `data/campaign_performance.json` chain.
+No production page reads revenue from any of them; a CI contract guard fails the
+build if one is reintroduced.
+
+Full doctrine: `docs/35_CANONICAL_REVENUE_LEDGER.md`.
 
 ---
 

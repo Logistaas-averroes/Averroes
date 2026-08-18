@@ -5,7 +5,7 @@
 
 ---
 
-> ### ⚠️ Authoritative status (PR-ADS-153E-A, August 2026)
+> ### ⚠️ Authoritative status (PR-ADS-153E-B, August 2026)
 >
 > This document's phase/status narrative below predates the PR-ADS-153A–D
 > sequence and is retained for its architectural content, not its status claims.
@@ -22,12 +22,21 @@
 >   bootstrap passed it. The audit now requires proven bootstrap coverage plus a
 >   successful incremental on top of it, and
 >   `scripts/backfill_canonical_deal_ledger.py` drives that bootstrap to a
->   proven completion. Still shadow mode; still no consumer switched.
-> * **153E-B: blocked** until the production evidence in
->   `docs/35_CANONICAL_REVENUE_LEDGER.md` §11 passes
->   (`--all-windows` aggregate `ok: true`). Then: revenue consumer cutover and
->   Unit Economics migration.
+>   proven completion.
+> * **153E-A3: merged.** Blank HubSpot monetary fields are normalized by one
+>   shared parser before persistence, so currency resolution and the ledger's
+>   `NUMERIC` columns can never disagree about whether a deal has an amount.
+> * **153E-B: consumer cutover DONE.** The production gate passed
+>   (`--all-windows` aggregate `ok: true`, 0 write failures, 0 association
+>   failures), and every revenue consumer now reads the canonical deal ledger
+>   through ONE shared contract (`services/canonical_revenue_service.py`) at an
+>   explicit attribution scope
+>   (`all_source ≥ google_ads_source ≥ campaign_attributable ≥ gclid_attributable`).
+>   Unit Economics is off local JSON / Windsor and on business windows. Shadow
+>   mode is over — see `docs/35_CANONICAL_REVENUE_LEDGER.md` §14–§23.
 > * **153F and 153G: remain.** Geo synchronization; legacy table/route deletion.
+>   No legacy table is dropped by 153E-B; they remain written and readable for
+>   the observation period.
 > * **Phase 2 / OCT: blocked.** Offline conversion uploads are not started and
 >   are not authorized.
 > * **Six-month read-only governance: ACTIVE.** No writes to Google Ads or
@@ -58,6 +67,8 @@ A lean Google Ads signal correction engine for Logistaas. It reads data from Win
 | File | Status | Notes |
 |------|--------|-------|
 | `connectors/hubspot_pull.py` | ✅ Complete | Extended by PR-ADS-153E-A with the read-only canonical deal-sync contract (all stages, `hs_is_closed_won`, currency trio, association labels). Change it only through a scoped PR |
+| `services/canonical_revenue_service.py` | ✅ Complete | **PR-ADS-153E-B** — THE canonical revenue read contract. Every revenue page reads through it. Never add a second revenue read path, never let a consumer import `db.deal_ledger_repository` directly, and never add a fallback to a legacy lineage: CI fails on all three |
+| `analysis/revenue_scope.py` | ✅ Complete | **PR-ADS-153E-B** — the attribution-scope lattice. Every revenue response declares its scope; a narrower scope is nested inside every wider one by construction |
 | `connectors/windsor_pull.py` | ✅ Complete | Do not modify |
 | `connectors/gclid_match.py` | ✅ Complete | Do not modify |
 | `analysis/core.py` | ✅ Complete | waste_detection, lead_quality, campaign_truth |

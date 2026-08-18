@@ -3116,7 +3116,8 @@ function renderDashboardRevenue() {
 function renderRevKpiRow(d) {
   const k = d.kpis || {};
   const pc = d.period_change || {};
-  const largestDealCompany = (d.top_deals || [])[0] && (d.top_deals || [])[0].company;
+  // PR-ADS-153E-B: the canonical ledger names the DEAL, not a company.
+  const largestDealCompany = (d.top_deals || [])[0] && ((d.top_deals || [])[0].deal_name || (d.top_deals || [])[0].company);
 
   const cards = [
     {
@@ -3466,7 +3467,7 @@ function renderRevConcentration(d) {
 }
 
 const REV_DEAL_COLUMNS = [
-  ["company", "Company"], ["company_id", "Company ID"], ["main_contact", "Main Contact"],
+  ["deal_name", "Deal name"], ["company", "Company"], ["company_id", "Company ID"], ["main_contact", "Main Contact"],
   ["contact_id", "Contact ID"], ["deal", "Deal"], ["deal_id", "Deal ID"],
   ["amount_usd", "Amount"], ["close_date", "Close Date"], ["campaign", "Campaign"],
   ["source", "Source"], ["country", "Country"], ["attribution_status", "Attribution"],
@@ -3513,6 +3514,7 @@ function wireRevDealDrawers(root, d) {
     const deal = deals[i];
     if (!deal) return;
     const rows = [
+      ["Deal name", dashValue(deal.deal_name)],
       ["Company", dashValue(deal.company)], ["Company ID", dashValue(deal.company_id)],
       ["Main Contact", dashValue(deal.main_contact)], ["Contact ID", dashValue(deal.contact_id)],
       ["Deal", dashValue(deal.deal)], ["Deal ID", dashValue(deal.deal_id)],
@@ -3529,7 +3531,7 @@ function wireRevDealDrawers(root, d) {
     }
     drawer.innerHTML = `
       <div class="rev-deal-drawer__head">
-        <strong>${escapeHtml(deal.company || "Deal detail")}</strong>
+        <strong>${escapeHtml(deal.deal_name || deal.company || "Deal detail")}</strong>
         <button type="button" class="rev-deal-drawer__close" aria-label="Close">×</button>
       </div>
       <dl class="rev-deal-drawer__grid">
@@ -4760,7 +4762,7 @@ function renderCampSearchSignals(d) {
 }
 
 const CAMP_DEAL_COLUMNS = [
-  ["company", "Company"], ["company_id", "Company ID"], ["main_contact", "Main Contact"],
+  ["deal_name", "Deal name"], ["company", "Company"], ["company_id", "Company ID"], ["main_contact", "Main Contact"],
   ["contact_id", "Contact ID"], ["deal", "Deal"], ["deal_id", "Deal ID"],
   ["amount_usd", "Amount"], ["close_date", "Close Date"], ["attribution_status", "Attribution"],
 ];
@@ -5384,7 +5386,7 @@ function renderCtryResidualPanel(d) {
 }
 
 const CTRY_DEAL_COLUMNS = [
-  ["company", "Company"], ["company_id", "Company ID"], ["main_contact", "Main Contact"],
+  ["deal_name", "Deal name"], ["company", "Company"], ["company_id", "Company ID"], ["main_contact", "Main Contact"],
   ["contact_id", "Contact ID"], ["deal", "Deal"], ["deal_id", "Deal ID"],
   ["amount_usd", "Amount"], ["close_date", "Close Date"], ["campaign_name", "Campaign (source)"],
   ["attribution_status", "Attribution"],
@@ -5816,8 +5818,8 @@ function renderDealTable(d) {
   const head = ["Deal / Company", "Stage", "Amount", "Age", "Close Date", "Campaign", "Country", "Status"]
     .map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const body = rows.map((r, i) => `
-    <tr class="deal-row" data-deal-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.company || "deal")} detail">
-      <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${dashValue(r.company)}</td>
+    <tr class="deal-row" data-deal-row="${i}" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.deal_name || r.company || "deal")} detail">
+      <td class="deal-td--name"><span class="deal-dot ${dealStatusDot(r.status)}"></span>${dashValue(r.deal_name || r.company)}</td>
       <td>${dashValue(r.stage)}</td>
       <td class="deal-num">${dashValue(r.amount_usd, fmtMoney)}</td>
       <td class="deal-num">${dashValue(r.age_days, fmtCount)}</td>
@@ -5874,7 +5876,7 @@ function wireDealDrawers(root, d) {
       .map(([page, label]) => `<a class="deal-drawer__link" href="#/${escapeHtml(page)}">${escapeHtml(label)} →</a>`).join("");
     drawer.innerHTML = `
       <div class="deal-drawer__head">
-        <strong>${escapeHtml(r.company || "Deal")}</strong>
+        <strong>${escapeHtml(r.deal_name || r.company || "Deal")}</strong>
         <span class="deal-status" style="--deal-accent:${dealStatusColor(r.status)}">${escapeHtml(r.status || "")}</span>
         <button type="button" class="deal-drawer__close" aria-label="Close">×</button>
       </div>
@@ -8158,7 +8160,7 @@ function renderSourceDrilldownRow(d) {
   const amount = d.amount == null ? drilldownValue(null) : fmtMoney(d.amount);
   return `
     <tr>
-      <td>${drilldownValue(d.company)}</td>
+      <td>${drilldownValue(d.deal_name || d.company)}</td>
       <td>${drilldownValue(d.company_id)}</td>
       <td>${drilldownValue(d.main_contact)}</td>
       <td>${drilldownValue(d.contact_id)}</td>
@@ -14686,7 +14688,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const ueRefresh = document.getElementById("unit-economics-refresh-btn");
   const ueWindow  = document.getElementById("unit-economics-window");
   if (ueRefresh) ueRefresh.addEventListener("click", loadUnitEconomics);
-  if (ueWindow)  ueWindow.addEventListener("change", handleSyncedWindowSelectChange);
+  // PR-ADS-153E-B: the selector now carries a BUSINESS window, so it must go to
+  // the business-window handler. Leaving it on the day-window handler fed a
+  // business key into `parseInt("current_quarter")` and silently reverted the page.
+  if (ueWindow)  ueWindow.addEventListener("change", handleBusinessWindowSelectChange);
 
   // Wire up Churn Input form
   const churnForm = document.getElementById("churn-input-form");
@@ -15008,6 +15013,9 @@ function handleBusinessWindowSelectChange(e) {
     case "deals":           loadDeals();         break;
     case "revenue-health":  loadRevenueHealth(); break;
     case "revenue-by-source": loadRevenueBySource(); break;
+    // PR-ADS-153E-B: Unit Economics now shares this selector, so it must reload
+    // ITSELF — falling through to the default reloaded ROAS by Campaign instead.
+    case "unit-economics":  loadUnitEconomics(); break;
     default:                loadRoasCampaigns();
   }
 }
@@ -15525,6 +15533,26 @@ function renderSpendCoverageNotice(sh) {
     </div>`;
 }
 
+// PR-ADS-153E-B: an ADVERTISING view must say which population its revenue was
+// measured over, and must not read as the company total. The mart carries both:
+// `summary.revenue_scope` is the all-source business scope, and
+// `summary.attributed_revenue_scope` is the narrower scope the ROAS numerator
+// used. Showing them together is what stops attributed revenue being mistaken
+// for total business revenue.
+function renderRevenueScopeDisclosure(data) {
+  const summary = (data && data.summary) || {};
+  const attributed = summary.attributed_revenue_scope;
+  if (!attributed) return "";
+  const business = summary.revenue_scope || "all_source";
+  const money = (v) => (v === null || v === undefined ? "Unavailable" : fmtMoney(v));
+  return `<p class="grace-note" data-revenue-scope="${escapeHtml(attributed)}">
+      Revenue scope: <strong>${escapeHtml(attributed)}</strong> —
+      ${money(summary.attributed_won_revenue_usd)} attributed to campaigns, out of
+      ${money(summary.won_revenue_usd)} across <strong>${escapeHtml(business)}</strong>.
+      Attributed revenue is a subset of total business revenue, not the same figure.
+    </p>`;
+}
+
 function renderRoasCampaignsPage() {
   const kpiGrid = document.getElementById("roas-campaigns-kpis");
   const tableBody = document.getElementById("roas-campaigns-table-body");
@@ -15563,6 +15591,7 @@ function renderRoasCampaignsPage() {
     ${renderMartDiagnostics(data)}
     ${renderRoasCampaignFilters()}
     ${renderRoasCampaignTable(filtered, spendIncomplete)}
+    ${renderRevenueScopeDisclosure(data)}
     <p class="revenue-footnote">Canonical Revenue Decision Mart — Google Ads canonical spend powers ROAS; HubSpot closed-won deals provide revenue.</p>
   `;
 }
@@ -16651,16 +16680,24 @@ document.addEventListener("click", (e) => {
 let unitEconomicsData = null;
 let unitEconomicsStatus = "idle";
 
+// PR-ADS-153E-B: the advertising scope Unit Economics computes CAC / ROAS at.
+// Sent explicitly so the page can never be read as a company-wide total: the
+// business figures beside it are `all_source`, and the two must stay labelled.
+const UNIT_ECONOMICS_SCOPE = "campaign_attributable";
+
 async function loadUnitEconomics() {
-  const window_ = getCurrentWindowParam();
-  if (!VALID_ROAS_WINDOWS.includes(window_)) return;
+  // PR-ADS-153E-B: business window, not a rolling day window.
+  const window_ = getRoasBusinessWindow();
 
   unitEconomicsStatus = "loading";
   const body = document.getElementById("unit-economics-table-body");
   if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Loading unit economics…</p>';
 
   try {
-    const res = await fetch(`/api/reports/unit-economics?window=${window_}`, { credentials: "same-origin" });
+    const res = await fetch(
+      `/api/reports/unit-economics?window=${encodeURIComponent(window_)}` +
+      `&scope=${encodeURIComponent(UNIT_ECONOMICS_SCOPE)}`,
+      { credentials: "same-origin" });
     if (!res.ok) {
       unitEconomicsStatus = "error";
       if (body) body.innerHTML = '<p class="empty-state" style="padding:var(--space-5)">Failed to load unit economics.</p>';
@@ -16688,33 +16725,43 @@ function renderUnitEconomicsPage() {
   }
 
   const d = unitEconomicsData;
-  const overall = d.overall || d;
+  // PR-ADS-153E-B: two labelled populations. `business` is all_source — the
+  // company. `advertising` is the declared attribution scope, and is the only
+  // one CAC/ROAS may be computed on. A withheld metric renders as "Unavailable"
+  // with its reason; it is never shown as 0.
+  const business = d.business || {};
+  const advertising = d.advertising || {};
+  const withheld = d.unavailable || [];
+  const reasonFor = (metric) => (withheld.find((u) => u.metric === metric) || {}).reason || "";
 
   if (kpiGrid) {
+    const dash = (v, fmtFn) => (v === null || v === undefined ? "Unavailable" : fmtFn(v));
     kpiGrid.innerHTML = `
-      <div class="kpi-card"><div class="kpi-card__label">LTV/CAC</div><div class="kpi-card__value">${fmtNum(overall.ltv_to_cac || overall.ltv_cac)}x</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Payback Months</div><div class="kpi-card__value">${fmtNum(overall.payback_months)}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Avg Deal ACV</div><div class="kpi-card__value">${fmtMoney(overall.avg_deal_acv || overall.average_deal_acv)}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Avg Deal MRR</div><div class="kpi-card__value">${fmtMoney(overall.avg_deal_mrr || overall.average_deal_mrr)}</div></div>
-      <div class="kpi-card"><div class="kpi-card__label">Monthly Churn Rate</div><div class="kpi-card__value">${fmtNum((overall.monthly_churn_rate_used ?? 0) * 100, 1)}%</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Customers (all sources)</div><div class="kpi-card__value">${dash(business.won_deals, fmt)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Closed-won revenue (all sources)</div><div class="kpi-card__value">${dash(business.revenue_usd, fmtMoney)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">Avg deal value</div><div class="kpi-card__value">${dash(business.avg_deal_value_usd, fmtMoney)}</div></div>
+      <div class="kpi-card"><div class="kpi-card__label">CAC (${escapeHtml(advertising.scope_label || advertising.scope || "—")})</div><div class="kpi-card__value">${dash(advertising.cac, fmtMoney)}</div></div>
+      <div class="kpi-card" title="${escapeHtml(reasonFor("ltv_to_cac"))}"><div class="kpi-card__label">LTV/CAC</div><div class="kpi-card__value">Unavailable</div></div>
     `;
   }
 
   if (verdictEl) {
-    const v = overall.verdict || overall.overall_verdict || "—";
-    const explanations = {
-      SCALE: "Strong unit economics — customer acquisition is profitable at scale.",
-      HOLD: "Watch closely — not enough scale confidence yet.",
-      FIX: "Economics are weak or payback is too long.",
-      CUT: "Losing money on customer acquisition.",
-      INSUFFICIENT_DATA: "Not enough closed-won volume to produce a reliable verdict."
-    };
-    verdictEl.innerHTML = `
-      <div class="unit-economics-verdict-card">
-        <span class="${getVerdictBadgeClass(v)}">${escapeHtml(v)}</span>
-        <span class="unit-economics-verdict-explanation">${escapeHtml(explanations[v] || "")}</span>
-      </div>
-    `;
+    if (d.revenue_available === false) {
+      verdictEl.innerHTML = `
+        <div class="unit-economics-verdict-card">
+          <span class="badge badge--warn">Unavailable</span>
+          <span class="unit-economics-verdict-explanation">${escapeHtml(
+            "Canonical revenue is unavailable (" + (d.revenue_unavailable_reason || "unknown") +
+            "). No legacy revenue source is used as a fallback.")}</span>
+        </div>`;
+    } else {
+      verdictEl.innerHTML = `
+        <div class="unit-economics-verdict-card">
+          <span class="unit-economics-verdict-explanation">${escapeHtml(
+            "Revenue: canonical HubSpot deal ledger. Spend: canonical Google Ads. " +
+            "LTV/CAC and payback are withheld — " + reasonFor("ltv_to_cac"))}</span>
+        </div>`;
+    }
   }
 
   const campaigns = d.by_campaign || d.campaigns || [];
@@ -16725,17 +16772,17 @@ function renderUnitEconomicsPage() {
 
   if (tableBody) {
     const headerRow = `<tr>
-      <th>Campaign</th><th>Spend</th><th>Deals Won</th><th>CAC</th><th>LTV/CAC</th>
-      <th>Payback Mo.</th><th>Verdict</th>
+      <th>Campaign</th><th>Spend</th><th>Deals Won</th><th>Won Revenue</th>
+      <th>Avg Deal Value</th><th>CAC</th><th>ROAS</th>
     </tr>`;
     const rows = campaigns.map((r) => `<tr>
       <td>${escapeHtml(r.campaign || "")}</td>
-      <td>${fmtMoney(r.spend)}</td>
+      <td>${r.spend === null || r.spend === undefined ? "Unavailable" : fmtMoney(r.spend)}</td>
       <td>${fmt(r.deals_won)}</td>
-      <td>${fmtMoney(r.cac)}</td>
-      <td>${fmtNum(r.ltv_to_cac || r.ltv_cac)}x</td>
-      <td>${fmtNum(r.payback_months)}</td>
-      <td><span class="${getVerdictBadgeClass(r.verdict)}">${escapeHtml(r.verdict || "")}</span></td>
+      <td>${r.won_revenue_usd === null || r.won_revenue_usd === undefined ? "Unavailable" : fmtMoney(r.won_revenue_usd)}</td>
+      <td>${r.avg_deal_value_usd === null || r.avg_deal_value_usd === undefined ? "Unavailable" : fmtMoney(r.avg_deal_value_usd)}</td>
+      <td>${r.cac === null || r.cac === undefined ? "Unavailable" : fmtMoney(r.cac)}</td>
+      <td>${r.roas === null || r.roas === undefined ? "Unavailable" : fmtNum(r.roas) + "x"}</td>
     </tr>`).join("");
     tableBody.innerHTML = `<div class="table-scroll"><table class="data-table roas-table">${headerRow}<tbody>${rows}</tbody></table></div>`;
   }

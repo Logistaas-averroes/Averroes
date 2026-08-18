@@ -23,6 +23,10 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_legacy_deal_rows, patch_canonical_ledger,
+)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -78,10 +82,18 @@ class _FakeConn:
         return _FakeCur()
 
 
-def _patch_db(monkeypatch, rows):
+def _patch_db(monkeypatch, rows, *, available=True):
+    """PR-ADS-153E-B: the country drilldown reads the CANONICAL deal ledger.
+
+    The legacy fake-cursor plumbing is kept for the repository SQL guards below
+    (which still assert `fetch_country_deal_details` is read-only and matches
+    countries exactly), but the service itself is stubbed at the canonical read.
+    """
     import db.revenue_repository as repo
     monkeypatch.setattr(repo, "get_conn", lambda: _FakeConn())
     monkeypatch.setattr(repo, "_rows_as_dicts", lambda cur: [dict(r) for r in rows])
+    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(rows),
+                           available=available)
 
 
 # Deal rows as stored in gclid_attribution (country is a NAME; no code column).
@@ -247,7 +259,10 @@ def test_contact_id_only_when_stored(monkeypatch):
     assert mexico["main_contact_name"] is None
     # Company record id is only a name in durable data → id is None, never fabricated.
     assert mexico["company_record_id"] is None
-    assert mexico["company_name"] == "Example Logistics"
+    # PR-ADS-153E-B: the canonical ledger names the DEAL, not a company, so the
+    # company columns are Unavailable and the deal name is what is shown.
+    assert mexico["company_name"] is None
+    assert mexico["deal_name"] == "Example Logistics"
 
 
 def test_gclid_is_masked_never_full(monkeypatch):
@@ -260,13 +275,14 @@ def test_gclid_is_masked_never_full(monkeypatch):
 
 
 def test_db_unavailable_is_reported(monkeypatch):
-    import db.revenue_repository as repo
-    monkeypatch.setattr(repo, "fetch_country_deal_details",
-                        lambda s, e, c, cc=None: {"available": False})
+    _patch_db(monkeypatch, [], available=False)
     from services.revenue_attribution_service import build_country_deal_details
     out = build_country_deal_details("ytd", "Mexico", "MX")
     assert out["details"] == []
-    assert out["source_health"]["status"] == "database_unavailable"
+    # PR-ADS-153E-B: the reason names the canonical read, and nothing falls back.
+    assert out["revenue_available"] is False
+    assert out["legacy_fallback_used"] is False
+    assert out["source_health"]["status"] == "canonical_ledger_unreadable"
 
 
 # ══════════════ Test 7 — frontend has an expandable country row ══════════════

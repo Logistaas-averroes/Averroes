@@ -64,7 +64,9 @@ from analysis.source_classification import (
     CH_UNSPECIFIED,
     GROUP_UNCLASSIFIED,
 )
+from analysis import revenue_scope
 from db import revenue_repository as repo
+from services import canonical_revenue_service as canonical_revenue
 from services.revenue_decision_mart import build_revenue_decision_mart
 from services.source_attribution_service import (
     build_revenue_by_source,
@@ -205,12 +207,14 @@ def _new_bucket():
 def _unknown_amount_maps(revenue_rows: list) -> tuple[set, set]:
     """Which executive channels / platform buckets contain an unknown deal amount.
 
-    build_revenue_by_source coerces a missing amount to $0 when summing, so its
-    per-channel ``won_revenue`` cannot signal incompleteness. We re-read the raw
-    closed-won source rows and, using the source service's OWN section/taxonomy
-    helpers (no new taxonomy), record which executive channel and which
-    (group, channel, platform) bucket holds a deal whose amount is unknown. Those
-    buckets' revenue (and any ROAS) must render Unavailable — never a lowered $0.
+    build_revenue_by_source aggregates by GROUP → channel → platform, which is a
+    different fold from the executive-channel rows this page shows, so its own
+    per-bucket ``revenue_unavailable_deals`` counts cannot be reused directly.
+    We re-read the same canonical closed-won rows (PR-ADS-153E-B) and, using the
+    source service's OWN section/taxonomy helpers (no new taxonomy), record which
+    executive channel and which (group, channel, platform) bucket holds a deal
+    whose amount is unknown. Those buckets' revenue (and any ROAS) must render
+    Unavailable — never a lowered $0.
     """
     exec_unknown: set = set()
     platform_unknown: set = set()
@@ -330,7 +334,7 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
     return channel_rows, platforms
 
 
-def _build_kpis(channel_rows: list) -> dict:
+def _build_kpis(channel_rows: list, *, revenue_available: bool = True) -> dict:
     """Hero KPIs derived FROM the channel rows so they reconcile exactly with the
     channel mix, platform matrix and trend (all built from the Revenue-by-Source
     taxonomy) — never a mart total on a different denominator.
@@ -342,6 +346,19 @@ def _build_kpis(channel_rows: list) -> dict:
     partial sum implying completeness.
     """
     total_sqls = sum((c.get("sqls") or 0) for c in channel_rows)
+
+    # PR-ADS-153E-B: an UNAVAILABLE canonical ledger produces no channel rows at
+    # all, and summing an empty list yields a confident 0.00 / 0 customers — a
+    # verified-looking zero standing in for an outage. Availability is therefore
+    # an explicit input, not something inferred from the rows that survived.
+    if not revenue_available:
+        return {
+            "total_sqls": total_sqls,
+            "total_customers": None,
+            "closed_won_revenue_usd": None,
+            "spend_connected_revenue_usd": None,
+            "revenue_only_revenue_usd": None,
+        }
 
     customers_incomplete = any(c.get("customers") is None for c in channel_rows)
     total_customers = (None if customers_incomplete
@@ -428,6 +445,51 @@ def _bucket_label(bstart, bucket: str) -> str:
     return f"{bstart.day} {bstart.strftime('%b')}"
 
 
+def _utc_midnight(day):
+    """A plain ``date`` as an explicit UTC midnight datetime, or ``None``.
+
+    The ledger read casts its bounds to ``timestamptz``, and PostgreSQL resolves
+    a DATE → timestamptz cast using the SESSION time zone. On a server whose
+    session is not UTC that silently shifts the window by hours and mis-buckets
+    deals that closed near a boundary — the trend and the KPI above it would
+    then disagree about the same quarter. Passing an explicit UTC datetime makes
+    the bound mean the same thing regardless of session settings, matching
+    ``analysis.business_windows.get_window_bounds``.
+    """
+    from datetime import datetime, time, timezone  # noqa: PLC0415
+
+    if day is None:
+        return None
+    if isinstance(day, datetime):
+        return day if day.tzinfo else day.replace(tzinfo=timezone.utc)
+    return datetime.combine(day, time.min, tzinfo=timezone.utc)
+
+
+def _canonical_daily_revenue(start_key, end_key) -> dict:
+    """Canonical won deals for a date range, carrying a per-day ``close_date``.
+
+    The bounds arrive as inclusive dates from the resolved window block, so the
+    upper bound is converted to the EXCLUSIVE bound the ledger read expects —
+    the same convention ``analysis.business_windows.get_window_bounds`` uses —
+    and both are expressed as explicit UTC datetimes (see ``_utc_midnight``).
+    """
+    from datetime import timedelta  # noqa: PLC0415
+
+    if end_key is None:
+        return {"available": False, "rows": []}
+    base = canonical_revenue.load_won_deals(
+        start=_utc_midnight(start_key),
+        end=_utc_midnight(end_key + timedelta(days=1)))
+    if not base.get("available"):
+        return {"available": False, "rows": [], "reason": base.get("reason")}
+    rows = []
+    for row in canonical_revenue.canonical_deal_rows(
+            base, revenue_scope.SCOPE_ALL_SOURCE):
+        close = row.get("deal_close_date")
+        rows.append({**row, "close_date": str(close)[:10] if close else None})
+    return {"available": True, "rows": rows}
+
+
 def _build_trend(window_block: dict) -> dict:
     """Per-bucket SQLs (by created date) + customers/revenue (by close date) per
     executive channel. Each metric uses its OWN business event date. A bucket
@@ -438,7 +500,11 @@ def _build_trend(window_block: dict) -> dict:
     end_key = _parse_iso_date(window_block.get("end_date"))
 
     leads = repo.fetch_source_leads_daily(start_key, end_key)
-    revenue = repo.fetch_source_revenue_daily(start_key, end_key)
+    # PR-ADS-153E-B: the per-day revenue series is the canonical ledger, bucketed
+    # by the canonical deal close date. `deal_source_attribution` supplied the
+    # same shape but a different population and no currency contract, so the
+    # trend and the KPI above it could disagree about the same quarter.
+    revenue = _canonical_daily_revenue(start_key, end_key)
     if not leads.get("available") or not revenue.get("available"):
         return {"bucket": None, "points": [], "status": "unavailable",
                 "reason": "Per-day channel source series is unavailable."}
@@ -746,7 +812,7 @@ def build_dashboard_channels(window: str = "current_quarter",
     # reported Unavailable rather than trusting a possibly-understated total.
     start_key = _parse_iso_date(window_block.get("start_date"))
     end_key = _parse_iso_date(window_block.get("end_date"))
-    raw_revenue = repo.fetch_source_revenue(start_key, end_key) if end_key else {
+    raw_revenue = _canonical_daily_revenue(start_key, end_key) if end_key else {
         "available": True, "rows": []}
     amounts_verifiable = bool(raw_revenue.get("available"))
     exec_unknown, platform_unknown = _unknown_amount_maps(raw_revenue.get("rows") or [])
@@ -778,7 +844,7 @@ def build_dashboard_channels(window: str = "current_quarter",
     # Hero KPIs derive from the channel rows so they reconcile with the mix /
     # matrix / trend (all Revenue-by-Source), never a mart total on a different
     # denominator (mart SQLs are campaign-based; these are source-based).
-    kpis = _build_kpis(channel_rows)
+    kpis = _build_kpis(channel_rows, revenue_available=amounts_verifiable)
     top_channel, top_platform = _top_channel_and_platform(channel_rows, platforms)
     kpis["top_channel"] = top_channel
     kpis["top_platform"] = top_platform

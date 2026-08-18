@@ -24,6 +24,10 @@ from datetime import date, datetime
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_source_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -123,8 +127,8 @@ def _patch_sources(monkeypatch, *, lead_rows=None, revenue_rows=None, spend_rows
     import db.revenue_repository as repo
     monkeypatch.setattr(repo, "fetch_source_leads",
                         lambda s, e: {"available": True, "rows": lead_rows or []})
-    monkeypatch.setattr(repo, "fetch_source_revenue",
-                        lambda s, e: {"available": True, "rows": revenue_rows or []})
+    # PR-ADS-153E-B: won revenue is read from the canonical deal ledger.
+    patch_canonical_ledger(monkeypatch, from_source_rows(revenue_rows or []))
     monkeypatch.setattr(repo, "fetch_campaign_country_spend",
                         lambda s, e: {"available": True, "rows": spend_rows or []})
     # PR-ADS-140: Google Ads source spend is the CANONICAL campaign spend truth (same
@@ -260,10 +264,10 @@ def test_google_spend_null_when_source_unavailable(monkeypatch):
     import db.revenue_repository as repo
     from services.source_attribution_service import build_revenue_by_source
     monkeypatch.setattr(repo, "fetch_source_leads", lambda s, e: {"available": True, "rows": []})
-    monkeypatch.setattr(repo, "fetch_source_revenue", lambda s, e: {"available": True, "rows": [
+    patch_canonical_ledger(monkeypatch, from_source_rows([
         {"acquisition_group": "google_ads", "attribution_status": "attributed",
          "deal_amount_usd": 5000.0, "source_primary_raw": "Paid Search",
-         "source_detail_raw": "google"}]})
+         "source_detail_raw": "google"}]))
     # Spend source reports unavailable.
     monkeypatch.setattr(repo, "fetch_campaign_country_spend",
                         lambda s, e: {"available": False, "rows": []})
@@ -335,10 +339,13 @@ CONTACT_ROWS = [
 ]
 
 
-def _patch_detail_repos(monkeypatch, *, deal_rows=None, contact_rows=None):
+def _patch_detail_repos(monkeypatch, *, deal_rows=None, contact_rows=None,
+                        deals_available=True):
     import db.revenue_repository as repo
-    monkeypatch.setattr(repo, "fetch_source_deal_details",
-                        lambda s, e: {"available": True, "rows": list(deal_rows or [])})
+    # PR-ADS-153E-B: the DEAL side of the source drawer is the canonical ledger.
+    # The contact side still comes from the classification tables.
+    patch_canonical_ledger(monkeypatch, from_source_rows(deal_rows or []),
+                           available=deals_available)
     monkeypatch.setattr(repo, "fetch_source_contact_details",
                         lambda s, e: {"available": True, "rows": list(contact_rows or [])})
 
@@ -351,12 +358,16 @@ def test_detail_filters_by_group_channel_platform(monkeypatch):
     assert ids == {"789"}, "only the LinkedIn organic-social deal matches"
     assert out["deals"] == out["rows"]   # backward-compatible alias
     r = out["rows"][0]
-    assert r["company"] == "Acme Logistics"
-    assert r["contact_id"] == "456"
+    # PR-ADS-153E-B: the ledger names the DEAL and holds no company field, so the
+    # drawer shows the deal name and reports `company` as Unavailable.
+    assert r["company"] is None
+    assert r["deal_name"] == "Deal 789"
     assert r["amount"] == 12000.0
     assert r["source"] == "Organic Social"
     assert r["source_drilldown_1"] == "LinkedIn"
-    assert r["status_category"] == "customer"
+    # `status_category` describes the associated CONTACT, which the canonical
+    # deal ledger does not carry — Unavailable rather than guessed.
+    assert r["status_category"] is None
     assert r["attribution_status"] == "attributed"
 
 
@@ -392,19 +403,26 @@ def test_detail_missing_amount_stays_null_and_labels_unavailable(monkeypatch):
     assert r["company"] is None
     assert r["company_id"] is None
     assert r["main_contact"] is None
-    assert r["deal"] is None
+    assert r["deal"] == "Deal 790"   # the deal's own name IS stored canonically
     assert r["lifecycle_stage"] is None
     assert r["source_drilldown_2"] is None
 
 
 def test_detail_db_unavailable_reported(monkeypatch):
     import db.revenue_repository as repo
-    monkeypatch.setattr(repo, "fetch_source_deal_details", lambda s, e: {"available": False})
+    patch_canonical_ledger(monkeypatch, [], available=False)
     monkeypatch.setattr(repo, "fetch_source_contact_details", lambda s, e: {"available": False})
     from services.source_attribution_service import build_source_platform_detail
     out = build_source_platform_detail("ytd", "organic", "organic_social", "linkedin")
     assert out["rows"] == [] and out["contacts"] == [] and out["deals"] == []
-    assert out["source_health"]["status"] == "database_unavailable"
+    # PR-ADS-153E-B: the status names the CANONICAL read that failed, so an
+    # operator can tell a canonical outage from a generic database outage. The
+    # drilldown fails closed on the deal side rather than rendering an empty
+    # deals section that would read as "this bucket has no deals".
+    assert out["source_health"]["status"] == "canonical_ledger_unreadable"
+    assert out["revenue_available"] is False
+    assert out["legacy_fallback_used"] is False
+    assert out["summary"]["deals"] is None
 
 
 def test_detail_query_is_read_only():

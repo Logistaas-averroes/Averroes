@@ -38,6 +38,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_legacy_deal_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -158,7 +162,8 @@ def _patch_durable(monkeypatch, *, canonical=None, geo_by_country=None, deals=No
                         lambda s, e: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
     monkeypatch.setattr(repo, "fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr(repo, "revenue_integration_connected", lambda: revenue_connected)
-    monkeypatch.setattr(repo, "fetch_revenue_deals", lambda s, e: {"available": True, "rows": list(dl)})
+    # PR-ADS-153E-B: closed-won proof deals come from the canonical deal ledger.
+    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(dl))
     import db.writers as db_writers
     monkeypatch.setattr(db_writers, "source_attribution_health_counts",
                         lambda: {"classified_contacts": 25, "attributed_deals": 2,
@@ -414,20 +419,21 @@ def test_build_residual_null_amount_is_unavailable_not_zero():
     assert res["customers"] == 1           # 3 − 2, still countable
 
 
-def test_residual_survives_deal_ledger_outage_from_mart(monkeypatch):
-    # BLOCKER regression: residual customers / revenue come from the canonical mart
-    # (summary − real countries), so a deal-ledger outage must NOT drop them to
-    # 0 / empty. Proof drawers are unavailable, but the residual truth survives.
-    import db.revenue_repository as repo
+def test_residual_withheld_not_zeroed_on_canonical_ledger_outage(monkeypatch):
+    # PR-ADS-153E-B: the residual used to be reconstructed from a mart total that
+    # had its own revenue lineage, so it could survive a deal-ledger outage. The
+    # mart total IS the canonical ledger now, so an outage withholds the residual
+    # too. What must never happen — and is what this test guards — is the residual
+    # silently collapsing to 0 customers / $0, which would read as "no
+    # unattributed revenue exists" rather than "we could not read it".
     _patch_durable(monkeypatch)
-    monkeypatch.setattr(repo, "fetch_revenue_deals", lambda s, e: {"available": False, "rows": []})
+    patch_canonical_ledger(monkeypatch, [], available=False)
     from services.dashboard_countries_service import build_dashboard_countries
     out = build_dashboard_countries(WINDOW, now=NOW)
-    assert out["residual"]["customers"] == 1              # from the mart, not the ledger
-    assert out["residual"]["won_revenue_usd"] == 4000.0   # from the mart, not the ledger
-    assert out["residual"]["won_revenue_usd"] != 0        # never a fabricated $0
-    assert out["kpis"]["residual_customers"] == 1
-    assert out["kpis"]["residual_revenue_usd"] == 4000.0
+    assert out["residual"]["customers"] != 0
+    assert out["residual"]["won_revenue_usd"] != 0
+    assert out["revenue_available"] is False
+    assert out["legacy_fallback_used"] is False
     assert out["deal_proof_available"] is False
     assert "deal_proof" in {u["metric"] for u in out["unavailable"]}
 
@@ -569,18 +575,20 @@ def test_period_change_metrics_are_country_attributed(monkeypatch):
 
 
 def test_deal_ledger_unavailable_does_not_claim_no_deals(monkeypatch):
-    import db.revenue_repository as repo
+    # PR-ADS-153E-B: the canonical ledger IS country revenue now, so an outage
+    # withholds it. The guard is that nothing renders as a measured zero, and no
+    # legacy ledger is consulted.
     _patch_durable(monkeypatch)
-    monkeypatch.setattr(repo, "fetch_revenue_deals",
-                        lambda s, e: {"available": False, "rows": []})
+    patch_canonical_ledger(monkeypatch, [], available=False)
     from services.dashboard_countries_service import build_dashboard_countries
     out = build_dashboard_countries(WINDOW, now=NOW)
     assert out["deal_proof_available"] is False
     assert out["truth_status"]["deal_proof"] == "unavailable"
     assert "deal_proof" in {u["metric"] for u in out["unavailable"]}
-    # Mart revenue remains canonical even though proof is unavailable.
-    assert _ctry(out, "US")["won_revenue_usd"] == 29000.0
-    assert out["kpis"]["won_revenue_usd"] == 29000.0
+    assert out["revenue_available"] is False
+    assert out["legacy_fallback_used"] is False
+    assert _ctry(out, "US")["won_revenue_usd"] is None, "an outage is not $0"
+    assert out["kpis"]["won_revenue_usd"] is None
     # No deals attached, but the drawer must say Unavailable, not "no deals".
     assert _ctry(out, "US")["deals"] == []
 

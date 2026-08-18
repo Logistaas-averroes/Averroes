@@ -21,6 +21,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_source_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -100,8 +104,8 @@ def _patch_source_service(monkeypatch, *, truth, lead_rows=None, revenue_rows=No
 
     monkeypatch.setattr(repo, "fetch_source_leads",
                         lambda s, e: {"available": True, "rows": lead_rows or []})
-    monkeypatch.setattr(repo, "fetch_source_revenue",
-                        lambda s, e: {"available": True, "rows": revenue_rows or []})
+    # PR-ADS-153E-B: won revenue is read from the canonical deal ledger.
+    patch_canonical_ledger(monkeypatch, from_source_rows(revenue_rows or []))
     # Geo spend still callable (diagnostic), but the source page must not use it.
     monkeypatch.setattr(
         repo, "fetch_campaign_country_spend",
@@ -225,8 +229,7 @@ def _patch_full_durable(monkeypatch):
                         lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)
     monkeypatch.setattr(repo, "fetch_source_leads", lambda s, e: {"available": True, "rows": []})
-    monkeypatch.setattr(repo, "fetch_source_revenue",
-                        lambda s, e: {"available": True, "rows": list(SOURCE_REV)})
+    patch_canonical_ledger(monkeypatch, from_source_rows(SOURCE_REV))
     monkeypatch.setattr(writers, "source_attribution_health_counts",
                         lambda: {"contacts_classified": 0, "deals_attributed": 0,
                                  "ambiguous_deals": 0, "unclassified_deals": 0})

@@ -36,6 +36,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_legacy_deal_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -226,10 +230,12 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
         lambda cid=None: {"available": True, "mappings": []},
     )
     monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)
-    monkeypatch.setattr(
-        repo, "fetch_revenue_deals",
-        lambda s, e: {"available": True, "rows": list(deals)},
-    )
+    # PR-ADS-153E-B: one canonical row set feeds the Overview KPIs, the trend
+    # and every downstream breakdown — which is the property this suite exists to
+    # check. A test overriding either legacy fixture drives that one ledger.
+    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(
+        won_rows if won_rows is not None else
+        (deal_rows if deal_rows is not None else DEAL_ROWS)))
     monkeypatch.setattr(
         repo, "fetch_source_leads",
         lambda s, e: {"available": True, "rows": list(src_leads)},
@@ -438,10 +444,8 @@ def test_unreadable_deal_ledger_downgrades_revenue_truth_chip(monkeypatch):
     # Copilot review (PR #134): with the integration connected but the deal
     # ledger unreadable, the trend withholds its revenue series — the revenue
     # truth chip must say "partial" in that state, never "ready".
-    import db.revenue_repository as repo
     _patch_durable(monkeypatch)
-    monkeypatch.setattr(repo, "fetch_revenue_deals",
-                        lambda s, e: {"available": False, "rows": []})
+    patch_canonical_ledger(monkeypatch, [], available=False)
     from services.dashboard_overview_service import build_dashboard_overview
     out = build_dashboard_overview(WINDOW, now=NOW)
     assert out["trend"]["revenue_status"] == "unavailable"

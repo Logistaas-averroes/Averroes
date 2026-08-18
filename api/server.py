@@ -8293,36 +8293,47 @@ async def get_roas_countries(
 
 @app.get("/api/reports/unit-economics")
 async def get_unit_economics(
-    window: str = Query(default="60d"),
+    window: str = Query(default="current_quarter"),
+    scope: str = Query(default=None),
     _user=Depends(require_auth),
 ):
-    """Unit economics report: LTV/CAC, payback, avg deal values."""
-    from analysis.roas_calculator import compute_all_campaign_roas
-    from services.unit_economics_service import compute_unit_economics_summary
+    """Unit economics from canonical sources only (PR-ADS-153E-B).
 
-    window_days = _parse_window(window)
+    Advertising cost is the canonical Google Ads spend truth; customers and
+    revenue are the canonical HubSpot deal ledger, read through the shared
+    contract at an explicit attribution scope. The retired local-JSON/Windsor
+    chain is no longer consulted, and there is no fallback to it: an unreadable
+    or unproven ledger returns explicit unavailable metrics with a reason.
+
+    Windows are BUSINESS windows (current_quarter, last_quarter, last_6_months,
+    ytd, all_time) — the same resolver every other revenue page uses. The old
+    rolling day windows (60d and friends) are rejected: they cut a B2B sales
+    cycle in half and gave this page a period no other page shared.
+    """
+    from analysis.business_windows import WINDOW_KEYS, is_valid_window
+    from analysis.revenue_scope import SCOPE_ORDER, is_valid_scope
+    from services.canonical_unit_economics_service import (
+        DEFAULT_ADVERTISING_SCOPE, build_unit_economics,
+    )
+
+    if not is_valid_window(window):
+        raise HTTPException(
+            status_code=400,
+            detail=("Invalid window. Unit economics uses business windows: "
+                    + ", ".join(WINDOW_KEYS)),
+        )
+    selected_scope = scope or DEFAULT_ADVERTISING_SCOPE
+    if not is_valid_scope(selected_scope):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid scope. Valid values: " + ", ".join(SCOPE_ORDER),
+        )
 
     try:
-        campaigns = compute_all_campaign_roas(window_days=window_days)
+        return build_unit_economics(window=window, scope=selected_scope)
     except Exception as exc:
         log.error("Unit economics computation failed: %s", exc)
         raise HTTPException(status_code=500, detail="Unit economics computation failed") from exc
-
-    overall = compute_unit_economics_summary(campaigns)
-
-    return {
-        "window": f"{window_days}d",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "overall": {
-            "ltv_to_cac": overall["ltv_to_cac"],
-            "payback_months": overall["payback_months"],
-            "avg_deal_acv": overall["avg_deal_acv"],
-            "avg_deal_mrr": overall["avg_deal_mrr"],
-            "monthly_churn_rate_used": overall["monthly_churn_rate_used"],
-            "verdict": overall["verdict"],
-        },
-        "by_campaign": campaigns,
-    }
 
 
 # ---------------------------------------------------------------------------

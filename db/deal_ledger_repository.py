@@ -460,8 +460,115 @@ def record_sync_state(*, status: str, sync_mode: str, watermark=None,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Reads (reconciliation / audit only — no production consumer in 153E-A)
+# Reads
+#
+# 153E-A added these for reconciliation and audit only. PR-ADS-153E-B promotes
+# ``fetch_won_deals`` to THE production revenue read: every migrated page now
+# reaches the ledger through it, via ``services.canonical_revenue_service``.
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Columns a production revenue page may consume. Deliberately narrower than
+# ``_LEDGER_COLUMNS``: sync bookkeeping (batch ids, fetch timestamps, row
+# timestamps) describes the pipeline, not the business, and has no place on a
+# dashboard. ``primary_contact_id`` is included because the existing deal
+# drilldowns already key contact identity off it — no contact NAME or email is
+# stored on the ledger at all, so none can leak through this read.
+PRODUCTION_DEAL_COLUMNS = (
+    "deal_id", "deal_name",
+    "deal_stage_id", "deal_stage_label", "hs_is_closed", "hs_is_closed_won",
+    "deal_created_at", "deal_close_date",
+    "amount_raw", "deal_currency_code",
+    "revenue_usd", "currency_status", "currency_reason",
+    "gclid", "campaign_name_raw", "keyword_raw", "country_raw",
+    "source_primary_raw", "source_detail_raw", "acquisition_group",
+    "attribution_status", "attribution_reason",
+    "primary_contact_id", "association_count", "association_status",
+    "association_reason",
+)
+
+
+def fetch_won_deals(start=None, end=None) -> dict:
+    """THE production won-deal population for a business window (PR-ADS-153E-B).
+
+    ``end`` is EXCLUSIVE, matching ``analysis.business_windows.get_window_bounds``.
+
+    Won is ``hs_is_closed_won IS TRUE`` and nothing else. There is deliberately
+    no stage-id parameter and no label matching: the legacy read this replaces
+    used ``deal_stage = '326093516' OR deal_stage_label ILIKE '%won%'``, which
+    counted "Closed Lost - Won Elsewhere" as revenue and would have silently
+    changed the population again the next time someone renamed a stage.
+
+    Deals with an unknown won state (``hs_is_closed_won IS NULL``) are excluded
+    from this read and counted separately by the caller. Unknown is not won, and
+    it is not lost either.
+
+    Every row is returned whether or not it carries advertising attribution.
+    Filtering to a narrower population is the scope lattice's job
+    (``analysis.revenue_scope``), applied to these rows — never a different SQL
+    query, because two queries are two populations waiting to disagree.
+
+    Read-only. No writes, no external calls.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows=[])
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {', '.join(PRODUCTION_DEAL_COLUMNS)}
+                    FROM {LEDGER_TABLE}
+                    WHERE hs_is_closed_won IS TRUE
+                      AND (%s::timestamptz IS NULL OR deal_close_date >= %s)
+                      AND (%s::timestamptz IS NULL OR deal_close_date < %s)
+                    ORDER BY deal_close_date DESC NULLS LAST, deal_id
+                    """,
+                    (start, start, end, end),
+                )
+                rows = [_normalise(r) for r in _rows_as_dicts(cur)]
+                for row in rows:
+                    for key in ("revenue_usd", "amount_raw"):
+                        if row.get(key) is not None:
+                            row[key] = float(row[key])
+        return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("fetch_won_deals failed: %s", exc)
+        return _unavailable(rows=[])
+
+
+def fetch_won_state_counts(start=None, end=None) -> dict:
+    """Deals in the window whose won state is UNKNOWN, plus the closed-lost count.
+
+    Kept separate from ``fetch_won_deals`` on purpose. A page that shows "180 won
+    deals" also needs to be able to say "and 3 deals whose won state HubSpot has
+    not told us", because folding those 3 into either bucket is a claim we cannot
+    support. ``end`` is EXCLUSIVE.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(counts={})
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                      COUNT(*) FILTER (WHERE hs_is_closed_won IS NULL)  AS unknown_won,
+                      COUNT(*) FILTER (WHERE hs_is_closed_won IS FALSE) AS not_won,
+                      COUNT(*)                                          AS deals_in_window
+                    FROM {LEDGER_TABLE}
+                    WHERE (%s::timestamptz IS NULL OR deal_close_date >= %s)
+                      AND (%s::timestamptz IS NULL OR deal_close_date < %s)
+                    """,
+                    (start, start, end, end),
+                )
+                cols = [d[0] for d in cur.description]
+                counts = dict(zip(cols, cur.fetchone()))
+        return {"available": True, "counts": counts}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("fetch_won_state_counts failed: %s", exc)
+        return _unavailable(counts={})
+
+
 def fetch_sync_state() -> dict:
     try:
         with get_conn() as conn:

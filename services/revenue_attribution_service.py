@@ -54,11 +54,13 @@ import logging
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from analysis import revenue_scope
 from analysis.attribution_confidence import get_confidence_severity
 from analysis.attribution_matcher import attribute_deals
 from analysis.business_windows import get_window_bounds, resolve_window
 from analysis.core import QUALIFIED
 from db import revenue_repository as repo
+from services import canonical_revenue_service as canonical_revenue
 from services.country_codes import country_name_for_code, get_country_code
 
 logger = logging.getLogger(__name__)
@@ -326,6 +328,10 @@ def _new_bucket(display_name: str) -> dict:
         "sqls": 0,
         "customers": 0,
         "won_revenue": 0.0,
+        # Won deals in this bucket whose USD value could not be proven. Kept
+        # separate so the bucket can say "3 customers, revenue incomplete"
+        # instead of implying the missing deals were worth nothing.
+        "revenue_unavailable_deals": 0,
         "tiers": [],
         "campaign_id": None,
     }
@@ -356,6 +362,7 @@ def _finalize_row(
     legacy_gclid: bool = False,
     extra_notes: list | None = None,
     revenue_available: bool = True,
+    revenue_readable: bool = True,
     lead_metrics_withheld: bool = False,
     spend_trusted: bool = True,
     spend_mapping_unavailable: bool = False,
@@ -368,8 +375,15 @@ def _finalize_row(
     #     or geo denominator).
     #   - spend_mapping_unavailable=True → a revenue/lead campaign with no
     #     canonical spend match: spend itself is Unavailable (never a fake $0).
-    won_revenue = round(bucket["won_revenue"], 2)
-    customers = bucket["customers"]
+    # PR-ADS-153E-B: an UNREADABLE canonical ledger leaves every bucket empty,
+    # and `round(0.0, 2)` turned that outage into a confident $0 with 0 customers
+    # on the row. Both are withheld instead, so an outage reads as an outage.
+    #
+    # `revenue_readable` is deliberately distinct from `revenue_available`: a
+    # window that genuinely closed no deals IS zero customers and is reported as
+    # such. Only an unreadable source withholds.
+    won_revenue = round(bucket["won_revenue"], 2) if revenue_readable else None
+    customers = bucket["customers"] if revenue_readable else None
     if spend_mapping_unavailable:
         spend = None
         roas = None
@@ -377,8 +391,10 @@ def _finalize_row(
         spend = round(bucket["spend"], 2)
         # ROAS is null (not 0) when the revenue source is not wired — a 0 would
         # falsely imply "spent and earned nothing" when we simply have no truth.
-        roas = compute_roas(won_revenue, spend) if (revenue_available and spend_trusted) else None
-    cac = compute_cac(spend or 0, customers)
+        roas = (compute_roas(won_revenue, spend)
+                if (revenue_available and spend_trusted and won_revenue is not None)
+                else None)
+    cac = compute_cac(spend or 0, customers) if customers is not None else None
 
     raw_confidence = confidence_from_tiers(bucket["tiers"])
     downgraded = legacy_gclid and raw_confidence == "high"
@@ -388,8 +404,9 @@ def _finalize_row(
     sqls_val = None if lead_metrics_withheld else bucket["sqls"]
     sqls_for_verdict = 0 if lead_metrics_withheld else bucket["sqls"]
 
-    has_revenue = customers > 0 or won_revenue > 0
-    verdict = classify_verdict(spend, sqls_for_verdict, customers, won_revenue, roas)
+    has_revenue = (customers or 0) > 0 or (won_revenue or 0) > 0
+    verdict = classify_verdict(spend, sqls_for_verdict, customers or 0,
+                               won_revenue or 0.0, roas)
     if lead_metrics_withheld and not has_revenue:
         # Without trusted lead/SQL signal we cannot call a spend-only row "waste".
         verdict = "learning"
@@ -647,18 +664,26 @@ def _build_summary(deals: list, spend_rows: list, contacts: list, *, legacy_gcli
 # ── Durable DB path (PR-ADS-108) ─────────────────────────────────────────────
 
 
-def _match_status_to_tier(match_status) -> str:
-    """Map a gclid_attribution.match_status to an attribution tier."""
-    ms = (match_status or "").strip().lower()
-    if ms == "matched":
+def _scope_to_tier(attribution_scope) -> str:
+    """Map a canonical attribution SCOPE to an attribution-confidence tier.
+
+    PR-ADS-153E-B: replaces ``_match_status_to_tier``, which read
+    ``gclid_attribution.match_status`` — a record of how a click id was matched
+    to a campaign. The canonical equivalent is the narrowest scope the deal
+    qualifies for (``analysis.revenue_scope``), which is an ordered statement
+    about how strong the evidence is, not about how a join was performed.
+    """
+    scope = (attribution_scope or "").strip().lower()
+    if scope == revenue_scope.SCOPE_GCLID_ATTRIBUTABLE:
         return "tier_1_gclid"
-    if ms == "url_fallback":
+    if scope == revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE:
         return "tier_2_source_tag"
     return "tier_3_spend_weighted"
 
 
 def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, group_field: str,
-                   revenue_available: bool = True, lead_metrics_withheld: bool = False,
+                   revenue_available: bool = True, revenue_readable: bool = True,
+                   lead_metrics_withheld: bool = False,
                    spend_trusted: bool = True, spend_mapping_keys: set | None = None,
                    manual_target_keys: set | None = None, compute_spend_state: bool = False):
     """Aggregate durable DB rows into finished campaign or country rows.
@@ -700,12 +725,19 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
         if row.get("status_category") == "qualified":
             b["sqls"] += 1
 
-    # revenue rows: {campaign_name, country, deal_id, deal_amount_usd, match_status}
+    # revenue rows: canonical scoped deals (PR-ADS-153E-B). A deal whose currency
+    # could not be proven is still a CUSTOMER — it is genuinely won — but it
+    # contributes no revenue, and the bucket records that its money is incomplete
+    # so a ROAS is not built on a silently understated numerator.
     for row in revenue_rows:
         _, b = bucket_for(row.get(group_field))
         b["customers"] += 1
-        b["won_revenue"] += _safe_float(row.get("deal_amount_usd"))
-        b["tiers"].append(_match_status_to_tier(row.get("match_status")))
+        amount = row.get("deal_amount_usd")
+        if amount is None:
+            b["revenue_unavailable_deals"] += 1
+        else:
+            b["won_revenue"] += float(amount)
+        b["tiers"].append(_scope_to_tier(row.get("attribution_scope")))
 
     rows = []
     for key, bucket in buckets.items():
@@ -726,6 +758,7 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
         finalized = _finalize_row(
             bucket, legacy_gclid=False,
             revenue_available=revenue_available,
+            revenue_readable=revenue_readable,
             lead_metrics_withheld=lead_metrics_withheld,
             spend_trusted=spend_trusted,
             spend_mapping_unavailable=mapping_unavailable,
@@ -771,16 +804,22 @@ def _db_top_campaign(country_key: str, revenue_rows: list, spend_rows: list) -> 
 
 
 def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
-                      revenue_available: bool = True, lead_metrics_withheld: bool = False,
+                      revenue_available: bool = True, revenue_readable: bool = True,
+                      lead_metrics_withheld: bool = False,
                       spend_trusted: bool = True) -> dict:
     spend = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
     leads = None if lead_metrics_withheld else len(lead_rows)
     sqls = None if lead_metrics_withheld else sum(
         1 for r in lead_rows if r.get("status_category") == "qualified"
     )
-    customers = len(revenue_rows)
-    won_revenue = round(sum(_safe_float(r.get("deal_amount_usd")) for r in revenue_rows), 2)
-    tiers = [_match_status_to_tier(r.get("match_status")) for r in revenue_rows]
+    customers = len(revenue_rows) if revenue_readable else None
+    known = [r for r in revenue_rows if r.get("deal_amount_usd") is not None]
+    # Withheld, not zero, when the window holds won deals whose value was never
+    # proven at all. A confident $0 beside a non-zero customer count is exactly
+    # the fabrication this contract exists to prevent.
+    won_revenue = (round(sum(float(r["deal_amount_usd"]) for r in known), 2)
+                   if (revenue_readable and (known or not revenue_rows)) else None)
+    tiers = [_scope_to_tier(r.get("attribution_scope")) for r in revenue_rows]
     # PR-ADS-118: the summary ROAS is only trustworthy from a complete canonical
     # denominator; otherwise it is unavailable (never from a partial/geo total).
     return {
@@ -789,8 +828,12 @@ def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
         "sqls": sqls,
         "customers": customers,
         "won_revenue": won_revenue,
-        "roas": compute_roas(won_revenue, spend) if (revenue_available and spend_trusted) else None,
-        "cac": compute_cac(spend, customers),
+        "revenue_unavailable_deals": (len(revenue_rows) - len(known)
+                                      if revenue_readable else None),
+        "roas": (compute_roas(won_revenue, spend)
+                 if (revenue_available and spend_trusted and won_revenue is not None)
+                 else None),
+        "cac": compute_cac(spend, customers) if customers else None,
         "confidence": confidence_from_tiers(tiers),
     }
 
@@ -870,7 +913,7 @@ def _apply_identity_map(rows: list, mapping: dict, applied_log: list) -> list:
     return out
 
 
-def _build_from_db(resolved, start_date, end_date) -> dict | None:
+def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dict | None:
     """Build the contract from durable DB sources.
 
     Returns the full contract dict, or None when the database is unavailable
@@ -881,11 +924,35 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         return None  # DB unreachable — signal caller to fall back
 
     leads = repo.fetch_lead_quality(start_date, end_date)
-    revenue = repo.fetch_won_revenue(start_date, end_date)
     sync = repo.fetch_sync_state()
 
+    # ── Revenue: canonical ledger, joined only through attribution evidence ──
+    # PR-ADS-153E-B. Google Ads still owns spend, clicks and campaign identity;
+    # it no longer defines which deals exist. The ROAS tables therefore read the
+    # canonical won population and narrow it with the explicit scope lattice:
+    #
+    #   * campaign rows  → `campaign_attributable` (a usable campaign identifier)
+    #   * country rows   → `google_ads_source`     (Google Ads evidence, any campaign)
+    #
+    # The all-source ladder is carried alongside so these views can state that
+    # attributed revenue is a SUBSET, and how large a subset — they must never
+    # read as total business revenue.
+    canonical_base = canonical_revenue.load_won_deals(
+        window, start=None if window else start_date,
+        end=None if window else end_date, now=now)
+    revenue_available_canonical = bool(canonical_base.get("available"))
+    campaign_revenue_rows = (canonical_revenue.canonical_deal_rows(
+        canonical_base, revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE)
+        if revenue_available_canonical else [])
+    country_revenue_rows = (canonical_revenue.canonical_deal_rows(
+        canonical_base, revenue_scope.SCOPE_GOOGLE_ADS_SOURCE)
+        if revenue_available_canonical else [])
+    scope_ladder = canonical_revenue.get_scope_ladder(base=canonical_base)
+
     spend_rows = spend["rows"]
-    revenue_rows = revenue["rows"]
+    # The campaign-scoped set drives identity mapping, the summary and the
+    # campaign table; the country table uses its own wider scope below.
+    revenue_rows = campaign_revenue_rows
 
     # PR-ADS-118: Campaign ROAS spend truth comes ONLY from the canonical Google
     # Ads campaign-daily table, NEVER the geo table. When the canonical table is
@@ -1040,6 +1107,12 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     if excluded_label_keys:
         revenue_rows = [r for r in revenue_rows
                         if _ident_norm(r.get("campaign_name")) not in excluded_label_keys]
+        # The same exclusions apply to the country table: a label an admin marked
+        # "not a real Google Ads campaign" is not Google Ads revenue in ANY
+        # advertising view. The deal keeps its place in all-source truth.
+        country_revenue_rows = [r for r in country_revenue_rows
+                                if _ident_norm(r.get("campaign_name"))
+                                not in excluded_label_keys]
     resolution_map = (_build_resolution_map(canonical.get("rows") or [], approved_mappings)
                       if canonical_access else {})
     if resolution_map:
@@ -1145,9 +1218,10 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     if resolution_map and lead_rows:
         lead_rows = _apply_identity_map(lead_rows, resolution_map, applied_identity_mappings)
 
-    # Revenue is "wired" only when there are closed-won attributed rows; without
-    # them ROAS is null (not zero) and the status says so.
-    revenue_available = bool(revenue_rows)
+    # Revenue is "wired" only when the canonical ledger is READABLE and the
+    # scope actually contains attributed deals. An unreadable ledger is not an
+    # empty one: ROAS stays null (never zero) and the status names the reason.
+    revenue_available = bool(revenue_available_canonical and revenue_rows)
 
     # PR-ADS-124: country availability keys off the COUNTRY SOURCE rows (canonical
     # geo when present, else legacy) so it reflects the same source that feeds the
@@ -1157,7 +1231,9 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
 
     campaigns = _build_db_rows(
         campaign_spend_rows, lead_rows, revenue_rows, group_field="campaign_name",
-        revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
+        revenue_available=revenue_available,
+        revenue_readable=revenue_available_canonical,
+        lead_metrics_withheld=lead_metrics_withheld,
         spend_trusted=campaign_spend_trusted, spend_mapping_keys=spend_mapping_keys,
         manual_target_keys=manual_target_keys, compute_spend_state=spend_identity_resolved,
     )
@@ -1176,8 +1252,10 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     for c in campaigns:
         c["aliases"] = alias_by_canon.get(_norm(c.get("campaign_name")), [])
     countries = _build_db_rows(
-        country_spend_rows, lead_rows, revenue_rows, group_field="country",
-        revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
+        country_spend_rows, lead_rows, country_revenue_rows, group_field="country",
+        revenue_available=revenue_available,
+        revenue_readable=revenue_available_canonical,
+        lead_metrics_withheld=lead_metrics_withheld,
         spend_trusted=country_spend_trusted,
     )
     # PR-ADS-131: append the explicit residual bucket AFTER the real country rows so
@@ -1192,7 +1270,9 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         countries.append(_residual_country_row(_res_native, country_residual_usd, use_usd))
     summary = _build_db_summary(
         campaign_spend_rows, lead_rows, revenue_rows,
-        revenue_available=revenue_available, lead_metrics_withheld=lead_metrics_withheld,
+        revenue_available=revenue_available,
+        revenue_readable=revenue_available_canonical,
+        lead_metrics_withheld=lead_metrics_withheld,
         spend_trusted=campaign_spend_trusted,
     )
 
@@ -1205,7 +1285,9 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         "db" if leads.get("rows") else "db_empty"
     )
     revenue_attribution_status = (
-        "gclid_attribution_db" if revenue_available else "not_wired_or_no_closed_won"
+        canonical_revenue.CANONICAL_SOURCE if revenue_available
+        else ("canonical_ledger_unavailable" if not revenue_available_canonical
+              else "no_campaign_attributable_deals_in_window")
     )
     # PR-ADS-115: split revenue truth into two independent facts. A connected
     # integration whose selected window simply has no closed-won deals is a SAFE
@@ -1216,7 +1298,7 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     revenue_window_status = "has_revenue" if revenue_available else "no_closed_won"
     # Top-level attribution_source_status retained for backward compatibility.
     if revenue_available:
-        attribution_status = "gclid_attribution_db"
+        attribution_status = canonical_revenue.CANONICAL_SOURCE
     elif not lead_metrics_withheld and leads.get("rows"):
         attribution_status = "hubspot_source_tags_only"
     else:
@@ -1276,7 +1358,8 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
     db_tables_used = [t for t, present in (
         ("geo", bool(spend_rows)),
         ("leads", bool(leads.get("rows"))),
-        ("gclid_attribution", bool(revenue_rows)),
+        # PR-ADS-153E-B: revenue is the canonical ledger, not gclid_attribution.
+        ("hubspot_deal_ledger", bool(revenue_rows)),
     ) if present]
 
     source_health = {
@@ -1344,8 +1427,10 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         # ROAS (offline / import / bad UTM / CRM). Never shown as $0 or unmapped.
         "excluded_campaign_labels": excluded_campaign_labels,
         "data_is_partial": data_is_partial,
-        "coverage_start": spend.get("coverage_start") or revenue.get("coverage_start"),
-        "coverage_end": spend.get("coverage_end") or revenue.get("coverage_end"),
+        # Revenue coverage now comes from the canonical ledger's own window, not
+        # from a legacy table's min/max close date.
+        "coverage_start": spend.get("coverage_start") or canonical_base.get("window_start"),
+        "coverage_end": spend.get("coverage_end") or canonical_base.get("window_end"),
         "missing_contact_created_at_count": leads.get("missing_contact_created_at_count", 0),
         "excluded_non_paid_count": leads.get("excluded_non_paid_count", 0),
         "excluded_pseudo_campaign_count": leads.get("excluded_pseudo_campaign_count", 0),
@@ -1380,6 +1465,23 @@ def _build_from_db(resolved, start_date, end_date) -> dict | None:
         ),
         "geo_country_source": geo_country_source,
         "data_is_partial": data_is_partial,
+        # ── PR-ADS-153E-B revenue provenance and scope ───────────────────────
+        # These views are ADVERTISING views. They declare the attribution scope
+        # their revenue was narrowed to and carry the all-source ladder, so a
+        # reader can see that the attributed figure is a subset of the business
+        # — and exactly how much of the business it covers. Non-attributed deals
+        # are never removed from the company-wide population to make these rows
+        # add up; they simply are not in this scope.
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+        "country_revenue_scope": revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
+        "revenue_available": revenue_available_canonical,
+        "revenue_unavailable_reason": (None if revenue_available_canonical
+                                       else canonical_base.get("reason")),
+        "revenue_violation_codes": canonical_base.get("violation_codes") or [],
+        "as_of": canonical_base.get("as_of"),
+        "attribution_coverage": scope_ladder,
+        "legacy_fallback_used": False,
         "source_health": source_health,
         "files_used": {},
         "db_tables_used": db_tables_used,
@@ -1524,9 +1626,12 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     """Build the shared revenue-attribution contract for a business window.
 
     Durable-source strategy (PR-ADS-108):
-      1. Read from persisted PostgreSQL tables (geo / leads / gclid_attribution).
-      2. If the database is unavailable, fall back to local JSON files, clearly
-         labeled as a diagnostic fallback (source_health.mode).
+      1. Read spend and leads from persisted PostgreSQL tables (geo / leads) and
+         closed-won revenue from the canonical deal ledger through
+         ``services.canonical_revenue_service`` (PR-ADS-153E-B).
+      2. If the database is unavailable, fall back to local JSON files for the
+         SPEND/lead shape only, clearly labeled as a diagnostic fallback
+         (source_health.mode). Revenue is never served from local JSON.
       3. If neither a durable DB source nor a local file exists, the response
          reports "source_unavailable" with the exact missing dependency.
 
@@ -1545,13 +1650,54 @@ def build_revenue_attribution(window: str, now: datetime | None = None) -> dict:
     """
     resolved, start_date, end_date = _window_date_bounds(window, now)
 
-    db_result = _build_from_db(resolved, start_date, end_date)
+    db_result = _build_from_db(resolved, start_date, end_date, window=window, now=now)
     if db_result is not None:
         return db_result
 
-    # Database unavailable — diagnostic fallback to local JSON.
+    # Database unavailable — diagnostic fallback to local JSON for SPEND SHAPE
+    # only. PR-ADS-153E-B: local JSON is a prohibited revenue source. It holds a
+    # different deal population with no deduplication and no currency doctrine,
+    # so serving revenue from it during a database outage would silently swap
+    # what "closed-won revenue" means at the worst possible moment.
     start_dt, end_dt = get_window_bounds(window, now=now)
-    return _build_from_json(resolved, start_dt, end_dt)
+    return _withhold_json_revenue(_build_from_json(resolved, start_dt, end_dt))
+
+
+# Metrics that depend on the closed-won deal population, and are therefore
+# unavailable whenever revenue does not come from the canonical ledger.
+_REVENUE_DERIVED_KEYS = ("customers", "won_revenue", "roas", "cac", "confidence")
+
+
+def _withhold_json_revenue(contract: dict) -> dict:
+    """Blank every revenue-derived metric on the local-JSON diagnostic fallback.
+
+    Spend, leads and SQLs survive — they come from their own sources and the
+    fallback is honest about being diagnostic. Revenue does not: it would come
+    from `data/attributed_deals.json`, which is one of the three conflicting
+    lineages PR-ADS-153E replaced. Withholding it leaves the page saying "revenue
+    unavailable" instead of quietly showing a second, smaller set of customers.
+    """
+    if not isinstance(contract, dict):
+        return contract
+    for key in _REVENUE_DERIVED_KEYS:
+        if key in (contract.get("summary") or {}):
+            contract["summary"][key] = None
+    for bucket in ("campaigns", "countries"):
+        for row in contract.get(bucket) or []:
+            for key in _REVENUE_DERIVED_KEYS:
+                if key in row:
+                    row[key] = None
+    health = contract.setdefault("source_health", {})
+    health["revenue_attribution_status"] = "canonical_ledger_unavailable"
+    health["revenue_source"] = canonical_revenue.CANONICAL_SOURCE
+    health["legacy_fallback_used"] = False
+    contract["revenue_available"] = False
+    contract["revenue_unavailable_reason"] = (
+        canonical_revenue.REASON_LEDGER_UNREADABLE)
+    contract.setdefault("warnings", []).append(
+        "Closed-won revenue is unavailable: the canonical deal ledger could not "
+        "be read and local JSON is not a permitted revenue source.")
+    return contract
 
 
 def _mask_gclid(gclid) -> str | None:
@@ -1570,20 +1716,27 @@ def _deal_detail_row(r: dict) -> dict:
     are explicit None so the UI shows "unavailable", never a fabricated id.
     """
     return {
-        "company_name": r.get("company") or None,
-        "company_record_id": None,          # durable table stores company NAME only
+        # PR-ADS-153E-B: the canonical ledger stores the DEAL's name, not the
+        # associated contact's employer, so the company columns are honestly
+        # unavailable rather than filled with a deal name.
+        "company_name": None,
+        "company_record_id": None,
         "main_contact_name": None,          # contact name is not stored
-        "main_contact_record_id": r.get("contact_id") or None,
-        "deal_name": None,                  # deal title is not stored (only stage label)
+        "main_contact_record_id": r.get("primary_contact_id") or None,
+        "deal_name": r.get("deal_name") or None,
         "deal_record_id": r.get("deal_id") or None,
         # Preserve None for a missing amount — never fabricate a $0.00 the UI
         # would show as real revenue; the drawer renders it as "unavailable".
         "deal_amount_usd": (lambda a: round(a, 2) if a is not None else None)(
             _nullable_float(r.get("deal_amount_usd"))),
+        "currency_status": r.get("currency_status"),
         "deal_close_date": r.get("deal_close_date"),
         "attributed_campaign_label": r.get("external_campaign_label") or r.get("campaign_name"),
         "canonical_campaign_name": r.get("campaign_name"),
-        "match_method": r.get("match_source") or r.get("match_status") or None,
+        # The attribution SCOPE this deal qualifies for, replacing the GCLID
+        # match_status/match_source pair that described a join, not evidence.
+        "match_method": r.get("attribution_scope") or None,
+        "attribution_status": r.get("attribution_status") or None,
         "gclid": _mask_gclid(r.get("gclid")),
         "country": r.get("country") or None,
         "deal_stage_label": r.get("deal_stage_label") or None,
@@ -1605,15 +1758,25 @@ def build_campaign_deal_details(window: str, campaign: str,
     resolved, start_date, end_date = _window_date_bounds(window, now)
     generated_at = datetime.now(timezone.utc).isoformat()
 
-    fetched = repo.fetch_campaign_deal_details(start_date, end_date)
-    if not fetched.get("available"):
+    # PR-ADS-153E-B: the deals proving a campaign row come from the canonical
+    # ledger at `campaign_attributable` scope — the SAME scope the ROAS row was
+    # aggregated at, so the drawer can never list a different set of deals from
+    # the number it is opened from.
+    base = canonical_revenue.load_won_deals(window, now=now)
+    if not base.get("available"):
         return {
             "window": resolved, "campaign": campaign, "details": [],
-            "source_health": {"status": "database_unavailable"},
+            "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+            "revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+            "revenue_available": False,
+            "revenue_unavailable_reason": base.get("reason"),
+            "legacy_fallback_used": False,
+            "source_health": {"status": base.get("reason") or "database_unavailable"},
             "generated_at": generated_at,
         }
 
-    rows = fetched.get("rows", [])
+    rows = canonical_revenue.canonical_deal_rows(
+        base, revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE)
     # Apply the canonical identity map (exact-normalized auto-links + approved
     # manual mappings) so raw deal labels resolve to the canonical campaign name.
     canonical = repo.fetch_canonical_campaign_spend(start_date, end_date)
@@ -1634,6 +1797,11 @@ def build_campaign_deal_details(window: str, campaign: str,
         "window": resolved,
         "campaign": campaign,
         "details": details,
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+        "revenue_available": True,
+        "as_of": base.get("as_of"),
+        "legacy_fallback_used": False,
         "source_health": {"status": "available"},
         "generated_at": generated_at,
     }
@@ -1648,16 +1816,18 @@ def _country_deal_detail_row(r: dict) -> dict:
     stays None (the drawer shows "unavailable"), never a fake $0.00.
     """
     return {
-        "company_name": r.get("company") or None,
-        "company_record_id": None,          # durable table stores company NAME only
+        # See `_deal_detail_row`: the ledger has the deal's name, not a company.
+        "company_name": None,
+        "company_record_id": None,
         "main_contact_name": None,          # contact name is not stored
-        "main_contact_record_id": r.get("contact_id") or None,
-        "deal_name": None,                  # deal title is not stored (only stage label)
+        "main_contact_record_id": r.get("primary_contact_id") or None,
+        "deal_name": r.get("deal_name") or None,
         "deal_record_id": r.get("deal_id") or None,
         # Preserve None for a missing amount — never fabricate a $0.00 the UI
         # would read as real revenue; the drawer renders it as "unavailable".
         "deal_amount_usd": (lambda a: round(a, 2) if a is not None else None)(
             _nullable_float(r.get("deal_amount_usd"))),
+        "currency_status": r.get("currency_status"),
         "deal_close_date": r.get("deal_close_date"),
         # campaign_name is the CANONICAL display label (post identity map);
         # raw_campaign_name preserves the original external/UTM label.
@@ -1665,8 +1835,8 @@ def _country_deal_detail_row(r: dict) -> dict:
         "raw_campaign_name": (r.get("raw_campaign_name")
                               or r.get("external_campaign_label")
                               or r.get("campaign_name")),
-        "match_status": r.get("match_status") or None,
-        "match_source": r.get("match_source") or None,
+        "attribution_status": r.get("attribution_status") or None,
+        "attribution_scope": r.get("attribution_scope") or None,
         "gclid_masked": _mask_gclid(r.get("gclid")),
         "country": r.get("country") or None,
         "deal_stage_label": r.get("deal_stage_label") or None,
@@ -1693,17 +1863,32 @@ def build_country_deal_details(window: str, country: str,
     generated_at = datetime.now(timezone.utc).isoformat()
     code = (country_code or "").strip().upper() or None
 
-    fetched = repo.fetch_country_deal_details(start_date, end_date, country, code)
-    if not fetched.get("available"):
+    # PR-ADS-153E-B: canonical ledger at `google_ads_source` scope — the same
+    # scope the ROAS by Country row aggregates. Country matching stays EXACT
+    # (ISO code when available, else exact normalized name); no fuzzy matching
+    # is introduced, so "United Arab Emirates" still cannot leak into
+    # "United Kingdom".
+    base = canonical_revenue.load_won_deals(window, now=now)
+    if not base.get("available"):
         return {
             "window": resolved, "country": country, "country_code": code,
             "details": [],
-            "summary": {"companies": 0, "deals": 0, "won_revenue_usd": None, "customers": 0},
-            "source_health": {"status": "database_unavailable"},
+            "summary": {"companies": None, "deals": None,
+                        "won_revenue_usd": None, "customers": None},
+            "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+            "revenue_scope": revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
+            "revenue_available": False,
+            "revenue_unavailable_reason": base.get("reason"),
+            "legacy_fallback_used": False,
+            "source_health": {"status": base.get("reason") or "database_unavailable"},
             "generated_at": generated_at,
         }
 
-    rows = fetched.get("rows", [])
+    target_country = _norm(country)
+    rows = [r for r in canonical_revenue.canonical_deal_rows(
+        base, revenue_scope.SCOPE_GOOGLE_ADS_SOURCE)
+        if _norm(r.get("country")) == target_country
+        or (code and get_country_code(r.get("country") or "") == code)]
     # Preserve the RAW label before the canonical identity map overwrites it, so
     # the drawer can show both "Campaign / Source" (canonical) and the raw label.
     for r in rows:
@@ -1729,7 +1914,6 @@ def build_country_deal_details(window: str, country: str,
         reverse=True,
     )
 
-    companies = {d["company_name"] for d in details if d.get("company_name")}
     deal_ids = {d["deal_record_id"] for d in details if d.get("deal_record_id")}
     amounts = [d["deal_amount_usd"] for d in details if d.get("deal_amount_usd") is not None]
     won_revenue = round(sum(amounts), 2) if amounts else None
@@ -1739,11 +1923,21 @@ def build_country_deal_details(window: str, country: str,
         "country_code": code,
         "details": details,
         "summary": {
-            "companies": len(companies),
+            # The ledger carries no company identity, so a distinct-company count
+            # cannot be produced from it. Withheld rather than approximated with
+            # a deal count that would silently mean something else.
+            "companies": None,
             "deals": len(deal_ids),
             "won_revenue_usd": won_revenue,
             "customers": len(deal_ids),
+            "revenue_unavailable_deals": sum(
+                1 for d in details if d.get("deal_amount_usd") is None),
         },
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_scope": revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
+        "revenue_available": True,
+        "as_of": base.get("as_of"),
+        "legacy_fallback_used": False,
         "source_health": {"status": "ready"},
         "generated_at": generated_at,
     }
@@ -1768,50 +1962,64 @@ def build_revenue_deals(window: str, now: datetime | None = None) -> dict:
     Raises:
         ValueError: If ``window`` is not a supported business window.
     """
-    resolved, start_date, end_date = _window_date_bounds(window, now)
+    resolved, _start_date, _end_date = _window_date_bounds(window, now)
 
-    ledger = repo.fetch_revenue_deals(start_date, end_date)
+    canonical = canonical_revenue.load_won_deals(window, now=now)
     generated_at = datetime.now(timezone.utc).isoformat()
 
-    if not ledger.get("available"):
-        # The durable ledger/database cannot be read — distinct from safe-empty.
+    if not canonical.get("available"):
+        # The canonical ledger cannot be read, or its coverage is not proven —
+        # distinct from safe-empty, and NOT a cue to fall back to
+        # `gclid_attribution`: that table holds a narrower population, so a
+        # fallback would quietly redefine "closed-won revenue" mid-incident.
         return {
             "window": resolved,
             "summary": {
-                "deal_count": 0,
+                "deal_count": None,
                 "won_revenue": None,
                 "average_deal_value": None,
-                "exact_gclid_count": 0,
+                "exact_gclid_count": None,
             },
             "deals": [],
             "source_health": {
-                "ledger_status": "database_unavailable",
-                "revenue_attribution_status": "database_unavailable",
+                "ledger_status": canonical.get("reason") or "database_unavailable",
+                "revenue_attribution_status": "canonical_ledger_unavailable",
+                "violation_codes": canonical.get("violation_codes") or [],
             },
+            "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+            "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+            "revenue_available": False,
+            "as_of": canonical.get("as_of"),
+            "legacy_fallback_used": False,
             "generated_at": generated_at,
         }
 
-    rows = ledger.get("rows", [])
+    rows = canonical_revenue.canonical_deal_rows(
+        canonical, revenue_scope.SCOPE_ALL_SOURCE)
+    totals = canonical_revenue.summarize_deals(
+        canonical.get("deals"), revenue_scope.SCOPE_ALL_SOURCE)
 
     deals = []
-    won_revenue = 0.0
-    exact_gclid_count = 0
+    gclid_attributable = 0
     for row in rows:
-        amount = _safe_float(row.get("deal_amount_usd"))
-        won_revenue += amount
-        match_source = (row.get("match_source") or "").strip().lower()
-        if match_source == "gclid":
-            exact_gclid_count += 1
+        if row.get("attribution_scope") == revenue_scope.SCOPE_GCLID_ATTRIBUTABLE:
+            gclid_attributable += 1
         deals.append({
             "deal_id": row.get("deal_id"),
-            "company": row.get("company"),
+            # The ledger stores the deal's own name; the contact employer the
+            # legacy `company` column carried is not a deal field at all.
+            "deal_name": row.get("deal_name"),
+            "company": None,
             "country": row.get("country"),
             "campaign_name": row.get("campaign_name"),
             "deal_close_date": row.get("deal_close_date"),
-            "deal_amount_usd": round(amount, 2),
+            # Null when the currency was never proven — never summed as $0.
+            "deal_amount_usd": row.get("deal_amount_usd"),
+            "currency_status": row.get("currency_status"),
             "deal_stage_label": row.get("deal_stage_label"),
-            "match_status": row.get("match_status"),
-            "match_source": row.get("match_source"),
+            "attribution_status": row.get("attribution_status"),
+            "attribution_scope": row.get("attribution_scope"),
+            "acquisition_group": row.get("acquisition_group"),
         })
 
     # Sort: most recent close first, then largest revenue.
@@ -1824,12 +2032,23 @@ def build_revenue_deals(window: str, now: datetime | None = None) -> dict:
     revenue_wired = deal_count > 0
     summary = {
         "deal_count": deal_count,
-        # No closed-won deals -> revenue is unavailable (None), never a fake $0.
-        "won_revenue": round(won_revenue, 2) if revenue_wired else None,
+        # Withheld (None) when no deal in the window had a provable amount —
+        # never a fake $0 standing in for "we could not resolve the currency".
+        # An EMPTY window also reports None rather than $0: this contract has
+        # always distinguished "no closed-won deals here" from "these deals were
+        # worth nothing", and the cutover does not change that.
+        "won_revenue": totals["revenue_usd"] if revenue_wired else None,
         "average_deal_value": (
-            round(won_revenue / deal_count, 2) if revenue_wired else None
+            round(totals["revenue_usd"] / totals["revenue_deals"], 2)
+            if totals["revenue_deals"] else None
         ),
-        "exact_gclid_count": exact_gclid_count,
+        # Renamed from `exact_gclid_count`: this is the GCLID-attributable SUBSET
+        # of an all-source population, and the lattice guarantees it is a subset.
+        "exact_gclid_count": gclid_attributable,
+        "gclid_attributable_deals": gclid_attributable,
+        "currency_unavailable_deals": totals["currency_unavailable_deals"],
+        "ambiguous_associations": totals["ambiguous_associations"],
+        "failed_associations": totals["failed_associations"],
     }
 
     return {
@@ -1839,9 +2058,16 @@ def build_revenue_deals(window: str, now: datetime | None = None) -> dict:
         "source_health": {
             "ledger_status": "available",
             "revenue_attribution_status": (
-                "gclid_attribution_db" if revenue_wired else "not_wired_or_no_closed_won"
+                canonical_revenue.CANONICAL_SOURCE if revenue_wired
+                else "no_closed_won_deals_in_window"
             ),
         },
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "revenue_available": True,
+        "as_of": canonical.get("as_of"),
+        "attribution_coverage": canonical_revenue.get_scope_ladder(base=canonical),
+        "legacy_fallback_used": False,
         "generated_at": generated_at,
     }
 
@@ -1861,17 +2087,21 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
 
     grain = repo.fetch_lead_date_grain_health(start_date, end_date)
     pollution = repo.fetch_campaign_pollution_report(start_date, end_date)
-    revenue = repo.fetch_won_revenue(start_date, end_date)
+    # PR-ADS-153E-B: the audit asks the SAME contract the pages read, so it can
+    # never report a window as revenue-safe using a lineage no page consumes.
+    revenue_base = canonical_revenue.load_won_deals(window, now=now)
 
     lead_window_safe = bool(grain.get("lead_window_safe"))
     spend_window_safe = True   # geo.run_date is the per-day source date
-    revenue_window_safe = True  # gclid_attribution.deal_close_date is the close date
+    # The canonical ledger is windowed by the canonical deal close date, never a
+    # scheduler run date.
+    revenue_window_safe = bool(revenue_base.get("available"))
 
     date_grain_health = {
         "spend_date_field": "geo.run_date",
         "lead_date_field_current": "leads.contact_created_at",
         "lead_event_date_field_available": bool(grain.get("lead_event_date_field_available")),
-        "deal_date_field": "gclid_attribution.deal_close_date",
+        "deal_date_field": "hubspot_deal_ledger.deal_close_date",
         "lead_window_safe": lead_window_safe,
         "spend_window_safe": spend_window_safe,
         "revenue_window_safe": revenue_window_safe,
@@ -1915,7 +2145,7 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
     # the selected business window. A connected integration with no deals in the
     # selected window is a SAFE EMPTY state, not "not wired".
     revenue_integration_connected = repo.revenue_integration_connected()
-    window_has_revenue = bool(revenue.get("rows"))
+    window_has_revenue = bool(revenue_base.get("deals"))
     try:
         import db.writers as _db_writers  # noqa: PLC0415
         legacy_excluded_count = _db_writers.count_lead_exclusions()

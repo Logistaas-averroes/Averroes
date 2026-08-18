@@ -62,12 +62,13 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
             tests/test_pr_ads_153e_a_pg_integration.py \
-            tests/test_pr_ads_153e_a2_pg_integration.py -q \
+            tests/test_pr_ads_153e_a2_pg_integration.py \
+            tests/test_pr_ads_153e_b_pg_integration.py -q \
             --junitxml=pg-results.xml
 
       # A skipped database suite is not merge evidence. If the cluster could not
@@ -98,7 +99,8 @@ jobs:
           # above would still look healthy from the other suites.
           for required in ("tests.test_pr_ads_153d_pg_integration",
                            "tests.test_pr_ads_153e_a_pg_integration",
-                           "tests.test_pr_ads_153e_a2_pg_integration"):
+                           "tests.test_pr_ads_153e_a2_pg_integration",
+                           "tests.test_pr_ads_153e_b_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):
                   sys.exit(f"{required} contributed no test cases — it was "
@@ -106,12 +108,16 @@ jobs:
                            "acceptable merge evidence")
           PY
 
-      - name: Contract tests (153D + 153E-A + 153E-A2)
+      # The 153E-B contract suite is the CUTOVER guard: it fails CI if a
+      # migrated consumer reaches for a retired legacy revenue table or
+      # provider again, or stops reading the one shared canonical contract.
+      - name: Contract tests (153D + 153E-A + 153E-A2 + 153E-B)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_waste_consolidation.py \
             tests/test_pr_ads_153e_a_revenue_ledger.py \
-            tests/test_pr_ads_153e_a2_cutover_gate.py -q
+            tests/test_pr_ads_153e_a2_cutover_gate.py \
+            tests/test_pr_ads_153e_b_consumer_cutover.py -q
 
       - name: Full suite (known-failing-on-main deselected)
         run: |

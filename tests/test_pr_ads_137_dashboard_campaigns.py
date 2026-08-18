@@ -38,6 +38,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_legacy_deal_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -170,7 +174,8 @@ def _patch_durable(monkeypatch, *, canonical=None, deals=None, keyword_snapshot=
                         lambda s, e: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
     monkeypatch.setattr(repo, "fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr(repo, "revenue_integration_connected", lambda: revenue_connected)
-    monkeypatch.setattr(repo, "fetch_revenue_deals", lambda s, e: {"available": True, "rows": list(dl)})
+    # PR-ADS-153E-B: closed-won proof deals come from the canonical deal ledger.
+    patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(dl))
     monkeypatch.setattr(repo, "fetch_keyword_theme_snapshot", lambda: dict(ks))
     monkeypatch.setattr(repo, "fetch_search_term_signals", lambda s, e: dict(ss))
     import db.writers as db_writers
@@ -396,15 +401,15 @@ def test_previous_period_unknown_amount_withholds_revenue_delta(monkeypatch):
     # The previous-period revenue baseline counts a null-amount deal as $0 in the
     # mart summary; if the previous window had an unknown amount, the revenue delta
     # must be withheld (No comparison), never measured against a lowered $0.
-    import db.revenue_repository as repo
+    import db.deal_ledger_repository as ledger_repo
     _patch_durable(monkeypatch)
 
-    def deals_by_window(start, end):
+    def deals_by_window(start=None, end=None):
         prev = start is not None and getattr(start, "year", 9999) < 2026
         rows = ([dict(DEAL_ROWS[0], deal_amount_usd=None)] if prev else list(DEAL_ROWS))
-        return {"available": True, "rows": rows}
+        return {"available": True, "rows": from_legacy_deal_rows(rows)}
 
-    monkeypatch.setattr(repo, "fetch_revenue_deals", deals_by_window)
+    monkeypatch.setattr(ledger_repo, "fetch_won_deals", deals_by_window)
     from services.dashboard_campaigns_service import build_dashboard_campaigns
     out = build_dashboard_campaigns("ytd", now=NOW)
     rev = out["period_change"]["metrics"]["won_revenue_usd"]
@@ -412,23 +417,26 @@ def test_previous_period_unknown_amount_withholds_revenue_delta(monkeypatch):
 
 
 def test_deal_ledger_unavailable_does_not_claim_no_deals(monkeypatch):
-    # The deal ledger is down but the mart still has canonical campaign revenue.
-    # Proof must be reported unavailable — never "No closed-won deals" — and the
-    # mart revenue stays canonical (not blanked just because proof is unavailable).
-    import db.revenue_repository as repo
+    # PR-ADS-153E-B: the canonical deal ledger IS the revenue source now, so an
+    # unreadable ledger withholds campaign revenue as well as deal proof. What
+    # must never happen — and is what this test guards — is a confident $0 or a
+    # "no closed-won deals" claim standing in for the outage. Spend is a Google
+    # Ads fact and survives.
     _patch_durable(monkeypatch)
-    monkeypatch.setattr(repo, "fetch_revenue_deals",
-                        lambda s, e: {"available": False, "rows": []})
+    patch_canonical_ledger(monkeypatch, [], available=False)
     from services.dashboard_campaigns_service import build_dashboard_campaigns
     out = build_dashboard_campaigns(WINDOW, now=NOW)
     assert out["deal_proof_available"] is False
     assert out["truth_status"]["deal_proof"] == "unavailable"
     assert "deal_proof" in {u["metric"] for u in out["unavailable"]}
-    # Mart revenue remains the canonical number (mart is ready).
+    assert out["revenue_available"] is False
+    assert out["legacy_fallback_used"] is False
     g = _camp(out, "Global Competitors")
-    assert g["won_revenue_usd"] == 29000.0
-    assert out["kpis"]["won_revenue_usd"] == 29000.0
-    assert out["kpis"]["customers"] == 2
+    assert g["won_revenue_usd"] is None, "an outage must not render as $0"
+    assert g["customers"] is None
+    assert g["spend_usd"] is not None, "Google Ads spend is unaffected"
+    assert out["kpis"]["won_revenue_usd"] is None
+    assert out["kpis"]["customers"] is None
     # No deals to display, but the row must NOT be rendered as "no deals" — the
     # contract exposes deal_proof_available for the drawer to say Unavailable.
     assert g["deals"] == []

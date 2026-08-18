@@ -24,7 +24,9 @@ from analysis.source_classification import (
     CH_PAID_SEARCH, PF_GOOGLE_ADS,
     classify_source, classify_source_taxonomy, attribute_deal,
 )
+from analysis import revenue_scope
 from db import revenue_repository as repo
+from services import canonical_revenue_service as canonical_revenue
 from services import revenue_spend_truth_service
 
 log = logging.getLogger(__name__)
@@ -136,6 +138,11 @@ def _roas(won, spend):
     """
     if spend is None or spend <= 0:
         return None
+    # A WITHHELD revenue numerator (every deal in the bucket has an unproven
+    # currency) makes ROAS unknown, not 0.00x — `_safe_float(None)` used to turn
+    # it into a confident zero return.
+    if won is None:
+        return None
     return round(_safe_float(won) / spend, 2)
 
 
@@ -144,6 +151,47 @@ def _window_bounds(window: str, now):
     start = date.fromisoformat(resolved["start_date"]) if resolved["start_date"] else None
     end = date.fromisoformat(resolved["end_date"])
     return resolved, start, end
+
+
+def _bucket_revenue(bucket: dict):
+    """A bucket's USD revenue, or ``None`` when NOTHING in it was proven.
+
+    A bucket holding three won deals whose currency could never be resolved has
+    an unknown total, not a $0 one. Returning 0.00 there would put a confident
+    zero next to a customer count of three — and, in the Google Ads group, feed a
+    0.00x ROAS built on a numerator we never had.
+    """
+    if not bucket.get("revenue_known_deals") and bucket.get("customers"):
+        return None
+    return round(bucket.get("won_revenue") or 0.0, 2)
+
+
+def _unavailable_revenue_by_source(resolved, canonical, spend_truth, now) -> dict:
+    """The explicit quarantined page (PR-ADS-153E-B).
+
+    Revenue by Source has no second revenue lineage to fall back to, by design:
+    `deal_source_attribution` holds a different population and would silently
+    change what the page means mid-incident. Leads/SQL structure is still shown
+    where it is readable, but every revenue figure is null with a stated reason.
+    """
+    return {
+        "window": resolved,
+        "groups": [],
+        "summary": source_attribution_health_counts(),
+        "source_spend_truth": spend_truth,
+        "source_truth": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_available": False,
+        "revenue_unavailable_reason": canonical.get("reason"),
+        "revenue_unavailable_detail": canonical.get("detail"),
+        "revenue_violation_codes": canonical.get("violation_codes") or [],
+        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "canonical_reconciliation": None,
+        "as_of": canonical.get("as_of"),
+        "google_ads_conversion_value_used": False,
+        "legacy_fallback_used": False,
+        "sql_reconciliation": None,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _section_bucket(acquisition_group: str) -> str:
@@ -178,11 +226,11 @@ def _finalize_channels(group: str, channels: dict, group_spend,
         # non-canonical bucket (e.g. an ``unspecified`` bucket from a raw-source
         # mismatch) that happens to sit inside the Google Ads group.
         canonical_channel = has_spend and ch_key == CH_PAID_SEARCH
-        ch_won = round(ch["won_revenue"], 2)
+        ch_won = _bucket_revenue(ch)
         platforms = []
         for pf_key, pf in ch["platforms"].items():
             canonical_platform = canonical_channel and pf_key == PF_GOOGLE_ADS
-            pf_won = round(pf["won_revenue"], 2)
+            pf_won = _bucket_revenue(pf)
             platforms.append({
                 "platform": pf_key,
                 "label": pf["label"],
@@ -190,6 +238,8 @@ def _finalize_channels(group: str, channels: dict, group_spend,
                 "sqls": pf["sqls"],
                 "customers": pf["customers"],
                 "won_revenue": pf_won,
+                "revenue_unavailable_deals": pf.get("revenue_unavailable_deals", 0),
+                "revenue_complete": not pf.get("revenue_unavailable_deals"),
                 "spend": group_spend if canonical_platform else None,
                 # Bucket-level ROAS = this bucket's won revenue / spend.
                 "roas": _roas(pf_won, group_spend) if canonical_platform else None,
@@ -197,7 +247,7 @@ def _finalize_channels(group: str, channels: dict, group_spend,
                            if canonical_platform and google_status_label is not None
                            else _platform_status(group, is_canonical=canonical_platform)),
             })
-        platforms.sort(key=lambda p: (p["won_revenue"], p["leads"]), reverse=True)
+        platforms.sort(key=lambda p: (p["won_revenue"] or 0.0, p["leads"]), reverse=True)
         out.append({
             "channel": ch_key,
             "label": ch["label"],
@@ -205,11 +255,13 @@ def _finalize_channels(group: str, channels: dict, group_spend,
             "sqls": ch["sqls"],
             "customers": ch["customers"],
             "won_revenue": ch_won,
+            "revenue_unavailable_deals": ch.get("revenue_unavailable_deals", 0),
+            "revenue_complete": not ch.get("revenue_unavailable_deals"),
             "spend": group_spend if canonical_channel else None,
             "roas": _roas(ch_won, group_spend) if canonical_channel else None,
             "platforms": platforms,
         })
-    out.sort(key=lambda c: (c["won_revenue"], c["leads"]), reverse=True)
+    out.sort(key=lambda c: (c["won_revenue"] or 0.0, c["leads"]), reverse=True)
     return out
 
 
@@ -227,7 +279,14 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     resolved, start, end = _window_bounds(window, now)
 
     leads = repo.fetch_source_leads(start, end)
-    revenue = repo.fetch_source_revenue(start, end)
+    # PR-ADS-153E-B: closed-won revenue now comes from the canonical deal ledger
+    # through the shared read contract, at `all_source` scope. `deal_source_attribution`
+    # held all closed-won deals but no currency contract, so an unverified amount
+    # entered a USD total as if it had been proven. Fail-closed: an unreadable or
+    # unproven ledger returns an explicit unavailable page rather than a silent
+    # fallback to the legacy table — a fallback would change the population under
+    # the same headline.
+    canonical = canonical_revenue.load_won_deals(window, now=now)
     # PR-ADS-140: Google Ads source spend is the CANONICAL campaign-daily spend
     # truth — the SAME number the Revenue Decision Mart shows at the top — NOT the
     # geo/country table (repo.fetch_campaign_country_spend). Geo spend stays
@@ -235,7 +294,16 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     # page can no longer tell two spend truths (canonical top vs geo Google Ads row).
     spend_truth = revenue_spend_truth_service.build_google_ads_spend_truth(window, now=now)
 
-    buckets = {g: {"leads": 0, "sqls": 0, "customers": 0, "won_revenue": 0.0}
+    if not canonical.get("available"):
+        return _unavailable_revenue_by_source(resolved, canonical, spend_truth, now)
+
+    revenue_rows = canonical_revenue.canonical_deal_rows(
+        canonical, revenue_scope.SCOPE_ALL_SOURCE)
+    canonical_totals = canonical_revenue.summarize_deals(
+        canonical.get("deals"), revenue_scope.SCOPE_ALL_SOURCE)
+
+    buckets = {g: {"leads": 0, "sqls": 0, "customers": 0, "won_revenue": 0.0,
+                   "revenue_known_deals": 0, "revenue_unavailable_deals": 0}
                for g in SECTION_ORDER}
     # Nested channel → platform sub-buckets per group (PR-ADS-133). Group totals
     # remain authoritative from acquisition_group; these only ADD a breakdown and
@@ -246,9 +314,12 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         ch, ch_label, pf, pf_label = _taxonomy_for_section(section, primary_raw, detail_raw)
         channel = nested[section].setdefault(
             ch, {"label": ch_label, "leads": 0, "sqls": 0, "customers": 0,
-                 "won_revenue": 0.0, "platforms": {}})
+                 "won_revenue": 0.0, "revenue_known_deals": 0,
+                 "revenue_unavailable_deals": 0, "platforms": {}})
         platform = channel["platforms"].setdefault(
-            pf, {"label": pf_label, "leads": 0, "sqls": 0, "customers": 0, "won_revenue": 0.0})
+            pf, {"label": pf_label, "leads": 0, "sqls": 0, "customers": 0,
+                 "won_revenue": 0.0, "revenue_known_deals": 0,
+                 "revenue_unavailable_deals": 0})
         return channel, platform
 
     for row in (leads.get("rows") or []):
@@ -265,17 +336,22 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
             channel["sqls"] += 1
             platform["sqls"] += 1
 
-    for row in (revenue.get("rows") or []):
+    for row in revenue_rows:
         g = _section_bucket(row.get("acquisition_group") or GROUP_UNCLASSIFIED)
-        amount = _safe_float(row.get("deal_amount_usd"))
-        buckets[g]["customers"] += 1
-        buckets[g]["won_revenue"] += amount
+        # A deal whose currency could not be proven has an UNKNOWN value, not a
+        # zero one. `_safe_float(None)` used to add 0.00 here, which silently
+        # asserted the deal was worth nothing and made every bucket total —
+        # and the ROAS built on it — quietly wrong.
+        amount = row.get("deal_amount_usd")
         channel, platform = _platform_bucket(
             g, row.get("source_primary_raw"), row.get("source_detail_raw"))
-        channel["customers"] += 1
-        channel["won_revenue"] += amount
-        platform["customers"] += 1
-        platform["won_revenue"] += amount
+        for bucket in (buckets[g], channel, platform):
+            bucket["customers"] += 1
+            if amount is None:
+                bucket["revenue_unavailable_deals"] += 1
+            else:
+                bucket["won_revenue"] += float(amount)
+                bucket["revenue_known_deals"] += 1
 
     # Only Google Ads has a connected spend source, and it is the CANONICAL
     # campaign-daily spend (PR-ADS-140). Its spend is the reporting USD spend, shown
@@ -294,7 +370,7 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     for g in SECTION_ORDER:
         b = buckets[g]
         has_spend = g in GROUPS_WITH_SPEND
-        won = round(b["won_revenue"], 2)
+        won = _bucket_revenue(b)
         if has_spend:
             group_spend = google_spend
             # ROAS = Google Ads won revenue / canonical USD spend, only with real
@@ -321,6 +397,10 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
             "sqls": b["sqls"],
             "customers": b["customers"],
             "won_revenue": won,
+            # Deals in this group whose USD value could not be proven. They are
+            # counted as customers (the deal IS won) and excluded from revenue.
+            "revenue_unavailable_deals": b["revenue_unavailable_deals"],
+            "revenue_complete": b["revenue_unavailable_deals"] == 0,
             "roas": roas,
             "roas_status": roas_status,
             # PR-ADS-140: honest Google Ads spend-truth label (ROAS available / FX
@@ -372,6 +452,39 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
                             pf["sqls"] = _display_sqls
                             pf["sqls_scope"] = _canon.SCOPE_GOOGLE_ADS_SOURCE
 
+    # ── Reconciliation to canonical all-source truth (PR-ADS-153E-B) ─────────
+    # The page's own rows must add back up to the canonical business total, or
+    # say exactly how much they do not cover. Nothing is dropped to make the
+    # classified rows look clean: an unclassified or ambiguous deal keeps its
+    # bucket, and a deal whose currency was never proven is reported as an
+    # uncovered AMOUNT rather than quietly counted as $0.
+    displayed_customers = sum(g["customers"] for g in groups)
+    displayed_revenue = round(
+        sum(g["won_revenue"] for g in groups if g["won_revenue"] is not None), 2)
+    canonical_revenue_usd = canonical_totals["revenue_usd"]
+    reconciliation = {
+        "scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "source": canonical_revenue.CANONICAL_SOURCE,
+        "canonical_won_deals": canonical_totals["won_deals"],
+        "canonical_revenue_usd": canonical_revenue_usd,
+        "displayed_customers": displayed_customers,
+        "displayed_revenue_usd": displayed_revenue,
+        "uncovered_deals": canonical_totals["won_deals"] - displayed_customers,
+        "uncovered_revenue_usd": (
+            round(canonical_revenue_usd - displayed_revenue, 2)
+            if canonical_revenue_usd is not None else None),
+        # Deals that ARE in a bucket but contribute no money, because their
+        # currency could not be proven. They are the honest reason a bucket's
+        # customer count can exceed the deals behind its revenue.
+        "revenue_unavailable_deals": canonical_totals["currency_unavailable_deals"],
+        "ambiguous_associations": canonical_totals["ambiguous_associations"],
+        "failed_associations": canonical_totals["failed_associations"],
+        "reconciles": (
+            canonical_totals["won_deals"] == displayed_customers
+            and canonical_revenue_usd is not None
+            and abs(canonical_revenue_usd - displayed_revenue) < 0.01),
+    }
+
     return {
         "window": resolved,
         "groups": groups,
@@ -380,7 +493,16 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
         # campaign-daily spend truth (native GBP + USD reporting + FX/coverage
         # status). Geo spend is diagnostic and explicitly NOT used here.
         "source_spend_truth": spend_truth,
-        "source_truth": "hubspot_original_source_classification",
+        # PR-ADS-153E-B: won revenue is the canonical deal ledger. The HubSpot
+        # source classification still decides which BUCKET a deal lands in; it no
+        # longer decides which deals exist or what they are worth.
+        "source_truth": canonical_revenue.CANONICAL_SOURCE,
+        "classification_truth": "hubspot_original_source_classification",
+        "revenue_available": True,
+        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "canonical_reconciliation": reconciliation,
+        "as_of": canonical.get("as_of"),
+        "legacy_fallback_used": False,
         "google_ads_conversion_value_used": False,
         # PR-ADS-152: canonical SQL-scope reconciliation metadata (§7).
         "sql_reconciliation": sql_reconciliation,
@@ -398,21 +520,32 @@ def _source_detail_row(r: dict, group: str, channel_label: str, platform_label: 
     """
     amount = _nullable_float(r.get("deal_amount_usd"))
     return {
-        "company": r.get("company") or None,
+        # PR-ADS-153E-B: the canonical ledger stores the DEAL's own name. The
+        # legacy `company` column was the associated contact's employer, joined
+        # in from `gclid_attribution` — a different record about a different
+        # object. It is not renamed onto `company` here, because a deal name
+        # under a "Company" heading is a fabricated label.
+        "deal_name": r.get("deal_name") or None,
+        "company": None,                    # contact employer is not on the ledger
         "company_id": None,                 # company record id is not stored
         "main_contact": None,               # contact name is not stored
-        "contact_id": r.get("associated_contact_id") or None,
+        "contact_id": r.get("primary_contact_id") or None,
         "lifecycle_stage": None,            # HubSpot lifecyclestage is not persisted
         "status_category": r.get("status_category") or None,
-        "deal": None,                       # deal name is not stored
+        "deal": r.get("deal_name") or None,
         "deal_id": r.get("deal_id") or None,
         "amount": round(amount, 2) if amount is not None else None,
+        # Why an amount is missing, so the drawer can say "currency unavailable"
+        # instead of leaving a bare dash next to a real won deal.
+        "currency_status": r.get("currency_status"),
+        "currency_reason": r.get("currency_reason"),
         "close_date": r.get("deal_close_date"),
         "source": channel_label,
         "source_drilldown_1": platform_label,
         "source_drilldown_2": None,         # hs_analytics_source_data_2 not persisted
         "campaign_source_label": r.get("campaign_name") or r.get("source_detail_raw") or None,
         "attribution_status": r.get("attribution_status") or None,
+        "attribution_scope": r.get("attribution_scope"),
     }
 
 
@@ -468,15 +601,51 @@ def build_source_platform_detail(window: str, source_group: str, source_channel:
         hit = section == source_group and ch == source_channel and pf == source_platform
         return hit, ch_label, pf_label
 
-    deals_fetch = repo.fetch_source_deal_details(start, end)
+    # PR-ADS-153E-B: the deal side of the drawer is the canonical ledger, at
+    # `all_source` scope, so the deals proving a bucket ARE the deals counted in
+    # it. The legacy read joined `deal_source_attribution` to `gclid_attribution`
+    # for a company name, which quietly restricted the drawer to deals the GCLID
+    # ledger also happened to hold.
+    canonical = canonical_revenue.load_won_deals(window, now=now)
+    deals_fetch = {
+        "available": bool(canonical.get("available")),
+        "rows": (canonical_revenue.canonical_deal_rows(
+            canonical, revenue_scope.SCOPE_ALL_SOURCE)
+            if canonical.get("available") else []),
+    }
     contacts_fetch = repo.fetch_source_contact_details(start, end)
-    if not deals_fetch.get("available") and not contacts_fetch.get("available"):
+    # Fail closed on the DEAL side specifically. Rendering an empty deals
+    # section because the ledger was unreadable — while the contacts section
+    # loads and the drawer otherwise looks healthy — reads as "this bucket has
+    # no deals", which is a far stronger claim than "we could not read them".
+    # An unreadable canonical ledger makes the whole drilldown unavailable, with
+    # the reason named, and no legacy ledger is consulted in its place.
+    if not deals_fetch.get("available") or not contacts_fetch.get("available"):
+        unreadable_ledger = not deals_fetch.get("available")
         return {
             "window": resolved, "source_group": source_group,
             "source_channel": source_channel, "source_platform": source_platform,
             "contacts": [], "deals": [], "rows": [],
-            "summary": {"contacts": 0, "sqls": 0, "deals": 0},
-            "source_health": {"status": "database_unavailable"},
+            # Counts are NULL, not 0 — see above.
+            "summary": {"contacts": None, "sqls": None, "deals": None},
+            # Contact evidence is a DIFFERENT source (the classification
+            # tables) and may still be readable. It is reported as its own
+            # availability flag rather than merged into the drawer's status, so
+            # a reader can see that one half is readable without the response
+            # ever implying the revenue half is healthy.
+            "contact_evidence_available": bool(contacts_fetch.get("available")),
+            "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+            "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+            "revenue_available": not unreadable_ledger,
+            "revenue_unavailable_reason": (canonical.get("reason")
+                                           if unreadable_ledger else None),
+            "revenue_violation_codes": (canonical.get("violation_codes") or []
+                                        if unreadable_ledger else []),
+            "as_of": canonical.get("as_of"),
+            "legacy_fallback_used": False,
+            "source_health": {
+                "status": (canonical.get("reason") or "canonical_ledger_unreadable")
+                if unreadable_ledger else "database_unavailable"},
             "generated_at": generated_at,
         }
 
@@ -500,6 +669,11 @@ def build_source_platform_detail(window: str, source_group: str, source_channel:
         "contacts": contacts,
         "deals": deals,
         "rows": deals,   # backward-compatible alias
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "revenue_available": True,
+        "as_of": canonical.get("as_of"),
+        "legacy_fallback_used": False,
         "summary": {
             "contacts": len(contacts),
             "sqls": sum(1 for c in contacts if c.get("is_sql")),

@@ -47,8 +47,10 @@ from datetime import date, datetime, timezone
 
 from dateutil.relativedelta import relativedelta
 
+from analysis import revenue_scope
 from analysis.business_windows import resolve_window
 from db import revenue_repository as repo
+from services import canonical_revenue_service as canonical_revenue
 from services.revenue_attribution_service import build_revenue_deals
 from services.revenue_decision_mart import build_revenue_decision_mart
 from services.source_attribution_service import build_revenue_by_source
@@ -972,6 +974,14 @@ def build_dashboard_overview(window: str = "current_quarter",
         "unavailable": _build_unavailable(gated_summary, spend_truth, readiness,
                                           period_change, trend),
         "source_truth": "revenue_decision_mart",
+        # PR-ADS-153E-B: the Overview's customers and revenue reach it through
+        # the mart, which reads the canonical deal ledger at `all_source` scope.
+        # The provenance is declared here so the page can never be read as
+        # showing an advertising subset under a company-wide heading.
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "revenue_available": bool((mart.get("summary") or {}).get("revenue_available")),
+        "legacy_fallback_used": False,
         "google_ads_conversion_value_used": False,
         # PR-ADS-152: canonical SQL-scope reconciliation metadata (§7). Its
         # google_ads_source_sqls equals the Revenue by Source Google Ads SQL count

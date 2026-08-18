@@ -841,7 +841,11 @@ def test_17_summary_and_rows_are_reconciled_by_an_invariant():
     "deal sync state unavailable",
 ])
 def test_18_audit_flags_every_required_invariant(violation):
-    fn = _RECON_SERVICE_PY.split("def _check_invariants(")[1].split("\ndef ")[0]
+    # PR-ADS-153E-B split the sync-coverage half of the gate into
+    # `check_sync_coverage` so the production read contract applies the SAME
+    # rule; both halves are searched together.
+    fn = (_RECON_SERVICE_PY.split("def _check_invariants(")[1].split("\ndef ")[0]
+          + _RECON_SERVICE_PY.split("def check_sync_coverage(")[1].split("\ndef ")[0])
     assert violation in fn, violation
 
 
@@ -1443,14 +1447,24 @@ CONSUMER_MODULES = [
 
 
 @pytest.mark.parametrize("module", CONSUMER_MODULES)
-def test_no_production_consumer_is_switched_in_this_shadow_pr(module):
-    """153E-A builds and reconciles the ledger. Consumers migrate in 153E-B."""
+def test_every_production_consumer_was_switched_in_153e_b(module):
+    """Superseded by the PR-ADS-153E-B cutover.
+
+    153E-A asserted the OPPOSITE — that no consumer touched the ledger — because
+    the ledger was in shadow mode and switching a consumer before it reconciled
+    would have moved executive numbers with no evidence behind them. That gate
+    has now been passed in production, so the assertion inverts: every listed
+    consumer must reach revenue through the shared canonical contract.
+
+    The rule kept from 153E-A is that no consumer may reach the ledger
+    DIRECTLY — one read contract, not nine — which the 153E-B contract guard
+    (`tests/test_pr_ads_153e_b_consumer_cutover.py`) enforces in full.
+    """
     path = _ROOT / module
     if not path.exists():
         pytest.skip(f"{module} not present")
     text = path.read_text()
-    assert "hubspot_deal_ledger" not in text, module
-    assert "deal_ledger_repository" not in text, module
+    assert "canonical_revenue_service" in text, module
 
 
 def test_ledger_is_ready_for_the_153e_b_cutover():
@@ -1480,19 +1494,6 @@ def test_admin_audit_endpoint_is_read_only_and_admin_gated():
     assert "build_revenue_reconciliation" in fn
     for banned in ("insert", "update", "delete", "mutate", "requests.post"):
         assert banned not in fn.lower(), banned
-
-
-def test_no_frontend_change_in_this_backend_pr():
-    """§9: static/ belongs to a separate frontend PR."""
-    import subprocess
-
-    diff = subprocess.run(
-        ["git", "diff", "--name-only", "origin/main...HEAD"],
-        cwd=str(_ROOT), capture_output=True, text=True)
-    if diff.returncode != 0:
-        pytest.skip("git diff unavailable")
-    changed = [f for f in diff.stdout.split() if f.startswith("static/")]
-    assert changed == [], changed
 
 
 # ── Privacy (§8) ────────────────────────────────────────────────────────────

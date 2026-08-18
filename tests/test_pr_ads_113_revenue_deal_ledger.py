@@ -28,6 +28,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    canonical_ledger_patch, from_legacy_deal_rows,
+)
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JS = open(os.path.join(ROOT, "static", "app.js"), encoding="utf-8").read()
 HTML = open(os.path.join(ROOT, "static", "index.html"), encoding="utf-8").read()
@@ -159,19 +163,19 @@ def test_service_database_unavailable_distinct_from_safe_empty():
     build_revenue_deals = _load_build_revenue_deals()
 
     # Database unavailable.
-    with patch("db.revenue_repository.fetch_revenue_deals",
-               return_value=_deals_payload([], available=False)):
+    with canonical_ledger_patch([], available=False):
         unavailable = build_revenue_deals("current_quarter", now=FIXED_NOW)
-    assert unavailable["source_health"]["ledger_status"] == "database_unavailable"
+    # PR-ADS-153E-B: the reason names WHY the canonical read failed.
+    assert unavailable["source_health"]["ledger_status"] == "canonical_ledger_unreadable"
+    assert unavailable["legacy_fallback_used"] is False
     assert unavailable["summary"]["won_revenue"] is None
     assert unavailable["deals"] == []
 
     # Ledger available but empty window (safe-empty) — must be a different status.
-    with patch("db.revenue_repository.fetch_revenue_deals",
-               return_value=_deals_payload([], available=True)):
+    with canonical_ledger_patch([]):
         empty = build_revenue_deals("current_quarter", now=FIXED_NOW)
     assert empty["source_health"]["ledger_status"] == "available"
-    assert empty["source_health"]["revenue_attribution_status"] == "not_wired_or_no_closed_won"
+    assert empty["source_health"]["revenue_attribution_status"] == "no_closed_won_deals_in_window"
     assert empty["summary"]["deal_count"] == 0
     # No fake zero revenue when there are no closed-won deals.
     assert empty["summary"]["won_revenue"] is None
@@ -195,17 +199,19 @@ def test_service_summary_totals_accurate():
          "deal_amount_usd": 12000.0, "deal_stage_label": "Won", "match_status": "url_fallback",
          "match_source": "crm_field"},
     ]
-    with patch("db.revenue_repository.fetch_revenue_deals",
-               return_value=_deals_payload(rows)):
+    with canonical_ledger_patch(from_legacy_deal_rows(rows)):
         out = build_revenue_deals("all_time", now=FIXED_NOW)
 
     s = out["summary"]
     assert s["deal_count"] == 3
     assert s["won_revenue"] == 42000.0
     assert s["average_deal_value"] == 14000.0
-    assert s["exact_gclid_count"] == 2   # only match_source == "gclid"
+    # PR-ADS-153E-B: the GCLID subset is now the `gclid_attributable` SCOPE, and
+    # the fixture's two `match_source == "gclid"` deals carry a GCLID.
+    assert s["exact_gclid_count"] == 2
+    assert s["gclid_attributable_deals"] == 2
     assert out["source_health"]["ledger_status"] == "available"
-    assert out["source_health"]["revenue_attribution_status"] == "gclid_attribution_db"
+    assert out["source_health"]["revenue_attribution_status"] == "hubspot_deal_ledger"
     # Sorted by close date desc, then revenue desc.
     closes = [d["deal_close_date"] for d in out["deals"]]
     assert closes == sorted(closes, reverse=True)
@@ -214,8 +220,7 @@ def test_service_summary_totals_accurate():
 def test_service_business_windows_differ():
     build_revenue_deals = _load_build_revenue_deals()
 
-    with patch("db.revenue_repository.fetch_revenue_deals",
-               return_value=_deals_payload([])):
+    with canonical_ledger_patch([]):
         cq = build_revenue_deals("current_quarter", now=FIXED_NOW)["window"]
         ytd = build_revenue_deals("ytd", now=FIXED_NOW)["window"]
         allt = build_revenue_deals("all_time", now=FIXED_NOW)["window"]
@@ -228,8 +233,7 @@ def test_service_business_windows_differ():
 
 def test_service_rejects_invalid_window():
     build_revenue_deals = _load_build_revenue_deals()
-    with patch("db.revenue_repository.fetch_revenue_deals",
-               return_value=_deals_payload([])):
+    with canonical_ledger_patch([]):
         with pytest.raises(ValueError):
             build_revenue_deals("30d", now=FIXED_NOW)
 

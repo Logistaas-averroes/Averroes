@@ -42,7 +42,9 @@ import logging
 from datetime import datetime, timezone
 
 from analysis.business_windows import resolve_window
+from analysis import revenue_scope
 from db import revenue_repository as repo
+from services import canonical_revenue_service as canonical_revenue
 from services.revenue_attribution_service import (
     build_revenue_attribution,
     build_revenue_deals,
@@ -188,8 +190,25 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
     page must use). ``roas`` is exactly the revenue-attribution ROAS, which is
     already None whenever the spend denominator is unsafe — the mart never
     re-derives ROAS from an unsafe denominator.
+
+    Two populations, named (PR-ADS-153E-B)
+    --------------------------------------
+    ``customers`` and ``won_revenue_usd`` are the BUSINESS totals: every won deal
+    in the window, at ``all_source`` scope, straight from the canonical ledger.
+    Until this PR they were the campaign-attributed figures, which is how the
+    executive KPI on the Overview and Revenue pages came to exclude every won
+    deal that arrived without Google Ads attribution.
+
+    ``attributed_customers`` / ``attributed_won_revenue_usd`` keep the
+    campaign-attributable subset, and they — not the business totals — remain the
+    ROAS numerator. Dividing all-source revenue by Google Ads spend would credit
+    advertising with revenue it did not produce.
     """
     summary = core.get("summary") or {}
+    ladder = core.get("attribution_coverage") or {}
+    scopes = ladder.get("scopes") or {}
+    all_source = scopes.get(revenue_scope.SCOPE_ALL_SOURCE) or {}
+    ladder_available = bool(ladder.get("available"))
     # spend_usd is STRICTLY the canonical USD spend. We never fall back to the
     # revenue-attribution summary["spend"], which is the native diagnostic figure
     # (GBP) whenever FX is incomplete — labelling native GBP as USD would be a
@@ -201,8 +220,23 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
         "spend_usd": spend_truth.get("usd_spend"),
         "leads": summary.get("leads"),
         "sqls": summary.get("sqls"),
-        "customers": summary.get("customers"),
-        "won_revenue_usd": _round2(summary.get("won_revenue")),
+        # Business totals — all_source. None (not 0) when the canonical ledger
+        # could not be read or its coverage is unproven.
+        "customers": all_source.get("won_deals") if ladder_available else None,
+        "won_revenue_usd": all_source.get("revenue_usd") if ladder_available else None,
+        "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
+        "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+        "revenue_available": ladder_available,
+        "currency_unavailable_deals": (all_source.get("currency_unavailable_deals")
+                                       if ladder_available else None),
+        "ambiguous_associations": (all_source.get("ambiguous_associations")
+                                   if ladder_available else None),
+        "failed_associations": (all_source.get("failed_associations")
+                                if ladder_available else None),
+        # Advertising subset — the ROAS numerator and its scope.
+        "attributed_customers": summary.get("customers"),
+        "attributed_won_revenue_usd": _round2(summary.get("won_revenue")),
+        "attributed_revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
         "roas": summary.get("roas"),
     }
 

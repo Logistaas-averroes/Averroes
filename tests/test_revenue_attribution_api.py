@@ -16,7 +16,12 @@ from unittest.mock import patch
 
 import pytest
 
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    canonical_ledger_patch, from_legacy_deal_rows,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -112,7 +117,7 @@ def _patched_service():
                "coverage_start": "2026-05-01", "coverage_end": "2026-05-01"}
     with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=leads), \
-         patch("db.revenue_repository.fetch_won_revenue", return_value=revenue), \
+         canonical_ledger_patch(from_legacy_deal_rows(revenue.get("rows") or [])), \
          patch("db.revenue_repository.fetch_sync_state", return_value={"available": True, "datasets": {}}):
         yield
 
@@ -160,7 +165,8 @@ class TestRevenueAttributionEndpoint:
         assert res.status_code == 200
         data = res.json()
         assert data["spend_source"] == "google_ads_api"
-        assert data["revenue_source"] == "hubspot_closed_won"
+        # PR-ADS-153E-B: revenue provenance names the canonical deal ledger.
+        assert data["revenue_source"] == "hubspot_deal_ledger"
         assert "attribution_source_status" in data
         assert "country_spend_available" in data
         assert "geo_country_mapping_status" in data

@@ -1063,13 +1063,16 @@
         <div id="page-explanation-unit-economics" hidden></div>
         <div class="roas-window-controls">
           <label class="roas-window-label">Window:</label>
-          <select id="unit-economics-window" class="waste-filter-select" data-sync-window-select aria-label="Unit economics window">
-            <option value="7d">7d</option>
-            <option value="14d">14d</option>
-            <option value="30d">30d</option>
-            <option value="60d" selected>60d</option>
-            <option value="90d">90d</option>
-            <option value="365d">365d</option>
+          <!-- PR-ADS-153E-B: Unit Economics uses BUSINESS windows, the same
+               resolver every other revenue page uses. Rolling ad-style day
+               windows cut a B2B sales cycle in half and gave this page a period
+               no other page shared. -->
+          <select id="unit-economics-window" class="waste-filter-select" data-business-window-select aria-label="Unit economics window">
+            <option value="current_quarter" selected>Current Quarter</option>
+            <option value="last_quarter">Last Quarter</option>
+            <option value="last_6_months">Last 6 Months</option>
+            <option value="ytd">YTD</option>
+            <option value="all_time">All Time</option>
           </select>
           <button id="unit-economics-refresh-btn" type="button" class="btn btn--secondary">Refresh</button>
         </div>

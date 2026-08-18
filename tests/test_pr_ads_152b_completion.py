@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.canonical_ledger_fixtures import patch_canonical_ledger  # noqa: E402
+
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
@@ -205,8 +207,10 @@ def test_repair_resolves_explicit_all_time_range(monkeypatch):
 def _patch_source(monkeypatch, *, lead_rows, recon):
     monkeypatch.setattr("db.revenue_repository.fetch_source_leads",
                         lambda s, e, *a, **k: {"available": True, "rows": lead_rows})
-    monkeypatch.setattr("db.revenue_repository.fetch_source_revenue",
-                        lambda s, e, *a, **k: {"available": True, "rows": []})
+    # PR-ADS-153E-B: won revenue comes from the canonical deal ledger. This suite
+    # exercises the SQL reconciliation, so the revenue population is empty but
+    # READABLE — an unavailable ledger would blank the page for a different reason.
+    patch_canonical_ledger(monkeypatch, [])
     monkeypatch.setattr("db.writers.source_attribution_health_counts",
                         lambda: {"contacts_classified": 0, "deals_attributed": 0,
                                  "ambiguous_deals": 0, "unclassified_deals": 0})

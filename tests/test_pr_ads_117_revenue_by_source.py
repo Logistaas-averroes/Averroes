@@ -13,6 +13,10 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.canonical_ledger_fixtures import (  # noqa: E402
+    from_source_rows, patch_canonical_ledger,
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -175,7 +179,18 @@ def _patch_sources(monkeypatch, *, lead_rows=None, revenue_rows=None, spend_rows
 
     try:
         monkeypatch.setattr("db.revenue_repository.fetch_source_leads", cap_leads)
-        monkeypatch.setattr("db.revenue_repository.fetch_source_revenue", cap_revenue)
+        # PR-ADS-153E-B: won revenue is read from the canonical deal ledger, so
+        # the window bounds are captured there.
+        patch_canonical_ledger(monkeypatch, from_source_rows(revenue_rows or []))
+        import db.deal_ledger_repository as ledger_repo
+        _canonical_rows = from_source_rows(revenue_rows or [])
+
+        def cap_canonical(start=None, end=None):
+            if seen is not None:
+                seen["revenue"] = (start, end)
+            return {"available": True, "rows": [dict(r) for r in _canonical_rows]}
+
+        monkeypatch.setattr(ledger_repo, "fetch_won_deals", cap_canonical)
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", cap_spend)
         monkeypatch.setattr(
             "services.revenue_spend_truth_service.build_google_ads_spend_truth", cap_truth)
@@ -259,7 +274,12 @@ def test_window_correct_same_bounds_all_sources(monkeypatch):
     expect = (date(2026, 1, 1), date(2026, 3, 31))
     # Leads/revenue read the resolved date bounds; PR-ADS-140: Google Ads spend is
     # the canonical spend truth, resolved from the SAME business-window key.
-    assert seen["leads"] == expect and seen["revenue"] == expect
+    assert seen["leads"] == expect
+    # PR-ADS-153E-B: the canonical revenue read uses UTC datetimes with an
+    # EXCLUSIVE upper bound — the same window in the canonical convention.
+    rev_start, rev_end = seen["revenue"]
+    assert rev_start.date() == date(2026, 1, 1)
+    assert rev_end.date() == date(2026, 4, 1)
     assert seen["spend_truth_window"] == "last_quarter"
 
 
