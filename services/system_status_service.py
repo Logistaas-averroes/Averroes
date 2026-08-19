@@ -16,6 +16,9 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from services.dataset_keys import (
+    PLATFORM_EVIDENCE_SOURCE as _PLATFORM_EVIDENCE_SOURCE,
+)
 from services.freshness_service import (
     BLOCKING_STATES,
     DATASET_FRESHNESS_CONFIG,
@@ -97,14 +100,14 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
     # page with nothing anywhere reporting why.
     "canonical_spend": {
         "label": "Canonical Campaign Spend",
-        "source": "google_ads",
+        "source": _PLATFORM_EVIDENCE_SOURCE,
         "page": "Campaigns",
         "depends_on": [],
         "blocks": ["canonical_geo"],
     },
     "canonical_geo": {
         "label": "Canonical Geo Spend",
-        "source": "google_ads",
+        "source": _PLATFORM_EVIDENCE_SOURCE,
         "page": "Countries",
         "depends_on": ["canonical_spend"],
         "blocks": [],
@@ -194,19 +197,19 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
 SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
     # PR-ADS-105: Google Ads API is the active platform-evidence source for
     # campaigns/search_terms/keywords/geo (scheduler cutover landed in PR-ADS-104).
-    # Windsor remains only as legacy/deprecated history, not the active source.
+    #
+    # PR-ADS-153F listed the canonical datasets under a SECOND source key,
+    # "google_ads", because that is what their writers stamped. PR-ADS-154
+    # removes the split at its root: `google_ads` and `google_ads_api` named one
+    # source, and keeping both spellings is what let the writers and the
+    # freshness config drift until neither matched. There is now one key
+    # (services/dataset_keys.PLATFORM_EVIDENCE_SOURCE), so the rollup is one
+    # entry — which is also the honest picture, since these datasets do come
+    # from one platform and one set of credentials.
     "google_ads_api": {
         "label": "Google Ads API",
-        "datasets": ["campaigns", "search_terms", "keywords", "keyword_facts", "geo"],
-    },
-    # PR-ADS-153F: the canonical Google Ads datasets stamp `source="google_ads"`
-    # (see services/dataset_keys.py), which is a DIFFERENT source key from the
-    # legacy `google_ads_api` snapshots above. Listing them separately keeps the
-    # rollup honest instead of implying the canonical tables and the legacy
-    # snapshots share a sync.
-    "google_ads": {
-        "label": "Google Ads API (canonical)",
-        "datasets": ["canonical_spend", "canonical_geo"],
+        "datasets": ["campaigns", "search_terms", "keywords", "keyword_facts",
+                     "geo", "canonical_spend", "canonical_geo"],
     },
     "hubspot": {
         "label": "HubSpot CRM",

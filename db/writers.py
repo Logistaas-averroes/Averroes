@@ -1046,22 +1046,18 @@ def write_keyword_daily_facts(
 # Sync tracking helpers (PR-ADS-039)
 # ---------------------------------------------------------------------------
 
-# Allowed values — used for normalisation/validation; not hard-fail guards so
-# that new sources/datasets can be added to the system without a code deploy.
-# ``google_ads_api`` is the active Platform Evidence source (PR-ADS-104 cutover:
-# campaigns / search_terms / geo / keyword_facts); it must be recognised so
-# start_sync_batch never logs a false "unknown source 'google_ads_api'".
-VALID_SYNC_SOURCES   = {"windsor", "google_ads_api", "hubspot", "gclid", "mailchimp"}
-VALID_SYNC_DATASETS  = {"campaigns", "keywords", "keyword_facts", "search_terms",
-                        "geo", "contacts", "deals", "matches",
-                        # PR-ADS-151 Mailchimp read-only datasets
-                        "reports", "audiences", "attribution",
-                        # PR-ADS-153B canonical CRM funnel datasets. These keys are
-                        # asserted against DATASET_FRESHNESS_CONFIG by a test so the
-                        # writer-key/registry-key mismatch class cannot recur.
-                        "contact_funnel", "lifecycle_events"}
-VALID_SYNC_TYPES     = {"backfill", "daily", "weekly", "monthly", "manual"}
-VALID_SYNC_STATUSES  = {"running", "success", "failed", "unknown"}
+# PR-ADS-154: the allowed values now come from ONE registry
+# (services/dataset_keys.py) rather than being spelled here as well. Two
+# hand-maintained lists of the same keys is how they drift, and the drift is
+# invisible: a pair missing from this set logged an "unknown source"/"unknown
+# dataset" warning and then wrote the row anyway, so the only symptom was a
+# warning nobody reads and a freshness row that never appeared.
+#
+# The names are re-exported so existing importers keep working.
+from services.dataset_keys import (  # noqa: E402  (registry is a leaf module)
+    VALID_SYNC_DATASETS, VALID_SYNC_SOURCES, VALID_SYNC_STATUSES,
+    VALID_SYNC_TYPES, canonical_source,
+)
 
 
 def _to_date_or_none(value):
@@ -1105,7 +1101,11 @@ def start_sync_batch(
     Returns 0 if the DB is unavailable or the inputs are invalid.
     Never raises.
     """
-    source    = (source    or "").strip().lower()
+    # PR-ADS-154: canonicalize BEFORE stamping, so every new row carries the one
+    # registered spelling. `google_ads` and `google_ads_api` were two names for
+    # the same platform-evidence source, and writing both is what let the
+    # freshness config match neither.
+    source    = canonical_source(source)
     dataset   = (dataset   or "").strip().lower()
     sync_type = (sync_type or "").strip().lower()
 
