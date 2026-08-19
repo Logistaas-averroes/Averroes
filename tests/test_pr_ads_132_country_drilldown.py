@@ -12,7 +12,7 @@ Core guarantees exercised here:
     "United Arab Emirates" NEVER leaks into "United Kingdom", no `contains`;
   - a missing deal amount stays None (UI: "unavailable"), never a fabricated $0;
   - a contact record id is returned only when stored, never fabricated;
-  - the residual ("Unattributed / No Country") row has NO expand drawer;
+  - the residual ("Unknown / Unattributed country") row has NO expand drawer;
   - the drawer renders the validation columns and never shows undefined/null;
   - no Google Ads / HubSpot writes; no spend/ROAS/residual/FX/mart math changes.
 """
@@ -201,8 +201,23 @@ def test_country_name_only_match_is_exact(monkeypatch):
 
 
 def test_name_only_path_is_exact_never_contains(monkeypatch):
-    # A country with NO ISO code (e.g. a region label) matches by EXACT name only —
-    # a near-miss ("Narnian") must never be pulled in by a partial/contains match.
+    """A label that is not a canonical country drills into NOTHING.
+
+    PR-ADS-153F changed the contract this test guards, and strengthened it.
+    Before, a country with no ISO code was matched by exact normalized name, so
+    "Narnia" returned its own deals and a near-miss ("Narnian Republic") was
+    correctly excluded.
+
+    Neither label is a supported country now, so both resolve to the ONE residual
+    bucket — and answering a request for "Narnia" with the residual's contents
+    would hand back "Narnian Republic"'s deals under Narnia's name, which is the
+    very leak this test exists to prevent, just by a different route. The
+    drilldown therefore refuses: no details, and an explicit reason saying the
+    requested country is not canonical.
+
+    The residual is still fully auditable — it is reachable by asking for it by
+    name, which the test below proves.
+    """
     rows = [
         {"deal_id": "n1", "contact_id": "c", "gclid": None, "company": "Co A",
          "country": "Narnia", "campaign_name": "x", "deal_close_date": "2026-05-01",
@@ -217,7 +232,17 @@ def test_name_only_path_is_exact_never_contains(monkeypatch):
     _patch_identity(monkeypatch)
     from services.revenue_attribution_service import build_country_deal_details
     out = build_country_deal_details("ytd", "Narnia")
-    assert {d["deal_record_id"] for d in out["details"]} == {"n1"}
+    assert out["details"] == []
+    assert out["source_health"]["status"] == "country_not_canonical"
+    assert out["country_status"] == "invalid"
+    # Above all: the near-miss did not leak in.
+    assert "n2" not in {d.get("deal_record_id") for d in out["details"]}
+
+    # The residual bucket itself IS reachable, and returns both unidentifiable
+    # deals — that is what makes the residual row's totals auditable.
+    from analysis.country_identity import RESIDUAL_LABEL
+    residual = build_country_deal_details("ytd", RESIDUAL_LABEL)
+    assert {d["deal_record_id"] for d in residual["details"]} == {"n1", "n2"}
 
 
 def test_name_only_path_pushes_exact_filter_into_sql():

@@ -15,6 +15,16 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+# PR-ADS-153F: dataset keys come from the shared registry, never spelled here.
+# A config that spells its own key can drift from the writer that stamps it, and
+# then the dataset has no freshness signal while looking perfectly configured.
+from services.dataset_keys import (
+    CANONICAL_GEO_DATASET as _GEO_SYNC_DATASET,
+    CANONICAL_GEO_SOURCE as _GEO_SYNC_SOURCE,
+    CANONICAL_SPEND_DATASET as _SPEND_DATASET,
+    CANONICAL_SPEND_SOURCE as _SPEND_SOURCE,
+)
+
 
 # ── Canonical Status Constants ──────────────────────────────────────────────
 
@@ -120,14 +130,38 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
     },
     # PR-ADS-143: the Campaign Evidence page reads canonical daily spend (not the
     # `campaigns` snapshot), so its freshness tracks the real upstream table.
+    #
+    # PR-ADS-153F: `source` corrected from "google_ads_api" to "google_ads". The
+    # writer has always stamped `source="google_ads"` on this dataset's sync
+    # batches (scheduler/incremental_sync._sync_canonical_spend), so the lookup
+    # key here matched nothing and the ROAS denominator had NO working freshness
+    # signal — the exact defect the PR-ADS-153A audit recorded (§1.7). The config
+    # is moved to what the writer actually stamps rather than the other way
+    # round: renaming the writer would orphan the sync_state rows production has
+    # already accumulated under "google_ads".
     "canonical_spend": {
         "table": "google_ads_campaign_daily_spend",
         "date_column": "spend_date",
-        "source": "google_ads_api",
-        "dataset": "canonical_spend",
+        "source": _SPEND_SOURCE,
+        "dataset": _SPEND_DATASET,
         "stale_threshold_days": 8,
         "depends_on": [],
         "page": "campaigns",
+    },
+    # PR-ADS-153F: canonical per-country Google Ads spend. `source`/`dataset` are
+    # imported from the ONE owner of this dataset
+    # (services.google_ads_geo_sync_service.GEO_SYNC_SOURCE / GEO_SYNC_DATASET)
+    # rather than spelled here, so the key cannot drift away from the writer the
+    # way canonical_spend's did. Depends on canonical_spend because geo is
+    # meaningless until there is a campaign total to reconcile it against.
+    "canonical_geo": {
+        "table": "google_ads_geo_daily_spend",
+        "date_column": "spend_date",
+        "source": _GEO_SYNC_SOURCE,
+        "dataset": _GEO_SYNC_DATASET,
+        "stale_threshold_days": 3,
+        "depends_on": ["canonical_spend"],
+        "page": "countries",
     },
     # PR-ADS-153B: canonical CRM funnel spine. `source`/`dataset` MUST equal the
     # keys the ingestion service stamps on its sync batches
@@ -173,15 +207,12 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "depends_on": ["search_terms"],
         "page": "waste",
     },
-    "ngrams": {
-        "table": "search_terms",
-        "date_column": "source_date",
-        "source": "computed",
-        "dataset": "ngrams",
-        "stale_threshold_days": 8,
-        "depends_on": ["search_terms"],
-        "page": "ngrams",
-    },
+    # PR-ADS-153F removed the "ngrams" entry. N-grams are computed on demand from
+    # `search_terms`; there is no n-gram table, no writer and no sync batch, so
+    # `(computed, ngrams)` matched no sync_state row and the dataset reported
+    # "never run" permanently while the page worked fine. A freshness row with no
+    # durable source is not evidence — the N-Gram page's real dependency is
+    # `search_terms`, which has its own entry above.
     "keywords": {
         "table": "keywords",
         "date_column": "run_date",
@@ -236,6 +267,14 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "page": "gclid-attribution",
     },
+    # PR-ADS-153F: this dataset is real (durable table + a real writer,
+    # `db_writers.write_gclid_coverage_snapshot`), but nothing stamped a
+    # `(gclid, coverage_snapshots)` sync batch, so it reported "never run"
+    # forever while the table filled up normally. It is CONNECTED rather than
+    # removed: scheduler/weekly.py and scheduler/monthly.py now open a batch
+    # under this exact key. Aliasing it onto `(gclid, matches)` was rejected —
+    # two configs sharing one (source, dataset) pair collide on the
+    # `source/dataset` key the freshness endpoint reports under.
     "gclid_coverage_snapshots": {
         "table": "gclid_coverage_snapshots",
         "date_column": "snapshot_date",
@@ -245,15 +284,12 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "page": "gclid-attribution",
     },
-    "historical_intelligence": {
-        "table": "historical_intelligence",
-        "date_column": "analysis_date",
-        "source": "analysis",
-        "dataset": "historical_intelligence",
-        "stale_threshold_days": 14,
-        "depends_on": [],
-        "page": "historical-intelligence",
-    },
+    # PR-ADS-153F removed the "historical_intelligence" entry. It named a table
+    # (`historical_intelligence`) that does not exist in db/schema.py and is
+    # created by nothing, with a `(analysis, historical_intelligence)` key no
+    # writer stamps — so both its row-count query and its sync lookup were
+    # guaranteed to fail. `analysis/historical_intelligence.py` computes campaign
+    # trends on demand from tables that have their own freshness entries.
     # PR-ADS-151: Mailchimp read-only email-marketing evidence datasets.
     "mailchimp_campaigns": {
         "table": "mailchimp_campaigns",
@@ -282,20 +318,14 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "page": "mailchimp",
     },
-    # Attribution feasibility is computed on demand by /api/mailchimp/audit — it
-    # has no durable date-stamped table of its own. Its freshness therefore tracks
-    # the report evidence it reconciles (mailchimp_campaign_reports): the audit can
-    # run whenever that evidence is fresh. Actual coverage is measured by the audit
-    # endpoint, not by a scheduler watermark.
-    "mailchimp_attribution": {
-        "table": "mailchimp_campaign_reports",
-        "date_column": "last_report_update",
-        "source": "mailchimp",
-        "dataset": "attribution",
-        "stale_threshold_days": 30,
-        "depends_on": [],
-        "page": "mailchimp",
-    },
+    # PR-ADS-153F removed the "mailchimp_attribution" entry — the third phantom.
+    # Attribution feasibility is computed on demand by /api/mailchimp/audit from
+    # `mailchimp_campaign_reports`; it has no table and no writer of its own, and
+    # `(mailchimp, attribution)` is stamped by nothing, so it could only ever
+    # report "never run". Its real evidence is the `mailchimp_reports` entry
+    # above, which tracks the same table under the key its writer actually
+    # stamps. (Pointing this entry at `reports` was rejected: two configs sharing
+    # one (source, dataset) pair collide on the freshness endpoint's dataset key.)
 }
 
 # States that block dependents (upstream is unusable for downstream derivation)

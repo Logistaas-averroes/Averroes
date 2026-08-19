@@ -308,14 +308,101 @@ def test_unknown_fallback():
 # ── Config validation ───────────────────────────────────────────────────────
 
 def test_all_datasets_have_config():
-    """All required datasets have configuration entries."""
+    """All required datasets have configuration entries.
+
+    PR-ADS-153F: ``ngrams``, ``historical_intelligence`` and
+    ``mailchimp_attribution`` were removed from this list because they were
+    removed from the config — each was computed on demand with no table, no
+    writer and no sync batch, so its entry could only ever report "never run".
+    ``canonical_spend`` and ``canonical_geo`` were added: they are real synced
+    datasets and the ROAS / Country-ROAS denominators.
+    """
     required = [
-        "campaigns", "search_terms", "waste_terms", "ngrams",
+        "campaigns", "search_terms", "waste_terms",
         "keywords", "geo", "leads", "deals",
-        "gclid_attribution", "gclid_coverage_snapshots", "historical_intelligence",
+        "gclid_attribution", "gclid_coverage_snapshots",
+        "canonical_spend", "canonical_geo",
     ]
     for ds in required:
         assert ds in DATASET_FRESHNESS_CONFIG, f"Missing config for {ds}"
+
+
+def test_no_configured_dataset_is_a_phantom():
+    """PR-ADS-153F: every configured dataset is backed by a real writer.
+
+    A freshness entry is looked up by the ``(source, dataset)`` pair its writer
+    stamps on ``sync_batches``. When the config spells that pair differently
+    from the writer — or when no writer exists at all — the lookup silently
+    matches nothing and the dataset reports "never run" forever while its table
+    fills up normally. That is worse than having no entry, because the config
+    makes it look monitored.
+
+    This walks the real source tree for ``start_sync_batch`` calls, so it tracks
+    the writers themselves rather than a second list that could drift too.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    pairs: set[tuple] = set()
+    for path in root.rglob("*.py"):
+        if "/tests/" in str(path) or "/.git/" in str(path):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):  # pragma: no cover
+            continue
+        # Resolve module-level string constants and `from ... import X as Y`
+        # aliases so keys imported from services.dataset_keys are recognised.
+        consts: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                    and isinstance(node.value.value, str):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        consts[target.id] = node.value.value
+            if isinstance(node, ast.ImportFrom) and node.module == "services.dataset_keys":
+                import services.dataset_keys as _dk
+                for alias in node.names:
+                    consts[alias.asname or alias.name] = getattr(_dk, alias.name)
+
+        def _value(node):
+            if isinstance(node, ast.Constant):
+                return node.value
+            if isinstance(node, ast.Name):
+                return consts.get(node.id)
+            return None
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(
+                    node.func, "attr", getattr(node.func, "id", None)) == "start_sync_batch":
+                kw = {k.arg: k.value for k in node.keywords}
+                pairs.add((_value(kw.get("source")), _value(kw.get("dataset"))))
+
+    unbacked = {
+        key: (cfg.get("source"), cfg.get("dataset"))
+        for key, cfg in DATASET_FRESHNESS_CONFIG.items()
+        if (cfg.get("source"), cfg.get("dataset")) not in pairs
+    }
+    assert not unbacked, (
+        "freshness config entries whose (source, dataset) key no writer stamps: "
+        f"{unbacked}")
+
+
+def test_no_two_datasets_share_a_source_dataset_key():
+    """PR-ADS-153F: the (source, dataset) pair must identify ONE dataset.
+
+    ``/api/datasets/freshness`` reports each dataset under a ``source/dataset``
+    key. Two configs sharing a pair collide on that key, so one silently
+    shadows the other — which is how "connect this phantom to a real writer by
+    pointing it at another dataset's batch" quietly breaks a working entry.
+    """
+    seen: dict[tuple, str] = {}
+    for key, cfg in DATASET_FRESHNESS_CONFIG.items():
+        pair = (cfg.get("source"), cfg.get("dataset"))
+        assert pair not in seen, (
+            f"{key} and {seen[pair]} both use {pair}")
+        seen[pair] = key
 
 
 def test_config_has_required_fields():

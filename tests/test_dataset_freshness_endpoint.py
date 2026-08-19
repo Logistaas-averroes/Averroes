@@ -145,12 +145,10 @@ def test_configured_datasets_get_count_coverage_or_unknown():
         "deals": 11,
         "gclid_attribution": 12,
         "gclid_coverage_snapshots": 13,
-        "historical_intelligence": 14,
     }
     conn, _ = _make_mock_conn(
         sync_rows=[
             ("analysis", "waste_terms", "success", now, date.today(), 1, None, now),
-            ("analysis", "historical_intelligence", "success", now, date.today(), 2, None, now),
             ("gclid", "matches", "success", now, date.today(), 3, None, now),
             ("gclid", "coverage_snapshots", "success", now, date.today(), 4, None, now),
             ("google_ads_api", "search_terms", "success", now, date.today(), 5, None, now),
@@ -160,14 +158,19 @@ def test_configured_datasets_get_count_coverage_or_unknown():
     payload = _call_endpoint(conn=conn, days=60)
     data_by_key = {d["dataset_key"]: d for d in payload["datasets"]}
     assert data_by_key["analysis/waste_terms"]["rows_in_window"] == 7
-    assert data_by_key["analysis/historical_intelligence"]["rows_in_window"] == 14
+    # PR-ADS-153F: analysis/historical_intelligence is no longer a configured
+    # dataset — it named a table that does not exist, so its row count could
+    # only ever fail. The endpoint still reports whatever sync_state holds, so
+    # this asserts on the CONFIG rather than on the response.
+    from services.freshness_service import DATASET_FRESHNESS_CONFIG
+    assert "historical_intelligence" not in DATASET_FRESHNESS_CONFIG
     assert data_by_key["gclid/matches"]["rows_in_window"] == 12
     assert data_by_key["gclid/coverage_snapshots"]["rows_in_window"] == 13
     for row in payload["datasets"]:
-        assert row["rows_in_window"] is not None or row["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN
+        assert row["rows_in_window"] is not None or row["canonical_status"] == CanonicalFreshnessStatus.UNKNOWN, row["dataset_key"]
 
 
-def test_dependency_blocked_still_applies_to_waste_terms_and_ngrams():
+def test_dependency_blocked_still_applies_to_waste_terms():
     """PR-ADS-095: emits BLOCKED_BY_DEPENDENCY (refined) instead of legacy
     DEPENDENCY_BLOCKED when upstream is actively empty/broken."""
     now = datetime.now(timezone.utc)
@@ -175,15 +178,17 @@ def test_dependency_blocked_still_applies_to_waste_terms_and_ngrams():
         sync_rows=[
             ("google_ads_api", "search_terms", "success", now, date.today(), 1, None, now),
             ("analysis", "waste_terms", "success", now, date.today(), 2, None, now),
-            ("computed", "ngrams", "success", now, date.today(), 3, None, now),
         ],
         count_by_table={"search_terms": 0, "waste_terms": 3},
     )
     payload = _call_endpoint(conn=conn, days=60)
     waste = next(d for d in payload["datasets"] if d["dataset_key"] == "analysis/waste_terms")
-    ngrams = next(d for d in payload["datasets"] if d["dataset_key"] == "computed/ngrams")
     assert waste["canonical_status"] == CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY
-    assert ngrams["canonical_status"] == CanonicalFreshnessStatus.BLOCKED_BY_DEPENDENCY
+    # PR-ADS-153F: "ngrams" is no longer a configured dataset — n-grams are
+    # computed on demand from search_terms and have no table, writer or sync
+    # batch, so a freshness row for them was never evidence of anything.
+    from services.freshness_service import DATASET_FRESHNESS_CONFIG
+    assert "ngrams" not in DATASET_FRESHNESS_CONFIG
 
 
 def test_freshness_endpoint_aligns_with_war_room_derivable_state():
@@ -193,9 +198,9 @@ def test_freshness_endpoint_aligns_with_war_room_derivable_state():
     """
     now = datetime.now(timezone.utc)
     conn, _ = _make_mock_conn(
-        # Search Terms is fresh with data, but waste_terms/ngrams have no
-        # sync_state rows at all (placeholder rows). Counts default to 0 for
-        # tables we don't override.
+        # Search Terms is fresh with data, but waste_terms has no sync_state row
+        # at all (placeholder rows). Counts default to 0 for tables we don't
+        # override.
         sync_rows=[
             ("google_ads_api", "search_terms", "success", now, date.today(), 1, None, now),
         ],
@@ -209,14 +214,11 @@ def test_freshness_endpoint_aligns_with_war_room_derivable_state():
             "gclid_attribution": 0,
             "gclid_coverage_snapshots": 0,
             "waste_terms": 0,
-            "historical_intelligence": 0,
         },
     )
     payload = _call_endpoint(conn=conn, days=60)
     waste = next(d for d in payload["datasets"] if d["dataset_key"] == "analysis/waste_terms")
-    ngrams = next(d for d in payload["datasets"] if d["dataset_key"] == "computed/ngrams")
     assert waste["canonical_status"] == CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE
-    assert ngrams["canonical_status"] == CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE
 
 
 def test_system_health_summary_renderer_uses_canonical_summary():

@@ -79,7 +79,10 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "source": "google_ads_api",
         "page": "Search Terms",
         "depends_on": [],
-        "blocks": ["waste_terms", "ngrams"],
+        # PR-ADS-153F: "ngrams" dropped — n-grams are computed on demand FROM
+        # search terms and have no dataset of their own, so search terms cannot
+        # block a dataset that does not exist.
+        "blocks": ["waste_terms"],
     },
     "waste_terms": {
         "label": "Waste Terms",
@@ -88,11 +91,22 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "depends_on": ["search_terms"],
         "blocks": [],
     },
-    "ngrams": {
-        "label": "N-Grams",
-        "source": "computed",
-        "page": "N-Grams",
-        "depends_on": ["search_terms"],
+    # PR-ADS-153F: the canonical Google Ads spend datasets. Both were missing
+    # from this map, so the ROAS denominator and the Country ROAS denominator
+    # were invisible on System Status — a stale geo sync blocked the Countries
+    # page with nothing anywhere reporting why.
+    "canonical_spend": {
+        "label": "Canonical Campaign Spend",
+        "source": "google_ads",
+        "page": "Campaigns",
+        "depends_on": [],
+        "blocks": ["canonical_geo"],
+    },
+    "canonical_geo": {
+        "label": "Canonical Geo Spend",
+        "source": "google_ads",
+        "page": "Countries",
+        "depends_on": ["canonical_spend"],
         "blocks": [],
     },
     "keywords": {
@@ -144,13 +158,10 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "depends_on": [],
         "blocks": [],
     },
-    "historical_intelligence": {
-        "label": "Historical Intelligence",
-        "source": "analysis",
-        "page": "Historical Intelligence",
-        "depends_on": [],
-        "blocks": [],
-    },
+    # PR-ADS-153F removed the "historical_intelligence" entry: it named a table
+    # that does not exist and a (source, dataset) key nothing stamps, so it could
+    # only ever report "never run". Campaign trends are computed on demand from
+    # datasets that appear in this map in their own right.
     # PR-ADS-151: Mailchimp read-only email-marketing evidence.
     "mailchimp_campaigns": {
         "label": "Mailchimp Campaigns",
@@ -164,23 +175,16 @@ PIPELINE_DEPENDENCIES: dict[str, dict[str, Any]] = {
         "source": "mailchimp",
         "page": "Email Marketing",
         "depends_on": ["mailchimp_campaigns"],
-        # Attribution feasibility is derived from report evidence (its freshness
-        # tracks mailchimp_campaign_reports), so reports — not campaigns — is its
-        # direct upstream: stale/failed reports block attribution.
-        "blocks": ["mailchimp_attribution"],
+        # PR-ADS-153F: attribution feasibility was removed as a dataset (no
+        # table, no writer, computed on demand from this table), so reports no
+        # longer block a dataset that does not exist.
+        "blocks": [],
     },
     "mailchimp_audiences": {
         "label": "Mailchimp Audiences",
         "source": "mailchimp",
         "page": "Email Marketing",
         "depends_on": [],
-        "blocks": [],
-    },
-    "mailchimp_attribution": {
-        "label": "Mailchimp Attribution",
-        "source": "mailchimp",
-        "page": "Email Marketing",
-        "depends_on": ["mailchimp_reports"],
         "blocks": [],
     },
 }
@@ -195,6 +199,15 @@ SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "label": "Google Ads API",
         "datasets": ["campaigns", "search_terms", "keywords", "keyword_facts", "geo"],
     },
+    # PR-ADS-153F: the canonical Google Ads datasets stamp `source="google_ads"`
+    # (see services/dataset_keys.py), which is a DIFFERENT source key from the
+    # legacy `google_ads_api` snapshots above. Listing them separately keeps the
+    # rollup honest instead of implying the canonical tables and the legacy
+    # snapshots share a sync.
+    "google_ads": {
+        "label": "Google Ads API (canonical)",
+        "datasets": ["canonical_spend", "canonical_geo"],
+    },
     "hubspot": {
         "label": "HubSpot CRM",
         "datasets": ["leads", "deals"],
@@ -203,19 +216,20 @@ SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "label": "GCLID Match",
         "datasets": ["gclid_attribution", "gclid_coverage_snapshots"],
     },
+    # PR-ADS-153F: "historical_intelligence" removed (no table, no writer) and
+    # the whole "computed" source removed — its only member was "ngrams", which
+    # is a derivation of search_terms rather than a dataset.
     "analysis": {
         "label": "Analysis Layer",
-        "datasets": ["waste_terms", "historical_intelligence"],
-    },
-    "computed": {
-        "label": "Computed Layer",
-        "datasets": ["ngrams"],
+        "datasets": ["waste_terms"],
     },
     # PR-ADS-151: Mailchimp read-only source.
+    # PR-ADS-153F: "mailchimp_attribution" removed — computed on demand from
+    # mailchimp_campaign_reports, with no table and no writer of its own.
     "mailchimp": {
         "label": "Mailchimp",
         "datasets": ["mailchimp_campaigns", "mailchimp_reports",
-                     "mailchimp_audiences", "mailchimp_attribution"],
+                     "mailchimp_audiences"],
     },
 }
 
@@ -226,8 +240,12 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
     "campaigns": ["campaigns"],
     "waste": ["waste_terms", "search_terms"],
     "search-terms": ["search_terms"],
-    "ngrams": ["ngrams", "search_terms"],
+    # PR-ADS-153F: the N-Gram page's only real dependency is search_terms.
+    "ngrams": ["search_terms"],
     "geo": ["geo"],
+    # PR-ADS-153F: Countries depends on canonical geo spend and the campaign
+    # total it must reconcile against.
+    "countries": ["canonical_geo", "canonical_spend"],
     "keywords": ["keyword_facts"],
     "leads": ["leads"],
     "deals": ["deals"],
@@ -235,21 +253,23 @@ PAGE_PIPELINE_IMPACT: dict[str, list[str]] = {
     "opportunities": ["leads"],
     "health": ["all"],
     "backfill": ["admin"],
-    "historical-intelligence": ["historical_intelligence"],
     "mailchimp": ["mailchimp_campaigns", "mailchimp_reports",
-                  "mailchimp_audiences", "mailchimp_attribution"],
+                  "mailchimp_audiences"],
 }
 
 # ── Core datasets vs derived ───────────────────────────────────────────────
 
 CORE_DATASETS = frozenset([
     "campaigns", "search_terms", "leads", "deals", "keywords", "keyword_facts", "geo",
+    # PR-ADS-153F: directly synced canonical Google Ads spend datasets.
+    "canonical_spend", "canonical_geo",
 ])
 
+# PR-ADS-153F: "ngrams" and "historical_intelligence" removed — neither has a
+# durable table or a writer, so neither is a dataset whose freshness can be
+# derived from anything.
 DERIVED_DATASETS = frozenset([
-    "waste_terms", "ngrams", "gclid_attribution",
-    "gclid_coverage_snapshots", "historical_intelligence",
-    "mailchimp_attribution",
+    "waste_terms", "gclid_attribution", "gclid_coverage_snapshots",
 ])
 
 

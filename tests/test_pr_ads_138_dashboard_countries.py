@@ -135,8 +135,18 @@ DEAL_ROWS = [
 ]
 
 
+# PR-ADS-153F: the durable geo coverage ledger is a MANDATORY gate input, so a
+# fixture describing a healthy account must prove the window was fetched — not
+# merely supply totals for it. Tests wanting the never-fetched case pass
+# `geo_coverage=[]`.
+GEO_COVERAGE_COMPLETE = [
+    {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified",
+     "rows_written": 13516, "cost_micros_total": 5_000_000, "country_count": 191},
+]
+
+
 def _patch_durable(monkeypatch, *, canonical=None, geo_by_country=None, deals=None,
-                   revenue_connected=True):
+                   revenue_connected=True, geo_coverage=None):
     import db.revenue_repository as repo
 
     canon = canonical if canonical is not None else CANONICAL
@@ -160,6 +170,11 @@ def _patch_durable(monkeypatch, *, canonical=None, geo_by_country=None, deals=No
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_by_country", lambda s, e: dict(geo))
     monkeypatch.setattr(repo, "fetch_spend_coverage",
                         lambda s, e: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
+    monkeypatch.setattr(repo, "fetch_geo_coverage",
+                        lambda c, s, e: {"available": True,
+                                         "chunks": list(GEO_COVERAGE_COMPLETE
+                                                        if geo_coverage is None
+                                                        else geo_coverage)})
     monkeypatch.setattr(repo, "fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr(repo, "revenue_integration_connected", lambda: revenue_connected)
     # PR-ADS-153E-B: closed-won proof deals come from the canonical deal ledger.
@@ -360,12 +375,12 @@ def test_residual_revenue_preserved_not_a_country(monkeypatch):
     # bucket — never forced onto a real country, never a real-country row.
     out = _countries(monkeypatch)
     res = out["residual"]
-    assert res["label"] == "Unattributed / No Country"
+    assert res["label"] == "Unknown / Unattributed country"
     assert res["customers"] == 1
     assert res["won_revenue_usd"] == 4000.0
     # It is NOT in the countries list and NO country row is a residual.
     assert all(not c["is_residual"] for c in out["countries"])
-    assert all(c["country_name"] != "Unattributed / No Country" for c in out["countries"])
+    assert all(c["country_name"] != "Unknown / Unattributed country" for c in out["countries"])
     # Residual revenue/customers surfaced as KPIs, separate from country totals.
     assert out["kpis"]["residual_revenue_usd"] == 4000.0
     assert out["kpis"]["residual_customers"] == 1
@@ -536,23 +551,50 @@ def test_country_status_distinguishes_unavailable_spend_from_zero():
 
 
 def test_geo_spend_merge_accumulates_duplicate_codes():
-    # Regression (Finding 4): two geo rows resolving to the same country_code are
+    # Regression (Finding 4): two geo rows resolving to the same country are
     # SUMMED, never last-wins (which would silently drop spend).
+    #
+    # PR-ADS-153F: the map is now keyed on the CANONICAL country key rather than
+    # carrying a by_code map AND a by_name map. That is a stronger form of the
+    # same guarantee — "UAE" and "United Arab Emirates" merge because they
+    # resolve to the same identity, not because a caller happened to try the
+    # code map before the name map.
+    from analysis.country_identity import country_key
     from services.dashboard_countries_service import _geo_spend_by_country
+    ae = country_key("United Arab Emirates")
     maps = _geo_spend_by_country({"rows": [
         {"country_code": "AE", "country_name": "United Arab Emirates", "spend": 6000.0, "spend_usd": 7800.0, "fx_complete": True},
         {"country_code": "AE", "country_name": "UAE", "spend": 1000.0, "spend_usd": 1300.0, "fx_complete": True},
     ]})
-    assert maps["by_code"]["AE"]["native"] == 7000.0
-    assert maps["by_code"]["AE"]["usd"] == 9100.0
+    assert maps["by_key"][ae]["native"] == 7000.0
+    assert maps["by_key"][ae]["usd"] == 9100.0
     # A FX gap on either side withholds the merged USD (never a partial sum).
     maps2 = _geo_spend_by_country({"rows": [
         {"country_code": "AE", "country_name": "x", "spend": 6000.0, "spend_usd": 7800.0, "fx_complete": True},
         {"country_code": "AE", "country_name": "y", "spend": 1000.0, "spend_usd": None, "fx_complete": False},
     ]})
-    assert maps2["by_code"]["AE"]["native"] == 7000.0
-    assert maps2["by_code"]["AE"]["usd"] is None
-    assert maps2["by_code"]["AE"]["fx_complete"] is False
+    assert maps2["by_key"][ae]["native"] == 7000.0
+    assert maps2["by_key"][ae]["usd"] is None
+    assert maps2["by_key"][ae]["fx_complete"] is False
+
+
+def test_geo_spend_without_an_identifiable_country_goes_to_the_residual():
+    """PR-ADS-153F: geo spend with no usable country is kept, not dropped.
+
+    It is real Google Ads spend and must stay in the account total, but it is
+    not evidence about any market — so it lands in the residual rather than
+    being attached to a country or silently discarded.
+    """
+    from services.dashboard_countries_service import _geo_spend_by_country
+    maps = _geo_spend_by_country({"rows": [
+        {"country_code": None, "country_name": None, "spend": 500.0,
+         "spend_usd": 650.0, "fx_complete": True},
+        {"country_code": "XX", "country_name": "Atlantis", "spend": 250.0,
+         "spend_usd": 325.0, "fx_complete": True},
+    ]})
+    assert maps["by_key"] == {}
+    assert maps["residual"]["native"] == 750.0
+    assert maps["residual"]["usd"] == 975.0
 
 
 def test_no_fake_deltas_when_previous_baseline_missing(monkeypatch):

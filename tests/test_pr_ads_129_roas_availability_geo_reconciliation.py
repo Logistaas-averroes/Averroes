@@ -183,7 +183,8 @@ def test_fx_complete_but_coverage_incomplete_blocks_for_coverage(monkeypatch):
 
 # ── Geo reconciliation (Tests 5/6/7) ────────────────────────────────────────
 
-def _geo_recon(monkeypatch, *, geo_total, canonical_total=69720.093979, chunks=None):
+def _geo_recon(monkeypatch, *, geo_total, canonical_total=69720.093979, chunks=None,
+               patch_after=None):
     import db.revenue_repository as repo
     from datetime import datetime, timezone
     monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "Europe/London")
@@ -199,18 +200,75 @@ def _geo_recon(monkeypatch, *, geo_total, canonical_total=69720.093979, chunks=N
     monkeypatch.setattr(repo, "fetch_geo_reconciliation_breakdown", lambda s, e: {
         "available": True, "daily": [], "by_campaign": [],
         "unmapped_geo_native": 0.0, "campaign_rows_counted": 3623})
+    # PR-ADS-153F: durable geo coverage is a MANDATORY gate input, so a fixture
+    # describing a HEALTHY account must now prove the range was actually
+    # fetched. Matching totals over a range nobody synced is not evidence.
+    monkeypatch.setattr(repo, "fetch_geo_coverage", lambda c, s, e: {
+        "available": True, "chunks": [
+            {"chunk_start": "2020-01-01", "chunk_end": "2030-12-31",
+             "status": "verified", "rows_written": 13516,
+             "cost_micros_total": 0, "country_count": 191}]})
+    if patch_after is not None:
+        patch_after()  # override one input to isolate a single gate condition
     from services.google_ads_geo_sync_service import build_geo_reconciliation
     return build_geo_reconciliation("ytd")
 
 
-# Test 5 — geo rows exist but mismatch keeps country blocked
+# Test 5 — geo rows exist but the strict reconcile fails
 def test_geo_mismatch_keeps_country_blocked(monkeypatch):
     out = _geo_recon(monkeypatch, geo_total=67271.062131)  # 3.51% below canonical
     assert out["status"] == "mismatch"
     assert out["reconciled"] is False
-    assert out["country_roas_unblockable"] is False
     assert round(out["variance_pct"], 2) == 3.51
-    assert out["tolerance"] == 0.02
+    assert out["tolerance"] == 0.02          # tolerance is NEVER loosened
+    # PR-ADS-153F: `country_roas_unblockable` no longer carries a private,
+    # stricter definition of readiness. It is now the SHARED predicate that the
+    # mart, Dashboard Countries and the disclosure block all read, so the four
+    # surfaces cannot disagree about the same window.
+    #
+    # For THIS scenario that changes the field's value, and the change is the
+    # point. Geo sits below campaign spend with complete coverage, complete FX,
+    # no campaign-spend day missing geo and no spending campaign missing geo —
+    # which is exactly the by-design unattributed shortfall PR-ADS-131 ruled
+    # safe to publish as an explicit residual. The mart and Dashboard Countries
+    # already treated this window as decision-ready; only this one field said
+    # otherwise. The contradiction was the defect, not the readiness.
+    from services.google_ads_geo_sync_service import country_geo_ready
+    assert out["country_spend_status"] == "reconciled_with_residual"
+    assert out["country_roas_unblockable"] is country_geo_ready(out["country_spend_status"])
+    assert out["geo_ready"] is out["country_roas_unblockable"]
+    assert out["geo_gap_codes"] == []
+
+
+# Test 5b — a genuine geo gap (not a by-design residual) still blocks hard
+def test_geo_gap_keeps_country_blocked(monkeypatch):
+    import db.revenue_repository as repo
+    out = _geo_recon(monkeypatch, geo_total=67271.062131, patch_after=lambda: (
+        # A campaign-spend day with NO geo spend is missing data, not a residual.
+        monkeypatch.setattr(repo, "fetch_geo_reconciliation_breakdown", lambda s, e: {
+            "available": True,
+            "daily": [{"spend_date": "2026-04-16", "campaign_spend": 10000.0,
+                       "geo_spend": 0.0}],
+            "by_campaign": [], "unmapped_geo_native": 0.0,
+            "campaign_rows_counted": 3623})))
+    assert out["status"] == "mismatch"
+    assert out["country_spend_status"] == "mismatch"
+    assert out["country_roas_unblockable"] is False
+    assert out["geo_ready"] is False
+
+
+# Test 5c — an unsynced range blocks even when the totals happen to agree
+def test_unproven_geo_coverage_blocks_even_on_exact_match(monkeypatch):
+    import db.revenue_repository as repo
+    out = _geo_recon(monkeypatch, geo_total=69720.093979, patch_after=lambda: (
+        monkeypatch.setattr(repo, "fetch_geo_coverage",
+                            lambda c, s, e: {"available": True, "chunks": []})))
+    # The arithmetic reconciles, but nothing proves the range was ever fetched,
+    # so the geo gate withholds Country ROAS rather than trusting a coincidence.
+    assert out["status"] == "reconciled"
+    assert out["country_spend_status"] == "unavailable"
+    assert out["country_roas_unblockable"] is False
+    assert "geo_coverage_incomplete" in out["geo_gap_codes"]
 
 
 # Test 6 — geo within tolerance unblocks country ROAS

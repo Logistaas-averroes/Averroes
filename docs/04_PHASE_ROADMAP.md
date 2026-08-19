@@ -3,7 +3,7 @@
 
 ---
 
-> ### ⚠️ Authoritative status (PR-ADS-153E-B, August 2026)
+> ### ⚠️ Authoritative status (PR-ADS-153F, August 2026)
 >
 > This document's phase/status narrative below predates the PR-ADS-153A–D
 > sequence and is retained for its architectural content, not its status claims.
@@ -32,9 +32,19 @@
 >   (`all_source ≥ google_ads_source ≥ campaign_attributable ≥ gclid_attributable`).
 >   Unit Economics is off local JSON / Windsor and on business windows. Shadow
 >   mode is over — see `docs/35_CANONICAL_REVENUE_LEDGER.md` §14–§23.
-> * **153F and 153G: remain.** Geo synchronization; legacy table/route deletion.
->   No legacy table is dropped by 153E-B; they remain written and readable for
->   the observation period.
+> * **153F: canonical country geography DONE.** Canonical geo spend is now
+>   scheduled in the daily incremental pipeline (canonical spend → FX → geo →
+>   reconciliation) with a durable coverage ledger, per-chunk failure evidence, a
+>   resume checkpoint and a cross-instance run lease. Every country consumer
+>   joins on ONE canonical key (`analysis/country_identity.py`); blank, invalid
+>   and unresolved geography lands in one explicit residual instead of being
+>   dropped by one page and preserved by another; and one shared predicate
+>   replaces the three readiness bars. Tolerance, window definitions, FX
+>   doctrine, revenue scopes, won-deal doctrine and PR-ADS-131 residual
+>   eligibility are unchanged — see `docs/36_CANONICAL_COUNTRY_GEOGRAPHY.md`.
+> * **153G: remains.** Legacy table/route deletion. No legacy table is dropped by
+>   153E-B or 153F; they remain written and readable for the observation period,
+>   and 153G must not start before 153F production verification passes.
 > * **Phase 2 / OCT: blocked.** Offline conversion uploads are not started and
 >   are not authorized.
 > * **Six-month read-only governance: ACTIVE.** No writes to Google Ads or

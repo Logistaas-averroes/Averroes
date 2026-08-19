@@ -266,7 +266,10 @@ def test_pipelines_include_dependency_info():
     st_pipe = next((p for p in pipelines if p["key"] == "search_terms"), None)
     assert st_pipe is not None
     assert "waste_terms" in st_pipe["blocks"]
-    assert "ngrams" in st_pipe["blocks"]
+    # PR-ADS-153F: search_terms no longer "blocks" ngrams — n-grams are computed
+    # on demand from search_terms and are not a dataset, so they were removed
+    # from the pipeline map entirely.
+    assert "ngrams" not in st_pipe["blocks"]
 
 
 def test_pipelines_show_dependent():

@@ -123,9 +123,32 @@ class TestSummaryShape:
             "hubspot/source_classification",
             "google_ads/canonical_spend",
             "fx/daily_rates",
+            # PR-ADS-153F: canonical per-country spend, plus the reconciliation
+            # step that must run AFTER it. Nothing scheduled the geo sync before
+            # this PR — its only caller was a manual admin button, so canonical
+            # geo went stale the moment the window advanced.
+            "google_ads/canonical_geo",
+            "google_ads/geo_reconciliation",
             "mailchimp/refresh",
         }
         assert set(result["datasets"].keys()) == expected
+
+    def test_geo_runs_after_canonical_spend_and_fx_then_reconciles(self, monkeypatch):
+        """PR-ADS-153F: the geo pipeline order is a contract, not a coincidence.
+
+        Geo spend is reconciled against canonical campaign spend and converted
+        with FX rates, so both must be current before geo runs — and the
+        reconciliation verdict must be computed after geo lands, or it scores
+        the previous run's coverage.
+        """
+        _patch_all_datasets_success(monkeypatch)
+
+        from scheduler.incremental_sync import run_daily_incremental_sync
+        keys = list(run_daily_incremental_sync()["datasets"].keys())
+        order = {k: i for i, k in enumerate(keys)}
+        assert order["google_ads/canonical_spend"] < order["google_ads/canonical_geo"]
+        assert order["fx/daily_rates"] < order["google_ads/canonical_geo"]
+        assert order["google_ads/canonical_geo"] < order["google_ads/geo_reconciliation"]
 
     def test_errors_is_list(self, monkeypatch):
         _patch_all_datasets_success(monkeypatch)
@@ -740,6 +763,27 @@ def _patch_all_datasets_success(
             source_pull()  # raises in the all-fail scenario
         return {"rows_written": 0, "fetched": 0, "failed": []}
     monkeypatch.setattr("services.fx_service.ensure_fx_rates", _fx_stub)
+
+    # PR-ADS-153F: canonical GEO spend sync + the reconciliation step that runs
+    # after it. Patched at the service seam like every other external step, and
+    # mirroring the source_pull failure mode so the all-fail scenario still
+    # drives both to failure.
+    def _geo_sync_stub(*a, **kw):
+        if source_pull:
+            source_pull()  # raises in the all-fail scenario
+        return {"status": "success", "coverage_complete": True, "errors": [],
+                "summary": {"rows_written": 0, "chunks_verified": 1,
+                            "chunks_failed": 0, "chunks_skipped": 0}}
+    monkeypatch.setattr(
+        "services.google_ads_geo_sync_service.run_google_ads_geo_sync", _geo_sync_stub)
+
+    def _geo_recon_stub(*a, **kw):
+        if source_pull:
+            source_pull()  # raises in the all-fail scenario
+        return {"status": "reconciled", "country_spend_status": "verified",
+                "missing_geo_dates": [], "reason": "reconciled"}
+    monkeypatch.setattr(
+        "services.google_ads_geo_sync_service.build_geo_reconciliation", _geo_recon_stub)
 
     # DB writers
     monkeypatch.setattr("db.writers.write_campaigns", campaign_write or _default_write)

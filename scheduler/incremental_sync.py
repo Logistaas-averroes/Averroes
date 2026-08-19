@@ -120,6 +120,9 @@ def run_daily_incremental_sync(
                                watermarked on lastmodifieddate (PR-ADS-153B)
       - hubspot/deals       (via GCLID contacts pulled in the deals window)
       - gclid/matches       — skipped; no incremental DB path yet
+      - google_ads/canonical_geo — CANONICAL per-country spend (PR-ADS-153F),
+                               run after canonical spend and FX and followed by
+                               geo reconciliation; resumable and coverage-backed
 
     Each dataset failure is isolated: one failed dataset does not abort the
     rest.  The returned summary includes per-dataset status and an ``errors``
@@ -235,6 +238,32 @@ def run_daily_incremental_sync(
     # published reference rates read-only; writes only the local fx_rates table.
     datasets["fx/daily_rates"] = _sync_fx_rates(
         run_id=run_id, date_to=today, errors=errors,
+    )
+
+    # ── google_ads/canonical_geo — PR-ADS-153F. Country ROAS needs per-country
+    # spend that reconciles with the canonical campaign total, and until this PR
+    # NOTHING scheduled it: the only caller was the manual Revenue Health button,
+    # so canonical geo went stale the moment the window advanced past the last
+    # human click and the page blocked itself (correctly) for a reason no health
+    # surface could see.
+    #
+    # The ORDER here is deliberate and must not be rearranged:
+    #   1. canonical campaign spend  — the reconciliation baseline
+    #   2. FX rates                  — needed before any USD geo figure is safe
+    #   3. canonical geo             — reconciled against (1), converted using (2)
+    #   4. geo reconciliation        — evaluated only after 1-3 have landed
+    # Reconciling before geo lands would score the previous run's coverage.
+    datasets["google_ads/canonical_geo"] = _sync_canonical_geo(
+        run_id=run_id, date_to=today, errors=errors,
+    )
+
+    # ── google_ads/geo_reconciliation — step 4. Read-only diagnostics computed
+    # AFTER spend, FX and geo are current, so the recorded verdict describes this
+    # run's data rather than the previous one's. Publishes no external state and
+    # never gates the sync: a reconciliation that reports "blocked" is a true
+    # answer about the data, not a sync failure.
+    datasets["google_ads/geo_reconciliation"] = _publish_geo_reconciliation(
+        errors=errors,
     )
 
     # ── mailchimp — read-only email-marketing refresh (PR-ADS-151). Pulls recent
@@ -870,6 +899,143 @@ def _sync_fx_rates(*, run_id, date_to, errors: list) -> dict:
         log.warning("[incremental_sync] %s", err)
         if batch_id:
             db_writers.finish_sync_batch(batch_id=batch_id, status="failed", error_message=str(exc)[:1000])
+        return {"status": "failed", "error": str(exc)[:500]}
+
+
+def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
+    """Refresh canonical Google Ads GEO spend for a small daily lookback (PR-ADS-153F).
+
+    Delegates every decision to ``services.google_ads_geo_sync_service`` — the one
+    owner of geo chunking, the durable coverage ledger, resume and the run lease.
+    This function starts a batch, calls the service, and records exactly what
+    happened.
+
+    A ``partial`` run is recorded as FAILED on the sync batch, because
+    ``sync_batches`` accepts success|failed only and a partially covered geo
+    range must never surface as a healthy dataset — an under-covered geo
+    denominator is precisely what makes Country ROAS wrong rather than absent.
+
+    ``skipped_locked`` is reported as ``skipped``: another worker holds the
+    lease, so this is not a failure and must not be counted as one. An
+    **unreachable** lease store is the opposite — ``failed``, with a failed sync
+    batch and an entry in the run's error list. The two used to share one
+    outcome, which meant a database outage looked exactly like healthy
+    concurrency and geo could stop syncing indefinitely without anything saying so.
+
+    Reads Google Ads read-only; writes only local canonical tables.
+    """
+    # The dataset key comes from the shared registry, not from the geo service's
+    # re-export: one import path for the key means one place to change it.
+    from services.dataset_keys import (  # noqa: PLC0415
+        CANONICAL_GEO_DATASET as GEO_SYNC_DATASET,
+        CANONICAL_GEO_SOURCE as GEO_SYNC_SOURCE,
+    )
+    from services.google_ads_geo_sync_service import (  # noqa: PLC0415
+        DAILY_GEO_LOOKBACK_DAYS, run_google_ads_geo_sync,
+    )
+    from datetime import timedelta as _td
+
+    start = date_to - _td(days=DAILY_GEO_LOOKBACK_DAYS - 1)
+
+    def _batch(status, **fields):
+        """Record this attempt as one sync batch, opened only once we know it ran.
+
+        A lease skip deliberately writes NO batch: the worker that holds the
+        lease records the real outcome, and stamping a `failed` batch here would
+        make a benign concurrency skip look like a broken geo dataset on every
+        freshness surface.
+        """
+        bid = db_writers.start_sync_batch(
+            source=GEO_SYNC_SOURCE, dataset=GEO_SYNC_DATASET, sync_type="daily",
+            date_from=start, date_to=date_to, run_id=run_id,
+        )
+        if bid:
+            db_writers.finish_sync_batch(batch_id=bid, status=status, **fields)
+
+    try:
+        result = run_google_ads_geo_sync(
+            date_from=str(start), date_to=str(date_to), dry_run=False,
+            job_id=str(run_id) if run_id else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        err = f"google_ads/canonical_geo: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+        _batch("failed", error_message=str(exc)[:1000])
+        return {"status": "failed", "error": str(exc)[:500]}
+
+    status = result.get("status") or "failed"
+    if status == "skipped_locked":
+        # Genuinely benign: another worker owns the lease and will record the
+        # real outcome. This is the ONLY lease result treated this way — a lease
+        # store that could not be reached comes back as `failed` below, because
+        # an outage that presents itself as healthy concurrency is an outage
+        # nobody will notice.
+        log.info("[incremental_sync] google_ads/canonical_geo: skipped (lease held)")
+        return {"status": "skipped", "reason": result.get("reason"),
+                "note": "another canonical geo sync was already running"}
+
+    summary = result.get("summary") or {}
+    if result.get("reason") == "lease_store_unavailable":
+        err = ("google_ads/canonical_geo: failed (lease_store_unavailable) — the "
+               "geo sync coordination store could not be reached, so no range "
+               "was fetched and none can be certified")
+        errors.append(err)
+        log.error("[incremental_sync] %s", err)
+        _batch("failed", error_message="lease_store_unavailable")
+        return {"status": "failed", "reason": "lease_store_unavailable",
+                "rows_written": 0, "chunks_verified": 0, "chunks_failed": 0,
+                "chunks_skipped": 0, "coverage_complete": False,
+                "errors": result.get("errors", [])}
+
+    if status != "success":
+        errors.append(f"google_ads/canonical_geo: {status} "
+                      f"({summary.get('chunks_failed', 0)} chunk(s) failed)")
+    _batch(
+        "success" if status == "success" else "failed",
+        row_count=summary.get("rows_written", 0),
+        last_source_date=(date_to if status == "success" else None),
+        error_message=(None if status == "success"
+                       else "; ".join(result.get("errors") or [])[:1000] or status),
+    )
+    return {
+        "status": status,
+        "rows_written": summary.get("rows_written", 0),
+        "chunks_verified": summary.get("chunks_verified", 0),
+        "chunks_failed": summary.get("chunks_failed", 0),
+        "chunks_skipped": summary.get("chunks_skipped", 0),
+        "coverage_complete": result.get("coverage_complete"),
+        "errors": result.get("errors", []),
+    }
+
+
+def _publish_geo_reconciliation(*, errors: list) -> dict:
+    """Evaluate geo↔campaign reconciliation after the geo sync (PR-ADS-153F).
+
+    Read-only. Runs LAST so the verdict describes the data this run produced.
+    Never raises and never fails the sync: a "blocked" reconciliation is a
+    truthful answer about the data, not a broken step, and treating it as a
+    failure would train operators to ignore real sync failures.
+    """
+    try:
+        from services.google_ads_geo_sync_service import build_geo_reconciliation  # noqa: PLC0415
+
+        recon = build_geo_reconciliation("current_quarter")
+        log.info("[incremental_sync] google_ads/geo_reconciliation: status=%s "
+                 "country_spend_status=%s missing_dates=%d",
+                 recon.get("status"), recon.get("country_spend_status"),
+                 len(recon.get("missing_geo_dates") or []))
+        return {
+            "status": "success",
+            "reconciliation_status": recon.get("status"),
+            "country_spend_status": recon.get("country_spend_status"),
+            "missing_geo_dates": len(recon.get("missing_geo_dates") or []),
+            "reason": recon.get("reason"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        err = f"google_ads/geo_reconciliation: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
         return {"status": "failed", "error": str(exc)[:500]}
 
 

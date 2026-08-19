@@ -1383,6 +1383,127 @@ CREATE TABLE IF NOT EXISTS hubspot_deal_sync_state (
 -- in the audit until a real sync records the mode.
 ALTER TABLE hubspot_deal_sync_state
   ADD COLUMN IF NOT EXISTS last_sync_mode TEXT;
+
+-- PR-ADS-153F: per-chunk fetch ledger for canonical Google Ads GEO spend, the
+-- exact counterpart of google_ads_spend_coverage. Before this table the geo sync
+-- had no durable evidence at all: a range that was never fetched and a range
+-- that was fetched and genuinely had no country-attributable spend were
+-- indistinguishable, so staleness was invisible on every health surface and a
+-- recovery run had to re-fetch history it had already proven.
+--
+-- It is a SEPARATE table rather than a `dataset` column on
+-- google_ads_spend_coverage because that table's identity is
+-- (customer_id, chunk_start, chunk_end): campaign coverage and geo coverage for
+-- the same customer and the same range would collide on one row and silently
+-- overwrite each other. Widening a production unique key is also a destructive
+-- migration; adding a table is additive and idempotent.
+--
+-- `status` is verified | failed, and a `failed` write never demotes a chunk that
+-- is already `verified` (the ON CONFLICT guard in db.writers.upsert_geo_coverage)
+-- — the same rule the campaign-spend ledger uses.
+CREATE TABLE IF NOT EXISTS google_ads_geo_coverage (
+  id                    SERIAL PRIMARY KEY,
+  customer_id           TEXT NOT NULL,
+  chunk_start           DATE NOT NULL,
+  chunk_end             DATE NOT NULL,
+  status                TEXT NOT NULL,          -- verified | failed
+  rows_written          INTEGER NOT NULL DEFAULT 0,
+  cost_micros_total     BIGINT NOT NULL DEFAULT 0,
+  country_count         INTEGER NOT NULL DEFAULT 0,
+  -- Internal diagnostics only. Never rendered to an end user and never used to
+  -- decide availability — a chunk is unusable because its status is not
+  -- `verified`, not because of what this string says.
+  error_message         TEXT,
+  source_query_version  TEXT,
+  sync_run_id           TEXT,
+  fetched_at            TIMESTAMPTZ DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (customer_id, chunk_start, chunk_end)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ga_geo_coverage_range
+  ON google_ads_geo_coverage(chunk_start, chunk_end);
+
+-- PR-ADS-153F: durable run/checkpoint state for the canonical geo sync, so a
+-- resumed run knows where it stopped and every health surface can see when geo
+-- last completed successfully. One row per (customer, scope) — `scope` is
+-- 'geo_daily_spend' today and exists so a second geo dataset cannot silently
+-- reuse this row.
+--
+-- last_successful_completed_at advances ONLY after the coverage ledger and the
+-- spend rows for that run are committed. Publishing freshness before the write
+-- lands is how a partial run starts looking healthy.
+CREATE TABLE IF NOT EXISTS google_ads_geo_sync_state (
+  id                            SERIAL PRIMARY KEY,
+  customer_id                   TEXT NOT NULL,
+  scope                         TEXT NOT NULL DEFAULT 'geo_daily_spend',
+  last_status                   TEXT,           -- success|partial|failed|running
+  last_started_at               TIMESTAMPTZ,
+  last_finished_at              TIMESTAMPTZ,
+  last_successful_completed_at  TIMESTAMPTZ,
+  -- The resume checkpoint: the newest date proven covered by a verified chunk.
+  checkpoint_date               DATE,
+  requested_start               DATE,
+  requested_end                 DATE,
+  chunks_verified               INTEGER NOT NULL DEFAULT 0,
+  chunks_failed                 INTEGER NOT NULL DEFAULT 0,
+  chunks_skipped                INTEGER NOT NULL DEFAULT 0,
+  rows_written                  INTEGER NOT NULL DEFAULT 0,
+  last_error                    TEXT,
+  last_run_id                   TEXT,
+  -- PR-ADS-153F: the lease FENCING token. Expiry alone is not ownership: if
+  -- worker A overruns the lease window and worker B legitimately reclaims it,
+  -- A can still be running and would otherwise overwrite B's state on finish.
+  -- Terminal writes are conditioned on this token, so a stale worker's write
+  -- simply matches nothing.
+  lease_token                   TEXT,
+  -- PR-ADS-153F: the lease DEADLINE, renewed by a heartbeat while the owner is
+  -- alive. `last_started_at + a fixed window` cannot express this: the
+  -- historical backfill runs for many monthly chunks and would silently pass
+  -- its own deadline mid-run, letting a second worker legitimately claim the
+  -- lease while the first kept writing geo rows and coverage. A renewable
+  -- deadline keeps crash recovery (it still lapses if nobody renews it) while
+  -- letting a long, healthy run stay the owner.
+  lease_expires_at              TIMESTAMPTZ,
+  updated_at                    TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (customer_id, scope)
+);
+
+-- Existing databases: add the fencing token and the lease deadline if the table
+-- predates them.
+ALTER TABLE google_ads_geo_sync_state ADD COLUMN IF NOT EXISTS lease_token TEXT;
+ALTER TABLE google_ads_geo_sync_state ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+
+-- PR-ADS-153F additive integrity constraints. Each is a rule the writers
+-- already enforce; stating it in the schema means a future writer, a migration
+-- or a manual fix cannot quietly produce a row the readers would misinterpret.
+-- Added NOT VALID-free because both tables are new in this PR and hold no rows
+-- that could violate them.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_geo_coverage_status') THEN
+    ALTER TABLE google_ads_geo_coverage
+      ADD CONSTRAINT ck_geo_coverage_status
+      CHECK (status IN ('verified', 'failed'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_geo_coverage_range') THEN
+    ALTER TABLE google_ads_geo_coverage
+      ADD CONSTRAINT ck_geo_coverage_range
+      CHECK (chunk_start <= chunk_end);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_geo_sync_state_status') THEN
+    ALTER TABLE google_ads_geo_sync_state
+      ADD CONSTRAINT ck_geo_sync_state_status
+      CHECK (last_status IS NULL
+             OR last_status IN ('running', 'success', 'partial', 'failed'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_geo_sync_state_range') THEN
+    ALTER TABLE google_ads_geo_sync_state
+      ADD CONSTRAINT ck_geo_sync_state_range
+      CHECK (requested_start IS NULL OR requested_end IS NULL
+             OR requested_start <= requested_end);
+  END IF;
+END $$;
 """
 
 

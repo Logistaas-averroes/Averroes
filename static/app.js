@@ -5285,7 +5285,7 @@ function renderCtryLeaderboard(d) {
   if (residual) {
     residualRow = `
       <tr class="ctry-row ctry-row--residual" aria-label="Unattributed residual (not a country)">
-        <td class="ctry-td ctry-td--name"><span class="ctry-dot ctry-dot--muted"></span>${escapeHtml(residual.label || "Unattributed / No Country")}</td>
+        <td class="ctry-td ctry-td--name"><span class="ctry-dot ctry-dot--muted"></span>${escapeHtml(residual.label || "Unknown / Unattributed country")}</td>
         <td class="ctry-td--region">—</td>
         <td class="ctry-num">${ctrySpendCell(residual)}</td>
         <td class="ctry-num"><span class="dash-unavailable">Unavailable</span></td>
@@ -5368,7 +5368,7 @@ function renderCtryResidualPanel(d) {
   const header = `
     <div class="dash-panel__header">
       <div>
-        <h3 class="dash-panel__title">Unattributed / No Country</h3>
+        <h3 class="dash-panel__title">Unknown / Unattributed country</h3>
         <p class="dash-panel__sub">Isolated — never distributed across markets</p>
       </div>
     </div>`;
@@ -7621,7 +7621,7 @@ function renderGeoReconcileDetail(r, cur) {
       <div class="revenue-summary-strip revenue-summary-strip--three">
         <div><span>Campaign spend</span><strong>${money(r.canonical_campaign_total)}</strong></div>
         <div><span>Geo country-attributed spend</span><strong>${money(r.geo_total)}</strong></div>
-        <div><span>Unattributed / No Country residual</span><strong>${money(r.country_residual_native)}${pct}</strong></div>
+        <div><span>Unknown / Unattributed country residual</span><strong>${money(r.country_residual_native)}${pct}</strong></div>
       </div>
       <p class="revenue-geo-cause">Country ROAS is shown with a residual row. Real country rows use country-attributed spend only. Running Geo Sync again will not close this gap — the geographic view does not assign this spend to a country by design.</p>
     </div>`;
@@ -16342,7 +16342,7 @@ function renderRoasCountriesPage() {
 
 // PR-ADS-131: compact warning shown above the country table when spend is
 // reconciled WITH an unattributed residual. It explains that most spend was
-// assigned to countries and the shortfall is shown as "Unattributed / No Country"
+// assigned to countries and the shortfall is shown as "Unknown / Unattributed country"
 // instead of being spread across real countries. Never presents "run geo sync" as
 // the fix — the residual is a by-design property of the geographic_view report.
 function renderCountryResidualWarning(spendTruth) {
@@ -16355,7 +16355,7 @@ function renderCountryResidualWarning(spendTruth) {
     <div class="revenue-residual-warning">
       <div class="revenue-residual-warning__eyebrow">Country spend includes an unattributed residual</div>
       <p>Google Ads assigned most spend to countries, but ${resNative}${pct} could not be assigned to a country by the geo report.</p>
-      <p class="revenue-residual-warning__note">The residual is shown as “Unattributed / No Country” instead of being spread across real countries. Real country rows use country-attributed spend only.</p>
+      <p class="revenue-residual-warning__note">The residual is shown as “Unknown / Unattributed country” instead of being spread across real countries. Real country rows use country-attributed spend only.</p>
     </div>`;
 }
 
@@ -16478,7 +16478,7 @@ function renderRoasCountryTable(rows) {
     if (r && r.is_residual) {
       return `
     <tr class="revenue-residual-row">
-      <td><span class="revenue-residual-name">Unattributed / No Country</span> <span class="revenue-residual-badge">Residual</span></td>
+      <td><span class="revenue-residual-name">Unknown / Unattributed country</span> <span class="revenue-residual-badge">Residual</span></td>
       <td>${fmtMoney(r.spend)}</td>
       <td>—</td>
       <td>—</td>

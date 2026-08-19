@@ -208,3 +208,29 @@ Do not attempt to use `scheduler/daily.py` until PR-ADS-013 is merged.
 ## If Uncertain
 
 Stop and add a comment to the PR. Do not guess field names. Do not add features not specified. Do not infer what "should" be there based on how other systems work. Build exactly what the PR says.
+
+---
+
+## Country geography (PR-ADS-153F, August 2026)
+
+If you touch anything country-shaped, read
+`docs/36_CANONICAL_COUNTRY_GEOGRAPHY.md` first. The short version:
+
+* **Group on `analysis.country_identity.country_key(...)`. Never on a country
+  name, never on a code you validated yourself.** Three different join rules
+  used to coexist, which is why the same window produced different rows on pages
+  claiming to describe the same thing.
+* **Never drop a row because its geography is unknown.** Blank, invalid and
+  unresolved geography goes to the `unknown` residual with a reason. Dropping it
+  is what made two pages disagree about the same total.
+* **Never treat a two-letter token as a country code.**
+* **Ask `google_ads_geo_sync_service.country_geo_ready(status)`** rather than
+  comparing the status string. A page that adopts its own bar re-creates the
+  defect where a window was ready on one page and blocked on another.
+* **Do not change `SPEND_VARIANCE_TOLERANCE`, window definitions, FX doctrine,
+  revenue scopes, won-deal doctrine or PR-ADS-131 residual eligibility to make a
+  blocked page go green.** The gate is not the defect.
+* **Google Ads geography ≠ HubSpot contact geography.** They are joined at
+  reporting grain, estimate-grade, and the response says so.
+* Adding a market is one line in `SUPPORTED_COUNTRIES`; both directions and the
+  alias table derive from it.

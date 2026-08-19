@@ -1399,6 +1399,94 @@ def fetch_spend_coverage(start: date | None, end: date) -> dict:
         return {"available": False, "chunks": []}
 
 
+def fetch_geo_coverage(customer_id: str, start: date | None, end: date) -> dict:
+    """Verified/failed canonical GEO chunks for ONE customer. Read-only.
+
+    PR-ADS-153F. Shaped EXACTLY like :func:`fetch_spend_coverage` so the same
+    ``services.google_ads_spend_service.analyze_coverage`` computes geo
+    completeness — one implementation of "is this window covered", not two.
+
+    ``customer_id`` is MANDATORY. The coverage ledger is keyed
+    ``(customer_id, chunk_start, chunk_end)``, so reading it without that filter
+    lets one account's verified chunks make another account look covered — and
+    lets a resume skip a fetch that account never performed. Coverage is an
+    account-scoped fact; there is no such thing as "covered, for whoever".
+
+    ``available: False`` means the ledger could not be read, which is NOT the
+    same as "no chunks": an unreadable ledger must never be presented as an
+    empty-but-healthy one.
+    """
+    if not customer_id:
+        # No account means no answer. Returning "no chunks" here would read as
+        # "nothing is covered" and returning available would be a lie about a
+        # question that was never asked.
+        return {"available": False, "chunks": [], "reason": "customer_id_required"}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "chunks": []}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT chunk_start, chunk_end, status, rows_written,
+                           cost_micros_total, country_count, error_message,
+                           sync_run_id, updated_at
+                    FROM google_ads_geo_coverage
+                    WHERE customer_id = %s
+                      AND chunk_end >= COALESCE(%s::date, chunk_end) AND chunk_start <= %s
+                    ORDER BY chunk_start
+                    """,
+                    (customer_id, start, end),
+                )
+                chunks = []
+                for r in _rows_as_dicts(cur):
+                    chunks.append({
+                        "chunk_start": _as_date(r.get("chunk_start")),
+                        "chunk_end": _as_date(r.get("chunk_end")),
+                        "status": r.get("status"),
+                        "rows_written": r.get("rows_written"),
+                        "cost_micros_total": int(r.get("cost_micros_total") or 0),
+                        "country_count": int(r.get("country_count") or 0),
+                        "error_message": r.get("error_message"),
+                        "sync_run_id": r.get("sync_run_id"),
+                    })
+            return {"available": True, "chunks": chunks}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_geo_coverage failed: %s", exc)
+        return {"available": False, "chunks": []}
+
+
+def fetch_geo_sync_state(customer_id: str, scope: str = "geo_daily_spend") -> dict:
+    """Durable canonical geo sync run/checkpoint state (PR-ADS-153F). Read-only.
+
+    Returns {available, row}. ``available: False`` is an unreadable store, not
+    an absent run — the geo readiness gate must be able to tell those apart.
+
+    ``customer_id`` is MANDATORY. Selecting "the most recently updated row"
+    would let one account's checkpoint answer a reporting question about
+    another; a reporting decision must never pick its account implicitly.
+    """
+    if not customer_id:
+        return {"available": False, "row": None, "reason": "customer_id_required"}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "row": None, "reason": "db_unavailable"}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM google_ads_geo_sync_state
+                    WHERE customer_id = %s AND scope = %s
+                    """,
+                    (customer_id, scope),
+                )
+                rows = _rows_as_dicts(cur)
+            return {"available": True, "row": rows[0] if rows else None}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_geo_sync_state failed: %s", exc)
+        return {"available": False, "row": None, "reason": "db_unavailable"}
+
+
 def fetch_geo_spend_total(start: date | None, end: date) -> dict:
     """Total legacy geo-table spend for the window (for reconciliation). Read-only."""
     try:

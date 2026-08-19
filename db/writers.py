@@ -2368,6 +2368,350 @@ def upsert_spend_coverage(
         return False
 
 
+def upsert_geo_coverage(
+    customer_id: str, chunk_start, chunk_end, status: str,
+    *, rows_written: int = 0, cost_micros_total: int = 0, country_count: int = 0,
+    error_message: Optional[str] = None, source_query_version: Optional[str] = None,
+    sync_run_id: Optional[str] = None,
+) -> bool:
+    """Record a fetched GEO chunk (verified|failed). Idempotent. Never raises.
+
+    PR-ADS-153F. The geo counterpart of :func:`upsert_spend_coverage`, and it
+    carries the same rule: a ``failed`` write NEVER overwrites a chunk that is
+    already ``verified``, so a transient API error cannot demote coverage that
+    was already proven — and a recovery run that re-fetches only the failed
+    chunks cannot erase the good ones.
+
+    The caller must only pass ``verified`` AFTER the geo spend rows for that
+    chunk are durably written. Recording coverage first would let a partial run
+    claim a covered range it never persisted.
+    """
+    if not customer_id or not chunk_start or not chunk_end:
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO google_ads_geo_coverage (
+                        customer_id, chunk_start, chunk_end, status,
+                        rows_written, cost_micros_total, country_count,
+                        error_message, source_query_version, sync_run_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (customer_id, chunk_start, chunk_end) DO UPDATE SET
+                        status               = EXCLUDED.status,
+                        rows_written         = EXCLUDED.rows_written,
+                        cost_micros_total    = EXCLUDED.cost_micros_total,
+                        country_count        = EXCLUDED.country_count,
+                        error_message        = EXCLUDED.error_message,
+                        source_query_version = EXCLUDED.source_query_version,
+                        sync_run_id          = EXCLUDED.sync_run_id,
+                        fetched_at           = NOW(),
+                        updated_at           = NOW()
+                    WHERE google_ads_geo_coverage.status <> 'verified'
+                       OR EXCLUDED.status = 'verified'
+                    """,
+                    (customer_id, chunk_start, chunk_end, status,
+                     int(rows_written), int(cost_micros_total), int(country_count),
+                     (error_message or None), source_query_version, sync_run_id),
+                )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_geo_coverage failed: %s", exc)
+        return False
+
+
+def upsert_geo_sync_state(customer_id: str, scope: str = "geo_daily_spend",
+                          lease_token: Optional[str] = None, **fields) -> bool:
+    """Record canonical geo sync run/checkpoint state (PR-ADS-153F). Never raises.
+
+    Accepts any subset of the durable state columns. ``checkpoint_date`` and
+    ``last_successful_completed_at`` must only be supplied by a caller that has
+    already committed the corresponding coverage and spend writes — this writer
+    deliberately does not infer either, so "checkpoint advanced before the write
+    landed" cannot be introduced here by accident.
+
+    When ``lease_token`` is supplied the write is FENCED on
+    ``(customer_id, scope, lease_token, last_status = 'running')``. A worker
+    whose lease expired and was reclaimed by another run therefore updates
+    nothing rather than overwriting the newer run's state and checkpoint.
+
+    Returns True only when a row was actually written. The caller MUST treat
+    False as a failure: a run that could not persist its terminal state has no
+    durable evidence it happened, so reporting success would be a claim nothing
+    can back up.
+    """
+    allowed = (
+        "last_status", "last_started_at", "last_finished_at",
+        "last_successful_completed_at", "checkpoint_date", "requested_start",
+        "requested_end", "chunks_verified", "chunks_failed", "chunks_skipped",
+        "rows_written", "last_error", "last_run_id",
+    )
+    payload = {k: v for k, v in fields.items() if k in allowed}
+    if not customer_id or not payload:
+        return False
+    cols = list(payload)
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                if lease_token:
+                    # Fenced: only the current lease owner may write terminal
+                    # state. A stale worker matches no row and no-ops.
+                    cur.execute(
+                        f"""
+                        UPDATE google_ads_geo_sync_state
+                           SET {", ".join(f"{c} = %s" for c in cols)},
+                               updated_at = NOW()
+                         WHERE customer_id = %s AND scope = %s
+                           AND lease_token = %s AND last_status = 'running'
+                        RETURNING id
+                        """,
+                        tuple([payload[c] for c in cols]
+                              + [customer_id, scope, lease_token]),
+                    )
+                    return cur.fetchone() is not None
+                cur.execute(
+                    f"""
+                    INSERT INTO google_ads_geo_sync_state (
+                        customer_id, scope, {", ".join(cols)}
+                    ) VALUES (%s, %s, {", ".join(["%s"] * len(cols))})
+                    ON CONFLICT (customer_id, scope) DO UPDATE SET
+                        {", ".join(f"{c} = EXCLUDED.{c}" for c in cols)},
+                        updated_at = NOW()
+                    """,
+                    tuple([customer_id, scope] + [payload[c] for c in cols]),
+                )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_geo_sync_state failed: %s", exc)
+        return False
+
+
+def try_claim_geo_sync_lease(customer_id: str, run_id: Optional[str] = None,
+                             scope: str = "geo_daily_spend",
+                             lease_minutes: int = 120,
+                             lease_token: Optional[str] = None) -> str:
+    """Claim the canonical geo sync lease, returning the outcome.
+
+    Returns one of:
+
+      * ``"acquired"`` — this caller now owns the lease (and ``lease_token`` is
+        stored on the row as its fence).
+      * ``"held"``     — another run owns it; the caller must not start.
+      * ``"unavailable"`` — the lease store could not be reached.
+
+    PR-ADS-153F. Render runs more than one instance and the manual Revenue
+    Health trigger can fire at any moment, so a process-local flag proves
+    nothing. The lease is a single conditional UPDATE, which PostgreSQL executes
+    atomically: exactly one caller can move the row out of ``running``.
+
+    **The caller must FAIL CLOSED on ``unavailable``.** An earlier revision let
+    the run proceed without a lease on the theory that visible staleness beat a
+    silent skip. That was wrong: with no database the run cannot persist geo
+    rows, coverage, or state either, so proceeding buys no visibility at all —
+    it only spends Google Ads quota and risks an uncoordinated concurrent fetch.
+
+    A stale lease (a worker that died mid-run) still expires so a crash cannot
+    block geo sync forever — but expiry is RECOVERY, not ownership. Ownership is
+    the token, checked by every terminal write.
+
+    The deadline is a stored ``lease_expires_at``, refreshed by
+    :func:`renew_geo_sync_lease` while the owner is alive, rather than a fixed
+    window measured from ``last_started_at``. A long historical backfill would
+    otherwise cross its own deadline mid-run and let a second worker claim the
+    lease while the first was still writing geo rows. Rows predating the column
+    fall back to ``last_started_at + lease_minutes`` so an in-flight upgrade
+    still recovers a dead worker rather than treating a NULL as "never expires".
+
+    Never raises.
+    """
+    if not customer_id:
+        return "unavailable"
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return "unavailable"
+            with conn.cursor() as cur:
+                # Ensure the row exists so the conditional UPDATE below has a
+                # target. ON CONFLICT DO NOTHING keeps this idempotent and never
+                # disturbs a lease another worker already holds.
+                cur.execute(
+                    """
+                    INSERT INTO google_ads_geo_sync_state (customer_id, scope, last_status)
+                    VALUES (%s, %s, NULL)
+                    ON CONFLICT (customer_id, scope) DO NOTHING
+                    """,
+                    (customer_id, scope),
+                )
+                cur.execute(
+                    """
+                    UPDATE google_ads_geo_sync_state
+                       SET last_status      = 'running',
+                           last_started_at  = NOW(),
+                           last_run_id      = %s,
+                           lease_token      = %s,
+                           lease_expires_at = NOW() + (%s * INTERVAL '1 minute'),
+                           updated_at       = NOW()
+                     WHERE customer_id = %s AND scope = %s
+                       AND (last_status IS DISTINCT FROM 'running'
+                            OR COALESCE(lease_expires_at,
+                                        last_started_at + (%s * INTERVAL '1 minute'))
+                            IS NULL
+                            OR COALESCE(lease_expires_at,
+                                        last_started_at + (%s * INTERVAL '1 minute'))
+                            < NOW())
+                    RETURNING id
+                    """,
+                    (run_id, lease_token, int(lease_minutes), customer_id, scope,
+                     int(lease_minutes), int(lease_minutes)),
+                )
+                return "acquired" if cur.fetchone() is not None else "held"
+    except Exception as exc:  # noqa: BLE001
+        log.error("try_claim_geo_sync_lease failed: %s", exc)
+        return "unavailable"
+
+
+def renew_geo_sync_lease(customer_id: str, lease_token: str,
+                         scope: str = "geo_daily_spend",
+                         lease_minutes: int = 120) -> bool:
+    """Extend this owner's lease deadline. Returns True only if still the owner.
+
+    PR-ADS-153F. The heartbeat that makes a long run safe. Without it the
+    historical backfill — many monthly chunks, potentially hours — would pass
+    its own lease deadline mid-run, a second worker could legitimately acquire
+    the lease, and the first would carry on replacing geo ranges and certifying
+    coverage for a range it no longer owned. Terminal-state fencing does not
+    help there: the damage is in the data writes, which happen long before the
+    terminal write.
+
+    Fenced on ``lease_token`` AND ``last_status = 'running'``, so a worker whose
+    lease already lapsed and was reclaimed by someone else cannot renew its way
+    back into ownership — the row no longer carries its token.
+
+    Returns False when ownership was lost OR the store is unreachable. Both mean
+    the caller must stop writing: it can no longer prove it owns the range, and
+    a caller that cannot prove ownership must not act as though it has it.
+    Never raises.
+    """
+    if not customer_id or not lease_token:
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE google_ads_geo_sync_state
+                       SET lease_expires_at = NOW() + (%s * INTERVAL '1 minute'),
+                           updated_at       = NOW()
+                     WHERE customer_id = %s AND scope = %s
+                       AND lease_token = %s
+                       AND last_status = 'running'
+                    RETURNING id
+                    """,
+                    (int(lease_minutes), customer_id, scope, lease_token),
+                )
+                return cur.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001
+        log.error("renew_geo_sync_lease failed: %s", exc)
+        return False
+
+
+def holds_geo_sync_lease(customer_id: str, lease_token: str,
+                         scope: str = "geo_daily_spend") -> bool:
+    """Whether this token still owns an unexpired lease. Read-only.
+
+    Used to REVALIDATE ownership after a slow Google Ads fetch and immediately
+    before writing geo rows or coverage, so a run that lost the lease during the
+    fetch writes nothing rather than discovering the loss only at the end.
+
+    Returns False when the store is unreachable: an unverifiable claim of
+    ownership is not ownership.
+    """
+    if not customer_id or not lease_token:
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM google_ads_geo_sync_state
+                     WHERE customer_id = %s AND scope = %s
+                       AND lease_token = %s
+                       AND last_status = 'running'
+                       AND (lease_expires_at IS NULL OR lease_expires_at > NOW())
+                    """,
+                    (customer_id, scope, lease_token),
+                )
+                return cur.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001
+        log.error("holds_geo_sync_lease failed: %s", exc)
+        return False
+
+
+def release_geo_sync_lease(customer_id: str, scope: str = "geo_daily_spend",
+                           status: str = "failed",
+                           lease_token: Optional[str] = None) -> bool:
+    """Release the geo sync lease with a terminal status, if still the owner.
+
+    ``status`` must be the REAL outcome. Releasing a partial run as ``success``
+    is exactly the lie this ledger exists to prevent, so the caller passes what
+    happened and this writer records it verbatim.
+
+    PR-ADS-153F: when ``lease_token`` is supplied the release is FENCED on it —
+    a worker whose lease already expired and was reclaimed matches nothing and
+    silently no-ops, instead of stamping a terminal status over the run that
+    legitimately owns the lease now.
+
+    Returns True only when a row was actually updated. Never raises.
+    """
+    if not customer_id:
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                if lease_token:
+                    cur.execute(
+                        """
+                        UPDATE google_ads_geo_sync_state
+                           SET last_status      = %s,
+                               last_finished_at = NOW(),
+                               lease_expires_at = NULL,
+                               updated_at       = NOW()
+                         WHERE customer_id = %s AND scope = %s
+                           AND lease_token = %s AND last_status = 'running'
+                        RETURNING id
+                        """,
+                        (status, customer_id, scope, lease_token),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE google_ads_geo_sync_state
+                           SET last_status      = %s,
+                               last_finished_at = NOW(),
+                               lease_expires_at = NULL,
+                               updated_at       = NOW()
+                         WHERE customer_id = %s AND scope = %s
+                        RETURNING id
+                        """,
+                        (status, customer_id, scope),
+                    )
+                return cur.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001
+        log.error("release_geo_sync_lease failed: %s", exc)
+        return False
+
+
 def upsert_account_daily_spend(rows: list, sync_run_id: Optional[str] = None) -> int:
     """Upsert account-level daily spend rows (PR-ADS-120). Idempotent. Never raises.
 
@@ -2473,6 +2817,122 @@ def upsert_geo_daily_spend(rows: list, sync_run_id: Optional[str] = None) -> int
     except Exception as exc:  # noqa: BLE001
         log.error("upsert_geo_daily_spend failed: %s", exc)
         return 0
+
+
+class GeoRangeReplacementError(RuntimeError):
+    """The atomic replacement of one canonical geo range did not commit.
+
+    Raised so the caller records the chunk as FAILED. A range whose replacement
+    did not land must never be marked verified, and its checkpoint must not move.
+    """
+
+
+def replace_geo_daily_spend_chunk(customer_id: str, chunk_start, chunk_end,
+                                  rows: list, sync_run_id: Optional[str] = None) -> dict:
+    """Atomically REPLACE one customer's canonical geo range with a fresh response.
+
+    PR-ADS-153F blocker 2. ``upsert_geo_daily_spend`` only inserts and updates
+    the rows Google Ads returned; it can never remove a row that existed in an
+    earlier fetch and is absent from a later one. That silently breaks the
+    seven-day rolling refresh, because Google restates recent data:
+
+      * a country/campaign/day that disappears from the response keeps its old
+        row, so the range keeps spend Google no longer reports;
+      * the chunk is then recorded ``verified`` and reconciliation divides by a
+        stale denominator;
+      * worst case, a genuinely EMPTY successful response writes nothing, every
+        stale row survives, and the range still looks freshly verified.
+
+    "Refresh" therefore has to mean replace, not merge. Everything happens in ONE
+    transaction — validate, delete the range, insert the response, commit — so a
+    reader never observes the range half-deleted, and a failure leaves the
+    previously committed range exactly as it was.
+
+    An EMPTY response is an explicit success: "Google reports no
+    country-attributable spend in this range" is a real answer, and the range
+    genuinely becomes empty. That is precisely the case the merge-only writer
+    could not express.
+
+    Returns ``{"replaced": bool, "deleted": int, "written": int}``. Raises
+    :class:`GeoRangeReplacementError` on any failure — this writer deliberately
+    does NOT swallow errors, because a silent zero here is what let a stale range
+    be certified.
+
+    Writes ONLY this local table. Never Google Ads, never HubSpot.
+    """
+    if not customer_id or not chunk_start or not chunk_end:
+        raise GeoRangeReplacementError("customer_id, chunk_start and chunk_end are required")
+    start_s, end_s = str(chunk_start), str(chunk_end)
+    if start_s > end_s:
+        raise GeoRangeReplacementError(f"chunk_start {start_s} is after chunk_end {end_s}")
+
+    # Validate BEFORE touching anything: a row from another account or outside
+    # the range would be deleted-then-not-reinserted, i.e. silent data loss.
+    prepared = []
+    for r in rows or []:
+        cust = (r.get("customer_id") or "").strip()
+        spend_date = r.get("spend_date")
+        if not cust or not spend_date:
+            raise GeoRangeReplacementError(
+                "every geo row needs a customer_id and a spend_date")
+        if cust != customer_id:
+            raise GeoRangeReplacementError(
+                f"row customer_id {cust!r} does not belong to {customer_id!r}")
+        if not (start_s <= str(spend_date) <= end_s):
+            raise GeoRangeReplacementError(
+                f"row spend_date {spend_date} is outside {start_s}..{end_s}")
+        prepared.append((
+            cust, r.get("currency_code"),
+            (r.get("country_criterion_id") or "").strip(),
+            r.get("country_code"), r.get("country_name"),
+            (r.get("campaign_id") or "").strip(),
+            spend_date, int(r.get("cost_micros") or 0),
+            sync_run_id, r.get("source_query_version"),
+        ))
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                raise GeoRangeReplacementError("database unavailable")
+            # `with get_conn()` commits on clean exit and rolls back on an
+            # exception, so the delete and the insert are one unit: the range is
+            # never observed emptied-but-not-refilled.
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM google_ads_geo_daily_spend
+                    WHERE customer_id = %s AND spend_date BETWEEN %s AND %s
+                    """,
+                    (customer_id, start_s, end_s),
+                )
+                deleted = cur.rowcount or 0
+                if prepared:
+                    cur.executemany(
+                        """
+                        INSERT INTO google_ads_geo_daily_spend (
+                            customer_id, currency_code, country_criterion_id,
+                            country_code, country_name,
+                            campaign_id, spend_date, cost_micros,
+                            sync_run_id, source_query_version
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (customer_id, country_criterion_id, campaign_id, spend_date)
+                        DO UPDATE SET
+                            currency_code        = EXCLUDED.currency_code,
+                            country_code         = EXCLUDED.country_code,
+                            country_name         = EXCLUDED.country_name,
+                            cost_micros          = EXCLUDED.cost_micros,
+                            sync_run_id          = EXCLUDED.sync_run_id,
+                            source_query_version = EXCLUDED.source_query_version,
+                            updated_at           = NOW()
+                        """,
+                        prepared,
+                    )
+        return {"replaced": True, "deleted": int(deleted), "written": len(prepared)}
+    except GeoRangeReplacementError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.error("replace_geo_daily_spend_chunk failed: %s", exc)
+        raise GeoRangeReplacementError(str(exc)) from exc
 
 
 def upsert_fx_rates(rows: list) -> int:

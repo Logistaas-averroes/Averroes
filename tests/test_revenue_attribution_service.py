@@ -92,9 +92,13 @@ def _canonical_from_spend(spend_rows):
             "coverage_start": "2000-01-01", "coverage_end": "2100-01-01"}
 
 
+def total_or_zero(geo_total_obj):
+    return int(geo_total_obj.get("total_cost_micros") or 0)
+
+
 def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
               spend_cov=("2026-04-01", "2026-06-20"), revenue_cov=("2026-05-01", "2026-05-10"),
-              canonical=None, coverage=None):
+              canonical=None, coverage=None, geo_coverage=None):
     spend_rows = spend if spend is not None else _spend_rows()
     spend_obj = {"available": True, "rows": spend_rows,
                  "coverage_start": spend_cov[0], "coverage_end": spend_cov[1], "table": "geo"}
@@ -116,7 +120,17 @@ def _build_db(window="current_quarter", *, spend=None, leads=None, revenue=None,
     # Mirror the geo spend into it (total + per-country) so the country table and
     # the reconciliation total come from the same canonical source.
     geo_total_obj, geo_country_obj = _geo_from_spend(spend_rows)
-    with patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend_obj), \
+    # PR-ADS-153F: the durable geo coverage ledger is a MANDATORY input to the
+    # country readiness gate — country spend is only trusted over a range that
+    # was demonstrably fetched. Mirroring a wide verified chunk keeps these
+    # DB-path fixtures describing a healthy account; pass `geo_coverage=[]` for
+    # the never-fetched case.
+    geo_coverage_obj = {"available": True, "chunks": (
+        [{"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified",
+          "rows_written": 10, "cost_micros_total": total_or_zero(geo_total_obj)}]
+        if geo_coverage is None else list(geo_coverage))}
+    with patch("db.revenue_repository.fetch_geo_coverage", return_value=geo_coverage_obj), \
+         patch("db.revenue_repository.fetch_campaign_country_spend", return_value=spend_obj), \
          patch("db.revenue_repository.fetch_lead_quality", return_value=leads_obj), \
          canonical_ledger_patch(from_legacy_deal_rows(revenue_obj.get("rows") or [])), \
          patch("db.revenue_repository.fetch_canonical_campaign_spend", return_value=canonical_obj), \

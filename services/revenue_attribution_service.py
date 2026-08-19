@@ -61,7 +61,8 @@ from analysis.business_windows import get_window_bounds, resolve_window
 from analysis.core import QUALIFIED
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
-from services.country_codes import country_name_for_code, get_country_code
+from analysis import country_identity
+from analysis.country_identity import country_name_for_code, get_country_code
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,25 @@ def _safe_float(value) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _read_geo_coverage_ledger(customer_id, start_date, end_date) -> dict:
+    """The durable geo coverage ledger for one account and range, or an honest gap.
+
+    PR-ADS-153F. Never raises: a coverage read that fails must degrade to "we do
+    not know", which the gate treats as blocking, rather than crashing the whole
+    revenue contract. An unreadable ledger and an empty one are different facts
+    and this preserves the difference — ``available: False`` means unreadable.
+    """
+    try:
+        from services.google_ads_geo_sync_service import (  # noqa: PLC0415
+            analyze_geo_coverage, configured_customer_id,
+        )
+        return analyze_geo_coverage(
+            customer_id or configured_customer_id(), start_date, end_date)
+    except Exception:  # noqa: BLE001 — coverage must never crash the contract
+        return {"available": False, "complete": False,
+                "missing_ranges": [], "failed_chunks": []}
 
 
 def _nullable_float(value) -> float | None:
@@ -467,19 +487,55 @@ def _finalize_row(
     }
 
 
-def _residual_country_row(residual_native, residual_usd, use_usd) -> dict:
-    """PR-ADS-131: the explicit 'Unattributed / No Country' residual bucket row.
+def _apply_geo_spend_residual(countries: list, residual_native, residual_usd,
+                              use_usd) -> list:
+    """Attach the Google Ads geo SPEND residual to the one residual country row.
 
-    This is NOT a real country: no country_code/flag, no leads or revenue, decision
-    'unattributed'. Its spend is the campaign↔geo shortfall Google Ads could not
-    assign to a country (geographic_view omits location-less spend by design). It is
-    surfaced so ``Sum(country spend) + residual = canonical campaign spend`` — never
-    spread across real countries. USD is shown only when FX is complete; otherwise
-    USD stays None (never native GBP relabelled as USD)."""
+    PR-ADS-153F. There is exactly ONE residual bucket per country view, and it
+    carries two independent facts that must not be confused with each other:
+
+      * **spend side** — the campaign↔geo shortfall Google Ads could not assign
+        to a country (``geographic_view`` omits location-less spend by design).
+        Governed by the unchanged PR-ADS-131 eligibility rules.
+      * **revenue side** — closed-won deals whose CRM country could not be
+        identified, produced by the country bucketing itself.
+
+    Before 153F the spend residual was appended as its own extra row with
+    ``customers: 0, won_revenue: 0.0`` while unidentifiable revenue was silently
+    dropped, so the view could show a residual that asserted "no revenue here"
+    over revenue it had discarded. Merging them means
+    ``Sum(real country rows) + residual`` reconciles on BOTH sides.
+
+    USD is shown only when FX is complete; otherwise USD stays None (never
+    native GBP relabelled as USD).
+    """
+    spend = residual_usd if use_usd else residual_native
+    existing = next((r for r in countries if r.get("is_residual")), None)
+    if existing is not None:
+        existing["spend"] = spend
+        existing["spend_native"] = residual_native
+        existing["spend_usd"] = residual_usd
+        existing["spend_mapping"] = "matched"
+        existing.setdefault("attribution_notes", []).append(
+            "Includes Google Ads spend the geographic view does not assign to any "
+            "country. Shown separately; never spread across real countries.")
+        return countries
+    countries.append(_geo_spend_only_residual_row(residual_native, residual_usd, use_usd))
+    return countries
+
+
+def _geo_spend_only_residual_row(residual_native, residual_usd, use_usd) -> dict:
+    """The residual row when there is unattributed SPEND but no unattributed revenue.
+
+    Zero customers / zero revenue is a MEASURED fact here — the country bucketing
+    ran and produced no unidentifiable-geography deals — not an assumption.
+    """
     spend = residual_usd if use_usd else residual_native
     return {
-        "country": "Unattributed / No Country",
+        "country": country_identity.RESIDUAL_LABEL,
+        "country_key": country_identity.RESIDUAL_KEY,
         "country_code": None,
+        "country_status": country_identity.STATUS_RESIDUAL,
         "is_residual": True,
         "spend": spend,
         "spend_native": residual_native,
@@ -557,7 +613,8 @@ def _top_campaign_for_country(country_key: str, deals: list) -> str | None:
     """
     by_revenue: dict[str, dict] = {}
     for deal in deals:
-        if _norm(deal.get("country")) != country_key:
+        # PR-ADS-153F: canonical key, matching how the bucket was built.
+        if country_identity.country_key(deal.get("country")) != country_key:
             continue
         name = deal.get("campaign") or "unknown"
         entry = by_revenue.setdefault(name, {"name": name, "revenue": 0.0})
@@ -579,12 +636,16 @@ def _build_country_rows(
 ) -> list:
     buckets: dict[str, dict] = {}
 
+    # PR-ADS-153F: the legacy JSON country path groups on the SAME canonical key
+    # as the durable path. It is diagnostic-only since 153E-B (revenue is
+    # withheld here), but two key spaces for "country" is exactly the defect this
+    # PR removes — leaving one behind would let it grow back.
     def bucket_for(name, display=None):
-        key = _norm(name)
+        identity = country_identity.resolve(name=name)
+        key = identity.key
         if key not in buckets:
-            buckets[key] = _new_bucket(display or name or "unknown")
-        elif display and buckets[key]["display"] in (None, "", "unknown"):
-            buckets[key]["display"] = display
+            buckets[key] = _new_bucket(identity.label)
+            buckets[key]["country_identity"] = identity
         return buckets[key]
 
     # Geo spend is only attributed to a country when the geo row is actually
@@ -622,10 +683,15 @@ def _build_country_rows(
                 "is 0; leads/SQLs/customers/revenue are HubSpot contact/deal-side."
             )
         finalized = _finalize_row(bucket, legacy_gclid=legacy_gclid, extra_notes=extra_notes)
-        display = bucket["display"] or "unknown"
-        finalized["country"] = display
-        finalized["country_code"] = get_country_code(display)
-        finalized["top_campaign"] = _top_campaign_for_country(key, deals)
+        identity = bucket.get("country_identity")
+        finalized["country_key"] = key
+        finalized["country"] = identity.label if identity else bucket["display"]
+        finalized["country_code"] = identity.code if identity else None
+        finalized["country_status"] = identity.status if identity else None
+        finalized["is_residual"] = bool(identity.is_residual) if identity else False
+        finalized["top_campaign"] = (
+            None if (identity is not None and identity.is_residual)
+            else _top_campaign_for_country(key, deals))
         rows.append(finalized)
 
     rows.sort(key=lambda r: (r["spend"], r["won_revenue"]), reverse=True)
@@ -705,8 +771,21 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
       never classed winner/waste/watch (verdict = mapping_required).
     """
     buckets: dict[str, dict] = {}
+    by_country = group_field == "country"
 
-    def bucket_for(name):
+    def bucket_for(name, code=None):
+        # PR-ADS-153F: country rows group on the CANONICAL country key, never on
+        # a raw lowercased label. Dashboard Countries already keyed ISO-code-first
+        # while this path keyed on the string, so the same window produced two
+        # different key sets — and therefore two different sets of country rows —
+        # on two pages claiming to describe the same thing.
+        if by_country:
+            identity = country_identity.resolve(name=name, code=code)
+            key = identity.key
+            if key not in buckets:
+                buckets[key] = _new_bucket(identity.label)
+                buckets[key]["country_identity"] = identity
+            return key, buckets[key]
         key = _norm(name)
         if key not in buckets:
             buckets[key] = _new_bucket(name or "unknown")
@@ -714,13 +793,13 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
 
     # spend rows: {campaign_name, country, spend}
     for row in spend_rows:
-        _, b = bucket_for(row.get(group_field))
+        _, b = bucket_for(row.get(group_field), row.get("country_code"))
         b["spend"] += _safe_float(row.get("spend"))
 
     # lead rows: {campaign_name, country, status_category, has_gclid}
     # (empty when lead metrics are withheld for an unsafe date grain)
     for row in lead_rows:
-        _, b = bucket_for(row.get(group_field))
+        _, b = bucket_for(row.get(group_field), row.get("country_code"))
         b["leads"] += 1
         if row.get("status_category") == "qualified":
             b["sqls"] += 1
@@ -730,7 +809,7 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
     # contributes no revenue, and the bucket records that its money is incomplete
     # so a ROAS is not built on a silently understated numerator.
     for row in revenue_rows:
-        _, b = bucket_for(row.get(group_field))
+        _, b = bucket_for(row.get(group_field), row.get("country_code"))
         b["customers"] += 1
         amount = row.get("deal_amount_usd")
         if amount is None:
@@ -741,8 +820,15 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
 
     rows = []
     for key, bucket in buckets.items():
+        # PR-ADS-153F: a COUNTRY bucket is never dropped. Blank, invalid and
+        # unresolved geography used to be discarded here, so revenue that exists
+        # simply vanished from ROAS by Country while Dashboard Countries kept it
+        # as a residual — the two pages then reported different totals for the
+        # same window. Country keys are now always non-empty (a real `code:XX` or
+        # the explicit residual), so the guard below only ever drops a blank
+        # CAMPAIGN key, which keeps that page's existing contract untouched.
         if not key:
-            continue  # drop unknown / blank campaign or country
+            continue
         mapping_unavailable = bool(spend_mapping_keys is not None and key not in spend_mapping_keys)
         # PR-ADS-120 spend state (campaign grouping only).
         spend_state = None
@@ -768,10 +854,29 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
             finalized["campaign_id"] = key
             finalized["campaign_name"] = bucket["display"] or "unknown"
         else:
-            display = bucket["display"] or "unknown"
-            finalized["country"] = display
-            finalized["country_code"] = get_country_code(display)
-            finalized["top_campaign"] = _db_top_campaign(key, revenue_rows, spend_rows)
+            # PR-ADS-153F: identity comes from the shared contract, so the code
+            # is the one that produced the key rather than a second, independent
+            # resolution of the display label (which is how a row could carry a
+            # code that disagreed with the bucket it was in).
+            identity = bucket.get("country_identity")
+            finalized["country_key"] = key
+            finalized["country"] = identity.label if identity else bucket["display"]
+            finalized["country_code"] = identity.code if identity else None
+            finalized["country_status"] = identity.status if identity else None
+            finalized["is_residual"] = bool(identity.is_residual) if identity else False
+            if identity is not None and identity.is_residual:
+                # The residual carries real revenue, so it must not be scored as
+                # a market: no ROAS verdict, no "top campaign", and an explicit
+                # note saying what it is. Its numbers stay visible and countable.
+                finalized["verdict"] = "unattributed"
+                finalized["decision"] = "unattributed"
+                finalized["top_campaign"] = None
+                finalized.setdefault("attribution_notes", []).append(
+                    "Revenue whose country could not be identified "
+                    f"({identity.reason}). Shown separately so totals reconcile; "
+                    "never spread across real countries.")
+            else:
+                finalized["top_campaign"] = _db_top_campaign(key, revenue_rows, spend_rows)
         rows.append(finalized)
 
     # Spend may be None (unavailable mapping); sort those as 0 so ordering is
@@ -781,10 +886,16 @@ def _build_db_rows(spend_rows: list, lead_rows: list, revenue_rows: list, *, gro
 
 
 def _db_top_campaign(country_key: str, revenue_rows: list, spend_rows: list) -> str | None:
-    """Top campaign in a country by won revenue, falling back to spend (DB rows)."""
+    """Top campaign in a country by won revenue, falling back to spend (DB rows).
+
+    PR-ADS-153F: matches on the CANONICAL country key, the same one the row was
+    bucketed under. Matching on a normalized name here while bucketing on the
+    canonical key would silently return "no top campaign" for every row whose
+    label differed from its code.
+    """
     by_rev: dict[str, float] = {}
     for r in revenue_rows:
-        if _norm(r.get("country")) == country_key:
+        if country_identity.country_key(r.get("country"), r.get("country_code")) == country_key:
             name = r.get("campaign_name") or "unknown"
             by_rev[name] = by_rev.get(name, 0.0) + _safe_float(r.get("deal_amount_usd"))
     if by_rev:
@@ -793,7 +904,7 @@ def _db_top_campaign(country_key: str, revenue_rows: list, spend_rows: list) -> 
             return best
     by_spend: dict[str, float] = {}
     for r in spend_rows:
-        if _norm(r.get("country")) == country_key:
+        if country_identity.country_key(r.get("country"), r.get("country_code")) == country_key:
             name = r.get("campaign_name") or "unknown"
             by_spend[name] = by_spend.get(name, 0.0) + _safe_float(r.get("spend"))
     if by_spend:
@@ -1027,8 +1138,25 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         # ROAS reconciliation onto canonical Google Ads API geo rows without ever
         # loosening the rule (no geo rows → fall back, never a fabricated match).
         geo_canonical = repo.fetch_geo_daily_spend_total(start_date, end_date)
+        # PR-ADS-153F: the durable coverage ledger is read HERE, before the geo
+        # total is chosen, because a legacy fallback is only defensible while we
+        # genuinely do not know what canonical geo holds for this range. Scoped
+        # to THIS window's canonical spend customer — coverage is an
+        # account-scoped fact, and reading it unscoped would let one account's
+        # verified history declare another account's window covered.
+        _geo_ledger = _read_geo_coverage_ledger(
+            canonical_customer_id, start_date, end_date)
+        geo_coverage_ok = bool(_geo_ledger.get("available") and _geo_ledger.get("complete"))
+        _geo_failed_chunks = _geo_ledger.get("failed_chunks") or []
         if geo_canonical.get("available") and geo_canonical.get("has_rows"):
             geo_total_for_recon = round(float(geo_canonical.get("total_spend") or 0.0), 2)
+        elif (geo_canonical.get("available") and geo_coverage_ok
+              and not _geo_failed_chunks):
+            # A successful query over a range the ledger certifies as fully
+            # fetched, returning nothing, is a MEASURED zero — not an absence.
+            # Falling back to the legacy table here would answer a question
+            # canonical geo had already answered, with a different source.
+            geo_total_for_recon = 0.0
         else:
             geo_total_for_recon = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
         if canonical_total > 0:
@@ -1078,6 +1206,13 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         canonical_customer_id = None
         canonical_currency = None
         country_spend_reconciled = None
+        # With no canonical baseline there is nothing to certify geo against, so
+        # the ledger is not consulted and coverage is reported as unproven rather
+        # than as absent-and-therefore-fine.
+        _geo_ledger = {"available": False, "complete": False,
+                       "missing_ranges": [], "failed_chunks": []}
+        geo_coverage_ok = False
+        _geo_failed_chunks = []
 
     # PR-ADS-119: apply APPROVED campaign-identity mappings so external
     # HubSpot/UTM labels aggregate onto their canonical Google Ads campaign BEFORE
@@ -1125,9 +1260,21 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # per-day-FX USD. A criterion that did not resolve to a country is dropped from
     # named rows (honest partial coverage), never bucketed as unknown spend.
     geo_by_country = repo.fetch_geo_daily_spend_by_country(start_date, end_date)
-    canonical_geo_country = bool(
-        canonical_access and geo_by_country.get("available") and geo_by_country.get("has_rows"))
-    if canonical_geo_country:
+    # PR-ADS-153F: readability is a statement about the QUERY, rows are a
+    # statement about the data, and a coverage-verified empty result is a third
+    # thing again — a proven zero. The gate needs all three named separately.
+    canonical_geo_readable = bool(canonical_access and geo_by_country.get("available"))
+    canonical_geo_country = bool(canonical_geo_readable and geo_by_country.get("has_rows"))
+    canonical_geo_verified_zero = bool(
+        canonical_geo_readable and not geo_by_country.get("has_rows")
+        and geo_coverage_ok and not _geo_failed_chunks)
+    if canonical_geo_verified_zero:
+        # Canonical geo answered, and the answer was "no country spend in this
+        # range". Reaching for the legacy table here would replace a proven
+        # answer with a different source's guess at the same question.
+        geo_country_source = "canonical_google_ads_api"
+        country_source_rows = []
+    elif canonical_geo_country:
         geo_country_source = "canonical_google_ads_api"
         country_source_rows = []
         for r in geo_by_country.get("rows", []):
@@ -1154,24 +1301,46 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # PR-ADS-131: a by-design unattributed residual (geo assigns most spend to
     # countries; the shortfall is location-less spend the geographic_view omits) is
     # a SAFE unblock. Real country rows keep their geo-attributed spend and an
-    # explicit "Unattributed / No Country" residual bucket is added — never spread
+    # explicit "Unknown / Unattributed country" residual bucket is added — never spread
     # across countries, never a real country, never loosening tolerance. Missing geo
     # dates / campaigns missing geo / incomplete FX/coverage stay BLOCKED.
     country_residual = {"eligible": False, "residual_native": None,
                         "residual_pct": None, "reason": None}
+    _country_missing_geo_dates: list = []
+    _country_campaigns_missing_geo: list = []
     if canonical_geo_country and country_spend_reconciled is False:
         from services.google_ads_geo_sync_service import (  # noqa: PLC0415
             _geo_reconciliation_detail, evaluate_country_residual,
         )
         _geo_detail = _geo_reconciliation_detail(
             start_date, end_date, canonical_total, geo_total_for_recon, "mismatch")
+        _country_missing_geo_dates = _geo_detail.get("missing_geo_dates") or []
+        _country_campaigns_missing_geo = _geo_detail.get("campaigns_missing_geo") or []
         country_residual = evaluate_country_residual(
             canonical_total, geo_total_for_recon, _geo_detail,
             coverage_complete=coverage_complete, fx_complete=fx_complete,
             geo_has_rows=canonical_geo_country, reconciled=False)
     country_residual_eligible = bool(country_residual["eligible"])
+    # PR-ADS-153F: carry the gap reason and the durable geo-coverage evidence into
+    # source_health so the shared country-truth disclosure can state WHY a window
+    # is blocked and WHICH ranges are missing or failed — evidence the spend
+    # comparison alone cannot produce (it cannot tell "never fetched" from
+    # "fetched, genuinely zero").
+    country_gap_reason = country_residual.get("reason")
+    # PR-ADS-153F blocker 1: durable geo coverage is a MANDATORY input, not side
+    # evidence. Its whole purpose is to separate "fetched and genuinely zero"
+    # from "never fetched", and a gate that reads it but does not require it
+    # discards exactly that distinction — a window whose geo was never synced
+    # would reconcile against a total it should not have trusted. `_geo_ledger`
+    # and `geo_coverage_ok` are read once, above, before the geo total is chosen.
+    #
+    # A coverage-verified empty geo range is trustworthy for the same reason a
+    # populated one is: the ledger proves it was fetched. Requiring ROWS here
+    # would have made this surface disagree with `build_geo_reconciliation`
+    # about the same window, which is the contradiction blocker 1 removed.
     country_spend_trusted = (
-        campaign_spend_trusted and canonical_geo_country
+        campaign_spend_trusted
+        and (canonical_geo_country or canonical_geo_verified_zero) and geo_coverage_ok
         and (country_spend_reconciled is True or country_residual_eligible))
     # Country spend expressed in the ROAS currency: when trusted + FX complete, use
     # the per-day-FX USD carried on the canonical geo rows; otherwise native
@@ -1267,7 +1436,8 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         _res_native = country_residual["residual_native"]
         country_residual_usd = (round(_res_native * fx_effective_rate, 2)
                                 if (use_usd and fx_effective_rate is not None) else None)
-        countries.append(_residual_country_row(_res_native, country_residual_usd, use_usd))
+        countries = _apply_geo_spend_residual(
+            countries, _res_native, country_residual_usd, use_usd)
     summary = _build_db_summary(
         campaign_spend_rows, lead_rows, revenue_rows,
         revenue_available=revenue_available,
@@ -1399,6 +1569,24 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         "geo_country_source": geo_country_source,
         "campaign_spend_total": canonical_total,
         "country_spend_reconciled": country_spend_reconciled,
+        # PR-ADS-153F: durable geo coverage is a MANDATORY gate input. Every
+        # field the shared gate needs is published here, so the mart derives the
+        # same verdict from the same facts rather than from a subset.
+        "country_gap_reason": country_gap_reason,
+        "geo_coverage_status": ("complete" if _geo_ledger.get("complete")
+                                else "incomplete" if _geo_ledger.get("available")
+                                else "unavailable"),
+        "geo_coverage_missing_ranges": _geo_ledger.get("missing_ranges") or [],
+        "failed_geo_dates": _geo_ledger.get("failed_chunks") or [],
+        "country_geo_rows_available": bool(canonical_geo_country),
+        # The gate's `geo_readable` input: did the canonical geo QUERY succeed?
+        # Distinct from `country_geo_rows_available` (did it return rows) and
+        # from `country_geo_verified_zero` (it returned nothing, and the ledger
+        # proves the range was fetched, so nothing is the real answer).
+        "country_geo_query_readable": bool(canonical_geo_readable),
+        "country_geo_verified_zero": bool(canonical_geo_verified_zero),
+        "missing_geo_dates": list(_country_missing_geo_dates or []),
+        "campaigns_missing_geo": list(_country_campaigns_missing_geo or []),
         # PR-ADS-129: exact geo↔canonical variance for the Country blocked card.
         "country_geo_total": country_geo_total_native,
         "country_spend_variance": country_spend_variance_native,
@@ -1884,11 +2072,48 @@ def build_country_deal_details(window: str, country: str,
             "generated_at": generated_at,
         }
 
-    target_country = _norm(country)
+    # PR-ADS-153F: the drilldown resolves the requested country through the SAME
+    # contract the ROAS row was built with and compares canonical keys. It used
+    # to run its own third rule — normalized-name equality OR a separate code
+    # resolution — so a drilldown could contain deals the row it opened from did
+    # not count, and vice versa.
+    #
+    # Requesting the residual bucket EXPLICITLY (by its key or its label) returns
+    # exactly the deals that bucket is built from, which is what makes the
+    # residual row's numbers auditable rather than merely disclosed.
+    #
+    # A request for a label that is neither a supported country nor the residual
+    # is refused rather than answered with the residual's contents. Every such
+    # label resolves to the same residual key, so answering would return one
+    # unidentifiable country's deals under another's name — a `contains`-style
+    # leak by a different route, and the drilldown has never been allowed to do
+    # that ("United Arab Emirates" must never leak into "United Kingdom").
+    target = country_identity.resolve(name=country, code=code)
+    asked_for_residual = (
+        str(country or "").strip().lower() in (
+            country_identity.RESIDUAL_KEY, country_identity.RESIDUAL_LABEL.lower())
+        or str(code or "").strip().lower() == country_identity.RESIDUAL_KEY)
+    if not target.is_country and not asked_for_residual:
+        return {
+            "window": resolved, "country": country, "country_code": code,
+            "country_key": None, "details": [],
+            "summary": {"companies": None, "deals": 0, "won_revenue_usd": None,
+                        "customers": 0, "revenue_unavailable_deals": 0},
+            "revenue_source": canonical_revenue.CANONICAL_SOURCE,
+            "revenue_scope": revenue_scope.SCOPE_GOOGLE_ADS_SOURCE,
+            "revenue_available": True,
+            "country_status": target.status,
+            "country_unresolved_reason": target.reason,
+            "as_of": base.get("as_of"),
+            "legacy_fallback_used": False,
+            "source_health": {"status": "country_not_canonical"},
+            "generated_at": generated_at,
+        }
+
+    target_key = target.key
     rows = [r for r in canonical_revenue.canonical_deal_rows(
         base, revenue_scope.SCOPE_GOOGLE_ADS_SOURCE)
-        if _norm(r.get("country")) == target_country
-        or (code and get_country_code(r.get("country") or "") == code)]
+        if country_identity.country_key(r.get("country"), r.get("country_code")) == target_key]
     # Preserve the RAW label before the canonical identity map overwrites it, so
     # the drawer can show both "Campaign / Source" (canonical) and the raw label.
     for r in rows:

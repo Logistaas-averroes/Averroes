@@ -248,21 +248,23 @@ class TestDatasetSourceMapping:
             )
 
     def test_known_datasets_in_server_use_google_ads_api(self):
-        # _KNOWN_DATASETS placeholders must match the new active source so the
-        # freshness endpoint reads PR-ADS-104's google_ads_api sync rows.
-        match = re.search(
-            r"_KNOWN_DATASETS:\s*list\[tuple\[str,\s*str\]\]\s*=\s*\[(.*?)\]",
-            SERVER_PY,
-            re.DOTALL,
-        )
-        assert match, "_KNOWN_DATASETS not found in api/server.py"
-        block = match.group(1)
+        # The freshness endpoint's placeholder pairs must name the active source
+        # so it reads PR-ADS-104's google_ads_api sync rows, never Windsor's.
+        #
+        # PR-ADS-153F: this asserted on a hand-listed `_KNOWN_DATASETS` literal in
+        # api/server.py. That list was a fourth copy of the dataset registry and
+        # had already drifted (it still named datasets no writer stamps), so it
+        # is now DERIVED from DATASET_FRESHNESS_CONFIG. The guarantee is
+        # unchanged and is asserted on the real pairs rather than on source text.
+        from api.server import _known_dataset_pairs
+
+        pairs = _known_dataset_pairs()
         for ds in GOOGLE_ADS_DATASETS:
-            assert f'("google_ads_api", "{ds}")' in block, (
-                f"_KNOWN_DATASETS must include (google_ads_api, {ds})"
+            assert ("google_ads_api", ds) in pairs, (
+                f"known datasets must include (google_ads_api, {ds})"
             )
-            assert f'("windsor", "{ds}")' not in block, (
-                f"_KNOWN_DATASETS must not list windsor/{ds} as active"
+            assert ("windsor", ds) not in pairs, (
+                f"known datasets must not list windsor/{ds} as active"
             )
 
 
