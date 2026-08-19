@@ -13,9 +13,9 @@ or scheduled report runs.  The daily incremental sync is the routine
 data-refresh layer that ensures dashboards always reflect recent platform
 activity.
 
-It reads read-only and writes only to the local database.  It does not modify
-Google Ads, HubSpot, campaigns, bids, budgets, contacts, deals, or negative
-keywords.
+Every external platform is read read-only; the only writes are to the local
+database.  The sync does not modify Google Ads, HubSpot, campaigns, bids,
+budgets, contacts, deals, or negative keywords.
 
 > **PR-ADS-154 (production hotfix).** Three defects made a failed run look like
 > a successful one. They are described in "Database readiness", "Retired

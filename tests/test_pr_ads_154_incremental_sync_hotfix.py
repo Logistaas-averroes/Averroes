@@ -634,3 +634,68 @@ def test_governance_the_scheduler_reaches_no_external_mutation():
                    "requests.delete", "mutate_", "MutateOperation",
                    "upload_click_conversions", "OfflineUserDataJob"):
         assert marker not in body, f"incremental sync must stay read-only ({marker})"
+
+
+def test_10_every_operator_facing_label_matches_its_report_key():
+    """One spelling per dataset, in the report AND in the logs and errors.
+
+    Renaming the report keys onto the canonical source left several log lines
+    and error strings spelling the superseded `google_ads/...`. An operator
+    greps the `errors` list and then looks for that dataset in the JSON, so two
+    spellings for one dataset is this PR's own defect class reappearing in the
+    human-facing layer.
+
+    The labels are now derived from the registry constants, which is what makes
+    the drift unrepresentable rather than merely absent today.
+    """
+    # No hand-spelled superseded prefix survives anywhere in the module.
+    code = "\n".join(ln for ln in _SYNC_SRC.splitlines()
+                     if not ln.strip().startswith("#"))
+    assert "google_ads/" not in code, (
+        "a superseded `google_ads/...` label survives in the scheduler")
+
+    # Every declared label is built from the registry, and matches a real pair.
+    labels = {
+        sync.LABEL_CANONICAL_SPEND: (dataset_keys.CANONICAL_SPEND_SOURCE,
+                                     dataset_keys.CANONICAL_SPEND_DATASET),
+        sync.LABEL_CANONICAL_GEO: (dataset_keys.CANONICAL_GEO_SOURCE,
+                                   dataset_keys.CANONICAL_GEO_DATASET),
+        sync.LABEL_FX: (dataset_keys.FX_SOURCE,
+                        dataset_keys.FX_DAILY_RATES_DATASET),
+        sync.LABEL_DEAL_LEDGER: (dataset_keys.DEAL_LEDGER_SOURCE,
+                                 dataset_keys.DEAL_LEDGER_DATASET),
+        sync.LABEL_SOURCE_CLASSIFICATION: (
+            dataset_keys.SOURCE_CLASSIFICATION_SOURCE,
+            dataset_keys.SOURCE_CLASSIFICATION_DATASET),
+        sync.LABEL_GCLID_MATCHES: (dataset_keys.GCLID_SOURCE,
+                                   dataset_keys.GCLID_MATCHES_DATASET),
+    }
+    for label, pair in labels.items():
+        assert label == "/".join(pair), label
+        assert dataset_keys.is_registered_pair(*pair), label
+    # The reconciliation step publishes no batch of its own, but shares the geo
+    # source so its label sorts and greps with the dataset it describes.
+    assert sync.LABEL_GEO_RECONCILIATION == (
+        f"{dataset_keys.CANONICAL_GEO_SOURCE}/geo_reconciliation")
+
+
+def test_10b_the_report_keys_are_the_labels(monkeypatch):
+    """Asserted on a real run, not on the constants alone."""
+    monkeypatch.setattr(sync, "ensure_database_ready", lambda: (True, None))
+    monkeypatch.setattr(sync.db_writers, "write_run", lambda *a, **k: 1)
+    monkeypatch.setattr(sync.db_writers, "update_run", lambda *a, **k: None)
+    monkeypatch.setattr(sync.db_writers, "start_sync_batch", lambda **k: 1)
+    monkeypatch.setattr(sync.db_writers, "finish_sync_batch", lambda **k: True)
+    for name in ("_sync_hubspot_contacts", "_sync_contact_funnel", "_sync_hubspot_deals",
+                 "_sync_gclid_attribution", "_sync_deal_ledger",
+                 "_sync_source_classification", "_sync_canonical_spend",
+                 "_sync_fx_rates", "_sync_canonical_geo",
+                 "_publish_geo_reconciliation", "_sync_mailchimp"):
+        monkeypatch.setattr(sync, name, lambda **k: {"status": "success"})
+
+    keys = set(sync.run_daily_incremental_sync(run_reason="test")["datasets"])
+    for label in (sync.LABEL_CANONICAL_SPEND, sync.LABEL_CANONICAL_GEO,
+                  sync.LABEL_GEO_RECONCILIATION, sync.LABEL_FX,
+                  sync.LABEL_DEAL_LEDGER, sync.LABEL_SOURCE_CLASSIFICATION,
+                  sync.LABEL_GCLID_MATCHES):
+        assert label in keys, label

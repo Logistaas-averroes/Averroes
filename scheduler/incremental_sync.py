@@ -160,6 +160,24 @@ RETIRED_DATASETS: dict[str, dict] = {
 }
 
 
+#: The dataset labels used in the run report, the log lines and the `errors`
+#: list — one definition, so they cannot drift apart.
+#:
+#: PR-ADS-154 renamed the report keys onto the canonical source
+#: (`google_ads_api/...`) but left several log and error strings spelling the
+#: superseded `google_ads/...`. An operator greps the errors list and then looks
+#: for that dataset in the JSON, so two spellings for one dataset is the same
+#: class of defect this PR exists to remove — just in the human-facing layer.
+LABEL_CANONICAL_SPEND = f"{CANONICAL_SPEND_SOURCE}/{CANONICAL_SPEND_DATASET}"
+LABEL_CANONICAL_GEO = f"{CANONICAL_GEO_SOURCE}/{CANONICAL_GEO_DATASET}"
+LABEL_GEO_RECONCILIATION = f"{CANONICAL_GEO_SOURCE}/geo_reconciliation"
+LABEL_FX = f"{FX_SOURCE}/{FX_DAILY_RATES_DATASET}"
+LABEL_DEAL_LEDGER = f"{DEAL_LEDGER_SOURCE}/{DEAL_LEDGER_DATASET}"
+LABEL_SOURCE_CLASSIFICATION = (
+    f"{SOURCE_CLASSIFICATION_SOURCE}/{SOURCE_CLASSIFICATION_DATASET}")
+LABEL_GCLID_MATCHES = f"{GCLID_SOURCE}/{GCLID_MATCHES_DATASET}"
+
+
 #: Every (source, dataset) pair this scheduler stamps on ``sync_batches``.
 #:
 #: Declared so the contract test can enumerate them and prove each one is
@@ -386,7 +404,7 @@ def run_daily_incremental_sync(
     # PR-ADS-114: this dataset now has a real persistence path. It pulls
     # closed-won deals DIRECTLY by closedate and writes GCLID-only attribution
     # rows (no synthetic GCLIDs) into gclid_attribution.
-    datasets[f"{GCLID_SOURCE}/{GCLID_MATCHES_DATASET}"] = _sync_gclid_attribution(
+    datasets[LABEL_GCLID_MATCHES] = _sync_gclid_attribution(
         run_id=run_id, date_from=date_from_deals, date_to=today, errors=errors,
     )
 
@@ -396,32 +414,32 @@ def run_daily_incremental_sync(
     # reconciles it, 153E-B migrates consumers. Orchestration only — every won,
     # currency, association and attribution decision lives in the service and
     # its pure rule modules, never here.
-    datasets[f"{DEAL_LEDGER_SOURCE}/{DEAL_LEDGER_DATASET}"] = _sync_deal_ledger(
+    datasets[LABEL_DEAL_LEDGER] = _sync_deal_ledger(
         run_id=run_id, errors=errors,
     )
 
     # ── hubspot/source_classification — keep acquisition-source classification
     # current (PR-ADS-117): classify newly-created contacts (all sources) and
     # attribute recent closed-won deals. Read-only from HubSpot; local DB only.
-    datasets[f"{SOURCE_CLASSIFICATION_SOURCE}/{SOURCE_CLASSIFICATION_DATASET}"] = _sync_source_classification(
+    datasets[LABEL_SOURCE_CLASSIFICATION] = _sync_source_classification(
         run_id=run_id, date_from=date_from_contacts, date_to=today, errors=errors,
     )
 
-    # ── google_ads/canonical_spend — keep canonical campaign-daily spend current
+    # ── google_ads_api/canonical_spend — keep canonical campaign-daily spend current
     # (PR-ADS-118) with a small daily lookback for late Google Ads adjustments.
     # Reads Google Ads read-only; writes only local canonical tables.
-    datasets[f"{CANONICAL_SPEND_SOURCE}/{CANONICAL_SPEND_DATASET}"] = _sync_canonical_spend(
+    datasets[LABEL_CANONICAL_SPEND] = _sync_canonical_spend(
         run_id=run_id, date_to=today, errors=errors,
     )
 
     # ── fx/daily_rates — keep daily GBP→USD FX rates current (PR-ADS-119) so
     # native spend can be converted to USD reporting spend per spend_date. Reads
     # published reference rates read-only; writes only the local fx_rates table.
-    datasets[f"{FX_SOURCE}/{FX_DAILY_RATES_DATASET}"] = _sync_fx_rates(
+    datasets[LABEL_FX] = _sync_fx_rates(
         run_id=run_id, date_to=today, errors=errors,
     )
 
-    # ── google_ads/canonical_geo — PR-ADS-153F. Country ROAS needs per-country
+    # ── google_ads_api/canonical_geo — PR-ADS-153F. Country ROAS needs per-country
     # spend that reconciles with the canonical campaign total, and until this PR
     # NOTHING scheduled it: the only caller was the manual Revenue Health button,
     # so canonical geo went stale the moment the window advanced past the last
@@ -434,16 +452,16 @@ def run_daily_incremental_sync(
     #   3. canonical geo             — reconciled against (1), converted using (2)
     #   4. geo reconciliation        — evaluated only after 1-3 have landed
     # Reconciling before geo lands would score the previous run's coverage.
-    datasets[f"{CANONICAL_GEO_SOURCE}/{CANONICAL_GEO_DATASET}"] = _sync_canonical_geo(
+    datasets[LABEL_CANONICAL_GEO] = _sync_canonical_geo(
         run_id=run_id, date_to=today, errors=errors,
     )
 
-    # ── google_ads/geo_reconciliation — step 4. Read-only diagnostics computed
+    # ── google_ads_api/geo_reconciliation — step 4. Read-only diagnostics computed
     # AFTER spend, FX and geo are current, so the recorded verdict describes this
     # run's data rather than the previous one's. Publishes no external state and
     # never gates the sync: a reconciliation that reports "blocked" is a true
     # answer about the data, not a sync failure.
-    datasets[f"{CANONICAL_GEO_SOURCE}/geo_reconciliation"] = _publish_geo_reconciliation(
+    datasets[LABEL_GEO_RECONCILIATION] = _publish_geo_reconciliation(
         errors=errors,
     )
 
@@ -689,7 +707,7 @@ def _sync_gclid_attribution(
         run_id=run_id,
     )
     try:
-        batch_id = _require_batch(batch_id, "gclid/matches")
+        batch_id = _require_batch(batch_id, LABEL_GCLID_MATCHES)
         deals = pull_closed_won_deals_in_range(
             date_from=str(date_from), date_to=str(date_to),
         )
@@ -725,7 +743,7 @@ def _sync_gclid_attribution(
         }
 
     except Exception as exc:  # noqa: BLE001
-        err = f"gclid/matches: {exc}"
+        err = f"{LABEL_GCLID_MATCHES}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         if batch_id:
@@ -752,13 +770,13 @@ def _sync_deal_ledger(*, run_id, errors: list) -> dict:
         # A ledger sync with no durable batch cannot publish freshness and its
         # written count cannot be attributed to anything, so it fails before the
         # HubSpot pull rather than after it.
-        batch_id = _require_batch(batch_id, "hubspot/deal_ledger")
+        batch_id = _require_batch(batch_id, LABEL_DEAL_LEDGER)
         from services.hubspot_deal_sync_service import sync_deals  # noqa: PLC0415
 
         result = sync_deals(batch_id=batch_id)
     except Exception as exc:  # noqa: BLE001
         log.error("[incremental] deal ledger sync failed: %s", exc, exc_info=True)
-        errors.append(f"hubspot/deal_ledger: {exc}")
+        errors.append(f"{LABEL_DEAL_LEDGER}: {exc}")
         db_writers.finish_sync_batch(batch_id, status="failed",
                                      error_message=str(exc))
         return {"status": "failed", "error": str(exc), "rows": 0}
@@ -766,7 +784,7 @@ def _sync_deal_ledger(*, run_id, errors: list) -> dict:
     status = result.get("status") or "failed"
     if status != "success":
         errors.append(
-            f"hubspot/deal_ledger: {status} "
+            f"{LABEL_DEAL_LEDGER}: {status} "
             f"({result.get('error') or 'incomplete'}; "
             f"{result.get('association_failures', 0)} association failure(s))")
     # sync_batches accepts success|failed only, so a PARTIAL sync is recorded
@@ -810,7 +828,7 @@ def _sync_source_classification(
         sync_type="daily", date_from=date_from, date_to=date_to, run_id=run_id,
     )
     try:
-        batch_id = _require_batch(batch_id, "hubspot/source_classification")
+        batch_id = _require_batch(batch_id, LABEL_SOURCE_CLASSIFICATION)
         contacts = pull_all_contacts_in_range(date_from=str(date_from), date_to=str(date_to))
         contact_rows = [classify_contact_row(c) for c in contacts]
         contacts_written = db_writers.upsert_contact_source_classification(contact_rows)
@@ -847,7 +865,7 @@ def _sync_source_classification(
             "deals_pulled": len(deal_rows),
         }
     except Exception as exc:  # noqa: BLE001
-        err = f"hubspot/source_classification: {exc}"
+        err = f"{LABEL_SOURCE_CLASSIFICATION}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         if batch_id:
@@ -909,7 +927,7 @@ def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:
         sync_type="daily", date_from=start, date_to=date_to, run_id=run_id,
     )
     try:
-        batch_id = _require_batch(batch_id, "google_ads_api/canonical_spend")
+        batch_id = _require_batch(batch_id, LABEL_CANONICAL_SPEND)
         payload = fetch_daily_spend(str(start), str(date_to))
         rows = payload.get("rows", [])
         micros = sum(int(r.get("cost_micros") or 0) for r in rows)
@@ -940,7 +958,7 @@ def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:
                 batch_id=batch_id, status="success", row_count=written, last_source_date=date_to)
         return {"status": "success", "rows_written": written, "cost_micros": micros}
     except Exception as exc:  # noqa: BLE001
-        err = f"google_ads/canonical_spend: {exc}"
+        err = f"{LABEL_CANONICAL_SPEND}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         # Record a `failed` coverage chunk against the real configured customer
@@ -973,7 +991,7 @@ def _sync_fx_rates(*, run_id, date_to, errors: list) -> dict:
         date_from=start, date_to=date_to, run_id=run_id,
     )
     try:
-        batch_id = _require_batch(batch_id, "fx/daily_rates")
+        batch_id = _require_batch(batch_id, LABEL_FX)
         result = ensure_fx_rates(start, date_to, base_currency=NATIVE_CURRENCY,
                                  quote_currency=REPORTING_CURRENCY, only_missing=True)
         failed = result.get("failed") or []
@@ -1004,7 +1022,7 @@ def _sync_fx_rates(*, run_id, date_to, errors: list) -> dict:
             "already_current": fetched == 0,
         }
     except Exception as exc:  # noqa: BLE001
-        err = f"fx/daily_rates: {exc}"
+        err = f"{LABEL_FX}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         if batch_id:
@@ -1065,7 +1083,7 @@ def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
         # surface can corroborate.
         if not bid:
             raise BatchTrackingError(
-                "google_ads_api/canonical_geo: sync batch could not be opened")
+                f"{LABEL_CANONICAL_GEO}: sync batch could not be opened")
         db_writers.finish_sync_batch(batch_id=bid, status=status, **fields)
 
     try:
@@ -1074,7 +1092,7 @@ def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
             job_id=str(run_id) if run_id else None,
         )
     except Exception as exc:  # noqa: BLE001
-        err = f"google_ads/canonical_geo: {exc}"
+        err = f"{LABEL_CANONICAL_GEO}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         _batch("failed", error_message=str(exc)[:1000])
@@ -1087,13 +1105,13 @@ def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
         # store that could not be reached comes back as `failed` below, because
         # an outage that presents itself as healthy concurrency is an outage
         # nobody will notice.
-        log.info("[incremental_sync] google_ads/canonical_geo: skipped (lease held)")
+        log.info("[incremental_sync] %s: skipped (lease held)", LABEL_CANONICAL_GEO)
         return {"status": "skipped", "reason": result.get("reason"),
                 "note": "another canonical geo sync was already running"}
 
     summary = result.get("summary") or {}
     if result.get("reason") == "lease_store_unavailable":
-        err = ("google_ads/canonical_geo: failed (lease_store_unavailable) — the "
+        err = (f"{LABEL_CANONICAL_GEO}: failed (lease_store_unavailable) — the "
                "geo sync coordination store could not be reached, so no range "
                "was fetched and none can be certified")
         errors.append(err)
@@ -1105,7 +1123,7 @@ def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
                 "errors": result.get("errors", [])}
 
     if status != "success":
-        errors.append(f"google_ads/canonical_geo: {status} "
+        errors.append(f"{LABEL_CANONICAL_GEO}: {status} "
                       f"({summary.get('chunks_failed', 0)} chunk(s) failed)")
     _batch(
         "success" if status == "success" else "failed",
@@ -1148,9 +1166,10 @@ def _publish_geo_reconciliation(*, errors: list) -> dict:
 
         recon = build_geo_reconciliation("current_quarter")
         recon_status = recon.get("status")
-        log.info("[incremental_sync] google_ads/geo_reconciliation: status=%s "
+        log.info("[incremental_sync] %s: status=%s "
                  "country_spend_status=%s missing_dates=%d",
-                 recon_status, recon.get("country_spend_status"),
+                 LABEL_GEO_RECONCILIATION, recon_status,
+                 recon.get("country_spend_status"),
                  len(recon.get("missing_geo_dates") or []))
         result = {
             "status": "success" if recon_status in evaluated else "failed",
@@ -1166,14 +1185,14 @@ def _publish_geo_reconciliation(*, errors: list) -> dict:
             "reason": recon.get("reason"),
         }
         if result["status"] == "failed":
-            err = (f"google_ads/geo_reconciliation: could not be evaluated "
+            err = (f"{LABEL_GEO_RECONCILIATION}: could not be evaluated "
                    f"(status={recon_status}, gaps={result['geo_gap_codes']})")
             result["error"] = err
             errors.append(err)
             log.warning("[incremental_sync] %s", err)
         return result
     except Exception as exc:  # noqa: BLE001
-        err = f"google_ads/geo_reconciliation: {exc}"
+        err = f"{LABEL_GEO_RECONCILIATION}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         return {"status": "failed", "error": str(exc)[:500]}
