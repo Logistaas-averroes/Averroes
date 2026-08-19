@@ -1457,12 +1457,22 @@ CREATE TABLE IF NOT EXISTS google_ads_geo_sync_state (
   -- Terminal writes are conditioned on this token, so a stale worker's write
   -- simply matches nothing.
   lease_token                   TEXT,
+  -- PR-ADS-153F: the lease DEADLINE, renewed by a heartbeat while the owner is
+  -- alive. `last_started_at + a fixed window` cannot express this: the
+  -- historical backfill runs for many monthly chunks and would silently pass
+  -- its own deadline mid-run, letting a second worker legitimately claim the
+  -- lease while the first kept writing geo rows and coverage. A renewable
+  -- deadline keeps crash recovery (it still lapses if nobody renews it) while
+  -- letting a long, healthy run stay the owner.
+  lease_expires_at              TIMESTAMPTZ,
   updated_at                    TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (customer_id, scope)
 );
 
--- Existing databases: add the fencing token if the table predates it.
+-- Existing databases: add the fencing token and the lease deadline if the table
+-- predates them.
 ALTER TABLE google_ads_geo_sync_state ADD COLUMN IF NOT EXISTS lease_token TEXT;
+ALTER TABLE google_ads_geo_sync_state ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
 
 -- PR-ADS-153F additive integrity constraints. Each is a rule the writers
 -- already enforce; stating it in the schema means a future writer, a migration

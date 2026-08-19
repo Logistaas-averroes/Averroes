@@ -223,20 +223,158 @@ def test_exactly_one_of_two_concurrent_claimants_wins_the_lease(pg):
     assert rows[0]["last_run_id"] == "run-a"     # the loser did not overwrite it
 
 
+def _age_lease(pg, interval="5 hours"):
+    """Push the stored lease deadline into the past (a worker that stopped)."""
+    import psycopg2
+    with psycopg2.connect(pg.url) as conn, conn.cursor() as cur:
+        cur.execute(f"UPDATE google_ads_geo_sync_state "
+                    f"SET lease_expires_at = NOW() - INTERVAL '{interval}', "
+                    f"    last_started_at  = NOW() - INTERVAL '{interval}' "
+                    f"WHERE customer_id = %s", (CUSTOMER,))
+
+
 def test_a_stale_lease_expires_so_a_dead_worker_cannot_block_forever(pg):
     w = _writers()
     assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="crashed") == "acquired"
     assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="next") == "held"
 
-    # Simulate the crashed worker's lease ageing past the lease window.
+    # The crashed worker stopped heartbeating, so its deadline lapsed.
+    _age_lease(pg)
+
+    assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="next",
+                                      lease_minutes=120) == "acquired"
+
+
+def test_a_row_predating_the_deadline_column_still_expires(pg):
+    """An in-flight upgrade must not turn a NULL deadline into "never expires".
+
+    Rows written before `lease_expires_at` existed carry NULL, and treating that
+    as an unexpired lease would leave a crashed worker blocking geo sync forever
+    — the exact failure the expiry exists to prevent.
+    """
     import psycopg2
+
+    w = _writers()
+    assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="legacy") == "acquired"
     with psycopg2.connect(pg.url) as conn, conn.cursor() as cur:
         cur.execute("UPDATE google_ads_geo_sync_state "
-                    "SET last_started_at = NOW() - INTERVAL '5 hours' "
+                    "SET lease_expires_at = NULL, "
+                    "    last_started_at  = NOW() - INTERVAL '5 hours' "
                     "WHERE customer_id = %s", (CUSTOMER,))
 
     assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="next",
                                       lease_minutes=120) == "acquired"
+
+
+# ── The heartbeat: a long run keeps proving it owns the range ────────────────
+# The historical bootstrap runs many monthly chunks and can outlive a fixed
+# lease window. Terminal-state fencing does not help there: the harm would be in
+# the range replacements and coverage writes, which happen long before any
+# terminal write.
+
+def test_the_current_owner_can_renew_its_lease(pg):
+    w = _writers()
+    assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="A",
+                                      lease_token="tok-A") == "acquired"
+    before = _rows(pg, "SELECT lease_expires_at FROM google_ads_geo_sync_state "
+                       "WHERE customer_id = %s", (CUSTOMER,))[0]["lease_expires_at"]
+    assert w.renew_geo_sync_lease(CUSTOMER, "tok-A", lease_minutes=240) is True
+    after = _rows(pg, "SELECT lease_expires_at FROM google_ads_geo_sync_state "
+                      "WHERE customer_id = %s", (CUSTOMER,))[0]["lease_expires_at"]
+    assert after > before
+    assert w.holds_geo_sync_lease(CUSTOMER, "tok-A") is True
+
+
+def test_a_stale_token_cannot_renew_its_way_back_into_ownership(pg):
+    """Renewal must not be a back door around the fence.
+
+    A worker whose lease lapsed and was reclaimed no longer appears on the row,
+    so its renewal matches nothing — it cannot extend a lease somebody else
+    now holds.
+    """
+    w = _writers()
+    w.try_claim_geo_sync_lease(CUSTOMER, run_id="A", lease_token="tok-A")
+    _age_lease(pg)
+    assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="B",
+                                      lease_token="tok-B") == "acquired"
+
+    assert w.renew_geo_sync_lease(CUSTOMER, "tok-A") is False
+    assert w.holds_geo_sync_lease(CUSTOMER, "tok-A") is False
+    assert w.holds_geo_sync_lease(CUSTOMER, "tok-B") is True
+    row = _rows(pg, "SELECT lease_token FROM google_ads_geo_sync_state "
+                    "WHERE customer_id = %s", (CUSTOMER,))[0]
+    assert row["lease_token"] == "tok-B"
+
+
+def test_after_takeover_the_old_worker_cannot_replace_rows_or_certify_coverage(pg):
+    """The decisive case: ownership is revalidated BEFORE the data writes.
+
+    Fencing the terminal state was never enough — geo rows and coverage are
+    written long before it, so a worker that lost the lease could still
+    overwrite the new owner's range and certify it.
+    """
+    import services.google_ads_geo_sync_service as geo
+
+    w = _writers()
+    w.try_claim_geo_sync_lease(CUSTOMER, run_id="A", lease_token="tok-A")
+    _age_lease(pg)
+    w.try_claim_geo_sync_lease(CUSTOMER, run_id="B", lease_token="tok-B")
+
+    # Worker B writes the range it now owns.
+    w.replace_geo_daily_spend_chunk(
+        CUSTOMER, "2026-05-01", "2026-05-31",
+        [{"customer_id": CUSTOMER, "spend_date": "2026-05-10", "campaign_id": "1",
+          "country_criterion_id": "2826", "country_code": "GB",
+          "country_name": "United Kingdom", "cost_micros": 5_000_000}],
+        sync_run_id="B")
+    w.upsert_geo_coverage(CUSTOMER, "2026-05-01", "2026-05-31", "verified",
+                          rows_written=1, sync_run_id="B")
+
+    # Worker A wakes up. Every ownership question it can ask answers "no".
+    assert w.holds_geo_sync_lease(CUSTOMER, "tok-A") is False
+    assert w.renew_geo_sync_lease(CUSTOMER, "tok-A") is False
+    assert w.upsert_geo_sync_state(CUSTOMER, lease_token="tok-A",
+                                   last_status="success") is False
+    assert w.release_geo_sync_lease(CUSTOMER, status="success",
+                                    lease_token="tok-A") is False
+
+    # ...so the service aborts A's chunk before touching B's data.
+    with pytest.raises(geo.GeoLeaseLostError):
+        geo._guard_geo_lease_ownership(w, CUSTOMER, "tok-A", "before writing")
+
+    rows = _rows(pg, "SELECT sync_run_id FROM google_ads_geo_daily_spend "
+                     "WHERE customer_id = %s", (CUSTOMER,))
+    assert [r["sync_run_id"] for r in rows] == ["B"]
+    cov = _rows(pg, "SELECT status, sync_run_id FROM google_ads_geo_coverage "
+                    "WHERE customer_id = %s", (CUSTOMER,))
+    assert cov[0]["status"] == "verified" and cov[0]["sync_run_id"] == "B"
+    state = _rows(pg, "SELECT last_status, lease_token FROM google_ads_geo_sync_state "
+                      "WHERE customer_id = %s", (CUSTOMER,))[0]
+    assert state["last_status"] == "running" and state["lease_token"] == "tok-B"
+
+
+def test_a_long_multi_chunk_bootstrap_keeps_ownership_through_heartbeats(pg):
+    """A run longer than the lease window stays the owner while it is alive.
+
+    Without a heartbeat the backfill would cross its own deadline mid-run,
+    another worker could legitimately claim the lease, and both would then be
+    writing the same ranges.
+    """
+    w = _writers()
+    assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="boot",
+                                      lease_token="tok-boot",
+                                      lease_minutes=1) == "acquired"
+
+    # Twelve monthly chunks, each renewing before it fetches.
+    for _ in range(12):
+        assert w.renew_geo_sync_lease(CUSTOMER, "tok-boot", lease_minutes=120) is True
+        assert w.holds_geo_sync_lease(CUSTOMER, "tok-boot") is True
+        # ...and no other worker can take the range while it is being renewed.
+        assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="other",
+                                          lease_token="tok-other") == "held"
+
+    assert w.upsert_geo_sync_state(CUSTOMER, lease_token="tok-boot",
+                                   last_status="success") is True
 
 
 def test_releasing_the_lease_records_the_real_outcome(pg):
@@ -497,14 +635,10 @@ def test_an_expired_worker_cannot_release_the_newer_workers_lease(pg):
     Worker A overruns, worker B legitimately reclaims — and A, still running,
     must not be able to stamp its terminal status over B's live run.
     """
-    import psycopg2
-
     w = _writers()
     assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="A", lease_token="tok-A") == "acquired"
-    with psycopg2.connect(pg.url) as conn, conn.cursor() as cur:
-        cur.execute("UPDATE google_ads_geo_sync_state "
-                    "SET last_started_at = NOW() - INTERVAL '5 hours' "
-                    "WHERE customer_id = %s", (CUSTOMER,))
+    # A stops heartbeating, so its stored deadline lapses and B may reclaim.
+    _age_lease(pg)
     assert w.try_claim_geo_sync_lease(CUSTOMER, run_id="B", lease_token="tok-B") == "acquired"
 
     # A finishes late and tries to release / record terminal state.

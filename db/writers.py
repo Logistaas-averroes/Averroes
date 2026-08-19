@@ -2515,10 +2515,17 @@ def try_claim_geo_sync_lease(customer_id: str, run_id: Optional[str] = None,
     rows, coverage, or state either, so proceeding buys no visibility at all —
     it only spends Google Ads quota and risks an uncoordinated concurrent fetch.
 
-    A stale lease (a worker that died mid-run) still expires after
-    ``lease_minutes`` so a crash cannot block geo sync forever — but expiry is
-    RECOVERY, not ownership. Ownership is the token, checked by every terminal
-    write.
+    A stale lease (a worker that died mid-run) still expires so a crash cannot
+    block geo sync forever — but expiry is RECOVERY, not ownership. Ownership is
+    the token, checked by every terminal write.
+
+    The deadline is a stored ``lease_expires_at``, refreshed by
+    :func:`renew_geo_sync_lease` while the owner is alive, rather than a fixed
+    window measured from ``last_started_at``. A long historical backfill would
+    otherwise cross its own deadline mid-run and let a second worker claim the
+    lease while the first was still writing geo rows. Rows predating the column
+    fall back to ``last_started_at + lease_minutes`` so an in-flight upgrade
+    still recovers a dead worker rather than treating a NULL as "never expires".
 
     Never raises.
     """
@@ -2543,23 +2550,110 @@ def try_claim_geo_sync_lease(customer_id: str, run_id: Optional[str] = None,
                 cur.execute(
                     """
                     UPDATE google_ads_geo_sync_state
-                       SET last_status     = 'running',
-                           last_started_at = NOW(),
-                           last_run_id     = %s,
-                           lease_token     = %s,
-                           updated_at      = NOW()
+                       SET last_status      = 'running',
+                           last_started_at  = NOW(),
+                           last_run_id      = %s,
+                           lease_token      = %s,
+                           lease_expires_at = NOW() + (%s * INTERVAL '1 minute'),
+                           updated_at       = NOW()
                      WHERE customer_id = %s AND scope = %s
                        AND (last_status IS DISTINCT FROM 'running'
-                            OR last_started_at IS NULL
-                            OR last_started_at < NOW() - (%s * INTERVAL '1 minute'))
+                            OR COALESCE(lease_expires_at,
+                                        last_started_at + (%s * INTERVAL '1 minute'))
+                            IS NULL
+                            OR COALESCE(lease_expires_at,
+                                        last_started_at + (%s * INTERVAL '1 minute'))
+                            < NOW())
                     RETURNING id
                     """,
-                    (run_id, lease_token, customer_id, scope, int(lease_minutes)),
+                    (run_id, lease_token, int(lease_minutes), customer_id, scope,
+                     int(lease_minutes), int(lease_minutes)),
                 )
                 return "acquired" if cur.fetchone() is not None else "held"
     except Exception as exc:  # noqa: BLE001
         log.error("try_claim_geo_sync_lease failed: %s", exc)
         return "unavailable"
+
+
+def renew_geo_sync_lease(customer_id: str, lease_token: str,
+                         scope: str = "geo_daily_spend",
+                         lease_minutes: int = 120) -> bool:
+    """Extend this owner's lease deadline. Returns True only if still the owner.
+
+    PR-ADS-153F. The heartbeat that makes a long run safe. Without it the
+    historical backfill — many monthly chunks, potentially hours — would pass
+    its own lease deadline mid-run, a second worker could legitimately acquire
+    the lease, and the first would carry on replacing geo ranges and certifying
+    coverage for a range it no longer owned. Terminal-state fencing does not
+    help there: the damage is in the data writes, which happen long before the
+    terminal write.
+
+    Fenced on ``lease_token`` AND ``last_status = 'running'``, so a worker whose
+    lease already lapsed and was reclaimed by someone else cannot renew its way
+    back into ownership — the row no longer carries its token.
+
+    Returns False when ownership was lost OR the store is unreachable. Both mean
+    the caller must stop writing: it can no longer prove it owns the range, and
+    a caller that cannot prove ownership must not act as though it has it.
+    Never raises.
+    """
+    if not customer_id or not lease_token:
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE google_ads_geo_sync_state
+                       SET lease_expires_at = NOW() + (%s * INTERVAL '1 minute'),
+                           updated_at       = NOW()
+                     WHERE customer_id = %s AND scope = %s
+                       AND lease_token = %s
+                       AND last_status = 'running'
+                    RETURNING id
+                    """,
+                    (int(lease_minutes), customer_id, scope, lease_token),
+                )
+                return cur.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001
+        log.error("renew_geo_sync_lease failed: %s", exc)
+        return False
+
+
+def holds_geo_sync_lease(customer_id: str, lease_token: str,
+                         scope: str = "geo_daily_spend") -> bool:
+    """Whether this token still owns an unexpired lease. Read-only.
+
+    Used to REVALIDATE ownership after a slow Google Ads fetch and immediately
+    before writing geo rows or coverage, so a run that lost the lease during the
+    fetch writes nothing rather than discovering the loss only at the end.
+
+    Returns False when the store is unreachable: an unverifiable claim of
+    ownership is not ownership.
+    """
+    if not customer_id or not lease_token:
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM google_ads_geo_sync_state
+                     WHERE customer_id = %s AND scope = %s
+                       AND lease_token = %s
+                       AND last_status = 'running'
+                       AND (lease_expires_at IS NULL OR lease_expires_at > NOW())
+                    """,
+                    (customer_id, scope, lease_token),
+                )
+                return cur.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001
+        log.error("holds_geo_sync_lease failed: %s", exc)
+        return False
 
 
 def release_geo_sync_lease(customer_id: str, scope: str = "geo_daily_spend",
@@ -2591,6 +2685,7 @@ def release_geo_sync_lease(customer_id: str, scope: str = "geo_daily_spend",
                         UPDATE google_ads_geo_sync_state
                            SET last_status      = %s,
                                last_finished_at = NOW(),
+                               lease_expires_at = NULL,
                                updated_at       = NOW()
                          WHERE customer_id = %s AND scope = %s
                            AND lease_token = %s AND last_status = 'running'
@@ -2604,6 +2699,7 @@ def release_geo_sync_lease(customer_id: str, scope: str = "geo_daily_spend",
                         UPDATE google_ads_geo_sync_state
                            SET last_status      = %s,
                                last_finished_at = NOW(),
+                               lease_expires_at = NULL,
                                updated_at       = NOW()
                          WHERE customer_id = %s AND scope = %s
                         RETURNING id

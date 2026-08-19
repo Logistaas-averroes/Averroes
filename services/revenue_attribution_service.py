@@ -212,6 +212,25 @@ def _safe_float(value) -> float:
         return 0.0
 
 
+def _read_geo_coverage_ledger(customer_id, start_date, end_date) -> dict:
+    """The durable geo coverage ledger for one account and range, or an honest gap.
+
+    PR-ADS-153F. Never raises: a coverage read that fails must degrade to "we do
+    not know", which the gate treats as blocking, rather than crashing the whole
+    revenue contract. An unreadable ledger and an empty one are different facts
+    and this preserves the difference — ``available: False`` means unreadable.
+    """
+    try:
+        from services.google_ads_geo_sync_service import (  # noqa: PLC0415
+            analyze_geo_coverage, configured_customer_id,
+        )
+        return analyze_geo_coverage(
+            customer_id or configured_customer_id(), start_date, end_date)
+    except Exception:  # noqa: BLE001 — coverage must never crash the contract
+        return {"available": False, "complete": False,
+                "missing_ranges": [], "failed_chunks": []}
+
+
 def _nullable_float(value) -> float | None:
     """Coerce ``value`` to float, or None when it is missing/invalid.
 
@@ -1119,8 +1138,25 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         # ROAS reconciliation onto canonical Google Ads API geo rows without ever
         # loosening the rule (no geo rows → fall back, never a fabricated match).
         geo_canonical = repo.fetch_geo_daily_spend_total(start_date, end_date)
+        # PR-ADS-153F: the durable coverage ledger is read HERE, before the geo
+        # total is chosen, because a legacy fallback is only defensible while we
+        # genuinely do not know what canonical geo holds for this range. Scoped
+        # to THIS window's canonical spend customer — coverage is an
+        # account-scoped fact, and reading it unscoped would let one account's
+        # verified history declare another account's window covered.
+        _geo_ledger = _read_geo_coverage_ledger(
+            canonical_customer_id, start_date, end_date)
+        geo_coverage_ok = bool(_geo_ledger.get("available") and _geo_ledger.get("complete"))
+        _geo_failed_chunks = _geo_ledger.get("failed_chunks") or []
         if geo_canonical.get("available") and geo_canonical.get("has_rows"):
             geo_total_for_recon = round(float(geo_canonical.get("total_spend") or 0.0), 2)
+        elif (geo_canonical.get("available") and geo_coverage_ok
+              and not _geo_failed_chunks):
+            # A successful query over a range the ledger certifies as fully
+            # fetched, returning nothing, is a MEASURED zero — not an absence.
+            # Falling back to the legacy table here would answer a question
+            # canonical geo had already answered, with a different source.
+            geo_total_for_recon = 0.0
         else:
             geo_total_for_recon = round(sum(_safe_float(r.get("spend")) for r in spend_rows), 2)
         if canonical_total > 0:
@@ -1170,6 +1206,13 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         canonical_customer_id = None
         canonical_currency = None
         country_spend_reconciled = None
+        # With no canonical baseline there is nothing to certify geo against, so
+        # the ledger is not consulted and coverage is reported as unproven rather
+        # than as absent-and-therefore-fine.
+        _geo_ledger = {"available": False, "complete": False,
+                       "missing_ranges": [], "failed_chunks": []}
+        geo_coverage_ok = False
+        _geo_failed_chunks = []
 
     # PR-ADS-119: apply APPROVED campaign-identity mappings so external
     # HubSpot/UTM labels aggregate onto their canonical Google Ads campaign BEFORE
@@ -1217,9 +1260,21 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # per-day-FX USD. A criterion that did not resolve to a country is dropped from
     # named rows (honest partial coverage), never bucketed as unknown spend.
     geo_by_country = repo.fetch_geo_daily_spend_by_country(start_date, end_date)
-    canonical_geo_country = bool(
-        canonical_access and geo_by_country.get("available") and geo_by_country.get("has_rows"))
-    if canonical_geo_country:
+    # PR-ADS-153F: readability is a statement about the QUERY, rows are a
+    # statement about the data, and a coverage-verified empty result is a third
+    # thing again — a proven zero. The gate needs all three named separately.
+    canonical_geo_readable = bool(canonical_access and geo_by_country.get("available"))
+    canonical_geo_country = bool(canonical_geo_readable and geo_by_country.get("has_rows"))
+    canonical_geo_verified_zero = bool(
+        canonical_geo_readable and not geo_by_country.get("has_rows")
+        and geo_coverage_ok and not _geo_failed_chunks)
+    if canonical_geo_verified_zero:
+        # Canonical geo answered, and the answer was "no country spend in this
+        # range". Reaching for the legacy table here would replace a proven
+        # answer with a different source's guess at the same question.
+        geo_country_source = "canonical_google_ads_api"
+        country_source_rows = []
+    elif canonical_geo_country:
         geo_country_source = "canonical_google_ads_api"
         country_source_rows = []
         for r in geo_by_country.get("rows", []):
@@ -1272,26 +1327,20 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # comparison alone cannot produce (it cannot tell "never fetched" from
     # "fetched, genuinely zero").
     country_gap_reason = country_residual.get("reason")
-    # Scoped to THIS window's canonical spend customer — coverage is an
-    # account-scoped fact, and reading it unscoped would let one account's
-    # verified history declare another account's window covered.
-    try:
-        from services.google_ads_geo_sync_service import (  # noqa: PLC0415
-            analyze_geo_coverage, configured_customer_id,
-        )
-        _geo_customer = canonical_customer_id or configured_customer_id()
-        _geo_ledger = analyze_geo_coverage(_geo_customer, start_date, end_date)
-    except Exception:  # noqa: BLE001 — coverage must never crash the contract
-        _geo_ledger = {"available": False, "complete": False,
-                       "missing_ranges": [], "failed_chunks": []}
-    # PR-ADS-153F blocker 1: durable geo coverage is a MANDATORY input, not
-    # side evidence. Its whole purpose is to separate "fetched and genuinely
-    # zero" from "never fetched", and a gate that reads it but does not require
-    # it discards exactly that distinction — a window whose geo was never
-    # synced would reconcile against a total it should not have trusted.
-    geo_coverage_ok = bool(_geo_ledger.get("available") and _geo_ledger.get("complete"))
+    # PR-ADS-153F blocker 1: durable geo coverage is a MANDATORY input, not side
+    # evidence. Its whole purpose is to separate "fetched and genuinely zero"
+    # from "never fetched", and a gate that reads it but does not require it
+    # discards exactly that distinction — a window whose geo was never synced
+    # would reconcile against a total it should not have trusted. `_geo_ledger`
+    # and `geo_coverage_ok` are read once, above, before the geo total is chosen.
+    #
+    # A coverage-verified empty geo range is trustworthy for the same reason a
+    # populated one is: the ledger proves it was fetched. Requiring ROWS here
+    # would have made this surface disagree with `build_geo_reconciliation`
+    # about the same window, which is the contradiction blocker 1 removed.
     country_spend_trusted = (
-        campaign_spend_trusted and canonical_geo_country and geo_coverage_ok
+        campaign_spend_trusted
+        and (canonical_geo_country or canonical_geo_verified_zero) and geo_coverage_ok
         and (country_spend_reconciled is True or country_residual_eligible))
     # Country spend expressed in the ROAS currency: when trusted + FX complete, use
     # the per-day-FX USD carried on the canonical geo rows; otherwise native
@@ -1530,6 +1579,12 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         "geo_coverage_missing_ranges": _geo_ledger.get("missing_ranges") or [],
         "failed_geo_dates": _geo_ledger.get("failed_chunks") or [],
         "country_geo_rows_available": bool(canonical_geo_country),
+        # The gate's `geo_readable` input: did the canonical geo QUERY succeed?
+        # Distinct from `country_geo_rows_available` (did it return rows) and
+        # from `country_geo_verified_zero` (it returned nothing, and the ledger
+        # proves the range was fetched, so nothing is the real answer).
+        "country_geo_query_readable": bool(canonical_geo_readable),
+        "country_geo_verified_zero": bool(canonical_geo_verified_zero),
         "missing_geo_dates": list(_country_missing_geo_dates or []),
         "campaigns_missing_geo": list(_country_campaigns_missing_geo or []),
         # PR-ADS-129: exact geo↔canonical variance for the Country blocked card.

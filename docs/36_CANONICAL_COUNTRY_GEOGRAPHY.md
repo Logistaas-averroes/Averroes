@@ -173,32 +173,83 @@ any moment, so the overlap guard is a durable conditional `UPDATE`, not a
 process-local flag. It is tri-state, and **two of the three states stop the
 run before any Google Ads call**:
 
-| Result | Behaviour |
-|---|---|
-| `acquired` | This worker owns the lease and proceeds, carrying a unique fencing token. |
-| `held` | Another run owns it → `skipped_locked`. **Zero Google Ads fetches.** |
-| `unavailable` | The lease store is unreachable → `skipped_locked`. **Zero Google Ads fetches.** |
+| Result | Run outcome | Google Ads calls |
+|---|---|---|
+| `acquired` | proceeds, carrying a unique fencing token | as needed |
+| `held` | `skipped_locked` — benign, another worker owns the range | **zero** |
+| `unavailable` | **`failed`**, reason `lease_store_unavailable` | **zero** |
 
 An earlier revision let an `unavailable` lease store proceed without a lease, on
 the argument that a visible stale run beat a silent skip. **That was wrong.**
 With the store unreachable the run cannot persist geo rows, coverage or state
 either — so proceeding buys no visibility at all; it only spends Google Ads
-quota and risks an uncoordinated concurrent fetch. Not starting leaves the range
-uncovered, which the gate already reports as blocked, and the next run picks it
-up.
+quota and risks an uncoordinated concurrent fetch.
 
-**Expiry is recovery; the token is ownership.** A stale lease expires after 120
-minutes so a worker that died mid-run cannot block geo sync forever. But expiry
-alone is not safe: if worker A overruns the window and worker B legitimately
-reclaims the lease, A may still be running. Every terminal write — run state,
-checkpoint, release — is therefore fenced on
-`(customer_id, scope, lease_token, last_status = 'running')`, so a stale worker
-matches no row and silently no-ops instead of overwriting the newer run.
+Stopping is right for both, but they are **not the same outcome**. `held` means
+the system is working exactly as designed. `unavailable` means the coordination
+store could not be reached at all, and reporting that as a lock skip described a
+worker that does not exist — geo could then stop syncing for as long as the
+database stayed down while every freshness surface stayed calm. The scheduler
+therefore records `unavailable` as a **failed sync batch** and adds it to the
+run's error list; only `held` is a silent skip, because the worker that holds
+the lease will record the real outcome.
+
+**Expiry is recovery; the token is ownership.** A lease carries a stored
+`lease_expires_at`, so a worker that died mid-run cannot block geo sync forever.
+The deadline is **renewable**, not a fixed window measured from the start: the
+historical bootstrap runs many monthly chunks and would otherwise cross its own
+deadline mid-run, letting a second worker legitimately claim the lease while the
+first kept writing. Rows predating the column fall back to
+`last_started_at + lease_minutes`, so an in-flight upgrade still recovers a dead
+worker rather than treating NULL as "never expires".
+
+Ownership is therefore proven continuously, not assumed:
+
+* `renew_geo_sync_lease` — **heartbeat before every Google fetch**;
+* `holds_geo_sync_lease` — **revalidation after the fetch, before any write**.
+  The Google call is the slow part, so it is exactly where a lease lapses
+  unnoticed.
+
+Both are fenced on `(customer_id, scope, lease_token, last_status = 'running')`,
+so a worker whose lease was reclaimed cannot renew its way back into ownership.
+If either check fails the run raises `GeoLeaseLostError` and aborts having
+written **nothing** — not the rows, not a `verified` coverage row, and not a
+`failed` one either: recording a failure for a range another worker now owns
+would corrupt that worker's ledger, which is exactly what the fence protects.
+
+Fencing the terminal write alone was never enough. The geo rows and the coverage
+ledger are written long before it, so a run that lost the lease could overwrite
+the new owner's range and certify it, and only the final state write would be
+rejected — after the damage.
 
 If terminal state cannot be persisted at all, the run reports **failed**. A run
 with no durable state has no evidence it happened: its checkpoint did not move
 and its freshness was not published, so reporting success would be a claim
 nothing can back up.
+
+### `success` is a claim about the RANGE, not about the run
+
+The chunk loop's status comes from its own counters, so a run whose chunks all
+happened to work would report `success` even when the final ledger said the
+window was still incomplete — or could not be read at all. Withholding the
+checkpoint was not enough: `success` was still persisted, still returned, and
+still finished the scheduler's sync batch green, so every freshness surface
+showed a healthy dataset over a range nothing certified.
+
+Final `success` now requires the re-read coverage to be **readable AND
+complete**. Otherwise the run is downgraded, persists the downgraded status, and
+advances neither checkpoint nor freshness:
+
+| Final ledger | Status | `reason` |
+|---|---|---|
+| readable + complete | `success` | — |
+| readable, incomplete | `partial` | `final_coverage_incomplete` |
+| unreadable | `failed` | `final_coverage_unreadable` |
+| lease lost mid-run | `failed` | `lease_ownership_lost` |
+| terminal state unpersisted | `failed` | `terminal_state_not_persisted` |
+
+Anything other than `success` fails the scheduler's sync batch, and the
+historical bootstrap keeps exiting non-zero.
 
 ---
 
@@ -294,7 +345,7 @@ it audits.
 | canonical campaign spend readable | it is the reconciliation baseline |
 | canonical campaign coverage complete | an unproven baseline cannot certify anything |
 | FX coverage complete | required before any USD geo figure is safe |
-| canonical geo rows readable | there is nothing to reconcile otherwise |
+| canonical geo rows readable | there is nothing to reconcile otherwise. This is a statement about the QUERY, not about the rows — see below |
 | durable geo coverage readable **and** complete, with no failed chunks | the only thing that separates "fetched and genuinely zero" from "never fetched" |
 
 Two unproven numbers can agree. Before this was enforced, a perfectly matching
@@ -305,6 +356,62 @@ read as evidence about inputs nobody had established.
 The geo coverage ledger is therefore a **blocking input, not side evidence**. A
 gate that reads it without requiring it discards its entire purpose at exactly
 the moment that purpose matters.
+
+### Unavailable is not zero — and a proven zero is not unavailable
+
+Three different things used to collapse into one:
+
+| Query | Ledger | `geo_total` | Meaning |
+|---|---|---|---|
+| failed | anything | `None` | we could not look |
+| succeeded, empty | incomplete / unreadable / has failed chunks | `None` | we do not know whether anyone ever looked |
+| succeeded, empty | complete, no failed chunks | **`0.0`** | we looked, and the geography genuinely carried no spend |
+| succeeded, rows | complete | the sum | ordinary measurement |
+
+An earlier revision set `geo_total = None` for **every** empty response,
+classified it `no_geo_data`, and passed `geo_readable = available AND has_rows`.
+That made a coverage-verified empty range indistinguishable from a database
+outage — which contradicts the ledger's entire purpose, since telling "never
+fetched" from "fetched and genuinely zero" is the one question it exists to
+answer. An empty table cannot answer that question about itself; only the ledger
+can, and the range is never judged from the table's emptiness alone.
+
+A proven zero is a real measurement, so the comparison actually happens:
+
+* zero campaign spend against a proven zero geo total **reconciles** —
+  `verified`;
+* positive campaign spend against a proven zero geo total is a **measured
+  disagreement** — `mismatch`, variance 100%, Country ROAS withheld. It is not a
+  by-design residual: Google omitting *some* location-less spend is a known
+  artefact, Google reporting *none* of it is not.
+
+The response publishes `geo_verified_zero` and `geo_readable` so a reader can
+tell which case they are in without re-deriving it. The same rule reaches the
+country row source: when canonical geo is a proven zero, ROAS by Country stays
+on the canonical source with no rows rather than falling back to the legacy geo
+table — reaching for a second source would replace a proven answer with a guess
+at the same question. The legacy fallback still applies when the range is
+genuinely unproven.
+
+### Every mandatory input is a required argument
+
+`resolve_country_spend_status` has **no defaults**. Each mandatory fact — and
+each evidence list — is a required keyword-only argument, so a caller that
+forgets one raises `TypeError` at the call site.
+
+An earlier revision defaulted them to `True`, which meant
+`resolve_country_spend_status(reconciled=True, residual_eligible=False)` still
+returned `verified` having proven nothing at all. A permissive default on a
+safety precondition is not a convenience; it is the original defect with a
+friendlier syntax, waiting for the first caller who forgets an argument.
+Defaulting `missing_geo_dates` to empty was the same trap: it would let a caller
+reach an accepted state by asserting `residual_eligible=True` without ever
+having looked.
+
+The rule applies one layer up too. The mart reads its gate inputs fail-closed
+(`is True`, an explicit membership test), because `.get(key, True)` on a
+`source_health` field that was never published asserts the fact rather than
+admitting it is unknown.
 
 ### Truth table
 

@@ -279,6 +279,10 @@ def test_geo_sync_resolves_country_codes_onto_rows(monkeypatch):
     # or failures — proceeding anyway would write geo rows nothing can vouch for.
     import db.writers as _w
     monkeypatch.setattr(_w, "try_claim_geo_sync_lease", lambda *a, **k: "acquired")
+    # ...and keeps proving it holds the lease: the heartbeat before each fetch
+    # and the ownership revalidation before each write.
+    monkeypatch.setattr(_w, "renew_geo_sync_lease", lambda *a, **k: True)
+    monkeypatch.setattr(_w, "holds_geo_sync_lease", lambda *a, **k: True)
     monkeypatch.setattr(_w, "release_geo_sync_lease", lambda *a, **k: True)
     monkeypatch.setattr(_w, "upsert_geo_sync_state", lambda *a, **k: True)
     monkeypatch.setattr(_w, "upsert_geo_coverage", lambda *a, **k: True)
@@ -479,8 +483,28 @@ def test_no_geo_data_remains_blocked_never_zero(monkeypatch):
     sh = out["source_health"]
     assert sh["country_roas_available"] is False     # blocked
     assert out["geo_country_mapping_status"] == "no_geo_data"
-    # Never a fabricated £0 country denominator.
-    assert out["source_health"].get("geo_country_source") == "legacy_geo_table"
+    # Never a fabricated £0 country denominator: Country ROAS stays blocked
+    # above, because campaign spend of £10,000 against zero geographic spend is
+    # a real disagreement, not a by-design residual.
+    #
+    # PR-ADS-153F: the SOURCE label is now `canonical_google_ads_api`. This
+    # fixture certifies the whole range as fetched, so canonical geo DID answer
+    # — the answer was "no country spend here". Reaching for the legacy table at
+    # that point would replace a proven answer with a different source's guess
+    # at the same question. The legacy fallback still applies when the range is
+    # genuinely unproven, which the second half of this test covers.
+    assert out["source_health"].get("geo_country_source") == "canonical_google_ads_api"
+    assert out["source_health"]["country_geo_verified_zero"] is True
+
+    # With NO coverage, the same empty table proves nothing, so the legacy
+    # fallback is still reached — and Country ROAS is still blocked.
+    _patch_revattr(monkeypatch, canonical=_canonical(10000.0, fx_complete=True),
+                   geo_daily=geo_daily, country_rows=[], revenue_rows=_REVENUE_ROWS,
+                   geo_country=None, legacy_spend=[], geo_coverage=[])
+    unproven = build("ytd", now=_at("2026-06-30"))
+    assert unproven["source_health"]["country_geo_verified_zero"] is False
+    assert unproven["source_health"].get("geo_country_source") == "legacy_geo_table"
+    assert unproven["source_health"]["country_roas_available"] is False
 
 
 def test_country_roas_blocked_when_fx_incomplete_even_if_geo_reconciles(monkeypatch):

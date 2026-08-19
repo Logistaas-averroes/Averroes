@@ -187,10 +187,41 @@ def test_3b_an_unreachable_lease_store_fails_closed(monkeypatch):
 
     out = geo.run_google_ads_geo_sync(date_from="2026-06-01", date_to="2026-06-30",
                                       dry_run=False)
-    assert out["status"] == "skipped_locked"
+    # ...but it is a FAILURE, not a lock skip. `held` and `unavailable` both stop
+    # before Google Ads; only `held` is benign. An unreachable coordination store
+    # reported as "another worker has it" describes a worker that does not
+    # exist, and geo could then stop syncing for as long as the database stayed
+    # down while every freshness surface stayed calm.
+    assert out["status"] == "failed"
     assert out["reason"] == "lease_store_unavailable"
+    assert out["errors"] == ["lease_store_unavailable"]
+    assert out["coverage_complete"] is False
     # The decisive assertion: ZERO Google Ads fetches.
     assert fetched == []
+
+
+def test_3b2_a_held_lease_and_an_unreachable_store_are_different_outcomes(monkeypatch):
+    """One stops the run because the system is working; the other because it is not."""
+    import db.writers as w
+
+    monkeypatch.setattr(geo, "configured_customer_id", lambda: "cust-1")
+    fetched: list = []
+    monkeypatch.setattr(geo, "fetch_geo_daily",
+                        lambda s, e: fetched.append((s, e)) or {"rows": []})
+
+    outcomes = {}
+    for lease in ("held", "unavailable"):
+        monkeypatch.setattr(w, "try_claim_geo_sync_lease", lambda *a, **k: lease)
+        outcomes[lease] = geo.run_google_ads_geo_sync(
+            date_from="2026-06-01", date_to="2026-06-30", dry_run=False)
+
+    assert outcomes["held"]["status"] == "skipped_locked"
+    assert outcomes["unavailable"]["status"] == "failed"
+    assert outcomes["held"]["status"] != outcomes["unavailable"]["status"]
+    # A benign skip carries no error; an outage does.
+    assert outcomes["held"]["errors"] == []
+    assert outcomes["unavailable"]["errors"]
+    assert fetched == []          # neither one called Google Ads
 
 
 def test_3d_every_real_run_carries_a_unique_lease_fence(monkeypatch):
@@ -250,7 +281,14 @@ def test_3c_the_lease_claim_is_one_conditional_update():
     body = body[:body.index("\ndef ", 1)]
     assert "UPDATE google_ads_geo_sync_state" in body
     assert "RETURNING id" in body
-    assert "last_started_at < NOW()" in body  # stale leases expire
+    # Stale leases still expire — but against a RENEWABLE stored deadline rather
+    # than a fixed window measured from the start, so a long historical backfill
+    # does not silently cross its own deadline mid-run. Rows predating the column
+    # fall back to `last_started_at + lease_minutes`, so an in-flight upgrade
+    # still recovers a dead worker instead of treating NULL as "never expires".
+    assert "lease_expires_at = NOW() + " in body
+    assert "COALESCE(lease_expires_at," in body
+    assert "last_started_at + (%s * INTERVAL '1 minute')" in body
     assert "lease_token" in body              # ...and ownership is fenced
 
     # Terminal writes are fenced on the token AND on still being 'running', so a
@@ -276,6 +314,12 @@ def _patch_geo_run(monkeypatch, *, existing_chunks, fetch=None, written=None):
 
     monkeypatch.setattr(geo, "configured_customer_id", lambda: "cust-1")
     monkeypatch.setattr(w, "try_claim_geo_sync_lease", lambda *a, **k: "acquired")
+    # PR-ADS-153F final patch §4: a run that holds the lease must keep PROVING it
+    # holds it — the heartbeat before each fetch and the revalidation before each
+    # write. A healthy owner renews successfully, which is what these stubs
+    # describe; `test_b4_*` below describes the owner that stops renewing.
+    monkeypatch.setattr(w, "renew_geo_sync_lease", lambda *a, **k: True)
+    monkeypatch.setattr(w, "holds_geo_sync_lease", lambda *a, **k: True)
     monkeypatch.setattr(geo.repo, "fetch_geo_coverage",
                         lambda c, s, e: {"available": True, "chunks": list(existing_chunks)})
 
@@ -402,7 +446,11 @@ def test_7_the_checkpoint_advances_only_after_the_coverage_ledger_agrees(monkeyp
     """A run whose own counters look clean still cannot claim completion.
 
     Completion is re-read from the LEDGER, so an earlier unrepaired failure
-    outside this run's chunks keeps the checkpoint where it is.
+    outside this run's chunks keeps the checkpoint where it is — AND keeps the
+    run from reporting success at all (final patch §5). Withholding only the
+    checkpoint was not enough: `success` was still persisted, still returned,
+    and still finished the scheduler's sync batch green, so every freshness
+    surface showed a healthy dataset over a range nothing certified.
     """
     _fetched, _recorded, state = _patch_geo_run(monkeypatch, existing_chunks=[])
     monkeypatch.setattr(geo, "analyze_geo_coverage",
@@ -413,8 +461,10 @@ def test_7_the_checkpoint_advances_only_after_the_coverage_ledger_agrees(monkeyp
 
     out = geo.run_google_ads_geo_sync(date_from="2026-04-01", date_to="2026-04-30",
                                       dry_run=False)
-    assert out["status"] == "success"          # this run had no errors ...
-    assert out["coverage_complete"] is False   # ... but the window is not covered
+    assert out["status"] == "partial"           # this run's chunks were clean ...
+    assert out["reason"] == "final_coverage_incomplete"  # ... the window is not
+    assert out["coverage_complete"] is False
+    assert state[-1]["last_status"] == "partial"   # persisted as non-success too
     assert "checkpoint_date" not in state[-1]
 
     # And when the ledger DOES agree, the checkpoint advances.
@@ -759,9 +809,8 @@ def test_17_missing_geo_dates_block_availability():
         10000.0, 6000.0, detail, coverage_complete=True, fx_complete=True,
         geo_has_rows=True, reconciled=False)
     assert residual["eligible"] is False
-    status, gaps = geo.resolve_country_spend_status(
-        reconciled=False, residual_eligible=residual["eligible"],
-        missing_geo_dates=detail["missing_geo_dates"])
+    status, gaps = _gate(reconciled=False, residual_eligible=residual["eligible"],
+                         missing_geo_dates=detail["missing_geo_dates"])
     assert status == geo.GEO_STATUS_MISMATCH
     assert geo.GEO_GAP_MISSING_DATES in gaps
     assert geo.country_geo_ready(status) is False
@@ -774,9 +823,8 @@ def test_18_campaign_spend_without_geo_blocks_availability():
         10000.0, 6000.0, detail, coverage_complete=True, fx_complete=True,
         geo_has_rows=True, reconciled=False)
     assert residual["eligible"] is False
-    status, gaps = geo.resolve_country_spend_status(
-        reconciled=False, residual_eligible=False,
-        campaigns_missing_geo=detail["campaigns_missing_geo"])
+    status, gaps = _gate(reconciled=False, residual_eligible=False,
+                         campaigns_missing_geo=detail["campaigns_missing_geo"])
     assert geo.country_geo_ready(status) is False
     assert geo.GEO_GAP_CAMPAIGN_WITHOUT_GEO in gaps
 
@@ -791,8 +839,7 @@ def test_19_a_safe_structural_residual_is_accepted_consistently():
     assert residual["eligible"] is True
     assert residual["residual_native"] == 500.0
 
-    status, gaps = geo.resolve_country_spend_status(reconciled=False,
-                                                    residual_eligible=True)
+    status, gaps = _gate(reconciled=False, residual_eligible=True)
     assert status == geo.GEO_STATUS_RECONCILED_WITH_RESIDUAL
     assert gaps == []
     assert geo.country_geo_ready(status) is True
@@ -815,8 +862,7 @@ def test_20_a_general_totals_mismatch_remains_blocked():
     assert geo.country_geo_ready(geo.GEO_STATUS_MISMATCH) is False
     # An UNMEASURED reconciliation is unavailable, never a mismatch: reporting a
     # mismatch would assert a comparison nobody performed.
-    assert geo.resolve_country_spend_status(
-        reconciled=None, residual_eligible=False)[0] == geo.GEO_STATUS_UNAVAILABLE
+    assert _gate(reconciled=None, residual_eligible=False)[0] == geo.GEO_STATUS_UNAVAILABLE
 
 
 def test_21_the_mart_and_dashboard_countries_use_the_same_gate():
@@ -844,19 +890,42 @@ def test_21_the_mart_and_dashboard_countries_use_the_same_gate():
 # exactly one mandatory input. Two unproven numbers can agree; agreement is not
 # evidence that the inputs behind them were ever established.
 
-_PERFECT = {"reconciled": True, "residual_eligible": False}
+
+# PR-ADS-153F final patch §2: the gate has NO defaults. Every mandatory fact is
+# a required keyword argument, so a test (or a production caller) that forgets
+# one gets a `TypeError` rather than a silent `True`. These fixtures therefore
+# spell out the complete evidence set, and each case below overrides exactly the
+# one input it is about.
+_PROVEN = {
+    "campaign_spend_readable": True,
+    "campaign_coverage_complete": True,
+    "fx_complete": True,
+    "geo_readable": True,
+    "geo_coverage_readable": True,
+    "geo_coverage_complete": True,
+    "geo_failed_chunks": [],
+    "missing_geo_dates": [],
+    "campaigns_missing_geo": [],
+}
+_PERFECT = {"reconciled": True, "residual_eligible": False, **_PROVEN}
+
+
+def _gate(**overrides):
+    """Call the gate with a fully proven evidence set plus explicit overrides."""
+    kwargs = {"reconciled": False, "residual_eligible": False, **_PROVEN}
+    kwargs.update(overrides)
+    return geo.resolve_country_spend_status(**kwargs)
 
 
 def test_b1_1_incomplete_campaign_coverage_is_never_ready():
-    status, gaps = geo.resolve_country_spend_status(
-        **_PERFECT, campaign_coverage_complete=False)
+    status, gaps = _gate(reconciled=True, campaign_coverage_complete=False)
     assert status == geo.GEO_STATUS_UNAVAILABLE
     assert geo.country_geo_ready(status) is False
     assert geo.GEO_GAP_CAMPAIGN_COVERAGE_INCOMPLETE in gaps
 
 
 def test_b1_2_incomplete_fx_is_never_ready():
-    status, gaps = geo.resolve_country_spend_status(**_PERFECT, fx_complete=False)
+    status, gaps = _gate(reconciled=True, fx_complete=False)
     assert geo.country_geo_ready(status) is False
     assert geo.GEO_GAP_FX_COVERAGE_INCOMPLETE in gaps
 
@@ -867,36 +936,33 @@ def test_b1_3_an_unreadable_geo_ledger_is_never_ready():
     The ledger is the ONLY thing that separates "fetched and genuinely zero"
     from "never fetched", so a gate that cannot read it cannot certify anything.
     """
-    status, gaps = geo.resolve_country_spend_status(
-        **_PERFECT, geo_coverage_readable=False)
+    status, gaps = _gate(reconciled=True, geo_coverage_readable=False)
     assert geo.country_geo_ready(status) is False
     assert geo.GEO_GAP_GEO_COVERAGE_UNREADABLE in gaps
 
 
 def test_b1_4_incomplete_geo_coverage_is_never_ready():
-    status, gaps = geo.resolve_country_spend_status(
-        **_PERFECT, geo_coverage_complete=False)
+    status, gaps = _gate(reconciled=True, geo_coverage_complete=False)
     assert geo.country_geo_ready(status) is False
     assert geo.GEO_GAP_GEO_COVERAGE_INCOMPLETE in gaps
 
 
 def test_b1_5_a_failed_geo_chunk_is_never_ready():
-    status, gaps = geo.resolve_country_spend_status(
-        **_PERFECT, geo_failed_chunks=[{"chunk_start": "2026-05-01",
-                                        "chunk_end": "2026-05-31"}])
+    status, gaps = _gate(reconciled=True,
+                         geo_failed_chunks=[{"chunk_start": "2026-05-01",
+                                             "chunk_end": "2026-05-31"}])
     assert geo.country_geo_ready(status) is False
     assert geo.GEO_GAP_GEO_CHUNKS_FAILED in gaps
 
 
 def test_b1_6_complete_coverage_plus_valid_reconciliation_is_ready():
-    status, gaps = geo.resolve_country_spend_status(**_PERFECT)
+    status, gaps = _gate(reconciled=True)
     assert status == geo.GEO_STATUS_VERIFIED
     assert geo.country_geo_ready(status) is True
     assert gaps == []
 
     # And the safe-residual route reaches the other accepted state, unchanged.
-    residual_status, residual_gaps = geo.resolve_country_spend_status(
-        reconciled=False, residual_eligible=True)
+    residual_status, residual_gaps = _gate(reconciled=False, residual_eligible=True)
     assert residual_status == geo.GEO_STATUS_RECONCILED_WITH_RESIDUAL
     assert geo.country_geo_ready(residual_status) is True
     assert residual_gaps == []
@@ -907,7 +973,7 @@ def test_b1_7_unreadable_campaign_spend_or_geo_rows_are_never_ready():
         ({"campaign_spend_readable": False}, geo.GEO_GAP_CAMPAIGN_SPEND_UNREADABLE),
         ({"geo_readable": False}, geo.GEO_GAP_GEO_ROWS_UNREADABLE),
     ):
-        status, gaps = geo.resolve_country_spend_status(**_PERFECT, **kwargs)
+        status, gaps = _gate(reconciled=True, **kwargs)
         assert geo.country_geo_ready(status) is False, kwargs
         assert code in gaps
 
@@ -918,8 +984,7 @@ def test_b1_8_an_unproven_input_is_unavailable_not_a_mismatch():
     Saying that about a window whose geo was never fetched would be a more
     alarming — and simply different — statement than "we never established this".
     """
-    status, _gaps = geo.resolve_country_spend_status(
-        **_PERFECT, geo_coverage_complete=False)
+    status, _gaps = _gate(reconciled=True, geo_coverage_complete=False)
     assert status == geo.GEO_STATUS_UNAVAILABLE
     assert status != geo.GEO_STATUS_MISMATCH
 
@@ -936,8 +1001,7 @@ def test_b1_9_the_safe_residual_cannot_be_asserted_past_the_131_conditions():
         ({"campaigns_missing_geo": [{"campaign_id": "c1"}]},
          geo.GEO_GAP_CAMPAIGN_WITHOUT_GEO),
     ):
-        status, gaps = geo.resolve_country_spend_status(
-            reconciled=False, residual_eligible=True, **kwargs)
+        status, gaps = _gate(reconciled=False, residual_eligible=True, **kwargs)
         assert status == geo.GEO_STATUS_MISMATCH
         assert gaps == [expect]
 
@@ -1283,3 +1347,385 @@ def test_26b_the_geo_writer_touches_only_local_canonical_tables():
         body = body[:body.index("\ndef ", 1)]
         assert "google_ads_geo" in body
         assert "requests." not in body
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FINAL PATCH §1 — a coverage-verified empty range is a measured ZERO
+# ═════════════════════════════════════════════════════════════════════════════
+# An empty geo table cannot answer "was this range ever fetched?" about itself.
+# The ledger can, and that is the whole reason it exists. Deciding from the
+# table's emptiness alone made a proven-empty range indistinguishable from a
+# never-synced one — which is the defect the ledger was built to remove.
+
+def _recon(monkeypatch, *, canonical_total, geo_available=True, geo_has_rows=False,
+           geo_total=0.0, coverage=None):
+    """Drive `build_geo_reconciliation` over one explicit evidence set."""
+    repo = geo.repo
+    monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "Europe/London")
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: {
+        "available": True, "total_spend": canonical_total, "currency_code": "GBP",
+        "customer_id": "cust-1", "coverage_start": "2026-01-01",
+        "coverage_end": "2026-06-30"})
+    monkeypatch.setattr(repo, "fetch_geo_daily_spend_total", lambda s, e: {
+        "available": geo_available, "has_rows": geo_has_rows,
+        "total_spend": geo_total, "rows_counted": 1 if geo_has_rows else 0,
+        "country_count": 1 if geo_has_rows else 0})
+    monkeypatch.setattr(repo, "fetch_spend_coverage", lambda s, e: {
+        "available": True, "chunks": [
+            {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01",
+             "status": "verified", "rows_written": 1, "cost_micros_total": 1}]})
+    monkeypatch.setattr(repo, "fetch_fx_coverage", lambda s, e, c: {"complete": True})
+    monkeypatch.setattr(repo, "fetch_geo_reconciliation_breakdown", lambda s, e: {
+        "available": True, "daily": [], "by_campaign": [],
+        "unmapped_geo_native": 0.0, "campaign_rows_counted": 0})
+    verified = [{"chunk_start": "2000-01-01", "chunk_end": "2100-01-01",
+                 "status": "verified", "rows_written": 0, "cost_micros_total": 0,
+                 "country_count": 0}]
+    monkeypatch.setattr(repo, "fetch_geo_coverage", lambda c, s, e: {
+        "available": True,
+        "chunks": (verified if coverage is None else coverage)}
+        if coverage != "unreadable" else {"available": False, "chunks": []})
+    return geo.build_geo_reconciliation("ytd")
+
+
+def test_f1_1_verified_coverage_plus_zero_on_both_sides_is_a_measured_zero(monkeypatch):
+    """Nothing spent, nothing reported, and the ledger proves we looked."""
+    out = _recon(monkeypatch, canonical_total=0.0)
+    assert out["geo_total"] == 0.0            # a real 0.0, not None
+    assert out["geo_verified_zero"] is True
+    assert out["status"] == "reconciled"      # the comparison HAPPENED
+    assert out["reconciled"] is True
+    assert out["country_spend_status"] == geo.GEO_STATUS_VERIFIED
+    assert out["geo_ready"] is True
+    assert out["geo_gap_codes"] == []
+
+
+def test_f1_2_an_empty_table_with_no_coverage_stays_unavailable(monkeypatch):
+    """Nothing fetched and nothing found look identical from the table alone."""
+    out = _recon(monkeypatch, canonical_total=0.0, coverage=[])
+    assert out["geo_total"] is None           # never a fabricated 0.0
+    assert out["geo_verified_zero"] is False
+    assert out["status"] == "no_geo_data"
+    assert out["country_spend_status"] == geo.GEO_STATUS_UNAVAILABLE
+    assert geo.GEO_GAP_GEO_COVERAGE_INCOMPLETE in out["geo_gap_codes"]
+    assert out["geo_ready"] is False
+
+
+def test_f1_3_an_unreadable_geo_query_stays_unavailable(monkeypatch):
+    """A failed read is not a zero, whatever the ledger says about the range."""
+    out = _recon(monkeypatch, canonical_total=0.0, geo_available=False)
+    assert out["geo_total"] is None
+    assert out["geo_verified_zero"] is False
+    assert out["geo_readable"] is False
+    assert out["country_spend_status"] == geo.GEO_STATUS_UNAVAILABLE
+    assert geo.GEO_GAP_GEO_ROWS_UNREADABLE in out["geo_gap_codes"]
+
+
+def test_f1_4_positive_campaign_spend_against_a_verified_zero_stays_blocked(monkeypatch):
+    """A proven zero is a measurement, and this measurement DISAGREES.
+
+    Campaign spend happened; geography reported none of it. That is a real
+    mismatch, not a shortfall Google omits by design, so Country ROAS stays
+    blocked — and it is reported as a mismatch rather than as "unavailable",
+    because a comparison genuinely was performed.
+    """
+    out = _recon(monkeypatch, canonical_total=10000.0)
+    assert out["geo_total"] == 0.0
+    assert out["geo_verified_zero"] is True
+    assert out["status"] == "mismatch"
+    assert out["reconciled"] is False
+    assert out["variance_pct"] == 100.0
+    assert out["country_spend_status"] == geo.GEO_STATUS_MISMATCH
+    assert out["country_roas_unblockable"] is False
+    assert out["geo_ready"] is False
+
+
+def test_f1_5_readability_is_about_the_query_not_about_the_rows():
+    """`geo_readable` must not be computed from `has_rows` anywhere."""
+    body = _GEO_SRC[_GEO_SRC.index("def build_geo_reconciliation"):]
+    body = body[:body.index("\ndef ", 1)]
+    assert "geo_readable=geo_available and geo_has_rows" not in body
+    assert "geo_readable = geo_available" in body
+    # And the empty-table branch consults the LEDGER, never the table alone.
+    assert "geo_verified_zero" in body
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FINAL PATCH §2 — an omitted mandatory input can never reach an accepted state
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_f2_1_the_gate_has_no_permissive_defaults():
+    """A default of `True` on a safety precondition IS the defect, restyled.
+
+    With defaults, a caller that simply forgot an argument asserted the fact
+    instead of admitting it was unknown — and `resolve_country_spend_status(
+    reconciled=True, residual_eligible=False)` returned `verified` having
+    proven nothing at all.
+    """
+    import inspect
+
+    sig = inspect.signature(geo.resolve_country_spend_status)
+    mandatory = ("campaign_spend_readable", "campaign_coverage_complete",
+                 "fx_complete", "geo_readable", "geo_coverage_readable",
+                 "geo_coverage_complete", "geo_failed_chunks",
+                 "missing_geo_dates", "campaigns_missing_geo")
+    for name in mandatory:
+        param = sig.parameters[name]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY, name
+        assert param.default is inspect.Parameter.empty, (
+            f"{name} has a default — a forgotten argument must fail, not pass")
+
+
+def test_f2_2_an_omitted_mandatory_input_raises_rather_than_certifying():
+    """The exact call that used to return `verified` now cannot be made."""
+    with pytest.raises(TypeError):
+        geo.resolve_country_spend_status(reconciled=True, residual_eligible=False)
+    # Nor can it be reached by supplying only some of the evidence.
+    with pytest.raises(TypeError):
+        geo.resolve_country_spend_status(
+            reconciled=True, residual_eligible=False,
+            campaign_spend_readable=True, campaign_coverage_complete=True,
+            fx_complete=True)
+
+
+def test_f2_3_every_production_caller_passes_the_complete_evidence_set():
+    """Asserted on the AST: a caller that drops one argument fails immediately,
+    but this catches it in review rather than at 3 a.m."""
+    required = {"reconciled", "residual_eligible", "campaign_spend_readable",
+                "campaign_coverage_complete", "fx_complete", "geo_readable",
+                "geo_coverage_readable", "geo_coverage_complete",
+                "geo_failed_chunks", "missing_geo_dates", "campaigns_missing_geo"}
+    seen = 0
+    for src in (_GEO_SRC, _MART_SRC):
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", getattr(node.func, "id", None))
+            if name != "resolve_country_spend_status":
+                continue
+            seen += 1
+            assert {kw.arg for kw in node.keywords} == required
+    assert seen == 2, "expected exactly two production callers of the gate"
+
+
+def test_f2_4_the_mart_reads_its_gate_inputs_fail_closed():
+    """A `source_health` that never published a fact must not have it assumed.
+
+    `.get(key, True)` and `!= "unavailable"` reproduced the permissive-default
+    defect one layer up: an absent field asserted the fact rather than admitting
+    it was missing.
+    """
+    body = _MART_SRC[_MART_SRC.index("def _spend_truth_block"):]
+    body = body[:body.index("\ndef ", 1)]
+    # Comments stripped: the block explains the shape it AVOIDS, and a guard
+    # that reads prose would fail on its own documentation.
+    code = "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("#"))
+    assert 'health.get("country_geo_rows_available", True)' not in code
+    assert '!= "unavailable"' not in code
+    assert 'health.get("country_geo_query_readable") is True' in body
+    assert 'in ("complete", "incomplete")' in body
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FINAL PATCH §4 — ownership is renewed and revalidated, not assumed
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_f4_1_the_run_heartbeats_before_each_fetch(monkeypatch):
+    """A long backfill must keep proving ownership, chunk by chunk."""
+    import db.writers as w
+
+    renewals: list = []
+    _fetched, _recorded, _state = _patch_geo_run(monkeypatch, existing_chunks=[])
+    monkeypatch.setattr(w, "renew_geo_sync_lease",
+                        lambda *a, **k: renewals.append(a) or True)
+    monkeypatch.setattr(geo, "analyze_geo_coverage",
+                        lambda c, s, e: {"available": True, "complete": True,
+                                         "missing_ranges": [], "failed_chunks": []})
+
+    geo.run_google_ads_geo_sync(date_from="2026-01-01", date_to="2026-04-30",
+                                dry_run=False, chunk_months=1)
+    # Four monthly chunks, four heartbeats — not one claim at the start held for
+    # the whole run, which is exactly how a backfill outlives its own lease.
+    assert len(renewals) == 4
+
+
+def test_f4_2_a_lost_heartbeat_aborts_without_writing_anything(monkeypatch):
+    """Losing the lease mid-run must stop the writes, not just the final state."""
+    import db.writers as w
+
+    fetched, recorded, state = _patch_geo_run(monkeypatch, existing_chunks=[])
+    replaced: list = []
+    monkeypatch.setattr(w, "replace_geo_daily_spend_chunk",
+                        lambda *a, **k: replaced.append(a) or {
+                            "replaced": True, "deleted": 0, "written": 1})
+    calls = {"n": 0}
+
+    def _renew(*a, **k):
+        calls["n"] += 1
+        return calls["n"] < 2          # the second chunk finds the lease gone
+
+    monkeypatch.setattr(w, "renew_geo_sync_lease", _renew)
+    monkeypatch.setattr(geo, "analyze_geo_coverage",
+                        lambda c, s, e: {"available": True, "complete": True,
+                                         "missing_ranges": [], "failed_chunks": []})
+
+    out = geo.run_google_ads_geo_sync(date_from="2026-01-01", date_to="2026-03-31",
+                                      dry_run=False, chunk_months=1)
+    assert out["status"] == "failed"
+    assert out["reason"] == "lease_ownership_lost"
+    assert len(fetched) == 1                  # stopped before the second fetch
+    assert len(replaced) == 1                 # and wrote only the owned chunk
+    # No coverage row is written for the range it no longer owns — not even a
+    # `failed` one, which would be this run editing the new owner's ledger.
+    assert [r["chunk"] for r in recorded] == ["2026-01-01:2026-01-31"]
+    assert state == []                        # no terminal state either
+
+
+def test_f4_3_ownership_is_revalidated_after_the_fetch_before_any_write(monkeypatch):
+    """The Google call is the slow part, so it is where a lease lapses unseen."""
+    import db.writers as w
+
+    fetched, recorded, _state = _patch_geo_run(monkeypatch, existing_chunks=[])
+    replaced: list = []
+    monkeypatch.setattr(w, "replace_geo_daily_spend_chunk",
+                        lambda *a, **k: replaced.append(a) or {
+                            "replaced": True, "deleted": 0, "written": 1})
+    monkeypatch.setattr(w, "renew_geo_sync_lease", lambda *a, **k: True)
+    monkeypatch.setattr(w, "holds_geo_sync_lease", lambda *a, **k: False)
+
+    out = geo.run_google_ads_geo_sync(date_from="2026-04-01", date_to="2026-04-30",
+                                      dry_run=False)
+    assert out["status"] == "failed"
+    assert out["reason"] == "lease_ownership_lost"
+    assert len(fetched) == 1        # the fetch happened ...
+    assert replaced == []           # ... and its payload was discarded
+    assert recorded == []
+
+
+def test_f4_4_the_renewal_and_the_ownership_check_are_both_token_fenced():
+    """Renewal must not be a way back into a lease somebody else now holds."""
+    src = (_ROOT / "db" / "writers.py").read_text()
+    for fn in ("renew_geo_sync_lease", "holds_geo_sync_lease"):
+        body = src[src.index(f"def {fn}"):]
+        body = body[:body.index("\ndef ", 1)]
+        assert "lease_token = %s" in body, fn
+        assert "last_status = 'running'" in body, fn
+        assert "google_ads_geo_sync_state" in body, fn
+    # An unreachable store returns False from both: an unverifiable claim of
+    # ownership is not ownership.
+    assert "return False" in src[src.index("def holds_geo_sync_lease"):]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FINAL PATCH §5 — `success` is a claim about the RANGE, not about the run
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _clean_run(monkeypatch, coverage):
+    _f, _r, state = _patch_geo_run(monkeypatch, existing_chunks=[])
+    monkeypatch.setattr(geo, "analyze_geo_coverage", lambda c, s, e: coverage)
+    out = geo.run_google_ads_geo_sync(date_from="2026-04-01", date_to="2026-04-30",
+                                      dry_run=False)
+    return out, state
+
+
+def test_f5_1_unreadable_final_coverage_is_a_failure_not_a_success(monkeypatch):
+    out, state = _clean_run(monkeypatch, {"available": False, "complete": False,
+                                          "missing_ranges": [], "failed_chunks": []})
+    assert out["status"] == "failed"
+    assert out["reason"] == "final_coverage_unreadable"
+    assert out["coverage_readable"] is False
+    assert state[-1]["last_status"] == "failed"     # persisted as a failure
+    assert "checkpoint_date" not in state[-1]
+    assert "last_successful_completed_at" not in state[-1]
+    assert out["errors"]
+
+
+def test_f5_2_incomplete_final_coverage_is_partial_not_a_success(monkeypatch):
+    out, state = _clean_run(monkeypatch, {
+        "available": True, "complete": False,
+        "missing_ranges": [{"start": "2026-04-10", "end": "2026-04-12"}],
+        "failed_chunks": []})
+    assert out["status"] == "partial"
+    assert out["reason"] == "final_coverage_incomplete"
+    assert state[-1]["last_status"] == "partial"
+    assert "checkpoint_date" not in state[-1]
+
+
+def test_f5_3_proven_final_coverage_is_still_a_success(monkeypatch):
+    """The downgrade must not swallow the healthy case."""
+    out, state = _clean_run(monkeypatch, {"available": True, "complete": True,
+                                          "missing_ranges": [], "failed_chunks": []})
+    assert out["status"] == "success"
+    assert out["reason"] is None
+    assert state[-1]["last_status"] == "success"
+    assert state[-1]["checkpoint_date"] == date(2026, 4, 30)
+
+
+def test_f5_4_the_scheduler_fails_its_sync_batch_on_a_downgraded_run():
+    """A non-success geo run must not finish the batch green.
+
+    Freshness is read off `sync_batches`, so a green batch over an uncertified
+    range is precisely the invisible staleness this programme removes.
+    """
+    body = _SCHED_SRC[_SCHED_SRC.index("def _sync_canonical_geo"):]
+    body = body[:body.index("\ndef ", 1)]
+    assert '"success" if status == "success" else "failed"' in body
+    assert 'last_source_date=(date_to if status == "success" else None)' in body
+
+
+def _run_geo_step(monkeypatch, result):
+    """Drive the scheduler's geo step over one service result."""
+    import scheduler.incremental_sync as sched
+
+    batches: list = []
+    monkeypatch.setattr(sched.db_writers, "start_sync_batch", lambda **k: 7)
+    monkeypatch.setattr(sched.db_writers, "finish_sync_batch",
+                        lambda **k: batches.append(k) or True)
+    monkeypatch.setattr(
+        "services.google_ads_geo_sync_service.run_google_ads_geo_sync",
+        lambda **k: result)
+    errors: list = []
+    out = sched._sync_canonical_geo(run_id=1, date_to=date(2026, 6, 22), errors=errors)
+    return out, errors, batches
+
+
+def test_f3_1_a_held_lease_is_a_benign_scheduler_skip(monkeypatch):
+    """Another worker owns the range and will record the real outcome."""
+    out, errors, batches = _run_geo_step(monkeypatch, {
+        "status": "skipped_locked", "reason": "another_geo_sync_is_running",
+        "summary": {}, "errors": []})
+    assert out["status"] == "skipped"
+    assert errors == []          # not a failure, and not counted as one
+    assert batches == []         # and no batch: the lease holder writes it
+
+
+def test_f3_2_an_unreachable_lease_store_fails_the_scheduler_step(monkeypatch):
+    """A coordination outage must not present itself as healthy concurrency.
+
+    Sharing one outcome with `held` meant geo could stop syncing for as long as
+    the database stayed unreachable while every surface reported a benign skip —
+    about a worker that does not exist.
+    """
+    out, errors, batches = _run_geo_step(monkeypatch, {
+        "status": "failed", "reason": "lease_store_unavailable",
+        "summary": {}, "errors": ["lease_store_unavailable"]})
+    assert out["status"] == "failed"
+    assert out["reason"] == "lease_store_unavailable"
+    assert out["coverage_complete"] is False
+    assert any("lease_store_unavailable" in e for e in errors)
+    # A FAILED sync batch, so freshness cannot report the dataset healthy.
+    assert len(batches) == 1
+    assert batches[0]["status"] == "failed"
+    assert batches[0]["error_message"] == "lease_store_unavailable"
+
+
+def test_f3_3_a_downgraded_run_fails_the_scheduler_batch(monkeypatch):
+    """`partial` from an incomplete final ledger is recorded as a failed batch."""
+    out, errors, batches = _run_geo_step(monkeypatch, {
+        "status": "partial", "reason": "final_coverage_incomplete",
+        "summary": {"chunks_failed": 0, "rows_written": 12},
+        "errors": ["final geo coverage is incomplete"], "coverage_complete": False})
+    assert out["status"] == "partial"
+    assert errors and "canonical_geo" in errors[0]
+    assert batches[0]["status"] == "failed"
+    assert batches[0]["last_source_date"] is None

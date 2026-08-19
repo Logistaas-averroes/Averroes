@@ -182,8 +182,12 @@ def _spend_truth_block(core: dict) -> dict:
         campaign_spend_readable=(health.get("spend_source") is not None),
         campaign_coverage_complete=(health.get("spend_coverage_status") == "complete"),
         fx_complete=(health.get("fx_coverage_status") == "complete"),
-        geo_readable=bool(health.get("country_geo_rows_available", True)),
-        geo_coverage_readable=(health.get("geo_coverage_status") != "unavailable"),
+        # Read fail-CLOSED. These used to be `.get(key, True)` and
+        # `!= "unavailable"`, so a `source_health` that never published the field
+        # asserted the fact rather than admitting it was absent — the same
+        # permissive-default defect the gate signature just removed, one layer up.
+        geo_readable=(health.get("country_geo_query_readable") is True),
+        geo_coverage_readable=(health.get("geo_coverage_status") in ("complete", "incomplete")),
         geo_coverage_complete=(health.get("geo_coverage_status") == "complete"),
         geo_failed_chunks=health.get("failed_geo_dates") or [],
         missing_geo_dates=health.get("missing_geo_dates") or [],

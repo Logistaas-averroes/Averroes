@@ -916,7 +916,11 @@ def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
     denominator is precisely what makes Country ROAS wrong rather than absent.
 
     ``skipped_locked`` is reported as ``skipped``: another worker holds the
-    lease, so this is not a failure and must not be counted as one.
+    lease, so this is not a failure and must not be counted as one. An
+    **unreachable** lease store is the opposite — ``failed``, with a failed sync
+    batch and an entry in the run's error list. The two used to share one
+    outcome, which meant a database outage looked exactly like healthy
+    concurrency and geo could stop syncing indefinitely without anything saying so.
 
     Reads Google Ads read-only; writes only local canonical tables.
     """
@@ -962,11 +966,28 @@ def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
 
     status = result.get("status") or "failed"
     if status == "skipped_locked":
+        # Genuinely benign: another worker owns the lease and will record the
+        # real outcome. This is the ONLY lease result treated this way — a lease
+        # store that could not be reached comes back as `failed` below, because
+        # an outage that presents itself as healthy concurrency is an outage
+        # nobody will notice.
         log.info("[incremental_sync] google_ads/canonical_geo: skipped (lease held)")
         return {"status": "skipped", "reason": result.get("reason"),
                 "note": "another canonical geo sync was already running"}
 
     summary = result.get("summary") or {}
+    if result.get("reason") == "lease_store_unavailable":
+        err = ("google_ads/canonical_geo: failed (lease_store_unavailable) — the "
+               "geo sync coordination store could not be reached, so no range "
+               "was fetched and none can be certified")
+        errors.append(err)
+        log.error("[incremental_sync] %s", err)
+        _batch("failed", error_message="lease_store_unavailable")
+        return {"status": "failed", "reason": "lease_store_unavailable",
+                "rows_written": 0, "chunks_verified": 0, "chunks_failed": 0,
+                "chunks_skipped": 0, "coverage_complete": False,
+                "errors": result.get("errors", [])}
+
     if status != "success":
         errors.append(f"google_ads/canonical_geo: {status} "
                       f"({summary.get('chunks_failed', 0)} chunk(s) failed)")
