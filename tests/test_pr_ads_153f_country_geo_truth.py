@@ -534,14 +534,21 @@ def test_8c_canonical_spend_freshness_key_matches_its_writer():
 
     The config expected ``google_ads_api`` while the writer stamped
     ``google_ads``, so the ROAS denominator's freshness matched nothing.
+
+    PR-ADS-154 removed the choice rather than picking a side: the two spellings
+    named one source, and keeping both is what let them drift. The assertion
+    that matters — config key IS writer key — is unchanged and is now expressed
+    without naming either spelling, so it cannot pin the wrong one again.
     """
     from services.freshness_service import DATASET_FRESHNESS_CONFIG
 
     cfg = DATASET_FRESHNESS_CONFIG["canonical_spend"]
     assert (cfg["source"], cfg["dataset"]) == (dataset_keys.CANONICAL_SPEND_SOURCE,
                                                dataset_keys.CANONICAL_SPEND_DATASET)
-    assert "google_ads" in _SCHED_SRC
-    assert cfg["source"] == "google_ads"
+    # ONE canonical platform-evidence source, and the superseded spelling
+    # normalizes onto it so accumulated history is not orphaned.
+    assert cfg["source"] == dataset_keys.PLATFORM_EVIDENCE_SOURCE == "google_ads_api"
+    assert dataset_keys.canonical_source("google_ads") == cfg["source"]
 
 
 def test_9_no_phantom_freshness_configuration_remains():

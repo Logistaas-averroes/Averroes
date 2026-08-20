@@ -5,16 +5,22 @@
 ## Purpose
 
 The daily incremental sync keeps the local database fresh by pulling recent
-data from Windsor.ai and HubSpot every morning and persisting it locally.
+data from the **Google Ads API** and HubSpot every morning and persisting it
+locally.
 
-Without this job, campaign, keyword, geo, and CRM data would remain stale
-between manual or scheduled report runs.  The daily incremental sync is the
-routine data-refresh layer that ensures dashboards always reflect recent
-platform activity.
+Without this job, campaign, geo, and CRM data would remain stale between manual
+or scheduled report runs.  The daily incremental sync is the routine
+data-refresh layer that ensures dashboards always reflect recent platform
+activity.
 
-The daily incremental sync reads recent data from Windsor.ai and HubSpot and
-writes only to the local database.  It does not modify Google Ads, HubSpot,
-campaigns, bids, budgets, contacts, deals, or negative keywords.
+Every external platform is read read-only; the only writes are to the local
+database.  The sync does not modify Google Ads, HubSpot, campaigns, bids,
+budgets, contacts, deals, or negative keywords.
+
+> **PR-ADS-154 (production hotfix).** Three defects made a failed run look like
+> a successful one. They are described in "Database readiness", "Retired
+> datasets" and "Exit codes" below. If you are reading this doc to understand a
+> run that reported `partial` and exited 0, that was the bug.
 
 ## Why Daily Instead of Every 4 Hours
 
@@ -51,30 +57,70 @@ are used so the scheduler always has valid values.
 
 ## Datasets Synced
 
-| Dataset                 | Source    | Method                            |
-|-------------------------|-----------|-----------------------------------|
-| `windsor/campaigns`     | Windsor   | `pull_campaign_performance_range` |
-| `windsor/keywords`      | Windsor   | `pull_keyword_performance_range`  |
-| `windsor/geo`           | Windsor   | `pull_geo_performance_range`      |
-| `windsor/search_terms`  | Windsor   | ⚠ **Skipped** (see below)         |
-| `hubspot/contacts`      | HubSpot   | `pull_paid_search_contacts_in_range` |
-| `hubspot/deals`         | HubSpot   | `pull_deals_with_gclid` (via contacts) |
-| `gclid/matches`         | Local     | ⚠ **Skipped** (see below)         |
+| Dataset                                | Source         | Owner |
+|----------------------------------------|----------------|-------|
+| `hubspot/contacts`                     | HubSpot        | `pull_paid_search_contacts_in_range` |
+| `hubspot/contact_funnel`               | HubSpot        | `hubspot_contact_funnel_sync_service` |
+| `hubspot/deals`                        | HubSpot        | `pull_deals_with_gclid` (via contacts) |
+| `gclid/matches`                        | HubSpot → local | `revenue_recovery_service` |
+| `hubspot/deal_ledger`                  | HubSpot        | `hubspot_deal_sync_service` |
+| `hubspot/source_classification`        | HubSpot        | `source_attribution_service` |
+| `google_ads_api/canonical_spend`       | Google Ads API | `google_ads_spend_service` |
+| `fx/daily_rates`                       | FX reference   | `fx_service` |
+| `google_ads_api/canonical_geo`         | Google Ads API | `google_ads_geo_sync_service` |
+| `google_ads_api/geo_reconciliation`    | local          | read-only verdict, runs last |
+| `mailchimp/refresh`                    | Mailchimp      | `mailchimp_sync_service` |
 
-### Skipped Datasets
+### One canonical Google Ads source key
 
-**`windsor/search_terms`**: The Windsor.ai search-terms endpoint uses
-`date_preset` only (e.g. `last_14d`).  It does not accept explicit
-`date_from`/`date_to` parameters reliably.  Using a preset would not give a
-true incremental sync (the preset window shifts with time, not with the last
-sync watermark).  To avoid creating false freshness signals, this dataset is
-skipped in incremental sync and documented as
-`unsupported_by_current_connector`.  Search terms are still written by the
-daily pulse scheduler (`scheduler/daily.py`) using the existing preset-based
-pull.
+`google_ads` and `google_ads_api` were two spellings of one source. Keeping
+both is what let the writers and the freshness configuration drift until
+neither matched the other — the ROAS denominator had no freshness signal at
+all, and `gclid_attribution` reported "never run" while its table filled up.
 
-**`gclid/matches`**: No incremental DB persistence path exists yet for GCLID
-match data.  The dataset is skipped and documented accordingly.
+There is now ONE key, `google_ads_api`, defined in `services/dataset_keys.py`
+and imported by every side. The superseded spelling is **normalized**, not
+deleted: writers canonicalize before stamping, and an idempotent migration
+relabels the accumulated rows, because dropping the spelling would orphan the
+history production already holds — the same defect wearing the opposite mask.
+
+### Retired datasets (PR-ADS-154)
+
+Production no longer uses Windsor.ai. These four are recorded as `retired`,
+which is neither `skipped` nor `success`: they never run, so they never
+contribute to freshness or to the overall verdict.
+
+| Retired                | Replaced by                        |
+|------------------------|------------------------------------|
+| `windsor/campaigns`    | `google_ads_api/canonical_spend`   |
+| `windsor/geo`          | `google_ads_api/canonical_geo`     |
+| `windsor/search_terms` | `google_ads_api/search_terms` (weekly scheduler, not this run) |
+| `windsor/keywords`     | **nothing** — see below            |
+
+`windsor/keywords` has **no canonical incremental replacement**.
+`keyword_daily_facts` is written by the weekly/monthly schedulers, not by this
+run. That is stated rather than papered over: keeping the Windsor call or
+reporting the dataset successful would both be false. Building an incremental
+keyword path is separate work.
+
+They are recorded rather than deleted from the report because a dataset that
+silently disappears is indistinguishable from one that was forgotten.
+
+### Database readiness (PR-ADS-154)
+
+**The run initializes the pool and probes it with `SELECT 1` before contacting
+any external platform**, and aborts with `status: failed`,
+`reason: database_unavailable` and an empty `datasets` map if that fails.
+
+A standalone `python -m scheduler.incremental_sync` process is not the Flask
+app: nothing had called `init_pool()`, so `_pool` was `None` and every
+persistence call received `conn is None` and degraded quietly to a no-op. The
+run pulled real rows from Google Ads and HubSpot, wrote none of them, and
+reported `partial`.
+
+`init_pool()` swallows its own failure and leaves `_pool = None`, and a pool
+that exists can still front an unreachable server — so "we called init_pool" is
+not evidence. The probe is.
 
 ## Rolling Windows
 
@@ -204,14 +250,46 @@ Expected: no external write paths.
    linked to contacts created outside the window are not refreshed in this
    incremental pass.  Full historical deal coverage requires backfill.
 
-2. **Windsor search_terms**: Not supported for incremental sync due to
-   connector limitations (preset-only date filter).  See "Skipped Datasets"
-   above.
+2. **No incremental keyword path**: `windsor/keywords` was retired with no
+   canonical replacement. `keyword_daily_facts` is refreshed by the
+   weekly/monthly schedulers. See "Retired datasets" above.
 
-3. **No run_id association**: Incremental sync rows are written with
-   `run_id=None` because the sync is not tied to a specific pulse run.
-   Writers accept `None` safely.  Rows remain queryable by `source_date`.
+3. **`lookback_days.ads` no longer drives a pull**: Windsor was its only
+   consumer. The canonical Google Ads steps own their own lookbacks
+   (`DAILY_SPEND_LOOKBACK_DAYS`, `DAILY_GEO_LOOKBACK_DAYS`), because the window
+   that is safe to re-fetch is a property of the dataset, not of the scheduler.
+   The parameter is still accepted and reported so the summary contract is
+   unchanged.
 
 4. **Single-worker concurrency guard**: The in-flight guard (`_job_state`) is
    process-local.  For single-worker Render deployments this is sufficient.
    Multi-worker deployments would require a DB-backed advisory lock.
+
+
+## Exit codes (PR-ADS-154)
+
+`python -m scheduler.incremental_sync` exits **0 only when every dataset that
+ran succeeded**. `partial` and `failed` both exit 1.
+
+The entry point previously fell off the end of the module at 0, so a run
+reporting nine failed datasets was indistinguishable, to any caller, from a
+clean one — and an operator reading `echo $?` was told everything worked.
+
+```bash
+python -m scheduler.incremental_sync
+echo "exit=$?"      # 0 = every dataset that ran succeeded
+```
+
+## A dataset never reports success it cannot back up
+
+Several results were derived from what a step *prepared* rather than what
+landed. Each is now fail-closed:
+
+| Case | Before | Now |
+|---|---|---|
+| Batch could not be opened (`start_sync_batch` → 0) | skipped the finish call, returned `success` | fails **before** the external pull |
+| No local run record | continued with a falsy `run_id` | `database_unavailable` |
+| Source classification | reported rows PREPARED as `contacts_classified` | reports rows PERSISTED; pulled-positive/written-zero fails |
+| FX refresh | `rows_written: 0` meant both "nothing was missing" and "nothing persisted" | `fetched` separates them; fetched-positive/written-zero fails |
+| Geo reconciliation | `success` whatever the verdict | `unavailable`/`no_geo_data` fail — a comparison that could not be performed is not an answer. `mismatch` stays `success`: the step ran and disagreed, which is true |
+| Unknown dataset status | counted as not-a-failure | counts as a failure — defaulting the unknown case to "fine" is how a new outcome string turns a broken run green |

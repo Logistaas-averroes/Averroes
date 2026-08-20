@@ -8,11 +8,22 @@ Responsibility:
 
   This is NOT the daily pulse (scheduler/daily.py) which runs anomaly
   detection and CRM delta checks.  This module's sole job is to pull
-  fresh data from Windsor.ai and HubSpot and persist it to the local DB
-  so that dashboard pages stay up to date.
+  fresh data from the Google Ads API and HubSpot and persist it to the
+  local DB so that dashboard pages stay up to date.
+
+PR-ADS-154 (production hotfix):
+  - The pool is initialized and PROBED before any external connector is
+    touched. A standalone `python -m scheduler.incremental_sync` process
+    starts with `db.connection._pool = None`, so every persistence call
+    received `conn is None` and the run pulled real data from Google Ads
+    and HubSpot only to discard all of it — while reporting `partial` and
+    exiting 0.
+  - Windsor is gone from active orchestration. Production no longer uses
+    it; the Google Ads API is the only platform-evidence source.
+  - The CLI's exit code agrees with the reported status.
 
 Doctrine:
-  - Read-only from external platforms (Windsor, HubSpot).
+  - Read-only from external platforms (Google Ads, HubSpot, FX providers).
   - Writes only to the local database.
   - Never modifies Google Ads campaigns, bids, budgets, keywords, or
     negative keywords.
@@ -38,6 +49,17 @@ from pathlib import Path
 
 import db.writers as db_writers
 from scheduler.sync_utils import max_source_date, persistence_succeeded
+# PR-ADS-154 §3/§4: every (source, dataset) pair this scheduler stamps comes
+# from the ONE registry. Spelling a key here as well is what let the writer and
+# the freshness config drift apart until neither matched the other.
+from services.dataset_keys import (
+    CANONICAL_GEO_DATASET, CANONICAL_GEO_SOURCE,
+    CANONICAL_SPEND_DATASET, CANONICAL_SPEND_SOURCE,
+    DEAL_LEDGER_DATASET, DEAL_LEDGER_SOURCE,
+    FX_DAILY_RATES_DATASET, FX_SOURCE,
+    GCLID_MATCHES_DATASET, GCLID_SOURCE,
+    SOURCE_CLASSIFICATION_DATASET, SOURCE_CLASSIFICATION_SOURCE,
+)
 
 log = logging.getLogger(__name__)
 
@@ -81,19 +103,186 @@ DEFAULT_LOOKBACK_HUBSPOT_DEALS = int(
     _SYNC_CONFIG.get("hubspot_deals", _CONFIG_FALLBACK_HUBSPOT_DEALS)
 )
 
-# search_terms uses preset-only querying (no explicit date range supported
-# by Windsor.ai connector); document as such and skip reliably.
-_SEARCH_TERMS_NOTE = (
-    "unsupported_by_current_connector: Windsor search_terms endpoint uses "
-    "date_preset only; explicit date-range incremental sync is not supported. "
-    "Dataset skipped to avoid false freshness."
-)
-
 # gclid/matches: no DB persistence path exists yet for incremental sync.
 _GCLID_NOTE = (
     "unsupported_by_current_connector: no incremental-sync DB persistence path "
     "for gclid/matches. Dataset skipped."
 )
+
+# ── Retired datasets (PR-ADS-154) ───────────────────────────────────────────
+# Production no longer uses Windsor.ai; the Google Ads API through the
+# configured credentials is the only platform-evidence source. These four
+# datasets were still being called on every run, spending time and credentials
+# on a platform whose output nothing consumes.
+#
+# They are recorded EXPLICITLY rather than deleted from the summary. A dataset
+# that simply disappears from the report is indistinguishable from one that was
+# forgotten, and the next person to audit the run would have to diff two
+# versions of this file to find out which. Each entry names the canonical
+# replacement, or says plainly that there is none.
+#
+# `status: "retired"` is deliberately NOT `skipped` and NOT `success`: it never
+# runs again, so it must never contribute to freshness or to the overall
+# verdict, and it must never look like work that succeeded.
+RETIRED_DATASETS: dict[str, dict] = {
+    "windsor/campaigns": {
+        "status": "retired",
+        "replaced_by": "google_ads_api/canonical_spend",
+        "note": ("Windsor.ai is no longer a production source. Campaign-daily "
+                 "spend comes from the canonical Google Ads API service."),
+    },
+    "windsor/geo": {
+        "status": "retired",
+        "replaced_by": "google_ads_api/canonical_geo",
+        "note": ("Windsor.ai is no longer a production source. Per-country "
+                 "spend comes from the canonical Google Ads API geo service "
+                 "(PR-ADS-153F), which is coverage-backed and reconciled."),
+    },
+    "windsor/search_terms": {
+        "status": "retired",
+        "replaced_by": "google_ads_api/search_terms",
+        "note": ("Windsor.ai is no longer a production source. Search terms "
+                 "come from the Google Ads API connector; that dataset is "
+                 "refreshed by the weekly scheduler, not by this incremental "
+                 "run, so no incremental entry replaces this one."),
+    },
+    "windsor/keywords": {
+        "status": "retired",
+        "replaced_by": None,
+        "note": ("Windsor.ai is no longer a production source. NO canonical "
+                 "Google Ads API incremental persistence path exists for "
+                 "keywords today: `keyword_daily_facts` is written by the "
+                 "weekly/monthly schedulers, not by this run. Reported as "
+                 "unsupported rather than quietly kept on Windsor or reported "
+                 "successful. Building an incremental keyword path is out of "
+                 "scope for this hotfix."),
+    },
+}
+
+
+#: The dataset labels used in the run report, the log lines and the `errors`
+#: list — one definition, so they cannot drift apart.
+#:
+#: PR-ADS-154 renamed the report keys onto the canonical source
+#: (`google_ads_api/...`) but left several log and error strings spelling the
+#: superseded `google_ads/...`. An operator greps the errors list and then looks
+#: for that dataset in the JSON, so two spellings for one dataset is the same
+#: class of defect this PR exists to remove — just in the human-facing layer.
+LABEL_CANONICAL_SPEND = f"{CANONICAL_SPEND_SOURCE}/{CANONICAL_SPEND_DATASET}"
+LABEL_CANONICAL_GEO = f"{CANONICAL_GEO_SOURCE}/{CANONICAL_GEO_DATASET}"
+LABEL_GEO_RECONCILIATION = f"{CANONICAL_GEO_SOURCE}/geo_reconciliation"
+LABEL_FX = f"{FX_SOURCE}/{FX_DAILY_RATES_DATASET}"
+LABEL_DEAL_LEDGER = f"{DEAL_LEDGER_SOURCE}/{DEAL_LEDGER_DATASET}"
+LABEL_SOURCE_CLASSIFICATION = (
+    f"{SOURCE_CLASSIFICATION_SOURCE}/{SOURCE_CLASSIFICATION_DATASET}")
+LABEL_GCLID_MATCHES = f"{GCLID_SOURCE}/{GCLID_MATCHES_DATASET}"
+
+
+#: Every (source, dataset) pair this scheduler stamps on ``sync_batches``.
+#:
+#: Declared so the contract test can enumerate them and prove each one is
+#: registered. The production run logged "unknown source"/"unknown dataset" for
+#: seven pairs, and the warning was the least of it: an unregistered pair is a
+#: key the freshness configuration does not read, so the dataset reports "never
+#: run" forever while its table fills up normally. Nothing fails; nothing shows.
+#:
+#: Datasets whose batches are opened by an owning SERVICE rather than by this
+#: module (contact_funnel, mailchimp) are not listed — they are covered by their
+#: own contract tests, next to the code that stamps them.
+ACTIVE_SYNC_PAIRS: tuple[tuple[str, str], ...] = (
+    ("hubspot", "contacts"),
+    ("hubspot", "deals"),
+    (GCLID_SOURCE, GCLID_MATCHES_DATASET),
+    (DEAL_LEDGER_SOURCE, DEAL_LEDGER_DATASET),
+    (SOURCE_CLASSIFICATION_SOURCE, SOURCE_CLASSIFICATION_DATASET),
+    (CANONICAL_SPEND_SOURCE, CANONICAL_SPEND_DATASET),
+    (FX_SOURCE, FX_DAILY_RATES_DATASET),
+    (CANONICAL_GEO_SOURCE, CANONICAL_GEO_DATASET),
+)
+
+
+# ---------------------------------------------------------------------------
+# Database readiness (PR-ADS-154 §1)
+# ---------------------------------------------------------------------------
+
+DB_UNAVAILABLE_REASON = "database_unavailable"
+
+
+def ensure_database_ready() -> tuple[bool, str | None]:
+    """Initialize the connection pool and PROVE it can serve a query.
+
+    Returns ``(ready, detail)``. ``detail`` is None when ready.
+
+    Why this exists
+    ---------------
+    A standalone ``python -m scheduler.incremental_sync`` process is not the
+    Flask app: nothing has called :func:`db.connection.init_pool`, so the
+    module-level ``_pool`` is ``None`` and every ``get_conn()`` yields ``None``.
+    Each persistence call then degrades quietly to a no-op, which is exactly the
+    right behaviour for a single writer and exactly the wrong behaviour for a
+    whole run: the production run pulled real rows from Google Ads and HubSpot,
+    wrote none of them, reported ``partial``, and exited 0.
+
+    So the pool is not merely initialized — it is **probed**. ``init_pool()``
+    swallows its own failure and leaves ``_pool = None``, and a pool that exists
+    is still not a database that answers, so "we called init_pool" is not
+    evidence. ``SELECT 1`` is.
+
+    Read-only and side-effect free. The caller must abort the whole run on
+    ``False``, before contacting any external platform: with no durable
+    persistence, a pull is quota spent to produce nothing, and reporting on it
+    would describe work whose results were discarded.
+    """
+    try:
+        from db.connection import get_conn, init_pool  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return False, f"db.connection import failed: {exc}"
+
+    try:
+        init_pool()
+    except Exception as exc:  # noqa: BLE001
+        return False, f"init_pool failed: {exc}"
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False, ("connection pool is not available "
+                               "(no DATABASE_URL, or the database is unreachable)")
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                row = cur.fetchone()
+        if not row or row[0] != 1:
+            return False, "readiness probe returned no result"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"readiness probe failed: {exc}"
+
+    return True, None
+
+
+def _database_unavailable_result(*, run_reason: str, started_at: str,
+                                 detail: str | None) -> dict:
+    """The structured result of a run that never started.
+
+    Shaped like a completed run so every consumer — the CLI, the scheduler
+    wrapper, the admin trigger — reads it the same way, but with no dataset
+    entries at all. An empty `datasets` map is the honest report: nothing was
+    attempted, so nothing may claim a status.
+    """
+    finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    message = (f"{DB_UNAVAILABLE_REASON}: {detail}" if detail
+               else DB_UNAVAILABLE_REASON)
+    log.error("[incremental_sync] aborting before any external pull — %s", message)
+    return {
+        "status": "failed",
+        "reason": DB_UNAVAILABLE_REASON,
+        "run_type": "daily_incremental_sync",
+        "run_reason": run_reason,
+        "run_id": None,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "datasets": {},
+        "errors": [message],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -110,23 +299,30 @@ def run_daily_incremental_sync(
     """Run daily rolling-window incremental sync for all major datasets.
 
     Syncs:
-      - windsor/campaigns   (explicit date range)
-      - windsor/keywords    (explicit date range)
-      - windsor/geo         (explicit date range)
-      - windsor/search_terms — skipped; connector does not support explicit
-                               date ranges reliably (documents as unsupported)
       - hubspot/contacts    (explicit date range via createdate filter)
       - hubspot/contact_funnel — CANONICAL all-source lifecycle spine,
                                watermarked on lastmodifieddate (PR-ADS-153B)
       - hubspot/deals       (via GCLID contacts pulled in the deals window)
       - gclid/matches       — skipped; no incremental DB path yet
-      - google_ads/canonical_geo — CANONICAL per-country spend (PR-ADS-153F),
+      - hubspot/deal_ledger, hubspot/source_classification
+      - google_ads_api/canonical_spend — the ROAS denominator
+      - fx/daily_rates      — required before any USD figure is safe
+      - google_ads_api/canonical_geo — CANONICAL per-country spend (PR-ADS-153F),
                                run after canonical spend and FX and followed by
                                geo reconciliation; resumable and coverage-backed
+      - mailchimp/refresh   — read-only, clean skip when unconfigured
+
+    The four Windsor datasets are recorded as ``retired`` (PR-ADS-154) and are
+    never called: production no longer uses Windsor.ai.
 
     Each dataset failure is isolated: one failed dataset does not abort the
     rest.  The returned summary includes per-dataset status and an ``errors``
     list for datasets that raised unexpected exceptions.
+
+    The run ABORTS before any external pull if the database is not ready — see
+    :func:`ensure_database_ready`. A run with no durable persistence produces
+    nothing, so spending Google Ads and HubSpot quota on it and then reporting
+    per-dataset outcomes would describe work that was discarded.
 
     Returns a structured summary dict.  The caller (scheduler wrapper or
     manual trigger) is responsible for logging.
@@ -137,7 +333,15 @@ def run_daily_incremental_sync(
     started_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     today = now.date()
 
-    date_from_ads = today - timedelta(days=lookback_days_ads)
+    # PR-ADS-154 §1: prove durable persistence BEFORE touching any external
+    # platform. This must be the first thing the run does — a pull performed
+    # without a database is quota spent to produce nothing, and every dataset
+    # downstream would report on work whose results were thrown away.
+    db_ready, db_detail = ensure_database_ready()
+    if not db_ready:
+        return _database_unavailable_result(
+            run_reason=run_reason, started_at=started_at, detail=db_detail)
+
     date_from_contacts = today - timedelta(days=lookback_days_hubspot_contacts)
     date_from_deals = today - timedelta(days=lookback_days_hubspot_deals)
 
@@ -153,6 +357,14 @@ def run_daily_incremental_sync(
         "started_at": started_at,
         "status": "running",
     })
+    # PR-ADS-154 §6: no run row means nothing this run writes can be attributed
+    # to it, and `write_run` returns a falsy id rather than raising. The
+    # readiness probe above should make this unreachable — which is precisely
+    # why reaching it is worth failing on rather than continuing past.
+    if not run_id:
+        return _database_unavailable_result(
+            run_reason=run_reason, started_at=started_at,
+            detail="could not create a local run record (write_run returned no id)")
 
     log.info(
         "[incremental_sync] started reason=%s run_id=%s ads_lookback=%d "
@@ -161,27 +373,14 @@ def run_daily_incremental_sync(
         lookback_days_hubspot_contacts, lookback_days_hubspot_deals,
     )
 
-    # ── windsor/campaigns ────────────────────────────────────────────────────
-    datasets["windsor/campaigns"] = _sync_windsor_campaigns(
-        run_id=run_id, date_from=date_from_ads, date_to=today, errors=errors,
-    )
-
-    # ── windsor/keywords ─────────────────────────────────────────────────────
-    datasets["windsor/keywords"] = _sync_windsor_keywords(
-        run_id=run_id, date_from=date_from_ads, date_to=today, errors=errors,
-    )
-
-    # ── windsor/geo ──────────────────────────────────────────────────────────
-    datasets["windsor/geo"] = _sync_windsor_geo(
-        run_id=run_id, date_from=date_from_ads, date_to=today, errors=errors,
-    )
-
-    # ── windsor/search_terms — unsupported for reliable incremental sync ──────
-    datasets["windsor/search_terms"] = {
-        "status": "skipped",
-        "note": _SEARCH_TERMS_NOTE,
-    }
-    log.info("[incremental_sync] windsor/search_terms: %s", _SEARCH_TERMS_NOTE)
+    # ── Retired: the four Windsor datasets (PR-ADS-154) ─────────────────────
+    # Recorded, not deleted, so the report says what happened to them instead of
+    # leaving the reader to diff two versions of this file. `retired` never
+    # contributes to the overall verdict and never publishes freshness.
+    for _name, _record in RETIRED_DATASETS.items():
+        datasets[_name] = dict(_record)
+        log.info("[incremental_sync] %s: retired (%s)",
+                 _name, _record.get("replaced_by") or "no canonical replacement")
 
     # ── hubspot/contacts ──────────────────────────────────────────────────────
     datasets["hubspot/contacts"] = _sync_hubspot_contacts(
@@ -205,7 +404,7 @@ def run_daily_incremental_sync(
     # PR-ADS-114: this dataset now has a real persistence path. It pulls
     # closed-won deals DIRECTLY by closedate and writes GCLID-only attribution
     # rows (no synthetic GCLIDs) into gclid_attribution.
-    datasets["gclid/matches"] = _sync_gclid_attribution(
+    datasets[LABEL_GCLID_MATCHES] = _sync_gclid_attribution(
         run_id=run_id, date_from=date_from_deals, date_to=today, errors=errors,
     )
 
@@ -215,32 +414,32 @@ def run_daily_incremental_sync(
     # reconciles it, 153E-B migrates consumers. Orchestration only — every won,
     # currency, association and attribution decision lives in the service and
     # its pure rule modules, never here.
-    datasets["hubspot/deal_ledger"] = _sync_deal_ledger(
+    datasets[LABEL_DEAL_LEDGER] = _sync_deal_ledger(
         run_id=run_id, errors=errors,
     )
 
     # ── hubspot/source_classification — keep acquisition-source classification
     # current (PR-ADS-117): classify newly-created contacts (all sources) and
     # attribute recent closed-won deals. Read-only from HubSpot; local DB only.
-    datasets["hubspot/source_classification"] = _sync_source_classification(
+    datasets[LABEL_SOURCE_CLASSIFICATION] = _sync_source_classification(
         run_id=run_id, date_from=date_from_contacts, date_to=today, errors=errors,
     )
 
-    # ── google_ads/canonical_spend — keep canonical campaign-daily spend current
+    # ── google_ads_api/canonical_spend — keep canonical campaign-daily spend current
     # (PR-ADS-118) with a small daily lookback for late Google Ads adjustments.
     # Reads Google Ads read-only; writes only local canonical tables.
-    datasets["google_ads/canonical_spend"] = _sync_canonical_spend(
+    datasets[LABEL_CANONICAL_SPEND] = _sync_canonical_spend(
         run_id=run_id, date_to=today, errors=errors,
     )
 
     # ── fx/daily_rates — keep daily GBP→USD FX rates current (PR-ADS-119) so
     # native spend can be converted to USD reporting spend per spend_date. Reads
     # published reference rates read-only; writes only the local fx_rates table.
-    datasets["fx/daily_rates"] = _sync_fx_rates(
+    datasets[LABEL_FX] = _sync_fx_rates(
         run_id=run_id, date_to=today, errors=errors,
     )
 
-    # ── google_ads/canonical_geo — PR-ADS-153F. Country ROAS needs per-country
+    # ── google_ads_api/canonical_geo — PR-ADS-153F. Country ROAS needs per-country
     # spend that reconciles with the canonical campaign total, and until this PR
     # NOTHING scheduled it: the only caller was the manual Revenue Health button,
     # so canonical geo went stale the moment the window advanced past the last
@@ -253,16 +452,16 @@ def run_daily_incremental_sync(
     #   3. canonical geo             — reconciled against (1), converted using (2)
     #   4. geo reconciliation        — evaluated only after 1-3 have landed
     # Reconciling before geo lands would score the previous run's coverage.
-    datasets["google_ads/canonical_geo"] = _sync_canonical_geo(
+    datasets[LABEL_CANONICAL_GEO] = _sync_canonical_geo(
         run_id=run_id, date_to=today, errors=errors,
     )
 
-    # ── google_ads/geo_reconciliation — step 4. Read-only diagnostics computed
+    # ── google_ads_api/geo_reconciliation — step 4. Read-only diagnostics computed
     # AFTER spend, FX and geo are current, so the recorded verdict describes this
     # run's data rather than the previous one's. Publishes no external state and
     # never gates the sync: a reconciliation that reports "blocked" is a true
     # answer about the data, not a sync failure.
-    datasets["google_ads/geo_reconciliation"] = _publish_geo_reconciliation(
+    datasets[LABEL_GEO_RECONCILIATION] = _publish_geo_reconciliation(
         errors=errors,
     )
 
@@ -309,6 +508,31 @@ def run_daily_incremental_sync(
 # Per-dataset sync helpers
 # ---------------------------------------------------------------------------
 
+class BatchTrackingError(RuntimeError):
+    """A dataset ran without a durable record that it ran.
+
+    ``start_sync_batch`` returns 0 when the database is unavailable or the
+    inputs are invalid, and the previous code simply skipped ``finish_sync_batch``
+    in that case while still returning ``{"status": "success"}``. The row count
+    was real; the evidence that anything was written was not. A dataset whose
+    batch was never opened publishes no freshness, so calling it successful
+    asserts something no surface can corroborate.
+    """
+
+
+def _require_batch(batch_id, dataset: str) -> int:
+    """Return a usable batch id, or raise :class:`BatchTrackingError`.
+
+    PR-ADS-154 §6. Called immediately after ``start_sync_batch`` so the dataset
+    fails BEFORE the external pull, rather than pulling successfully and then
+    discovering it cannot record the outcome.
+    """
+    if not batch_id:
+        raise BatchTrackingError(
+            f"{dataset}: sync batch could not be opened — the run has no durable "
+            "record, so its outcome cannot be published as freshness")
+    return int(batch_id)
+
 def _sync_mailchimp(*, run_id, errors: list) -> dict:
     """Read-only Mailchimp incremental refresh (PR-ADS-151).
 
@@ -342,154 +566,6 @@ def _sync_mailchimp(*, run_id, errors: list) -> dict:
         return {"status": "failed", "error": str(exc)[:500]}
 
 
-def _sync_windsor_campaigns(
-    *, run_id, date_from, date_to, errors: list
-) -> dict:
-    """Pull and persist windsor/campaigns for the given date range."""
-    from connectors.windsor_pull import pull_campaign_performance_range  # noqa: PLC0415
-
-    batch_id = db_writers.start_sync_batch(
-        source="windsor",
-        dataset="campaigns",
-        sync_type="daily",
-        date_from=date_from,
-        date_to=date_to,
-    )
-    try:
-        rows = pull_campaign_performance_range(
-            date_from=str(date_from), date_to=str(date_to),
-        )
-        rows_pulled = len(rows)
-
-        rows_written = db_writers.write_campaigns(run_id, rows)
-
-        if not persistence_succeeded(rows, rows_written):
-            raise RuntimeError(
-                f"windsor/campaigns persistence failed: "
-                f"{rows_pulled} pulled, {rows_written} written"
-            )
-
-        last_date = max_source_date(rows, fallback_date=date_to)
-        if batch_id:
-            db_writers.finish_sync_batch(
-                batch_id=batch_id,
-                status="success",
-                row_count=rows_written,
-                last_source_date=last_date,
-            )
-        return {"status": "success", "rows_pulled": rows_pulled, "rows_written": rows_written}
-
-    except Exception as exc:  # noqa: BLE001
-        err = f"windsor/campaigns: {exc}"
-        errors.append(err)
-        log.warning("[incremental_sync] %s", err)
-        if batch_id:
-            db_writers.finish_sync_batch(
-                batch_id=batch_id,
-                status="failed",
-                error_message=str(exc)[:1000],
-            )
-        return {"status": "failed", "error": str(exc)[:500]}
-
-
-def _sync_windsor_keywords(
-    *, run_id, date_from, date_to, errors: list
-) -> dict:
-    """Pull and persist windsor/keywords for the given date range."""
-    from connectors.windsor_pull import pull_keyword_performance_range  # noqa: PLC0415
-
-    batch_id = db_writers.start_sync_batch(
-        source="windsor",
-        dataset="keywords",
-        sync_type="daily",
-        date_from=date_from,
-        date_to=date_to,
-    )
-    try:
-        rows = pull_keyword_performance_range(
-            date_from=str(date_from), date_to=str(date_to),
-        )
-        rows_pulled = len(rows)
-        rows_written = db_writers.write_keywords(run_id, rows)
-
-        if not persistence_succeeded(rows, rows_written):
-            raise RuntimeError(
-                f"windsor/keywords persistence failed: "
-                f"{rows_pulled} pulled, {rows_written} written"
-            )
-
-        last_date = max_source_date(rows, fallback_date=date_to)
-        if batch_id:
-            db_writers.finish_sync_batch(
-                batch_id=batch_id,
-                status="success",
-                row_count=rows_written,
-                last_source_date=last_date,
-            )
-        return {"status": "success", "rows_pulled": rows_pulled, "rows_written": rows_written}
-
-    except Exception as exc:  # noqa: BLE001
-        err = f"windsor/keywords: {exc}"
-        errors.append(err)
-        log.warning("[incremental_sync] %s", err)
-        if batch_id:
-            db_writers.finish_sync_batch(
-                batch_id=batch_id,
-                status="failed",
-                error_message=str(exc)[:1000],
-            )
-        return {"status": "failed", "error": str(exc)[:500]}
-
-
-def _sync_windsor_geo(
-    *, run_id, date_from, date_to, errors: list
-) -> dict:
-    """Pull and persist windsor/geo for the given date range."""
-    from connectors.windsor_pull import pull_geo_performance_range  # noqa: PLC0415
-
-    batch_id = db_writers.start_sync_batch(
-        source="windsor",
-        dataset="geo",
-        sync_type="daily",
-        date_from=date_from,
-        date_to=date_to,
-    )
-    try:
-        rows = pull_geo_performance_range(
-            date_from=str(date_from), date_to=str(date_to),
-        )
-        rows_pulled = len(rows)
-        rows_written = db_writers.write_geo(run_id, rows)
-
-        if not persistence_succeeded(rows, rows_written):
-            raise RuntimeError(
-                f"windsor/geo persistence failed: "
-                f"{rows_pulled} pulled, {rows_written} written"
-            )
-
-        last_date = max_source_date(rows, fallback_date=date_to)
-        if batch_id:
-            db_writers.finish_sync_batch(
-                batch_id=batch_id,
-                status="success",
-                row_count=rows_written,
-                last_source_date=last_date,
-            )
-        return {"status": "success", "rows_pulled": rows_pulled, "rows_written": rows_written}
-
-    except Exception as exc:  # noqa: BLE001
-        err = f"windsor/geo: {exc}"
-        errors.append(err)
-        log.warning("[incremental_sync] %s", err)
-        if batch_id:
-            db_writers.finish_sync_batch(
-                batch_id=batch_id,
-                status="failed",
-                error_message=str(exc)[:1000],
-            )
-        return {"status": "failed", "error": str(exc)[:500]}
-
-
 def _sync_hubspot_contacts(
     *, run_id, date_from, date_to, errors: list
 ) -> dict:
@@ -502,8 +578,10 @@ def _sync_hubspot_contacts(
         sync_type="daily",
         date_from=date_from,
         date_to=date_to,
+        run_id=run_id,
     )
     try:
+        batch_id = _require_batch(batch_id, "hubspot/contacts")
         rows = pull_paid_search_contacts_in_range(
             date_from=str(date_from), date_to=str(date_to),
         )
@@ -562,8 +640,10 @@ def _sync_hubspot_deals(
         sync_type="daily",
         date_from=date_from,
         date_to=date_to,
+        run_id=run_id,
     )
     try:
+        batch_id = _require_batch(batch_id, "hubspot/deals")
         contacts = pull_paid_search_contacts_in_range(
             date_from=str(date_from), date_to=str(date_to),
         )
@@ -613,15 +693,21 @@ def _sync_gclid_attribution(
     from connectors.hubspot_pull import pull_closed_won_deals_in_range  # noqa: PLC0415
     from services.revenue_recovery_service import build_attribution_rows_from_deals  # noqa: PLC0415
 
+    # PR-ADS-154: stamps `(gclid, matches)` — the key the freshness config
+    # reads and the registry recognises. It previously stamped
+    # `(hubspot, gclid_matches)`, which matched neither: the run logged
+    # "unknown dataset 'gclid_matches'" and `gclid_attribution` reported
+    # "never run" forever while its table filled up normally.
     batch_id = db_writers.start_sync_batch(
-        source="hubspot",
-        dataset="gclid_matches",
+        source=GCLID_SOURCE,
+        dataset=GCLID_MATCHES_DATASET,
         sync_type="daily",
         date_from=date_from,
         date_to=date_to,
         run_id=run_id,
     )
     try:
+        batch_id = _require_batch(batch_id, LABEL_GCLID_MATCHES)
         deals = pull_closed_won_deals_in_range(
             date_from=str(date_from), date_to=str(date_to),
         )
@@ -657,7 +743,7 @@ def _sync_gclid_attribution(
         }
 
     except Exception as exc:  # noqa: BLE001
-        err = f"gclid/matches: {exc}"
+        err = f"{LABEL_GCLID_MATCHES}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         if batch_id:
@@ -678,15 +764,19 @@ def _sync_deal_ledger(*, run_id, errors: list) -> dict:
     zero-row result, because a silent revenue gap is worse than a loud failure.
     """
     batch_id = db_writers.start_sync_batch(
-        source="hubspot", dataset="deal_ledger", sync_type="daily",
+        source=DEAL_LEDGER_SOURCE, dataset=DEAL_LEDGER_DATASET, sync_type="daily",
         run_id=run_id)
     try:
+        # A ledger sync with no durable batch cannot publish freshness and its
+        # written count cannot be attributed to anything, so it fails before the
+        # HubSpot pull rather than after it.
+        batch_id = _require_batch(batch_id, LABEL_DEAL_LEDGER)
         from services.hubspot_deal_sync_service import sync_deals  # noqa: PLC0415
 
         result = sync_deals(batch_id=batch_id)
     except Exception as exc:  # noqa: BLE001
         log.error("[incremental] deal ledger sync failed: %s", exc, exc_info=True)
-        errors.append(f"hubspot/deal_ledger: {exc}")
+        errors.append(f"{LABEL_DEAL_LEDGER}: {exc}")
         db_writers.finish_sync_batch(batch_id, status="failed",
                                      error_message=str(exc))
         return {"status": "failed", "error": str(exc), "rows": 0}
@@ -694,7 +784,7 @@ def _sync_deal_ledger(*, run_id, errors: list) -> dict:
     status = result.get("status") or "failed"
     if status != "success":
         errors.append(
-            f"hubspot/deal_ledger: {status} "
+            f"{LABEL_DEAL_LEDGER}: {status} "
             f"({result.get('error') or 'incomplete'}; "
             f"{result.get('association_failures', 0)} association failure(s))")
     # sync_batches accepts success|failed only, so a PARTIAL sync is recorded
@@ -734,10 +824,11 @@ def _sync_source_classification(
     )
 
     batch_id = db_writers.start_sync_batch(
-        source="hubspot", dataset="source_classification", sync_type="daily",
-        date_from=date_from, date_to=date_to, run_id=run_id,
+        source=SOURCE_CLASSIFICATION_SOURCE, dataset=SOURCE_CLASSIFICATION_DATASET,
+        sync_type="daily", date_from=date_from, date_to=date_to, run_id=run_id,
     )
     try:
+        batch_id = _require_batch(batch_id, LABEL_SOURCE_CLASSIFICATION)
         contacts = pull_all_contacts_in_range(date_from=str(date_from), date_to=str(date_to))
         contact_rows = [classify_contact_row(c) for c in contacts]
         contacts_written = db_writers.upsert_contact_source_classification(contact_rows)
@@ -747,18 +838,34 @@ def _sync_source_classification(
         deal_rows = [attribute_deal_row(d) for d in deals]
         deals_written = db_writers.upsert_deal_source_attribution(deal_rows)
 
-        if batch_id:
-            db_writers.finish_sync_batch(
-                batch_id=batch_id, status="success",
-                row_count=contacts_written + deals_written, last_source_date=date_to,
-            )
+        # PR-ADS-154 §6: fail closed on pulled-positive / written-zero. This
+        # dataset previously reported `success` with `contacts_classified` set
+        # to the number of rows PREPARED, so a run that classified 900 contacts
+        # and persisted none of them looked identical to one that persisted all
+        # of them. Preparing a row in memory is not evidence of anything.
+        if not persistence_succeeded(contact_rows, contacts_written):
+            raise RuntimeError(
+                f"contact classification persisted {contacts_written} of "
+                f"{len(contact_rows)} row(s)")
+        if not persistence_succeeded(deal_rows, deals_written):
+            raise RuntimeError(
+                f"deal source attribution persisted {deals_written} of "
+                f"{len(deal_rows)} row(s)")
+
+        db_writers.finish_sync_batch(
+            batch_id=batch_id, status="success",
+            row_count=contacts_written + deals_written, last_source_date=date_to,
+        )
+        # The reported figures are what LANDED, not what was prepared.
         return {
             "status": "success",
-            "contacts_classified": len(contact_rows),
-            "deals_attributed": len(deal_rows),
+            "contacts_classified": contacts_written,
+            "deals_attributed": deals_written,
+            "contacts_pulled": len(contact_rows),
+            "deals_pulled": len(deal_rows),
         }
     except Exception as exc:  # noqa: BLE001
-        err = f"hubspot/source_classification: {exc}"
+        err = f"{LABEL_SOURCE_CLASSIFICATION}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         if batch_id:
@@ -816,10 +923,11 @@ def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:
     run_id_str = str(run_id) if run_id else None
     start = date_to - _td(days=DAILY_SPEND_LOOKBACK_DAYS - 1)
     batch_id = db_writers.start_sync_batch(
-        source="google_ads", dataset="canonical_spend", sync_type="daily",
-        date_from=start, date_to=date_to, run_id=run_id,
+        source=CANONICAL_SPEND_SOURCE, dataset=CANONICAL_SPEND_DATASET,
+        sync_type="daily", date_from=start, date_to=date_to, run_id=run_id,
     )
     try:
+        batch_id = _require_batch(batch_id, LABEL_CANONICAL_SPEND)
         payload = fetch_daily_spend(str(start), str(date_to))
         rows = payload.get("rows", [])
         micros = sum(int(r.get("cost_micros") or 0) for r in rows)
@@ -850,7 +958,7 @@ def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:
                 batch_id=batch_id, status="success", row_count=written, last_source_date=date_to)
         return {"status": "success", "rows_written": written, "cost_micros": micros}
     except Exception as exc:  # noqa: BLE001
-        err = f"google_ads/canonical_spend: {exc}"
+        err = f"{LABEL_CANONICAL_SPEND}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         # Record a `failed` coverage chunk against the real configured customer
@@ -879,22 +987,42 @@ def _sync_fx_rates(*, run_id, date_to, errors: list) -> dict:
     lookback_days = 7
     start = date_to - _td(days=lookback_days - 1)
     batch_id = db_writers.start_sync_batch(
-        source="fx", dataset="daily_rates", sync_type="daily",
+        source=FX_SOURCE, dataset=FX_DAILY_RATES_DATASET, sync_type="daily",
         date_from=start, date_to=date_to, run_id=run_id,
     )
     try:
+        batch_id = _require_batch(batch_id, LABEL_FX)
         result = ensure_fx_rates(start, date_to, base_currency=NATIVE_CURRENCY,
                                  quote_currency=REPORTING_CURRENCY, only_missing=True)
         failed = result.get("failed") or []
         if failed:
             raise RuntimeError(f"{len(failed)} FX date(s) failed to fetch")
-        if batch_id:
-            db_writers.finish_sync_batch(
-                batch_id=batch_id, status="success",
-                row_count=result.get("rows_written", 0), last_source_date=date_to)
-        return {"status": "success", "rows_written": result.get("rows_written", 0)}
+
+        # PR-ADS-154 §6: "nothing was missing" and "everything failed to persist"
+        # both arrive here as rows_written == 0 with an empty `failed` list —
+        # `upsert_fx_rates` returns 0 on an unavailable database rather than
+        # raising, so the fetch loop records no failure. `fetched` separates
+        # them: it counts the dates this run actually went and got.
+        fetched = int(result.get("fetched") or 0)
+        written = int(result.get("rows_written") or 0)
+        if fetched and written == 0:
+            raise RuntimeError(
+                f"fetched {fetched} FX rate(s) and persisted none — "
+                "FX coverage stays incomplete, which correctly blocks USD ROAS")
+
+        db_writers.finish_sync_batch(
+            batch_id=batch_id, status="success",
+            row_count=written, last_source_date=date_to)
+        return {
+            "status": "success",
+            "rows_written": written,
+            "rates_fetched": fetched,
+            # Explicit, so a reader can tell an idle refresh from a busy one
+            # rather than inferring it from a zero.
+            "already_current": fetched == 0,
+        }
     except Exception as exc:  # noqa: BLE001
-        err = f"fx/daily_rates: {exc}"
+        err = f"{LABEL_FX}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         if batch_id:
@@ -949,8 +1077,14 @@ def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
             source=GEO_SYNC_SOURCE, dataset=GEO_SYNC_DATASET, sync_type="daily",
             date_from=start, date_to=date_to, run_id=run_id,
         )
-        if bid:
-            db_writers.finish_sync_batch(batch_id=bid, status=status, **fields)
+        # PR-ADS-154 §6: a batch that could not be opened is not a detail to
+        # swallow. Without it this dataset publishes no freshness, so silently
+        # continuing would let the run report a healthy geo refresh that no
+        # surface can corroborate.
+        if not bid:
+            raise BatchTrackingError(
+                f"{LABEL_CANONICAL_GEO}: sync batch could not be opened")
+        db_writers.finish_sync_batch(batch_id=bid, status=status, **fields)
 
     try:
         result = run_google_ads_geo_sync(
@@ -958,7 +1092,7 @@ def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
             job_id=str(run_id) if run_id else None,
         )
     except Exception as exc:  # noqa: BLE001
-        err = f"google_ads/canonical_geo: {exc}"
+        err = f"{LABEL_CANONICAL_GEO}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         _batch("failed", error_message=str(exc)[:1000])
@@ -971,13 +1105,13 @@ def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
         # store that could not be reached comes back as `failed` below, because
         # an outage that presents itself as healthy concurrency is an outage
         # nobody will notice.
-        log.info("[incremental_sync] google_ads/canonical_geo: skipped (lease held)")
+        log.info("[incremental_sync] %s: skipped (lease held)", LABEL_CANONICAL_GEO)
         return {"status": "skipped", "reason": result.get("reason"),
                 "note": "another canonical geo sync was already running"}
 
     summary = result.get("summary") or {}
     if result.get("reason") == "lease_store_unavailable":
-        err = ("google_ads/canonical_geo: failed (lease_store_unavailable) — the "
+        err = (f"{LABEL_CANONICAL_GEO}: failed (lease_store_unavailable) — the "
                "geo sync coordination store could not be reached, so no range "
                "was fetched and none can be certified")
         errors.append(err)
@@ -989,7 +1123,7 @@ def _sync_canonical_geo(*, run_id, date_to, errors: list) -> dict:
                 "errors": result.get("errors", [])}
 
     if status != "success":
-        errors.append(f"google_ads/canonical_geo: {status} "
+        errors.append(f"{LABEL_CANONICAL_GEO}: {status} "
                       f"({summary.get('chunks_failed', 0)} chunk(s) failed)")
     _batch(
         "success" if status == "success" else "failed",
@@ -1013,27 +1147,52 @@ def _publish_geo_reconciliation(*, errors: list) -> dict:
     """Evaluate geo↔campaign reconciliation after the geo sync (PR-ADS-153F).
 
     Read-only. Runs LAST so the verdict describes the data this run produced.
-    Never raises and never fails the sync: a "blocked" reconciliation is a
-    truthful answer about the data, not a broken step, and treating it as a
-    failure would train operators to ignore real sync failures.
+
+    A reconciliation that was PERFORMED and disagreed is a truthful answer about
+    the data, not a broken step: `mismatch` keeps the dataset `success`, because
+    treating an honest disagreement as a sync failure would train operators to
+    ignore real sync failures.
+
+    PR-ADS-154 §6 draws the other half of that line. A reconciliation that could
+    NOT be performed — `unavailable` (an input was unreadable) or `no_geo_data`
+    (the geo total was not measurable) — is not an answer at all, and reporting
+    it as `success` claimed a step had run that had not. The two cases used to
+    return the same thing.
     """
+    #: Reconciliation statuses that mean the comparison actually happened.
+    evaluated = ("reconciled", "mismatch")
     try:
         from services.google_ads_geo_sync_service import build_geo_reconciliation  # noqa: PLC0415
 
         recon = build_geo_reconciliation("current_quarter")
-        log.info("[incremental_sync] google_ads/geo_reconciliation: status=%s "
+        recon_status = recon.get("status")
+        log.info("[incremental_sync] %s: status=%s "
                  "country_spend_status=%s missing_dates=%d",
-                 recon.get("status"), recon.get("country_spend_status"),
+                 LABEL_GEO_RECONCILIATION, recon_status,
+                 recon.get("country_spend_status"),
                  len(recon.get("missing_geo_dates") or []))
-        return {
-            "status": "success",
-            "reconciliation_status": recon.get("status"),
+        result = {
+            "status": "success" if recon_status in evaluated else "failed",
+            "reconciliation_status": recon_status,
+            # Published explicitly so the post-deploy check can assert
+            # "available and reconciled" without re-deriving either.
+            "available": recon_status in evaluated,
+            "reconciled": bool(recon.get("reconciled")),
             "country_spend_status": recon.get("country_spend_status"),
+            "geo_ready": recon.get("geo_ready"),
+            "geo_gap_codes": recon.get("geo_gap_codes") or [],
             "missing_geo_dates": len(recon.get("missing_geo_dates") or []),
             "reason": recon.get("reason"),
         }
+        if result["status"] == "failed":
+            err = (f"{LABEL_GEO_RECONCILIATION}: could not be evaluated "
+                   f"(status={recon_status}, gaps={result['geo_gap_codes']})")
+            result["error"] = err
+            errors.append(err)
+            log.warning("[incremental_sync] %s", err)
+        return result
     except Exception as exc:  # noqa: BLE001
-        err = f"google_ads/geo_reconciliation: {exc}"
+        err = f"{LABEL_GEO_RECONCILIATION}: {exc}"
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         return {"status": "failed", "error": str(exc)[:500]}
@@ -1043,18 +1202,31 @@ def _publish_geo_reconciliation(*, errors: list) -> dict:
 # Helpers
 # ---------------------------------------------------------------------------
 
+#: Dataset outcomes that describe work NOT attempted, and therefore cannot vote
+#: on the overall verdict. `skipped` = not applicable on this run (unconfigured
+#: integration, no persistence path). `retired` = removed from orchestration for
+#: good (PR-ADS-154). Neither may count as a success, because neither did
+#: anything that could have succeeded.
+NON_VOTING_STATUSES = frozenset({"skipped", "retired"})
+
+
 def _overall_status(datasets: dict) -> str:
     """Derive overall sync status from individual dataset outcomes.
 
-    Returns 'success' if all non-skipped datasets succeeded,
-    'partial' if some succeeded and some failed,
-    'failed' if all non-skipped datasets failed.
+    Returns 'success' when every voting dataset succeeded, 'partial' when some
+    succeeded and some did not, and 'failed' when none succeeded.
+
+    Anything that is neither `success` nor a non-voting status counts as a
+    failure. That is deliberate: an unrecognised status is not evidence of
+    success, and defaulting the unknown case to "fine" is how a new outcome
+    string silently turns a broken run green.
     """
-    statuses = [v["status"] for v in datasets.values() if v.get("status") != "skipped"]
+    statuses = [v.get("status") for v in datasets.values()
+                if v.get("status") not in NON_VOTING_STATUSES]
     if not statuses:
-        return "success"  # only skipped datasets — nothing to fail
+        return "success"  # nothing was attempted — nothing can have failed
     successes = statuses.count("success")
-    failures  = statuses.count("failed")
+    failures  = len(statuses) - successes
     if failures == 0:
         return "success"
     if successes == 0:
@@ -1066,12 +1238,27 @@ def _overall_status(datasets: dict) -> str:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main() -> int:
+    """Run one incremental sync and return the process exit code.
+
+    PR-ADS-154 §5: the exit code AGREES with the reported status. It previously
+    always fell off the end of the module at 0, so a run that reported `partial`
+    with nine failed datasets was indistinguishable, to any caller, from a clean
+    one — and an operator reading `echo $?` was told everything worked.
+
+    Exit 0 means and only means: every dataset that ran, succeeded.
+    """
+    import json as _json
     import logging as _logging
+
     _logging.basicConfig(
         level=_logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     result = run_daily_incremental_sync(run_reason="cli")
-    import json as _json
     print(_json.dumps(result, indent=2, default=str))
+    return 0 if result.get("status") == "success" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

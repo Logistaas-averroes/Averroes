@@ -422,6 +422,10 @@ def _patch_incremental(monkeypatch, *, contacts_write=None, contacts_pull=None):
         monkeypatch.setattr("db.writers.update_run", lambda *a, **k: None)
         monkeypatch.setattr("db.writers.start_sync_batch", lambda *a, **k: 1)
         monkeypatch.setattr("db.writers.finish_sync_batch", lambda *a, **k: True)
+        # PR-ADS-154: the run aborts before any external pull unless the
+        # database is ready, so a fixture describing a healthy run must say so.
+        monkeypatch.setattr(
+            "scheduler.incremental_sync.ensure_database_ready", lambda: (True, None))
     except (ImportError, AttributeError) as exc:
         pytest.skip(f"runtime deps unavailable: {exc}")
     return captured

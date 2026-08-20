@@ -131,14 +131,17 @@ DATASET_FRESHNESS_CONFIG: dict[str, dict[str, Any]] = {
     # PR-ADS-143: the Campaign Evidence page reads canonical daily spend (not the
     # `campaigns` snapshot), so its freshness tracks the real upstream table.
     #
-    # PR-ADS-153F: `source` corrected from "google_ads_api" to "google_ads". The
-    # writer has always stamped `source="google_ads"` on this dataset's sync
-    # batches (scheduler/incremental_sync._sync_canonical_spend), so the lookup
-    # key here matched nothing and the ROAS denominator had NO working freshness
-    # signal — the exact defect the PR-ADS-153A audit recorded (§1.7). The config
-    # is moved to what the writer actually stamps rather than the other way
-    # round: renaming the writer would orphan the sync_state rows production has
-    # already accumulated under "google_ads".
+    # PR-ADS-153F found the writer stamping `source="google_ads"` while this
+    # config expected `google_ads_api`, so the lookup matched nothing and the
+    # ROAS denominator had NO working freshness signal (PR-ADS-153A §1.7). That
+    # PR moved the config to the writer's spelling.
+    #
+    # PR-ADS-154 removes the choice entirely: `google_ads` and `google_ads_api`
+    # were two names for one source, and keeping both is what let them drift.
+    # There is now ONE key — `google_ads_api` — canonicalized at the writer
+    # boundary, with the historical `google_ads` rows relabelled by an
+    # idempotent migration so no accumulated history is orphaned. Both sides
+    # import the key from services/dataset_keys, so neither can move alone.
     "canonical_spend": {
         "table": "google_ads_campaign_daily_spend",
         "date_column": "spend_date",

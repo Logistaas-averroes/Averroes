@@ -1504,6 +1504,52 @@ BEGIN
              OR requested_start <= requested_end);
   END IF;
 END $$;
+
+-- PR-ADS-154: fold the superseded `google_ads` source spelling onto the one
+-- canonical `google_ads_api` key.
+--
+-- Both spellings named the same platform-evidence source. Writers now
+-- canonicalize before stamping (services/dataset_keys.canonical_source), so no
+-- new row can carry the old spelling — but production already holds rows under
+-- it, including the successful historical geo bootstrap's batches. Leaving them
+-- behind would orphan that history and the affected datasets would report
+-- "never run" again, which is the same defect wearing the opposite mask.
+--
+-- This relabels BOOKKEEPING rows only. No evidence table is touched:
+-- google_ads_geo_daily_spend, google_ads_geo_coverage and
+-- google_ads_campaign_daily_spend are untouched, so the bootstrap's populated
+-- data is preserved exactly.
+--
+-- Idempotent and collision-safe: `sync_state` is UNIQUE(source, dataset), so a
+-- dataset that somehow has BOTH spellings is resolved by keeping the row with
+-- the newer successful sync and dropping the staler duplicate, rather than
+-- failing the migration or silently keeping the older answer.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM sync_state WHERE source = 'google_ads') THEN
+    DELETE FROM sync_state stale
+     USING sync_state keep
+     WHERE stale.source = 'google_ads'
+       AND keep.source  = 'google_ads_api'
+       AND keep.dataset = stale.dataset
+       AND COALESCE(keep.last_successful_sync_at, '-infinity'::timestamptz)
+           >= COALESCE(stale.last_successful_sync_at, '-infinity'::timestamptz);
+
+    DELETE FROM sync_state superseded
+     USING sync_state fresher
+     WHERE superseded.source = 'google_ads_api'
+       AND fresher.source    = 'google_ads'
+       AND fresher.dataset   = superseded.dataset
+       AND COALESCE(fresher.last_successful_sync_at, '-infinity'::timestamptz)
+           > COALESCE(superseded.last_successful_sync_at, '-infinity'::timestamptz);
+
+    UPDATE sync_state SET source = 'google_ads_api' WHERE source = 'google_ads';
+  END IF;
+
+  -- sync_batches is an append-only history with no uniqueness constraint on
+  -- (source, dataset), so it relabels unconditionally.
+  UPDATE sync_batches SET source = 'google_ads_api' WHERE source = 'google_ads';
+END $$;
 """
 
 

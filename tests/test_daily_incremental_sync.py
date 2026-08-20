@@ -110,6 +110,9 @@ class TestSummaryShape:
         from scheduler.incremental_sync import run_daily_incremental_sync
         result = run_daily_incremental_sync()
         expected = {
+            # PR-ADS-154: the four Windsor datasets are RECORDED as retired
+            # rather than removed from the report. A dataset that silently
+            # disappears is indistinguishable from one that was forgotten.
             "windsor/campaigns",
             "windsor/keywords",
             "windsor/geo",
@@ -121,14 +124,14 @@ class TestSummaryShape:
             "hubspot/deal_ledger",
             "gclid/matches",
             "hubspot/source_classification",
-            "google_ads/canonical_spend",
+            "google_ads_api/canonical_spend",
             "fx/daily_rates",
             # PR-ADS-153F: canonical per-country spend, plus the reconciliation
             # step that must run AFTER it. Nothing scheduled the geo sync before
             # this PR — its only caller was a manual admin button, so canonical
             # geo went stale the moment the window advanced.
-            "google_ads/canonical_geo",
-            "google_ads/geo_reconciliation",
+            "google_ads_api/canonical_geo",
+            "google_ads_api/geo_reconciliation",
             "mailchimp/refresh",
         }
         assert set(result["datasets"].keys()) == expected
@@ -146,9 +149,10 @@ class TestSummaryShape:
         from scheduler.incremental_sync import run_daily_incremental_sync
         keys = list(run_daily_incremental_sync()["datasets"].keys())
         order = {k: i for i, k in enumerate(keys)}
-        assert order["google_ads/canonical_spend"] < order["google_ads/canonical_geo"]
-        assert order["fx/daily_rates"] < order["google_ads/canonical_geo"]
-        assert order["google_ads/canonical_geo"] < order["google_ads/geo_reconciliation"]
+        assert order["google_ads_api/canonical_spend"] < order["google_ads_api/canonical_geo"]
+        assert order["fx/daily_rates"] < order["google_ads_api/canonical_geo"]
+        assert (order["google_ads_api/canonical_geo"]
+                < order["google_ads_api/geo_reconciliation"])
 
     def test_errors_is_list(self, monkeypatch):
         _patch_all_datasets_success(monkeypatch)
@@ -190,24 +194,20 @@ class TestConfigValues:
 class TestRollingDateWindows:
     """Rolling date windows must be calculated correctly from lookback_days."""
 
-    def test_ads_window(self, monkeypatch):
-        captured = {}
+    def test_ads_lookback_is_reported_but_no_longer_drives_a_pull(self, monkeypatch):
+        """PR-ADS-154: Windsor was the only consumer of the ads window.
 
-        def fake_campaign_range(date_from, date_to):
-            captured["campaigns"] = (date_from, date_to)
-            return []
-
-        _patch_all_datasets_success(monkeypatch, campaign_pull=fake_campaign_range)
+        The canonical Google Ads steps own their own lookbacks
+        (`DAILY_SPEND_LOOKBACK_DAYS`, `DAILY_GEO_LOOKBACK_DAYS`), because the
+        window that is safe to re-fetch is a property of the dataset, not of the
+        scheduler. The parameter is still reported so the summary contract is
+        unchanged — and so an operator can see what it was set to.
+        """
+        _patch_all_datasets_success(monkeypatch)
 
         from scheduler.incremental_sync import run_daily_incremental_sync
-        import datetime as dt
-        today = dt.datetime.now(tz=dt.timezone.utc).date()
-        run_daily_incremental_sync(lookback_days_ads=14)
-
-        expected_from = str(today - timedelta(days=14))
-        expected_to   = str(today)
-        assert captured["campaigns"][0] == expected_from
-        assert captured["campaigns"][1] == expected_to
+        result = run_daily_incremental_sync(lookback_days_ads=14)
+        assert result["lookback"]["ads_days"] == 14
 
     def test_contacts_window(self, monkeypatch):
         captured_calls: list = []
@@ -238,39 +238,41 @@ class TestRollingDateWindows:
 class TestDatasetFailureIsolation:
     """A single failed dataset must not abort the rest of the sync."""
 
-    def test_campaign_failure_does_not_abort_others(self, monkeypatch):
-        # Campaigns will raise; other datasets succeed.
-        def failing_campaign_pull(*args, **kwargs):
-            raise RuntimeError("Windsor API error (test)")
+    # PR-ADS-154: isolation used to be demonstrated by failing windsor/campaigns.
+    # That dataset no longer runs, so the same property is demonstrated on a
+    # LIVE dataset — the rule is unchanged, only the dataset carrying it.
+    def test_one_dataset_failure_does_not_abort_the_others(self, monkeypatch):
+        def failing_contacts_pull(*args, **kwargs):
+            raise RuntimeError("HubSpot API error (test)")
 
-        _patch_all_datasets_success(monkeypatch, campaign_pull=failing_campaign_pull)
+        _patch_all_datasets_success(monkeypatch, contacts_pull=failing_contacts_pull)
 
         from scheduler.incremental_sync import run_daily_incremental_sync
         result = run_daily_incremental_sync()
 
-        assert result["datasets"]["windsor/campaigns"]["status"] == "failed"
-        # Other supported datasets should still have succeeded.
-        assert result["datasets"]["windsor/keywords"]["status"] == "success"
-        assert result["datasets"]["windsor/geo"]["status"] == "success"
-        assert result["datasets"]["hubspot/contacts"]["status"] == "success"
+        assert result["datasets"]["hubspot/contacts"]["status"] == "failed"
+        # Every other dataset still ran and still succeeded.
+        assert result["datasets"]["google_ads_api/canonical_spend"]["status"] == "success"
+        assert result["datasets"]["fx/daily_rates"]["status"] == "success"
+        assert result["datasets"]["hubspot/deal_ledger"]["status"] == "success"
 
     def test_errors_list_populated_on_failure(self, monkeypatch):
         def failing_pull(*args, **kwargs):
             raise RuntimeError("forced error")
 
-        _patch_all_datasets_success(monkeypatch, campaign_pull=failing_pull)
+        _patch_all_datasets_success(monkeypatch, contacts_pull=failing_pull)
 
         from scheduler.incremental_sync import run_daily_incremental_sync
         result = run_daily_incremental_sync()
 
         assert len(result["errors"]) >= 1
-        assert any("windsor/campaigns" in e for e in result["errors"])
+        assert any("hubspot/contacts" in e for e in result["errors"])
 
     def test_overall_status_partial_on_mixed_results(self, monkeypatch):
         def failing_pull(*args, **kwargs):
             raise RuntimeError("forced error")
 
-        _patch_all_datasets_success(monkeypatch, campaign_pull=failing_pull)
+        _patch_all_datasets_success(monkeypatch, contacts_pull=failing_pull)
 
         from scheduler.incremental_sync import run_daily_incremental_sync
         result = run_daily_incremental_sync()
@@ -313,7 +315,10 @@ class TestDatasetFailureIsolation:
 class TestPersistenceFailure:
     """Pulled > 0 rows but written = 0 must mark the dataset failed."""
 
-    def test_campaigns_zero_written_marks_failed(self, monkeypatch):
+    # PR-ADS-154: this property used to be demonstrated on windsor/campaigns,
+    # which no longer runs. It is demonstrated on a LIVE dataset instead —
+    # the rule is unchanged, only the dataset carrying it.
+    def test_deals_zero_written_marks_failed(self, monkeypatch):
         def pull_ok(*args, **kwargs):
             return _fake_rows(5)
 
@@ -322,14 +327,13 @@ class TestPersistenceFailure:
 
         _patch_all_datasets_success(
             monkeypatch,
-            campaign_pull=pull_ok,
-            campaign_write=write_zero,
+            deals_write=write_zero,
         )
 
         from scheduler.incremental_sync import run_daily_incremental_sync
         result = run_daily_incremental_sync()
 
-        assert result["datasets"]["windsor/campaigns"]["status"] == "failed"
+        assert result["datasets"]["hubspot/deals"]["status"] == "failed"
 
     def test_contacts_zero_written_marks_failed(self, monkeypatch):
         def pull_ok(*args, **kwargs):
@@ -357,23 +361,22 @@ class TestPersistenceFailure:
 class TestZeroRowsSuccess:
     """Zero rows from a successful pull → status success, row_count=0."""
 
-    def test_campaigns_zero_rows_success(self, monkeypatch):
+    def test_deals_zero_rows_success(self, monkeypatch):
         def pull_empty(*args, **kwargs):
             return []  # genuine empty window
 
         def write_zero(*args, **kwargs):
             return 0
 
-        _patch_all_datasets_success(
-            monkeypatch,
-            campaign_pull=pull_empty,
-            campaign_write=write_zero,
-        )
+        _patch_all_datasets_success(monkeypatch, deals_write=write_zero)
+        # A genuinely empty deals window: no contacts carried a deal.
+        monkeypatch.setattr("connectors.hubspot_pull.pull_deals_with_gclid",
+                            pull_empty)
 
         from scheduler.incremental_sync import run_daily_incremental_sync
         result = run_daily_incremental_sync()
 
-        ds = result["datasets"]["windsor/campaigns"]
+        ds = result["datasets"]["hubspot/deals"]
         assert ds["status"] == "success"
         assert ds["rows_pulled"] == 0
         assert ds["rows_written"] == 0
@@ -407,16 +410,28 @@ class TestZeroRowsSuccess:
 class TestUnsupportedDatasets:
     """Skipped datasets must appear in summary with status='skipped'."""
 
-    def test_search_terms_skipped(self, monkeypatch):
+    def test_windsor_datasets_are_retired_with_a_stated_replacement(self, monkeypatch):
+        """PR-ADS-154: `retired` is not `skipped` and not `success`.
+
+        Each entry names its canonical replacement, or says plainly that there
+        is none — so an operator reading the run does not have to diff two
+        versions of the scheduler to find out what happened to it.
+        """
         _patch_all_datasets_success(monkeypatch)
 
         from scheduler.incremental_sync import run_daily_incremental_sync
         result = run_daily_incremental_sync()
 
-        ds = result["datasets"]["windsor/search_terms"]
-        assert ds["status"] == "skipped"
-        assert "note" in ds
-        assert "unsupported_by_current_connector" in ds["note"]
+        for name in ("windsor/campaigns", "windsor/keywords",
+                     "windsor/geo", "windsor/search_terms"):
+            ds = result["datasets"][name]
+            assert ds["status"] == "retired", name
+            assert ds["note"], name
+            assert "replaced_by" in ds, name
+        assert (result["datasets"]["windsor/campaigns"]["replaced_by"]
+                == "google_ads_api/canonical_spend")
+        # No canonical incremental path exists for keywords — stated, not faked.
+        assert result["datasets"]["windsor/keywords"]["replaced_by"] is None
 
     def test_gclid_matches_persisted_not_skipped(self, monkeypatch):
         # PR-ADS-114: gclid/matches now has a real persistence path (closed-won
@@ -659,6 +674,14 @@ def _patch_all_datasets_success(
     """
     rows3 = _fake_rows(3)
 
+    # PR-ADS-154: the run now ABORTS before any external pull unless the
+    # database is ready, so a fixture describing a healthy run has to say the
+    # database is up. These tests are about orchestration; the readiness gate
+    # itself is proven in tests/test_pr_ads_154_incremental_sync_hotfix.py,
+    # including that a NOT-ready database reaches zero connectors.
+    monkeypatch.setattr(
+        "scheduler.incremental_sync.ensure_database_ready", lambda: (True, None))
+
     def _default_pull(*args, **kwargs):
         return _fake_rows(3)
 
@@ -780,7 +803,11 @@ def _patch_all_datasets_success(
     def _geo_recon_stub(*a, **kw):
         if source_pull:
             source_pull()  # raises in the all-fail scenario
+        # PR-ADS-154: a reconciliation that could not be PERFORMED is no longer
+        # reported as a successful step, so a healthy fixture must describe a
+        # comparison that actually happened.
         return {"status": "reconciled", "country_spend_status": "verified",
+                "reconciled": True, "geo_ready": True, "geo_gap_codes": [],
                 "missing_geo_dates": [], "reason": "reconciled"}
     monkeypatch.setattr(
         "services.google_ads_geo_sync_service.build_geo_reconciliation", _geo_recon_stub)

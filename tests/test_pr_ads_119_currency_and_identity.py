@@ -485,10 +485,39 @@ def test_fx_and_mapping_endpoints_registered():
 
 
 def test_daily_fx_sync_step_wired():
+    """The FX step runs in the daily incremental sync and stamps its own key.
+
+    PR-ADS-154: this used to grep for the literal string ``"fx/daily_rates"``.
+    That was a proxy for "the step is wired", and the label is now derived from
+    the ONE registry (``services/dataset_keys``) so the literal is gone while
+    the wiring is stronger than before. The assertion follows the call graph
+    instead — a text match would have passed on a commented-out step and failed
+    on a correctly refactored one.
+    """
+    import ast
+
+    from scheduler.incremental_sync import LABEL_FX, run_daily_incremental_sync
+    from services.dataset_keys import (
+        FX_DAILY_RATES_DATASET, FX_SOURCE, is_registered_pair,
+    )
+
     INCR = open(os.path.join(ROOT, "scheduler", "incremental_sync.py"), encoding="utf-8").read()
-    assert '"fx/daily_rates"' in INCR
     assert "def _sync_fx_rates" in INCR
     assert "ensure_fx_rates" in INCR
+
+    # The orchestration actually calls it.
+    tree = ast.parse(INCR)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "run_daily_incremental_sync")
+    called = {getattr(n.func, "id", getattr(n.func, "attr", None))
+              for n in ast.walk(fn) if isinstance(n, ast.Call)}
+    assert "_sync_fx_rates" in called
+    assert run_daily_incremental_sync is not None
+
+    # ...and it is keyed on the registered FX pair, under the same label the
+    # run report, the logs and the errors list all use.
+    assert LABEL_FX == f"{FX_SOURCE}/{FX_DAILY_RATES_DATASET}" == "fx/daily_rates"
+    assert is_registered_pair(FX_SOURCE, FX_DAILY_RATES_DATASET)
 
 
 def test_fx_connector_is_read_only():
