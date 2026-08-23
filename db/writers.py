@@ -193,9 +193,13 @@ def safe_db_error(exc: BaseException, limit: int = 300) -> str:
     connection error can carry the DSN, and a DSN carries the password, so the
     text is redacted before it travels anywhere.
 
-    Redacts DSNs, ``password=`` pairs and ``user:pass@host`` forms, then caps
-    the length so a driver's multi-kilobyte context dump cannot flood a
-    response body.
+    Redacts DSNs, libpq keyword pairs that assign a password, and
+    ``user:secret@host`` forms, then caps the length so a driver's
+    multi-kilobyte context dump cannot flood a response body.
+
+    (The keyword form is described rather than spelled: review tools mask the
+    literal as a suspected secret, which made this very sentence unreadable in
+    the PR diff. The pattern itself is in ``_DB_SECRET_RE`` above.)
     """
     text = " ".join(str(exc).split())          # collapse newlines/tabs
     text = _DB_SECRET_RE.sub("[redacted]", text)

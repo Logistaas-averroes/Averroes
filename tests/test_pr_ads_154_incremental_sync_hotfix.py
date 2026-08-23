@@ -178,8 +178,12 @@ def test_2b_a_missing_run_record_stops_the_run(monkeypatch):
     `test_a1_*` below for why that distinction cost a production run.
     """
     monkeypatch.setattr(sync, "ensure_database_ready", lambda: (True, None))
-    monkeypatch.setattr(sync.db_writers, "write_run_detailed",
-                        lambda *a, **k: (0, "value too long for type character varying(20)"))
+    # The real failure contract is `(None, error)`. A falsy 0 would also take
+    # the failure path, which is exactly why the stub should not use it: a test
+    # that passes for a reason the API cannot produce proves less than it looks.
+    monkeypatch.setattr(
+        sync.db_writers, "write_run_detailed",
+        lambda *a, **k: (None, "value too long for type character varying(20)"))
 
     out = sync.run_daily_incremental_sync(run_reason="test")
     assert out["status"] == "failed"
@@ -894,3 +898,67 @@ def test_a7_the_two_abort_reasons_stay_distinct(monkeypatch):
         assert out["datasets"] == {}
         assert out["run_id"] is None
     assert calls_unavailable == []
+
+
+def test_a8_the_readiness_detail_is_redacted_too(monkeypatch):
+    """Both abort paths must be safe, not just the one I remembered.
+
+    PR-ADS-154A redacted `write_run_detailed`'s error but left
+    `ensure_database_ready` interpolating raw exception text — and a connection
+    failure is exactly the case most likely to carry the DSN. The safety of an
+    operator-facing message must not depend on which of two failures happened
+    to occur.
+    """
+    import db.connection as conn
+
+    dsn = "postgresql://averroes:hunter2@db.internal:5432/prod"
+
+    def _boom():
+        raise RuntimeError(f'could not connect to server: "{dsn}" refused')
+
+    monkeypatch.setattr(conn, "init_pool", _boom)
+    ready, detail = sync.ensure_database_ready()
+    assert ready is False
+    assert "hunter2" not in detail
+    assert dsn not in detail
+    assert "[redacted]" in detail
+    assert "init_pool failed" in detail          # the useful part survives
+
+    # ...and the same holds for a probe that raises mid-query.
+    monkeypatch.setattr(conn, "init_pool", lambda: None)
+
+    class _BoomCursor:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, *a):
+            raise RuntimeError(f"server closed the connection to {dsn}")
+
+    class _BoomConn:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def cursor(self): return _BoomCursor()
+
+    monkeypatch.setattr(conn, "get_conn", lambda: _BoomConn())
+    ready, detail = sync.ensure_database_ready()
+    assert ready is False
+    assert "hunter2" not in detail and dsn not in detail
+    assert "[redacted]" in detail
+
+    # And the redacted detail is what reaches the report the operator reads.
+    monkeypatch.setattr(sync, "ensure_database_ready", lambda: (False, detail))
+    out = sync.run_daily_incremental_sync(run_reason="test")
+    assert "hunter2" not in json.dumps(out)
+    assert out["reason"] == "database_unavailable"
+
+
+def test_a9_both_abort_paths_route_their_detail_through_the_redactor():
+    """Asserted on the source: a new abort path must not reintroduce the gap."""
+    body = _SYNC_SRC[_SYNC_SRC.index("def ensure_database_ready"):]
+    body = body[:body.index("\ndef ", 1)]
+    code = "\n".join(ln for ln in body.splitlines()
+                     if not ln.strip().startswith("#"))
+    # Every interpolated exception is wrapped.
+    assert "{exc}" not in code, (
+        "ensure_database_ready must not interpolate a raw exception — "
+        "a connection error can carry the DSN")
+    assert code.count("safe_db_error(exc)") == 3

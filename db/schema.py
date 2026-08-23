@@ -1581,9 +1581,16 @@ DO $$
 DECLARE
   current_len INTEGER;
 BEGIN
+  -- Scoped to the ACTIVE schema. Unscoped, a database with more than one
+  -- schema (or a non-default search_path) could match a different `runs` table
+  -- and either skip the widening the real table needs or apply it blindly.
+  -- `current_schema()` is the same schema the ALTER below resolves to, so the
+  -- guard and the action can never disagree about which table they mean.
   SELECT character_maximum_length INTO current_len
     FROM information_schema.columns
-   WHERE table_name = 'runs' AND column_name = 'run_type';
+   WHERE table_schema = current_schema()
+     AND table_name = 'runs'
+     AND column_name = 'run_type';
 
   IF current_len IS NOT NULL AND current_len < 64 THEN
     ALTER TABLE runs ALTER COLUMN run_type TYPE VARCHAR(64);

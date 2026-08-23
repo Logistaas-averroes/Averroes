@@ -94,9 +94,11 @@ def _run_type_length(pg) -> int | None:
 def test_the_schema_declares_a_column_wide_enough_for_the_canonical_run_type(pg):
     """The column must fit the value the application has always written.
 
-    Asserted against the value itself rather than a hard-coded 64, so shortening
-    the column below what the scheduler emits fails here — whatever the numbers
-    happen to be.
+    Two assertions, deliberately: the PROPERTY (wide enough for whatever
+    `RUN_TYPE` currently is, so shortening the column below what the scheduler
+    emits fails here whatever the numbers happen to be), and the CONTRACT this
+    PR sets (exactly 64, so a future narrowing to some other sufficient width
+    is a decision someone has to make on purpose).
     """
     length = _run_type_length(pg)
     assert length is not None, "run_type must stay a bounded varchar, not become TEXT"
