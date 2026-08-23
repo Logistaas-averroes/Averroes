@@ -95,6 +95,43 @@ def failed_spend_chunks(customer_id: str | None, start: date, end: date) -> list
     ]
 
 
+def already_verified_chunk_keys(customer_id: str | None, start: date, end: date,
+                                chunk_months: int) -> list[str]:
+    """The backfill chunk keys this range has already PROVEN, for ``resume``.
+
+    ``run_google_ads_spend_backfill`` skips a chunk only when ``resume`` is set
+    AND a ``load_completed`` callback names it. Without that callback ``resume``
+    changes nothing and every chunk is re-fetched — so "repair only what is
+    missing" quietly became "re-fetch the whole range, every run", which is both
+    the wrong contract and a great deal of Google Ads quota.
+
+    A chunk counts as completed only when the durable ledger shows every one of
+    its days verified. Partial coverage re-fetches the whole chunk: the upsert is
+    idempotent, so redoing a little proven work is the cheap side of this trade,
+    while skipping an unproven day is the expensive one.
+
+    The keys are built with the same iteration and the same ``f"{start}:{end}"``
+    shape the backfill uses, because a key that does not match is a key that
+    never skips anything.
+    """
+    from dateutil.relativedelta import relativedelta  # noqa: PLC0415
+
+    ledger = repo.fetch_spend_coverage(start, end, customer_id)
+    if not ledger.get("available"):
+        return []
+
+    chunks = ledger.get("chunks", [])
+    keys: list[str] = []
+    cursor = start
+    step = relativedelta(months=max(1, chunk_months))
+    while cursor <= end:
+        chunk_to = min(cursor + step - relativedelta(days=1), end)
+        if analyze_coverage(cursor, chunk_to, chunks).get("complete"):
+            keys.append(f"{cursor.isoformat()}:{chunk_to.isoformat()}")
+        cursor = chunk_to + relativedelta(days=1)
+    return keys
+
+
 def verify_spend_coverage(customer_id: str | None, start: date, end: date) -> dict:
     """Re-read the durable ledger and say whether [start, end] is proven covered."""
     ledger = repo.fetch_spend_coverage(start, end, customer_id)
@@ -169,8 +206,15 @@ def repair_canonical_spend_and_fx(
     # ── 1. Retry the ledger's own failed ranges, at their recorded boundaries ──
     # Before the general backfill, because these are the chunks a general
     # backfill provably cannot fix.
+    #
+    # Runs for EVERY non-dry-run repair, resume or restart. Gating it on
+    # `resume` was wrong in the one direction that matters: `--restart` is what
+    # an operator reaches for when a range looks wrong, and it re-fetches in
+    # monthly chunks, which write different ledger keys and therefore leave the
+    # original failed 7-day rows standing. The mode most likely to be used on a
+    # damaged window was the mode that skipped the only step able to repair it.
     retried: list[dict] = []
-    if resume and not dry_run:
+    if not dry_run:
         for chunk in failed_spend_chunks(scope_customer_id, date_from, date_to):
             try:
                 outcome = run_google_ads_spend_backfill(
@@ -186,9 +230,16 @@ def repair_canonical_spend_and_fx(
                     f"retry {chunk['chunk_start']}..{chunk['chunk_end']}: {exc}")
 
     # ── 2. Backfill campaign spend across the whole requested range ───────────
+    # On resume, chunks the ledger already proves complete are skipped — which
+    # requires handing the backfill a `load_completed` callback, since `resume`
+    # alone does nothing. Step 1 has already run, so a chunk containing a
+    # just-repaired failure is re-read here and correctly seen as complete.
+    completed_keys = (already_verified_chunk_keys(
+        scope_customer_id, date_from, date_to, chunk_months) if resume else [])
     spend = run_google_ads_spend_backfill(
         date_from=date_from.isoformat(), date_to=date_to.isoformat(),
-        dry_run=dry_run, chunk_months=chunk_months, resume=resume)
+        dry_run=dry_run, chunk_months=chunk_months, resume=resume,
+        load_completed=(lambda: completed_keys) if resume else None)
     errors.extend(spend.get("errors") or [])
 
     # ── 3. FX for the same range ──────────────────────────────────────────────
@@ -232,6 +283,9 @@ def repair_canonical_spend_and_fx(
             "chunks_failed": (spend.get("summary") or {}).get("chunks_failed"),
             "rows_written": (spend.get("summary") or {}).get("rows_written"),
             "retried_failed_chunks": retried,
+            # Published so a reader can see the resume actually resumed, rather
+            # than inferring it from a low fetch count.
+            "chunks_skipped_already_verified": len(completed_keys),
         },
         "fx": {
             "rows_written": fx.get("rows_written"),

@@ -122,6 +122,7 @@ def _render(outcome: dict) -> None:
     print("-" * 68)
     print(f"  spend backfill   : {spend['status']} — "
           f"{spend['chunks_verified']} chunk(s) verified, "
+          f"{spend['chunks_skipped_already_verified']} already covered, "
           f"{spend['chunks_failed']} failed, {spend['rows_written']} row(s) written")
     if spend["retried_failed_chunks"]:
         print("  retried failures :")

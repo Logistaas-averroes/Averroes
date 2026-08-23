@@ -447,6 +447,101 @@ def test_the_repair_is_idempotent(pg, monkeypatch):
     assert total_after_first == total_after_second, "a rerun must not double-count"
 
 
+def test_restart_also_retries_the_failed_boundary_chunks(pg, monkeypatch):
+    """`--restart` must repair failed rows too — review finding on this PR.
+
+    The boundary retry was gated on `resume`, so a restart skipped it. That was
+    wrong in the one direction that matters: `--restart` is what an operator
+    reaches for when a range looks wrong, and it re-fetches in MONTHLY chunks,
+    which write different ledger keys and leave the original failed 7-day rows
+    standing. The mode most likely to be used on a damaged window was the mode
+    that skipped the only step able to repair it.
+    """
+    from services.canonical_coverage_repair_service import repair_canonical_spend_and_fx
+    from db import revenue_repository as repo
+
+    days = ["2026-01-05", "2026-02-05", "2026-03-05"]
+    _stub_google_ads_and_fx(monkeypatch, spend_days=days)
+    # A failure recorded under the scheduler's rolling 7-day chunking.
+    _coverage(_A, "2026-02-01", "2026-02-07", "failed")
+
+    out = repair_canonical_spend_and_fx(date_from=_FROM, date_to=_TO, resume=False)
+
+    assert out["spend_backfill"]["retried_failed_chunks"] == [
+        {"chunk_start": "2026-02-01", "chunk_end": "2026-02-07", "status": "success"}]
+    # The row itself is now verified, not merely superseded by a monthly chunk.
+    rows = {(c["chunk_start"], c["chunk_end"]): c["status"]
+            for c in repo.fetch_spend_coverage(_FROM, _TO, _A)["chunks"]}
+    assert rows[("2026-02-01", "2026-02-07")] == "verified"
+    assert out["coverage"]["ok"] is True
+
+
+def test_resume_skips_ranges_the_ledger_already_proves(pg, monkeypatch):
+    """`resume` must mean "repair what is missing", not "re-fetch everything".
+
+    `run_google_ads_spend_backfill` consults `resume` only when a
+    `load_completed` callback names the chunks to skip. Without one, `resume`
+    changed nothing and every run re-fetched the whole range — the wrong
+    contract, and a great deal of Google Ads quota.
+    """
+    from services.canonical_coverage_repair_service import repair_canonical_spend_and_fx
+    import services.google_ads_spend_service as spend_svc
+
+    days = ["2026-01-05", "2026-02-05", "2026-03-05"]
+    _stub_google_ads_and_fx(monkeypatch, spend_days=days)
+
+    fetched: list[tuple] = []
+    real = spend_svc.fetch_daily_spend
+    monkeypatch.setattr(spend_svc, "fetch_daily_spend",
+                        lambda s, e: (fetched.append((s, e)), real(s, e))[1])
+
+    first = repair_canonical_spend_and_fx(date_from=_FROM, date_to=_TO)
+    assert first["coverage"]["ok"] is True
+    assert len(fetched) == 3, "first pass fetches all three months"
+
+    fetched.clear()
+    second = repair_canonical_spend_and_fx(date_from=_FROM, date_to=_TO)
+    assert second["coverage"]["ok"] is True
+    assert fetched == [], "a proven range must not be re-fetched on resume"
+    assert second["spend_backfill"]["chunks_skipped_already_verified"] == 3
+
+
+def test_restart_refetches_even_a_proven_range(pg, monkeypatch):
+    """The other half of the contract: `--restart` deliberately redoes the work."""
+    from services.canonical_coverage_repair_service import repair_canonical_spend_and_fx
+    import services.google_ads_spend_service as spend_svc
+
+    days = ["2026-01-05", "2026-02-05", "2026-03-05"]
+    _stub_google_ads_and_fx(monkeypatch, spend_days=days)
+    repair_canonical_spend_and_fx(date_from=_FROM, date_to=_TO)
+
+    fetched: list[tuple] = []
+    real = spend_svc.fetch_daily_spend
+    monkeypatch.setattr(spend_svc, "fetch_daily_spend",
+                        lambda s, e: (fetched.append((s, e)), real(s, e))[1])
+
+    out = repair_canonical_spend_and_fx(date_from=_FROM, date_to=_TO, resume=False)
+    assert len(fetched) == 3, "restart re-fetches every chunk"
+    assert out["spend_backfill"]["chunks_skipped_already_verified"] == 0
+    assert out["coverage"]["ok"] is True
+
+
+def test_resume_refetches_a_partially_covered_chunk(pg, monkeypatch):
+    """Partial coverage is not proof, so the whole chunk is redone.
+
+    Redoing a little proven work is the cheap side of this trade; skipping an
+    unproven day is the expensive one.
+    """
+    from services.canonical_coverage_repair_service import already_verified_chunk_keys
+
+    # January fully verified; February only half; March untouched.
+    _coverage(_A, "2026-01-01", "2026-01-31", "verified")
+    _coverage(_A, "2026-02-01", "2026-02-14", "verified")
+
+    keys = already_verified_chunk_keys(_A, _FROM, _TO, chunk_months=1)
+    assert keys == ["2026-01-01:2026-01-31"]
+
+
 def test_a_dry_run_writes_nothing_and_is_never_ok(pg, monkeypatch):
     """A run that writes nothing proves nothing, however healthy it looks."""
     from services.canonical_coverage_repair_service import repair_canonical_spend_and_fx
