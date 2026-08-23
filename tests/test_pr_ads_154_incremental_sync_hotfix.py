@@ -169,14 +169,22 @@ def test_2_database_unavailability_fails_before_any_external_connector(monkeypat
     assert out["errors"]
 
 
-def test_2b_a_missing_run_record_is_also_a_database_failure(monkeypatch):
-    """No run row means nothing written can be attributed to this run."""
+def test_2b_a_missing_run_record_stops_the_run(monkeypatch):
+    """No run row means nothing written can be attributed to this run.
+
+    PR-ADS-154A corrected the REASON. This used to report
+    `database_unavailable`, but the readiness probe has just passed — the
+    database is demonstrably reachable and refused the row. See
+    `test_a1_*` below for why that distinction cost a production run.
+    """
     monkeypatch.setattr(sync, "ensure_database_ready", lambda: (True, None))
-    monkeypatch.setattr(sync.db_writers, "write_run", lambda *a, **k: 0)
+    monkeypatch.setattr(sync.db_writers, "write_run_detailed",
+                        lambda *a, **k: (0, "value too long for type character varying(20)"))
 
     out = sync.run_daily_incremental_sync(run_reason="test")
     assert out["status"] == "failed"
-    assert out["reason"] == sync.DB_UNAVAILABLE_REASON
+    assert out["reason"] == sync.RUN_RECORD_WRITE_FAILED_REASON
+    assert out["reason"] != sync.DB_UNAVAILABLE_REASON
     assert out["datasets"] == {}
 
 
@@ -196,7 +204,11 @@ def test_2c_readiness_is_checked_before_anything_else_in_the_run():
             if name:
                 called.append(name)
     assert "ensure_database_ready" in called
-    assert called.index("ensure_database_ready") < called.index("write_run"), (
+    # PR-ADS-154A: the run record is written through `write_run_detailed`, which
+    # reports WHY a write failed — the scheduler must distinguish "unreachable"
+    # from "refused" and `write_run` discards that.
+    assert "write_run_detailed" in called
+    assert called.index("ensure_database_ready") < called.index("write_run_detailed"), (
         "the readiness gate must precede the first durable write")
 
 
@@ -682,7 +694,7 @@ def test_10_every_operator_facing_label_matches_its_report_key():
 def test_10b_the_report_keys_are_the_labels(monkeypatch):
     """Asserted on a real run, not on the constants alone."""
     monkeypatch.setattr(sync, "ensure_database_ready", lambda: (True, None))
-    monkeypatch.setattr(sync.db_writers, "write_run", lambda *a, **k: 1)
+    monkeypatch.setattr(sync.db_writers, "write_run_detailed", lambda *a, **k: (1, None))
     monkeypatch.setattr(sync.db_writers, "update_run", lambda *a, **k: None)
     monkeypatch.setattr(sync.db_writers, "start_sync_batch", lambda **k: 1)
     monkeypatch.setattr(sync.db_writers, "finish_sync_batch", lambda **k: True)
@@ -699,3 +711,186 @@ def test_10b_the_report_keys_are_the_labels(monkeypatch):
                   sync.LABEL_DEAL_LEDGER, sync.LABEL_SOURCE_CLASSIFICATION,
                   sync.LABEL_GCLID_MATCHES):
         assert label in keys, label
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-154A — the run record is a distinct failure mode from an outage
+# ═════════════════════════════════════════════════════════════════════════════
+# Production, on the merged PR-ADS-154 (417d320): the pool initialized, the
+# probe passed, and `write_run()` failed with
+#
+#     value too long for type character varying(20)
+#
+# because `runs.run_type` was VARCHAR(20) and the scheduler's canonical run type
+# `daily_incremental_sync` is 22 characters. The run correctly stopped before
+# any external pull and correctly exited 1 — but it blamed
+# `database_unavailable`, which sent the operator to check a connection that
+# was already fine while the actual defect went unnamed.
+
+def _ready_db(monkeypatch):
+    """A database that is reachable and answering — the PR-ADS-154A premise."""
+    monkeypatch.setattr(sync, "ensure_database_ready", lambda: (True, None))
+
+
+def _forbid_all_connectors(monkeypatch) -> list[str]:
+    """Trip-wire every external seam this run could reach."""
+    calls: list[str] = []
+
+    import connectors.hubspot_pull as hubspot
+    for name in ("pull_paid_search_contacts_in_range", "pull_all_contacts_in_range",
+                 "pull_closed_won_deals_in_range", "pull_deals_with_gclid"):
+        monkeypatch.setattr(hubspot, name,
+                            lambda *a, _n=name, **k: calls.append(_n) or [])
+
+    import services.google_ads_spend_service as spend
+    monkeypatch.setattr(spend, "fetch_daily_spend",
+                        lambda *a, **k: calls.append("google_ads_spend") or {"rows": []})
+    import services.google_ads_geo_sync_service as geo
+    monkeypatch.setattr(geo, "run_google_ads_geo_sync",
+                        lambda **k: calls.append("google_ads_geo") or {"status": "success"})
+    import services.fx_service as fx
+    monkeypatch.setattr(fx, "ensure_fx_rates",
+                        lambda *a, **k: calls.append("fx") or
+                        {"rows_written": 0, "fetched": 0, "failed": []})
+    import services.mailchimp_sync_service as mc
+    monkeypatch.setattr(mc, "run_incremental",
+                        lambda *a, **k: calls.append("mailchimp") or {"status": "success"})
+    import services.hubspot_deal_sync_service as ledger
+    monkeypatch.setattr(ledger, "sync_deals",
+                        lambda **k: calls.append("deal_ledger") or {"status": "success"})
+    import services.hubspot_contact_funnel_sync_service as funnel
+    monkeypatch.setattr(funnel, "run_contact_funnel_sync",
+                        lambda **k: calls.append("contact_funnel") or {"status": "success"})
+    return calls
+
+
+def test_a1_a_rejected_run_record_is_not_reported_as_an_outage(monkeypatch):
+    """The exact production scenario, correctly classified.
+
+    "We could not reach the database" and "the database refused this row" call
+    for completely different fixes. Collapsing them into one reason is what
+    made a 20-character column look like a connectivity problem.
+    """
+    _ready_db(monkeypatch)
+    monkeypatch.setattr(
+        sync.db_writers, "write_run_detailed",
+        lambda *a, **k: (None, "value too long for type character varying(20)"))
+
+    out = sync.run_daily_incremental_sync(run_reason="test")
+
+    assert out["status"] == "failed"
+    assert out["reason"] == "run_record_write_failed"
+    assert out["reason"] != "database_unavailable"
+    assert out["run_id"] is None
+    assert out["datasets"] == {}
+    # The driver's message IS the diagnosis, so it must survive into the report.
+    assert any("character varying(20)" in e for e in out["errors"])
+
+
+def test_a2_no_external_connector_runs_when_the_run_record_fails(monkeypatch):
+    """A run that cannot be attributed must not spend quota.
+
+    The same rule as the readiness gate, at the next step down: without a run
+    row nothing this run writes can be tied to it, so pulling is expenditure
+    with nothing to show for it.
+    """
+    _ready_db(monkeypatch)
+    calls = _forbid_all_connectors(monkeypatch)
+    monkeypatch.setattr(sync.db_writers, "write_run_detailed",
+                        lambda *a, **k: (None, "refused"))
+
+    out = sync.run_daily_incremental_sync(run_reason="test")
+
+    assert calls == [], f"external work was attempted with no run record: {calls}"
+    assert out["reason"] == "run_record_write_failed"
+
+
+def test_a3_a_failed_run_record_exits_nonzero(monkeypatch, capsys):
+    """Status and exit code agree here too."""
+    monkeypatch.setattr(
+        sync, "run_daily_incremental_sync",
+        lambda **k: {"status": "failed", "reason": "run_record_write_failed",
+                     "datasets": {}})
+    assert sync.main() == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == "run_record_write_failed"
+
+
+def test_a4_a_successful_run_record_proceeds_and_emits_the_canonical_type(monkeypatch):
+    """The healthy path: the probe passes, the row lands, the run continues."""
+    _ready_db(monkeypatch)
+    written: list[dict] = []
+    monkeypatch.setattr(sync.db_writers, "write_run_detailed",
+                        lambda payload: (written.append(payload) or 4242, None))
+    monkeypatch.setattr(sync.db_writers, "update_run", lambda *a, **k: None)
+    for name in ("_sync_hubspot_contacts", "_sync_contact_funnel", "_sync_hubspot_deals",
+                 "_sync_gclid_attribution", "_sync_deal_ledger",
+                 "_sync_source_classification", "_sync_canonical_spend",
+                 "_sync_fx_rates", "_sync_canonical_geo",
+                 "_publish_geo_reconciliation", "_sync_mailchimp"):
+        monkeypatch.setattr(sync, name, lambda **k: {"status": "success"})
+
+    out = sync.run_daily_incremental_sync(run_reason="test")
+
+    assert out["status"] == "success"
+    assert out["run_id"] == 4242
+    assert out.get("reason") is None
+    assert out["datasets"], "a healthy run reports its datasets"
+    # The canonical run type is written unshortened.
+    assert written and written[0]["run_type"] == "daily_incremental_sync"
+    assert len(written[0]["run_type"]) == 22
+
+
+def test_a5_the_canonical_run_type_is_spelled_once(monkeypatch):
+    """One constant, so the value cannot drift between the writer and its tests."""
+    assert sync.RUN_TYPE == "daily_incremental_sync"
+    code = "\n".join(ln for ln in _SYNC_SRC.splitlines()
+                     if not ln.strip().startswith("#"))
+    # The literal appears only in the constant's own definition.
+    assert code.count('"daily_incremental_sync"') == 1
+    assert 'RUN_TYPE = "daily_incremental_sync"' in code
+
+
+def test_a6_the_schema_column_fits_the_canonical_run_type():
+    """A static guard beside the PostgreSQL proof.
+
+    The database suite is the real evidence, but it is skipped where a cluster
+    is unavailable — and this defect shipped precisely because nothing cheap
+    ever compared the column to the value.
+    """
+    import re
+
+    ddl = (_ROOT / "db" / "schema.py").read_text()
+    block = ddl[ddl.index("CREATE TABLE IF NOT EXISTS runs"):]
+    block = block[:block.index(");")]
+    declared = re.search(r"run_type\s+VARCHAR\((\d+)\)", block)
+    assert declared, "runs.run_type must stay a bounded varchar"
+    assert int(declared.group(1)) >= len(sync.RUN_TYPE)
+    # ...and existing databases are migrated, not left behind: CREATE TABLE IF
+    # NOT EXISTS shapes only NEW databases, which is why production kept
+    # VARCHAR(20) after the column was widened in the definition.
+    assert "ALTER TABLE runs ALTER COLUMN run_type TYPE VARCHAR(64)" in ddl
+    assert "character_maximum_length" in ddl        # guarded, so a redeploy is a no-op
+
+
+def test_a7_the_two_abort_reasons_stay_distinct(monkeypatch):
+    """Both stop before any connector; only one of them means "unreachable"."""
+    calls_unavailable = _forbid_all_connectors(monkeypatch)
+    monkeypatch.setattr(sync, "ensure_database_ready",
+                        lambda: (False, "connection pool is not available"))
+    unavailable = sync.run_daily_incremental_sync(run_reason="test")
+
+    _ready_db(monkeypatch)
+    monkeypatch.setattr(sync.db_writers, "write_run_detailed",
+                        lambda *a, **k: (None, "refused"))
+    refused = sync.run_daily_incremental_sync(run_reason="test")
+
+    assert unavailable["reason"] == "database_unavailable"
+    assert refused["reason"] == "run_record_write_failed"
+    assert unavailable["reason"] != refused["reason"]
+    # Both are failures, both report no datasets, and neither touched anything.
+    for out in (unavailable, refused):
+        assert out["status"] == "failed"
+        assert out["datasets"] == {}
+        assert out["run_id"] is None
+    assert calls_unavailable == []

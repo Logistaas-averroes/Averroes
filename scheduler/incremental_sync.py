@@ -205,7 +205,28 @@ ACTIVE_SYNC_PAIRS: tuple[tuple[str, str], ...] = (
 # Database readiness (PR-ADS-154 §1)
 # ---------------------------------------------------------------------------
 
+#: THE canonical run type this scheduler writes to `runs.run_type`.
+#:
+#: PR-ADS-154A: spelled once, and deliberately NOT shortened to fit a column.
+#: It is 22 characters, `runs.run_type` was VARCHAR(20), and the fix was to
+#: widen the column — the value is already what scheduler output, tests,
+#: monitoring and diagnostics key on, so the schema moves to the contract
+#: rather than the contract to the schema.
+RUN_TYPE = "daily_incremental_sync"
+
+#: The database could not be reached at all — no pool, or the probe failed.
 DB_UNAVAILABLE_REASON = "database_unavailable"
+
+#: The database ANSWERED and then rejected the run record. PR-ADS-154A: these
+#: two were one reason, and production paid for it. The readiness probe passed,
+#: `write_run()` failed on `value too long for type character varying(20)`, and
+#: the run reported `database_unavailable` — sending the operator to check
+#: connectivity that was already fine, while the actual defect (a schema column
+#: narrower than the value the application has always written) went unnamed.
+#:
+#: "We could not reach the database" and "the database refused this row" call
+#: for completely different fixes, so they are completely different reasons.
+RUN_RECORD_WRITE_FAILED_REASON = "run_record_write_failed"
 
 
 def ensure_database_ready() -> tuple[bool, str | None]:
@@ -259,23 +280,27 @@ def ensure_database_ready() -> tuple[bool, str | None]:
     return True, None
 
 
-def _database_unavailable_result(*, run_reason: str, started_at: str,
-                                 detail: str | None) -> dict:
+def _aborted_before_start(*, reason: str, run_reason: str, started_at: str,
+                          detail: str | None) -> dict:
     """The structured result of a run that never started.
 
     Shaped like a completed run so every consumer — the CLI, the scheduler
     wrapper, the admin trigger — reads it the same way, but with no dataset
     entries at all. An empty `datasets` map is the honest report: nothing was
     attempted, so nothing may claim a status.
+
+    ``reason`` is the machine-readable cause, and it must name what actually
+    happened: see :data:`RUN_RECORD_WRITE_FAILED_REASON`. ``detail`` carries the
+    human-readable specifics and is already redacted by
+    :func:`db.writers.safe_db_error` when it originates from a driver error.
     """
     finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    message = (f"{DB_UNAVAILABLE_REASON}: {detail}" if detail
-               else DB_UNAVAILABLE_REASON)
+    message = f"{reason}: {detail}" if detail else reason
     log.error("[incremental_sync] aborting before any external pull — %s", message)
     return {
         "status": "failed",
-        "reason": DB_UNAVAILABLE_REASON,
-        "run_type": "daily_incremental_sync",
+        "reason": reason,
+        "run_type": RUN_TYPE,
         "run_reason": run_reason,
         "run_id": None,
         "started_at": started_at,
@@ -283,6 +308,14 @@ def _database_unavailable_result(*, run_reason: str, started_at: str,
         "datasets": {},
         "errors": [message],
     }
+
+
+def _database_unavailable_result(*, run_reason: str, started_at: str,
+                                 detail: str | None) -> dict:
+    """The run could not reach the database at all."""
+    return _aborted_before_start(
+        reason=DB_UNAVAILABLE_REASON, run_reason=run_reason,
+        started_at=started_at, detail=detail)
 
 
 # ---------------------------------------------------------------------------
@@ -352,19 +385,27 @@ def run_daily_incremental_sync(
     # persistence is attributed to a real run_id (never None). The per-dataset
     # persistence guard still prevents reporting success when rows were fetched
     # but zero rows were persisted.
-    run_id = db_writers.write_run({
-        "run_type": "daily_incremental_sync",
+    run_id, run_write_error = db_writers.write_run_detailed({
+        "run_type": RUN_TYPE,
         "started_at": started_at,
         "status": "running",
     })
     # PR-ADS-154 §6: no run row means nothing this run writes can be attributed
-    # to it, and `write_run` returns a falsy id rather than raising. The
-    # readiness probe above should make this unreachable — which is precisely
-    # why reaching it is worth failing on rather than continuing past.
+    # to it, and `write_run` returns a falsy id rather than raising.
+    #
+    # PR-ADS-154A: the REASON is `run_record_write_failed`, not
+    # `database_unavailable`. The probe above just succeeded, so the database is
+    # demonstrably reachable — it answered and then rejected this row. Reporting
+    # a connectivity problem here sent an operator to check a connection that
+    # was already fine while the real defect (`runs.run_type` was VARCHAR(20);
+    # `daily_incremental_sync` is 22 characters) went unnamed. The driver's own
+    # message is carried through, redacted, because it IS the diagnosis.
     if not run_id:
-        return _database_unavailable_result(
+        return _aborted_before_start(
+            reason=RUN_RECORD_WRITE_FAILED_REASON,
             run_reason=run_reason, started_at=started_at,
-            detail="could not create a local run record (write_run returned no id)")
+            detail=(run_write_error
+                    or "write_run returned no id and no error detail"))
 
     log.info(
         "[incremental_sync] started reason=%s run_id=%s ads_lookback=%d "
@@ -483,7 +524,7 @@ def run_daily_incremental_sync(
 
     summary = {
         "status": overall_status,
-        "run_type": "daily_incremental_sync",
+        "run_type": RUN_TYPE,
         "run_reason": run_reason,
         "run_id": run_id,
         "started_at": started_at,

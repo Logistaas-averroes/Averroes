@@ -27,7 +27,18 @@ _DDL = """
 -- One row per scheduler run
 CREATE TABLE IF NOT EXISTS runs (
     id                  SERIAL PRIMARY KEY,
-    run_type            VARCHAR(20)  NOT NULL,
+    -- PR-ADS-154A: widened from VARCHAR(20). The scheduler's canonical run type
+    -- is `daily_incremental_sync` — 22 characters — so every incremental run
+    -- failed at INSERT with "value too long for type character varying(20)".
+    -- The mismatch predates PR-ADS-154; that PR surfaced it by finally
+    -- initializing the pool and requiring a durable run record before any
+    -- external pull, which turned a silent no-op into a loud failure.
+    --
+    -- 64 leaves room for descriptive machine identifiers rather than forcing
+    -- future run types to be abbreviated to fit a column. The value is what
+    -- scheduler output, tests, monitoring and diagnostics already key on, so
+    -- the column moves to the contract, not the contract to the column.
+    run_type            VARCHAR(64)  NOT NULL,
     started_at          TIMESTAMPTZ  NOT NULL,
     finished_at         TIMESTAMPTZ,
     status              VARCHAR(20)  NOT NULL,
@@ -1549,6 +1560,35 @@ BEGIN
   -- sync_batches is an append-only history with no uniqueness constraint on
   -- (source, dataset), so it relabels unconditionally.
   UPDATE sync_batches SET source = 'google_ads_api' WHERE source = 'google_ads';
+END $$;
+
+-- PR-ADS-154A: widen `runs.run_type` on databases created before the column
+-- was VARCHAR(64).
+--
+-- `CREATE TABLE IF NOT EXISTS` above only shapes NEW databases; production's
+-- `runs` table already exists, so without this migration the deployed schema
+-- keeps VARCHAR(20) and every incremental run keeps failing on INSERT. It runs
+-- through the normal `init_db()` deployment path precisely so nobody has to
+-- remember a manual production SQL command.
+--
+-- Guarded on the current length so a redeploy is a no-op rather than a
+-- repeated DDL statement. Widening a varchar is a catalog-only change in
+-- PostgreSQL — no table rewrite, no lock beyond a brief ACCESS EXCLUSIVE, and
+-- every existing row keeps its value untouched. Shorter run types ('daily',
+-- 'backfill', 'revenue_recovery') are unaffected: a wider domain still
+-- contains them.
+DO $$
+DECLARE
+  current_len INTEGER;
+BEGIN
+  SELECT character_maximum_length INTO current_len
+    FROM information_schema.columns
+   WHERE table_name = 'runs' AND column_name = 'run_type';
+
+  IF current_len IS NOT NULL AND current_len < 64 THEN
+    ALTER TABLE runs ALTER COLUMN run_type TYPE VARCHAR(64);
+    RAISE NOTICE 'runs.run_type widened from VARCHAR(%) to VARCHAR(64)', current_len;
+  END IF;
 END $$;
 """
 

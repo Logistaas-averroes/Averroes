@@ -69,7 +69,8 @@ jobs:
             tests/test_pr_ads_153e_a_pg_integration.py \
             tests/test_pr_ads_153e_a2_pg_integration.py \
             tests/test_pr_ads_153e_b_pg_integration.py \
-            tests/test_pr_ads_153f_pg_integration.py -q \
+            tests/test_pr_ads_153f_pg_integration.py \
+            tests/test_pr_ads_154a_run_type_pg_integration.py -q \
             --junitxml=pg-results.xml
 
       # A skipped database suite is not merge evidence. If the cluster could not
@@ -102,7 +103,8 @@ jobs:
                            "tests.test_pr_ads_153e_a_pg_integration",
                            "tests.test_pr_ads_153e_a2_pg_integration",
                            "tests.test_pr_ads_153e_b_pg_integration",
-                           "tests.test_pr_ads_153f_pg_integration"):
+                           "tests.test_pr_ads_153f_pg_integration",
+                 "tests.test_pr_ads_154a_run_type_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):
                   sys.exit(f"{required} contributed no test cases — it was "
