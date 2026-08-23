@@ -307,6 +307,19 @@ def _aborted_before_start(*, reason: str, run_reason: str, started_at: str,
     log.error("[incremental_sync] aborting before any external pull — %s", message)
     return {
         "status": "failed",
+        "execution_status": "failed",
+        # PR-ADS-154B §3: a run that never started learned nothing about the
+        # data, so truth is UNKNOWN — not `not_ready`, which would report a
+        # finding about canonical completeness that nobody established. Present
+        # on this path too, so a consumer can read the same keys from any result
+        # instead of testing which shape it got.
+        "truth_status": TRUTH_UNKNOWN,
+        "campaign_coverage_complete": False,
+        "fx_coverage_complete": False,
+        "geo_coverage_complete": False,
+        "geo_reconciled": False,
+        "geo_ready": False,
+        "gap_codes": [reason],
         "reason": reason,
         "run_type": RUN_TYPE,
         "run_reason": run_reason,
@@ -522,6 +535,11 @@ def run_daily_incremental_sync(
     finished_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     overall_status = _overall_status(datasets)
+    # PR-ADS-154B §3: execution health and truth readiness are different
+    # questions and are now answered separately. `status` keeps its meaning
+    # exactly — every dataset that ran, ran cleanly — so nothing downstream that
+    # reads it changes behaviour.
+    truth = build_truth_block(datasets)
 
     # Reflect the true final state on the local run record.
     db_writers.update_run(run_id, {
@@ -532,6 +550,12 @@ def run_daily_incremental_sync(
 
     summary = {
         "status": overall_status,
+        # The same verdict under an unambiguous name. `status` is retained
+        # because callers, the CLI exit code and the deployment checks all read
+        # it; `execution_status` exists so a reader never has to guess which of
+        # the two questions it was answering.
+        "execution_status": overall_status,
+        **truth,
         "run_type": RUN_TYPE,
         "run_reason": run_reason,
         "run_id": run_id,
@@ -547,8 +571,10 @@ def run_daily_incremental_sync(
     }
 
     log.info(
-        "[incremental_sync] finished status=%s datasets=%s errors=%d",
-        overall_status, list(datasets.keys()), len(errors),
+        "[incremental_sync] finished execution_status=%s truth_status=%s "
+        "geo_ready=%s gaps=%s datasets=%s errors=%d",
+        overall_status, truth["truth_status"], truth["geo_ready"],
+        truth["gap_codes"], list(datasets.keys()), len(errors),
     )
     return summary
 
@@ -1232,6 +1258,16 @@ def _publish_geo_reconciliation(*, errors: list) -> dict:
             "geo_gap_codes": recon.get("geo_gap_codes") or [],
             "missing_geo_dates": len(recon.get("missing_geo_dates") or []),
             "reason": recon.get("reason"),
+            # PR-ADS-154B §3 — the three coverage facts behind the verdict, so a
+            # reader can see WHICH input is short without opening the database.
+            # `mismatch` alone never said whether the totals genuinely disagree
+            # or whether one of them was measured over a half-fetched range.
+            "campaign_coverage_complete": recon.get("coverage_status") == "complete",
+            "fx_coverage_complete": recon.get("fx_coverage_status") == "complete",
+            "geo_coverage_complete": bool(recon.get("geo_coverage_complete")),
+            # PR-ADS-154B §2.
+            "comparison_like_for_like": bool(recon.get("comparison_like_for_like")),
+            "scope_customer_id": recon.get("scope_customer_id"),
         }
         if result["status"] == "failed":
             err = (f"{LABEL_GEO_RECONCILIATION}: could not be evaluated "
@@ -1257,6 +1293,72 @@ def _publish_geo_reconciliation(*, errors: list) -> dict:
 #: good (PR-ADS-154). Neither may count as a success, because neither did
 #: anything that could have succeeded.
 NON_VOTING_STATUSES = frozenset({"skipped", "retired"})
+
+
+#: Truth-readiness verdicts. `ready` means the canonical dataset is complete AND
+#: reconciled; `not_ready` means it demonstrably is not; `unknown` means the
+#: evaluation could not be performed, which is not the same as either.
+TRUTH_READY = "ready"
+TRUTH_NOT_READY = "not_ready"
+TRUTH_UNKNOWN = "unknown"
+
+
+def build_truth_block(datasets: dict) -> dict:
+    """Summarise whether the canonical dataset is TRUE, not whether the run WORKED.
+
+    PR-ADS-154B §3. These were one field. ``status`` votes on per-dataset
+    execution — did each step run without an operational error — and geo
+    reconciliation deliberately reports ``success`` when it performs the
+    comparison and the totals disagree, because an honest disagreement is a
+    working step reporting a real answer.
+
+    Both of those are right, and together they produced ``status: success`` on a
+    run whose country spend was ``unavailable``, whose campaign and FX coverage
+    were incomplete, and whose geo did not reconcile. Nothing lied; the question
+    "did the pipeline run?" was simply being read as "is the data usable?".
+
+    So the run now answers both, separately. ``execution_status`` keeps its exact
+    meaning. ``truth_status`` is new and answers the second question, and
+    ``geo_ready`` stays False unless every coverage and reconciliation condition
+    holds — it is derived from the shared gate's verdict, never recomputed here.
+
+    ``unknown`` is a real third state: a run that never reached the
+    reconciliation step knows nothing about the data, and reporting that as
+    ``not_ready`` would claim a finding nobody made.
+    """
+    recon = datasets.get(LABEL_GEO_RECONCILIATION) or {}
+    evaluated = bool(recon.get("available"))
+
+    campaign_ok = bool(recon.get("campaign_coverage_complete"))
+    fx_ok = bool(recon.get("fx_coverage_complete"))
+    geo_cov_ok = bool(recon.get("geo_coverage_complete"))
+    reconciled = bool(recon.get("reconciled"))
+    geo_ready = bool(recon.get("geo_ready"))
+
+    gap_codes = list(recon.get("geo_gap_codes") or [])
+    if not evaluated and not gap_codes:
+        # The step did not produce a verdict at all. Say which, rather than
+        # publishing an empty gap list that reads like "no problems found".
+        gap_codes = [recon.get("reason") or "geo_reconciliation_not_evaluated"]
+
+    if not evaluated:
+        truth_status = TRUTH_UNKNOWN
+    elif geo_ready and campaign_ok and fx_ok and geo_cov_ok and reconciled:
+        truth_status = TRUTH_READY
+    else:
+        truth_status = TRUTH_NOT_READY
+
+    return {
+        "truth_status": truth_status,
+        "campaign_coverage_complete": campaign_ok,
+        "fx_coverage_complete": fx_ok,
+        "geo_coverage_complete": geo_cov_ok,
+        "geo_reconciled": reconciled,
+        # Never True while any condition above is False: this is the shared
+        # gate's verdict, and the gate already requires every one of them.
+        "geo_ready": geo_ready and truth_status == TRUTH_READY,
+        "gap_codes": [] if truth_status == TRUTH_READY else gap_codes,
+    }
 
 
 def _overall_status(datasets: dict) -> str:

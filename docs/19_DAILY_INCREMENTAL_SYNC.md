@@ -136,6 +136,57 @@ These windows are intentionally overlapping: data from the last N days is
 re-pulled each day.  Writers use upsert semantics so re-pulling does not
 duplicate rows.
 
+### A rolling window maintains history; it cannot create it (PR-ADS-154B)
+
+Canonical campaign spend and FX both refresh over a **7-day** rolling window,
+because Google Ads restates recent spend. That is the right maintenance
+behaviour and it is not a bootstrap: on `current_quarter`, `ytd` or `all_time`,
+seven proven days can never make the coverage ledger complete. Those windows
+therefore report `campaign_coverage_incomplete` and `fx_coverage_incomplete`
+**however many times the daily sync succeeds** — the daily run is working
+exactly as designed and the window still cannot be trusted.
+
+Each canonical dataset needs one deliberate historical pass, run as a command:
+
+| Dataset | Bootstrap / repair command |
+|---|---|
+| canonical geo | `python -m scripts.backfill_canonical_geo` (PR-ADS-153F) |
+| canonical campaign spend + FX | `python -m scripts.backfill_canonical_spend_fx` (PR-ADS-154B) |
+
+Both are resumable, both verify against the durable ledger afterwards, and both
+exit non-zero unless coverage is **proven** complete. Neither contains ingestion
+logic of its own — they call the same functions the scheduler calls.
+
+```bash
+# Repair a window, then prove it. Exit 0 ONLY when both coverage sides are complete.
+python -m scripts.backfill_canonical_spend_fx --window current_quarter --json > /tmp/repair.json; rc=$?
+cat /tmp/repair.json
+echo "EXIT_CODE=$rc"
+```
+
+`--window` resolves through the same `_window_bounds` and the same account time
+zone the geo reconciliation uses, so the repaired range is the range the gate
+measures. Explicit `--from` / `--to` are both **inclusive**, matching every
+coverage query's `spend_date >= start AND spend_date <= end`.
+
+`--dry-run` never exits 0: it writes nothing, so it proves nothing.
+
+#### A failed coverage chunk is repaired, not stranded
+
+`google_ads_spend_coverage` is UNIQUE on `(customer_id, chunk_start, chunk_end)`,
+so a `failed` row is only ever flipped to `verified` by a re-fetch **at its own
+boundaries**. A chunk that failed as the scheduler's rolling 7-day range is
+never rewritten by a monthly backfill — the row survives.
+
+Two changes make that recoverable without manual SQL:
+
+1. the repair command retries the ledger's failed ranges at their **recorded**
+   boundaries before doing anything else;
+2. a failed chunk is fatal only while its dates are still unproven. One whose
+   every day is covered by verified chunks is reported as
+   `superseded_failed_chunks` and no longer blocks — the dates *were* fetched.
+   A failed chunk with even one uncovered day stays fatal.
+
 ## Freshness Metadata
 
 Dataset freshness (in `sync_state` table) is updated **only after successful
@@ -365,3 +416,79 @@ a varchar is a catalog-only change in PostgreSQL: no table rewrite, and every
 existing row — `daily`, `backfill`, `revenue_recovery` — keeps its value.
 
 No manual production SQL is required.
+
+## Execution health is not truth readiness (PR-ADS-154B)
+
+The run answers **two** questions, and it used to publish one number for both.
+
+| Field | Question | Meaning |
+|---|---|---|
+| `status` / `execution_status` | Did the pipeline run? | every dataset that ran, ran cleanly |
+| `truth_status` | Is the canonical dataset usable? | `ready` \| `not_ready` \| `unknown` |
+
+Both were right on their own terms, and together they produced `status: success`
+on a run whose country spend was `unavailable`, whose campaign and FX coverage
+were incomplete, and whose geo did not reconcile. Nothing lied: geo
+reconciliation deliberately reports `success` when it *performs* the comparison
+and the totals disagree, because an honest disagreement is a working step
+returning a real answer. The question "did it run?" was simply being read as "is
+the data true?".
+
+Alongside `truth_status` the summary publishes the facts behind it, so no
+consumer has to re-derive them:
+
+```json
+{
+  "status": "success",
+  "execution_status": "success",
+  "truth_status": "not_ready",
+  "campaign_coverage_complete": false,
+  "fx_coverage_complete": false,
+  "geo_coverage_complete": true,
+  "geo_reconciled": false,
+  "geo_ready": false,
+  "gap_codes": ["campaign_coverage_incomplete", "fx_coverage_incomplete"]
+}
+```
+
+`geo_ready` is never `true` unless every coverage and reconciliation condition
+holds. It is the shared gate's verdict
+(`google_ads_geo_sync_service.country_geo_ready`), never recomputed locally.
+
+`unknown` is a real third state, not a softer `not_ready`: a run that aborted
+before the reconciliation step — or never reached it — learned nothing about the
+data, and reporting `not_ready` would claim a finding nobody made. Every result
+carries the same keys, including the abort paths, so a consumer never tests
+which shape it received.
+
+**The exit code still follows `execution_status` only.** A run that ingests
+cleanly over incomplete history is not a failed run, and making it exit non-zero
+would train operators to ignore a signal that means "the pipeline is broken".
+Truth readiness is asserted by the post-deployment validation instead.
+
+## Like-for-like reconciliation (PR-ADS-154B)
+
+A geo↔campaign comparison is only a finding about the data if both sides were
+measured over the same thing. The window and time zone match by construction —
+one `_window_bounds` call feeds both queries. Scope did not:
+
+- `google_ads_campaign_daily_spend`, `google_ads_geo_daily_spend` and
+  `google_ads_spend_coverage` all key on `customer_id`, and all three were read
+  **unscoped**, while `fetch_geo_coverage` has been customer-scoped since
+  PR-ADS-153F. A database holding more than one account compared all-accounts
+  totals against coverage proven for one.
+- `MIN(currency_code)` named one member of a possibly-mixed set, and neither
+  query converts, so GBP and EUR micros were summed as though commensurate.
+
+All four reads now take an optional `customer_id` (unscoped callers unchanged),
+the reconciliation resolves the configured account **first** and applies it to
+every side, and `customer_count` / `currency_count` report how big each set
+actually is.
+
+When the two sides are not comparable the verdict is `unavailable` with
+`comparison_not_like_for_like` — never `mismatch`. A mismatch asserts that the
+data disagrees; this is a disagreement about what was measured, and reporting it
+as the former sends someone hunting a sync bug that is not there. Matching
+totals do not rescue it either: agreement between two figures over different
+scopes is not evidence, for the same reason PR-ADS-153F required every gate
+input to be proven.

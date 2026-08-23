@@ -89,7 +89,7 @@ def _patch_global_competitors(monkeypatch, svc, *, coverage=None, duplicates=Non
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_spend_duplicate_dates", _dup)
     monkeypatch.setattr(
         "db.revenue_repository.fetch_spend_coverage",
-        lambda s, e: {"available": True, "chunks": coverage if coverage is not None else [
+        lambda s, e, *_a, **_k: {"available": True, "chunks": coverage if coverage is not None else [
             {"chunk_start": "2026-01-01", "chunk_end": "2026-06-30", "status": "verified"}]})
     monkeypatch.setattr(
         "db.revenue_repository.fetch_campaign_identity",

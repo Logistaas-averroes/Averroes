@@ -198,18 +198,18 @@ def _patch_durable(monkeypatch, *, coverage=None, won_rows=None, canonical=None,
                         lambda: {"available": True, "datasets": {}})
     monkeypatch.setattr(
         repo, "fetch_canonical_campaign_spend",
-        lambda s, e: dict(canon),
+        lambda s, e, *_a, **_k: dict(canon),
     )
     # PR-ADS-124 canonical Google Ads geo source (reconciliation + country rows).
     monkeypatch.setattr(
-        repo, "fetch_geo_daily_spend_total", lambda s, e: dict(geo_tot),
+        repo, "fetch_geo_daily_spend_total", lambda s, e, *_a, **_k: dict(geo_tot),
     )
     monkeypatch.setattr(
         repo, "fetch_geo_daily_spend_by_country", lambda s, e: dict(geo_country),
     )
     monkeypatch.setattr(
         repo, "fetch_spend_coverage",
-        lambda s, e: {"available": True, "chunks": list(chunks)},
+        lambda s, e, *_a, **_k: {"available": True, "chunks": list(chunks)},
     )
     monkeypatch.setattr(
         repo, "fetch_geo_coverage",

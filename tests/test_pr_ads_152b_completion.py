@@ -380,7 +380,7 @@ def test_identity_contract_unavailable_returns_no_fallback(monkeypatch):
     # Canonical spend source unavailable → identity_available False, unavailable
     # resolver (NOT the safe-label default).
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": False, "rows": []})
+                        lambda s, e, *_a, **_k: {"available": False, "rows": []})
     resolver, available = canon._build_identity_resolver(date(2026, 7, 1), date(2026, 7, 23))
     assert available is False
     assert resolver is canon.unavailable_campaign_resolver
@@ -394,7 +394,7 @@ def test_build_nulls_campaign_attributable_when_identity_unavailable(monkeypatch
         lambda start, end: {"available": True, "lead_rows": rows,
                             "exclusions": set(), "classification": []})
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": False, "rows": []})
+                        lambda s, e, *_a, **_k: {"available": False, "rows": []})
     out = canon.build(canon.WINDOW_BUSINESS, "current_quarter",
                       now=datetime(2026, 7, 23, tzinfo=timezone.utc))
     # google_ads_source stays available; campaign_attributable is null, not 0.

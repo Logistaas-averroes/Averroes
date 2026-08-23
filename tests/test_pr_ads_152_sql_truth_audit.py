@@ -250,7 +250,7 @@ def test_endpoint_returns_audit_with_admin_token(monkeypatch):
     # Google Ads campaign id via the real identity contract; the other six do not.
     monkeypatch.setattr(
         "db.revenue_repository.fetch_canonical_campaign_spend",
-        lambda s, e: {"customer_id": "X", "rows": [{"campaign_id": "1", "campaign_name": "Brand - US"}]})
+        lambda s, e, *_a, **_k: {"customer_id": "X", "rows": [{"campaign_id": "1", "campaign_name": "Brand - US"}]})
     monkeypatch.setattr(
         "db.revenue_repository.fetch_campaign_identity",
         lambda cid=None: {"available": True, "mappings": []})

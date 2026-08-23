@@ -89,13 +89,13 @@ def test_account_time_zone_controls_window_boundary():
 def _patch_audit(monkeypatch, *, canonical, account, coverage=None, tz="Europe/London"):
     svc = _load_spend()
     monkeypatch.setattr("db.revenue_repository.fetch_account_time_zone", lambda: tz)
-    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
+    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
     monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage",
-                        lambda s, e: {"available": True, "chunks": coverage or [
+                        lambda s, e, *_a, **_k: {"available": True, "chunks": coverage or [
                             {"chunk_start": "2026-04-01", "chunk_end": "2026-06-23", "status": "verified"}]})
     monkeypatch.setattr("db.revenue_repository.fetch_geo_spend_total", lambda s, e: {"available": True, "total_spend": 19090.30})
     monkeypatch.setattr("db.revenue_repository.fetch_account_daily_spend_total", lambda s, e: account)
-    monkeypatch.setattr("db.revenue_repository.fetch_fx_coverage", lambda s, e, b, q="USD": {"available": True, "complete": True, "missing_dates": []})
+    monkeypatch.setattr("db.revenue_repository.fetch_fx_coverage", lambda s, e, b, q="USD", *_a, **_k: {"available": True, "complete": True, "missing_dates": []})
     monkeypatch.setattr(svc, "fetch_daily_spend", lambda a, b: {"rows": []})
     return svc
 
@@ -190,8 +190,8 @@ def _patch_revattr(monkeypatch, *, canonical, coverage, revenue_rows, identity=N
         patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
         monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
-        monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
-        monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e: {"available": True, "chunks": coverage})
+        monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
+        monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": coverage})
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity",
                             lambda cid=None: identity or {"available": True, "mappings": []})
     except (ImportError, AttributeError) as exc:

@@ -62,7 +62,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -70,7 +70,8 @@ jobs:
             tests/test_pr_ads_153e_a2_pg_integration.py \
             tests/test_pr_ads_153e_b_pg_integration.py \
             tests/test_pr_ads_153f_pg_integration.py \
-            tests/test_pr_ads_154a_run_type_pg_integration.py -q \
+            tests/test_pr_ads_154a_run_type_pg_integration.py \
+            tests/test_pr_ads_154b_coverage_repair_pg.py -q \
             --junitxml=pg-results.xml
 
       # A skipped database suite is not merge evidence. If the cluster could not
@@ -104,7 +105,8 @@ jobs:
                            "tests.test_pr_ads_153e_a2_pg_integration",
                            "tests.test_pr_ads_153e_b_pg_integration",
                            "tests.test_pr_ads_153f_pg_integration",
-                 "tests.test_pr_ads_154a_run_type_pg_integration"):
+                           "tests.test_pr_ads_154a_run_type_pg_integration",
+                           "tests.test_pr_ads_154b_coverage_repair_pg"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):
                   sys.exit(f"{required} contributed no test cases — it was "
@@ -115,7 +117,7 @@ jobs:
       # The 153E-B contract suite is the CUTOVER guard: it fails CI if a
       # migrated consumer reaches for a retired legacy revenue table or
       # provider again, or stops reading the one shared canonical contract.
-      - name: Contract tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154)
+      - name: Contract tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154 + 154B)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_waste_consolidation.py \
@@ -124,7 +126,9 @@ jobs:
             tests/test_pr_ads_153e_b_consumer_cutover.py \
             tests/test_pr_ads_153f_country_geo_truth.py \
             tests/test_pr_ads_154_incremental_sync_hotfix.py \
-            tests/test_daily_incremental_sync.py -q
+            tests/test_daily_incremental_sync.py \
+            tests/test_pr_ads_154b_truth_readiness.py \
+            tests/test_pr_ads_129_roas_availability_geo_reconciliation.py -q
 
       - name: Full suite (known-failing-on-main deselected)
         run: |

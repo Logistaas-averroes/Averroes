@@ -192,6 +192,10 @@ def _spend_truth_block(core: dict) -> dict:
         geo_failed_chunks=health.get("failed_geo_dates") or [],
         missing_geo_dates=health.get("missing_geo_dates") or [],
         campaigns_missing_geo=health.get("campaigns_missing_geo") or [],
+        # PR-ADS-154B §2, read fail-CLOSED for the same reason as the three
+        # above: absent evidence that the two sides were measured at the same
+        # scope is not evidence that they were.
+        comparison_like_for_like=(health.get("comparison_like_for_like") is True),
     )
     country_roas_unblockable = geo_gate.country_geo_ready(country_spend_status)
 

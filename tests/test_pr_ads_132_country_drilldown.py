@@ -118,7 +118,7 @@ DB_ROWS = [
 
 def _patch_identity(monkeypatch):
     import db.revenue_repository as repo
-    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: {
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: {
         "available": True, "customer_id": "111",
         "rows": [{"campaign_name": "Mexico, Chile, Colombia"},
                  {"campaign_name": "Gulf"}, {"campaign_name": "Europe"}]})

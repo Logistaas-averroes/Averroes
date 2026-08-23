@@ -111,7 +111,7 @@ def _patch(monkeypatch, agg, *, waste_rows=None, reviews=None, sql_attr=None):
                             "source_systems": ["google_ads_api"],
                         } for g in agg["rows"]]})
     monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": True, "customer_id": "c1",
+                        lambda s, e, *_a, **_k: {"available": True, "customer_id": "c1",
                                       "currency_code": "GBP",
                                       "reporting_currency": "USD",
                                       "fx_complete": True, "fx_missing_days": 0,
@@ -126,7 +126,7 @@ def _patch(monkeypatch, agg, *, waste_rows=None, reviews=None, sql_attr=None):
     monkeypatch.setattr(st_repo, "fetch_latest_waste_classification",
                         lambda *a, **k: {"available": True, "row": None})
     monkeypatch.setattr(revenue_repo, "fetch_fx_coverage",
-                        lambda s, e, b, q: {"available": True, "complete": True,
+                        lambda s, e, b, q, *_a, **_k: {"available": True, "complete": True,
                                             "spend_days": 7, "covered_days": 7,
                                             "missing_dates": []})
 

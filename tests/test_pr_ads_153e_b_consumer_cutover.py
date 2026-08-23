@@ -183,11 +183,11 @@ def _patch_business_total_stack(monkeypatch, rows=None, *, available=True):
     monkeypatch.setattr(repo, "fetch_sql_lead_details",
                         lambda s, e: {"available": True, "rows": []})
     monkeypatch.setattr(repo, "fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": False, "rows": []})
+                        lambda s, e, *_a, **_k: {"available": False, "rows": []})
     monkeypatch.setattr(repo, "fetch_spend_coverage",
-                        lambda s, e: {"available": True, "chunks": []})
+                        lambda s, e, *_a, **_k: {"available": True, "chunks": []})
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_total",
-                        lambda s, e: {"available": False, "has_rows": False})
+                        lambda s, e, *_a, **_k: {"available": False, "has_rows": False})
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_by_country",
                         lambda s, e: {"available": False, "has_rows": False, "rows": []})
     monkeypatch.setattr(repo, "fetch_campaign_identity",

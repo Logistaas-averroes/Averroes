@@ -698,7 +698,7 @@ def test_14_the_drilldown_matches_on_the_same_canonical_key(monkeypatch):
 
     patch_canonical_ledger(monkeypatch, _COUNTRY_DEALS)
     monkeypatch.setattr(svc.repo, "fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": False})
+                        lambda s, e, *_a, **_k: {"available": False})
 
     # Both spellings open the same drawer, holding the same two deals.
     for label in ("United Arab Emirates", "UAE"):
@@ -913,6 +913,8 @@ _PROVEN = {
     "geo_failed_chunks": [],
     "missing_geo_dates": [],
     "campaigns_missing_geo": [],
+    # PR-ADS-154B §2 — both totals measured over the same account and currency.
+    "comparison_like_for_like": True,
 }
 _PERFECT = {"reconciled": True, "residual_eligible": False, **_PROVEN}
 
@@ -1369,19 +1371,19 @@ def _recon(monkeypatch, *, canonical_total, geo_available=True, geo_has_rows=Fal
     """Drive `build_geo_reconciliation` over one explicit evidence set."""
     repo = geo.repo
     monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "Europe/London")
-    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: {
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: {
         "available": True, "total_spend": canonical_total, "currency_code": "GBP",
         "customer_id": "cust-1", "coverage_start": "2026-01-01",
         "coverage_end": "2026-06-30"})
-    monkeypatch.setattr(repo, "fetch_geo_daily_spend_total", lambda s, e: {
+    monkeypatch.setattr(repo, "fetch_geo_daily_spend_total", lambda s, e, *_a, **_k: {
         "available": geo_available, "has_rows": geo_has_rows,
         "total_spend": geo_total, "rows_counted": 1 if geo_has_rows else 0,
         "country_count": 1 if geo_has_rows else 0})
-    monkeypatch.setattr(repo, "fetch_spend_coverage", lambda s, e: {
+    monkeypatch.setattr(repo, "fetch_spend_coverage", lambda s, e, *_a, **_k: {
         "available": True, "chunks": [
             {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01",
              "status": "verified", "rows_written": 1, "cost_micros_total": 1}]})
-    monkeypatch.setattr(repo, "fetch_fx_coverage", lambda s, e, c: {"complete": True})
+    monkeypatch.setattr(repo, "fetch_fx_coverage", lambda s, e, c, *_a, **_k: {"complete": True})
     monkeypatch.setattr(repo, "fetch_geo_reconciliation_breakdown", lambda s, e: {
         "available": True, "daily": [], "by_campaign": [],
         "unmapped_geo_native": 0.0, "campaign_rows_counted": 0})
@@ -1501,7 +1503,11 @@ def test_f2_3_every_production_caller_passes_the_complete_evidence_set():
     required = {"reconciled", "residual_eligible", "campaign_spend_readable",
                 "campaign_coverage_complete", "fx_complete", "geo_readable",
                 "geo_coverage_readable", "geo_coverage_complete",
-                "geo_failed_chunks", "missing_geo_dates", "campaigns_missing_geo"}
+                "geo_failed_chunks", "missing_geo_dates", "campaigns_missing_geo",
+                # PR-ADS-154B §2 — were the two totals even measured at the same
+                # scope? A caller that omits it now raises at the call site; this
+                # says so in review instead.
+                "comparison_like_for_like"}
     seen = 0
     for src in (_GEO_SRC, _MART_SRC):
         for node in ast.walk(ast.parse(src)):

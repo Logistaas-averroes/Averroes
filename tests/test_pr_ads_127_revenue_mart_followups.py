@@ -110,7 +110,7 @@ def test_country_unavailable_uses_no_geo_wording(monkeypatch):
     t125._patch_durable(monkeypatch)
     # Canonical campaign spend unreachable -> reconciliation is None -> country
     # spend status "unavailable" (no geo to reconcile), with revenue still ready.
-    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: {"available": False})
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: {"available": False})
     from services.revenue_decision_mart import build_revenue_decision_mart
     mart = build_revenue_decision_mart(view="country", window=t125.WINDOW, now=t125.NOW)
     assert mart["spend_truth"]["country_spend_status"] == "unavailable"

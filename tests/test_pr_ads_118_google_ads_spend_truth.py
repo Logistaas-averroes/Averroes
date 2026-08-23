@@ -96,7 +96,7 @@ def test_audit_passes_window_bounds(monkeypatch):
                 "coverage_start": None, "coverage_end": None}
 
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", cap)
-    monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e: {"available": True, "chunks": []})
+    monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": []})
     monkeypatch.setattr("db.revenue_repository.fetch_geo_spend_total", lambda s, e: {"available": True, "total_spend": 0.0})
     monkeypatch.setattr(svc, "fetch_daily_spend", lambda a, b: {"rows": []})
     svc.build_google_ads_spend_audit("current_quarter", now=_at("2026-06-22"))
@@ -112,9 +112,9 @@ def test_audit_passes_window_bounds(monkeypatch):
 def _patch_audit(monkeypatch, *, canonical=None, coverage=None, geo=None, api_rows=None):
     svc = _load_spend()
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend",
-                        lambda s, e: canonical or {"available": False, "rows": []})
+                        lambda s, e, *_a, **_k: canonical or {"available": False, "rows": []})
     monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage",
-                        lambda s, e: {"available": True, "chunks": coverage or []})
+                        lambda s, e, *_a, **_k: {"available": True, "chunks": coverage or []})
     monkeypatch.setattr("db.revenue_repository.fetch_geo_spend_total",
                         lambda s, e: {"available": True, "total_spend": geo if geo is not None else 0.0})
     monkeypatch.setattr(svc, "fetch_daily_spend", lambda a, b: {"rows": api_rows or []})
@@ -200,8 +200,8 @@ def _patch_revattr(monkeypatch, *, canonical, geo_rows, coverage, revenue_rows):
         patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
         monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
-        monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
-        monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e: {"available": True, "chunks": coverage})
+        monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
+        monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": coverage})
     except (ImportError, AttributeError) as exc:
         pytest.skip(f"runtime deps unavailable: {exc}")
 

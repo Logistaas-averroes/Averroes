@@ -124,21 +124,50 @@ def _enumerate_days(start: date, end: date) -> set:
     return days
 
 
+def _chunk_days(chunk: dict) -> set:
+    """Every day a ledger chunk claims, as a set. Empty when unparseable."""
+    try:
+        cs = date.fromisoformat(chunk["chunk_start"])
+        ce = date.fromisoformat(chunk["chunk_end"])
+    except Exception:  # noqa: BLE001
+        return set()
+    return _enumerate_days(cs, ce) if cs <= ce else set()
+
+
 def analyze_coverage(start: date | None, end: date, chunks: list) -> dict:
     """Compute spend-coverage completeness over [start, end].
 
-    A day is covered only when it falls inside a VERIFIED chunk. Failed chunks
-    and uncovered days both make the window incomplete. For all_time (start
-    None), the effective lower bound is the earliest verified chunk.
+    A day is covered only when it falls inside a VERIFIED chunk. Uncovered days
+    make the window incomplete, and so does a failed chunk whose dates nothing
+    else has since fetched. For all_time (start None), the effective lower bound
+    is the earliest verified chunk.
+
+    PR-ADS-154B — a failed chunk is fatal only while its dates are still
+    unproven. Previously ANY failed row in the window made it permanently
+    incomplete, including one every day of which a later verified chunk covers.
+    That was unrepairable in production: the ledger is keyed
+    ``(customer_id, chunk_start, chunk_end)``, so a row can only be flipped to
+    verified by a re-fetch at its EXACT boundaries. A chunk that failed under
+    one chunking (say the scheduler's rolling 7 days) is never rewritten by a
+    backfill using another (monthly), so a single transient API error blocked
+    every window containing it forever — and clearing it by hand is precisely
+    the manual production SQL this programme forbids.
+
+    This is not a loosened gate. "Was every day in this range fetched and
+    persisted?" is the same question the missing-day computation already asks,
+    and a verified chunk covering those days is an affirmative answer to it: the
+    fetch that failed was retried and succeeded, under different boundaries. A
+    failed chunk with even ONE uncovered day stays fatal, and is reported.
     """
     verified = [c for c in chunks if c.get("status") == "verified" and c.get("chunk_start")]
-    failed = [c for c in chunks if c.get("status") != "verified"]
+    failed_rows = [c for c in chunks if c.get("status") != "verified"]
 
     if start is None:
         starts = [date.fromisoformat(c["chunk_start"]) for c in verified]
         if not starts:
             return {"complete": False, "missing_days": None, "missing_ranges": [],
-                    "failed_chunks": failed, "verified_chunks": verified}
+                    "failed_chunks": failed_rows, "superseded_failed_chunks": [],
+                    "verified_chunks": verified}
         start = min(starts)
 
     window_days = _enumerate_days(start, end)
@@ -149,8 +178,22 @@ def analyze_coverage(start: date | None, end: date, chunks: list) -> dict:
         if cs <= ce:
             covered |= _enumerate_days(cs, ce)
 
+    # Split the failed rows by whether their dates have since been proven. Only
+    # the days that fall INSIDE this window can be judged here, so a failed
+    # chunk extending past the window is assessed on its overlap: the part
+    # outside is another window's question.
+    # A chunk with NO day inside the window — an unparseable row, or one that
+    # falls entirely before an all_time start derived from the earliest verified
+    # chunk — cannot be shown to have been superseded, so it stays fatal. Both
+    # branches of an uncertainty go to the strict side.
+    unresolved, superseded = [], []
+    for c in failed_rows:
+        days = _chunk_days(c) & window_days
+        (superseded if days and not (days - covered) else unresolved).append(c)
+
     missing = sorted(window_days - covered)
-    complete = (not missing) and (not failed)
+    complete = (not missing) and (not unresolved)
+    failed = unresolved
     # Collapse missing days into contiguous ranges for display.
     ranges = []
     for d in missing:
@@ -164,6 +207,11 @@ def analyze_coverage(start: date | None, end: date, chunks: list) -> dict:
         "missing_days": len(missing),
         "missing_ranges": missing_ranges,
         "failed_chunks": [{"chunk_start": c.get("chunk_start"), "chunk_end": c.get("chunk_end")} for c in failed],
+        # Recorded, not hidden: these ranges DID fail once, and a reader auditing
+        # why coverage is complete is entitled to see that a retry under other
+        # boundaries is what settled them.
+        "superseded_failed_chunks": [
+            {"chunk_start": c.get("chunk_start"), "chunk_end": c.get("chunk_end")} for c in superseded],
         "verified_chunks": [{"chunk_start": c.get("chunk_start"), "chunk_end": c.get("chunk_end")} for c in verified],
     }
 
@@ -209,9 +257,18 @@ def classify_coverage(start: date | None, end: date, chunks: list,
         {"date_from": r.get("start"), "date_to": r.get("end")}
         for r in (cov.get("missing_ranges") or [])
     ]
+    # PR-ADS-154B: the UNRESOLVED failures, taken from `analyze_coverage` rather
+    # than recomputed from the raw rows. Recomputing them here let this function
+    # report `incomplete / failed_chunks` over a chunk `analyze_coverage` had
+    # already found fully superseded — one ledger, two verdicts, and the stricter
+    # one wins by accident of ordering rather than by decision.
     failed_chunks = [
         {"date_from": _coerce_iso(c.get("chunk_start")), "date_to": _coerce_iso(c.get("chunk_end"))}
-        for c in chunks if c.get("status") != "verified"
+        for c in (cov.get("failed_chunks") or [])
+    ]
+    superseded_failed_chunks = [
+        {"date_from": _coerce_iso(c.get("chunk_start")), "date_to": _coerce_iso(c.get("chunk_end"))}
+        for c in (cov.get("superseded_failed_chunks") or [])
     ]
     verified_zero_chunks = [
         {
@@ -255,6 +312,7 @@ def classify_coverage(start: date | None, end: date, chunks: list,
         "reason": reason,
         "missing_chunks": missing_chunks,
         "failed_chunks": failed_chunks,
+        "superseded_failed_chunks": superseded_failed_chunks,
         "verified_zero_chunks": verified_zero_chunks,
     }
 
@@ -453,12 +511,22 @@ def is_window_spend_verified(window: str, now: datetime | None = None) -> dict:
 
     Returns {available, complete, partial, local_total_spend, customer_id,
     currency_code} based ONLY on local canonical + coverage (no live API call).
+
+    PR-ADS-154B §2: the window is resolved in the ACCOUNT time zone, as
+    ``build_geo_reconciliation`` has always resolved it. This function did not
+    pass the zone, so on either side of the account's midnight the two readiness
+    surfaces answered about ranges differing by one whole day — and a boundary
+    day is exactly where coverage is most likely to be incomplete. Both reads are
+    also scoped to the configured account, for the reasons in
+    :func:`db.revenue_repository.fetch_spend_coverage`.
     """
-    _resolved, start, end = _window_bounds(window, now)
-    canonical = repo.fetch_canonical_campaign_spend(start, end)
+    account_time_zone = repo.fetch_account_time_zone()
+    _resolved, start, end = _window_bounds(window, now, account_time_zone)
+    scope_customer_id = configured_customer_id()
+    canonical = repo.fetch_canonical_campaign_spend(start, end, scope_customer_id)
     if not canonical.get("available"):
         return {"available": False, "complete": False, "partial": False}
-    coverage = repo.fetch_spend_coverage(start, end)
+    coverage = repo.fetch_spend_coverage(start, end, scope_customer_id)
     cov = analyze_coverage(start, end, coverage.get("chunks", []))
     return {
         "available": True,
