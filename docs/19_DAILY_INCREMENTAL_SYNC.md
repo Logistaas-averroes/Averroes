@@ -275,9 +275,30 @@ The entry point previously fell off the end of the module at 0, so a run
 reporting nine failed datasets was indistinguishable, to any caller, from a
 clean one — and an operator reading `echo $?` was told everything worked.
 
+### The safe operator command
+
 ```bash
-python -m scheduler.incremental_sync
-echo "exit=$?"      # 0 = every dataset that ran succeeded
+python -m scheduler.incremental_sync > /tmp/incremental.json; rc=$?
+cat /tmp/incremental.json
+echo "EXIT_CODE=$rc"
+```
+
+**Do not pipe through `tee`.** `python ... | tee file; echo $?` reports
+**`tee`'s** exit status, not Python's — and `tee` almost always succeeds, so a
+failed run reads as `0` and the exit-code fix above is defeated by the very
+command used to check it. The redirect form above captures Python's own status
+in `rc` before anything else can overwrite `$?`.
+
+If you must pipe, make the pipeline honest first:
+
+```bash
+set -o pipefail                                    # bash/zsh
+python -m scheduler.incremental_sync | tee /tmp/incremental.json
+echo "EXIT_CODE=$?"
+
+# or, without pipefail:
+python -m scheduler.incremental_sync | tee /tmp/incremental.json
+echo "EXIT_CODE=${PIPESTATUS[0]}"
 ```
 
 ## A dataset never reports success it cannot back up
@@ -288,8 +309,59 @@ landed. Each is now fail-closed:
 | Case | Before | Now |
 |---|---|---|
 | Batch could not be opened (`start_sync_batch` → 0) | skipped the finish call, returned `success` | fails **before** the external pull |
-| No local run record | continued with a falsy `run_id` | `database_unavailable` |
+| No local run record | continued with a falsy `run_id` | aborts with `run_record_write_failed` (PR-ADS-154A — see below) |
 | Source classification | reported rows PREPARED as `contacts_classified` | reports rows PERSISTED; pulled-positive/written-zero fails |
 | FX refresh | `rows_written: 0` meant both "nothing was missing" and "nothing persisted" | `fetched` separates them; fetched-positive/written-zero fails |
 | Geo reconciliation | `success` whatever the verdict | `unavailable`/`no_geo_data` fail — a comparison that could not be performed is not an answer. `mismatch` stays `success`: the step ran and disagreed, which is true |
 | Unknown dataset status | counted as not-a-failure | counts as a failure — defaulting the unknown case to "fine" is how a new outcome string turns a broken run green |
+
+
+## The run record is a distinct failure mode (PR-ADS-154A)
+
+PR-ADS-154 made the run abort when `write_run()` returned no id — but reported
+it as `database_unavailable`. Production showed why that is not good enough:
+
+```
+PostgreSQL pool initialized successfully
+write_run() failed: value too long for type character varying(20)
+status: failed   reason: database_unavailable   EXIT_CODE=1
+```
+
+The readiness probe had **passed**. The database was reachable, answered, and
+then refused the row, because `runs.run_type` was `VARCHAR(20)` while the
+scheduler's canonical run type `daily_incremental_sync` is 22 characters. The
+mismatch predates PR-ADS-154; that PR surfaced it by finally initializing the
+pool and requiring a durable run record before any external pull, which turned
+a silent no-op into a loud failure.
+
+Blaming connectivity sent the operator to check a connection that was already
+fine while the actual defect went unnamed. So there are now two reasons:
+
+| Reason | Meaning | What to fix |
+|---|---|---|
+| `database_unavailable` | no pool, or the `SELECT 1` probe failed | connectivity, `DATABASE_URL`, the server |
+| `run_record_write_failed` | the database answered and **refused the row** | whatever the message says — schema, constraint, permissions |
+
+Both stop before every external connector, both return `run_id: null` and an
+empty `datasets` map, and both exit non-zero. Only the reason differs — which
+is the entire point.
+
+The driver's own message is carried into `errors`, because it *is* the
+diagnosis. It is redacted first (`db.writers.safe_db_error`): a connection
+error can carry the DSN, and a DSN carries the password.
+
+### The column moved to the contract, not the contract to the column
+
+`run_type` is now `VARCHAR(64)`, and `daily_incremental_sync` is unchanged.
+Shortening the value to fit an outdated column would have been the cheaper
+edit and the wrong one — it is already what scheduler output, tests, monitoring
+and operational diagnostics key on.
+
+Existing databases are migrated through the normal `init_db()` deployment path
+(`ALTER TABLE runs ALTER COLUMN run_type TYPE VARCHAR(64)`), guarded on the
+current length so a redeploy issues no DDL. `CREATE TABLE IF NOT EXISTS` shapes
+only NEW databases, which is exactly why production kept `VARCHAR(20)`. Widening
+a varchar is a catalog-only change in PostgreSQL: no table rewrite, and every
+existing row — `daily`, `backfill`, `revenue_recovery` — keeps its value.
+
+No manual production SQL is required.

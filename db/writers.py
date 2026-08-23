@@ -176,16 +176,52 @@ def _map_source_type(hs_source: str, campaign_name: Optional[str]) -> str:
 # Public write functions
 # ---------------------------------------------------------------------------
 
-def write_run(run_data: dict) -> Optional[int]:
-    """Insert a run record and return its auto-generated run_id.
+_DB_SECRET_RE = re.compile(
+    r"(postgres(?:ql)?://[^\s'\"]+)"     # a DSN, credentials and all
+    r"|(password\s*=\s*\S+)"             # libpq keyword form
+    r"|(://[^/\s:]+:[^@\s]+@)",          # any user:pass@host
+    re.IGNORECASE,
+)
 
-    Returns None if the database is unavailable or the write fails.
-    Never raises.
+
+def safe_db_error(exc: BaseException, limit: int = 300) -> str:
+    """A database error message safe to put in an API response or a log.
+
+    PR-ADS-154A. Callers need to know WHY a write failed — "value too long for
+    type character varying(20)" is the entire diagnosis of the production
+    failure, and withholding it would have left an operator guessing. But a
+    connection error can carry the DSN, and a DSN carries the password, so the
+    text is redacted before it travels anywhere.
+
+    Redacts DSNs, libpq keyword pairs that assign a password, and
+    ``user:secret@host`` forms, then caps the length so a driver's
+    multi-kilobyte context dump cannot flood a response body.
+
+    (The keyword form is described rather than spelled: review tools mask the
+    literal as a suspected secret, which made this very sentence unreadable in
+    the PR diff. The pattern itself is in ``_DB_SECRET_RE`` above.)
+    """
+    text = " ".join(str(exc).split())          # collapse newlines/tabs
+    text = _DB_SECRET_RE.sub("[redacted]", text)
+    return text[:limit]
+
+
+def write_run_detailed(run_data: dict) -> tuple[Optional[int], Optional[str]]:
+    """Insert a run record, returning ``(run_id, error)``.
+
+    The full-fidelity form of :func:`write_run`, which discards the reason a
+    write failed. A caller that must decide between "the database is
+    unreachable" and "the database rejected this row" cannot do that from
+    ``None`` alone — and reporting the wrong one sends the operator to fix the
+    wrong thing, which is exactly what happened when a VARCHAR(20) rejection
+    was reported as ``database_unavailable``.
+
+    ``error`` is None on success and a redacted message otherwise. Never raises.
     """
     try:
         with get_conn() as conn:
             if conn is None:
-                return None
+                return None, "connection pool is not available"
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -210,11 +246,25 @@ def write_run(run_data: dict) -> Optional[int]:
                 )
                 row = cur.fetchone()
                 run_id = row[0] if row else None
+                if run_id is None:
+                    return None, "insert returned no run id"
                 log.info("Wrote run record to database — run_id=%s", run_id)
-                return run_id
+                return run_id, None
     except Exception as exc:  # noqa: BLE001
-        log.error("write_run failed: %s", exc)
-        return None
+        detail = safe_db_error(exc)
+        log.error("write_run failed: %s", detail)
+        return None, detail
+
+
+def write_run(run_data: dict) -> Optional[int]:
+    """Insert a run record and return its auto-generated run_id.
+
+    Returns None if the database is unavailable or the write fails.
+    Never raises. Callers that need to know WHY should use
+    :func:`write_run_detailed`.
+    """
+    run_id, _error = write_run_detailed(run_data)
+    return run_id
 
 
 def update_run(run_id: int, run_data: dict) -> None:
