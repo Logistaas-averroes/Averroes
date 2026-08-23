@@ -188,6 +188,8 @@ def _patch_recovery(monkeypatch, contacts, deals, *, leads_written=None, attr_wr
         monkeypatch.setattr("db.writers.write_leads", _write_leads)
         monkeypatch.setattr("db.writers.write_gclid_attribution", _write_gclid)
         monkeypatch.setattr("db.writers.write_run", lambda *a, **k: 777)
+        # PR-ADS-154A: the scheduler now uses `write_run_detailed`.
+        monkeypatch.setattr("db.writers.write_run_detailed", lambda *a, **k: (777, None))
         monkeypatch.setattr("db.writers.update_run", lambda *a, **k: None)
     except (ImportError, AttributeError) as exc:
         pytest.skip(f"runtime deps unavailable: {exc}")
@@ -419,6 +421,8 @@ def _patch_incremental(monkeypatch, *, contacts_write=None, contacts_pull=None):
                             lambda *a, **k: {"rows": []})
         monkeypatch.setattr("db.writers.upsert_account_daily_spend", lambda *a, **k: 0)
         monkeypatch.setattr("db.writers.write_run", lambda *a, **k: 4242)
+        # PR-ADS-154A: the scheduler now uses `write_run_detailed`.
+        monkeypatch.setattr("db.writers.write_run_detailed", lambda *a, **k: (4242, None))
         monkeypatch.setattr("db.writers.update_run", lambda *a, **k: None)
         monkeypatch.setattr("db.writers.start_sync_batch", lambda *a, **k: 1)
         monkeypatch.setattr("db.writers.finish_sync_batch", lambda *a, **k: True)

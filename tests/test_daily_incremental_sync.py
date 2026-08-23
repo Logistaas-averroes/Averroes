@@ -821,7 +821,12 @@ def _patch_all_datasets_success(
     monkeypatch.setattr("db.writers.write_gclid_attribution", lambda *a, **kw: 0)
 
     # PR-ADS-114: real local run record (returns a non-None run_id).
+    # PR-ADS-154A: the scheduler writes the run record through
+    # `write_run_detailed`, which reports WHY a write failed so an outage and a
+    # rejected row can be told apart. `write_run` is kept stubbed too, for any
+    # other caller reached from these fixtures.
     monkeypatch.setattr("db.writers.write_run", lambda *a, **kw: 1)
+    monkeypatch.setattr("db.writers.write_run_detailed", lambda *a, **kw: (1, None))
     monkeypatch.setattr("db.writers.update_run", lambda *a, **kw: None)
 
     # Sync batch tracking — stub out to return a valid batch_id
