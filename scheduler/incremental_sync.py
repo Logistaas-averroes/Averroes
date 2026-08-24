@@ -124,6 +124,32 @@ _GCLID_NOTE = (
 # `status: "retired"` is deliberately NOT `skipped` and NOT `success`: it never
 # runs again, so it must never contribute to freshness or to the overall
 # verdict, and it must never look like work that succeeded.
+#: PR-ADS-154C — datasets that still RUN but are NOT authoritative for any
+#: production metric. Distinct from `RETIRED_DATASETS`, which never run at all.
+#:
+#: The production run that motivated this register showed HubSpot 429 responses
+#: in the legacy `hubspot/deals` contact-association scan while the canonical
+#: `hubspot/deal_ledger` completed with zero association failures and zero write
+#: failures. Both statements were true, and read side by side they invited the
+#: wrong conclusion: that revenue truth had been degraded. It had not — the two
+#: datasets answer different questions, and only one of them is truth.
+#:
+#: The legacy scan is kept for migration evidence and reconciliation. Marking it
+#: here is what makes "it did not contaminate the totals" checkable from the
+#: payload rather than something a reader has to be told. Nothing is deleted.
+LEGACY_NON_AUTHORITATIVE_DATASETS: dict[str, dict] = {
+    "hubspot/deals": {
+        "authoritative": False,
+        "superseded_by": "hubspot/deal_ledger",
+        "note": ("Legacy GCLID-contact association scan. Retained for migration "
+                 "evidence and reconciliation only. It holds the GCLID-attributable "
+                 "SUBSET of deals, so it can never stand in for all-source revenue, "
+                 "and a partial or rate-limited result here does not move canonical "
+                 "truth readiness — which is derived from the canonical deal ledger "
+                 "and the geo reconciliation, never from this scan."),
+    },
+}
+
 RETIRED_DATASETS: dict[str, dict] = {
     "windsor/campaigns": {
         "status": "retired",
@@ -462,6 +488,11 @@ def run_daily_incremental_sync(
     datasets["hubspot/deals"] = _sync_hubspot_deals(
         run_id=run_id, date_from=date_from_deals, date_to=today, errors=errors,
     )
+    # PR-ADS-154C: stamp the non-authoritative classification onto the RESULT,
+    # not just the register, so a reader of the JSON can see that a degraded or
+    # rate-limited legacy scan is not a statement about revenue truth. The run
+    # that motivated this had 429s here beside a clean canonical deal ledger.
+    datasets["hubspot/deals"].update(LEGACY_NON_AUTHORITATIVE_DATASETS["hubspot/deals"])
 
     # ── gclid/matches — closed-won deals by closedate → gclid_attribution ────
     # PR-ADS-114: this dataset now has a real persistence path. It pulls

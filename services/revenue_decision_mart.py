@@ -41,7 +41,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from analysis.business_windows import resolve_window
+# PR-ADS-154C: THE canonical window anchor — the Google Ads account calendar
+# day, not UTC. See services/canonical_contract.resolve_canonical_window.
+from services.canonical_contract import resolve_canonical_window
 from analysis import country_identity, revenue_scope
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
@@ -514,7 +516,7 @@ def build_revenue_decision_mart(
         )
     # Validate / resolve the window up front so every view fails identically on a
     # bad window (shared window resolver — one truth for the business window).
-    resolve_window(window, now=now)
+    resolve_canonical_window(window, now=now)
 
     core = _canonical_core(window, now)
 
@@ -645,7 +647,7 @@ def build_revenue_performance_audit(
     Raises:
         ValueError: If ``window`` is unsupported.
     """
-    resolve_window(window, now=now)
+    resolve_canonical_window(window, now=now)
 
     core = _canonical_core(window, now)
     spend_truth = _spend_truth_block(core)

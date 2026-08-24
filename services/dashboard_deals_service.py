@@ -45,7 +45,12 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from analysis.business_windows import resolve_window
+# PR-ADS-154C: THE canonical window anchor — the Google Ads account
+# calendar day, not UTC. Sharing `resolve_window` while disagreeing about
+# which day "today" is meant two pages could resolve `current_quarter` to
+# different quarters across the account's midnight and both call it "this
+# quarter". Spend is denominated in the account day, so the account day wins.
+from services.canonical_contract import resolve_canonical_window
 from analysis.source_classification import GROUP_LABELS
 from analysis import revenue_scope
 from db import revenue_repository as repo
@@ -590,7 +595,7 @@ def build_dashboard_deals(window: str = "current_quarter",
     Raises:
         ValueError: If ``window`` is not a supported business window.
     """
-    resolve_window(window, now=now)
+    resolve_canonical_window(window, now=now)
     ref_now = _coerce_utc(now)
 
     mart = build_revenue_decision_mart(view="deal", window=window, now=now)
