@@ -317,6 +317,7 @@ def _aborted_before_start(*, reason: str, run_reason: str, started_at: str,
         "campaign_coverage_complete": False,
         "fx_coverage_complete": False,
         "geo_coverage_complete": False,
+        "comparison_like_for_like": False,
         "geo_reconciled": False,
         "geo_ready": False,
         "gap_codes": [reason],
@@ -1302,6 +1303,12 @@ TRUTH_READY = "ready"
 TRUTH_NOT_READY = "not_ready"
 TRUTH_UNKNOWN = "unknown"
 
+#: PR-ADS-154B-F1. Published when truth is not ready and nothing below could say
+#: why. A blocked verdict with an empty gap list is unactionable — the reader is
+#: told to fix something and not told what — so an inconsistency in the inputs
+#: surfaces as its own code rather than as silence.
+GAP_NOT_READY_WITHOUT_REASON = "geo_truth_not_ready_without_reason"
+
 
 def build_truth_block(datasets: dict) -> dict:
     """Summarise whether the canonical dataset is TRUE, not whether the run WORKED.
@@ -1318,13 +1325,37 @@ def build_truth_block(datasets: dict) -> dict:
     "did the pipeline run?" was simply being read as "is the data usable?".
 
     So the run now answers both, separately. ``execution_status`` keeps its exact
-    meaning. ``truth_status`` is new and answers the second question, and
-    ``geo_ready`` stays False unless every coverage and reconciliation condition
-    holds — it is derived from the shared gate's verdict, never recomputed here.
+    meaning. ``truth_status`` is new and answers the second question.
 
     ``unknown`` is a real third state: a run that never reached the
     reconciliation step knows nothing about the data, and reporting that as
     ``not_ready`` would claim a finding nobody made.
+
+    PR-ADS-154B-F1 — readiness DEFERS to the shared gate; it does not re-derive it
+    ------------------------------------------------------------------------------
+    The first version of this function required ``reconciled`` — exact equality of
+    the two totals — on top of the shared gate's ``geo_ready``. That is precisely
+    the mistake PR-ADS-153F blocker 1 removed one layer down, reintroduced one
+    layer up, and the docstring above it claimed the opposite was happening.
+
+    ``country_geo_ready`` accepts ``reconciled_with_residual``: the PR-ADS-131
+    case where Google Ads' geographic view does not assign some spend to any
+    country, the shortfall is surfaced as an explicit residual bucket, and every
+    coverage, scope and completeness condition passes. The totals genuinely do
+    not match, by design, and the country figures are still safe to use.
+    Requiring exact equality here overrode that verdict and produced the
+    incoherent state this fix exists to remove::
+
+        country_spend_status: reconciled_with_residual   geo_ready: true   (dataset)
+        truth_status: not_ready                          geo_ready: false  (top level)
+        gap_codes: []            <- blocked, with nothing to act on
+
+    So ``reconciled`` stays exactly what it was — a fact about whether the raw
+    totals matched, published unchanged, False for an accepted residual, because
+    pretending otherwise would be the opposite error. It simply stops being a
+    PRECONDITION of readiness. Readiness is: the comparison happened, at a
+    like-for-like scope, over complete coverage on all three inputs, and the
+    shared gate says the country denominator is usable, with no gaps outstanding.
     """
     recon = datasets.get(LABEL_GEO_RECONCILIATION) or {}
     evaluated = bool(recon.get("available"))
@@ -1332,7 +1363,12 @@ def build_truth_block(datasets: dict) -> dict:
     campaign_ok = bool(recon.get("campaign_coverage_complete"))
     fx_ok = bool(recon.get("fx_coverage_complete"))
     geo_cov_ok = bool(recon.get("geo_coverage_complete"))
+    like_for_like = bool(recon.get("comparison_like_for_like"))
     reconciled = bool(recon.get("reconciled"))
+    # THE shared gate's verdict — `country_geo_ready(country_spend_status)`,
+    # computed once in google_ads_geo_sync_service and passed through. Read, not
+    # recomputed: two implementations of "is this usable" is how the same window
+    # became ready on one surface and blocked on another.
     geo_ready = bool(recon.get("geo_ready"))
 
     gap_codes = list(recon.get("geo_gap_codes") or [])
@@ -1343,20 +1379,40 @@ def build_truth_block(datasets: dict) -> dict:
 
     if not evaluated:
         truth_status = TRUTH_UNKNOWN
-    elif geo_ready and campaign_ok and fx_ok and geo_cov_ok and reconciled:
+    elif (geo_ready and like_for_like and campaign_ok and fx_ok
+            and geo_cov_ok and not gap_codes):
         truth_status = TRUTH_READY
     else:
         truth_status = TRUTH_NOT_READY
+
+    # PR-ADS-154B-F1: a blocked verdict must always carry something to act on.
+    # Every path above that blocks has a reason; if the inputs ever combine so
+    # that none of them was recorded, that is itself the finding, and it is
+    # published rather than left as an empty list a reader would take for "no
+    # problems found". No credentials or connection details are involved — these
+    # are the gate's own machine codes and three booleans.
+    if truth_status != TRUTH_READY and not gap_codes:
+        gap_codes = [GAP_NOT_READY_WITHOUT_REASON]
+        log.warning(
+            "[incremental_sync] truth is %s but the reconciliation reported no "
+            "gap codes — publishing %s. geo_ready=%s like_for_like=%s "
+            "campaign_coverage=%s fx_coverage=%s geo_coverage=%s",
+            truth_status, GAP_NOT_READY_WITHOUT_REASON, geo_ready, like_for_like,
+            campaign_ok, fx_ok, geo_cov_ok)
 
     return {
         "truth_status": truth_status,
         "campaign_coverage_complete": campaign_ok,
         "fx_coverage_complete": fx_ok,
         "geo_coverage_complete": geo_cov_ok,
+        "comparison_like_for_like": like_for_like,
+        # Exact equality of the two totals, unchanged and still observable. False
+        # for an accepted residual — which is the honest answer, and no longer
+        # the same question as "is this usable".
         "geo_reconciled": reconciled,
-        # Never True while any condition above is False: this is the shared
-        # gate's verdict, and the gate already requires every one of them.
-        "geo_ready": geo_ready and truth_status == TRUTH_READY,
+        # Agrees with `truth_status` by construction, so the two can never
+        # disagree in a published payload.
+        "geo_ready": truth_status == TRUTH_READY,
         "gap_codes": [] if truth_status == TRUTH_READY else gap_codes,
     }
 

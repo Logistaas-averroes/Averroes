@@ -143,6 +143,10 @@ def _recon(**kw):
         "geo_ready": True, "geo_gap_codes": [],
         "campaign_coverage_complete": True, "fx_coverage_complete": True,
         "geo_coverage_complete": True,
+        # PR-ADS-154B-F1: readiness now requires the scope precondition
+        # explicitly, so a fully-proven fixture must state it. `_publish_geo_
+        # reconciliation` has published this field since PR-ADS-154B.
+        "comparison_like_for_like": True,
     }
     base.update(kw)
     return {sched.LABEL_GEO_RECONCILIATION: base}
