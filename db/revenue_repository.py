@@ -1149,11 +1149,20 @@ def fetch_source_deal_details(start: date | None, end: date) -> dict:
 # ── Canonical Google Ads spend truth (PR-ADS-118) ────────────────────────────
 
 
-def fetch_canonical_campaign_spend(start: date | None, end: date) -> dict:
+def fetch_canonical_campaign_spend(start: date | None, end: date,
+                                   customer_id: str | None = None) -> dict:
     """Per-campaign canonical Google Ads spend from google_ads_campaign_daily_spend.
 
     Spend truth read DIRECTLY from the canonical table (never the geo table).
     Aggregates raw cost_micros (no early rounding). Read-only.
+
+    PR-ADS-154B: ``customer_id`` scopes the read to ONE Google Ads account. The
+    table is keyed ``(customer_id, campaign_id, spend_date)``, so without it this
+    sums every account present and the result is not comparable with the geo
+    coverage ledger, which has been customer-scoped since PR-ADS-153F. Optional
+    and defaulting to None so existing account-wide callers are unchanged; the
+    geo reconciliation passes it, because that comparison is the one that must be
+    like-for-like.
 
     PR-ADS-119: each daily spend row is converted to USD using the FX rate for
     its OWN spend_date (LEFT JOIN fx_rates) — never one spot rate for the whole
@@ -1184,9 +1193,10 @@ def fetch_canonical_campaign_spend(start: date | None, end: date) -> dict:
                      AND fx.base_currency = s.currency_code
                      AND fx.quote_currency = %s
                     WHERE (%s::date IS NULL OR s.spend_date >= %s) AND s.spend_date <= %s
+                      AND (%s::text IS NULL OR s.customer_id = %s)
                     GROUP BY s.campaign_id
                     """,
-                    (FX_REPORTING_CURRENCY, start, start, end),
+                    (FX_REPORTING_CURRENCY, start, start, end, customer_id, customer_id),
                 )
                 rows = []
                 total = 0
@@ -1209,13 +1219,16 @@ def fetch_canonical_campaign_spend(start: date | None, end: date) -> dict:
                 cur.execute(
                     """
                     SELECT MIN(spend_date) AS cstart, MAX(spend_date) AS cend,
-                           MIN(customer_id) AS customer_id, MIN(currency_code) AS currency
+                           MIN(customer_id) AS customer_id, MIN(currency_code) AS currency,
+                           COUNT(DISTINCT customer_id) AS customer_count,
+                           COUNT(DISTINCT currency_code) AS currency_count
                     FROM google_ads_campaign_daily_spend
                     WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                      AND (%s::text IS NULL OR customer_id = %s)
                     """,
-                    (start, start, end),
+                    (start, start, end, customer_id, customer_id),
                 )
-                meta = cur.fetchone() or (None, None, None, None)
+                meta = cur.fetchone() or (None, None, None, None, 0, 0)
                 cur.execute(
                     """
                     SELECT COUNT(*) FROM (
@@ -1226,10 +1239,11 @@ def fetch_canonical_campaign_spend(start: date | None, end: date) -> dict:
                          AND fx.base_currency = s.currency_code
                          AND fx.quote_currency = %s
                         WHERE (%s::date IS NULL OR s.spend_date >= %s) AND s.spend_date <= %s
+                          AND (%s::text IS NULL OR s.customer_id = %s)
                           AND fx.rate IS NULL
                     ) m
                     """,
-                    (FX_REPORTING_CURRENCY, start, start, end),
+                    (FX_REPORTING_CURRENCY, start, start, end, customer_id, customer_id),
                 )
                 fx_missing_days = int((cur.fetchone() or (0,))[0] or 0)
             fx_complete = fx_missing_days == 0
@@ -1242,6 +1256,14 @@ def fetch_canonical_campaign_spend(start: date | None, end: date) -> dict:
                 "campaign_count": len(rows),
                 "customer_id": meta[2],
                 "currency_code": meta[3],
+                # PR-ADS-154B: how many DISTINCT accounts and currencies this
+                # total actually spans. `customer_id` and `currency_code` above
+                # are MIN() — one arbitrary member of the set — so on their own
+                # they describe a mixed total as though it were single-account,
+                # single-currency. A caller that must compare like with like
+                # (geo reconciliation) checks these before trusting the total.
+                "customer_count": int(meta[4] or 0),
+                "currency_count": int(meta[5] or 0),
                 "reporting_currency": FX_REPORTING_CURRENCY,
                 "fx_missing_days": fx_missing_days,
                 "fx_complete": fx_complete,
@@ -1364,11 +1386,18 @@ def fetch_lead_daily_series(start: date | None, end: date) -> dict:
         return {"available": False, "rows": []}
 
 
-def fetch_spend_coverage(start: date | None, end: date) -> dict:
+def fetch_spend_coverage(start: date | None, end: date,
+                         customer_id: str | None = None) -> dict:
     """Verified/failed Google Ads spend chunks intersecting the window. Read-only.
 
     Returns {available, chunks:[{chunk_start, chunk_end, status, rows_written,
-             cost_micros_total}]}.
+             cost_micros_total, customer_id}]}.
+
+    PR-ADS-154B: ``customer_id`` scopes the ledger read, exactly as
+    :func:`fetch_geo_coverage` has done since PR-ADS-153F. The ledger is keyed
+    ``(customer_id, chunk_start, chunk_end)``, so reading it unscoped lets one
+    account's verified chunks certify another account's window as covered.
+    Optional and defaulting to None to leave account-wide callers unchanged.
     """
     try:
         with get_conn() as conn:
@@ -1377,12 +1406,14 @@ def fetch_spend_coverage(start: date | None, end: date) -> dict:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT chunk_start, chunk_end, status, rows_written, cost_micros_total
+                    SELECT chunk_start, chunk_end, status, rows_written,
+                           cost_micros_total, customer_id
                     FROM google_ads_spend_coverage
                     WHERE chunk_end >= COALESCE(%s::date, chunk_end) AND chunk_start <= %s
+                      AND (%s::text IS NULL OR customer_id = %s)
                     ORDER BY chunk_start
                     """,
-                    (start, end),
+                    (start, end, customer_id, customer_id),
                 )
                 chunks = []
                 for r in _rows_as_dicts(cur):
@@ -1392,6 +1423,7 @@ def fetch_spend_coverage(start: date | None, end: date) -> dict:
                         "status": r.get("status"),
                         "rows_written": r.get("rows_written"),
                         "cost_micros_total": int(r.get("cost_micros_total") or 0),
+                        "customer_id": r.get("customer_id"),
                     })
             return {"available": True, "chunks": chunks}
     except Exception as exc:  # noqa: BLE001
@@ -1577,7 +1609,8 @@ def fetch_account_time_zone() -> str | None:
         return None
 
 
-def fetch_geo_daily_spend_total(start: date | None, end: date) -> dict:
+def fetch_geo_daily_spend_total(start: date | None, end: date,
+                                customer_id: str | None = None) -> dict:
     """Canonical Google Ads geo (country) daily spend total for the window.
 
     PR-ADS-124 geo-reconciliation source: the country-segmented spend total read
@@ -1603,13 +1636,16 @@ def fetch_geo_daily_spend_total(start: date | None, end: date) -> dict:
                            MIN(spend_date) AS cstart, MAX(spend_date) AS cend,
                            MIN(currency_code) AS currency,
                            MIN(customer_id) AS customer_id,
-                           MAX(updated_at) AS last_synced_at
+                           MAX(updated_at) AS last_synced_at,
+                           COUNT(DISTINCT customer_id) AS customer_count,
+                           COUNT(DISTINCT currency_code) AS currency_count
                     FROM google_ads_geo_daily_spend
                     WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                      AND (%s::text IS NULL OR customer_id = %s)
                     """,
-                    (start, start, end),
+                    (start, start, end, customer_id, customer_id),
                 )
-                row = cur.fetchone() or (0, 0, 0, None, None, None, None, None)
+                row = cur.fetchone() or (0, 0, 0, None, None, None, None, None, 0, 0)
             micros = int(row[0] or 0)
             rows_counted = int(row[1] or 0)
             return {
@@ -1624,6 +1660,10 @@ def fetch_geo_daily_spend_total(start: date | None, end: date) -> dict:
                 "currency_code": row[5],
                 "customer_id": row[6],
                 "last_synced_at": str(row[7]) if row[7] else None,
+                # PR-ADS-154B — see fetch_canonical_campaign_spend: MIN() names
+                # one member of the set, these say how big the set is.
+                "customer_count": int(row[8] or 0),
+                "currency_count": int(row[9] or 0),
             }
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_geo_daily_spend_total failed: %s", exc)
@@ -1961,13 +2001,18 @@ def fetch_campaign_spend_duplicate_dates(
 
 
 def fetch_fx_coverage(start: date | None, end: date,
-                      base_currency: str, quote_currency: str = FX_REPORTING_CURRENCY) -> dict:
+                      base_currency: str, quote_currency: str = FX_REPORTING_CURRENCY,
+                      customer_id: str | None = None) -> dict:
     """FX coverage over the canonical spend dates in the window (PR-ADS-119).
 
     Returns {available, complete, spend_days, covered_days, missing_dates}. A
     spend_date with no fx_rates row is reported missing — never converted at a
     wrong rate. With no spend dates, coverage is trivially complete (nothing to
     convert). Read-only.
+
+    PR-ADS-154B: ``customer_id`` scopes the spend dates this coverage is measured
+    over, so FX completeness answers the same question about the same account as
+    the campaign total it gates.
     """
     try:
         with get_conn() as conn:
@@ -1982,6 +2027,7 @@ def fetch_fx_coverage(start: date | None, end: date,
                         SELECT DISTINCT spend_date, currency_code
                         FROM google_ads_campaign_daily_spend
                         WHERE (%s::date IS NULL OR spend_date >= %s) AND spend_date <= %s
+                          AND (%s::text IS NULL OR customer_id = %s)
                     ) s
                     LEFT JOIN fx_rates fx
                       ON fx.rate_date = s.spend_date
@@ -1990,7 +2036,8 @@ def fetch_fx_coverage(start: date | None, end: date,
                     GROUP BY s.spend_date
                     ORDER BY s.spend_date
                     """,
-                    (start, start, end, base_currency, quote_currency),
+                    (start, start, end, customer_id, customer_id,
+                     base_currency, quote_currency),
                 )
                 spend_days = 0
                 covered = 0

@@ -175,16 +175,16 @@ def _patch_durable(monkeypatch, *, deals=None, sql_leads=None, revenue_connected
                         lambda s, e: {"available": True, "rows": list(WON_ROWS),
                                       "coverage_start": "2026-01-01", "coverage_end": "2026-06-22"})
     monkeypatch.setattr(repo, "fetch_sync_state", lambda: {"available": True, "datasets": {}})
-    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: dict(CANONICAL))
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: dict(CANONICAL))
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_total",
-                        lambda s, e: {"available": True, "has_rows": True, "total_spend": 10000.0,
+                        lambda s, e, *_a, **_k: {"available": True, "has_rows": True, "total_spend": 10000.0,
                                       "total_cost_micros": 10000_000_000, "currency_code": "GBP", "customer_id": "111"})
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_by_country",
                         lambda s, e: {"available": True, "has_rows": False, "rows": [], "total_spend": 10000.0,
                                       "total_spend_usd": 13000.0, "fx_complete": True, "currency_code": "GBP",
                                       "customer_id": "111", "reporting_currency": "USD"})
     monkeypatch.setattr(repo, "fetch_spend_coverage",
-                        lambda s, e: {"available": True, "chunks": [{"chunk_start": "2026-01-01", "chunk_end": "2026-12-31", "status": "verified"}]})
+                        lambda s, e, *_a, **_k: {"available": True, "chunks": [{"chunk_start": "2026-01-01", "chunk_end": "2026-12-31", "status": "verified"}]})
     monkeypatch.setattr(repo, "fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr(repo, "revenue_integration_connected", lambda: revenue_connected)
     # PR-ADS-153E-B: the closed-won population is the canonical deal ledger.

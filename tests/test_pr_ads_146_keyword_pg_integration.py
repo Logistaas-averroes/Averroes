@@ -346,7 +346,7 @@ def test_mixed_conversion_days_are_partial_not_confirmed_zero(monkeypatch, pg):
 
     with patch.object(rr, "fetch_fx_rates", _fx), \
          patch.object(rr, "fetch_canonical_campaign_spend",
-                      lambda s, e: {"available": True, "customer_id": "C1",
+                      lambda s, e, *_a, **_k: {"available": True, "customer_id": "C1",
                                     "total_spend_usd": 100.0, "fx_complete": True,
                                     "rows": [{"campaign_id": "10", "campaign_name": "Brand - UK"}]}), \
          patch.object(rr, "fetch_campaign_identity",

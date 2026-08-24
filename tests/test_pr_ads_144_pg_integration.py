@@ -403,7 +403,7 @@ def test_end_to_end_gbp_not_usd_per_date_fx(pg, monkeypatch):
     import db.revenue_repository as revenue_repo
     from datetime import date
     monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": True, "customer_id": "c1",
+                        lambda s, e, *_a, **_k: {"available": True, "customer_id": "c1",
                                       "rows": [], "total_spend_usd": None,
                                       "fx_complete": False})
     monkeypatch.setattr(revenue_repo, "fetch_campaign_identity",
@@ -461,7 +461,7 @@ def test_per_date_fx_differs_from_window_average(pg, monkeypatch):
 
     import db.revenue_repository as revenue_repo
     monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": True, "customer_id": "c1",
+                        lambda s, e, *_a, **_k: {"available": True, "customer_id": "c1",
                                       "rows": [], "total_spend_usd": None,
                                       "fx_complete": False})
     monkeypatch.setattr(revenue_repo, "fetch_campaign_identity",
@@ -506,7 +506,7 @@ def test_missing_fx_date_withholds_usd(pg, monkeypatch):
 
     import db.revenue_repository as revenue_repo
     monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": True, "customer_id": "c1",
+                        lambda s, e, *_a, **_k: {"available": True, "customer_id": "c1",
                                       "rows": [], "total_spend_usd": None,
                                       "fx_complete": False})
     monkeypatch.setattr(revenue_repo, "fetch_campaign_identity",
@@ -535,7 +535,7 @@ def _stub_identity_and_spend(monkeypatch):
     monkeypatch.setattr(revenue_repo, "fetch_campaign_identity",
                         lambda customer_id=None: {"available": True, "mappings": []})
     monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": True, "customer_id": "c1",
+                        lambda s, e, *_a, **_k: {"available": True, "customer_id": "c1",
                                       "rows": [
                                           {"campaign_id": "10", "campaign_name": "brand - uk",
                                            "spend": 0.0, "spend_usd": None, "fx_complete": True},
@@ -665,7 +665,7 @@ def test_drawer_unique_name_allows_classification_proof(pg, monkeypatch):
     monkeypatch.setattr(revenue_repo, "fetch_campaign_identity",
                         lambda customer_id=None: {"available": True, "mappings": []})
     monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": True, "customer_id": "c1",
+                        lambda s, e, *_a, **_k: {"available": True, "customer_id": "c1",
                                       "rows": [{"campaign_id": "2", "campaign_name": "gulf",
                                                 "spend": 0.0, "spend_usd": None,
                                                 "fx_complete": True}],
@@ -721,7 +721,7 @@ def test_waste_bridge_and_legacy_audit_end_to_end(pg, monkeypatch):
 
     import db.revenue_repository as revenue_repo
     monkeypatch.setattr(revenue_repo, "fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": True, "customer_id": "c1",
+                        lambda s, e, *_a, **_k: {"available": True, "customer_id": "c1",
                                       "rows": [{"campaign_id": "2", "campaign_name": "gulf"}],
                                       "total_spend_usd": 100.0, "fx_complete": True})
     monkeypatch.setattr(revenue_repo, "fetch_campaign_identity",

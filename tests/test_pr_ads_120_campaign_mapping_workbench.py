@@ -65,7 +65,7 @@ def _load_revattr():
 
 
 def _patch_review(monkeypatch, *, canonical, revenue, identity=None, known=None, leads=None):
-    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
+    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
     # PR-ADS-153E-B: label revenue comes from the canonical deal ledger.
     patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity",
@@ -188,7 +188,7 @@ def test_candidate_pool_scoped_to_customer(monkeypatch):
         seen["cid"] = cid
         return {"available": True, "campaigns": []}
 
-    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
+    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
     patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda s, e: {"available": True, "rows": []})
@@ -342,8 +342,8 @@ def _patch_revattr(monkeypatch, *, canonical, coverage, revenue_rows, identity=N
     patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
     monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
     monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
-    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
-    monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e: {"available": True, "chunks": coverage})
+    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
+    monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": coverage})
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity",
                         lambda cid=None: identity or {"available": True, "mappings": []})
 

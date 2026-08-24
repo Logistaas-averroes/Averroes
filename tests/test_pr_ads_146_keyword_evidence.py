@@ -108,7 +108,7 @@ def _patch(monkeypatch, rows, *, canonical=None, rate=1.25, identity=None,
     monkeypatch.setattr(kr, "fetch_keyword_daily_costs", daily or _daily_from(rows, skip_fx_for=skip_fx))
     monkeypatch.setattr(kr, "fetch_keyword_daily_for_criterion",
                         lambda s, e, **kw: {"available": True, "rows": []})
-    monkeypatch.setattr(rr, "fetch_canonical_campaign_spend", lambda s, e: canonical or _canonical())
+    monkeypatch.setattr(rr, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical or _canonical())
     monkeypatch.setattr(rr, "fetch_campaign_identity",
                         lambda customer_id=None: identity or {"available": True, "mappings": []})
     monkeypatch.setattr(rr, "fetch_fx_rates", _fx(rate, skip=skip_fx and date(2026, 7, 6)))
@@ -141,7 +141,7 @@ def test_all_time_has_no_lower_bound(monkeypatch):
         return {"available": True, "rows": [_k("kw", "Brand - UK", "1", "1001", 10.0)], "source": _source([_k("kw", "Brand - UK", "1", "1001", 10.0)])}
     monkeypatch.setattr(kr, "fetch_keyword_aggregates", _agg)
     monkeypatch.setattr(kr, "fetch_keyword_daily_costs", lambda s, e: {"available": True, "rows": []})
-    monkeypatch.setattr(rr, "fetch_canonical_campaign_spend", lambda s, e: _canonical())
+    monkeypatch.setattr(rr, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: _canonical())
     monkeypatch.setattr(rr, "fetch_campaign_identity", lambda customer_id=None: {"available": True, "mappings": []})
     monkeypatch.setattr(rr, "fetch_fx_rates", _fx())
     from services.keyword_evidence_service import build_keyword_evidence

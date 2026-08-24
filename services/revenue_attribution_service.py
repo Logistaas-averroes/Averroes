@@ -1074,13 +1074,24 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
     # Spend is a usable ROAS denominator only when canonical coverage is COMPLETE.
     # When the canonical table is unreachable we fall to geo, but geo is
     # DIAGNOSTIC ONLY and must never back a Campaign or Country ROAS.
-    canonical = repo.fetch_canonical_campaign_spend(start_date, end_date)
+    # PR-ADS-154B §2: one account scope, resolved before any read, applied to
+    # every side of the comparison — campaign total, geo total, spend ledger and
+    # geo ledger. The geo ledger has been customer-scoped since PR-ADS-153F; the
+    # other three were not, so a multi-account database compared totals spanning
+    # every account against coverage proven for one. When no account is
+    # configured this is None and the reads stay account-wide, unchanged.
+    from services.google_ads_spend_service import (  # noqa: PLC0415
+        configured_customer_id as _configured_customer_id,
+    )
+    _scope_customer_id = _configured_customer_id()
+
+    canonical = repo.fetch_canonical_campaign_spend(start_date, end_date, _scope_customer_id)
     canonical_access = bool(canonical.get("available"))
     if canonical_access:
         from services.google_ads_spend_service import (  # noqa: PLC0415
             analyze_coverage as _analyze_cov, SPEND_VARIANCE_TOLERANCE,
         )
-        coverage = repo.fetch_spend_coverage(start_date, end_date)
+        coverage = repo.fetch_spend_coverage(start_date, end_date, _scope_customer_id)
         _cov = _analyze_cov(start_date, end_date, coverage.get("chunks", []))
         coverage_complete = bool(_cov.get("complete"))
         spend_coverage_status = "complete" if coverage_complete else "incomplete"
@@ -1100,7 +1111,7 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         spend_source = "canonical_google_ads_api"
         canonical_rows = canonical.get("rows") or []
         canonical_total = round(float(canonical.get("total_spend") or 0), 2)
-        canonical_customer_id = canonical.get("customer_id")
+        canonical_customer_id = _scope_customer_id or canonical.get("customer_id")
         canonical_currency = canonical.get("currency_code") or "GBP"
         # PR-ADS-119: HubSpot revenue is USD, so the ROAS denominator must be USD.
         # Convert via daily FX (already done in the repo). fx_complete is None when
@@ -1137,7 +1148,8 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         # rows; otherwise fall back to the legacy geo-table sum. This moves country
         # ROAS reconciliation onto canonical Google Ads API geo rows without ever
         # loosening the rule (no geo rows → fall back, never a fabricated match).
-        geo_canonical = repo.fetch_geo_daily_spend_total(start_date, end_date)
+        geo_canonical = repo.fetch_geo_daily_spend_total(
+            start_date, end_date, _scope_customer_id)
         # PR-ADS-153F: the durable coverage ledger is read HERE, before the geo
         # total is chosen, because a legacy fallback is only defensible while we
         # genuinely do not know what canonical geo holds for this range. Scoped
@@ -1148,6 +1160,24 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
             canonical_customer_id, start_date, end_date)
         geo_coverage_ok = bool(_geo_ledger.get("available") and _geo_ledger.get("complete"))
         _geo_failed_chunks = _geo_ledger.get("failed_chunks") or []
+        # PR-ADS-154B §2: the two totals below are only comparable if they were
+        # measured over the same accounts and the same currency. Both tables key
+        # on customer_id and store currency_code per row, and neither query
+        # converts, so a mixed set is summed as though it were one thing.
+        _scope_notes = []
+        if int(canonical.get("customer_count") or 0) > 1:
+            _scope_notes.append("campaign spend spans multiple Google Ads accounts")
+        if int(geo_canonical.get("customer_count") or 0) > 1:
+            _scope_notes.append("geo spend spans multiple Google Ads accounts")
+        if (int(canonical.get("currency_count") or 0) > 1
+                or int(geo_canonical.get("currency_count") or 0) > 1):
+            _scope_notes.append("spend rows span multiple currencies and are summed unconverted")
+        _geo_currency = geo_canonical.get("currency_code")
+        if (geo_canonical.get("has_rows") and _geo_currency and canonical_currency
+                and _geo_currency != canonical_currency):
+            _scope_notes.append(
+                f"campaign total is {canonical_currency} but geo total is {_geo_currency}")
+        comparison_like_for_like = not _scope_notes
         if geo_canonical.get("available") and geo_canonical.get("has_rows"):
             geo_total_for_recon = round(float(geo_canonical.get("total_spend") or 0.0), 2)
         elif (geo_canonical.get("available") and geo_coverage_ok
@@ -1213,6 +1243,12 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
                        "missing_ranges": [], "failed_chunks": []}
         geo_coverage_ok = False
         _geo_failed_chunks = []
+        # No canonical baseline means no comparison was made at all, so there is
+        # no scope at which one could have been like-for-like. False, not True:
+        # this branch already reports every country metric unavailable, and an
+        # optimistic default here would be the only thing arguing otherwise.
+        _scope_notes = ["canonical campaign spend is unavailable"]
+        comparison_like_for_like = False
 
     # PR-ADS-119: apply APPROVED campaign-identity mappings so external
     # HubSpot/UTM labels aggregate onto their canonical Google Ads campaign BEFORE
@@ -1587,6 +1623,13 @@ def _build_from_db(resolved, start_date, end_date, window=None, now=None) -> dic
         "country_geo_verified_zero": bool(canonical_geo_verified_zero),
         "missing_geo_dates": list(_country_missing_geo_dates or []),
         "campaigns_missing_geo": list(_country_campaigns_missing_geo or []),
+        # PR-ADS-154B §2: the gate's `comparison_like_for_like` input, plus the
+        # reasons behind a False. Without this the mart reads the field absent
+        # and — reading fail-closed, correctly — blocks; publishing it here is
+        # what lets a genuinely single-account, single-currency comparison pass.
+        "comparison_like_for_like": comparison_like_for_like,
+        "comparison_scope_notes": list(_scope_notes),
+        "scope_customer_id": _scope_customer_id,
         # PR-ADS-129: exact geo↔canonical variance for the Country blocked card.
         "country_geo_total": country_geo_total_native,
         "country_spend_variance": country_spend_variance_native,

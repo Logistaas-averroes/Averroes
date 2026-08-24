@@ -728,7 +728,7 @@ def _detail(rows, *, available=True):
 def _patch_drawer(monkeypatch, spend_result, lead_result, identity_result, detail_result):
     """Patch the durable layer incl. fetch_campaign_lead_detail for drawer tests."""
     import db.revenue_repository as repo
-    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: spend_result)
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: spend_result)
     monkeypatch.setattr(repo, "fetch_lead_quality", lambda s, e: lead_result)
     monkeypatch.setattr(repo, "fetch_campaign_identity",
                         lambda customer_id=None: identity_result)
@@ -800,7 +800,7 @@ def test_backfilled_contact_excluded_from_recent_window(monkeypatch):
             rows.append(old)
         return {"available": True, "rows": rows}
     import db.revenue_repository as repo
-    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: spend)
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: spend)
     monkeypatch.setattr(repo, "fetch_lead_quality", lambda s, e: lq)
     monkeypatch.setattr(repo, "fetch_campaign_identity", lambda customer_id=None: _identity([]))
     monkeypatch.setattr(repo, "fetch_campaign_lead_detail", _detail_fn)

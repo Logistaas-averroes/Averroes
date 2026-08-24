@@ -178,11 +178,11 @@ def _patch_durable(monkeypatch, *, won_rows=None, deal_rows=None, canonical=None
                         lambda s, e: {"available": True, "rows": list(won),
                                       "coverage_start": "2026-01-01", "coverage_end": "2026-06-22"})
     monkeypatch.setattr(repo, "fetch_sync_state", lambda: {"available": True, "datasets": {}})
-    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: dict(canon))
-    monkeypatch.setattr(repo, "fetch_geo_daily_spend_total", lambda s, e: dict(GEO_CANONICAL_TOTAL))
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: dict(canon))
+    monkeypatch.setattr(repo, "fetch_geo_daily_spend_total", lambda s, e, *_a, **_k: dict(GEO_CANONICAL_TOTAL))
     monkeypatch.setattr(repo, "fetch_geo_daily_spend_by_country", lambda s, e: dict(GEO_BY_COUNTRY))
     monkeypatch.setattr(repo, "fetch_spend_coverage",
-                        lambda s, e: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
+                        lambda s, e, *_a, **_k: {"available": True, "chunks": list(COVERAGE_COMPLETE)})
     monkeypatch.setattr(repo, "fetch_campaign_identity",
                         lambda cid=None: {"available": True, "mappings": []})
     monkeypatch.setattr(repo, "revenue_integration_connected", lambda: True)

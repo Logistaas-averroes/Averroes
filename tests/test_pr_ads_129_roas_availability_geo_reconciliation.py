@@ -100,7 +100,7 @@ def test_coverage_audit_unavailable_when_canonical_unavailable(monkeypatch):
     # an ambiguous "unknown".
     import db.revenue_repository as repo
     monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "Europe/London")
-    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: {"available": False})
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: {"available": False})
     from services.google_ads_spend_service import build_campaign_spend_coverage_audit
     out = build_campaign_spend_coverage_audit("ytd")
     assert out["coverage_status"] == "unavailable"
@@ -109,11 +109,22 @@ def test_coverage_audit_unavailable_when_canonical_unavailable(monkeypatch):
 
 # Test 3 — failed chunks block ROAS
 def test_failed_chunks_incomplete():
+    """A failed chunk whose dates NOTHING has since fetched blocks the window.
+
+    PR-ADS-154B narrowed the fixture. It used to pair the failed May chunk with
+    a verified chunk spanning 2000-01-01 to 2100-01-01 — which covers every day
+    the failed chunk claims, so what it actually demonstrated was a failure that
+    had already been superseded by a successful re-fetch. The rule under test is
+    "unproven dates block", so the verified chunk now stops before May and the
+    failed range is genuinely the only account of those dates.
+    """
     chunks = [
-        {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01",
+        {"chunk_start": "2026-01-01", "chunk_end": "2026-04-30",
          "status": "verified", "rows_written": 5, "cost_micros_total": 1_000},
         {"chunk_start": "2026-05-01", "chunk_end": "2026-05-31",
          "status": "failed", "rows_written": 0, "cost_micros_total": 0},
+        {"chunk_start": "2026-06-01", "chunk_end": "2026-07-01",
+         "status": "verified", "rows_written": 5, "cost_micros_total": 1_000},
     ]
     out = classify_coverage(date(2026, 1, 1), date(2026, 7, 1), chunks,
                             first_spend_date="2026-01-01")
@@ -121,6 +132,59 @@ def test_failed_chunks_incomplete():
     assert out["status"] == "incomplete"
     assert out["reason"] == "failed_chunks"
     assert out["failed_chunks"]
+
+
+def test_a_failed_chunk_that_was_later_refetched_no_longer_blocks():
+    """The companion case, and the reason PR-ADS-154B changed this rule.
+
+    The ledger is keyed (customer_id, chunk_start, chunk_end), so a failed row is
+    only ever flipped to verified by a re-fetch at its EXACT boundaries. A chunk
+    that failed under the scheduler's rolling 7-day window is therefore never
+    rewritten by a monthly backfill — the row survives forever, and while ANY
+    failed row was fatal it blocked every window containing it with no repair
+    available short of manual production SQL, which is forbidden.
+
+    Here the whole of the failed May range is covered by verified chunks. Those
+    dates HAVE been fetched and persisted; the window is complete, and the
+    superseded failure is still reported rather than quietly dropped.
+    """
+    chunks = [
+        {"chunk_start": "2026-05-01", "chunk_end": "2026-05-31",
+         "status": "failed", "rows_written": 0, "cost_micros_total": 0},
+        {"chunk_start": "2026-01-01", "chunk_end": "2026-07-01",
+         "status": "verified", "rows_written": 9, "cost_micros_total": 5_000},
+    ]
+    out = classify_coverage(date(2026, 1, 1), date(2026, 7, 1), chunks,
+                            first_spend_date="2026-01-01")
+    assert out["complete"] is True
+    assert out["status"] == "complete"
+    assert out["failed_chunks"] == []
+    assert out["superseded_failed_chunks"] == [
+        {"date_from": "2026-05-01", "date_to": "2026-05-31"}]
+
+
+def test_a_partially_refetched_failed_chunk_still_blocks():
+    """One uncovered day inside a failed chunk is enough to keep it fatal.
+
+    The dividing line is whether EVERY day the failed chunk claims has since
+    been proven, not whether some of it has. A rule that accepted partial
+    supersession would let a re-fetch of most of a range certify all of it.
+    """
+    chunks = [
+        {"chunk_start": "2026-05-01", "chunk_end": "2026-05-31",
+         "status": "failed", "rows_written": 0, "cost_micros_total": 0},
+        # Covers all of May EXCEPT the 31st, and the rest of the window.
+        {"chunk_start": "2026-01-01", "chunk_end": "2026-05-30",
+         "status": "verified", "rows_written": 9, "cost_micros_total": 5_000},
+        {"chunk_start": "2026-06-01", "chunk_end": "2026-07-01",
+         "status": "verified", "rows_written": 3, "cost_micros_total": 2_000},
+    ]
+    out = classify_coverage(date(2026, 1, 1), date(2026, 7, 1), chunks,
+                            first_spend_date="2026-01-01")
+    assert out["complete"] is False
+    assert out["reason"] == "failed_chunks"
+    assert out["failed_chunks"] == [{"date_from": "2026-05-01", "date_to": "2026-05-31"}]
+    assert out["superseded_failed_chunks"] == []
 
 
 # ── Mart-level coverage gating (Tests 1/2/4) ────────────────────────────────
@@ -188,15 +252,15 @@ def _geo_recon(monkeypatch, *, geo_total, canonical_total=69720.093979, chunks=N
     import db.revenue_repository as repo
     from datetime import datetime, timezone
     monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "Europe/London")
-    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: {
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: {
         "available": True, "total_spend": canonical_total, "currency_code": "GBP",
         "customer_id": "111", "coverage_start": "2026-01-01", "coverage_end": "2026-06-30"})
-    monkeypatch.setattr(repo, "fetch_geo_daily_spend_total", lambda s, e: {
+    monkeypatch.setattr(repo, "fetch_geo_daily_spend_total", lambda s, e, *_a, **_k: {
         "available": True, "has_rows": True, "total_spend": geo_total,
         "rows_counted": 13516, "country_count": 191,
         "last_synced_at": "2026-07-01 05:03:37+00:00"})
-    monkeypatch.setattr(repo, "fetch_spend_coverage", lambda s, e: chunks or _wide_verified_chunk())
-    monkeypatch.setattr(repo, "fetch_fx_coverage", lambda s, e, c: {"complete": True})
+    monkeypatch.setattr(repo, "fetch_spend_coverage", lambda s, e, *_a, **_k: chunks or _wide_verified_chunk())
+    monkeypatch.setattr(repo, "fetch_fx_coverage", lambda s, e, c, *_a, **_k: {"complete": True})
     monkeypatch.setattr(repo, "fetch_geo_reconciliation_breakdown", lambda s, e: {
         "available": True, "daily": [], "by_campaign": [],
         "unmapped_geo_native": 0.0, "campaign_rows_counted": 3623})

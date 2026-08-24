@@ -140,8 +140,8 @@ def _patch_revattr(monkeypatch, *, canonical, coverage, revenue_rows, geo_rows=N
         patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
         monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
-        monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
-        monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e: {"available": True, "chunks": coverage})
+        monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
+        monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": coverage})
     except (ImportError, AttributeError) as exc:
         pytest.skip(f"runtime deps unavailable: {exc}")
 
@@ -246,10 +246,10 @@ def test_audit_native_total_reconciles_to_window(monkeypatch):
                  "reporting_currency": "USD", "fx_missing_days": 0, "fx_complete": True,
                  "coverage_start": "2026-04-01", "coverage_end": "2026-06-22"}
     coverage = [{"chunk_start": "2026-04-01", "chunk_end": "2026-06-22", "status": "verified"}]
-    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
-    monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e: {"available": True, "chunks": coverage})
+    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
+    monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": coverage})
     monkeypatch.setattr("db.revenue_repository.fetch_geo_spend_total", lambda s, e: {"available": True, "total_spend": micros / 1_000_000})
-    monkeypatch.setattr("db.revenue_repository.fetch_fx_coverage", lambda s, e, b, q="USD": {"available": True, "complete": True, "spend_days": 83, "covered_days": 83, "missing_dates": []})
+    monkeypatch.setattr("db.revenue_repository.fetch_fx_coverage", lambda s, e, b, q="USD", *_a, **_k: {"available": True, "complete": True, "spend_days": 83, "covered_days": 83, "missing_dates": []})
     monkeypatch.setattr(svc, "fetch_daily_spend", lambda a, b: {"rows": []})
     out = svc.build_google_ads_spend_audit("current_quarter", now=_at("2026-06-22"), api_total_micros=micros)
     # Native total reconciles to the canonical local total within £0.01.
@@ -301,7 +301,7 @@ def test_mapping_review_unmatched_has_no_zero_spend(monkeypatch):
         {"campaign_name": "Gulf Region", "deal_amount_usd": 1000.0},
         {"campaign_name": "mexico,chile", "deal_amount_usd": 500.0},  # no GA candidate
     ]}
-    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
+    monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
     # PR-ADS-153E-B: the workbench reads label revenue from the canonical ledger.
     patch_canonical_ledger(monkeypatch, from_legacy_deal_rows(revenue["rows"]))
     monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity", lambda cid=None: {"available": True, "mappings": []})

@@ -72,7 +72,7 @@ def _patch_details(monkeypatch, rows=None, *, available=True):
         from_legacy_deal_rows(rows if rows is not None else DEAL_DETAIL_ROWS),
         available=available)
     # Identity map: canonical campaigns from the spend set (auto-links), no manual maps.
-    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: {
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: {
         "available": True, "customer_id": "111",
         "rows": [{"campaign_name": "Mexico, Chile, Colombia"}, {"campaign_name": "Gulf"}]})
     monkeypatch.setattr(repo, "fetch_campaign_identity",
@@ -194,17 +194,17 @@ def test_no_undefined_or_null_in_drilldown():
 def _geo(monkeypatch, *, geo_total, canonical_total=69991.91, breakdown=None):
     import db.revenue_repository as repo
     monkeypatch.setattr(repo, "fetch_account_time_zone", lambda: "Europe/London")
-    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e: {
+    monkeypatch.setattr(repo, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: {
         "available": True, "total_spend": canonical_total, "currency_code": "GBP",
         "customer_id": "111", "coverage_start": "2026-01-01", "coverage_end": "2026-06-30"})
-    monkeypatch.setattr(repo, "fetch_geo_daily_spend_total", lambda s, e: {
+    monkeypatch.setattr(repo, "fetch_geo_daily_spend_total", lambda s, e, *_a, **_k: {
         "available": True, "has_rows": True, "total_spend": geo_total,
         "rows_counted": 13516, "country_count": 191,
         "last_synced_at": "2026-07-01 05:03:37+00:00"})
-    monkeypatch.setattr(repo, "fetch_spend_coverage", lambda s, e: {"available": True, "chunks": [
+    monkeypatch.setattr(repo, "fetch_spend_coverage", lambda s, e, *_a, **_k: {"available": True, "chunks": [
         {"chunk_start": "2000-01-01", "chunk_end": "2100-01-01", "status": "verified",
          "rows_written": 10, "cost_micros_total": 5_000_000}]})
-    monkeypatch.setattr(repo, "fetch_fx_coverage", lambda s, e, c: {"complete": True})
+    monkeypatch.setattr(repo, "fetch_fx_coverage", lambda s, e, c, *_a, **_k: {"complete": True})
     # PR-ADS-153F: the durable geo coverage ledger is a MANDATORY gate input, so
     # a fixture describing a healthy account has to prove the range was actually
     # fetched rather than only supplying totals for it.

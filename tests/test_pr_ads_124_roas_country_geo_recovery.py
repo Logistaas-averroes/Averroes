@@ -362,14 +362,14 @@ def _patch_revattr(monkeypatch, *, canonical, geo_daily, country_rows, revenue_r
         monkeypatch.setattr("db.revenue_repository.fetch_won_revenue", lambda s, e: revenue)
         monkeypatch.setattr("db.revenue_repository.fetch_sync_state", lambda: {"available": True, "datasets": {}})
         monkeypatch.setattr("db.revenue_repository.revenue_integration_connected", lambda: True)
-        monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e: canonical)
+        monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: canonical)
         monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage",
-                            lambda s, e: {"available": True, "chunks": cov})
+                            lambda s, e, *_a, **_k: {"available": True, "chunks": cov})
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_identity",
                             lambda cid=None: {"available": True, "mappings": []})
         # PR-ADS-124: canonical geo total drives reconciliation; canonical geo
         # by-country is the country ROW source.
-        monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_total", lambda s, e: geo_daily)
+        monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_total", lambda s, e, *_a, **_k: geo_daily)
         monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_by_country",
                             lambda s, e: _geo_by_country(geo_country))
     except (ImportError, AttributeError) as exc:
@@ -522,15 +522,15 @@ def test_geo_reconciliation_service_keeps_country_blocked_on_mismatch(monkeypatc
     svc = _load_geo()
     monkeypatch.setattr("db.revenue_repository.fetch_account_time_zone", lambda: "Europe/London")
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": True, "total_spend": 10000.0,
+                        lambda s, e, *_a, **_k: {"available": True, "total_spend": 10000.0,
                                       "currency_code": "GBP", "customer_id": "3059734490"})
     monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage",
-                        lambda s, e: {"available": True, "chunks": [
+                        lambda s, e, *_a, **_k: {"available": True, "chunks": [
                             {"chunk_start": "2026-01-01", "chunk_end": "2026-06-30", "status": "verified"}]})
     monkeypatch.setattr("db.revenue_repository.fetch_fx_coverage",
-                        lambda s, e, b, q="USD": {"available": True, "complete": True})
+                        lambda s, e, b, q="USD", *_a, **_k: {"available": True, "complete": True})
     monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_total",
-                        lambda s, e: {"available": True, "has_rows": True, "total_spend": 7000.0,
+                        lambda s, e, *_a, **_k: {"available": True, "has_rows": True, "total_spend": 7000.0,
                                       "rows_counted": 120, "country_count": 14})
     out = svc.build_geo_reconciliation("ytd", now=_at("2026-06-30"))
     assert out["status"] == "mismatch"
@@ -542,14 +542,14 @@ def test_geo_reconciliation_no_geo_data_is_not_treated_as_zero(monkeypatch):
     svc = _load_geo()
     monkeypatch.setattr("db.revenue_repository.fetch_account_time_zone", lambda: "Europe/London")
     monkeypatch.setattr("db.revenue_repository.fetch_canonical_campaign_spend",
-                        lambda s, e: {"available": True, "total_spend": 10000.0,
+                        lambda s, e, *_a, **_k: {"available": True, "total_spend": 10000.0,
                                       "currency_code": "GBP", "customer_id": "3059734490"})
     monkeypatch.setattr("db.revenue_repository.fetch_spend_coverage",
-                        lambda s, e: {"available": True, "chunks": []})
+                        lambda s, e, *_a, **_k: {"available": True, "chunks": []})
     monkeypatch.setattr("db.revenue_repository.fetch_fx_coverage",
-                        lambda s, e, b, q="USD": {"available": True, "complete": True})
+                        lambda s, e, b, q="USD", *_a, **_k: {"available": True, "complete": True})
     monkeypatch.setattr("db.revenue_repository.fetch_geo_daily_spend_total",
-                        lambda s, e: {"available": True, "has_rows": False})
+                        lambda s, e, *_a, **_k: {"available": True, "has_rows": False})
     out = svc.build_geo_reconciliation("ytd", now=_at("2026-06-30"))
     assert out["status"] == "no_geo_data"
     assert out["geo_total"] is None        # never a fabricated £0

@@ -169,15 +169,33 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
     date_from = resolved.get("start_date")
     date_to = resolved.get("end_date")
 
-    canonical = repo.fetch_canonical_campaign_spend(start, end)
+    # PR-ADS-154B §2 — resolve the account FIRST, then read every side of the
+    # comparison at that scope.
+    #
+    # This used to run the other way round: the campaign total was read
+    # account-wide, and the customer id was whatever `MIN(customer_id)` happened
+    # to return from the rows it summed. That id was then used to read the geo
+    # COVERAGE ledger, which has been customer-scoped since PR-ADS-153F. So a
+    # database holding more than one Google Ads account compared an all-accounts
+    # campaign total against an all-accounts geo total while certifying coverage
+    # for exactly one of them — three different scopes in one verdict, and a
+    # mismatch that says nothing about whether the data is actually wrong.
+    #
+    # The configured account is authoritative when set. When it is not, the reads
+    # stay account-wide exactly as before, and `scope_customer_id` is None so the
+    # payload says which of the two happened rather than implying a scope it did
+    # not apply.
+    scope_customer_id = configured_customer_id()
+
+    canonical = repo.fetch_canonical_campaign_spend(start, end, scope_customer_id)
     canonical_available = bool(canonical.get("available"))
     canonical_total = (round(float(canonical.get("total_spend") or 0.0), 6)
                        if canonical_available else None)
     currency_code = (canonical.get("currency_code") if canonical_available else None) or "GBP"
-    customer_id = (canonical.get("customer_id") if canonical_available else None) \
-        or configured_customer_id()
+    customer_id = (scope_customer_id
+                   or (canonical.get("customer_id") if canonical_available else None))
 
-    geo = repo.fetch_geo_daily_spend_total(start, end)
+    geo = repo.fetch_geo_daily_spend_total(start, end, scope_customer_id)
     geo_available = bool(geo.get("available"))
     geo_has_rows = bool(geo.get("has_rows"))
 
@@ -215,7 +233,9 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
     if canonical_available:
         try:
             from services.google_ads_spend_service import analyze_coverage  # noqa: PLC0415
-            cov = analyze_coverage(start, end, repo.fetch_spend_coverage(start, end).get("chunks", []))
+            cov = analyze_coverage(
+                start, end,
+                repo.fetch_spend_coverage(start, end, scope_customer_id).get("chunks", []))
             coverage_complete = bool(cov.get("complete"))
             coverage_status = "complete" if coverage_complete else "incomplete"
         except Exception as exc:  # noqa: BLE001
@@ -223,10 +243,37 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
 
     fx_complete = False
     try:
-        fx = repo.fetch_fx_coverage(start, end, currency_code)
+        fx = repo.fetch_fx_coverage(start, end, currency_code,
+                                    customer_id=scope_customer_id)
         fx_complete = bool(fx.get("complete"))
     except Exception as exc:  # noqa: BLE001
         log.warning("[geo-reconcile] fx coverage failed: %s", exc)
+
+    # ── PR-ADS-154B §2: is this comparison like-for-like at all? ─────────────
+    # Both totals come from the same `start`/`end` and the same account time
+    # zone by construction (one `_window_bounds` call feeds both queries), so
+    # the window and timezone halves of the contract hold structurally. What can
+    # still differ is SCOPE: which accounts the rows belong to, and which
+    # currency their micros are denominated in. Both tables store `customer_id`
+    # and `currency_code` per row and neither sums across them with conversion.
+    geo_currency = geo.get("currency_code") if geo_available else None
+    scope_notes: list = []
+    if int(canonical.get("customer_count") or 0) > 1:
+        scope_notes.append("campaign spend spans multiple Google Ads accounts")
+    if int(geo.get("customer_count") or 0) > 1:
+        scope_notes.append("geo spend spans multiple Google Ads accounts")
+    if int(canonical.get("currency_count") or 0) > 1 or int(geo.get("currency_count") or 0) > 1:
+        scope_notes.append("spend rows span multiple currencies and are summed unconverted")
+    # A geo side with no rows has no currency to disagree about; that case is
+    # the verified-zero question, decided by the coverage ledger above.
+    if geo_has_rows and geo_currency and canonical_available and \
+            canonical.get("currency_code") and geo_currency != canonical.get("currency_code"):
+        scope_notes.append(
+            f"campaign total is {canonical.get('currency_code')} but geo total is {geo_currency}")
+    comparison_like_for_like = not scope_notes
+    if scope_notes:
+        log.warning("[geo-reconcile] comparison is not like-for-like: %s",
+                    "; ".join(scope_notes))
 
     # Variance is computed in native currency and never hidden.
     if canonical_total is not None and geo_total is not None:
@@ -243,6 +290,12 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
         reconciled = False
 
     if not canonical_available:
+        status = "unavailable"
+    elif not comparison_like_for_like:
+        # PR-ADS-154B §2. The totals may well differ, but not for any reason
+        # that is about the data: they were measured over different accounts or
+        # different currencies. `mismatch` would assert a real disagreement and
+        # send someone looking for a sync bug that is not there.
         status = "unavailable"
     elif geo_total is None:
         # No measurable geo figure: either the query failed, or the range was
@@ -288,6 +341,7 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
         geo_failed_chunks=geo_failed_chunks,
         missing_geo_dates=breakdown.get("missing_geo_dates") or [],
         campaigns_missing_geo=breakdown.get("campaigns_missing_geo") or [],
+        comparison_like_for_like=comparison_like_for_like,
     )
     # ONE verdict, published under both names. These previously disagreed by
     # construction: this flag meant "reconciles perfectly" while the mart's
@@ -311,6 +365,12 @@ def build_geo_reconciliation(window: str, now: datetime | None = None) -> dict:
         "reconciled": status == "reconciled",
         "coverage_status": coverage_status,
         "fx_coverage_status": "complete" if fx_complete else "incomplete",
+        # PR-ADS-154B §2 — the scope both sides were actually measured at, and
+        # whether that scope made them comparable. Published rather than
+        # inferred: a reader can check the claim instead of trusting it.
+        "scope_customer_id": scope_customer_id,
+        "comparison_like_for_like": comparison_like_for_like,
+        "comparison_scope_notes": scope_notes,
         "country_roas_unblockable": country_roas_unblockable,
         # PR-ADS-131: safe-unblock verdict + explicit residual bucket for the
         # Country page and Revenue Health. `country_spend_status` mirrors the mart's
@@ -621,6 +681,9 @@ GEO_GAP_GEO_ROWS_UNREADABLE = "geo_rows_unreadable"
 GEO_GAP_GEO_COVERAGE_UNREADABLE = "geo_coverage_ledger_unreadable"
 GEO_GAP_GEO_COVERAGE_INCOMPLETE = "geo_coverage_incomplete"
 GEO_GAP_GEO_CHUNKS_FAILED = "geo_coverage_has_failed_chunks"
+# PR-ADS-154B §2: the two sides were not measured at the same scope, so whatever
+# they say about each other is not a finding about the data.
+GEO_GAP_NOT_LIKE_FOR_LIKE = "comparison_not_like_for_like"
 
 
 def resolve_country_spend_status(*, reconciled, residual_eligible,
@@ -632,7 +695,8 @@ def resolve_country_spend_status(*, reconciled, residual_eligible,
                                  geo_coverage_complete,
                                  geo_failed_chunks,
                                  missing_geo_dates,
-                                 campaigns_missing_geo) -> tuple[str, list]:
+                                 campaigns_missing_geo,
+                                 comparison_like_for_like) -> tuple[str, list]:
     """Derive the ONE canonical country-spend status, over ALL its inputs.
 
     Returns ``(status, gap_codes)``.
@@ -677,10 +741,18 @@ def resolve_country_spend_status(*, reconciled, residual_eligible,
     ``missing_geo_dates`` to empty would let a caller reach an accepted state by
     asserting ``residual_eligible=True`` without ever having looked.
 
+    ``comparison_like_for_like`` (PR-ADS-154B §2) asserts that the two totals
+    were measured over the same account, currency and window. It is a
+    precondition, not a result: when it is False the totals may differ purely
+    because they describe different things, and calling that a mismatch reports
+    a finding about the data that nobody established. Required, like the rest.
+
     Nothing here loosens anything: the accepted states and the PR-ADS-131
     residual eligibility rules are unchanged, and this only adds preconditions.
     """
     gaps: list = []
+    if not comparison_like_for_like:
+        gaps.append(GEO_GAP_NOT_LIKE_FOR_LIKE)
     if not campaign_spend_readable:
         gaps.append(GEO_GAP_CAMPAIGN_SPEND_UNREADABLE)
     if not campaign_coverage_complete:
@@ -742,6 +814,10 @@ def country_geo_ready(country_spend_status) -> bool:
 # into a single "geo does not reconcile" sentence would answer the operator's
 # real question ("what do I fix?") with the wrong instruction.
 GEO_GAP_MESSAGES = {
+    GEO_GAP_NOT_LIKE_FOR_LIKE:
+        "Geo ROAS is withheld — the campaign and geographic totals were measured "
+        "over different Google Ads accounts or different currencies, so comparing "
+        "them would say nothing about whether the data is correct.",
     GEO_GAP_CAMPAIGN_SPEND_UNREADABLE:
         "Geo ROAS requires canonical campaign spend as its reconciliation baseline — "
         "that spend could not be read for this window.",
@@ -774,6 +850,8 @@ GEO_GAP_MESSAGES = {
 }
 
 _GEO_GAP_PRIORITY = (
+    # First: if the two sides are not comparable, nothing below is worth saying.
+    GEO_GAP_NOT_LIKE_FOR_LIKE,
     GEO_GAP_CAMPAIGN_SPEND_UNREADABLE,
     GEO_GAP_CAMPAIGN_COVERAGE_INCOMPLETE,
     GEO_GAP_GEO_ROWS_UNREADABLE,

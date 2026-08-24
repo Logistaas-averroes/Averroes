@@ -109,7 +109,7 @@ def _patch(monkeypatch, rows, *, waste=None, canonical=None, rate=1.25,
     monkeypatch.setattr(st, "fetch_waste_evidence_for_terms",
                         lambda terms: waste or {"available": True, "rows": []})
     monkeypatch.setattr(rr, "fetch_canonical_campaign_spend",
-                        lambda a, b: canonical or _canonical())
+                        lambda a, b, *_a, **_k: canonical or _canonical())
     monkeypatch.setattr(rr, "fetch_campaign_identity",
                         lambda customer_id=None: identity or {"available": True, "mappings": []})
     monkeypatch.setattr(rr, "fetch_fx_rates", _fx(rate))
@@ -221,7 +221,7 @@ def test_missing_fx_affects_only_the_unit_needing_that_date(monkeypatch):
     monkeypatch.setattr(st, "fetch_search_term_daily_costs", _daily)
     monkeypatch.setattr(st, "fetch_waste_evidence_for_terms",
                         lambda t: {"available": True, "rows": []})
-    monkeypatch.setattr(rr, "fetch_canonical_campaign_spend", lambda a, b: _canonical())
+    monkeypatch.setattr(rr, "fetch_canonical_campaign_spend", lambda a, b, *_a, **_k: _canonical())
     monkeypatch.setattr(rr, "fetch_campaign_identity",
                         lambda customer_id=None: {"available": True, "mappings": []})
     monkeypatch.setattr(rr, "fetch_fx_rates", _fx(1.25))   # only covers Jul 2026
