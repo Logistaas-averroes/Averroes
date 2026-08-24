@@ -445,15 +445,79 @@ consumer has to re-derive them:
   "campaign_coverage_complete": false,
   "fx_coverage_complete": false,
   "geo_coverage_complete": true,
+  "comparison_like_for_like": true,
   "geo_reconciled": false,
   "geo_ready": false,
   "gap_codes": ["campaign_coverage_incomplete", "fx_coverage_incomplete"]
 }
 ```
 
-`geo_ready` is never `true` unless every coverage and reconciliation condition
-holds. It is the shared gate's verdict
-(`google_ads_geo_sync_service.country_geo_ready`), never recomputed locally.
+### Two fields are called `geo_ready`, and they are not the same field
+
+They sit at different levels of the payload and answer different questions. The
+production defect below was precisely the two disagreeing, so it is worth being
+exact:
+
+| Where | Meaning |
+|---|---|
+| `datasets["google_ads_api/geo_reconciliation"].geo_ready` | the **shared gate's** verdict, `country_geo_ready(country_spend_status)`, computed once in `google_ads_geo_sync_service` |
+| top-level `geo_ready` | **truth readiness** — `truth_status == "ready"` |
+
+The top level *reads* the gate's verdict and never recomputes it, but it is not a
+mirror of it: readiness also requires like-for-like scope, all three coverage
+inputs complete, and no outstanding gap codes. So the dataset field can be `true`
+while the top-level field is `false` — the gate is content with the country
+denominator, and something else about the window is not yet proven. The reverse
+cannot happen: the gate's verdict is one of readiness' preconditions.
+
+Top-level `geo_ready` is `truth_status == "ready"` **by construction**, so those
+two can never disagree in a published payload.
+
+### `geo_reconciled` is not a precondition of `geo_ready` (PR-ADS-154B-F1)
+
+These answer different questions and must not be conflated:
+
+| Field | Question |
+|---|---|
+| `geo_reconciled` | did the two raw totals match exactly? |
+| `geo_ready` | is the country denominator safe to use? |
+
+The shared gate accepts **two** states: `verified` (exact) and
+`reconciled_with_residual` — the PR-ADS-131 case where Google Ads' geographic
+view does not assign some spend to any country, the shortfall is published as an
+explicit residual bucket, and every coverage, scope and completeness condition
+passes. The totals genuinely do not match, *by design*, and the country figures
+are still usable.
+
+PR-ADS-154B's first version required `geo_reconciled` on top of the gate's
+verdict — the same mistake PR-ADS-153F blocker 1 removed one layer down,
+reintroduced one layer up. Production then reported an accepted residual as:
+
+```
+country_spend_status: reconciled_with_residual   geo_ready: true    (dataset)
+truth_status: not_ready                          geo_ready: false   (top level)
+gap_codes: []          <- blocked, with nothing to act on
+```
+
+Readiness now requires: the comparison was evaluated, at a like-for-like scope,
+over complete campaign / FX / geo coverage, with the gate's `geo_ready` true and
+no outstanding gap codes. `geo_reconciled` keeps its exact meaning and is still
+published — `false` for an accepted residual, because claiming the totals match
+would be the opposite error.
+
+A genuine unexplained mismatch is unaffected: the gate returns `mismatch`,
+`geo_ready` is false, and the gap codes say why.
+
+### A blocked verdict always carries a reason
+
+Any non-ready `truth_status` with an empty `gap_codes` is unactionable — the
+reader is told to fix something and not told what. If the inputs ever combine so
+that nothing recorded a reason, `geo_truth_not_ready_without_reason` is published
+and the contradicting inputs are logged.
+
+The guard covers `unknown` as well as `not_ready`. In practice only `not_ready`
+reaches it, because an unevaluated reconciliation is already given a reason; the
+broader condition is a deliberate backstop, not a live second path.
 
 `unknown` is a real third state, not a softer `not_ready`: a run that aborted
 before the reconciliation step — or never reached it — learned nothing about the
@@ -492,3 +556,72 @@ as the former sends someone hunting a sync bug that is not there. Matching
 totals do not rescue it either: agreement between two figures over different
 scopes is not evidence, for the same reason PR-ADS-153F required every gate
 input to be proven.
+
+## The truth validator (PR-ADS-154B-F1)
+
+Kept here rather than only in a pull-request description, so the command an
+operator runs is version-controlled alongside the behaviour it asserts.
+
+```bash
+python -m scheduler.incremental_sync > /tmp/incremental.json; rc=$?
+cat /tmp/incremental.json
+echo "EXIT_CODE=$rc"
+```
+
+```bash
+python - <<'PY'
+import json, sys
+
+d  = json.load(open("/tmp/incremental.json"))
+ds = d["datasets"]
+g  = ds["google_ads_api/geo_reconciliation"]
+blob = json.dumps(d)
+
+# The two ACCEPTED country-spend states. `reconciled_with_residual` is
+# PR-ADS-131: Google Ads' geographic view leaves some spend unassigned to any
+# country, the shortfall is published as an explicit residual, and every
+# coverage and scope condition passes. Requiring exact reconciliation here would
+# reject a state the canonical gate deliberately accepts.
+ACCEPTED = {"verified", "reconciled_with_residual"}
+
+checks = {
+  "execution status success":     d["execution_status"] == "success",
+  "truth status ready":           d["truth_status"] == "ready",
+  "campaign coverage complete":   d["campaign_coverage_complete"] is True,
+  "fx coverage complete":         d["fx_coverage_complete"] is True,
+  "geo coverage complete":        d["geo_coverage_complete"] is True,
+  "reconciliation evaluated":     g["available"] is True,
+  "comparison like-for-like":     g["comparison_like_for_like"] is True,
+  "country spend accepted":       g["country_spend_status"] in ACCEPTED,
+  "dataset geo ready":            g["geo_ready"] is True,
+  "top-level geo ready":          d["geo_ready"] is True,
+  "no gap codes":                 d["gap_codes"] == [],
+  "no database_unavailable":      "database_unavailable" not in blob,
+  "no run_record_write_failed":   "run_record_write_failed" not in blob,
+  "no Windsor dataset ran":       all(v["status"] == "retired"
+                                      for k, v in ds.items()
+                                      if k.startswith("windsor/")),
+  "canonical spend success":      ds["google_ads_api/canonical_spend"]["status"] == "success",
+  "canonical geo success":        ds["google_ads_api/canonical_geo"]["status"] == "success",
+  "contact funnel success":       ds["hubspot/contact_funnel"]["status"] == "success",
+  "deal ledger success":          ds["hubspot/deal_ledger"]["status"] == "success",
+}
+
+for name, ok in checks.items():
+    print(("PASS  " if ok else "FAIL  ") + name)
+
+# Reported separately, and deliberately NOT a pass condition: an accepted
+# residual is usable and does not reconcile exactly. Printing it keeps the
+# distinction visible instead of hiding it behind the verdict.
+print()
+print(f"exact reconciliation : {d['geo_reconciled']}"
+      f"   (country_spend_status={g['country_spend_status']})")
+if not d["geo_reconciled"] and g["country_spend_status"] == "reconciled_with_residual":
+    print("  -> totals differ by an ACCEPTED residual; country figures are usable")
+
+sys.exit(0 if all(checks.values()) else 1)
+PY
+```
+
+Plus, from the logs: no `unknown source` / `unknown dataset` warning, and
+`EXIT_CODE=0`.
