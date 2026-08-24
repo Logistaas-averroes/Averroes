@@ -452,9 +452,26 @@ consumer has to re-derive them:
 }
 ```
 
-`geo_ready` is the shared gate's verdict
-(`google_ads_geo_sync_service.country_geo_ready`), read here and **not
-recomputed**.
+### Two fields are called `geo_ready`, and they are not the same field
+
+They sit at different levels of the payload and answer different questions. The
+production defect below was precisely the two disagreeing, so it is worth being
+exact:
+
+| Where | Meaning |
+|---|---|
+| `datasets["google_ads_api/geo_reconciliation"].geo_ready` | the **shared gate's** verdict, `country_geo_ready(country_spend_status)`, computed once in `google_ads_geo_sync_service` |
+| top-level `geo_ready` | **truth readiness** — `truth_status == "ready"` |
+
+The top level *reads* the gate's verdict and never recomputes it, but it is not a
+mirror of it: readiness also requires like-for-like scope, all three coverage
+inputs complete, and no outstanding gap codes. So the dataset field can be `true`
+while the top-level field is `false` — the gate is content with the country
+denominator, and something else about the window is not yet proven. The reverse
+cannot happen: the gate's verdict is one of readiness' preconditions.
+
+Top-level `geo_ready` is `truth_status == "ready"` **by construction**, so those
+two can never disagree in a published payload.
 
 ### `geo_reconciled` is not a precondition of `geo_ready` (PR-ADS-154B-F1)
 
@@ -493,11 +510,14 @@ A genuine unexplained mismatch is unaffected: the gate returns `mismatch`,
 
 ### A blocked verdict always carries a reason
 
-`truth_status: not_ready` with an empty `gap_codes` is unactionable — the reader
-is told to fix something and not told what. If the inputs ever combine so that
-nothing recorded a reason, `geo_truth_not_ready_without_reason` is published and
-the contradicting inputs are logged. Top-level `geo_ready` and `truth_status`
-agree by construction, so a payload cannot contradict itself.
+Any non-ready `truth_status` with an empty `gap_codes` is unactionable — the
+reader is told to fix something and not told what. If the inputs ever combine so
+that nothing recorded a reason, `geo_truth_not_ready_without_reason` is published
+and the contradicting inputs are logged.
+
+The guard covers `unknown` as well as `not_ready`. In practice only `not_ready`
+reaches it, because an unevaluated reconciliation is already given a reason; the
+broader condition is a deliberate backstop, not a live second path.
 
 `unknown` is a real third state, not a softer `not_ready`: a run that aborted
 before the reconciliation step — or never reached it — learned nothing about the

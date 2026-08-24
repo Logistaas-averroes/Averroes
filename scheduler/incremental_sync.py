@@ -1303,10 +1303,15 @@ TRUTH_READY = "ready"
 TRUTH_NOT_READY = "not_ready"
 TRUTH_UNKNOWN = "unknown"
 
-#: PR-ADS-154B-F1. Published when truth is not ready and nothing below could say
-#: why. A blocked verdict with an empty gap list is unactionable — the reader is
-#: told to fix something and not told what — so an inconsistency in the inputs
-#: surfaces as its own code rather than as silence.
+#: PR-ADS-154B-F1. Published when truth is anything other than READY and nothing
+#: else could say why. A non-ready verdict with an empty gap list is unactionable
+#: — the reader is told to fix something and not told what — so an inconsistency
+#: in the inputs surfaces as its own code rather than as silence.
+#:
+#: The guard covers ``unknown`` as well as ``not_ready``, though only the latter
+#: can reach it today: an unevaluated reconciliation is already given a reason
+#: earlier in :func:`build_truth_block`. It is written to the broader condition
+#: deliberately, so the invariant holds if that earlier branch ever changes.
 GAP_NOT_READY_WITHOUT_REASON = "geo_truth_not_ready_without_reason"
 
 
@@ -1385,12 +1390,18 @@ def build_truth_block(datasets: dict) -> dict:
     else:
         truth_status = TRUTH_NOT_READY
 
-    # PR-ADS-154B-F1: a blocked verdict must always carry something to act on.
-    # Every path above that blocks has a reason; if the inputs ever combine so
-    # that none of them was recorded, that is itself the finding, and it is
-    # published rather than left as an empty list a reader would take for "no
-    # problems found". No credentials or connection details are involved — these
-    # are the gate's own machine codes and three booleans.
+    # PR-ADS-154B-F1: ANY non-ready verdict must carry something to act on —
+    # `not_ready` and `unknown` alike, which is why this tests `!= TRUTH_READY`
+    # rather than the narrower `== TRUTH_NOT_READY`. In practice only
+    # `not_ready` can arrive here with an empty list, because an unevaluated
+    # reconciliation was already given a reason above; the broader condition is
+    # a backstop for a future change to that branch, not a live second path.
+    #
+    # Every path that blocks has a reason; if the inputs ever combine so that
+    # none of them was recorded, that is itself the finding, and it is published
+    # rather than left as an empty list a reader would take for "no problems
+    # found". No credentials or connection details are involved — these are the
+    # gate's own machine codes and three booleans.
     if truth_status != TRUTH_READY and not gap_codes:
         gap_codes = [GAP_NOT_READY_WITHOUT_REASON]
         log.warning(
