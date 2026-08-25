@@ -1011,13 +1011,40 @@ def build_dashboard_countries(window: str = "current_quarter",
     # here is what the audit checks that distinction against.
     _geo_ready = bool(spend_truth.get("country_roas_unblockable")
                       or spend_truth.get("geo_ready"))
+    # PR-ADS-154C-F2 §4: country REVENUE needs the closed-won deal proof as well.
+    # Geo readiness says the spend side is placed; it is silent on whether the
+    # deals behind the revenue were readable, so a page with ready geo coverage
+    # and an unreadable ledger must not declare its revenue ready.
+    _country_revenue_ready = bool(_geo_ready and deal_proof_available)
+    _country_revenue_status = (canonical_contract.TRUTH_READY
+                               if _country_revenue_ready
+                               else canonical_contract.TRUTH_NOT_READY)
     _mt = canonical_contract.metric_truth_block(core["window_block"], [
-        {"metric": "country_attributed_won_revenue_usd",
+        *[{"metric": m,
+           "data_source": canonical_contract.SOURCE_CANONICAL_GEO,
+           "scope": "country_attributed_revenue",
+           "truth_status": _country_revenue_status,
+           "customer_id": spend_truth.get("customer_id")}
+          for m in ("country_attributed_won_revenue_usd",
+                    "country_attributed_customers")],
+        # Country-attributed SPEND is a different question from the full-account
+        # denominator the Overview and the mart publish: this figure is the sum of
+        # the per-country rows, and geographic_view does not place location-less
+        # spend in any of them. Registered under its own identity so the two are
+        # never compared (PR-ADS-131's governed residual is the difference).
+        {"metric": "country_attributed_spend_usd",
          "data_source": canonical_contract.SOURCE_CANONICAL_GEO,
-         "scope": "country_attributed_revenue",
-         "truth_status": (canonical_contract.TRUTH_READY if _geo_ready
+         "scope": "country_attributed_spend",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if (_geo_ready and kpis.get("verified_spend_usd") is not None)
                           else canonical_contract.TRUTH_NOT_READY),
          "customer_id": spend_truth.get("customer_id")},
+        {"metric": "campaign_attributable_sqls",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_sqls",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("sqls") is not None
+                          else canonical_contract.TRUTH_NOT_READY)},
     ])
 
     return {

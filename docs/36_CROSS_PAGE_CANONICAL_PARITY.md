@@ -84,15 +84,68 @@ Every page composes `revenue_decision_mart`, which computes the canonical truth
 once per window. The per-view `rows` change with the grain; `window`,
 `spend_truth` and `summary` do not.
 
+### 4.1 The decision-metric registry (PR-ADS-154C-F2)
+
+`METRIC_IDENTITIES` in `services/cross_page_parity_service.py` is the registry.
+Each row is **one question**; every consumer listed must answer it identically,
+and each must publish `metric_truth.<identity>` naming the authority it read.
+
+| Identity | Scope | Authority | Consumers |
+|---|---|---|---|
+| `google_ads_spend_usd` | full-account denominator | canonical campaign spend | overview `kpis.google_ads_spend_usd`, campaigns `kpis.verified_spend_usd`, mart `summary.spend_usd` |
+| `country_attributed_spend_usd` | country-attributed | canonical geo | countries `kpis.verified_spend_usd` |
+| `closed_won_revenue_usd` | all-source business revenue | mart · **revenue-by-source** for Channels | overview, revenue, channels, deals, mart `summary.won_revenue_usd` |
+| `customers` | all-source business revenue | mart · **revenue-by-source** for Channels | overview, revenue, channels `kpis.total_customers`, deals `kpis.closed_won_customers`, mart |
+| `campaign_attributed_won_revenue_usd` | campaign-attributable | mart | campaigns `kpis.won_revenue_usd`, mart `summary.attributed_won_revenue_usd` |
+| `campaign_attributed_customers` | campaign-attributable | mart | campaigns `kpis.customers`, mart `summary.attributed_customers` |
+| `country_attributed_won_revenue_usd` | country-attributed | canonical geo | countries `kpis.won_revenue_usd` |
+| `country_attributed_customers` | country-attributed | canonical geo | countries `kpis.customers` |
+| `campaign_attributable_sqls` | campaign-attributable | mart | overview, revenue, campaigns, countries, deals `kpis.sqls`, mart `summary.sqls` |
+| `campaign_attributable_leads` | campaign-attributable | mart | overview `kpis.leads`, mart `summary.leads` |
+| `source_group_sqls` | channel taxonomy | revenue by source | channels `kpis.total_sqls` |
+| `lifecycle_{leads,mqls,sqls,opportunities,customers}` | one per stage | canonical contact funnel | overview `kpis.lifecycle_*` |
+
+Sixteen identities across seven consumers. Before F2 the audit built seven
+consumers and certified **four** identities, then reported all seven as
+"inspected" — Channels, Campaigns and Deals passed by having nothing checked
+about them, which is the agreement-shaped failure this command exists to catch
+occurring inside the command itself.
+
+**A consumer is certified only when at least one identity it is registered for
+returns a value with a contract the registry accepts.** Building successfully and
+having a window checked is not certification; `consumer_certified_nothing` says
+so, and `registered_consumer_not_built` covers a page dropped from the builder.
+
+`consumer_sources` lets one identity name a different expected authority per
+consumer. Channels genuinely reads `build_revenue_by_source` — itself the
+canonical deal ledger grouped by CRM acquisition source — so that is what it must
+declare. Making it claim the mart instead would be provenance that is *echoed*
+rather than *checked*, which is the defect F1 closed.
+
+### 4.2 Per-page summary
+
 | Page / endpoint | Metric | Window resolver | Canonical source | Legacy dependency | Fallback behaviour |
 |---|---|---|---|---|---|
-| `/api/dashboard/overview` | `google_ads_spend_usd`, `closed_won_revenue_usd` | `resolve_canonical_window` | mart → canonical spend + deal ledger | none | metric `null` + reason |
-| `/api/dashboard/revenue` | `closed_won_revenue_usd`, `customers` | `resolve_canonical_window` | mart → canonical deal ledger | `fetch_lead_daily_series` (trend series only) | metric `null` + reason |
-| `/api/dashboard/channels` | channel mix | `resolve_canonical_window` | mart → revenue by source | none | metric `null` + reason |
-| `/api/dashboard/campaigns` | campaign spend / ROAS | `resolve_canonical_window` | mart → canonical spend | none | ROAS withheld when denominator unsafe |
-| `/api/dashboard/countries` | `won_revenue_usd` (country-attributed), geo ROAS | `resolve_canonical_window` | mart → canonical geo | none | blocked unless the geo gate is ready |
-| `/api/dashboard/deals` | pipeline / deal mix | `resolve_canonical_window` | mart → canonical deal ledger | `fetch_sql_lead_details` (detail rows only) | metric `null` + reason |
-| `revenue_decision_mart` | `spend_usd`, `won_revenue_usd`, `customers` | `resolve_canonical_window` | canonical spend, geo, funnel, ledger, FX | diagnostic reads only | `unavailable` + gap codes |
+| `/api/dashboard/overview` | spend, all-source revenue/customers, SQLs, leads, 5 lifecycle stages | `resolve_canonical_window` | mart → canonical spend + deal ledger + contact funnel | none | metric `null` + reason |
+| `/api/dashboard/revenue` | `closed_won_revenue_usd`, `customers`, SQLs | `resolve_canonical_window` | mart → canonical deal ledger | `fetch_lead_daily_series` (trend series only) | metric `null` + reason |
+| `/api/dashboard/channels` | all-source revenue/customers, source-group SQLs | `resolve_canonical_window` | revenue by source | none | metric `null` + reason |
+| `/api/dashboard/campaigns` | full-account spend, campaign-attributed revenue/customers, SQLs | `resolve_canonical_window` | mart → canonical spend | none | ROAS withheld when denominator unsafe |
+| `/api/dashboard/countries` | country-attributed spend/revenue/customers, SQLs | `resolve_canonical_window` | mart → canonical geo | none | blocked unless the geo gate is ready |
+| `/api/dashboard/deals` | all-source revenue/customers, SQLs | `resolve_canonical_window` | mart → canonical deal ledger | `fetch_sql_lead_details` (detail rows only) | metric `null` + reason |
+| `revenue_decision_mart` | spend, all-source and campaign-attributed outcomes, SQLs, leads | `resolve_canonical_window` | canonical spend, geo, funnel, ledger, FX | diagnostic reads only | `unavailable` + gap codes |
+
+### 4.3 Pages that are explicitly NOT certified
+
+**Platform Evidence** (`campaign_evidence_service`, `keyword_evidence_service`)
+and **Lead Intelligence** (`/api/leads`, `/api/leads/country-summary`) publish
+figures that overlap the executive metrics — spend and SQLs, leads and SQLs — and
+are pending redesign. Neither is redesigned here.
+
+They are registered in `PENDING_REDESIGN_CONSUMERS` as
+`pending_redesign_non_authoritative` and **printed by the audit**, in both output
+formats, rather than omitted from it. A page absent from a parity report reads as
+a page with nothing to answer for, which is precisely how an uncertified total
+keeps being read as a certified one.
 
 ### Legacy reads that remain, and what they are
 
@@ -127,6 +180,23 @@ Comparing these is the mistake, not the difference between them:
 | campaign spend | the canonical ROAS denominator |
 | country-attributed spend | the part `geographic_view` assigns to a country |
 | residual / unallocated geo spend | the governed remainder (PR-ADS-131) |
+| lifecycle SQLs | stage-ENTRY events on `hs_v2_date_entered_salesqualifiedlead`, all sources |
+| campaign-attributable SQLs | the mart's lead population filtered to campaign identity |
+| source-group SQLs | qualified leads counted by CRM acquisition source (the channel taxonomy) |
+| lifecycle customers | contacts that entered the customer stage |
+| revenue customers | closed-won deals in the canonical ledger |
+
+**Three SQL counts, three questions.** In the reference fixture the
+campaign-attributable count is 25 and the source-group count is 0. That
+difference is the answer, not a defect: they count different populations under
+one word. Forcing them to match would file the answer as a bug and hide a real
+one inside it. `lifecycle_customers` and `customers` are the same trap in the
+other direction — PR-ADS-153C separated them deliberately.
+
+**Country spend is not the full-account denominator.** Countries' KPI sums the
+per-country rows, and `geographic_view` does not place location-less spend in any
+of them; the two are equal only when the account happens to have no unplaced
+spend. Registered separately, and never compared.
 
 `DISTINCT_BY_DESIGN` in `services/cross_page_parity_service.py` registers these
 pairs with their reasons, and the audit never compares across them.
@@ -216,7 +286,9 @@ figure do not.
 | `consumer_windows_differ` | same window name, different date range |
 | `consumer_window_missing` | a built consumer published no complete window |
 | `consumer_metric_missing` | a registered consumer published no value while others did |
-| `metric_contract_invalid` | missing/wrong provenance: source, scope, status, fallback or window |
+| `consumer_certified_nothing` | a registered consumer was built but certified no identity |
+| `registered_consumer_not_built` | a registered consumer the audit never built at all |
+| `metric_contract_invalid` | missing/wrong provenance: name, source, scope, status, fallback or window |
 | `metric_contract_inconsistent` | consumers disagree on currency or customer identity |
 | `agreement_on_unproven_coverage` | unanimous, over coverage nobody proved |
 | `legacy_fallback_used` | a consumer declared `fallback_used: true` |
@@ -247,12 +319,54 @@ Campaign-spend coverage was the universal proof, so a country metric could be
 certified by evidence about campaign spend — a different table entirely. Each
 authority is now asked about itself:
 
-| Metric family | Proof required |
+Each identity names its evidence explicitly in `coverage_proof`. An unrecognised
+kind is **not proven**: a permissive default would certify any future metric that
+forgot to say what backs it.
+
+| `coverage_proof` | Proof required |
 |---|---|
-| campaign spend | campaign coverage **and** FX coverage both `verified` |
-| country spend / revenue | geo coverage plus an accepted country reconciliation — `verified` **or** `reconciled_with_residual` |
-| revenue / customers | canonical deal-ledger availability |
-| funnel metrics | canonical contact-funnel availability |
+| `campaign_spend_and_fx_coverage` | campaign coverage **and** FX coverage both `verified` |
+| `geo_coverage_and_country_reconciliation` | an accepted country reconciliation — `verified` **or** `reconciled_with_residual` |
+| `country_reconciliation_and_deal_ledger` | that reconciliation **and** canonical deal-ledger proof |
+| `canonical_deal_ledger` | canonical deal-ledger availability |
+| `mart_lead_population` | `readiness.lead_metrics_ready` **and** `lead_metrics_status == "db"` |
+| `canonical_contact_funnel` | the funnel is available **and** `lifecycle_funnel.sync.available` is true |
+
+#### "It published a number" is not proof
+
+Both lead-side proofs started as "did the page publish a count", and running the
+audit against a real **empty** PostgreSQL schema showed what that certifies: six
+identities came back `identical 0` — every page unanimously reporting a
+population nobody had synced. The same fabricated zero PR-ADS-153F named for geo,
+one table over.
+
+The mart already distinguishes the three cases: `lead_metrics_status` is `db`
+when rows were read, `db_empty` when the query returned nothing at all, and
+`withheld` when the business event date was unsafe. Only `db` is proof. There is
+no contacts coverage ledger, so `db_empty` cannot be told apart from "HubSpot was
+never synced" — which means a quarter that genuinely closed no leads is reported
+**unproven** rather than certified. That is the honest answer; certifying it would
+be the fabricated zero wearing a plausible story.
+
+The contact funnel is the same shape: against an empty schema it reports
+`available: true` with all five stages at 0, "reconciled" against nothing, while
+its own `sync` block says the bootstrap never ran. The sync block is the one that
+knows, so it is the one the audit asks.
+
+#### Country revenue needs two proofs, not one (PR-ADS-154C-F2 §4)
+
+F1 chose the proof from the metric's canonical **source**, so country spend and
+country revenue — both from the geo authority — got the same answer. They do not
+depend on the same thing being true. Geo coverage says the **spend** side is
+placed; it is silent on whether the closed-won deals behind the **revenue** were
+readable at all.
+
+Country revenue and country customers therefore require the accepted
+reconciliation **and** canonical deal-ledger proof. With the ledger unreadable,
+country spend stays proven and country revenue does not — which is the point of
+separating them. The Countries service publishes the same distinction in its own
+contracts: `country_attributed_*` revenue is `ready` only when
+`deal_proof_available` is true as well.
 
 ### Fallback flags are read where production actually puts them
 
@@ -272,6 +386,35 @@ values differing at the seventh decimal are reported as the two answers they are
 
 One window failing fails the audit: a page that agrees this quarter and disagrees
 year-to-date is not a page that agrees.
+
+### The contract is checked field by field (PR-ADS-154C-F2)
+
+`_contract_problem` now asserts, in order:
+
+1. **Presence** of every field in `REQUIRED_CONTRACT_FIELDS` — before any
+   comparison, because two missing values compare equal. A contract that omitted
+   its window previously satisfied the window check by saying nothing at all.
+   `window_start` is exempt only for `all_time`; `customer_id` must be a present
+   key and may hold `None`, since not every canonical authority is account-scoped
+   and inventing an identity would be the opposite of provenance.
+2. **`contract.metric` equals the identity it is filed under.** A block keyed
+   `customers` that names itself `attributed_customers` describes a different
+   question.
+3. **`data_source` equals the authority THIS consumer is expected to read**
+   (`expected_source`), **and `scope` equals the registry's.**
+4. **`truth_status` is `ready` and `fallback_used` is `False`.**
+5. **`contract.window` equals the REQUESTED window key.** F1 compared the
+   contract's dates with the payload's, which a page that resolved the wrong
+   window satisfies perfectly — both halves are wrong together.
+6. The declared date range and effective timezone match the ones the consumer
+   published.
+
+### `ok=true` means everything was checked
+
+Not "every page built". The audit passes only when every certified consumer
+produced at least one valid identity **and** every metric identity was compared.
+The human-readable output prints `N built, M/N certified` and names any consumer
+that certified nothing, so the two numbers can never be confused again.
 
 ---
 
@@ -295,7 +438,18 @@ python -m scripts.audit_cross_page_canonical_parity --json > /tmp/parity.json; r
 cat /tmp/parity.json; echo "PARITY_EXIT=$rc"
 ```
 
-Both commands must exit `0`. Then spot-check representative pages in the
+Both commands must exit `0`.
+
+**What a `canonical_source_unavailable` on the lifecycle identities means.** The
+five `lifecycle_*` identities come from the canonical HubSpot contact funnel and
+have one consumer, the Overview funnel strip. If that funnel is not populated for
+the window, the Overview publishes `lifecycle_available: false` and every stage as
+`null` — honestly — and the audit reports `canonical_source_unavailable` and exits
+`1`. That is deliberate: an executive page whose funnel strip is blank is not a
+fully certified page, and the audit is not in the business of passing metrics it
+could not check. The fix is to run the contact-funnel sync, not to relax the gate.
+
+Then spot-check representative pages in the
 browser's Network tab against the audit output — the audit inspects services, and
 confirming the UI renders what the service returned is the one step it cannot
 take for you.

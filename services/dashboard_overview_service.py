@@ -975,6 +975,15 @@ def build_dashboard_overview(window: str = "current_quarter",
     }
     _spend_ready = (spend_truth.get("campaign_spend_status") == "verified")
     _revenue_ready = bool((mart.get("summary") or {}).get("revenue_available"))
+    # The mart's lead/SQL population is withheld wholesale when the business event
+    # date is unsafe, so "did it publish a count" is the readiness question.
+    _lead_ready = (summary.get("leads") is not None or summary.get("sqls") is not None)
+    # PR-ADS-153C: the lifecycle strip is a DIFFERENT authority answering a
+    # different question, on each stage's own event date. It gets its own status.
+    _lifecycle_ready = bool(lifecycle_funnel.get("available")) and \
+        lifecycle_funnel.get("status") != "mismatch"
+    _lifecycle_status = (canonical_contract.TRUTH_READY if _lifecycle_ready
+                         else canonical_contract.TRUTH_NOT_READY)
     metric_truth = canonical_contract.metric_truth_block(_resolved_window, [
         {"metric": "google_ads_spend_usd",
          "data_source": canonical_contract.SOURCE_CANONICAL_SPEND,
@@ -987,6 +996,26 @@ def build_dashboard_overview(window: str = "current_quarter",
          "scope": "all_source_business_revenue",
          "truth_status": (canonical_contract.TRUTH_READY if _revenue_ready
                           else canonical_contract.TRUTH_NOT_READY)},
+        {"metric": "customers",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY if _revenue_ready
+                          else canonical_contract.TRUTH_NOT_READY)},
+        {"metric": "campaign_attributable_sqls",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_sqls",
+         "truth_status": (canonical_contract.TRUTH_READY if _lead_ready
+                          else canonical_contract.TRUTH_NOT_READY)},
+        {"metric": "campaign_attributable_leads",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_leads",
+         "truth_status": (canonical_contract.TRUTH_READY if _lead_ready
+                          else canonical_contract.TRUTH_NOT_READY)},
+        *[{"metric": f"lifecycle_{_stage}",
+           "data_source": canonical_contract.SOURCE_CANONICAL_FUNNEL,
+           "scope": f"lifecycle_{_stage}",
+           "truth_status": _lifecycle_status}
+          for _stage in ("leads", "mqls", "sqls", "opportunities", "customers")],
     ])
 
     return {

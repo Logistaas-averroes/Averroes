@@ -595,6 +595,34 @@ def build_revenue_decision_mart(
                  "truth_status": (canonical_contract.TRUTH_READY
                                   if summary.get("revenue_available")
                                   else canonical_contract.TRUTH_NOT_READY)},
+                # The advertising SUBSET. Same authority, different population —
+                # so it carries its own scope and is never compared with the
+                # all-source pair above.
+                *[{"metric": m,
+                   "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+                   "scope": "campaign_attributable_revenue",
+                   "truth_status": (canonical_contract.TRUTH_READY
+                                    if summary.get(field) is not None
+                                    else canonical_contract.TRUTH_NOT_READY)}
+                  for m, field in (
+                      ("campaign_attributed_won_revenue_usd",
+                       "attributed_won_revenue_usd"),
+                      ("campaign_attributed_customers", "attributed_customers"))],
+                # The mart's lead population, from which every page's "SQLs"
+                # headline derives. Distinct from the canonical contact funnel's
+                # lifecycle stages, which are dated by their own stage-entry
+                # timestamps.
+                *[{"metric": m,
+                   "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+                   "scope": scope,
+                   "truth_status": (canonical_contract.TRUTH_READY
+                                    if summary.get(field) is not None
+                                    else canonical_contract.TRUTH_NOT_READY)}
+                  for m, scope, field in (
+                      ("campaign_attributable_sqls", "campaign_attributable_sqls",
+                       "sqls"),
+                      ("campaign_attributable_leads", "campaign_attributable_leads",
+                       "leads"))],
             ]),
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
     }

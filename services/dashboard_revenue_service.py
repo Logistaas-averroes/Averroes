@@ -780,12 +780,22 @@ def build_dashboard_revenue(window: str = "current_quarter",
     # PR-ADS-154C-F1: per-metric provenance, so the audit checks where each
     # figure came from instead of echoing the source it expected.
     _mt = canonical_contract.metric_truth_block(window_block, [
-        {"metric": m,
+        *[{"metric": m,
+           "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+           "scope": "all_source_business_revenue",
+           "truth_status": (canonical_contract.TRUTH_READY if revenue_ready
+                            else canonical_contract.TRUTH_NOT_READY)}
+          for m in ("closed_won_revenue_usd", "customers")],
+        # The SQL headline is the mart's campaign-attributable population, NOT
+        # all-source business revenue — a separate identity with its own scope,
+        # so it carries its own contract rather than borrowing the revenue one.
+        {"metric": "campaign_attributable_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
-         "scope": "all_source_business_revenue",
-         "truth_status": (canonical_contract.TRUTH_READY if revenue_ready
-                          else canonical_contract.TRUTH_NOT_READY)}
-        for m in ("closed_won_revenue_usd", "customers")])
+         "scope": "campaign_attributable_sqls",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("sqls") is not None
+                          else canonical_contract.TRUTH_NOT_READY)},
+    ])
 
     return {
         "window": window_block,

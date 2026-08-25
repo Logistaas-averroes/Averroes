@@ -47,9 +47,19 @@ def _render(outcome: dict) -> None:
 
         ranges = {(r["window_start"], r["window_end"], r["timezone"])
                   for r in result["consumer_windows"] if r["window_end"]}
-        print(f"       consumers: {len(result['consumers_inspected'])}, "
+        # PR-ADS-154C-F2: a count of consumers BUILT said nothing about how many
+        # were actually certified — the audit built seven and certified four, and
+        # reported seven. Both numbers are printed now.
+        cert = result.get("consumer_certification") or []
+        certified = sum(1 for c in cert if c.get("certified"))
+        print(f"       consumers: {len(result['consumers_inspected'])} built, "
+              f"{certified}/{len(cert)} certified, "
               f"distinct window ranges: {len(ranges)}"
               + ("" if len(ranges) <= 1 else "   <-- CONSUMERS DISAGREE ON THE RANGE"))
+        for c in cert:
+            if not c.get("certified"):
+                print(f"             NOT CERTIFIED {c['consumer']:28} "
+                      f"0 of {c['identities_registered']} registered identities")
 
         for m in result["metrics"]:
             # PR-ADS-154C-F1: `.get(status, "·")`, not `[status]`. This indexed
@@ -72,6 +82,19 @@ def _render(outcome: dict) -> None:
         for v in result["violations"]:
             where = v.get("metric") or v.get("consumer") or "-"
             print(f"       VIOLATION {v['code']}  ({where}): {v.get('detail','')}")
+
+    # PR-ADS-154C-F2 §5. Pages that publish overlapping executive-looking figures
+    # and are NOT certified. Printed rather than omitted: a page absent from a
+    # parity report reads as a page with nothing to answer for.
+    uncertified = outcome.get("uncertified_consumers") or []
+    if uncertified:
+        print("\n" + "-" * 74)
+        print("  EXPLICITLY UNCERTIFIED (not audited for parity, not authoritative)")
+        for u in uncertified:
+            print(f"    {u['consumer']}  [{u['classification']}]")
+            print(f"      overlapping metrics: {', '.join(u['overlapping_metrics'])}")
+            print(f"      surfaces: {', '.join(u['services'])}")
+            print(f"      {u['note']}")
 
     print("\n" + "-" * 74)
     if outcome["ok"]:

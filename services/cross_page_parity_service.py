@@ -50,10 +50,10 @@ from datetime import datetime, timezone
 from analysis.business_windows import WINDOW_KEYS
 from services.canonical_contract import (
     METRIC_TRUTH_KEY,
-    SOURCE_CANONICAL_DEAL_LEDGER,
     SOURCE_CANONICAL_FUNNEL,
     SOURCE_CANONICAL_GEO,
     SOURCE_CANONICAL_SPEND,
+    SOURCE_REVENUE_BY_SOURCE,
     SOURCE_REVENUE_DECISION_MART,
     TRUTH_READY,
     resolve_canonical_window,
@@ -77,54 +77,243 @@ V_CONSUMER_METRIC_MISSING = "consumer_metric_missing"
 V_WINDOW_MISSING = "consumer_window_missing"
 V_CONTRACT_INVALID = "metric_contract_invalid"
 V_CONTRACT_INCONSISTENT = "metric_contract_inconsistent"
+#: PR-ADS-154C-F2. A registered consumer that was built, published a window, and
+#: certified no metric identity. Building is not certification.
+V_CONSUMER_UNCERTIFIED = "consumer_certified_nothing"
+#: A consumer named in the registry that the audit never built at all.
+V_CONSUMER_NOT_BUILT = "registered_consumer_not_built"
 
 #: Country reconciliation states that count as governed geo readiness. Both are
 #: accepted: `reconciled_with_residual` is the PR-ADS-131 case where the
 #: shortfall is explicitly calculated and published rather than hidden.
 ACCEPTED_COUNTRY_STATES = frozenset({"verified", "reconciled_with_residual"})
 
+#: Coverage-proof kinds. Which authority has to have proven itself before a
+#: figure from it counts as measured rather than merely rendered. Named
+#: explicitly per identity: PR-ADS-154C-F1 chose the proof from the metric's
+#: canonical source, which cannot separate country SPEND from country REVENUE
+#: even though they depend on different things being true (F2 §4).
+PROOF_CAMPAIGN_SPEND = "campaign_spend_and_fx_coverage"
+PROOF_GEO_SPEND = "geo_coverage_and_country_reconciliation"
+PROOF_COUNTRY_REVENUE = "country_reconciliation_and_deal_ledger"
+PROOF_DEAL_LEDGER = "canonical_deal_ledger"
+PROOF_MART_LEAD_FUNNEL = "mart_lead_population"
+PROOF_LIFECYCLE_FUNNEL = "canonical_contact_funnel"
+
 #: Metric identities. Each entry is ONE question, and every consumer listed must
 #: answer it identically. Consumers are (label, dotted path into the payload).
+#:
+#: ``canonical_source`` is the authority the identity is defined against.
+#: ``consumer_sources`` overrides it for a consumer that legitimately reads a
+#: DIFFERENT canonical authority for the same question — Channels renders the
+#: all-source totals from the source-group taxonomy, which is the canonical deal
+#: ledger grouped by acquisition source. The declaration is still checked exactly;
+#: the registry simply knows which authority each page is expected to name, so a
+#: page cannot satisfy the audit by claiming an authority it never read.
 #:
 #: Paths are asserted against real payloads in the test suite, so a renamed key
 #: fails a test rather than silently reporting the metric "unavailable" here —
 #: an audit that goes quiet when it loses its grip is worse than no audit.
 METRIC_IDENTITIES = {
+    # ── Google Ads spend, FULL account denominator ───────────────────────────
+    # Countries' `kpis.verified_spend_usd` is deliberately NOT here. It sums the
+    # per-country rows, so it is the country-ATTRIBUTED denominator; it equals the
+    # full-account figure only when geographic_view happens to place every penny.
+    # Same label, different question — see `country_attributed_spend_usd`.
     "google_ads_spend_usd": {
-        "label": "Google Ads spend (USD)",
+        "label": "Google Ads spend, full account (USD)",
         "canonical_source": SOURCE_CANONICAL_SPEND,
         "scope": "google_ads_campaign_spend",
+        "coverage_proof": PROOF_CAMPAIGN_SPEND,
         "consumers": [
             ("dashboard/overview", "kpis.google_ads_spend_usd"),
+            ("dashboard/campaigns", "kpis.verified_spend_usd"),
             ("revenue_decision_mart", "summary.spend_usd"),
         ],
     },
+    "country_attributed_spend_usd": {
+        "label": "Google Ads spend attributed to a country (USD)",
+        "canonical_source": SOURCE_CANONICAL_GEO,
+        "scope": "country_attributed_spend",
+        "coverage_proof": PROOF_GEO_SPEND,
+        "consumers": [
+            ("dashboard/countries", "kpis.verified_spend_usd"),
+        ],
+    },
+
+    # ── All-source commercial outcomes ───────────────────────────────────────
+    # The company-wide totals. Every closed-won deal, whatever brought it in.
     "closed_won_revenue_usd": {
         "label": "Closed-won revenue, ALL sources (USD)",
         "canonical_source": SOURCE_REVENUE_DECISION_MART,
         "scope": "all_source_business_revenue",
+        "coverage_proof": PROOF_DEAL_LEDGER,
         "consumers": [
             ("dashboard/overview", "kpis.closed_won_revenue_usd"),
             ("dashboard/revenue", "kpis.closed_won_revenue_usd"),
+            ("dashboard/channels", "kpis.closed_won_revenue_usd"),
+            ("dashboard/deals", "kpis.closed_won_revenue_usd"),
             ("revenue_decision_mart", "summary.won_revenue_usd"),
         ],
+        "consumer_sources": {"dashboard/channels": SOURCE_REVENUE_BY_SOURCE},
     },
     "customers": {
         "label": "Closed-won customers, ALL sources",
         "canonical_source": SOURCE_REVENUE_DECISION_MART,
         "scope": "all_source_business_revenue",
+        "coverage_proof": PROOF_DEAL_LEDGER,
         "consumers": [
+            ("dashboard/overview", "kpis.customers"),
             ("dashboard/revenue", "kpis.customers"),
+            ("dashboard/channels", "kpis.total_customers"),
+            ("dashboard/deals", "kpis.closed_won_customers"),
             ("revenue_decision_mart", "summary.customers"),
         ],
+        "consumer_sources": {"dashboard/channels": SOURCE_REVENUE_BY_SOURCE},
     },
+
+    # ── Campaign-ATTRIBUTABLE outcomes — a SUBSET, not the business total ────
+    "campaign_attributed_won_revenue_usd": {
+        "label": "Closed-won revenue attributable to a campaign (USD)",
+        "canonical_source": SOURCE_REVENUE_DECISION_MART,
+        "scope": "campaign_attributable_revenue",
+        "coverage_proof": PROOF_DEAL_LEDGER,
+        "consumers": [
+            ("dashboard/campaigns", "kpis.won_revenue_usd"),
+            ("revenue_decision_mart", "summary.attributed_won_revenue_usd"),
+        ],
+    },
+    "campaign_attributed_customers": {
+        "label": "Closed-won customers attributable to a campaign",
+        "canonical_source": SOURCE_REVENUE_DECISION_MART,
+        "scope": "campaign_attributable_revenue",
+        "coverage_proof": PROOF_DEAL_LEDGER,
+        "consumers": [
+            ("dashboard/campaigns", "kpis.customers"),
+            ("revenue_decision_mart", "summary.attributed_customers"),
+        ],
+    },
+
+    # ── Country-ATTRIBUTED outcomes — a different subset again ───────────────
+    # These need BOTH proofs. Geo readiness says the spend side is placed; it says
+    # nothing about whether the closed-won deals behind the revenue were readable.
     "country_attributed_won_revenue_usd": {
         "label": "Closed-won revenue attributed to a country (USD)",
         "canonical_source": SOURCE_CANONICAL_GEO,
         "scope": "country_attributed_revenue",
+        "coverage_proof": PROOF_COUNTRY_REVENUE,
         "consumers": [
             ("dashboard/countries", "kpis.won_revenue_usd"),
         ],
+    },
+    "country_attributed_customers": {
+        "label": "Closed-won customers attributed to a country",
+        "canonical_source": SOURCE_CANONICAL_GEO,
+        "scope": "country_attributed_revenue",
+        "coverage_proof": PROOF_COUNTRY_REVENUE,
+        "consumers": [
+            ("dashboard/countries", "kpis.customers"),
+        ],
+    },
+
+    # ── SQL identities. Deliberately separate populations ────────────────────
+    # The mart's `summary.sqls` is the CAMPAIGN-ATTRIBUTABLE subset — it says so
+    # in its own `sql_reconciliation` block — and every page that renders "SQLs"
+    # beside campaign or country spend is rendering that same subset.
+    "campaign_attributable_sqls": {
+        "label": "SQLs attributable to a campaign",
+        "canonical_source": SOURCE_REVENUE_DECISION_MART,
+        "scope": "campaign_attributable_sqls",
+        "coverage_proof": PROOF_MART_LEAD_FUNNEL,
+        "consumers": [
+            ("dashboard/overview", "kpis.sqls"),
+            ("dashboard/revenue", "kpis.sqls"),
+            ("dashboard/campaigns", "kpis.sqls"),
+            ("dashboard/countries", "kpis.sqls"),
+            ("dashboard/deals", "kpis.sqls"),
+            ("revenue_decision_mart", "summary.sqls"),
+        ],
+    },
+    # Channels counts SQLs by SOURCE GROUP, which is a different population and
+    # genuinely differs from the campaign-attributable subset — 0 against 25 in
+    # the reference fixture, and that difference is the answer, not a defect.
+    # Registered as its own identity so it is checked, and never compared with
+    # the one above.
+    "source_group_sqls": {
+        "label": "SQLs by source group (channel taxonomy)",
+        "canonical_source": SOURCE_REVENUE_BY_SOURCE,
+        "scope": "source_group_sqls",
+        "coverage_proof": PROOF_MART_LEAD_FUNNEL,
+        "consumers": [
+            ("dashboard/channels", "kpis.total_sqls"),
+        ],
+    },
+    "campaign_attributable_leads": {
+        "label": "Leads attributable to a campaign",
+        "canonical_source": SOURCE_REVENUE_DECISION_MART,
+        "scope": "campaign_attributable_leads",
+        "coverage_proof": PROOF_MART_LEAD_FUNNEL,
+        "consumers": [
+            ("dashboard/overview", "kpis.leads"),
+            ("revenue_decision_mart", "summary.leads"),
+        ],
+    },
+}
+
+#: Lifecycle stages from the canonical HubSpot contact funnel — a DIFFERENT
+#: authority from the mart's lead population above, reached through each stage's
+#: own ``hs_v2_date_entered_*`` timestamp. A contact becomes an MQL on one date
+#: and an SQL on another, so these are five questions with five event-date
+#: semantics, not one metric sliced five ways, and none of them is the
+#: campaign-attributable SQL count or the channel source-group count. The
+#: registry keeps all three apart on purpose.
+LIFECYCLE_STAGES = ("leads", "mqls", "sqls", "opportunities", "customers")
+for _stage in LIFECYCLE_STAGES:
+    METRIC_IDENTITIES[f"lifecycle_{_stage}"] = {
+        "label": f"Lifecycle {_stage}, ALL sources (canonical funnel)",
+        "canonical_source": SOURCE_CANONICAL_FUNNEL,
+        "scope": f"lifecycle_{_stage}",
+        "coverage_proof": PROOF_LIFECYCLE_FUNNEL,
+        "consumers": [("dashboard/overview", f"kpis.lifecycle_{_stage}")],
+    }
+
+
+def expected_source(spec: dict, consumer: str) -> str:
+    """The canonical authority THIS consumer is expected to name for THIS metric."""
+    return (spec.get("consumer_sources") or {}).get(consumer, spec["canonical_source"])
+
+
+#: Consumers the audit CERTIFIES. Each must contribute at least one substantive
+#: metric identity — building successfully and having its window checked is not
+#: certification, and counting it as inspected on that basis was the gap
+#: PR-ADS-154C-F2 closes: seven consumers were built and four identities were
+#: certified, so three pages passed by producing nothing to check.
+CERTIFIED_CONSUMERS = frozenset(
+    consumer
+    for spec in METRIC_IDENTITIES.values()
+    for consumer, _path in spec["consumers"]
+)
+
+#: Pages that publish overlapping executive-looking totals but are NOT certified
+#: canonical sources, and are scheduled for redesign. Reported explicitly by the
+#: audit rather than omitted: a page missing from a parity report reads as a page
+#: with nothing to answer for.
+PENDING_REDESIGN_CONSUMERS = {
+    "platform_evidence": {
+        "classification": "pending_redesign_non_authoritative",
+        "overlapping_metrics": ["spend_usd", "sqls"],
+        "services": ["campaign_evidence_service", "keyword_evidence_service"],
+        "note": ("Publishes spend and SQL figures at an evidence grain. Not a "
+                 "canonical executive total and must not be read as one. Consumer "
+                 "migration belongs to the Platform Evidence redesign."),
+    },
+    "lead_intelligence": {
+        "classification": "pending_redesign_non_authoritative",
+        "overlapping_metrics": ["leads", "sqls"],
+        "services": ["/api/leads", "/api/leads/country-summary"],
+        "note": ("Publishes lead and SQL counts from the pre-canonical lead "
+                 "snapshot. Not a canonical executive total. Consumer migration "
+                 "belongs to the Lead Intelligence redesign."),
     },
 }
 
@@ -147,6 +336,40 @@ DISTINCT_BY_DESIGN = [
             "country. The shortfall is the governed residual (PR-ADS-131), which is "
             "why an accepted residual is a truth-ready state rather than a mismatch."),
     },
+    {
+        "left": "campaign_attributable_sqls",
+        "right": "source_group_sqls",
+        "reason": (
+            "Campaign-attributable SQLs count qualified leads reaching a canonical "
+            "Google Ads campaign; source-group SQLs count them by CRM acquisition "
+            "source across every channel. Different populations under one word."),
+    },
+    {
+        "left": "campaign_attributable_sqls",
+        "right": "lifecycle_sqls",
+        "reason": (
+            "Lifecycle SQLs are stage-ENTRY events dated by the contact's own "
+            "hs_v2_date_entered_salesqualifiedlead timestamp, all sources. The "
+            "campaign-attributable count is a mart lead population filtered to "
+            "campaign identity. Same word, different event and different date."),
+    },
+    {
+        "left": "lifecycle_customers",
+        "right": "customers",
+        "reason": (
+            "A lifecycle customer is a contact that entered the customer stage; a "
+            "revenue customer is a closed-won deal in the canonical ledger. "
+            "PR-ADS-153C kept these apart deliberately and neither substitutes for "
+            "the other."),
+    },
+    {
+        "left": "campaign_attributable_leads",
+        "right": "lifecycle_leads",
+        "reason": (
+            "The mart's lead population is dated by contact_created_at and filtered "
+            "by campaign exclusions; the lifecycle lead count is a canonical funnel "
+            "stage-entry event. Two lead definitions, both legitimate."),
+    },
 ]
 
 
@@ -160,8 +383,23 @@ def _dig(payload: dict, path: str):
     return node
 
 
+#: Fields every metric contract must actually CARRY. PR-ADS-154C-F2 §3: F1
+#: checked that the declared window matched the published one, which two absent
+#: values satisfy just as well as two present ones. Presence is checked first, so
+#: a contract cannot pass by omitting the thing it is supposed to state.
+#:
+#: ``customer_id`` is required as a KEY but may hold ``None`` — some canonical
+#: authorities are not account-scoped, and inventing an identity for them would be
+#: the opposite of provenance. ``window_start`` is absent only for ``all_time``.
+REQUIRED_CONTRACT_FIELDS = (
+    "metric", "data_source", "scope", "truth_status", "window",
+    "window_end", "timezone", "currency", "fallback_used", "customer_id",
+)
+
+
 def _contract_problem(contract, spec: dict, metric_key: str,
-                      consumer_window: tuple | None) -> str | None:
+                      consumer_window: tuple | None, consumer: str = "",
+                      window: str = "") -> str | None:
     """Check a reading's declared provenance against the registry. None = fine.
 
     PR-ADS-154C-F1 §2. Before this, the audit printed the ``canonical_source``
@@ -175,15 +413,43 @@ def _contract_problem(contract, spec: dict, metric_key: str,
     """
     if not isinstance(contract, dict):
         return f"no {METRIC_TRUTH_KEY}.{metric_key} contract published"
-    if contract.get("data_source") != spec["canonical_source"]:
+
+    # Presence FIRST. Every check below compares two values, and two missing
+    # values compare equal — so a contract omitting its window would have passed
+    # the consistency check by saying nothing at all.
+    absent = [f for f in REQUIRED_CONTRACT_FIELDS if f not in contract]
+    if window != "all_time" and "window_start" not in contract:
+        absent.append("window_start")
+    if absent:
+        return f"contract omits required field(s): {', '.join(sorted(absent))}"
+
+    # The contract must be about the metric it is filed under. A block keyed
+    # `customers` that names itself `attributed_customers` describes a different
+    # question, and reading it as provenance for this one is the mistake the
+    # per-metric registry exists to prevent.
+    if contract.get("metric") != metric_key:
+        return (f"contract.metric is {contract.get('metric')!r}, filed under "
+                f"{metric_key!r}")
+
+    wanted_source = expected_source(spec, consumer)
+    if contract.get("data_source") != wanted_source:
         return (f"data_source is {contract.get('data_source')!r}, "
-                f"expected {spec['canonical_source']!r}")
+                f"expected {wanted_source!r}")
     if contract.get("scope") != spec["scope"]:
         return f"scope is {contract.get('scope')!r}, expected {spec['scope']!r}"
     if contract.get("truth_status") != TRUTH_READY:
         return f"truth_status is {contract.get('truth_status')!r}, expected 'ready'"
     if contract.get("fallback_used") is not False:
         return f"fallback_used is {contract.get('fallback_used')!r}, expected False"
+
+    # The window the contract names must be the window that was ASKED for, not
+    # merely one the page and its own contract agree on. A page that resolved
+    # `ytd` while the audit asked for `current_quarter` is internally consistent
+    # and answering a different question.
+    if window and contract.get("window") != window:
+        return (f"contract.window is {contract.get('window')!r}, expected the "
+                f"requested window {window!r}")
+
     if consumer_window is not None:
         declared = (contract.get("window_start"), contract.get("window_end"),
                     contract.get("timezone"))
@@ -211,20 +477,46 @@ def _coverage_proven(consumers: dict, spec: dict) -> tuple[bool, str]:
     PR-ADS-154C-F1 §5: the proof is chosen per metric. Campaign-spend coverage
     was previously used as the universal answer, which meant a country metric
     could be certified by evidence about campaign spend, and revenue by evidence
-    about neither. Each authority is now asked about itself:
+    about neither.
 
-      * campaign spend  -> campaign coverage AND FX coverage
-      * country metrics -> geo coverage AND an accepted country reconciliation
-                           (`verified` or `reconciled_with_residual`)
+    PR-ADS-154C-F2 §4: the proof is now named EXPLICITLY on each identity rather
+    than inferred from its canonical source, because one source can back two
+    metrics that depend on different things being true. Country spend and country
+    revenue both come from the geo authority, but geo coverage says only that the
+    spend side is placed — it is silent on whether the closed-won deals behind
+    the revenue were readable at all. Marking country revenue ready because geo
+    spend is ready is the specific false positive this closes.
+
+      * campaign spend   -> campaign coverage AND FX coverage
+      * country spend    -> an accepted country reconciliation (`verified` or
+                            `reconciled_with_residual`)
+      * country revenue  -> that reconciliation AND canonical deal-ledger proof
       * revenue / customers -> the deal ledger is available
-      * funnel metrics  -> the contact funnel is available
+      * mart lead/SQL population -> the mart published a lead count
+      * lifecycle stages -> the canonical contact funnel is available
+
+    An unrecognised proof kind is NOT proven. A permissive default here would
+    certify any future identity that forgot to name its evidence.
     """
     mart = (consumers.get("revenue_decision_mart") or {}).get("payload") or {}
     spend_truth = mart.get("spend_truth") or {}
     summary = mart.get("summary") or {}
-    source = spec["canonical_source"]
+    proof = spec.get("coverage_proof")
 
-    if source == SOURCE_CANONICAL_SPEND:
+    def _country_ok() -> tuple[bool, str]:
+        country = spend_truth.get("country_spend_status")
+        if country in ACCEPTED_COUNTRY_STATES:
+            return True, ""
+        return False, (f"country reconciliation is {country!r}, which is not one "
+                       f"of {sorted(ACCEPTED_COUNTRY_STATES)}")
+
+    def _ledger_ok() -> tuple[bool, str]:
+        if summary.get("revenue_available") is True:
+            return True, ""
+        return False, (f"canonical revenue availability is "
+                       f"{summary.get('revenue_available')!r}")
+
+    if proof == PROOF_CAMPAIGN_SPEND:
         campaign = spend_truth.get("campaign_spend_status")
         fx = spend_truth.get("fx_status")
         if campaign == "verified" and fx == "verified":
@@ -232,25 +524,59 @@ def _coverage_proven(consumers: dict, spec: dict) -> tuple[bool, str]:
         return False, (f"campaign spend coverage is {campaign!r} and FX coverage "
                        f"is {fx!r}")
 
-    if source == SOURCE_CANONICAL_GEO:
-        country = spend_truth.get("country_spend_status")
-        if country in ACCEPTED_COUNTRY_STATES:
-            return True, ""
-        return False, (f"country reconciliation is {country!r}, which is not one "
-                       f"of {sorted(ACCEPTED_COUNTRY_STATES)}")
+    if proof == PROOF_GEO_SPEND:
+        return _country_ok()
 
-    if source in (SOURCE_REVENUE_DECISION_MART, SOURCE_CANONICAL_DEAL_LEDGER):
-        if summary.get("revenue_available") is True:
-            return True, ""
-        return False, (f"canonical revenue availability is "
-                       f"{summary.get('revenue_available')!r}")
+    if proof == PROOF_COUNTRY_REVENUE:
+        ok, detail = _country_ok()
+        if not ok:
+            return False, detail
+        ok, detail = _ledger_ok()
+        if not ok:
+            return False, (f"geo coverage is ready but the deal proof is not: "
+                           f"{detail}")
+        return True, ""
 
-    if source == SOURCE_CANONICAL_FUNNEL:
-        if summary.get("leads_available", summary.get("sqls") is not None):
-            return True, ""
-        return False, "canonical contact funnel is unavailable"
+    if proof == PROOF_DEAL_LEDGER:
+        return _ledger_ok()
 
-    return True, ""
+    if proof == PROOF_MART_LEAD_FUNNEL:
+        # "It published a number" is not proof — an empty contacts table publishes
+        # 0 on every page, which is unanimity about a population nobody measured.
+        # `lead_metrics_status` distinguishes the three cases the mart already
+        # knows apart: `db` (rows were read), `db_empty` (the query returned
+        # nothing at all) and `withheld` (the business event date was unsafe).
+        #
+        # There is no contacts coverage ledger, so `db_empty` cannot be told from
+        # "HubSpot was never synced" — and a quarter that genuinely closed no
+        # leads is therefore reported as unproven rather than certified. Saying so
+        # is the honest answer; certifying it would be the PR-ADS-153F fabricated
+        # zero under a different table.
+        readiness = mart.get("readiness") or {}
+        status = readiness.get("lead_metrics_status")
+        if readiness.get("lead_metrics_ready") is True and status == "db":
+            return True, ""
+        return False, (f"the mart's lead population is {status!r} "
+                       f"(lead_metrics_ready={readiness.get('lead_metrics_ready')!r}), "
+                       "so no lead or SQL count over this window was measured")
+
+    if proof == PROOF_LIFECYCLE_FUNNEL:
+        # Same distinction one authority over. The funnel service reports
+        # `available: true` against an empty schema — every stage 0, reconciled
+        # against nothing — while its own `sync` block says the bootstrap never
+        # ran. The sync block is the one that knows.
+        overview = (consumers.get("dashboard/overview") or {}).get("payload") or {}
+        funnel = overview.get("lifecycle_funnel") or {}
+        sync = funnel.get("sync") or {}
+        if (overview.get("kpis") or {}).get("lifecycle_available") is not True:
+            return False, "the canonical HubSpot contact funnel is unavailable"
+        if sync.get("available") is not True:
+            return False, (f"the contact funnel reports available, but its sync is "
+                           f"{sync.get('bootstrap_status')!r} and has never run — "
+                           "stage counts over an unsynced range are not measurements")
+        return True, ""
+
+    return False, f"no recognised coverage proof for this identity ({proof!r})"
 
 
 def _window_signature(payload: dict, window: str) -> tuple:
@@ -390,8 +716,10 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
             value = _dig(payload, path) if payload else None
             contract = ((payload or {}).get(METRIC_TRUTH_KEY) or {}).get(metric_key)
             problem = _contract_problem(contract, spec, metric_key,
-                                        _window_signature(payload or {}, window)[0])
+                                        _window_signature(payload or {}, window)[0],
+                                        consumer=consumer_name, window=window)
             readings.append({"consumer": consumer_name, "path": path, "value": value,
+                             "expected_source": expected_source(spec, consumer_name),
                              "contract": contract, "contract_problem": problem})
 
         present = [r for r in readings if r["value"] is not None]
@@ -464,10 +792,43 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
             "label": spec["label"],
             "scope": spec["scope"],
             "canonical_source": spec["canonical_source"],
+            "coverage_proof": spec.get("coverage_proof"),
             "status": status,
             "value": baseline,
             "readings": readings,
         })
+
+    # ── Certification: did every registered consumer actually answer? ────────
+    # PR-ADS-154C-F2 §1. The audit built seven consumers and certified four
+    # identities, then reported all seven as "inspected". Three pages passed by
+    # having nothing checked — the strongest possible form of the agreement-shaped
+    # failure this whole command exists to catch. A consumer is certified only
+    # when at least one metric identity it is registered for came back with a
+    # value AND a contract the registry accepts.
+    certified: dict = {name: {"consumer": name, "identities_certified": 0,
+                              "identities_registered": 0, "certified": False}
+                       for name in sorted(CERTIFIED_CONSUMERS)}
+    for entry in metrics:
+        for r in entry["readings"]:
+            row = certified.get(r["consumer"])
+            if row is None:
+                continue
+            row["identities_registered"] += 1
+            if r["value"] is not None and not r["contract_problem"]:
+                row["identities_certified"] += 1
+    for name, row in certified.items():
+        row["certified"] = row["identities_certified"] > 0
+        if name not in consumers:
+            violations.append({
+                "code": V_CONSUMER_NOT_BUILT, "consumer": name,
+                "detail": ("registered in METRIC_IDENTITIES but not built by "
+                           "_build_consumers, so nothing about it was checked")})
+        elif not row["certified"]:
+            violations.append({
+                "code": V_CONSUMER_UNCERTIFIED, "consumer": name,
+                "detail": (f"built and window-checked, but none of its "
+                           f"{row['identities_registered']} registered metric "
+                           f"identities produced a value with a valid contract")})
 
     ok = not violations
     return {
@@ -478,6 +839,16 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
         "timezone": resolved.get("timezone"),
         "ok": ok,
         "consumers_inspected": sorted(consumers),
+        # What "inspected" is worth, per consumer. `consumers_inspected` alone
+        # said only that a page was built.
+        "consumer_certification": [certified[k] for k in sorted(certified)],
+        # PR-ADS-154C-F2 §5. Pages that publish overlapping executive-looking
+        # figures and are NOT certified. Named here rather than omitted: a page
+        # absent from a parity report reads as a page with nothing to answer for,
+        # which is how an uncertified total keeps being read as a certified one.
+        "uncertified_consumers": [
+            {"consumer": name, **detail}
+            for name, detail in sorted(PENDING_REDESIGN_CONSUMERS.items())],
         "consumer_windows": window_rows,
         "metrics": metrics,
         "distinct_by_design": DISTINCT_BY_DESIGN,
@@ -540,6 +911,9 @@ def audit_all_windows(windows=None, now: datetime | None = None) -> dict:
     return {
         "ok": all(r["ok"] for r in results),
         "windows_audited": keys,
+        "uncertified_consumers": [
+            {"consumer": name, **detail}
+            for name, detail in sorted(PENDING_REDESIGN_CONSUMERS.items())],
         "results": results,
         "violations": all_violations,
         "violation_codes": sorted({v["code"] for v in all_violations}),

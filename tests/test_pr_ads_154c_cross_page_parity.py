@@ -33,6 +33,7 @@ Run with:
 from __future__ import annotations
 
 import ast
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -180,6 +181,20 @@ def _payloads(**overrides):
     never fire on a real payload. A fixture shaped like the thing it stands in
     for is the only kind that can catch that.
     """
+    _MART = contract_mod.SOURCE_REVENUE_DECISION_MART
+    _BY_SOURCE = contract_mod.SOURCE_REVENUE_BY_SOURCE
+    _SPEND = contract_mod.SOURCE_CANONICAL_SPEND
+    _GEO = contract_mod.SOURCE_CANONICAL_GEO
+    _FUNNEL = contract_mod.SOURCE_CANONICAL_FUNNEL
+
+    def _mt(*specs):
+        return {m: _contract(m, src, scope) for m, src, scope in specs}
+
+    # The figures are the ones the reference fixture actually produces (see
+    # tests/test_pr_ads_138_dashboard_countries.py): 13000 spend, 33000 all-source
+    # revenue over 3 customers, 29000 over 2 for both the campaign- and
+    # country-attributed subsets, 25 campaign-attributable SQLs against 0
+    # source-group SQLs, 105 leads.
     base = {
         "dashboard/overview": {
             "window": dict(_WIN), "read_only": True,
@@ -187,64 +202,108 @@ def _payloads(**overrides):
             "legacy_fallback_used": False,                 # TOP-LEVEL, as in production
             "google_ads_conversion_value_used": False,
             "kpis": {"google_ads_spend_usd": 13000.0,
-                     "closed_won_revenue_usd": 33000.0},
-            contract_mod.METRIC_TRUTH_KEY: {
-                "google_ads_spend_usd": _contract(
-                    "google_ads_spend_usd", contract_mod.SOURCE_CANONICAL_SPEND,
-                    "google_ads_campaign_spend"),
-                "closed_won_revenue_usd": _contract(
-                    "closed_won_revenue_usd",
-                    contract_mod.SOURCE_REVENUE_DECISION_MART,
-                    "all_source_business_revenue")}},
+                     "closed_won_revenue_usd": 33000.0,
+                     "customers": 3, "sqls": 25, "leads": 105,
+                     "lifecycle_leads": 105, "lifecycle_mqls": 60,
+                     "lifecycle_sqls": 30, "lifecycle_opportunities": 8,
+                     "lifecycle_customers": 4, "lifecycle_available": True},
+            # The funnel reports `available` against an empty schema too, so the
+            # proof is its own sync block, not the availability flag.
+            "lifecycle_funnel": {"available": True, "status": "reconciled",
+                                 "sync": {"available": True,
+                                          "bootstrap_status": "complete"}},
+            contract_mod.METRIC_TRUTH_KEY: _mt(
+                ("google_ads_spend_usd", _SPEND, "google_ads_campaign_spend"),
+                ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
+                ("customers", _MART, "all_source_business_revenue"),
+                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"),
+                ("campaign_attributable_leads", _MART, "campaign_attributable_leads"),
+                *[(f"lifecycle_{s}", _FUNNEL, f"lifecycle_{s}")
+                  for s in ("leads", "mqls", "sqls", "opportunities", "customers")])},
         "dashboard/revenue": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "hubspot_deal_ledger", "legacy_fallback_used": False,
-            "kpis": {"closed_won_revenue_usd": 33000.0, "customers": 3},
-            contract_mod.METRIC_TRUTH_KEY: {
-                "closed_won_revenue_usd": _contract(
-                    "closed_won_revenue_usd",
-                    contract_mod.SOURCE_REVENUE_DECISION_MART,
-                    "all_source_business_revenue"),
-                "customers": _contract(
-                    "customers", contract_mod.SOURCE_REVENUE_DECISION_MART,
-                    "all_source_business_revenue")}},
-        "dashboard/channels": {"window": dict(_WIN), "legacy_fallback_used": False,
-                               "kpis": {}},
-        "dashboard/campaigns": {"window": dict(_WIN), "legacy_fallback_used": False,
-                                "kpis": {}},
+            "kpis": {"closed_won_revenue_usd": 33000.0, "customers": 3, "sqls": 25},
+            contract_mod.METRIC_TRUTH_KEY: _mt(
+                ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
+                ("customers", _MART, "all_source_business_revenue"),
+                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"))},
+        "dashboard/channels": {
+            "window": dict(_WIN), "read_only": True,
+            "source_truth": "revenue_by_source_taxonomy",
+            "legacy_fallback_used": False,
+            # Channels renders the all-source totals from the source-group
+            # taxonomy, so it names THAT canonical authority — and its SQL count
+            # is a different population, registered under its own identity.
+            "kpis": {"closed_won_revenue_usd": 33000.0, "total_customers": 3,
+                     "total_sqls": 0},
+            contract_mod.METRIC_TRUTH_KEY: _mt(
+                ("closed_won_revenue_usd", _BY_SOURCE, "all_source_business_revenue"),
+                ("customers", _BY_SOURCE, "all_source_business_revenue"),
+                ("source_group_sqls", _BY_SOURCE, "source_group_sqls"))},
+        "dashboard/campaigns": {
+            "window": dict(_WIN), "read_only": True,
+            "source_truth": "revenue_decision_mart_campaign_view",
+            "legacy_fallback_used": False,
+            "kpis": {"verified_spend_usd": 13000.0, "won_revenue_usd": 29000.0,
+                     "customers": 2, "sqls": 25},
+            contract_mod.METRIC_TRUTH_KEY: _mt(
+                ("google_ads_spend_usd", _SPEND, "google_ads_campaign_spend"),
+                ("campaign_attributed_won_revenue_usd", _MART,
+                 "campaign_attributable_revenue"),
+                ("campaign_attributed_customers", _MART,
+                 "campaign_attributable_revenue"),
+                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"))},
         "dashboard/countries": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "revenue_decision_mart_country_view",
             "legacy_fallback_used": False,
-            "kpis": {"won_revenue_usd": 29000.0},
-            contract_mod.METRIC_TRUTH_KEY: {
-                "country_attributed_won_revenue_usd": _contract(
-                    "country_attributed_won_revenue_usd",
-                    contract_mod.SOURCE_CANONICAL_GEO,
-                    "country_attributed_revenue")}},
-        "dashboard/deals": {"window": dict(_WIN), "legacy_fallback_used": False,
-                            "kpis": {}},
+            # `verified_spend_usd` here sums the per-country rows — the
+            # country-ATTRIBUTED denominator, not the full-account one, even when
+            # the two happen to agree.
+            "kpis": {"won_revenue_usd": 29000.0, "customers": 2,
+                     "verified_spend_usd": 13000.0, "sqls": 25},
+            contract_mod.METRIC_TRUTH_KEY: _mt(
+                ("country_attributed_won_revenue_usd", _GEO,
+                 "country_attributed_revenue"),
+                ("country_attributed_customers", _GEO, "country_attributed_revenue"),
+                ("country_attributed_spend_usd", _GEO, "country_attributed_spend"),
+                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"))},
+        "dashboard/deals": {
+            "window": dict(_WIN), "read_only": True,
+            "source_truth": "hubspot_deal_ledger", "legacy_fallback_used": False,
+            "kpis": {"closed_won_revenue_usd": 33000.0, "closed_won_customers": 3,
+                     "sqls": 25},
+            contract_mod.METRIC_TRUTH_KEY: _mt(
+                ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
+                ("customers", _MART, "all_source_business_revenue"),
+                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"))},
         "revenue_decision_mart": {
             "window": dict(_WIN),
             # Coverage proof is per metric: campaign spend needs campaign AND FX
-            # coverage; country metrics need an accepted reconciliation; revenue
-            # needs the ledger available.
+            # coverage; country spend needs an accepted reconciliation; country
+            # revenue needs that AND the deal ledger; revenue needs the ledger.
             "spend_truth": {"campaign_spend_status": "verified",
                             "fx_status": "verified",
                             "country_spend_status": "reconciled_with_residual"},
+            # `db` = the lead query returned rows. `db_empty` is an unmeasured
+            # window, not a quarter with no leads, and is not proof of either.
+            "readiness": {"lead_metrics_ready": True, "lead_metrics_status": "db"},
             "summary": {"spend_usd": 13000.0, "won_revenue_usd": 33000.0,
-                        "customers": 3, "revenue_available": True},
-            contract_mod.METRIC_TRUTH_KEY: {
-                "google_ads_spend_usd": _contract(
-                    "google_ads_spend_usd", contract_mod.SOURCE_CANONICAL_SPEND,
-                    "google_ads_campaign_spend"),
-                "closed_won_revenue_usd": _contract(
-                    "closed_won_revenue_usd",
-                    contract_mod.SOURCE_REVENUE_DECISION_MART,
-                    "all_source_business_revenue"),
-                "customers": _contract(
-                    "customers", contract_mod.SOURCE_REVENUE_DECISION_MART,
-                    "all_source_business_revenue")}},
+                        "customers": 3, "revenue_available": True,
+                        "attributed_won_revenue_usd": 29000.0,
+                        "attributed_customers": 2, "sqls": 25, "leads": 105},
+            contract_mod.METRIC_TRUTH_KEY: _mt(
+                ("google_ads_spend_usd", _SPEND, "google_ads_campaign_spend"),
+                ("closed_won_revenue_usd", _MART, "all_source_business_revenue"),
+                ("customers", _MART, "all_source_business_revenue"),
+                ("campaign_attributed_won_revenue_usd", _MART,
+                 "campaign_attributable_revenue"),
+                ("campaign_attributed_customers", _MART,
+                 "campaign_attributable_revenue"),
+                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"),
+                ("campaign_attributable_leads", _MART,
+                 "campaign_attributable_leads"))},
     }
     for name, patch in overrides.items():
         target = base[name.replace("__", "/")]
@@ -317,7 +376,8 @@ def test_2d_unanimous_agreement_over_unproven_coverage_is_not_parity(monkeypatch
     out = _audit_with(monkeypatch, _payloads(
         revenue_decision_mart={"spend_truth.campaign_spend_status": "incomplete",
                                "summary.spend_usd": 0.0},
-        dashboard__overview={"kpis.google_ads_spend_usd": 0.0}))
+        dashboard__overview={"kpis.google_ads_spend_usd": 0.0},
+        dashboard__campaigns={"kpis.verified_spend_usd": 0.0}))
     assert out["ok"] is False
     assert parity.V_AGREEMENT_ON_UNPROVEN_COVERAGE in out["violation_codes"]
     spend = next(m for m in out["metrics"] if m["metric"] == "google_ads_spend_usd")
@@ -954,9 +1014,16 @@ def test_f1_9_every_real_audited_payload_publishes_its_metric_contracts():
 
     A registry that drifts from the services reports "unavailable" forever and
     looks like a data problem. This binds the two together.
+
+    Every registered consumer must publish the CONTRACT unconditionally — an
+    outage is something a page states, not something it goes quiet about — and
+    must publish the VALUE whenever its own contract calls the metric ready. The
+    reference fixture leaves the canonical contact funnel unwired, so the five
+    lifecycle identities are legitimately `not_ready` here and are checked on the
+    first rule only.
     """
     import tests.test_pr_ads_138_dashboard_countries as t138
-    from services.cross_page_parity_service import METRIC_IDENTITIES
+    from services.cross_page_parity_service import METRIC_IDENTITIES, expected_source
 
     mp = pytest.MonkeyPatch()
     t138._patch_durable(mp)
@@ -970,12 +1037,409 @@ def test_f1_9_every_real_audited_payload_publishes_its_metric_contracts():
             entry = built.get(consumer_name) or {}
             assert entry.get("error") is None, f"{consumer_name}: {entry.get('error')}"
             payload = entry["payload"]
-            assert parity._dig(payload, path) is not None, (
-                f"{consumer_name}.{path} publishes nothing — the registry has "
-                "drifted from the service")
             block = (payload.get(contract_mod.METRIC_TRUTH_KEY) or {}).get(metric_key)
             assert isinstance(block, dict), (
                 f"{consumer_name} publishes no contract for {metric_key}")
-            assert block["data_source"] == spec["canonical_source"]
+            assert block["metric"] == metric_key
+            assert block["data_source"] == expected_source(spec, consumer_name)
             assert block["scope"] == spec["scope"]
             assert block["fallback_used"] is False
+            if block["truth_status"] == contract_mod.TRUTH_READY:
+                assert parity._dig(payload, path) is not None, (
+                    f"{consumer_name}.{path} declares {metric_key} ready and "
+                    "publishes nothing — the registry has drifted from the service")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-154C-F2 — complete the decision-metric registry
+#
+# The gap this closes: the audit built SEVEN consumers and certified FOUR metric
+# identities, then reported all seven as "inspected". Three production pages
+# passed by having nothing checked about them — the agreement-shaped failure the
+# command exists to catch, occurring inside the command itself.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def test_f2_1_every_executive_page_contributes_a_certified_identity():
+    """No production page is registered as a consumer of nothing."""
+    from services.cross_page_parity_service import (
+        CERTIFIED_CONSUMERS, METRIC_IDENTITIES)
+
+    for page in ("dashboard/overview", "dashboard/revenue", "dashboard/channels",
+                 "dashboard/campaigns", "dashboard/countries", "dashboard/deals",
+                 "revenue_decision_mart"):
+        assert page in CERTIFIED_CONSUMERS, f"{page} certifies no metric identity"
+        registered = [k for k, s in METRIC_IDENTITIES.items()
+                      if any(c == page for c, _ in s["consumers"])]
+        assert registered, f"{page} is in CERTIFIED_CONSUMERS but registers nothing"
+
+
+def test_f2_1b_a_page_that_certifies_nothing_is_a_violation(monkeypatch):
+    """Building successfully is not certification.
+
+    Channels published no audited identity before this PR and the audit still
+    counted it among the consumers inspected. Stripping its contracts must now
+    fail rather than pass quietly.
+    """
+    payloads = _payloads()
+    payloads["dashboard/channels"].pop(contract_mod.METRIC_TRUTH_KEY)
+    out = _audit_with(monkeypatch, payloads)
+    assert out["ok"] is False
+    assert parity.V_CONSUMER_UNCERTIFIED in out["violation_codes"]
+    row = next(c for c in out["consumer_certification"]
+               if c["consumer"] == "dashboard/channels")
+    assert row["certified"] is False
+    assert row["identities_certified"] == 0
+    assert row["identities_registered"] > 0
+
+
+def test_f2_1c_a_registered_consumer_that_is_never_built_is_a_violation(monkeypatch):
+    """A page dropped from `_build_consumers` must not vanish from the report."""
+    payloads = _payloads()
+    payloads.pop("dashboard/deals")
+    out = _audit_with(monkeypatch, payloads)
+    assert out["ok"] is False
+    assert parity.V_CONSUMER_NOT_BUILT in out["violation_codes"]
+
+
+def test_f2_2_lifecycle_stages_are_five_identities_from_the_canonical_funnel():
+    """Each stage keeps its OWN event-date semantics, so each is its own question."""
+    from services.cross_page_parity_service import (
+        LIFECYCLE_STAGES, METRIC_IDENTITIES)
+
+    assert LIFECYCLE_STAGES == ("leads", "mqls", "sqls", "opportunities", "customers")
+    for stage in LIFECYCLE_STAGES:
+        spec = METRIC_IDENTITIES[f"lifecycle_{stage}"]
+        assert spec["canonical_source"] == contract_mod.SOURCE_CANONICAL_FUNNEL
+        assert spec["scope"] == f"lifecycle_{stage}"
+        assert spec["consumers"] == [("dashboard/overview", f"kpis.lifecycle_{stage}")]
+
+
+def test_f2_2b_the_three_sql_populations_are_never_compared():
+    """Lifecycle SQLs, campaign-attributable SQLs and source-group SQLs are three
+    questions. Forcing them to match would file the answer as a bug."""
+    from services.cross_page_parity_service import DISTINCT_BY_DESIGN, METRIC_IDENTITIES
+
+    scopes = {k: METRIC_IDENTITIES[k]["scope"] for k in
+              ("lifecycle_sqls", "campaign_attributable_sqls", "source_group_sqls")}
+    assert len(set(scopes.values())) == 3, scopes
+
+    pairs = {frozenset((d["left"], d["right"])) for d in DISTINCT_BY_DESIGN}
+    assert frozenset(("campaign_attributable_sqls", "source_group_sqls")) in pairs
+    assert frozenset(("campaign_attributable_sqls", "lifecycle_sqls")) in pairs
+    # And no identity puts two of them under one roof.
+    for key, spec in METRIC_IDENTITIES.items():
+        paths = {p for _, p in spec["consumers"]}
+        assert not ({"kpis.sqls", "kpis.total_sqls"} <= paths), key
+
+
+def test_f2_2c_lifecycle_customers_is_not_the_revenue_customer_count():
+    """PR-ADS-153C kept these apart; the registry must not quietly rejoin them."""
+    from services.cross_page_parity_service import DISTINCT_BY_DESIGN, METRIC_IDENTITIES
+
+    assert (METRIC_IDENTITIES["lifecycle_customers"]["canonical_source"]
+            != METRIC_IDENTITIES["customers"]["canonical_source"])
+    pairs = {frozenset((d["left"], d["right"])) for d in DISTINCT_BY_DESIGN}
+    assert frozenset(("lifecycle_customers", "customers")) in pairs
+
+
+def test_f2_2d_all_source_outcomes_span_every_page_that_publishes_them(monkeypatch):
+    """33000 over 3 customers is one number on five surfaces, and the audit now
+    checks all five rather than two."""
+    from services.cross_page_parity_service import METRIC_IDENTITIES
+
+    for key in ("closed_won_revenue_usd", "customers"):
+        consumers = {c for c, _ in METRIC_IDENTITIES[key]["consumers"]}
+        assert consumers == {"dashboard/overview", "dashboard/revenue",
+                             "dashboard/channels", "dashboard/deals",
+                             "revenue_decision_mart"}, key
+
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__deals={"kpis.closed_won_customers": 4}))
+    assert out["ok"] is False
+    assert parity.V_VALUE_MISMATCH in out["violation_codes"]
+
+
+def test_f2_2e_country_spend_is_not_the_full_account_denominator():
+    """Countries sums the per-country rows. geographic_view does not place
+    location-less spend in any of them, so the two are equal only by accident."""
+    from services.cross_page_parity_service import DISTINCT_BY_DESIGN, METRIC_IDENTITIES
+
+    full = {c for c, _ in METRIC_IDENTITIES["google_ads_spend_usd"]["consumers"]}
+    assert "dashboard/countries" not in full
+    country = METRIC_IDENTITIES["country_attributed_spend_usd"]
+    assert country["consumers"] == [("dashboard/countries", "kpis.verified_spend_usd")]
+    assert country["canonical_source"] == contract_mod.SOURCE_CANONICAL_GEO
+    pairs = {frozenset((d["left"], d["right"])) for d in DISTINCT_BY_DESIGN}
+    assert frozenset(("google_ads_spend_usd", "country_attributed_spend_usd")) in pairs
+
+
+def test_f2_3_a_contract_filed_under_the_wrong_metric_fails(monkeypatch):
+    """A block keyed `customers` that names itself something else describes a
+    different question; reading it as provenance for this one is the mistake."""
+    out = _audit_with(monkeypatch, _payloads(dashboard__deals={
+        f"{contract_mod.METRIC_TRUTH_KEY}.customers.metric": "attributed_customers"}))
+    assert out["ok"] is False
+    assert parity.V_CONTRACT_INVALID in out["violation_codes"]
+    detail = " ".join(v.get("detail", "") for v in out["violations"])
+    assert "contract.metric" in detail
+
+
+def test_f2_3b_a_contract_naming_a_different_window_key_fails(monkeypatch):
+    """Internally consistent and answering a different question.
+
+    F1 compared the contract's dates with the payload's, which a page that
+    resolved the wrong window satisfies perfectly — both halves are wrong
+    together. The requested key is now checked too.
+    """
+    out = _audit_with(monkeypatch, _payloads(dashboard__campaigns={
+        f"{contract_mod.METRIC_TRUTH_KEY}.campaign_attributable_sqls.window": "ytd"}))
+    assert out["ok"] is False
+    assert parity.V_CONTRACT_INVALID in out["violation_codes"]
+    detail = " ".join(v.get("detail", "") for v in out["violations"])
+    assert "requested window" in detail
+
+
+@pytest.mark.parametrize("field", [
+    "data_source", "scope", "truth_status", "window", "window_end",
+    "timezone", "currency", "fallback_used", "customer_id",
+])
+def test_f2_3c_an_omitted_contract_field_fails_rather_than_comparing_equal(
+        monkeypatch, field):
+    """Presence is checked BEFORE consistency, because two missing values compare
+    equal. A contract that omits its window used to satisfy the window check by
+    saying nothing at all."""
+    out = _audit_with(monkeypatch, _payloads(dashboard__revenue={
+        f"{contract_mod.METRIC_TRUTH_KEY}.customers.{field}": _DELETE}))
+    assert out["ok"] is False
+    assert parity.V_CONTRACT_INVALID in out["violation_codes"]
+    detail = " ".join(v.get("detail", "") for v in out["violations"])
+    assert "omits required field" in detail and field in detail
+
+
+def test_f2_3d_each_consumer_must_name_the_authority_it_actually_reads(monkeypatch):
+    """Channels renders the all-source totals from the source-group taxonomy, so
+    that is what it must declare — and it may not claim the mart instead."""
+    from services.cross_page_parity_service import METRIC_IDENTITIES, expected_source
+
+    spec = METRIC_IDENTITIES["closed_won_revenue_usd"]
+    assert expected_source(spec, "dashboard/channels") == contract_mod.SOURCE_REVENUE_BY_SOURCE
+    assert expected_source(spec, "dashboard/deals") == contract_mod.SOURCE_REVENUE_DECISION_MART
+
+    out = _audit_with(monkeypatch, _payloads(dashboard__channels={
+        f"{contract_mod.METRIC_TRUTH_KEY}.closed_won_revenue_usd.data_source":
+            contract_mod.SOURCE_REVENUE_DECISION_MART}))
+    assert out["ok"] is False
+    assert parity.V_CONTRACT_INVALID in out["violation_codes"]
+
+
+def test_f2_4_country_revenue_is_not_ready_on_geo_coverage_alone(monkeypatch):
+    """The §4 correction. Geo coverage says the SPEND side is placed; it is silent
+    on whether the closed-won deals behind the revenue were readable at all.
+
+    Country SPEND stays proven in the same run — the two depend on different
+    things being true, which is the whole point of separating them.
+    """
+    out = _audit_with(monkeypatch, _payloads(
+        revenue_decision_mart={"summary.revenue_available": False}))
+    assert out["ok"] is False
+
+    for key in ("country_attributed_won_revenue_usd", "country_attributed_customers"):
+        entry = next(m for m in out["metrics"] if m["metric"] == key)
+        assert entry["status"] == "unproven", key
+    spend = next(m for m in out["metrics"]
+                 if m["metric"] == "country_attributed_spend_usd")
+    assert spend["status"] == "identical"
+
+    detail = " ".join(v.get("detail", "") for v in out["violations"])
+    assert "deal proof" in detail
+
+
+def test_f2_4b_country_revenue_needs_the_reconciliation_too(monkeypatch):
+    """Both halves are required, not either one."""
+    out = _audit_with(monkeypatch, _payloads(
+        revenue_decision_mart={"spend_truth.country_spend_status": "mismatch"}))
+    assert out["ok"] is False
+    entry = next(m for m in out["metrics"]
+                 if m["metric"] == "country_attributed_won_revenue_usd")
+    assert entry["status"] == "unproven"
+
+
+def test_f2_4c_every_identity_names_its_own_evidence():
+    """An identity with no recognised coverage proof is NOT proven.
+
+    A permissive default would certify any future metric that forgot to say what
+    evidence backs it — the exact shape of the defect F1 fixed for the universal
+    campaign-spend proof.
+    """
+    from services.cross_page_parity_service import METRIC_IDENTITIES
+
+    known = {parity.PROOF_CAMPAIGN_SPEND, parity.PROOF_GEO_SPEND,
+             parity.PROOF_COUNTRY_REVENUE, parity.PROOF_DEAL_LEDGER,
+             parity.PROOF_MART_LEAD_FUNNEL, parity.PROOF_LIFECYCLE_FUNNEL}
+    for key, spec in METRIC_IDENTITIES.items():
+        assert spec.get("coverage_proof") in known, key
+
+    proven, detail = parity._coverage_proven(
+        {}, {"canonical_source": "x", "scope": "x", "coverage_proof": "invented"})
+    assert proven is False
+    assert "no recognised coverage proof" in detail
+
+
+def test_f2_5_pages_pending_redesign_are_reported_not_omitted(monkeypatch):
+    """A page absent from a parity report reads as a page with nothing to answer
+    for, which is how an uncertified total keeps being read as a certified one."""
+    from services.cross_page_parity_service import PENDING_REDESIGN_CONSUMERS
+
+    assert set(PENDING_REDESIGN_CONSUMERS) == {"platform_evidence", "lead_intelligence"}
+    out = _audit_with(monkeypatch, _payloads())
+    named = {u["consumer"] for u in out["uncertified_consumers"]}
+    assert named == {"platform_evidence", "lead_intelligence"}
+    for u in out["uncertified_consumers"]:
+        assert u["classification"] == "pending_redesign_non_authoritative"
+        assert u["overlapping_metrics"] and u["services"] and u["note"]
+    # They are declared uncertified, so they are never registered as consumers.
+    assert not (named & parity.CERTIFIED_CONSUMERS)
+
+
+def test_f2_5b_the_renderer_prints_the_uncertified_pages(capsys, monkeypatch):
+    import scripts.audit_cross_page_canonical_parity as cli
+
+    out = _audit_with(monkeypatch, _payloads())
+    cli._render({"ok": out["ok"], "results": [out],
+                 "violations": out["violations"],
+                 "violation_codes": out["violation_codes"],
+                 "uncertified_consumers": [
+                     {"consumer": name, **detail} for name, detail
+                     in sorted(parity.PENDING_REDESIGN_CONSUMERS.items())]})
+    printed = capsys.readouterr().out
+    assert "EXPLICITLY UNCERTIFIED" in printed
+    assert "platform_evidence" in printed and "lead_intelligence" in printed
+    assert "certified" in printed
+
+
+def test_f2_6_the_audit_passes_only_when_every_identity_was_checked(monkeypatch):
+    """`ok=true` requires every certified consumer AND every metric identity to
+    have been checked — not merely that every page built."""
+    out = _audit_with(monkeypatch, _payloads())
+    assert out["ok"] is True
+    assert out["violations"] == []
+    assert len(out["metrics"]) == len(parity.METRIC_IDENTITIES)
+    assert all(m["status"] == "identical" for m in out["metrics"]), \
+        [(m["metric"], m["status"]) for m in out["metrics"] if m["status"] != "identical"]
+    assert all(c["certified"] for c in out["consumer_certification"])
+
+
+def test_f2_4d_an_empty_contacts_table_is_not_a_measured_zero(monkeypatch):
+    """Found by running the audit against a real EMPTY PostgreSQL schema.
+
+    Every page renders 0 leads and 0 SQLs, unanimously, from a table nobody
+    synced. "It published a number" is not proof — `db_empty` means the query
+    returned nothing at all, which is indistinguishable from never having run.
+    """
+    for override in ({"readiness.lead_metrics_status": "db_empty"},
+                     {"readiness.lead_metrics_status": "withheld",
+                      "readiness.lead_metrics_ready": False}):
+        out = _audit_with(monkeypatch, _payloads(revenue_decision_mart=override))
+        assert out["ok"] is False
+        for key in ("campaign_attributable_sqls", "campaign_attributable_leads",
+                    "source_group_sqls"):
+            entry = next(m for m in out["metrics"] if m["metric"] == key)
+            assert entry["status"] == "unproven", (key, override)
+        assert parity.V_AGREEMENT_ON_UNPROVEN_COVERAGE in out["violation_codes"]
+
+
+def test_f2_4e_an_unsynced_lifecycle_funnel_is_not_a_measured_zero(monkeypatch):
+    """The funnel service reports `available: true` against an empty schema —
+    five stages at 0, reconciled against nothing — while its own sync block says
+    the bootstrap never ran. The sync block is the one that knows."""
+    out = _audit_with(monkeypatch, _payloads(dashboard__overview={
+        "lifecycle_funnel.sync.available": False,
+        "lifecycle_funnel.sync.bootstrap_status": "unavailable"}))
+    assert out["ok"] is False
+    for stage in parity.LIFECYCLE_STAGES:
+        entry = next(m for m in out["metrics"] if m["metric"] == f"lifecycle_{stage}")
+        assert entry["status"] == "unproven", stage
+    detail = " ".join(v.get("detail", "") for v in out["violations"])
+    assert "sync" in detail
+
+
+# ── The command itself, end to end, through the real builders ────────────────
+
+
+def _cli_argv(monkeypatch, argv):
+    """Run `main()` with a patched argv, returning its exit code."""
+    import scripts.audit_cross_page_canonical_parity as cli
+    monkeypatch.setattr(sys, "argv", argv)
+    return cli.main()
+
+
+
+
+
+def test_f2_7_the_cli_reports_full_parity_against_a_complete_fixture(monkeypatch, capsys):
+    """Both output formats against a COMPLETE fixture — must exit 0."""
+    import tests.test_pr_ads_138_dashboard_countries as t138
+    from services import cross_page_parity_service as parity
+    import scripts.audit_cross_page_canonical_parity as cli
+
+    t138._patch_durable(monkeypatch)
+    monkeypatch.setattr("db.connection.init_pool", lambda: None)
+    # The 138 fixture leaves the contact funnel unwired; supply the one signal
+    # that makes the lifecycle strip a measurement rather than an empty schema.
+    real = parity._build_consumers
+
+    def patched(window, now):
+        built = real(window, now)
+        ov = built["dashboard/overview"]["payload"]
+        ov["kpis"].update({f"lifecycle_{s}": n for s, n in
+                           (("leads", 105), ("mqls", 60), ("sqls", 30),
+                            ("opportunities", 8), ("customers", 4))})
+        ov["kpis"]["lifecycle_available"] = True
+        ov["lifecycle_funnel"] = {"available": True, "status": "reconciled",
+                                  "sync": {"available": True,
+                                           "bootstrap_status": "complete"}}
+        for stage in ("leads", "mqls", "sqls", "opportunities", "customers"):
+            ov["metric_truth"][f"lifecycle_{stage}"]["truth_status"] = "ready"
+        return built
+    monkeypatch.setattr(parity, "_build_consumers", patched)
+
+    rc = _cli_argv(monkeypatch, ["prog", "--window", "current_quarter"])
+    text = capsys.readouterr().out
+    assert "EXPLICITLY UNCERTIFIED" in text
+    assert "certified" in text
+    assert rc == 0, text[-4000:]
+
+    rc = _cli_argv(monkeypatch, ["prog", "--window", "current_quarter", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["ok"] is True
+    assert len(payload["uncertified_consumers"]) == 2
+    assert len(payload["results"][0]["metrics"]) == 16
+    assert all(c["certified"] for c in payload["results"][0]["consumer_certification"])
+
+
+def test_f2_7b_the_cli_exits_nonzero_against_an_inconsistent_fixture(monkeypatch, capsys):
+    """A deliberately inconsistent fixture — must exit 1 and name the violation."""
+    import tests.test_pr_ads_138_dashboard_countries as t138
+    from services import cross_page_parity_service as parity
+
+    t138._patch_durable(monkeypatch)
+    monkeypatch.setattr("db.connection.init_pool", lambda: None)
+    real = parity._build_consumers
+
+    def broken(window, now):
+        built = real(window, now)
+        built["dashboard/deals"]["payload"]["kpis"]["closed_won_revenue_usd"] = 42.0
+        return built
+    monkeypatch.setattr(parity, "_build_consumers", broken)
+
+    rc = _cli_argv(monkeypatch, ["prog", "--window", "current_quarter"])
+    text = capsys.readouterr().out
+    assert rc == 1
+    assert "consumer_values_differ" in text
+
+    rc = _cli_argv(monkeypatch, ["prog", "--window", "current_quarter", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert "consumer_values_differ" in payload["violation_codes"]
