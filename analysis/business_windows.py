@@ -202,24 +202,37 @@ def resolve_window_in_zone(key: str, time_zone: str | None,
     """
     from analysis.account_time import ACCOUNT_TZ  # noqa: PLC0415
 
-    zone = time_zone or ACCOUNT_TZ
+    requested = time_zone or ACCOUNT_TZ
     base = _coerce_utc(now)
-    try:
-        from zoneinfo import ZoneInfo  # noqa: PLC0415
-        local_day = base.astimezone(ZoneInfo(zone)).date()
-    except Exception:  # noqa: BLE001 - unknown zone / tzdata unavailable
+
+    # PR-ADS-154C-F1: report the zone actually USED, not the one asked for.
+    # Returning the requested string after falling back to the account default
+    # told a reader the dates were computed in a zone they were not, which is the
+    # same class of defect as the anchoring bug this resolver exists to fix — a
+    # field that describes something other than what happened.
+    effective = requested
+    local_day = None
+    for candidate in (requested, ACCOUNT_TZ):
         try:
             from zoneinfo import ZoneInfo  # noqa: PLC0415
-            local_day = base.astimezone(ZoneInfo(ACCOUNT_TZ)).date()
-        except Exception:  # noqa: BLE001
-            local_day = base.date()
+            local_day = base.astimezone(ZoneInfo(candidate)).date()
+            effective = candidate
+            break
+        except Exception:  # noqa: BLE001 - unknown zone / tzdata unavailable
+            continue
+    if local_day is None:
+        # No tz database at all. UTC is the only thing left, and saying so is
+        # better than naming a zone that was never applied.
+        local_day = base.date()
+        effective = "UTC"
 
     # Anchor at midday so the delegated resolver, which coerces to UTC, cannot
     # shift the day back across the boundary it was just moved over.
     anchored = datetime(local_day.year, local_day.month, local_day.day,
                         12, 0, 0, tzinfo=timezone.utc)
     resolved = resolve_window(key, now=anchored)
-    resolved["timezone"] = zone
+    resolved["timezone"] = effective
+    resolved["timezone_requested"] = requested
     return resolved
 
 

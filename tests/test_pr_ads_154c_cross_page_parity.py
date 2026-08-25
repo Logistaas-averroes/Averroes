@@ -44,6 +44,7 @@ sys.path.insert(0, str(_ROOT))
 
 from analysis.business_windows import WINDOW_KEYS, resolve_window, resolve_window_in_zone  # noqa: E402
 from services import canonical_contract as contract  # noqa: E402
+from services import canonical_contract as contract_mod  # noqa: E402
 from services import cross_page_parity_service as parity  # noqa: E402
 import services.google_ads_geo_sync_service as geo  # noqa: E402
 import scheduler.incremental_sync as sched  # noqa: E402
@@ -146,28 +147,104 @@ def test_1d_every_production_consumer_uses_the_canonical_resolver():
 # §2/§3 — value parity within an identity; separation between identities
 # ═════════════════════════════════════════════════════════════════════════════
 
+#: Sentinel for an override that REMOVES a key rather than setting it.
+_DELETE = object()
+
+_WIN = {"key": "current_quarter", "label": "Current Quarter",
+        "start_date": "2026-04-01", "end_date": "2026-06-22",
+        "timezone": "Europe/London", "bounds": "inclusive_start_exclusive_end_utc"}
+
+
+def _contract(metric, source, scope, **over):
+    """A per-metric provenance block in the shape the services publish."""
+    block = {
+        "metric": metric, "data_source": source, "scope": scope,
+        "truth_status": "ready",
+        "window": _WIN["key"], "window_start": _WIN["start_date"],
+        "window_end": _WIN["end_date"], "timezone": _WIN["timezone"],
+        "customer_id": None, "currency": "USD", "fallback_used": False,
+        "generated_at": "2026-06-22T12:00:00+00:00",
+    }
+    block.update(over)
+    return block
+
+
 def _payloads(**overrides):
-    """A consistent set of consumer payloads, plus deliberate overrides."""
-    win = {"key": "current_quarter", "start_date": "2026-04-01",
-           "end_date": "2026-06-22", "timezone": "Europe/London"}
+    """Consumer payloads in the EXACT shape production publishes.
+
+    PR-ADS-154C-F1 §1 asks for this specifically, and the reason is that the
+    previous synthetic fixture hid a live defect: real dashboards expose
+    `legacy_fallback_used` as a TOP-LEVEL boolean and `source_truth` as a
+    STRING, while the fixture nested them as dictionaries. The audit's fallback
+    guard checked `isinstance(block, dict)`, so it passed the fixture and could
+    never fire on a real payload. A fixture shaped like the thing it stands in
+    for is the only kind that can catch that.
+    """
     base = {
-        "dashboard/overview": {"window": dict(win), "kpis": {
-            "google_ads_spend_usd": 13000.0, "closed_won_revenue_usd": 33000.0}},
-        "dashboard/revenue": {"window": dict(win), "kpis": {
-            "closed_won_revenue_usd": 33000.0, "customers": 3}},
-        "dashboard/channels": {"window": dict(win), "kpis": {}},
-        "dashboard/campaigns": {"window": dict(win), "kpis": {}},
-        "dashboard/countries": {"window": dict(win), "kpis": {
-            "won_revenue_usd": 29000.0}},
-        "dashboard/deals": {"window": dict(win), "kpis": {}},
+        "dashboard/overview": {
+            "window": dict(_WIN), "read_only": True,
+            "source_truth": "revenue_decision_mart",       # a STRING, as in production
+            "legacy_fallback_used": False,                 # TOP-LEVEL, as in production
+            "google_ads_conversion_value_used": False,
+            "kpis": {"google_ads_spend_usd": 13000.0,
+                     "closed_won_revenue_usd": 33000.0},
+            contract_mod.METRIC_TRUTH_KEY: {
+                "google_ads_spend_usd": _contract(
+                    "google_ads_spend_usd", contract_mod.SOURCE_CANONICAL_SPEND,
+                    "google_ads_campaign_spend"),
+                "closed_won_revenue_usd": _contract(
+                    "closed_won_revenue_usd",
+                    contract_mod.SOURCE_REVENUE_DECISION_MART,
+                    "all_source_business_revenue")}},
+        "dashboard/revenue": {
+            "window": dict(_WIN), "read_only": True,
+            "source_truth": "hubspot_deal_ledger", "legacy_fallback_used": False,
+            "kpis": {"closed_won_revenue_usd": 33000.0, "customers": 3},
+            contract_mod.METRIC_TRUTH_KEY: {
+                "closed_won_revenue_usd": _contract(
+                    "closed_won_revenue_usd",
+                    contract_mod.SOURCE_REVENUE_DECISION_MART,
+                    "all_source_business_revenue"),
+                "customers": _contract(
+                    "customers", contract_mod.SOURCE_REVENUE_DECISION_MART,
+                    "all_source_business_revenue")}},
+        "dashboard/channels": {"window": dict(_WIN), "legacy_fallback_used": False,
+                               "kpis": {}},
+        "dashboard/campaigns": {"window": dict(_WIN), "legacy_fallback_used": False,
+                                "kpis": {}},
+        "dashboard/countries": {
+            "window": dict(_WIN), "read_only": True,
+            "source_truth": "revenue_decision_mart_country_view",
+            "legacy_fallback_used": False,
+            "kpis": {"won_revenue_usd": 29000.0},
+            contract_mod.METRIC_TRUTH_KEY: {
+                "country_attributed_won_revenue_usd": _contract(
+                    "country_attributed_won_revenue_usd",
+                    contract_mod.SOURCE_CANONICAL_GEO,
+                    "country_attributed_revenue")}},
+        "dashboard/deals": {"window": dict(_WIN), "legacy_fallback_used": False,
+                            "kpis": {}},
         "revenue_decision_mart": {
-            "window": dict(win),
-            # Agreement counts as parity only over PROVEN coverage: an unproven
-            # window makes every consumer render the same zero, which is
-            # unanimity about a number nobody measured.
-            "spend_truth": {"campaign_spend_status": "verified"},
+            "window": dict(_WIN),
+            # Coverage proof is per metric: campaign spend needs campaign AND FX
+            # coverage; country metrics need an accepted reconciliation; revenue
+            # needs the ledger available.
+            "spend_truth": {"campaign_spend_status": "verified",
+                            "fx_status": "verified",
+                            "country_spend_status": "reconciled_with_residual"},
             "summary": {"spend_usd": 13000.0, "won_revenue_usd": 33000.0,
-                        "customers": 3}},
+                        "customers": 3, "revenue_available": True},
+            contract_mod.METRIC_TRUTH_KEY: {
+                "google_ads_spend_usd": _contract(
+                    "google_ads_spend_usd", contract_mod.SOURCE_CANONICAL_SPEND,
+                    "google_ads_campaign_spend"),
+                "closed_won_revenue_usd": _contract(
+                    "closed_won_revenue_usd",
+                    contract_mod.SOURCE_REVENUE_DECISION_MART,
+                    "all_source_business_revenue"),
+                "customers": _contract(
+                    "customers", contract_mod.SOURCE_REVENUE_DECISION_MART,
+                    "all_source_business_revenue")}},
     }
     for name, patch in overrides.items():
         target = base[name.replace("__", "/")]
@@ -176,8 +253,13 @@ def _payloads(**overrides):
             *parents, leaf = path.split(".")
             for p in parents:
                 node = node.setdefault(p, {})
-            node[leaf] = value
+            if value is _DELETE:
+                node.pop(leaf, None)
+            else:
+                node[leaf] = value
     return base
+
+
 
 
 def _audit_with(monkeypatch, payloads):
@@ -588,3 +670,312 @@ def test_10d_the_cli_never_interpolates_a_raw_exception():
 def test_10e_the_audit_covers_every_required_window():
     assert set(WINDOW_KEYS) == {"current_quarter", "last_quarter", "last_6_months",
                                 "ytd", "all_time"}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-154C-F1 — the false-negative paths the first version left open
+#
+# Every test below fails against the pre-F1 audit. Together they close the gap
+# between "the audit reported parity" and "parity was actually proved".
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_f1_1_production_shaped_top_level_legacy_fallback_fails(monkeypatch):
+    """The defect: `legacy_fallback_used` is a TOP-LEVEL bool in production.
+
+    The original guard checked `isinstance(block, dict)` on keys named
+    `truth_contract`, `disclosure` and `source_truth`. In a real dashboard
+    payload `source_truth` is a STRING and the fallback flags sit at the top
+    level, so the check was False for every production shape — a guard that
+    could not fire on the thing it was written for.
+    """
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__countries={"legacy_fallback_used": True}))
+    assert out["ok"] is False
+    assert parity.V_LEGACY_READ in out["violation_codes"]
+    assert any("top-level" in v.get("detail", "") for v in out["violations"])
+
+
+def test_f1_1b_production_shaped_top_level_fallback_used_fails(monkeypatch):
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__revenue={"fallback_used": True}))
+    assert out["ok"] is False
+    assert parity.V_FALLBACK_USED in out["violation_codes"]
+
+
+def test_f1_1c_a_string_source_truth_does_not_crash_the_guard(monkeypatch):
+    """Production publishes `source_truth` as a string; the guard must cope."""
+    payloads = _payloads()
+    assert isinstance(payloads["dashboard/overview"]["source_truth"], str)
+    out = _audit_with(monkeypatch, payloads)
+    assert out["ok"] is True
+
+
+def test_f1_2_a_missing_metric_contract_fails(monkeypatch):
+    """Silence is not proof that the right source was used."""
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__revenue={f"{contract_mod.METRIC_TRUTH_KEY}.closed_won_revenue_usd": _DELETE}))
+    assert out["ok"] is False
+    assert parity.V_CONTRACT_INVALID in out["violation_codes"]
+
+
+def test_f1_2b_a_wrong_canonical_source_fails(monkeypatch):
+    """A page reading somewhere else can no longer be certified by the registry."""
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__revenue={
+            f"{contract_mod.METRIC_TRUTH_KEY}.closed_won_revenue_usd.data_source":
+                "legacy.gclid_attribution"}))
+    assert out["ok"] is False
+    assert parity.V_CONTRACT_INVALID in out["violation_codes"]
+    assert any("legacy.gclid_attribution" in v.get("detail", "")
+               for v in out["violations"])
+
+
+def test_f1_2c_a_wrong_metric_scope_fails(monkeypatch):
+    """The GCLID subset published under an all-source label is the whole point."""
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__revenue={
+            f"{contract_mod.METRIC_TRUTH_KEY}.closed_won_revenue_usd.scope":
+                "google_ads_attributed_revenue"}))
+    assert out["ok"] is False
+    assert parity.V_CONTRACT_INVALID in out["violation_codes"]
+
+
+@pytest.mark.parametrize("status", ["not_ready", "unavailable"])
+def test_f1_2d_a_non_ready_contract_fails(monkeypatch, status):
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__overview={
+            f"{contract_mod.METRIC_TRUTH_KEY}.google_ads_spend_usd.truth_status": status}))
+    assert out["ok"] is False
+    assert parity.V_CONTRACT_INVALID in out["violation_codes"]
+
+
+def test_f1_2e_a_contract_window_disagreeing_with_the_payload_fails(monkeypatch):
+    """A contract describing a different range than the page computed over."""
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__revenue={
+            f"{contract_mod.METRIC_TRUTH_KEY}.customers.window_end": "2026-06-23"}))
+    assert out["ok"] is False
+    assert parity.V_CONTRACT_INVALID in out["violation_codes"]
+
+
+def test_f1_2f_inconsistent_currency_across_consumers_fails(monkeypatch):
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__revenue={
+            f"{contract_mod.METRIC_TRUTH_KEY}.closed_won_revenue_usd.currency": "GBP"}))
+    assert out["ok"] is False
+    assert parity.V_CONTRACT_INCONSISTENT in out["violation_codes"]
+
+
+def test_f1_3_one_missing_consumer_value_fails_even_when_the_others_agree(monkeypatch):
+    """Comparing only what is present let a dropped metric look like agreement.
+
+    Two consumers agreeing while a third declines to answer is not three
+    consumers agreeing.
+    """
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__revenue={"kpis.closed_won_revenue_usd": None}))
+    assert out["ok"] is False
+    assert parity.V_CONSUMER_METRIC_MISSING in out["violation_codes"]
+    metric = next(m for m in out["metrics"] if m["metric"] == "closed_won_revenue_usd")
+    assert metric["status"] != "identical"
+
+
+def test_f1_3b_a_removed_dotted_path_fails_the_same_way(monkeypatch):
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__overview={"kpis.closed_won_revenue_usd": _DELETE}))
+    assert out["ok"] is False
+    assert parity.V_CONSUMER_METRIC_MISSING in out["violation_codes"]
+
+
+def test_f1_4_a_missing_consumer_window_fails(monkeypatch):
+    """One valid signature is not unanimity when another page published none."""
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__deals={"window": _DELETE}))
+    assert out["ok"] is False
+    assert parity.V_WINDOW_MISSING in out["violation_codes"]
+
+
+@pytest.mark.parametrize("field", ["end_date", "timezone", "key"])
+def test_f1_4b_an_incomplete_consumer_window_fails(monkeypatch, field):
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__channels={f"window.{field}": _DELETE}))
+    assert out["ok"] is False
+    assert parity.V_WINDOW_MISSING in out["violation_codes"]
+
+
+def test_f1_4c_a_null_start_is_allowed_only_for_all_time(monkeypatch):
+    """`all_time` has a genuinely open lower bound; every other window does not."""
+    monkeypatch.setattr(parity, "resolve_canonical_window",
+                        lambda w, now=None: {"key": w, "label": w,
+                                             "start_date": None,
+                                             "end_date": "2026-06-22",
+                                             "timezone": "Europe/London"})
+    payloads = _payloads(dashboard__overview={"window.start_date": None})
+    monkeypatch.setattr(parity, "_build_consumers",
+                        lambda window, now: {k: {"payload": v, "error": None}
+                                             for k, v in payloads.items()})
+    blocked = parity.audit_window("current_quarter")
+    assert parity.V_WINDOW_MISSING in blocked["violation_codes"]
+
+    allowed = parity.audit_window("all_time")
+    assert parity.V_WINDOW_MISSING not in allowed["violation_codes"]
+
+
+def test_f1_5_campaign_coverage_cannot_substitute_for_geo_coverage(monkeypatch):
+    """Each authority is asked about ITSELF.
+
+    Campaign spend coverage was previously the universal proof, so a country
+    metric could be certified by evidence about campaign spend — evidence about
+    a different table entirely.
+    """
+    out = _audit_with(monkeypatch, _payloads(
+        revenue_decision_mart={
+            "spend_truth.campaign_spend_status": "verified",
+            "spend_truth.fx_status": "verified",
+            "spend_truth.country_spend_status": "mismatch"}))
+    assert out["ok"] is False
+    assert parity.V_AGREEMENT_ON_UNPROVEN_COVERAGE in out["violation_codes"]
+
+    country = next(m for m in out["metrics"]
+                   if m["metric"] == "country_attributed_won_revenue_usd")
+    assert country["status"] == "unproven"
+    # ...while campaign spend, whose own coverage IS proven, stays identical.
+    spend = next(m for m in out["metrics"] if m["metric"] == "google_ads_spend_usd")
+    assert spend["status"] == "identical"
+
+
+def test_f1_5b_incomplete_fx_blocks_campaign_spend_even_with_campaign_coverage(monkeypatch):
+    """Spend needs BOTH its coverage and FX; one is not the other."""
+    out = _audit_with(monkeypatch, _payloads(
+        revenue_decision_mart={"spend_truth.fx_status": "incomplete"}))
+    assert out["ok"] is False
+    spend = next(m for m in out["metrics"] if m["metric"] == "google_ads_spend_usd")
+    assert spend["status"] == "unproven"
+
+
+def test_f1_5c_unavailable_revenue_blocks_revenue_metrics(monkeypatch):
+    out = _audit_with(monkeypatch, _payloads(
+        revenue_decision_mart={"summary.revenue_available": False}))
+    assert out["ok"] is False
+    revenue = next(m for m in out["metrics"] if m["metric"] == "closed_won_revenue_usd")
+    assert revenue["status"] == "unproven"
+
+
+def test_f1_5d_reconciled_with_residual_remains_accepted(monkeypatch):
+    """PR-ADS-131 / PR-ADS-154B-F1, re-asserted at the parity layer."""
+    assert "reconciled_with_residual" in parity.ACCEPTED_COUNTRY_STATES
+    out = _audit_with(monkeypatch, _payloads(
+        revenue_decision_mart={
+            "spend_truth.country_spend_status": "reconciled_with_residual"}))
+    assert out["ok"] is True
+    country = next(m for m in out["metrics"]
+                   if m["metric"] == "country_attributed_won_revenue_usd")
+    assert country["status"] == "identical"
+
+
+def test_f1_6_the_human_readable_renderer_handles_unproven(capsys, monkeypatch):
+    """`_render` indexed a three-entry map and raised KeyError on `unproven` —
+    crashing on exactly the failure it exists to explain."""
+    import scripts.audit_cross_page_canonical_parity as cli
+
+    out = _audit_with(monkeypatch, _payloads(
+        revenue_decision_mart={"spend_truth.fx_status": "incomplete"}))
+    assert any(m["status"] == "unproven" for m in out["metrics"])
+
+    cli._render({"ok": False, "results": [out],
+                 "violations": out["violations"],
+                 "violation_codes": out["violation_codes"]})
+    printed = capsys.readouterr().out
+    assert "unproven" in printed
+    assert "agreement_on_unproven_coverage" in printed
+
+
+def test_f1_6b_an_unknown_future_status_renders_rather_than_raising(capsys):
+    """A status this renderer has not been taught about must still print."""
+    import scripts.audit_cross_page_canonical_parity as cli
+
+    cli._render({"ok": False, "violations": [], "violation_codes": [],
+                 "results": [{
+                     "window": "ytd", "window_start": "2026-01-01",
+                     "window_end": "2026-06-22", "timezone": "Europe/London",
+                     "ok": False, "consumers_inspected": ["x"],
+                     "consumer_windows": [], "violations": [],
+                     "metrics": [{"metric": "m", "status": "a_status_from_the_future",
+                                  "value": 1, "readings": []}]}]})
+    assert "a_status_from_the_future" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("zone,expected", [
+    (None, "Europe/London"), ("", "Europe/London"),
+    ("Not/AZone", "Europe/London"), ("America/Los_Angeles", "America/Los_Angeles"),
+])
+def test_f1_7_the_reported_timezone_is_the_one_actually_used(zone, expected):
+    """Returning the REQUESTED zone after falling back described dates as having
+    been computed somewhere they were not — the same class of defect as the
+    anchoring bug this resolver exists to fix."""
+    resolved = resolve_window_in_zone("ytd", zone, now=_MIDNIGHT_CROSSING)
+    assert resolved["timezone"] == expected
+    assert resolved["timezone_requested"] == (zone or "Europe/London")
+
+
+def test_f1_7b_the_dates_match_the_reported_timezone():
+    """The reported zone and the computed dates must tell the same story."""
+    invalid = resolve_window_in_zone("current_quarter", "Not/AZone",
+                                     now=_MIDNIGHT_CROSSING)
+    account = resolve_window_in_zone("current_quarter", "Europe/London",
+                                     now=_MIDNIGHT_CROSSING)
+    assert invalid["timezone"] == account["timezone"] == "Europe/London"
+    assert invalid["start_date"] == account["start_date"] == "2026-07-01"
+
+    la = resolve_window_in_zone("current_quarter", "America/Los_Angeles",
+                                now=_MIDNIGHT_CROSSING)
+    assert la["timezone"] == "America/Los_Angeles"
+    assert la["start_date"] == "2026-04-01"    # still Q2 in Los Angeles
+
+
+def test_f1_8_comparison_is_exact_not_rounded(monkeypatch):
+    """`_norm` rounded to six decimals while the command claimed exactness.
+
+    Rounding is a tolerance wearing different clothes. Two values differing at
+    the seventh decimal are two answers to one question.
+    """
+    from decimal import Decimal
+    assert parity._norm(1.00000001) != parity._norm(1.0)
+    assert parity._norm(2.0) == parity._norm(2) == Decimal("2.0")
+
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__revenue={"kpis.closed_won_revenue_usd": 33000.00000001}))
+    assert out["ok"] is False
+    assert parity.V_VALUE_MISMATCH in out["violation_codes"]
+
+
+def test_f1_9_every_real_audited_payload_publishes_its_metric_contracts():
+    """The registry's paths and contracts checked against REAL service output.
+
+    A registry that drifts from the services reports "unavailable" forever and
+    looks like a data problem. This binds the two together.
+    """
+    import tests.test_pr_ads_138_dashboard_countries as t138
+    from services.cross_page_parity_service import METRIC_IDENTITIES
+
+    mp = pytest.MonkeyPatch()
+    t138._patch_durable(mp)
+    try:
+        built = parity._build_consumers("current_quarter", t138.NOW)
+    finally:
+        mp.undo()
+
+    for metric_key, spec in METRIC_IDENTITIES.items():
+        for consumer_name, path in spec["consumers"]:
+            entry = built.get(consumer_name) or {}
+            assert entry.get("error") is None, f"{consumer_name}: {entry.get('error')}"
+            payload = entry["payload"]
+            assert parity._dig(payload, path) is not None, (
+                f"{consumer_name}.{path} publishes nothing — the registry has "
+                "drifted from the service")
+            block = (payload.get(contract_mod.METRIC_TRUTH_KEY) or {}).get(metric_key)
+            assert isinstance(block, dict), (
+                f"{consumer_name} publishes no contract for {metric_key}")
+            assert block["data_source"] == spec["canonical_source"]
+            assert block["scope"] == spec["scope"]
+            assert block["fallback_used"] is False

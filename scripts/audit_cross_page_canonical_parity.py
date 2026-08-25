@@ -52,11 +52,22 @@ def _render(outcome: dict) -> None:
               + ("" if len(ranges) <= 1 else "   <-- CONSUMERS DISAGREE ON THE RANGE"))
 
         for m in result["metrics"]:
-            symbol = {"identical": "=", "mismatch": "!", "unavailable": "?"}[m["status"]]
+            # PR-ADS-154C-F1: `.get(status, "·")`, not `[status]`. This indexed
+            # a three-entry map and raised KeyError on `unproven` — crashing on
+            # precisely the failure the human-readable form exists to explain,
+            # and it would do the same for any status added later. An unknown
+            # status now renders as a neutral marker beside its own name, which
+            # is always readable even when this renderer has not been taught
+            # about it.
+            symbol = {"identical": "=", "mismatch": "!",
+                      "unavailable": "?", "unproven": "~"}.get(m["status"], "·")
             print(f"       [{symbol}] {m['metric']:38} {m['status']:12} {m['value']}")
             if m["status"] != "identical":
                 for r in m["readings"]:
                     print(f"             {r['consumer']:28} {r['path']:34} {r['value']}")
+                    problem = r.get("contract_problem")
+                    if problem:
+                        print(f"               contract: {problem}")
 
         for v in result["violations"]:
             where = v.get("metric") or v.get("consumer") or "-"

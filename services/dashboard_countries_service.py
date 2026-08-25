@@ -52,6 +52,7 @@ from datetime import datetime, timezone
 # different quarters across the account's midnight and both call it "this
 # quarter". Spend is denominated in the account day, so the account day wins.
 from services.canonical_contract import resolve_canonical_window
+from services import canonical_contract
 from analysis import revenue_scope
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
@@ -1005,10 +1006,25 @@ def build_dashboard_countries(window: str = "current_quarter",
     truth_status = _build_truth_status(spend_truth, readiness, deal_proof_available)
     unavailable = _build_unavailable(kpis, spend_truth, period_change, deal_proof_available)
 
+    # PR-ADS-154C-F1: per-metric provenance. Country-attributed revenue is a
+    # DISTINCT identity from all-source business revenue, and the scope declared
+    # here is what the audit checks that distinction against.
+    _geo_ready = bool(spend_truth.get("country_roas_unblockable")
+                      or spend_truth.get("geo_ready"))
+    _mt = canonical_contract.metric_truth_block(core["window_block"], [
+        {"metric": "country_attributed_won_revenue_usd",
+         "data_source": canonical_contract.SOURCE_CANONICAL_GEO,
+         "scope": "country_attributed_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY if _geo_ready
+                          else canonical_contract.TRUTH_NOT_READY),
+         "customer_id": spend_truth.get("customer_id")},
+    ])
+
     return {
         "window": core["window_block"],
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "read_only": True,
+        canonical_contract.METRIC_TRUTH_KEY: _mt,
         "source_truth": "revenue_decision_mart_country_view",
         # PR-ADS-153E-B: geography and spend stay Google Ads; the closed-won
         # deals behind every country row are the canonical ledger.

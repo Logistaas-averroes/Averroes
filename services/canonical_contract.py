@@ -144,6 +144,63 @@ def truth_contract(*, data_source: str, window: str,
     }
 
 
+#: The key under which a response publishes its PER-METRIC provenance.
+#: Deliberately not `truth_status`, which several dashboards already use for
+#: something else at the top level.
+METRIC_TRUTH_KEY = "metric_truth"
+
+
+def metric_contract(*, metric: str, data_source: str, scope: str,
+                    resolved: dict, truth_status: str = TRUTH_READY,
+                    customer_id: str | None = None,
+                    currency: str = REPORTING_CURRENCY,
+                    fallback_used: bool = False,
+                    unavailable_reason: str | None = None) -> dict:
+    """The provenance block for ONE metric within a response.
+
+    PR-ADS-154C-F1. A single response-level ``data_source`` cannot describe a
+    page that combines Google Ads spend, HubSpot revenue and funnel counts: the
+    Overview publishes all three, so one source name is wrong about at least two
+    of them. Worse, it made the audit's registry self-certifying — the audit
+    printed the ``canonical_source`` it *expected*, which proves nothing about
+    where the number came from.
+
+    Each metric now states its own lineage, and the audit checks the statement
+    against its registry rather than echoing it.
+
+    ``resolved`` is the window this response actually used, passed in rather than
+    re-resolved, so a page cannot describe a different range from the one it
+    computed over.
+    """
+    block = {
+        "metric": metric,
+        "data_source": data_source,
+        "scope": scope,
+        "truth_status": truth_status,
+        "window": resolved.get("key"),
+        "window_start": resolved.get("start_date"),
+        "window_end": resolved.get("end_date"),
+        "timezone": resolved.get("timezone"),
+        "customer_id": customer_id,
+        "currency": currency,
+        "fallback_used": bool(fallback_used),
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    if unavailable_reason:
+        block["unavailable_reason"] = unavailable_reason
+    return block
+
+
+def metric_truth_block(resolved: dict, entries: list[dict]) -> dict:
+    """Assemble ``metric_truth`` from a list of :func:`metric_contract` specs.
+
+    Each entry is a dict of :func:`metric_contract` keyword arguments minus
+    ``resolved``, which is supplied once here so every metric in a response is
+    described against the same window by construction.
+    """
+    return {e["metric"]: metric_contract(resolved=resolved, **e) for e in entries}
+
+
 def unavailable_contract(*, data_source: str, window: str, reason: str,
                          now: datetime | None = None,
                          account_time_zone: str | None = None) -> dict:

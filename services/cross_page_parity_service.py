@@ -49,9 +49,13 @@ from datetime import datetime, timezone
 
 from analysis.business_windows import WINDOW_KEYS
 from services.canonical_contract import (
+    METRIC_TRUTH_KEY,
+    SOURCE_CANONICAL_DEAL_LEDGER,
+    SOURCE_CANONICAL_FUNNEL,
     SOURCE_CANONICAL_GEO,
     SOURCE_CANONICAL_SPEND,
     SOURCE_REVENUE_DECISION_MART,
+    TRUTH_READY,
     resolve_canonical_window,
 )
 
@@ -68,6 +72,16 @@ V_UNCLASSIFIED_DIFFERENCE = "difference_not_classified"
 #: Every consumer published the same figure, but the coverage behind it was never
 #: proven — so the agreement is not evidence. See `_coverage_proven`.
 V_AGREEMENT_ON_UNPROVEN_COVERAGE = "agreement_on_unproven_coverage"
+#: PR-ADS-154C-F1.
+V_CONSUMER_METRIC_MISSING = "consumer_metric_missing"
+V_WINDOW_MISSING = "consumer_window_missing"
+V_CONTRACT_INVALID = "metric_contract_invalid"
+V_CONTRACT_INCONSISTENT = "metric_contract_inconsistent"
+
+#: Country reconciliation states that count as governed geo readiness. Both are
+#: accepted: `reconciled_with_residual` is the PR-ADS-131 case where the
+#: shortfall is explicitly calculated and published rather than hidden.
+ACCEPTED_COUNTRY_STATES = frozenset({"verified", "reconciled_with_residual"})
 
 #: Metric identities. Each entry is ONE question, and every consumer listed must
 #: answer it identically. Consumers are (label, dotted path into the payload).
@@ -146,34 +160,122 @@ def _dig(payload: dict, path: str):
     return node
 
 
-def _coverage_proven(consumers: dict) -> tuple[bool, str | None]:
-    """Was the canonical spend coverage behind these figures actually proven?
+def _contract_problem(contract, spec: dict, metric_key: str,
+                      consumer_window: tuple | None) -> str | None:
+    """Check a reading's declared provenance against the registry. None = fine.
 
-    Parity between consumers is only evidence when the thing they agree about was
-    established. On a window with no verified coverage, the canonical campaign
-    spend query returns zero rows and every consumer renders the same ``0.0`` —
-    perfect agreement about a number nobody measured. Zero rows over an unproven
-    range is not a measured zero; it is the absence of a measurement, which is
-    the distinction PR-ADS-153F drew for geo and which applies identically here.
+    PR-ADS-154C-F1 §2. Before this, the audit printed the ``canonical_source``
+    the REGISTRY expected and called that provenance — a claim about itself, not
+    about the number. A page could read anything at all and the audit would echo
+    the source it wished for.
 
-    So the audit asks the mart what its own spend truth is, and refuses to count
-    agreement as parity while that truth is anything but verified. The figures
-    are still reported; only the verdict changes.
+    Now each response declares, per metric, where its figure came from, and this
+    checks the declaration. A missing contract is a failure: silence is not proof
+    that the right source was used.
+    """
+    if not isinstance(contract, dict):
+        return f"no {METRIC_TRUTH_KEY}.{metric_key} contract published"
+    if contract.get("data_source") != spec["canonical_source"]:
+        return (f"data_source is {contract.get('data_source')!r}, "
+                f"expected {spec['canonical_source']!r}")
+    if contract.get("scope") != spec["scope"]:
+        return f"scope is {contract.get('scope')!r}, expected {spec['scope']!r}"
+    if contract.get("truth_status") != TRUTH_READY:
+        return f"truth_status is {contract.get('truth_status')!r}, expected 'ready'"
+    if contract.get("fallback_used") is not False:
+        return f"fallback_used is {contract.get('fallback_used')!r}, expected False"
+    if consumer_window is not None:
+        declared = (contract.get("window_start"), contract.get("window_end"),
+                    contract.get("timezone"))
+        if declared != consumer_window:
+            return (f"contract window {declared} does not match the window the "
+                    f"consumer published {consumer_window}")
+    return None
+
+
+def _consistent(readings: list, field: str) -> bool:
+    """Do all readings' contracts agree on ``field``? Absent values are ignored."""
+    seen = {(r.get("contract") or {}).get(field) for r in readings
+            if (r.get("contract") or {}).get(field) is not None}
+    return len(seen) <= 1
+
+
+def _coverage_proven(consumers: dict, spec: dict) -> tuple[bool, str]:
+    """Was the coverage behind THIS metric actually proven?
+
+    Parity is only evidence when the thing consumers agree about was
+    established. On an unproven window the canonical query returns zero rows and
+    every consumer renders the same ``0.0`` — perfect agreement about a number
+    nobody measured, which is the distinction PR-ADS-153F drew for geo.
+
+    PR-ADS-154C-F1 §5: the proof is chosen per metric. Campaign-spend coverage
+    was previously used as the universal answer, which meant a country metric
+    could be certified by evidence about campaign spend, and revenue by evidence
+    about neither. Each authority is now asked about itself:
+
+      * campaign spend  -> campaign coverage AND FX coverage
+      * country metrics -> geo coverage AND an accepted country reconciliation
+                           (`verified` or `reconciled_with_residual`)
+      * revenue / customers -> the deal ledger is available
+      * funnel metrics  -> the contact funnel is available
     """
     mart = (consumers.get("revenue_decision_mart") or {}).get("payload") or {}
     spend_truth = mart.get("spend_truth") or {}
-    status = spend_truth.get("campaign_spend_status")
-    if status == "verified":
-        return True, None
-    return False, status or "unknown"
+    summary = mart.get("summary") or {}
+    source = spec["canonical_source"]
+
+    if source == SOURCE_CANONICAL_SPEND:
+        campaign = spend_truth.get("campaign_spend_status")
+        fx = spend_truth.get("fx_status")
+        if campaign == "verified" and fx == "verified":
+            return True, ""
+        return False, (f"campaign spend coverage is {campaign!r} and FX coverage "
+                       f"is {fx!r}")
+
+    if source == SOURCE_CANONICAL_GEO:
+        country = spend_truth.get("country_spend_status")
+        if country in ACCEPTED_COUNTRY_STATES:
+            return True, ""
+        return False, (f"country reconciliation is {country!r}, which is not one "
+                       f"of {sorted(ACCEPTED_COUNTRY_STATES)}")
+
+    if source in (SOURCE_REVENUE_DECISION_MART, SOURCE_CANONICAL_DEAL_LEDGER):
+        if summary.get("revenue_available") is True:
+            return True, ""
+        return False, (f"canonical revenue availability is "
+                       f"{summary.get('revenue_available')!r}")
+
+    if source == SOURCE_CANONICAL_FUNNEL:
+        if summary.get("leads_available", summary.get("sqls") is not None):
+            return True, ""
+        return False, "canonical contact funnel is unavailable"
+
+    return True, ""
 
 
-def _window_signature(payload: dict) -> tuple | None:
-    """The (start, end, timezone) a consumer actually used, or None."""
-    w = payload.get("window") or {}
-    if not isinstance(w, dict) or not w.get("end_date"):
-        return None
-    return (w.get("start_date"), w.get("end_date"), w.get("timezone"))
+def _window_signature(payload: dict, window: str) -> tuple:
+    """The (start, end, timezone) a consumer used, plus a problem description.
+
+    Returns ``(signature, None)`` when the window is complete, or
+    ``(None, reason)`` when it is not. A consumer that publishes no window has
+    not agreed with anyone — it has declined to say what it measured — so the
+    caller records a violation rather than dropping it from the comparison.
+
+    ``start_date`` may be ``None`` only for ``all_time``, whose lower bound is
+    genuinely open.
+    """
+    w = payload.get("window")
+    if not isinstance(w, dict):
+        return None, "no window block"
+    if not w.get("key"):
+        return None, "window block has no key"
+    if not w.get("end_date"):
+        return None, "window block has no end_date"
+    if w.get("start_date") is None and window != "all_time":
+        return None, f"window block has no start_date (window={window})"
+    if not w.get("timezone"):
+        return None, "window block has no effective timezone"
+    return (w.get("start_date"), w.get("end_date"), w.get("timezone")), None
 
 
 def _build_consumers(window: str, now: datetime | None) -> dict:
@@ -223,20 +325,29 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
             violations.append({"code": V_CONSUMER_FAILED, "consumer": name,
                                "detail": entry["error"]})
 
-    # ── Window parity: every consumer must have used the SAME range ──────────
+    # ── Window parity: every built consumer must publish a COMPLETE window ───
+    # PR-ADS-154C-F1: a consumer that omits its window used to contribute no
+    # signature at all, so a single remaining signature read as unanimity. One
+    # page silently dropping its window looked exactly like every page agreeing.
     window_rows = []
     signatures: dict = {}
     for name, entry in consumers.items():
         payload = entry["payload"]
-        sig = _window_signature(payload) if payload else None
+        if payload is None:
+            continue                       # already reported as V_CONSUMER_FAILED
+        sig, problem = _window_signature(payload, window)
         window_rows.append({
             "consumer": name,
             "window_start": sig[0] if sig else None,
             "window_end": sig[1] if sig else None,
             "timezone": sig[2] if sig else None,
+            "problem": problem,
         })
         if sig:
             signatures.setdefault(sig, []).append(name)
+        else:
+            violations.append({"code": V_WINDOW_MISSING, "consumer": name,
+                               "detail": problem})
     if len(signatures) > 1:
         violations.append({
             "code": V_WINDOW_MISMATCH, "metric": None,
@@ -245,25 +356,31 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                        for sig, names in signatures.items()],
         })
 
-    # ── Fallback usage: a canonical metric may never come from a fallback ────
+    # ── Fallback usage ───────────────────────────────────────────────────────
+    # PR-ADS-154C-F1: the real dashboards publish `legacy_fallback_used` as a
+    # TOP-LEVEL boolean and `source_truth` as a STRING. The previous check looked
+    # only inside nested dicts of those names, so `isinstance(block, dict)` was
+    # False for every production payload and the detection was completely inert —
+    # a guard that could not fire on the shape it was written for.
     for name, entry in consumers.items():
         payload = entry["payload"] or {}
-        for block_name in ("truth_contract", "disclosure", "source_truth"):
-            block = payload.get(block_name)
-            if isinstance(block, dict) and block.get("fallback_used") is True:
-                violations.append({
-                    "code": V_FALLBACK_USED, "consumer": name,
-                    "detail": f"{block_name}.fallback_used is true"})
-            if isinstance(block, dict) and block.get("legacy_fallback_used") is True:
-                violations.append({
-                    "code": V_LEGACY_READ, "consumer": name,
-                    "detail": f"{block_name}.legacy_fallback_used is true"})
+        for flag, code in (("fallback_used", V_FALLBACK_USED),
+                           ("legacy_fallback_used", V_LEGACY_READ)):
+            if payload.get(flag) is True:
+                violations.append({"code": code, "consumer": name,
+                                   "detail": f"top-level {flag} is true"})
+            for block_name in ("truth_contract", "disclosure", "source_truth",
+                               "country_truth", "spend_truth"):
+                block = payload.get(block_name)
+                if isinstance(block, dict) and block.get(flag) is True:
+                    violations.append({
+                        "code": code, "consumer": name,
+                        "detail": f"{block_name}.{flag} is true"})
 
     # ── Value parity, within each metric identity ────────────────────────────
     # Agreement is only evidence when the coverage behind it was proven. See
     # `_coverage_proven`: an unproven window makes every consumer render the same
     # zero, which is unanimity about a number nobody measured.
-    coverage_proven, coverage_status = _coverage_proven(consumers)
     metrics = []
     for metric_key, spec in METRIC_IDENTITIES.items():
         readings = []
@@ -271,20 +388,52 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
             entry = consumers.get(consumer_name) or {}
             payload = entry.get("payload")
             value = _dig(payload, path) if payload else None
-            readings.append({"consumer": consumer_name, "path": path, "value": value})
+            contract = ((payload or {}).get(METRIC_TRUTH_KEY) or {}).get(metric_key)
+            problem = _contract_problem(contract, spec, metric_key,
+                                        _window_signature(payload or {}, window)[0])
+            readings.append({"consumer": consumer_name, "path": path, "value": value,
+                             "contract": contract, "contract_problem": problem})
 
         present = [r for r in readings if r["value"] is not None]
+        missing = [r for r in readings if r["value"] is None]
+        bad_contract = [r for r in readings if r["contract_problem"]]
         distinct = {_norm(r["value"]) for r in present}
         baseline = present[0]["value"] if present else None
 
         for r in readings:
             r["difference"], r["difference_pct"] = _diff(r["value"], baseline)
 
+        # PR-ADS-154C-F1 §5: coverage proof is chosen per METRIC, not one
+        # campaign-spend answer applied to everything. Geo metrics need geo
+        # coverage and an accepted country reconciliation; revenue needs the deal
+        # ledger; funnel metrics need the contact funnel.
+        coverage_proven, coverage_detail = _coverage_proven(consumers, spec)
+
         if not present:
             status = "unavailable"
             violations.append({
                 "code": V_SOURCE_UNAVAILABLE, "metric": metric_key,
                 "detail": "no consumer published this metric"})
+        elif missing:
+            # PR-ADS-154C-F1 §3: comparing only the readings that happen to be
+            # present let a page that dropped a metric look like agreement. Every
+            # REGISTERED consumer must answer, or the others are agreeing among
+            # themselves about a question one of them declined.
+            status = "consumer_missing"
+            violations.append({
+                "code": V_CONSUMER_METRIC_MISSING, "metric": metric_key,
+                "detail": (f"{len(missing)} registered consumer(s) published no "
+                           f"value while others did"),
+                "missing": [{"consumer": r["consumer"], "path": r["path"]}
+                            for r in missing]})
+        elif bad_contract:
+            # Provenance is CHECKED, not echoed. Printing the registry's expected
+            # `canonical_source` proves nothing about where the number came from.
+            status = "unverified_provenance"
+            violations.append({
+                "code": V_CONTRACT_INVALID, "metric": metric_key,
+                "detail": "; ".join(f"{r['consumer']}: {r['contract_problem']}"
+                                    for r in bad_contract)})
         elif len(distinct) > 1:
             status = "mismatch"
             violations.append({
@@ -292,15 +441,21 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                 "detail": f"{len(distinct)} distinct values across consumers",
                 "readings": [{"consumer": r["consumer"], "value": r["value"]}
                              for r in present]})
-        elif (not coverage_proven
-                and spec["canonical_source"] in (SOURCE_CANONICAL_SPEND,
-                                                 SOURCE_CANONICAL_GEO)):
+        elif not _consistent(present, "currency") or not _consistent(present, "customer_id"):
+            status = "unverified_provenance"
+            violations.append({
+                "code": V_CONTRACT_INCONSISTENT, "metric": metric_key,
+                "detail": "consumers disagree on currency or customer identity",
+                "readings": [{"consumer": r["consumer"],
+                              "currency": (r["contract"] or {}).get("currency"),
+                              "customer_id": (r["contract"] or {}).get("customer_id")}
+                             for r in present]})
+        elif not coverage_proven:
             status = "unproven"
             violations.append({
                 "code": V_AGREEMENT_ON_UNPROVEN_COVERAGE, "metric": metric_key,
-                "detail": (f"every consumer published {baseline!r}, but canonical "
-                           f"spend coverage is {coverage_status!r} — zero rows over "
-                           "an unproven range is not a measured zero")})
+                "detail": (f"every consumer published {baseline!r}, but {coverage_detail}"
+                           " — a figure over an unproven range is not a measurement")})
         else:
             status = "identical"
 
@@ -333,11 +488,28 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
 
 
 def _norm(value):
-    """Compare numerics by value, everything else by identity of content."""
+    """Normalise a reading for EXACT comparison.
+
+    PR-ADS-154C-F1: this rounded to six decimals while the command claimed
+    parity was exact. Rounding is a tolerance wearing different clothes — a
+    narrow one, but the audit's whole argument is that two renderings of the same
+    canonical figure must not need one. Two values that differ at the seventh
+    decimal are two answers to one question, and if that ever happens it is worth
+    knowing rather than smoothing away.
+
+    ``Decimal(str(...))`` is used rather than raw floats so ``2.0`` and ``2``
+    compare equal and the textual form does not reintroduce binary
+    representation noise of its own.
+    """
+    from decimal import Decimal, InvalidOperation  # noqa: PLC0415
+
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        return round(float(value), 6)
+        try:
+            return Decimal(str(value))
+        except InvalidOperation:      # nan / inf
+            return repr(value)
     return value
 
 

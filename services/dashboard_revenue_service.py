@@ -54,6 +54,7 @@ from analysis import revenue_scope
 # different quarters across the account's midnight and both call it "this
 # quarter". Spend is denominated in the account day, so the account day wins.
 from services.canonical_contract import resolve_canonical_window
+from services import canonical_contract
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
 from services.revenue_decision_mart import build_revenue_decision_mart
@@ -776,11 +777,22 @@ def build_dashboard_revenue(window: str = "current_quarter",
     unavailable = _build_unavailable(
         kpis, readiness, revenue_trend, customer_trend, period_change)
 
+    # PR-ADS-154C-F1: per-metric provenance, so the audit checks where each
+    # figure came from instead of echoing the source it expected.
+    _mt = canonical_contract.metric_truth_block(window_block, [
+        {"metric": m,
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY if revenue_ready
+                          else canonical_contract.TRUTH_NOT_READY)}
+        for m in ("closed_won_revenue_usd", "customers")])
+
     return {
         "window": window_block,
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "read_only": True,
         "truth_status": truth_status,
+        canonical_contract.METRIC_TRUTH_KEY: _mt,
         "kpis": kpis,
         "period_change": period_change,
         "revenue_trend": revenue_trend,

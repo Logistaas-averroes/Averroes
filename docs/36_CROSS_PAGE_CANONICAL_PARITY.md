@@ -214,11 +214,61 @@ figure do not.
 |---|---|
 | `consumer_values_differ` | two consumers answered the same question differently |
 | `consumer_windows_differ` | same window name, different date range |
+| `consumer_window_missing` | a built consumer published no complete window |
+| `consumer_metric_missing` | a registered consumer published no value while others did |
+| `metric_contract_invalid` | missing/wrong provenance: source, scope, status, fallback or window |
+| `metric_contract_inconsistent` | consumers disagree on currency or customer identity |
+| `agreement_on_unproven_coverage` | unanimous, over coverage nobody proved |
 | `legacy_fallback_used` | a consumer declared `fallback_used: true` |
 | `legacy_source_supplied_production_total` | a legacy provider backed a published total |
 | `canonical_source_unavailable` | no consumer could publish the metric |
 | `consumer_raised` | a consumer failed to build |
-| `difference_not_classified` | a difference with no registered reason |
+
+### Provenance is checked, not echoed (PR-ADS-154C-F1)
+
+The first version printed the `canonical_source` the **registry expected** and
+called that provenance — a claim about the audit, not about the number. A page
+could read anything at all and the audit would echo the source it wished for.
+
+Every audited response now publishes `metric_truth.<metric_identity>`, built by
+`services.canonical_contract.metric_contract`, stating per metric its
+`data_source`, `scope`, `truth_status`, window, `timezone`, `customer_id`,
+`currency` and `fallback_used`. The audit checks each declaration against the
+registry. A missing contract is a failure: silence is not proof that the right
+source was used.
+
+A single response-level `data_source` cannot describe the Overview, which
+publishes Google Ads spend **and** HubSpot revenue — one source name is wrong
+about at least one of them.
+
+### Coverage proof is per metric
+
+Campaign-spend coverage was the universal proof, so a country metric could be
+certified by evidence about campaign spend — a different table entirely. Each
+authority is now asked about itself:
+
+| Metric family | Proof required |
+|---|---|
+| campaign spend | campaign coverage **and** FX coverage both `verified` |
+| country spend / revenue | geo coverage plus an accepted country reconciliation — `verified` **or** `reconciled_with_residual` |
+| revenue / customers | canonical deal-ledger availability |
+| funnel metrics | canonical contact-funnel availability |
+
+### Fallback flags are read where production actually puts them
+
+Real dashboards expose `legacy_fallback_used` as a **top-level boolean** and
+`source_truth` as a **string**. The original guard checked `isinstance(block,
+dict)` on nested keys of those names, so it was False for every production
+payload — a guard that could not fire on the shape it was written for. Top-level
+and nested flags are now both blocking, and the test fixture is shaped like a
+real response rather than a synthetic nested dictionary.
+
+### Comparison is exact
+
+`_norm` rounded to six decimals while the command claimed exactness. Rounding is
+a tolerance wearing different clothes. Readings are now normalised through
+`Decimal(str(value))` and compared exactly, so `2.0` and `2` still agree while
+values differing at the seventh decimal are reported as the two answers they are.
 
 One window failing fails the audit: a page that agrees this quarter and disagrees
 year-to-date is not a page that agrees.

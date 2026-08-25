@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 # PR-ADS-154C: THE canonical window anchor — the Google Ads account calendar
 # day, not UTC. See services/canonical_contract.resolve_canonical_window.
 from services.canonical_contract import resolve_canonical_window
+from services import canonical_contract
 from analysis import country_identity, revenue_scope
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
@@ -570,6 +571,31 @@ def build_revenue_decision_mart(
         "diagnostics": diagnostics,
         "source_truth": "revenue_decision_mart",
         "google_ads_conversion_value_used": False,
+        # PR-ADS-154C-F1: per-metric provenance. The mart publishes spend AND
+        # revenue AND customers, so one response-level source name describes at
+        # most one of them correctly.
+        canonical_contract.METRIC_TRUTH_KEY: canonical_contract.metric_truth_block(
+            window_block, [
+                {"metric": "google_ads_spend_usd",
+                 "data_source": canonical_contract.SOURCE_CANONICAL_SPEND,
+                 "scope": "google_ads_campaign_spend",
+                 "truth_status": (canonical_contract.TRUTH_READY
+                                  if spend_truth.get("campaign_spend_status") == "verified"
+                                  else canonical_contract.TRUTH_NOT_READY),
+                 "customer_id": spend_truth.get("customer_id")},
+                {"metric": "closed_won_revenue_usd",
+                 "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+                 "scope": "all_source_business_revenue",
+                 "truth_status": (canonical_contract.TRUTH_READY
+                                  if summary.get("revenue_available")
+                                  else canonical_contract.TRUTH_NOT_READY)},
+                {"metric": "customers",
+                 "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+                 "scope": "all_source_business_revenue",
+                 "truth_status": (canonical_contract.TRUTH_READY
+                                  if summary.get("revenue_available")
+                                  else canonical_contract.TRUTH_NOT_READY)},
+            ]),
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
     }
 

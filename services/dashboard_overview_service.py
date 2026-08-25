@@ -54,6 +54,7 @@ from analysis import revenue_scope
 # different quarters across the account's midnight and both call it "this
 # quarter". Spend is denominated in the account day, so the account day wins.
 from services.canonical_contract import resolve_canonical_window
+from services import canonical_contract
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
 from services.revenue_attribution_service import build_revenue_deals
@@ -963,11 +964,37 @@ def build_dashboard_overview(window: str = "current_quarter",
         "lifecycle_status": lifecycle_funnel.get("status"),
     }
 
+    # PR-ADS-154C-F1: per-metric provenance. This page publishes Google Ads
+    # spend AND HubSpot revenue, so a single response-level `source_truth` is
+    # wrong about one of them whichever value it takes. Each metric now states
+    # its own lineage, and the cross-page audit checks those statements against
+    # its registry instead of echoing the source it expected to find.
+    _resolved_window = {
+        "key": window_block.get("key"), "start_date": window_block.get("start_date"),
+        "end_date": window_block.get("end_date"), "timezone": window_block.get("timezone"),
+    }
+    _spend_ready = (spend_truth.get("campaign_spend_status") == "verified")
+    _revenue_ready = bool((mart.get("summary") or {}).get("revenue_available"))
+    metric_truth = canonical_contract.metric_truth_block(_resolved_window, [
+        {"metric": "google_ads_spend_usd",
+         "data_source": canonical_contract.SOURCE_CANONICAL_SPEND,
+         "scope": "google_ads_campaign_spend",
+         "truth_status": (canonical_contract.TRUTH_READY if _spend_ready
+                          else canonical_contract.TRUTH_NOT_READY),
+         "customer_id": spend_truth.get("customer_id")},
+        {"metric": "closed_won_revenue_usd",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY if _revenue_ready
+                          else canonical_contract.TRUTH_NOT_READY)},
+    ])
+
     return {
         "window": window_block,
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "read_only": True,
         "truth_status": truth_status,
+        canonical_contract.METRIC_TRUTH_KEY: metric_truth,
         "kpis": kpis,
         "period_change": period_change,
         "trend": trend,
