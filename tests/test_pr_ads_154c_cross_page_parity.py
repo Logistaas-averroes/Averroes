@@ -1201,7 +1201,7 @@ def test_f2_3b_a_contract_naming_a_different_window_key_fails(monkeypatch):
 
 
 @pytest.mark.parametrize("field", [
-    "data_source", "scope", "truth_status", "window", "window_end",
+    "metric", "data_source", "scope", "truth_status", "window", "window_end",
     "timezone", "currency", "fallback_used", "customer_id",
 ])
 def test_f2_3c_an_omitted_contract_field_fails_rather_than_comparing_equal(
@@ -1443,3 +1443,86 @@ def test_f2_7b_the_cli_exits_nonzero_against_an_inconsistent_fixture(monkeypatch
     payload = json.loads(capsys.readouterr().out)
     assert rc == 1
     assert "consumer_values_differ" in payload["violation_codes"]
+
+
+@pytest.mark.parametrize("consumer,path", [
+    ("dashboard/overview", "kpis.sqls"),
+    ("dashboard/revenue", "kpis.sqls"),
+    ("dashboard/campaigns", "kpis.sqls"),
+    ("dashboard/countries", "kpis.sqls"),
+    ("dashboard/deals", "kpis.sqls"),
+    ("revenue_decision_mart", "summary.sqls"),
+])
+def test_f2_8_one_sql_identity_is_compared_across_every_consumer(
+        monkeypatch, consumer, path):
+    """Registering a consumer is not the same as comparing it.
+
+    Every page that renders the campaign-attributable SQL count is parametrised
+    here, so a consumer silently dropped from the comparison fails a test rather
+    than reducing the audit's reach without saying so.
+    """
+    out = _audit_with(monkeypatch, _payloads(
+        **{consumer.replace("/", "__"): {path: 26}}))
+    assert out["ok"] is False
+    assert parity.V_VALUE_MISMATCH in out["violation_codes"]
+    entry = next(m for m in out["metrics"]
+                 if m["metric"] == "campaign_attributable_sqls")
+    assert entry["status"] == "mismatch"
+    assert {r["consumer"] for r in entry["readings"]} == {
+        c for c, _ in parity.METRIC_IDENTITIES["campaign_attributable_sqls"]["consumers"]}
+
+
+@pytest.mark.parametrize("consumer,path", [
+    ("dashboard/overview", "kpis.google_ads_spend_usd"),
+    ("dashboard/campaigns", "kpis.verified_spend_usd"),
+    ("revenue_decision_mart", "summary.spend_usd"),
+])
+def test_f2_8b_full_account_spend_is_compared_across_every_consumer(
+        monkeypatch, consumer, path):
+    """The same for the full-account denominator — and Countries is NOT among
+    them, because its KPI sums the per-country rows."""
+    out = _audit_with(monkeypatch, _payloads(
+        **{consumer.replace("/", "__"): {path: 13000.5}}))
+    assert out["ok"] is False
+    assert parity.V_VALUE_MISMATCH in out["violation_codes"]
+    entry = next(m for m in out["metrics"] if m["metric"] == "google_ads_spend_usd")
+    assert entry["status"] == "mismatch"
+    assert "dashboard/countries" not in {r["consumer"] for r in entry["readings"]}
+    # Country-attributed spend is a different identity and is untouched by this.
+    country = next(m for m in out["metrics"]
+                   if m["metric"] == "country_attributed_spend_usd")
+    assert country["status"] == "identical"
+
+
+def test_f2_9_campaign_and_country_attributed_outcomes_stay_distinct(monkeypatch):
+    """Two subsets of the same all-source population, cut on different axes.
+
+    In the reference fixture both happen to read 29000 over 2 customers, which is
+    exactly when a registry is tempted to merge them. They answer different
+    questions — attributable to a campaign, versus assigned to a real country —
+    and a page can be right about one while wrong about the other.
+    """
+    campaign = parity.METRIC_IDENTITIES["campaign_attributed_won_revenue_usd"]
+    country = parity.METRIC_IDENTITIES["country_attributed_won_revenue_usd"]
+    assert campaign["scope"] != country["scope"]
+    assert campaign["canonical_source"] != country["canonical_source"]
+    assert campaign["coverage_proof"] != country["coverage_proof"]
+    assert not ({c for c, _ in campaign["consumers"]}
+                & {c for c, _ in country["consumers"]})
+
+    # Equal values, separately certified — and moving ONE moves only its own
+    # identity, which is what "never compared" has to mean in practice.
+    out = _audit_with(monkeypatch, _payloads())
+    assert out["ok"] is True
+    assert (next(m for m in out["metrics"] if m["metric"] ==
+                 "campaign_attributed_won_revenue_usd")["value"]
+            == next(m for m in out["metrics"] if m["metric"] ==
+                    "country_attributed_won_revenue_usd")["value"] == 29000.0)
+
+    out = _audit_with(monkeypatch, _payloads(
+        dashboard__countries={"kpis.won_revenue_usd": 27000.0}))
+    assert next(m for m in out["metrics"] if m["metric"] ==
+                "campaign_attributed_won_revenue_usd")["status"] == "identical"
+    assert next(m for m in out["metrics"] if m["metric"] ==
+                "country_attributed_won_revenue_usd")["status"] == "identical"
+    assert out["ok"] is True     # a different subset moving is not a parity failure
