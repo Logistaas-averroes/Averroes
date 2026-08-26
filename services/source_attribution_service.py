@@ -16,7 +16,9 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timezone
 
-from analysis.business_windows import resolve_window
+# PR-ADS-154C: THE canonical window anchor — the Google Ads account calendar
+# day, not UTC. See services/canonical_contract.resolve_canonical_window.
+from services.canonical_contract import resolve_canonical_window
 from analysis.source_classification import (
     GROUP_GOOGLE_ADS, GROUP_OTHER_PAID, GROUP_ORGANIC, GROUP_OFFLINE,
     GROUP_UNCLASSIFIED, GROUP_LABELS, GROUPS_WITH_SPEND, RULE_VERSION,
@@ -147,7 +149,7 @@ def _roas(won, spend):
 
 
 def _window_bounds(window: str, now):
-    resolved = resolve_window(window, now=now)
+    resolved = resolve_canonical_window(window, now=now)
     start = date.fromisoformat(resolved["start_date"]) if resolved["start_date"] else None
     end = date.fromisoformat(resolved["end_date"])
     return resolved, start, end

@@ -48,7 +48,13 @@ import logging
 from datetime import date, datetime, timezone
 
 from analysis import revenue_scope
-from analysis.business_windows import resolve_window
+# PR-ADS-154C: THE canonical window anchor — the Google Ads account
+# calendar day, not UTC. Sharing `resolve_window` while disagreeing about
+# which day "today" is meant two pages could resolve `current_quarter` to
+# different quarters across the account's midnight and both call it "this
+# quarter". Spend is denominated in the account day, so the account day wins.
+from services.canonical_contract import resolve_canonical_window
+from services import canonical_contract
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
 from services.revenue_decision_mart import build_revenue_decision_mart
@@ -688,7 +694,7 @@ def build_dashboard_revenue(window: str = "current_quarter",
     Raises:
         ValueError: If ``window`` is not a supported business window.
     """
-    resolved = resolve_window(window, now=now)
+    resolved = resolve_canonical_window(window, now=now)
     ref_now = _coerce_utc(now)
 
     mart = build_revenue_decision_mart(view="campaign", window=window, now=now)
@@ -771,11 +777,32 @@ def build_dashboard_revenue(window: str = "current_quarter",
     unavailable = _build_unavailable(
         kpis, readiness, revenue_trend, customer_trend, period_change)
 
+    # PR-ADS-154C-F1: per-metric provenance, so the audit checks where each
+    # figure came from instead of echoing the source it expected.
+    _mt = canonical_contract.metric_truth_block(window_block, [
+        *[{"metric": m,
+           "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+           "scope": "all_source_business_revenue",
+           "truth_status": (canonical_contract.TRUTH_READY if revenue_ready
+                            else canonical_contract.TRUTH_NOT_READY)}
+          for m in ("closed_won_revenue_usd", "customers")],
+        # The SQL headline is the mart's campaign-attributable population, NOT
+        # all-source business revenue — a separate identity with its own scope,
+        # so it carries its own contract rather than borrowing the revenue one.
+        {"metric": "campaign_attributable_sqls",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_sqls",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("sqls") is not None
+                          else canonical_contract.TRUTH_NOT_READY)},
+    ])
+
     return {
         "window": window_block,
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "read_only": True,
         "truth_status": truth_status,
+        canonical_contract.METRIC_TRUTH_KEY: _mt,
         "kpis": kpis,
         "period_change": period_change,
         "revenue_trend": revenue_trend,

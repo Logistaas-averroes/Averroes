@@ -47,7 +47,13 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timezone
 
-from analysis.business_windows import resolve_window
+# PR-ADS-154C: THE canonical window anchor — the Google Ads account
+# calendar day, not UTC. Sharing `resolve_window` while disagreeing about
+# which day "today" is meant two pages could resolve `current_quarter` to
+# different quarters across the account's midnight and both call it "this
+# quarter". Spend is denominated in the account day, so the account day wins.
+from services.canonical_contract import resolve_canonical_window
+from services import canonical_contract
 from analysis.source_classification import (
     CH_DIRECT_EMAIL,
     CH_EMAIL_MARKETING,
@@ -793,7 +799,7 @@ def build_dashboard_channels(window: str = "current_quarter",
     Raises:
         ValueError: If ``window`` is not a supported business window.
     """
-    resolve_window(window, now=now)
+    resolve_canonical_window(window, now=now)
     ref_now = _coerce_utc(now)
 
     mart = build_revenue_decision_mart(view="campaign", window=window, now=now)
@@ -866,12 +872,48 @@ def build_dashboard_channels(window: str = "current_quarter",
     truth_status = _build_truth_status(mart, google_spend, channel_rows, readiness)
     unavailable = _build_unavailable(kpis, google_spend, trend, readiness, period_change)
 
+    # PR-ADS-154C-F2 §3: per-metric provenance. Until now this page was built by
+    # the cross-page audit, had its window checked, and certified nothing — so it
+    # could have published anything under an executive heading and passed.
+    #
+    # The declarations name the authority this page ACTUALLY reads. Revenue,
+    # customers and SQLs here come from the source-group taxonomy
+    # (`build_revenue_by_source`, itself the canonical deal ledger and lead
+    # population grouped by CRM acquisition source), never from the mart totals —
+    # which is why `total_sqls` is a source-group count and is registered as its
+    # own identity rather than compared with the campaign-attributable one.
+    _resolved_window = {
+        "key": window_block.get("key"), "start_date": window_block.get("start_date"),
+        "end_date": window_block.get("end_date"), "timezone": window_block.get("timezone"),
+    }
+    _mt = canonical_contract.metric_truth_block(_resolved_window, [
+        *[{"metric": m,
+           "data_source": canonical_contract.SOURCE_REVENUE_BY_SOURCE,
+           "scope": "all_source_business_revenue",
+           "truth_status": (canonical_contract.TRUTH_READY
+                            if kpis.get(field) is not None
+                            else canonical_contract.TRUTH_NOT_READY)}
+          for m, field in (("closed_won_revenue_usd", "closed_won_revenue_usd"),
+                           ("customers", "total_customers"))],
+        {"metric": "source_group_sqls",
+         "data_source": canonical_contract.SOURCE_REVENUE_BY_SOURCE,
+         "scope": "source_group_sqls",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("total_sqls") is not None
+                          else canonical_contract.TRUTH_NOT_READY)},
+    ])
+
     return {
         "window": window_block,
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "read_only": True,
         "source_truth": "revenue_by_source_taxonomy",
+        # This page reads canonical authorities only; declared so the audit's
+        # fallback guard has something to check rather than an absent field it
+        # would otherwise have to read as innocence.
+        "legacy_fallback_used": False,
         "google_ads_conversion_value_used": False,
+        canonical_contract.METRIC_TRUTH_KEY: _mt,
         "kpis": kpis,
         "period_change": period_change,
         "channel_mix": channel_rows,

@@ -169,6 +169,73 @@ def resolve_window(key: str, now: datetime | None = None) -> dict:
     }
 
 
+def resolve_window_in_zone(key: str, time_zone: str | None,
+                           now: datetime | None = None) -> dict:
+    """Resolve a business window against the calendar day in ``time_zone``.
+
+    PR-ADS-154C §"Window parity". Every consumer already called
+    :func:`resolve_window`, so the *resolver* was shared — but the reference
+    instant was not. Three anchors were in use for one set of window keys:
+
+      * the dashboard services passed a UTC ``now``;
+      * the spend and geo services anchored on the Google Ads ACCOUNT day, read
+        from the database, silently falling back to UTC when no row carried one;
+      * the evidence services anchored on ``analysis.account_time.ACCOUNT_TZ``,
+        hardcoded to Europe/London.
+
+    Sharing a resolver while disagreeing about "today" is not shared at all. At
+    23:30 UTC on 30 June during British Summer Time the account day is already
+    1 July, so ``current_quarter`` resolves to Q2 under one anchor and Q3 under
+    another — two pages showing different quarters and both calling it "this
+    quarter". Every named window diverges at that instant, not just the
+    quarterly ones.
+
+    The account day wins, because spend is denominated in it: Google Ads reports
+    a day's cost against the account's local calendar, so a business window that
+    disagrees with the account is asking about a range the spend data does not
+    have. A ``None`` or unknown zone falls back to :data:`ACCOUNT_TZ` rather than
+    to UTC — falling back to UTC is precisely what produced the divergence, and a
+    missing database row is not a reason to change which day it is.
+
+    Pure: no database access, no I/O. Callers holding a configured zone pass it;
+    everything else gets the account default.
+    """
+    from analysis.account_time import ACCOUNT_TZ  # noqa: PLC0415
+
+    requested = time_zone or ACCOUNT_TZ
+    base = _coerce_utc(now)
+
+    # PR-ADS-154C-F1: report the zone actually USED, not the one asked for.
+    # Returning the requested string after falling back to the account default
+    # told a reader the dates were computed in a zone they were not, which is the
+    # same class of defect as the anchoring bug this resolver exists to fix — a
+    # field that describes something other than what happened.
+    effective = requested
+    local_day = None
+    for candidate in (requested, ACCOUNT_TZ):
+        try:
+            from zoneinfo import ZoneInfo  # noqa: PLC0415
+            local_day = base.astimezone(ZoneInfo(candidate)).date()
+            effective = candidate
+            break
+        except Exception:  # noqa: BLE001 - unknown zone / tzdata unavailable
+            continue
+    if local_day is None:
+        # No tz database at all. UTC is the only thing left, and saying so is
+        # better than naming a zone that was never applied.
+        local_day = base.date()
+        effective = "UTC"
+
+    # Anchor at midday so the delegated resolver, which coerces to UTC, cannot
+    # shift the day back across the boundary it was just moved over.
+    anchored = datetime(local_day.year, local_day.month, local_day.day,
+                        12, 0, 0, tzinfo=timezone.utc)
+    resolved = resolve_window(key, now=anchored)
+    resolved["timezone"] = effective
+    resolved["timezone_requested"] = requested
+    return resolved
+
+
 def get_window_bounds(
     key: str, now: datetime | None = None
 ) -> tuple[datetime | None, datetime]:

@@ -48,7 +48,13 @@ from datetime import date, datetime, timezone
 from dateutil.relativedelta import relativedelta
 
 from analysis import revenue_scope
-from analysis.business_windows import resolve_window
+# PR-ADS-154C: THE canonical window anchor — the Google Ads account
+# calendar day, not UTC. Sharing `resolve_window` while disagreeing about
+# which day "today" is meant two pages could resolve `current_quarter` to
+# different quarters across the account's midnight and both call it "this
+# quarter". Spend is denominated in the account day, so the account day wins.
+from services.canonical_contract import resolve_canonical_window
+from services import canonical_contract
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
 from services.revenue_attribution_service import build_revenue_deals
@@ -854,7 +860,7 @@ def build_dashboard_overview(window: str = "current_quarter",
         ValueError: If ``window`` is not a supported business window.
     """
     # Validate up front so a bad window fails identically to every mart page.
-    resolve_window(window, now=now)
+    resolve_canonical_window(window, now=now)
     ref_now = _coerce_utc(now)
 
     mart = build_revenue_decision_mart(view="campaign", window=window, now=now)
@@ -958,11 +964,66 @@ def build_dashboard_overview(window: str = "current_quarter",
         "lifecycle_status": lifecycle_funnel.get("status"),
     }
 
+    # PR-ADS-154C-F1: per-metric provenance. This page publishes Google Ads
+    # spend AND HubSpot revenue, so a single response-level `source_truth` is
+    # wrong about one of them whichever value it takes. Each metric now states
+    # its own lineage, and the cross-page audit checks those statements against
+    # its registry instead of echoing the source it expected to find.
+    _resolved_window = {
+        "key": window_block.get("key"), "start_date": window_block.get("start_date"),
+        "end_date": window_block.get("end_date"), "timezone": window_block.get("timezone"),
+    }
+    _spend_ready = (spend_truth.get("campaign_spend_status") == "verified")
+    _revenue_ready = bool((mart.get("summary") or {}).get("revenue_available"))
+    # The mart's lead/SQL population is withheld wholesale when the business event
+    # date is unsafe, so "did it publish a count" is the readiness question.
+    _lead_ready = (summary.get("leads") is not None or summary.get("sqls") is not None)
+    # PR-ADS-153C: the lifecycle strip is a DIFFERENT authority answering a
+    # different question, on each stage's own event date. It gets its own status.
+    _lifecycle_ready = bool(lifecycle_funnel.get("available")) and \
+        lifecycle_funnel.get("status") != "mismatch"
+    _lifecycle_status = (canonical_contract.TRUTH_READY if _lifecycle_ready
+                         else canonical_contract.TRUTH_NOT_READY)
+    metric_truth = canonical_contract.metric_truth_block(_resolved_window, [
+        {"metric": "google_ads_spend_usd",
+         "data_source": canonical_contract.SOURCE_CANONICAL_SPEND,
+         "scope": "google_ads_campaign_spend",
+         "truth_status": (canonical_contract.TRUTH_READY if _spend_ready
+                          else canonical_contract.TRUTH_NOT_READY),
+         "customer_id": spend_truth.get("customer_id")},
+        {"metric": "closed_won_revenue_usd",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY if _revenue_ready
+                          else canonical_contract.TRUTH_NOT_READY)},
+        {"metric": "customers",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY if _revenue_ready
+                          else canonical_contract.TRUTH_NOT_READY)},
+        {"metric": "campaign_attributable_sqls",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_sqls",
+         "truth_status": (canonical_contract.TRUTH_READY if _lead_ready
+                          else canonical_contract.TRUTH_NOT_READY)},
+        {"metric": "campaign_attributable_leads",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_leads",
+         "truth_status": (canonical_contract.TRUTH_READY if _lead_ready
+                          else canonical_contract.TRUTH_NOT_READY)},
+        *[{"metric": f"lifecycle_{_stage}",
+           "data_source": canonical_contract.SOURCE_CANONICAL_FUNNEL,
+           "scope": f"lifecycle_{_stage}",
+           "truth_status": _lifecycle_status}
+          for _stage in ("leads", "mqls", "sqls", "opportunities", "customers")],
+    ])
+
     return {
         "window": window_block,
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "read_only": True,
         "truth_status": truth_status,
+        canonical_contract.METRIC_TRUTH_KEY: metric_truth,
         "kpis": kpis,
         "period_change": period_change,
         "trend": trend,

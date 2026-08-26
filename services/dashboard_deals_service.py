@@ -45,7 +45,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from analysis.business_windows import resolve_window
+# PR-ADS-154C: THE canonical window anchor — the Google Ads account
+# calendar day, not UTC. Sharing `resolve_window` while disagreeing about
+# which day "today" is meant two pages could resolve `current_quarter` to
+# different quarters across the account's midnight and both call it "this
+# quarter". Spend is denominated in the account day, so the account day wins.
+from services.canonical_contract import resolve_canonical_window
+from services import canonical_contract
 from analysis.source_classification import GROUP_LABELS
 from analysis import revenue_scope
 from db import revenue_repository as repo
@@ -590,7 +596,7 @@ def build_dashboard_deals(window: str = "current_quarter",
     Raises:
         ValueError: If ``window`` is not a supported business window.
     """
-    resolve_window(window, now=now)
+    resolve_canonical_window(window, now=now)
     ref_now = _coerce_utc(now)
 
     mart = build_revenue_decision_mart(view="deal", window=window, now=now)
@@ -653,10 +659,35 @@ def build_dashboard_deals(window: str = "current_quarter",
                                      sql_no_deal_available, sql_no_deal_reason,
                                      amount_unknown, period_change)
 
+    # PR-ADS-154C-F2 §3: per-metric provenance. Every KPI on this page is read
+    # from the mart summary, so the all-source closed-won pair here is the SAME
+    # identity the Overview, Revenue and Channels pages publish — which is exactly
+    # the claim the audit now checks rather than assumes.
+    _resolved_window = {
+        "key": window_block.get("key"), "start_date": window_block.get("start_date"),
+        "end_date": window_block.get("end_date"), "timezone": window_block.get("timezone"),
+    }
+    _revenue_ready = bool(revenue_connected and ledger_available)
+    _mt = canonical_contract.metric_truth_block(_resolved_window, [
+        *[{"metric": m,
+           "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+           "scope": "all_source_business_revenue",
+           "truth_status": (canonical_contract.TRUTH_READY if _revenue_ready
+                            else canonical_contract.TRUTH_NOT_READY)}
+          for m in ("closed_won_revenue_usd", "customers")],
+        {"metric": "campaign_attributable_sqls",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_sqls",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("sqls") is not None
+                          else canonical_contract.TRUTH_NOT_READY)},
+    ])
+
     return {
         "window": window_block,
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "read_only": True,
+        canonical_contract.METRIC_TRUTH_KEY: _mt,
         "source_truth": canonical_revenue.CANONICAL_SOURCE,
         "google_ads_conversion_value_used": False,
         # Structural truth: open opportunity / lost / aging stage data is NOT durable.

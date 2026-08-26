@@ -47,7 +47,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from analysis.business_windows import resolve_window
+# PR-ADS-154C: THE canonical window anchor — the Google Ads account
+# calendar day, not UTC. Sharing `resolve_window` while disagreeing about
+# which day "today" is meant two pages could resolve `current_quarter` to
+# different quarters across the account's midnight and both call it "this
+# quarter". Spend is denominated in the account day, so the account day wins.
+from services.canonical_contract import resolve_canonical_window
+from services import canonical_contract
 from analysis import revenue_scope
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
@@ -724,7 +730,7 @@ def build_dashboard_campaigns(window: str = "current_quarter",
     Raises:
         ValueError: If ``window`` is not a supported business window.
     """
-    resolved = resolve_window(window, now=now)
+    resolved = resolve_canonical_window(window, now=now)
     ref_now = _coerce_utc(now)
 
     mart = build_revenue_decision_mart(view="campaign", window=window, now=now)
@@ -791,10 +797,45 @@ def build_dashboard_campaigns(window: str = "current_quarter",
     unavailable = _build_unavailable(kpis, spend_truth, keyword_themes,
                                      search_signals, period_change, deal_proof_available)
 
+    # PR-ADS-154C-F2 §3: per-metric provenance. Spend here is the FULL-account
+    # canonical denominator — the same figure the Overview and the mart publish,
+    # which is why it is registered as one identity with them — while revenue and
+    # customers are the campaign-ATTRIBUTABLE subset summed from the Google Ads
+    # rows, deliberately excluding the Unattributed bucket. Two different scopes
+    # on one page; one response-level source name could describe neither.
+    _resolved_window = {
+        "key": window_block.get("key"), "start_date": window_block.get("start_date"),
+        "end_date": window_block.get("end_date"), "timezone": window_block.get("timezone"),
+    }
+    _mt = canonical_contract.metric_truth_block(_resolved_window, [
+        {"metric": "google_ads_spend_usd",
+         "data_source": canonical_contract.SOURCE_CANONICAL_SPEND,
+         "scope": "google_ads_campaign_spend",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if spend_truth.get("campaign_spend_status") == "verified"
+                          else canonical_contract.TRUTH_NOT_READY),
+         "customer_id": spend_truth.get("customer_id")},
+        *[{"metric": m,
+           "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+           "scope": "campaign_attributable_revenue",
+           "truth_status": (canonical_contract.TRUTH_READY
+                            if kpis.get(field) is not None
+                            else canonical_contract.TRUTH_NOT_READY)}
+          for m, field in (("campaign_attributed_won_revenue_usd", "won_revenue_usd"),
+                           ("campaign_attributed_customers", "customers"))],
+        {"metric": "campaign_attributable_sqls",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_sqls",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("sqls") is not None
+                          else canonical_contract.TRUTH_NOT_READY)},
+    ])
+
     return {
         "window": window_block,
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "read_only": True,
+        canonical_contract.METRIC_TRUTH_KEY: _mt,
         "source_truth": "revenue_decision_mart_campaign_view",
         # PR-ADS-153E-B: spend/campaign identity remain Google Ads; the closed-won
         # deals behind every campaign row are the canonical ledger.

@@ -58,6 +58,9 @@ from analysis import revenue_scope
 from analysis.attribution_confidence import get_confidence_severity
 from analysis.attribution_matcher import attribute_deals
 from analysis.business_windows import get_window_bounds, resolve_window
+# PR-ADS-154C: THE canonical window anchor — the Google Ads account calendar
+# day, not UTC. See services/canonical_contract.resolve_canonical_window.
+from services.canonical_contract import resolve_canonical_window
 from analysis.core import QUALIFIED
 from db import revenue_repository as repo
 from services import canonical_revenue_service as canonical_revenue
@@ -951,7 +954,7 @@ def _build_db_summary(spend_rows: list, lead_rows: list, revenue_rows: list, *,
 
 def _window_date_bounds(window: str, now: datetime | None):
     """Return (start_date, end_date) as date objects (start may be None)."""
-    resolved = resolve_window(window, now=now)
+    resolved = resolve_canonical_window(window, now=now)
     start_date = date.fromisoformat(resolved["start_date"]) if resolved["start_date"] else None
     end_date = date.fromisoformat(resolved["end_date"])
     return resolved, start_date, end_date
@@ -2387,7 +2390,7 @@ def build_revenue_attribution_audit(window: str, now: datetime | None = None) ->
         except Exception:  # noqa: BLE001
             window_comparison[wk] = {}
         try:
-            wr = resolve_window(wk, now=now)
+            wr = resolve_canonical_window(wk, now=now)
             window_ranges[wk] = {
                 "key": wr["key"],
                 "start_date": wr["start_date"],
