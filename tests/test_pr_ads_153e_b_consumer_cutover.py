@@ -221,10 +221,32 @@ def test_2_business_total_consumers_agree_on_won_deals_and_revenue(monkeypatch):
     assert deals["summary"]["deal_count"] == ALL_SOURCE_WON_DEALS
     assert deals["summary"]["won_revenue"] == ALL_SOURCE_REVENUE
     assert mart["summary"]["customers"] == ALL_SOURCE_WON_DEALS
-    assert mart["summary"]["won_revenue_usd"] == ALL_SOURCE_REVENUE
     recon = by_source["canonical_reconciliation"]
     assert recon["canonical_won_deals"] == ALL_SOURCE_WON_DEALS
     assert recon["canonical_revenue_usd"] == ALL_SOURCE_REVENUE
+
+    # PR-ADS-154C-F3 changes ONE of these expectations, deliberately.
+    #
+    # `ALL_SOURCE_REVENUE` is 40,000 — the sum of the four deals whose amounts
+    # were proven. D4 is a won customer whose value is unknown, so the true
+    # business total for this window is "40,000 plus an unknown amount", which is
+    # not a number. The contract snapshot and the reconciliation diagnostic keep
+    # reporting the partial sum, because comparing populations is what they are
+    # for; the MART is what the Overview and Revenue pages render as
+    # "Closed-Won Revenue", and in production this exact shape published
+    # $878,324.80 on three pages while the four consumers with their own
+    # partial-sum rules published "unavailable" about the same population.
+    #
+    # The count is unaffected: five won deals is five won deals whatever their
+    # amounts, which is why `customers` is still asserted above.
+    assert mart["summary"]["won_revenue_usd"] is None
+    assert mart["summary"]["revenue_available"] is True      # population readable
+    assert mart["summary"]["revenue_total_available"] is False
+    assert (mart["summary"]["revenue_total_unavailable_reason"]
+            == canonical_revenue.REASON_REVENUE_INCOMPLETE)
+    assert mart["summary"]["currency_unavailable_deals"] == 1
+    # The partial sum still exists as a diagnostic; it is simply not the total.
+    assert contract["revenue_usd"] == ALL_SOURCE_REVENUE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
