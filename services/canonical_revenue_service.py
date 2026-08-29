@@ -574,12 +574,80 @@ def summable_revenue(row):
     return None
 
 
+#: Why a scope's revenue TOTAL is not publishable, even though the population is.
+REASON_REVENUE_INCOMPLETE = "canonical_revenue_amounts_incomplete"
+V_CURRENCY_UNPROVEN_DEALS = "currency_unproven_deals_in_population"
+
+
+def revenue_total_publishable(base: dict, scope=DEFAULT_SCOPE) -> dict:
+    """THE one decision: may a production page publish this scope's revenue total?
+
+    PR-ADS-154C-F3. Two conditions, and the second was the live defect.
+
+    **1. The population must be available.** A page must never publish revenue
+    when :func:`load_won_deals` refused to release the population.
+
+    **2. Every deal in it must have a proven amount.** ``summarize_deals``
+    returns ``revenue_usd`` as the sum of the deals whose currency WAS proven —
+    a partial known-dollar sum — whenever at least one such deal exists. Over a
+    population holding 181 won deals of which one has no proven amount, that is
+    a number smaller than the truth, published under the heading "Closed-Won
+    Revenue" with ``truth_status: ready``.
+
+    Channels, Campaigns, Countries and Deals already refused it, each with its
+    own "never a partial sum implying completeness" rule; the mart, Overview and
+    Revenue did not, which is precisely why All Time showed
+    ``$878,324.80`` on three pages and ``unavailable`` on four. One rule, applied
+    once, replaces four private copies and the mart's silent exception.
+
+    Returns ``{publishable, reason, detail, violation_codes, currency_unavailable_deals}``.
+    ``publishable`` False means the total is UNKNOWN — never zero, never partial.
+
+    The COUNT is deliberately not governed here. ``won_deals`` is complete
+    whatever the amounts are, so a page may keep publishing customers while
+    withholding revenue; blanking a count we did measure would be its own
+    fabrication.
+    """
+    if not base.get("available"):
+        return {
+            "publishable": False,
+            "reason": base.get("reason") or REASON_LEDGER_UNREADABLE,
+            "detail": base.get("detail"),
+            "violation_codes": sorted(base.get("violation_codes") or []),
+            "currency_unavailable_deals": None,
+        }
+
+    summary = summarize_deals(base.get("deals") or [], scope)
+    unproven = summary.get("currency_unavailable_deals") or 0
+    if unproven:
+        return {
+            "publishable": False,
+            "reason": REASON_REVENUE_INCOMPLETE,
+            "detail": (
+                f"{unproven} of {summary.get('won_deals')} closed-won deal(s) in "
+                f"scope '{summary.get('scope', scope)}' have no proven amount, so "
+                "the window total is unknown — the sum of the rest is a partial "
+                "figure and is not published as the total"),
+            "violation_codes": [V_CURRENCY_UNPROVEN_DEALS],
+            "currency_unavailable_deals": unproven,
+        }
+
+    return {
+        "publishable": True,
+        "reason": None,
+        "detail": None,
+        "violation_codes": [],
+        "currency_unavailable_deals": 0,
+    }
+
+
 __all__ = [
     "CANONICAL_SOURCE", "SUMMABLE_CURRENCY_STATUSES",
     "REASON_UNKNOWN_WINDOW", "REASON_UNKNOWN_SCOPE",
     "REASON_LEDGER_UNREADABLE", "REASON_SYNC_STATE_UNREADABLE",
-    "REASON_COVERAGE_NOT_PROVEN", "ALL_UNAVAILABLE_REASONS",
+    "REASON_COVERAGE_NOT_PROVEN", "REASON_REVENUE_INCOMPLETE",
+    "V_CURRENCY_UNPROVEN_DEALS", "ALL_UNAVAILABLE_REASONS",
     "unavailable", "load_won_deals", "summarize_deals", "build_snapshot",
     "get_revenue_snapshot", "get_scope_ladder", "deal_display_row",
-    "canonical_deal_rows", "summable_revenue",
+    "canonical_deal_rows", "summable_revenue", "revenue_total_publishable",
 ]

@@ -70,14 +70,45 @@ def _render(outcome: dict) -> None:
             # is always readable even when this renderer has not been taught
             # about it.
             symbol = {"identical": "=", "mismatch": "!",
-                      "unavailable": "?", "unproven": "~"}.get(m["status"], "·")
-            print(f"       [{symbol}] {m['metric']:38} {m['status']:12} {m['value']}")
+                      "unavailable": "?", "unproven": "~",
+                      # PR-ADS-154C-F3: a value published over a source its own
+                      # contract calls unavailable. Deliberately its own marker —
+                      # it is not a disagreement, and reading it as one is how it
+                      # survived.
+                      "published_over_unavailable_source": "X"}.get(m["status"], "·")
+            print(f"       [{symbol}] {m['metric']:38} {m['status']:34} {m['value']}")
             if m["status"] != "identical":
                 for r in m["readings"]:
                     print(f"             {r['consumer']:28} {r['path']:34} {r['value']}")
+                    # Say WHY, from the consumer's own declaration, rather than
+                    # sending the reader to the database to find out what the
+                    # page already knew.
+                    bits = []
+                    if r.get("truth_status"):
+                        bits.append(f"status={r['truth_status']}")
+                    if r.get("declared_source"):
+                        bits.append(f"source={r['declared_source']}")
+                    if r.get("unavailable_reason"):
+                        bits.append(f"reason={r['unavailable_reason']}")
+                    if r.get("violation_codes"):
+                        bits.append(f"codes={','.join(r['violation_codes'])}")
+                    if r.get("fallback_used") or r.get("legacy_fallback_used"):
+                        bits.append("FALLBACK ATTEMPTED")
+                    if bits:
+                        print(f"               {'  '.join(bits)}")
                     problem = r.get("contract_problem")
                     if problem:
                         print(f"               contract: {problem}")
+
+        # Split identities that must add back up to their total.
+        for c in result.get("conservation") or []:
+            mark = {"conserved": "=", "broken": "!"}.get(c["status"], "·")
+            parts = " + ".join(f"{p}={v}" for p, v in
+                               zip(c["parts"], c["part_values"]))
+            print(f"       [{mark}] conservation  {parts} vs {c['total']}="
+                  f"{c['total_value']}  ({c['status']})")
+            if c["status"] == "broken":
+                print(f"             {c['detail']}")
 
         for v in result["violations"]:
             where = v.get("metric") or v.get("consumer") or "-"
@@ -106,7 +137,13 @@ def _render(outcome: dict) -> None:
               f"{', '.join(outcome['violation_codes'])}")
         print("  A value mismatch means two pages answer the same question")
         print("  differently. A window mismatch means they answered different")
-        print("  questions while using the same window name.")
+        print("  questions while using the same window name. An identity")
+        print("  registered as distinct by design is never compared at all.")
+        print("  `canonical_source_unavailable` means no consumer could publish")
+        print("  the metric — an honest outage. `value_published_while_source_")
+        print("  unavailable` is the opposite and worse: a page published a")
+        print("  number its own contract says it had no source for, and two such")
+        print("  pages can agree with each other perfectly.")
     print("=" * 74 + "\n")
 
 

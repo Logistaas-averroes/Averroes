@@ -100,12 +100,14 @@ and each must publish `metric_truth.<identity>` naming the authority it read.
 | `campaign_attributed_customers` | campaign-attributable | mart | campaigns `kpis.customers`, mart `summary.attributed_customers` |
 | `country_attributed_won_revenue_usd` | country-attributed | canonical geo | countries `kpis.won_revenue_usd` |
 | `country_attributed_customers` | country-attributed | canonical geo | countries `kpis.customers` |
-| `campaign_attributable_sqls` | campaign-attributable | mart | overview, revenue, campaigns, countries, deals `kpis.sqls`, mart `summary.sqls` |
+| `campaign_attributable_sqls` | campaign-attributable | mart | overview, revenue, campaigns, deals `kpis.sqls`, mart `summary.sqls` |
+| `country_attributed_sqls` | assigned to a real country | canonical geo | countries `kpis.sqls` |
+| `country_unattributed_residual_sqls` | governed residual | canonical geo | countries `residual.sqls` |
 | `campaign_attributable_leads` | campaign-attributable | mart | overview `kpis.leads`, mart `summary.leads` |
 | `source_group_sqls` | channel taxonomy | revenue by source | channels `kpis.total_sqls` |
 | `lifecycle_{leads,mqls,sqls,opportunities,customers}` | one per stage | canonical contact funnel | overview `kpis.lifecycle_*` |
 
-Sixteen identities across seven consumers. Before F2 the audit built seven
+Eighteen identities across seven consumers. Before F2 the audit built seven
 consumers and certified **four** identities, then reported all seven as
 "inspected" — Channels, Campaigns and Deals passed by having nothing checked
 about them, which is the agreement-shaped failure this command exists to catch
@@ -185,6 +187,45 @@ Comparing these is the mistake, not the difference between them:
 | source-group SQLs | qualified leads counted by CRM acquisition source (the channel taxonomy) |
 | lifecycle customers | contacts that entered the customer stage |
 | revenue customers | closed-won deals in the canonical ledger |
+
+### Five SQL populations, and one of them is a split (PR-ADS-154C-F3)
+
+The first production run of the audit reported Countries "disagreeing" with the
+mart about SQLs in every window:
+
+| Window | campaign-attributable | Countries | residual |
+|---|---:|---:|---:|
+| current quarter | 16 | 14 | 2 |
+| last quarter | 40 | 36 | 4 |
+| last 6 months | 66 | 60 | 6 |
+| YTD | 111 | 99 | 12 |
+| all time | 605 | 572 | 33 |
+
+Nothing was lost and neither number was wrong. `_build_kpis` sums the SQLs of
+the **real country rows**; the ones that could not be assigned to a canonical
+country are preserved in the page's own residual bucket and are never spread
+across countries to make a total look complete. The registry described the wrong
+population, so a correct page and a correct mart were reported as disagreeing —
+and the residual, which is the operator's actual worklist, stayed invisible.
+
+Countries is therefore no longer a consumer of `campaign_attributable_sqls`. It
+publishes `country_attributed_sqls` and `country_unattributed_residual_sqls`,
+and `CONSERVATION_RULES` asserts they add back up:
+
+```
+country_attributed_sqls + country_unattributed_residual_sqls
+    == campaign_attributable_sqls          # 14 + 2 = 16
+```
+
+Registering a split is not enough. If the parts do not add to the total, one of
+the three is wrong and the audit cannot tell which, so it raises
+`metric_conservation_broken` rather than certifying all three. Inflating the
+real-country total to swallow the residual — the obvious way to make the numbers
+"agree" — fails that check. A component the page honestly withheld makes the rule
+`not_evaluable`, never broken: an outage is not bad arithmetic.
+
+The page's KPI also carries `sqls_scope` and `sqls_residual`, so "SQLs" on the
+Countries screen cannot be read as the whole campaign-attributable population.
 
 **Three SQL counts, three questions.** In the reference fixture the
 campaign-attributable count is 25 and the source-group count is 0. That
@@ -288,6 +329,8 @@ figure do not.
 | `consumer_metric_missing` | a registered consumer published no value while others did |
 | `consumer_certified_nothing` | a registered consumer was built but certified no identity |
 | `registered_consumer_not_built` | a registered consumer the audit never built at all |
+| `value_published_while_source_unavailable` | a consumer published a number its own contract says it had no source for |
+| `metric_conservation_broken` | split identities did not add back up to their total |
 | `metric_contract_invalid` | missing/wrong provenance: name, source, scope, status, fallback or window |
 | `metric_contract_inconsistent` | consumers disagree on currency or customer identity |
 | `agreement_on_unproven_coverage` | unanimous, over coverage nobody proved |
@@ -408,6 +451,63 @@ year-to-date is not a page that agrees.
    window satisfies perfectly — both halves are wrong together.
 6. The declared date range and effective timezone match the ones the consumer
    published.
+
+### One revenue availability decision (PR-ADS-154C-F3)
+
+The second production finding: over All Time the Overview, the Revenue page and
+the mart published **$878,324.80** while Channels, Campaigns, Countries and Deals
+published *unavailable* — and all-source **customers were 181 and identical on
+every page**.
+
+A readiness-gate rejection cannot produce that shape. When
+`load_won_deals` refuses the population it returns a block with no rows at all,
+so every consumer blanks its revenue **and its count**. Identical customers
+across all seven pages is proof the gate was open.
+
+What produces it is `summarize_deals`:
+
+```python
+"revenue_usd": (round(revenue, 2)
+                if revenue_deals or not currency_unavailable else None),
+```
+
+The sum of the deals whose currency **was** proven, published as soon as one such
+deal exists. Over a population of 181 won deals of which one has no proven
+amount, that is a partial known-dollar sum — smaller than the truth — presented
+under the heading "Closed-Won Revenue" with `truth_status: ready`. Channels,
+Campaigns, Countries and Deals each already refused a partial sum under their own
+"never a partial sum implying completeness" rule; the mart, and therefore the two
+pages that read it, were the exception. Bounded windows stayed green because the
+unproven deals are older than YTD.
+
+`canonical_revenue_service.revenue_total_publishable` is now the one decision,
+and it asks two questions:
+
+1. is the population available; and
+2. does every deal in the requested scope have a proven amount.
+
+The mart publishes `revenue_total_available` beside `revenue_available`, because
+they are different facts, and the metric contract follows the former. **The count
+is deliberately not governed by it** — `won_deals` is complete whatever the
+amounts are, so a page keeps publishing customers while withholding revenue.
+Blanking a number we did measure would be its own fabrication.
+
+> **`TOTAL_WON_DEALS=0, UNSUMMABLE_DEALS=0` beside `LEDGER_AVAILABLE=False`
+> proves nothing about the deals.** A rejected read carries no population, so a
+> diagnostic counting its rows counts an empty list. Both zeros are artifacts of
+> the refusal, not measurements — asserted in
+> `test_f3_11_the_zero_counts_in_a_rejected_read_are_not_measurements`.
+
+### The gate never looks at the window
+
+`check_sync_coverage(sync_res)` takes one argument and reads only the sync-state
+row: bootstrap status, its timestamps, the last sync mode and status. It has no
+window parameter and no notion of a lower bound, so "All Time is rejected for
+being unbounded" is not a thing that can happen — every window is accepted or
+rejected on identical evidence. **Nothing in the gate was weakened**, and two
+tests hold it that way: one asserts the signature, one drives all five windows
+through a real PostgreSQL schema in both the healthy and the incomplete-bootstrap
+state.
 
 ### `ok=true` means everything was checked
 

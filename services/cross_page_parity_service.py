@@ -82,6 +82,31 @@ V_CONTRACT_INCONSISTENT = "metric_contract_inconsistent"
 V_CONSUMER_UNCERTIFIED = "consumer_certified_nothing"
 #: A consumer named in the registry that the audit never built at all.
 V_CONSUMER_NOT_BUILT = "registered_consumer_not_built"
+#: PR-ADS-154C-F3. A consumer published a NUMBER while its own contract says the
+#: canonical source behind it is unavailable or not ready. Deliberately not a
+#: value mismatch: those two consumers may agree perfectly and still both be
+#: publishing a figure neither is entitled to.
+V_VALUE_OVER_UNAVAILABLE_SOURCE = "value_published_while_source_unavailable"
+#: Split identities that must add back up did not.
+V_CONSERVATION_BROKEN = "metric_conservation_broken"
+
+#: Identities that partition a whole. Registering the split is not enough — if
+#: the parts do not add back to the total, one of the three is wrong and the
+#: audit cannot tell which, so it says so rather than certifying all three.
+#:
+#: PR-ADS-154C-F3: Countries assigns SQLs to real countries and holds the rest in
+#: an explicit residual. 14 + 2 = 16 in the production current quarter.
+CONSERVATION_RULES = [
+    {
+        "total": "campaign_attributable_sqls",
+        "parts": ["country_attributed_sqls", "country_unattributed_residual_sqls"],
+        "reason": (
+            "Every campaign-attributable SQL is either assigned to a real "
+            "canonical country or held in the governed residual. The residual is "
+            "never spread across countries to make the parts match, and a real "
+            "country total is never inflated to swallow it."),
+    },
+]
 
 #: Country reconciliation states that count as governed geo readiness. Both are
 #: accepted: `reconciled_with_residual` is the PR-ADS-131 case where the
@@ -225,13 +250,38 @@ METRIC_IDENTITIES = {
         "canonical_source": SOURCE_REVENUE_DECISION_MART,
         "scope": "campaign_attributable_sqls",
         "coverage_proof": PROOF_MART_LEAD_FUNNEL,
+        # PR-ADS-154C-F3: Dashboard Countries is NOT here. Its `kpis.sqls` sums
+        # the REAL-COUNTRY rows only — 14 against the mart's 16 in the production
+        # quarter — because the SQLs it could not assign to a country are held in
+        # its explicit residual bucket. Registering it as this identity declared a
+        # subset to be the whole population and reported the difference as a
+        # parity mismatch, which is the "labels look similar" trap.
         "consumers": [
             ("dashboard/overview", "kpis.sqls"),
             ("dashboard/revenue", "kpis.sqls"),
             ("dashboard/campaigns", "kpis.sqls"),
-            ("dashboard/countries", "kpis.sqls"),
             ("dashboard/deals", "kpis.sqls"),
             ("revenue_decision_mart", "summary.sqls"),
+        ],
+    },
+    # The two halves of the country split. They are separate identities, and
+    # together they must account for the whole — see SQL_CONSERVATION below.
+    "country_attributed_sqls": {
+        "label": "SQLs attributed to a real country",
+        "canonical_source": SOURCE_CANONICAL_GEO,
+        "scope": "country_attributed_sqls",
+        "coverage_proof": PROOF_MART_LEAD_FUNNEL,
+        "consumers": [
+            ("dashboard/countries", "kpis.sqls"),
+        ],
+    },
+    "country_unattributed_residual_sqls": {
+        "label": "SQLs that could not be assigned to a country (governed residual)",
+        "canonical_source": SOURCE_CANONICAL_GEO,
+        "scope": "country_unattributed_residual_sqls",
+        "coverage_proof": PROOF_MART_LEAD_FUNNEL,
+        "consumers": [
+            ("dashboard/countries", "residual.sqls"),
         ],
     },
     # Channels counts SQLs by SOURCE GROUP, which is a different population and
@@ -343,6 +393,38 @@ DISTINCT_BY_DESIGN = [
             "Campaign-attributable SQLs count qualified leads reaching a canonical "
             "Google Ads campaign; source-group SQLs count them by CRM acquisition "
             "source across every channel. Different populations under one word."),
+    },
+    {
+        "left": "campaign_attributable_sqls",
+        "right": "country_attributed_sqls",
+        "reason": (
+            "Countries sums the SQLs it could assign to a REAL canonical country; "
+            "the mart counts every campaign-attributable SQL. The difference is "
+            "the governed residual, published separately — 14 + 2 = 16 in the "
+            "production current quarter — not a disagreement to reconcile away."),
+    },
+    {
+        "left": "country_attributed_sqls",
+        "right": "country_unattributed_residual_sqls",
+        "reason": (
+            "The two halves of the country split. An SQL is in exactly one of "
+            "them, and a residual SQL is never assigned to a guessed country to "
+            "make the real-country total look complete."),
+    },
+    {
+        "left": "country_attributed_sqls",
+        "right": "source_group_sqls",
+        "reason": (
+            "Country assignment and CRM acquisition source are different axes "
+            "over different populations; neither is a rollup of the other."),
+    },
+    {
+        "left": "country_attributed_sqls",
+        "right": "lifecycle_sqls",
+        "reason": (
+            "Lifecycle SQLs are all-source stage-entry events on their own "
+            "timestamp. Country-attributed SQLs are the mart's campaign "
+            "population narrowed to deals with a canonical country."),
     },
     {
         "left": "campaign_attributable_sqls",
@@ -718,9 +800,22 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
             problem = _contract_problem(contract, spec, metric_key,
                                         _window_signature(payload or {}, window)[0],
                                         consumer=consumer_name, window=window)
-            readings.append({"consumer": consumer_name, "path": path, "value": value,
-                             "expected_source": expected_source(spec, consumer_name),
-                             "contract": contract, "contract_problem": problem})
+            # PR-ADS-154C-F3 §5: an "unavailable" reading must say WHY, from the
+            # consumer's own declaration — source, status, reason, violation
+            # codes — and whether it reached for a fallback. A reading that only
+            # says `None` sends the reader back to the database to find out what
+            # the page already knew.
+            c = contract if isinstance(contract, dict) else {}
+            readings.append({
+                "consumer": consumer_name, "path": path, "value": value,
+                "expected_source": expected_source(spec, consumer_name),
+                "declared_source": c.get("data_source"),
+                "truth_status": c.get("truth_status"),
+                "unavailable_reason": c.get("unavailable_reason"),
+                "violation_codes": c.get("violation_codes") or [],
+                "fallback_used": c.get("fallback_used"),
+                "legacy_fallback_used": (payload or {}).get("legacy_fallback_used"),
+                "contract": contract, "contract_problem": problem})
 
         present = [r for r in readings if r["value"] is not None]
         missing = [r for r in readings if r["value"] is None]
@@ -737,7 +832,42 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
         # ledger; funnel metrics need the contact funnel.
         coverage_proven, coverage_detail = _coverage_proven(consumers, spec)
 
-        if not present:
+        # PR-ADS-154C-F3. A consumer that publishes a NUMBER while its own
+        # contract says the canonical source behind it is not ready. This is not
+        # a value mismatch — two such consumers can agree perfectly and both be
+        # publishing a figure neither is entitled to, which is exactly how
+        # $878,324.80 appeared on three pages, agreeing with itself, over a
+        # population whose total was unknown. It gets its own code so it can
+        # never be read as "the pages disagree".
+        # An ABSENT `truth_status` is a different, more precise finding — the
+        # contract omitted a required field — so it stays with the presence check
+        # rather than being reported as a deliberate publish over a known-bad
+        # source.
+        published_over_unavailable = [
+            r for r in present
+            if isinstance(r.get("contract"), dict)
+            and r["contract"].get("truth_status") is not None
+            and r["contract"].get("truth_status") != TRUTH_READY
+        ]
+
+        if published_over_unavailable:
+            status = "published_over_unavailable_source"
+            violations.append({
+                "code": V_VALUE_OVER_UNAVAILABLE_SOURCE, "metric": metric_key,
+                "detail": "; ".join(
+                    f"{r['consumer']} published {r['value']!r} while its contract "
+                    f"declares truth_status="
+                    f"{(r['contract'] or {}).get('truth_status')!r}"
+                    + (f" ({(r['contract'] or {}).get('unavailable_reason')})"
+                       if (r['contract'] or {}).get('unavailable_reason') else "")
+                    for r in published_over_unavailable),
+                "readings": [{
+                    "consumer": r["consumer"], "path": r["path"], "value": r["value"],
+                    "truth_status": (r["contract"] or {}).get("truth_status"),
+                    "unavailable_reason": (r["contract"] or {}).get("unavailable_reason"),
+                    "canonical_source": (r["contract"] or {}).get("data_source"),
+                } for r in published_over_unavailable]})
+        elif not present:
             status = "unavailable"
             violations.append({
                 "code": V_SOURCE_UNAVAILABLE, "metric": metric_key,
@@ -798,6 +928,41 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
             "readings": readings,
         })
 
+    # ── Conservation: do the parts of a split identity add back up? ─────────
+    # PR-ADS-154C-F3. Splitting `campaign_attributable_sqls` into a real-country
+    # total and a governed residual is only honest if the two account for the
+    # whole. If they do not, one of the three is wrong and the audit cannot tell
+    # which — so it says so rather than certifying all three as identical.
+    by_key = {m["metric"]: m for m in metrics}
+    conservation = []
+    for rule in CONSERVATION_RULES:
+        total_entry = by_key.get(rule["total"])
+        part_entries = [by_key.get(p) for p in rule["parts"]]
+        values = [None if e is None else e.get("value")
+                  for e in [total_entry, *part_entries]]
+        row = {"total": rule["total"], "parts": rule["parts"],
+               "total_value": values[0], "part_values": values[1:],
+               "reason": rule["reason"]}
+        if any(v is None for v in values):
+            # Not a violation: a withheld component cannot disprove conservation,
+            # and calling that a failure would punish an honest outage.
+            row["status"] = "not_evaluable"
+            row["detail"] = "one or more components were not published"
+        else:
+            parts_sum = sum(values[1:])
+            row["parts_sum"] = parts_sum
+            if _norm(parts_sum) == _norm(values[0]):
+                row["status"] = "conserved"
+            else:
+                row["status"] = "broken"
+                row["detail"] = (
+                    f"{' + '.join(f'{p}={v}' for p, v in zip(rule['parts'], values[1:]))} "
+                    f"= {parts_sum}, but {rule['total']} = {values[0]}")
+                violations.append({
+                    "code": V_CONSERVATION_BROKEN, "metric": rule["total"],
+                    "detail": row["detail"] + " — " + rule["reason"]})
+        conservation.append(row)
+
     # ── Certification: did every registered consumer actually answer? ────────
     # PR-ADS-154C-F2 §1. The audit built seven consumers and certified four
     # identities, then reported all seven as "inspected". Three pages passed by
@@ -851,6 +1016,8 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
             for name, detail in sorted(PENDING_REDESIGN_CONSUMERS.items())],
         "consumer_windows": window_rows,
         "metrics": metrics,
+        # PR-ADS-154C-F3: the split identities and whether they add back up.
+        "conservation": conservation,
         "distinct_by_design": DISTINCT_BY_DESIGN,
         "violations": violations,
         "violation_codes": sorted({v["code"] for v in violations}),

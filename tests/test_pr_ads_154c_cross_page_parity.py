@@ -261,14 +261,21 @@ def _payloads(**overrides):
             # `verified_spend_usd` here sums the per-country rows — the
             # country-ATTRIBUTED denominator, not the full-account one, even when
             # the two happen to agree.
+            # PR-ADS-154C-F3: this page's SQL headline is the REAL-COUNTRY total.
+            # 23 assigned + 2 residual = the mart's 25, which is the production
+            # 14 + 2 = 16 shape at this fixture's scale.
             "kpis": {"won_revenue_usd": 29000.0, "customers": 2,
-                     "verified_spend_usd": 13000.0, "sqls": 25},
+                     "verified_spend_usd": 13000.0, "sqls": 23,
+                     "sqls_scope": "country_attributed_sqls", "sqls_residual": 2},
+            "residual": {"sqls": 2},
             contract_mod.METRIC_TRUTH_KEY: _mt(
                 ("country_attributed_won_revenue_usd", _GEO,
                  "country_attributed_revenue"),
                 ("country_attributed_customers", _GEO, "country_attributed_revenue"),
                 ("country_attributed_spend_usd", _GEO, "country_attributed_spend"),
-                ("campaign_attributable_sqls", _MART, "campaign_attributable_sqls"))},
+                ("country_attributed_sqls", _GEO, "country_attributed_sqls"),
+                ("country_unattributed_residual_sqls", _GEO,
+                 "country_unattributed_residual_sqls"))},
         "dashboard/deals": {
             "window": dict(_WIN), "read_only": True,
             "source_truth": "hubspot_deal_ledger", "legacy_fallback_used": False,
@@ -802,11 +809,21 @@ def test_f1_2c_a_wrong_metric_scope_fails(monkeypatch):
 
 @pytest.mark.parametrize("status", ["not_ready", "unavailable"])
 def test_f1_2d_a_non_ready_contract_fails(monkeypatch, status):
+    """A non-ready contract beside a PUBLISHED value still fails.
+
+    PR-ADS-154C-F3 sharpened the code: F1 filed this under the general
+    `metric_contract_invalid`, which also covers a wrong source, a wrong scope
+    and an omitted field. Publishing a number over a source your own contract
+    calls unavailable is a different and worse thing than describing it badly,
+    and it now says so.
+    """
     out = _audit_with(monkeypatch, _payloads(
         dashboard__overview={
             f"{contract_mod.METRIC_TRUTH_KEY}.google_ads_spend_usd.truth_status": status}))
     assert out["ok"] is False
-    assert parity.V_CONTRACT_INVALID in out["violation_codes"]
+    assert parity.V_VALUE_OVER_UNAVAILABLE_SOURCE in out["violation_codes"]
+    entry = next(m for m in out["metrics"] if m["metric"] == "google_ads_spend_usd")
+    assert entry["status"] == "published_over_unavailable_source"
 
 
 def test_f1_2e_a_contract_window_disagreeing_with_the_payload_fails(monkeypatch):
@@ -1415,7 +1432,7 @@ def test_f2_7_the_cli_reports_full_parity_against_a_complete_fixture(monkeypatch
     assert rc == 0
     assert payload["ok"] is True
     assert len(payload["uncertified_consumers"]) == 2
-    assert len(payload["results"][0]["metrics"]) == 16
+    assert len(payload["results"][0]["metrics"]) == 18
     assert all(c["certified"] for c in payload["results"][0]["consumer_certification"])
 
 
@@ -1449,7 +1466,6 @@ def test_f2_7b_the_cli_exits_nonzero_against_an_inconsistent_fixture(monkeypatch
     ("dashboard/overview", "kpis.sqls"),
     ("dashboard/revenue", "kpis.sqls"),
     ("dashboard/campaigns", "kpis.sqls"),
-    ("dashboard/countries", "kpis.sqls"),
     ("dashboard/deals", "kpis.sqls"),
     ("revenue_decision_mart", "summary.sqls"),
 ])

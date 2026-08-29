@@ -668,13 +668,22 @@ def build_dashboard_deals(window: str = "current_quarter",
         "end_date": window_block.get("end_date"), "timezone": window_block.get("timezone"),
     }
     _revenue_ready = bool(revenue_connected and ledger_available)
+    # PR-ADS-154C-F3: the total is withheld when a deal has no proven amount,
+    # while the count stays published — so the two carry different statuses.
+    _revenue_total_ready = bool(_revenue_ready
+                                and summary.get("revenue_total_available"))
     _mt = canonical_contract.metric_truth_block(_resolved_window, [
-        *[{"metric": m,
-           "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
-           "scope": "all_source_business_revenue",
-           "truth_status": (canonical_contract.TRUTH_READY if _revenue_ready
-                            else canonical_contract.TRUTH_NOT_READY)}
-          for m in ("closed_won_revenue_usd", "customers")],
+        {"metric": "closed_won_revenue_usd",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY if _revenue_total_ready
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": summary.get("revenue_total_unavailable_reason")},
+        {"metric": "customers",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY if _revenue_ready
+                          else canonical_contract.TRUTH_NOT_READY)},
         {"metric": "campaign_attributable_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "campaign_attributable_sqls",
