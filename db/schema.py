@@ -1171,6 +1171,80 @@ CREATE TABLE IF NOT EXISTS hubspot_contact_funnel_sync_state (
   updated_at                TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- PR-ADS-155 §4: stage-entry timestamps RECOVERED from HubSpot property history.
+--
+-- Why a separate table
+-- --------------------
+-- `hubspot_contact_funnel.date_entered_*` is owned exclusively by the contact
+-- sync, whose upsert refreshes every column from the newest HubSpot read
+-- (`date_entered_lead = EXCLUDED.date_entered_lead`). A recovered timestamp
+-- written into that column would therefore be ERASED by the very next
+-- incremental sync, because HubSpot still returns null for the
+-- `hs_v2_date_entered_*` property it was recovered for. Recovery lives here
+-- instead, and the funnel read coalesces the two with provenance intact.
+--
+-- What is stored here is HubSpot's OWN record, not a guess
+-- --------------------------------------------------------
+-- HubSpot retains version history for `lifecyclestage`: each historical value
+-- with the timestamp it was set and the source that set it. Where a version
+-- exists whose value is a funnel stage, that version's timestamp IS HubSpot's
+-- recorded transition into that stage — the same evidence `hs_v2_date_entered_*`
+-- is derived from, read from the other end. This table therefore holds ingested
+-- evidence, never an inference.
+--
+-- Nothing in this table is ever synthesised. If property history holds no
+-- version for a stage, NO ROW IS WRITTEN, the timestamp stays NULL, and the
+-- lifecycle cohort keeps reporting that contact as an excluded coverage gap.
+-- Contact creation date, current-stage date and ingestion time are never used.
+--
+-- The recovering command is read-only against HubSpot: it uses the CRM read API
+-- with `propertiesWithHistory` and has no write path to HubSpot at all.
+CREATE TABLE IF NOT EXISTS hubspot_lifecycle_stage_history (
+  id                        SERIAL PRIMARY KEY,
+  contact_id                TEXT NOT NULL,          -- durable HubSpot identity
+  funnel_event              TEXT NOT NULL,          -- lead|mql|sql|opportunity|customer
+  entered_at                TIMESTAMPTZ NOT NULL,   -- the history version's timestamp
+
+  -- Provenance: HubSpot's own account of who/what set the value, carried
+  -- verbatim so a recovered date can always be traced back to its version.
+  hubspot_property          TEXT NOT NULL DEFAULT 'lifecyclestage',
+  hubspot_value             TEXT NOT NULL,          -- the stage value in that version
+  hubspot_source_type       TEXT,                   -- e.g. FORM, IMPORT, AUTOMATION, CRM_UI
+  hubspot_source_id         TEXT,
+  hubspot_updated_by_user_id TEXT,
+
+  -- Lineage of the recovery run itself.
+  recovery_run_id           TEXT NOT NULL,
+  recovered_at              TIMESTAMPTZ DEFAULT NOW(),
+  lifecycle_rule_version    TEXT,
+  source_system             TEXT NOT NULL DEFAULT 'hubspot_property_history',
+  updated_at                TIMESTAMPTZ DEFAULT NOW(),
+
+  UNIQUE (contact_id, funnel_event)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hlsh_contact ON hubspot_lifecycle_stage_history(contact_id);
+CREATE INDEX IF NOT EXISTS idx_hlsh_event   ON hubspot_lifecycle_stage_history(funnel_event);
+
+-- Durable, resumable checkpoint for the recovery command, so a bounded run can
+-- be stopped and restarted without rescanning contacts it already resolved.
+-- `contacts_without_history` is recorded explicitly: "we looked and HubSpot had
+-- nothing" is a finding, and must never be confused with "we have not looked".
+CREATE TABLE IF NOT EXISTS hubspot_lifecycle_history_recovery_state (
+  id                        SERIAL PRIMARY KEY,
+  scope                     TEXT NOT NULL UNIQUE,   -- 'lifecycle_stage_history'
+  last_contact_id           TEXT,                   -- resume cursor (ascending)
+  contacts_examined         INTEGER DEFAULT 0,
+  contacts_recovered        INTEGER DEFAULT 0,
+  contacts_without_history  INTEGER DEFAULT 0,
+  events_recovered          INTEGER DEFAULT 0,
+  last_run_id               TEXT,
+  last_run_at               TIMESTAMPTZ,
+  last_run_mode             TEXT,                   -- dry_run|apply
+  last_error                TEXT,
+  updated_at                TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- PR-ADS-153D: durable LOCAL review decisions for canonical search terms.
 --
 -- One row per durable search-term identity (analysis/search_term_identity.py):

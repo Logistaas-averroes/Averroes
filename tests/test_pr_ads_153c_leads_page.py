@@ -377,29 +377,73 @@ def test_conversions_render_only_when_cohort_safe():
 
 
 def test_dashboard_conversion_helper_requires_cohort_basis():
-    helper = _APP_JS.split("function dashCohortConversion(")[1].split("\n}")[0]
-    assert 'found.basis !== "cohort"' in helper
-    assert "found.available" in helper
+    """PR-ADS-155 §1 replaced the mechanism this originally checked.
+
+    The old Dashboard strip laid five INDEPENDENT stage-entry totals out as a
+    pipeline and hung adjacent cohort-conversion chips between them, so a
+    `dashCohortConversion` helper existed to make sure those chips only ever came
+    from a proven cohort basis. The strip is now ONE Lead-anchored cohort whose
+    every rate is computed by the canonical service, so the helper — and the
+    browser-side conversion helper beside it — are gone rather than guarded.
+
+    The requirement is unchanged and is now structural: the cohort block declares
+    `basis: "cohort"`, and the renderer reads the service's percentages instead
+    of deriving any.
+    """
+    assert "function dashCohortConversion(" not in _APP_JS
+    assert "function dashConversion(" not in _APP_JS
+    assert "BASIS_COHORT" in (
+        _ROOT / "services" / "canonical_crm_funnel_service.py").read_text()
+    block = _APP_JS.split("function renderDashLifecycleCohort(")[1].split(
+        "\nfunction ")[0]
+    assert "previous_stage_conversion_pct" in block
+    assert "rate_from_anchor_pct" in block
 
 
 # =============================================================================
 # §21/§22 — Dashboard migration
 # =============================================================================
 def test_dashboard_funnel_uses_canonical_lifecycle_counts():
-    block = _APP_JS.split("function renderDashFunnel(")[1].split("\n}")[0]
-    assert "k.lifecycle_leads" in block
-    assert "k.lifecycle_mqls" in block
-    assert "k.lifecycle_sqls" in block
-    # The naked campaign-attributable "SQLs" is gone from the funnel strip.
-    assert "k.sqls" not in block
+    """PR-ADS-155 §1 tightened this from "canonical counts" to "one cohort".
+
+    153C moved the strip off the contact-created-date proxy and onto canonical
+    stage-ENTRY counts, which was right and is still true. But those five counts
+    are five independent populations, and the strip drew them as a narrowing
+    pipeline — so it could widen while reading as attrition. The strip now reads
+    the Lead-anchored cohort contract, in which every later stage is a subset of
+    the same denominator. The independent totals remain published as KPIs; they
+    are simply no longer drawn as a funnel.
+    """
+    block = _APP_JS.split("function renderDashLifecycleCohort(")[1].split(
+        "\nfunction ")[0]
+    assert "d.lifecycle_cohort" in block
+    for independent_total in ("k.lifecycle_leads", "k.lifecycle_mqls",
+                              "k.lifecycle_sqls", "k.sqls"):
+        assert independent_total not in block
+    # The canonical counts are still published, under their own names.
+    source = (_ROOT / "services" / "dashboard_overview_service.py").read_text()
+    assert '"lifecycle_leads": lifecycle_funnel.get("lead")' in source
 
 
 def test_dashboard_keeps_revenue_customers_on_the_revenue_contract():
-    """§14 — lifecycle customers must NEVER silently replace revenue customers."""
-    block = _APP_JS.split("function renderDashFunnel(")[1].split("\n}")[0]
-    assert "k.customers" in block
-    assert "k.lifecycle_customers" not in block
-    assert "Closed-won deals" in block
+    """§14 — lifecycle customers must NEVER silently replace revenue customers.
+
+    PR-ADS-155 §2 strengthened this: the two are no longer merely labelled apart
+    inside one strip, they are in separate sections with no arrow between them.
+    A lifecycle Customer is a contact-stage fact and a closed-won customer is a
+    deal fact; nothing in this product proves one converts into the other.
+    """
+    lifecycle = _APP_JS.split("function renderDashLifecycleCohort(")[1].split(
+        "\nfunction ")[0]
+    assert "k.customers" not in lifecycle
+    assert "closed_won_revenue_usd" not in lifecycle
+
+    outcomes = _APP_JS.split("function renderDashCommercialOutcomes(")[1].split(
+        "\nfunction ")[0]
+    assert "o.customers" in outcomes
+    assert "Closed-Won Customers" in outcomes
+    # The outcomes section draws no conversion chips into or out of itself.
+    assert "dash-funnel__conv" not in outcomes
 
 
 def test_dashboard_payload_exposes_lifecycle_and_revenue_separately():

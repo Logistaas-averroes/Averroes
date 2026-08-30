@@ -337,6 +337,15 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
                 if ladder_available else sorted(ladder.get("violation_codes") or []))),
         "currency_unavailable_deals": (all_source.get("currency_unavailable_deals")
                                        if ladder_available else None),
+        # PR-ADS-155 §5. The whole fail-closed picture in one block: the complete
+        # deal count, how many of them are priced, how many are not, what the
+        # priced ones are worth under a label that names its own denominator, and
+        # the NULL total with its reason. Built by the canonical contract from
+        # this same ladder — the mart still decides nothing about revenue.
+        "revenue_disclosure": canonical_revenue.disclosure_from_ladder(
+            ladder, revenue_scope.SCOPE_ALL_SOURCE),
+        "attributed_revenue_disclosure": canonical_revenue.disclosure_from_ladder(
+            ladder, revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE),
         "ambiguous_associations": (all_source.get("ambiguous_associations")
                                    if ladder_available else None),
         "failed_associations": (all_source.get("failed_associations")

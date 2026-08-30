@@ -2107,8 +2107,10 @@ const DASH_DONUT_COLORS = {
   offline: "#94a3b8",
   unclassified: "#b45309",
 };
-// Ordinal ramp for the funnel stages (validated with --ordinal).
-const DASH_FUNNEL_RAMP = ["#6db8f8", "#3f9df0", "#1a80cf", "#0b5f92"];
+// Ordinal ramp for the funnel stages (validated with --ordinal). Five steps:
+// the lifecycle cohort has five stages (Lead → MQL → SQL → Opportunity →
+// Lifecycle Customer) and each needs its own rung.
+const DASH_FUNNEL_RAMP = ["#6db8f8", "#3f9df0", "#1a80cf", "#0b5f92", "#08425f"];
 
 // Metric valence for delta chips: up is good for revenue/pipeline, neutral for
 // spend (more spend is neither win nor loss without revenue proof).
@@ -2264,7 +2266,8 @@ function renderDashboardOverview() {
         ${renderDashSignals(d)}
       </aside>
     </div>
-    ${renderDashFunnel(d)}
+    ${renderDashLifecycleCohort(d)}
+    ${renderDashCommercialOutcomes(d)}
     <div class="dash-lower-grid">
       <section class="dash-panel dash-anim" aria-label="Channel mix">
         ${renderDashSourceMix(d)}
@@ -2708,87 +2711,224 @@ function wireDashChartHover(root, d) {
   wrap.addEventListener("pointerleave", hide);
 }
 
-function renderDashFunnel(d) {
-  const k = d.kpis || {};
-  const pc = d.period_change || {};
-  // PR-ADS-153C §21/§22: the CRM stages are canonical HubSpot lifecycle
-  // stage-ENTRY events, each on its own hs_v2_date_entered_* date — not the
-  // legacy contact-created-date proxy, and not the campaign-attributable subset
-  // that used to sit under a bare "SQLs" label.
-  //
-  // Customers / Closed-Won Revenue deliberately REMAIN on the revenue contract:
-  // a lifecycle customer is not a revenue customer, and PR-ADS-153E owns that
-  // reconciliation. They are labelled from their own source so the two are never
-  // confused.
-  const lf = d.lifecycle_funnel || {};
-  const stages = [
-    { label: "Leads", value: k.lifecycle_leads, fmt: fmtCount, source: "HubSpot lifecycle · entered Lead", metric: null },
-    { label: "MQLs", value: k.lifecycle_mqls, fmt: fmtCount, source: "HubSpot lifecycle · entered MQL", metric: null },
-    { label: "SQLs", value: k.lifecycle_sqls, fmt: fmtCount, source: "HubSpot lifecycle · entered SQL", metric: null },
-    { label: "Customers", value: k.customers, fmt: fmtCount, source: "Closed-won deals", metric: "customers" },
-    { label: "Closed-Won Revenue", value: k.closed_won_revenue_usd, fmt: fmtMoney, source: "USD · HubSpot", metric: "revenue_usd" },
-  ];
-  // Only cohort-safe conversions are ever displayed. Unrelated period totals are
-  // never divided, and the lifecycle→revenue step crosses two different truths,
-  // so it stays unavailable until PR-ADS-153E reconciles them.
-  const conversions = [
-    dashCohortConversion(lf, "lead", "mql"),
-    dashCohortConversion(lf, "mql", "sql"),
-    null, // SQL → revenue Customer: different doctrines, not cohort-safe.
-    null, // revenue is a value, not a count conversion
-  ];
-
-  const cells = stages.map((s, i) => {
-    const conv = i > 0 ? conversions[i - 1] : null;
-    const convChip = i === 0 ? "" : (
-      conv === null
-        ? '<span class="dash-funnel__conv dash-funnel__conv--muted" aria-hidden="true">→</span>'
-        : `<span class="dash-funnel__conv">→ ${escapeHtml(conv)}</span>`
-    );
-    const delta = s.metric ? `<div class="dash-funnel__stage-delta">${dashDeltaChip(s.metric, pc)}</div>` : "";
+/**
+ * PR-ADS-155 §1/§2/§3 — the Dashboard funnel.
+ *
+ * What this replaced, and why
+ * --------------------------
+ * The panel used to place five INDEPENDENT window totals in a narrowing
+ * pipeline: contacts that entered Lead in the window, contacts that entered MQL
+ * in the window, and so on, then closed-won Customers and Closed-Won Revenue.
+ * Those are five different populations answering five different questions. A
+ * contact counted at MQL this quarter may have entered Lead two years ago, so
+ * the strip could widen rather than narrow while still being read as attrition,
+ * and the last two cells crossed into an entirely different truth — deals, not
+ * contacts — under the same connecting arrows.
+ *
+ * It is now ONE Lead-anchored cohort followed forward (`lifecycle_cohort`), with
+ * commercial outcomes in their own section below. Every count, percentage and
+ * status here is READ from the canonical backend contract. This function
+ * performs no conversion arithmetic: there is no division anywhere in it, by
+ * design, because a rate computed in the browser is a rate nobody governs.
+ */
+function renderDashLifecycleCohort(d) {
+  const cohort = d.lifecycle_cohort || null;
+  if (!cohort || !cohort.available) {
     return `
-      ${convChip}
-      <div class="dash-funnel__stage" style="--funnel-accent:${DASH_FUNNEL_RAMP[i]}">
-        <div class="dash-funnel__stage-label">${escapeHtml(s.label)}</div>
-        <div class="dash-funnel__stage-value">${dashValue(s.value, s.fmt)}</div>
-        <div class="dash-funnel__stage-sub">${escapeHtml(s.source)}</div>
-        ${delta}
+      <section class="dash-panel dash-funnel-panel dash-anim" aria-label="Lifecycle cohort">
+        <div class="dash-panel__header">
+          <div>
+            <h3 class="dash-panel__title">Lifecycle Cohort</h3>
+            <p class="dash-panel__sub">${escapeHtml(dashCohortSubtitle(cohort))}</p>
+          </div>
+        </div>
+        <p class="empty-state">${dashValue(null)} — ${escapeHtml(
+          dashCohortReasonLabel((cohort || {}).reason))}</p>
+      </section>`;
+  }
+
+  const stages = Array.isArray(cohort.stages) ? cohort.stages : [];
+  const cells = stages.map((s, i) => {
+    // The arrow chip carries the previous-stage conversion the SERVICE computed.
+    const step = s.previous_stage_conversion_pct;
+    const chip = i === 0 ? "" : (
+      step === null || step === undefined
+        ? '<span class="dash-funnel__conv dash-funnel__conv--muted" aria-hidden="true">→</span>'
+        : `<span class="dash-funnel__conv">→ ${escapeHtml(String(step))}%</span>`
+    );
+    const fromAnchor = s.rate_from_anchor_pct;
+    const share = (fromAnchor === null || fromAnchor === undefined)
+      ? "" : `<div class="dash-funnel__stage-share">${escapeHtml(String(fromAnchor))}% of Lead cohort</div>`;
+    const gap = s.excluded_contacts
+      ? `<div class="dash-funnel__stage-gap" title="${escapeHtml(
+          dashCohortExclusionTitle(s.exclusion_reasons))}">${escapeHtml(
+          String(s.excluded_contacts))} excluded</div>`
+      : "";
+    return `
+      ${chip}
+      <div class="dash-funnel__stage" style="--funnel-accent:${DASH_FUNNEL_RAMP[i % DASH_FUNNEL_RAMP.length]}">
+        <div class="dash-funnel__stage-label">${escapeHtml(s.label || s.event || "")}</div>
+        <div class="dash-funnel__stage-value">${dashValue(s.reached, fmtCount)}</div>
+        <div class="dash-funnel__stage-sub">${escapeHtml(
+          i === 0 ? "Entered Lead in this window" : "Of that same cohort")}</div>
+        ${share}
+        ${gap}
       </div>`;
   }).join("");
 
   return `
-    <section class="dash-panel dash-funnel-panel dash-anim" aria-label="Pipeline funnel">
+    <section class="dash-panel dash-funnel-panel dash-anim" aria-label="Lifecycle cohort funnel">
       <div class="dash-panel__header">
         <div>
-          <h3 class="dash-panel__title">Pipeline</h3>
-          <p class="dash-panel__sub">HubSpot lifecycle stage entries → closed-won revenue</p>
+          <h3 class="dash-panel__title">Lifecycle Cohort</h3>
+          <p class="dash-panel__sub">${escapeHtml(dashCohortSubtitle(cohort))}</p>
         </div>
+        ${dashCohortCoverageBadge(cohort)}
       </div>
       <div class="dash-funnel">${cells}</div>
+      ${dashCohortCoverageDisclosure(cohort)}
     </section>`;
 }
 
-/**
- * Cohort-safe conversion between two canonical funnel events, read from the
- * backend contract. Returns null (rendered as "—") unless the service PROVED the
- * rate is cohort-based: of the contacts that entered X inside this window, the
- * share that later entered Y. Dividing two independent period totals compares
- * different cohorts and is never done here.
- */
-function dashCohortConversion(lifecycleFunnel, fromEvent, toEvent) {
-  const list = (lifecycleFunnel || {}).conversions;
-  if (!Array.isArray(list)) return null;
-  const found = list.find((c) => c && c.from_event === fromEvent && c.to_event === toEvent);
-  if (!found || !found.available || found.basis !== "cohort") return null;
-  if (found.rate_pct === null || found.rate_pct === undefined) return null;
-  return `${found.rate_pct}%`;
+// The cohort's own description of itself. Never assembled from stage counts.
+function dashCohortSubtitle(cohort) {
+  if (cohort && cohort.anchor_definition) return cohort.anchor_definition;
+  return "Contacts whose HubSpot Lead-entry date falls inside this window, "
+    + "followed through every later lifecycle stage.";
 }
 
-// Stage-to-stage conversion; null (not "0%") when either side is unavailable.
-function dashConversion(numerator, denominator) {
-  if (numerator === null || numerator === undefined) return null;
-  if (denominator === null || denominator === undefined || denominator <= 0) return null;
-  return `${((numerator / denominator) * 100).toFixed(1)}%`;
+function dashCohortReasonLabel(reason) {
+  const labels = {
+    canonical_contact_store_unavailable: "the canonical contact store could not be read",
+    funnel_invariant_mismatch: "a funnel invariant broke, so no count is rendered",
+    campaign_identity_unavailable: "the Google Ads campaign-identity contract could not be consulted",
+  };
+  return labels[reason] || "the canonical lifecycle cohort is not available";
+}
+
+/**
+ * §3 — partial lifecycle coverage is stated on the face of the panel, not
+ * buried. A funnel that silently omits contacts whose stage-entry timestamps
+ * HubSpot never recorded looks exactly like a complete one, which is how a gap
+ * becomes an accepted number.
+ */
+function dashCohortCoverageBadge(cohort) {
+  const status = (cohort || {}).coverage_status;
+  if (status === "partial") {
+    return '<span class="dash-badge dash-badge--warn" title="Some contacts reached a stage '
+      + 'that HubSpot holds no entry timestamp for. They are excluded and listed below — '
+      + 'no substitute date is ever used.">Partial lifecycle history</span>';
+  }
+  if (status === "complete") {
+    return '<span class="dash-badge dash-badge--ok">Complete lifecycle history</span>';
+  }
+  return '<span class="dash-badge dash-badge--muted">Coverage unknown</span>';
+}
+
+function dashCohortExclusionTitle(reasons) {
+  if (!reasons) return "";
+  return Object.keys(reasons)
+    .map((r) => `${dashCohortExclusionLabel(r)}: ${reasons[r]}`)
+    .join(" · ");
+}
+
+function dashCohortExclusionLabel(reason) {
+  const labels = {
+    missing_lead_entry_date: "Reached Lead, no Lead-entry timestamp in HubSpot",
+    missing_stage_entry_date: "Reached this stage, no entry timestamp in HubSpot",
+    stage_entry_before_lead_entry: "Stage entry predates this cohort's Lead entry",
+    prior_stage_entry_unproven: "No proven entry for the preceding stage",
+  };
+  return labels[reason] || reason;
+}
+
+// The detail behind the badge: every excluded contact, by reason, with the
+// population each count is over. Disclosed, never imputed.
+function dashCohortCoverageDisclosure(cohort) {
+  const reasons = Array.isArray(cohort.exclusion_reasons) ? cohort.exclusion_reasons : [];
+  if (!reasons.length) return "";
+  const items = reasons.map((r) => `
+    <li class="dash-coverage__item">
+      <span class="dash-coverage__count">${escapeHtml(String(r.contacts))}</span>
+      <span class="dash-coverage__reason">${escapeHtml(dashCohortExclusionLabel(r.reason))}</span>
+      <span class="dash-coverage__detail">${escapeHtml(r.detail || "")}</span>
+    </li>`).join("");
+  return `
+    <details class="dash-coverage">
+      <summary class="dash-coverage__summary">Lifecycle coverage — ${escapeHtml(
+        String(cohort.excluded_contacts))} contact(s) excluded from this cohort</summary>
+      <ul class="dash-coverage__list">${items}</ul>
+      <p class="dash-coverage__note">A missing stage-entry timestamp is never replaced
+        with contact creation date, current-stage date, or an ingestion timestamp.
+        The transition is real; the date is unknown, and it is reported as unknown.</p>
+    </details>`;
+}
+
+/**
+ * PR-ADS-155 §2/§5 — commercial outcomes, deliberately OUTSIDE the funnel.
+ *
+ * A lifecycle Customer is a HubSpot contact-stage fact. A closed-won customer is
+ * a deal fact. No governed contact-to-deal cohort contract exists that would let
+ * one be drawn as a conversion of the other, so these never appear inside the
+ * lifecycle strip and are never joined to it by an arrow.
+ *
+ * The revenue half is fail-closed: the total is Unavailable whenever any won
+ * deal has no proven amount, and the sum of the priced ones appears ONLY under
+ * the label the backend supplies, which names its own denominator.
+ */
+function renderDashCommercialOutcomes(d) {
+  const o = d.commercial_outcomes || {};
+  const knownLabel = o.known_revenue_label || "Known revenue from priced deals";
+  const blocked = o.total_revenue_publishable
+    ? ""
+    : `<p class="dash-outcomes__blocked">Total revenue is ${dashValue(null)}: ${escapeHtml(
+        dashRevenueBlockLabel(o))}</p>`;
+  return `
+    <section class="dash-panel dash-outcomes-panel dash-anim" aria-label="Commercial outcomes">
+      <div class="dash-panel__header">
+        <div>
+          <h3 class="dash-panel__title">Commercial Outcomes</h3>
+          <p class="dash-panel__sub">Closed-won deals. A separate truth from the lifecycle
+            stages above — not a stage of that funnel.</p>
+        </div>
+      </div>
+      <div class="dash-outcomes">
+        <div class="dash-outcomes__cell">
+          <div class="dash-outcomes__label">Closed-Won Customers</div>
+          <div class="dash-outcomes__value">${dashValue(o.customers, fmtCount)}</div>
+          <div class="dash-outcomes__sub">Complete count — independent of deal amounts</div>
+        </div>
+        <div class="dash-outcomes__cell">
+          <div class="dash-outcomes__label">Total Closed-Won Revenue</div>
+          <div class="dash-outcomes__value">${dashValue(o.total_revenue_usd, fmtMoney)}</div>
+          <div class="dash-outcomes__sub">USD · all sources</div>
+        </div>
+        <div class="dash-outcomes__cell">
+          <div class="dash-outcomes__label">${escapeHtml(knownLabel)}</div>
+          <div class="dash-outcomes__value dash-outcomes__value--partial">${dashValue(
+            o.known_revenue_usd, fmtMoney)}</div>
+          <div class="dash-outcomes__sub">A named subset — not the window total</div>
+        </div>
+        <div class="dash-outcomes__cell">
+          <div class="dash-outcomes__label">Deals Missing an Amount</div>
+          <div class="dash-outcomes__value">${dashValue(o.revenue_unavailable_deals, fmtCount)}</div>
+          <div class="dash-outcomes__sub">Price these in HubSpot to unblock the total</div>
+        </div>
+      </div>
+      ${blocked}
+    </section>`;
+}
+
+function dashRevenueBlockLabel(o) {
+  const labels = {
+    closed_won_deals_missing_amount:
+      "closed-won deals in this window have no amount in HubSpot, so the total is unknown",
+    revenue_integration_not_connected: "the revenue integration is not connected",
+    canonical_ledger_unreadable: "the canonical deal ledger could not be read",
+    canonical_coverage_not_proven: "the canonical deal ledger's coverage is not proven",
+    canonical_sync_state_unreadable: "the canonical ledger's sync state could not be read",
+  };
+  return labels[o.unavailable_reason] || "the canonical revenue contract withheld it";
 }
 
 function renderDashSourceMix(d) {

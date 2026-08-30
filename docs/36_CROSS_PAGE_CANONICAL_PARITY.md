@@ -610,3 +610,37 @@ Then spot-check representative pages in the
 browser's Network tab against the audit output — the audit inspects services, and
 confirming the UI renders what the service returned is the one step it cannot
 take for you.
+
+---
+
+## PR-ADS-155 §7 — four kinds of unavailability, told apart
+
+`canonical_source_unavailable` was one bucket holding four situations that four
+different people resolve. It is now the catch-all only, and the specific classes
+have their own codes:
+
+| Class | Code | Resolved by |
+|---|---|---|
+| the canonical store could not be read | `canonical_database_unreadable` | an engineer |
+| coverage for the window is unproven | `revenue_population_unavailable` | a backfill |
+| population complete, TOTAL unknown | `revenue_total_unpublishable_missing_amount` | pricing the deals in HubSpot |
+| lifecycle stage evidence incomplete | `lifecycle_coverage_partial` | disclosed; see below |
+
+Classification reads the consumers' **own declared** `unavailable_reason`, which
+the readings already carried, so the audit reports what the pages reported rather
+than re-deriving it. An absence it cannot classify stays
+`canonical_source_unavailable`: an unexplained absence is still a violation, and
+guessing which kind it is would be its own fabrication. Consumers that declare
+*different* reasons for the same metric are reported as such.
+
+All-Time closed-won revenue therefore reports
+`revenue_total_unpublishable_missing_amount`, naming the 14 unpriced HubSpot
+deals rather than reading like a database outage. **The audit does not go green
+while those records remain unpriced.**
+
+`lifecycle_coverage_partial` appears in a separate `coverage_disclosures`
+section, not in `violations`. It is a quantified gap in HubSpot's own records —
+contacts whose current stage proves a transition HubSpot holds no timestamp for —
+which the product discloses rather than imputes. Counting it as a violation would
+make red the permanent state of a condition we deliberately report. See
+`docs/37_LIFECYCLE_COHORT_AND_REVENUE_TRUTH.md`.

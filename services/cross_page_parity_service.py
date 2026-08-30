@@ -48,6 +48,7 @@ import logging
 from datetime import datetime, timezone
 
 from analysis.business_windows import WINDOW_KEYS
+from services import canonical_revenue_service as canonical_revenue
 from services.canonical_contract import (
     METRIC_TRUTH_KEY,
     SOURCE_CANONICAL_FUNNEL,
@@ -89,6 +90,79 @@ V_CONSUMER_NOT_BUILT = "registered_consumer_not_built"
 V_VALUE_OVER_UNAVAILABLE_SOURCE = "value_published_while_source_unavailable"
 #: Split identities that must add back up did not.
 V_CONSERVATION_BROKEN = "metric_conservation_broken"
+
+# ── PR-ADS-155 §7 — four reasons a metric is absent, told apart ──────────────
+# `canonical_source_unavailable` used to cover all of them. It is kept as the
+# code for "we could not tell", so an unclassifiable absence is still reported
+# and never silently downgraded; the three specific codes below replace it
+# wherever the consumers' own contracts say which situation it actually is.
+#
+# The distinction is operational, not cosmetic. A database outage is fixed by an
+# engineer; an unproven coverage range is fixed by a backfill; an unpriced deal
+# is fixed by whoever owns the deal, in HubSpot, in about a minute. Reporting all
+# three as one code sends every one of them to the wrong person.
+#: The canonical store could not be read at all.
+V_DB_UNREADABLE = "canonical_database_unreadable"
+#: The store is readable, but the population for this window is not releasable.
+V_POPULATION_UNAVAILABLE = "revenue_population_unavailable"
+#: The population IS available and complete; its TOTAL is unknown because deals
+#: inside it carry no amount. The most actionable of the four.
+V_TOTAL_UNPUBLISHABLE = "revenue_total_unpublishable_missing_amount"
+#: The lifecycle funnel is readable but stage-entry evidence is incomplete.
+V_LIFECYCLE_PARTIAL = "lifecycle_coverage_partial"
+
+#: Canonical unavailable-reasons → the class of problem they represent. The keys
+#: are `canonical_revenue_service`'s own constants, so a reason renamed there
+#: cannot silently stop matching here.
+_UNAVAILABLE_CLASSES = {
+    canonical_revenue.REASON_LEDGER_UNREADABLE:
+        ("database_unreadable", V_DB_UNREADABLE,
+         "the canonical deal ledger could not be read"),
+    canonical_revenue.REASON_SYNC_STATE_UNREADABLE:
+        ("database_unreadable", V_DB_UNREADABLE,
+         "the canonical ledger's sync state could not be read"),
+    canonical_revenue.REASON_COVERAGE_NOT_PROVEN:
+        ("population_unavailable", V_POPULATION_UNAVAILABLE,
+         "the canonical ledger's coverage for this window is not proven, so its "
+         "population is not releasable"),
+    canonical_revenue.REASON_REVENUE_INCOMPLETE:
+        ("total_unpublishable", V_TOTAL_UNPUBLISHABLE,
+         "the population IS available and complete, but closed-won deals inside "
+         "it have no amount in HubSpot, so the total is unknown. This is not an "
+         "outage: it is resolved by pricing those deals at source"),
+}
+
+
+def _classify_unavailable(readings: list, metric_key: str):
+    """Which of the four situations made every consumer withhold this metric.
+
+    Returns ``(status, violation_code, detail)``. Falls back to the original
+    catch-all when the consumers' contracts do not say — an absence we cannot
+    explain is still a violation, and pretending to know which kind it is would
+    be its own fabrication.
+    """
+    declared = [r for r in readings if r.get("unavailable_reason")]
+    classes = {_UNAVAILABLE_CLASSES[r["unavailable_reason"]]
+               for r in declared if r["unavailable_reason"] in _UNAVAILABLE_CLASSES}
+    reasons = sorted({r["unavailable_reason"] for r in declared})
+
+    if len(classes) == 1:
+        status, code, why = classes.pop()
+        return status, code, (
+            f"no consumer published {metric_key}: {why} "
+            f"(declared reason: {', '.join(reasons)})")
+    if classes:
+        # Consumers disagree about WHY. That is itself worth naming: they are
+        # reading the same canonical contract and reached different refusals.
+        return ("unavailable", V_SOURCE_UNAVAILABLE,
+                f"no consumer published {metric_key}, and the consumers declare "
+                f"differing reasons: {', '.join(reasons)}")
+    if reasons:
+        return ("unavailable", V_SOURCE_UNAVAILABLE,
+                f"no consumer published {metric_key} (declared reason(s): "
+                f"{', '.join(reasons)}, none of which the audit can classify)")
+    return ("unavailable", V_SOURCE_UNAVAILABLE,
+            f"no consumer published {metric_key}, and none declared a reason")
 
 #: Identities that partition a whole. Registering the split is not enough — if
 #: the parts do not add back to the total, one of the three is wrong and the
@@ -888,10 +962,21 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                     "canonical_source": (r["contract"] or {}).get("data_source"),
                 } for r in published_over_unavailable]})
         elif not present:
-            status = "unavailable"
+            # PR-ADS-155 §7. "No consumer published this metric" was one bucket
+            # holding four situations an operator resolves in four different
+            # ways. All-Time closed-won revenue landed in it, so a total that is
+            # blocked by 14 unpriced HubSpot deals — a fixed, nameable, fixable
+            # list — read exactly like a database outage. The readings already
+            # carry each consumer's own declared reason; the audit now classifies
+            # on it instead of reporting the absence.
+            status, code, detail = _classify_unavailable(readings, metric_key)
             violations.append({
-                "code": V_SOURCE_UNAVAILABLE, "metric": metric_key,
-                "detail": "no consumer published this metric"})
+                "code": code, "metric": metric_key, "detail": detail,
+                "readings": [{"consumer": r["consumer"],
+                              "truth_status": r["truth_status"],
+                              "unavailable_reason": r["unavailable_reason"],
+                              "violation_codes": r["violation_codes"]}
+                             for r in readings]})
         elif missing:
             # PR-ADS-154C-F1 §3: comparing only the readings that happen to be
             # present let a page that dropped a metric look like agreement. Every
@@ -1015,6 +1100,17 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
                            f"{row['identities_registered']} registered metric "
                            f"identities produced a value with a valid contract")})
 
+    # ── PR-ADS-155 §7 — coverage disclosures, distinct from violations ───────
+    # The fourth class the audit must tell apart is lifecycle-partial: the
+    # canonical funnel IS readable and its cohort IS published, but HubSpot holds
+    # no stage-entry timestamp for some contacts that demonstrably reached a
+    # stage. That is a disclosed, quantified gap in the source system, not a
+    # product defect, and marking the audit red for it would make red the
+    # permanent state of a condition we have decided to report rather than
+    # invent our way out of. It is surfaced in its own section, with counts, so
+    # it is impossible to miss and impossible to confuse with a broken metric.
+    coverage_disclosures = _lifecycle_coverage_disclosures(consumers)
+
     ok = not violations
     return {
         "window": window,
@@ -1038,11 +1134,47 @@ def audit_window(window: str, now: datetime | None = None) -> dict:
         "metrics": metrics,
         # PR-ADS-154C-F3: the split identities and whether they add back up.
         "conservation": conservation,
+        # PR-ADS-155 §7: quantified source-system gaps. Reported, not counted as
+        # violations — see the comment above the assignment.
+        "coverage_disclosures": coverage_disclosures,
         "distinct_by_design": DISTINCT_BY_DESIGN,
         "violations": violations,
         "violation_codes": sorted({v["code"] for v in violations}),
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
     }
+
+
+def _lifecycle_coverage_disclosures(consumers: dict) -> list[dict]:
+    """Quantified lifecycle-coverage gaps, per consumer that publishes a cohort.
+
+    PR-ADS-155 §7. Reads the consumer's OWN published ``lifecycle_cohort`` block
+    rather than re-deriving coverage here, so the audit reports exactly what the
+    page reported and cannot disagree with it.
+    """
+    rows = []
+    for name in sorted(consumers):
+        payload = (consumers.get(name) or {}).get("payload")
+        cohort = (payload or {}).get("lifecycle_cohort")
+        if not isinstance(cohort, dict):
+            continue
+        status = cohort.get("coverage_status")
+        if status == "complete":
+            continue
+        rows.append({
+            "consumer": name,
+            "code": V_LIFECYCLE_PARTIAL,
+            "coverage_status": status,
+            "truth_status": cohort.get("truth_status"),
+            "cohort_size": cohort.get("cohort_size"),
+            "excluded_contacts": cohort.get("excluded_contacts"),
+            "exclusion_reasons": cohort.get("exclusion_reasons") or [],
+            "detail": (
+                "the lifecycle cohort is published but incomplete: HubSpot holds "
+                "no stage-entry timestamp for some contacts that demonstrably "
+                "reached a stage. No substitute date is used, and the missing "
+                "transitions are excluded and counted rather than imputed."),
+        })
+    return rows
 
 
 def _norm(value):

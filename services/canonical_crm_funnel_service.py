@@ -137,6 +137,46 @@ REASON_NOT_GOOGLE_ADS = "not_google_ads_source"
 REASON_UNKNOWN_LIFECYCLE_STAGE = "unknown_lifecycle_stage"
 REASON_CAMPAIGN_IDENTITY_UNAVAILABLE = "campaign_identity_unavailable"
 
+# ── PR-ADS-155 §1 — the Lead-anchored cohort funnel ──────────────────────────
+# The Dashboard used to place five INDEPENDENT window totals side by side under
+# a narrowing "Pipeline" shape. Those totals answer five different questions
+# about five different populations ("who entered Lead this quarter", "who entered
+# MQL this quarter", …) and are not a funnel: a contact counted at MQL this
+# quarter may have entered Lead two years ago, so the strip could — and on
+# production did — widen rather than narrow, while still reading as attrition.
+#
+# The honest structure is ONE cohort followed forward. The anchor is Lead entry;
+# every later stage is a SUBSET of that same anchored cohort, so the displayed
+# counts are monotonically non-increasing by construction rather than by luck.
+ANCHOR_EVENT = EVENT_LEAD
+
+#: The ordered stages the cohort funnel displays, anchor first.
+COHORT_STAGES = FUNNEL_EVENTS
+
+# Why a contact that shows evidence of a later stage is nevertheless not counted
+# in that stage of the cohort. Every one of these is a REPORTED exclusion, never
+# a silent drop and never repaired with a substitute date.
+EXCLUSION_MISSING_ANCHOR_DATE = "missing_lead_entry_date"
+EXCLUSION_MISSING_STAGE_DATE = REASON_MISSING_STAGE_DATE
+EXCLUSION_STAGE_BEFORE_ANCHOR = "stage_entry_before_lead_entry"
+EXCLUSION_PRIOR_STAGE_UNPROVEN = "prior_stage_entry_unproven"
+
+#: Coverage vocabulary for the cohort block. ``partial`` means the cohort is
+#: readable but HubSpot holds no stage-entry timestamp for contacts that
+#: demonstrably reached a stage — a gap that is DISCLOSED, never imputed.
+COVERAGE_COMPLETE = "complete"
+COVERAGE_PARTIAL = "partial"
+COVERAGE_UNAVAILABLE = "unavailable"
+
+# ── PR-ADS-155 §4 — where one stage-entry date came from ─────────────────────
+# Both values are HubSpot's own evidence. They are named apart because they are
+# different reads: the property is HubSpot's computed "date entered stage"; the
+# history version is the recorded change that the property is derived from, read
+# where the property is absent. Neither is ever a proxy, a creation date, or an
+# ingestion timestamp — those are not represented here because they are never used.
+PROVENANCE_HUBSPOT_PROPERTY = "hubspot_stage_entry_property"
+PROVENANCE_PROPERTY_HISTORY = "hubspot_lifecyclestage_property_history"
+
 # Why a contact row does (or does not) carry Google Ads campaign/keyword labels.
 # ``hs_analytics_source_data_1`` / ``_data_2`` are HubSpot Original Source
 # Drill-Down fields. They carry Google Ads campaign / keyword semantics ONLY for
@@ -389,6 +429,18 @@ def build_populations(
             event: _as_date(raw.get(EVENT_DATE_COLUMN[event]))
             for event in FUNNEL_EVENTS
         }
+        # PR-ADS-155 §4. Where a date was recovered from HubSpot's own
+        # `lifecyclestage` property history (because the `hs_v2_date_entered_*`
+        # property is absent), the repository says so. Both are HubSpot evidence,
+        # but they are not the same evidence, and a consumer must be able to tell
+        # them apart. A row from a store without the recovery join simply reports
+        # every date as directly read, which is what it is.
+        event_provenance = {
+            event: (PROVENANCE_PROPERTY_HISTORY
+                    if raw.get(f"{EVENT_DATE_COLUMN[event]}_from_history")
+                    else PROVENANCE_HUBSPOT_PROPERTY)
+            for event in FUNNEL_EVENTS
+        }
 
         contact = {
             "contact_id": contact_id,
@@ -404,6 +456,7 @@ def build_populations(
             "country": raw.get("ip_country") or raw.get("country"),
             "has_gclid": bool(raw.get("has_gclid")),
             "event_dates": event_dates,
+            "event_date_provenance": event_provenance,
             "scopes": {s: scopes[s] for s in ORDERED_SCOPES},
             "campaign_block_reason": scopes["campaign_block_reason"],
         }
@@ -567,6 +620,313 @@ def build_conversions(populations: dict, scope: str = SCOPE_ALL_SOURCE) -> list[
     ]
 
 
+# ── PR-ADS-155 §1 — one Lead-anchored cohort, followed forward ───────────────
+def _anchor_cohort(populations: dict, scope: str):
+    """The Lead-entry cohort for this window, or ``None`` when unknowable.
+
+    Membership of the anchor population already REQUIRES a Lead-entry date
+    inside the window (:func:`build_populations` admits an event only on its own
+    proven timestamp), so every member carries a real anchor date. ``None`` is
+    returned when the scope itself is UNAVAILABLE, so an attribution outage
+    cannot render as an empty cohort.
+    """
+    anchor_population = (populations.get("events") or {}).get(ANCHOR_EVENT) or []
+    if any(c["scopes"].get(scope) is None for c in anchor_population):
+        return None
+    return [c for c in anchor_population if c["scopes"][scope]]
+
+
+def _contacts_without_anchor_date(populations: dict, scope: str) -> int | None:
+    """Contacts whose current stage proves they reached Lead, with no Lead date.
+
+    These contacts cannot be placed in ANY window's cohort — not this one and not
+    another — because HubSpot holds no Lead-entry timestamp for them at all. They
+    are therefore not "excluded from this cohort"; they are missing from the
+    anchor population outright, and they are disclosed as their own gap rather
+    than folded into the per-stage exclusion counts.
+    """
+    contacts = populations.get("contacts") or []
+    if any(c["scopes"].get(scope) is None for c in contacts):
+        return None
+    return sum(
+        1 for c in contacts
+        if c["scopes"][scope]
+        and c["event_dates"].get(ANCHOR_EVENT) is None
+        and _stage_reached(c.get("lifecycle_stage"), ANCHOR_EVENT)
+    )
+
+
+def _pct(numerator, denominator):
+    """A percentage, or ``None`` when there is nothing to be a percentage of."""
+    if not denominator:
+        return None
+    return round(numerator * 100.0 / denominator, 2)
+
+
+def lead_cohort_progression(populations: dict,
+                            scope: str = SCOPE_ALL_SOURCE) -> dict:
+    """ONE Lead-anchored cohort followed through every later lifecycle stage.
+
+    PR-ADS-155 §1. This replaces the Dashboard's five independent stage-entry
+    totals, which were laid out as a narrowing pipeline while being five separate
+    populations. The contract here is different in kind:
+
+    * **The denominator is fixed.** It is the set of contacts whose canonical
+      Lead-entry date falls inside the selected window — nothing else, at any
+      stage.
+    * **Every later stage is a subset of that same cohort.** A contact counts at
+      a stage only if it is already counted at the stage before it, so
+
+          ``Lead cohort >= reached MQL >= reached SQL >= reached Opportunity
+            >= reached Lifecycle Customer``
+
+      holds by construction, not by coincidence. Adjacent independent cohorts are
+      never chained: ``cohort_conversion`` (which does compare adjacent cohorts,
+      correctly, for the analyst-facing conversion list) is a different question
+      and is never used to build this progression.
+    * **Later stages may fall outside the window.** A Lead from January that
+      became an SQL in July is a conversion of the January cohort and counts as
+      one. Only the ANCHOR is windowed.
+    * **A stage-entry date on/after the Lead-entry date is required.** A recorded
+      transition dated BEFORE the anchor is not this cohort's progression — it
+      belongs to an earlier lifecycle pass — and is excluded and reported rather
+      than quietly counted.
+
+    Nothing is imputed. A contact whose current lifecycle stage proves it reached
+    a stage, but for which HubSpot holds no entry timestamp, is EXCLUDED and
+    counted in ``exclusion_reasons``; its date is never replaced with the
+    contact's creation date, its current-stage date, an ingestion timestamp, or
+    any other proxy.
+
+    Pure: operates on the dict rows :func:`build_populations` produced.
+    """
+    if scope not in ORDERED_SCOPES:
+        raise ValueError(f"Unknown scope '{scope}'")
+
+    cohort = _anchor_cohort(populations, scope)
+    if cohort is None:
+        return _unavailable_cohort(scope, REASON_CAMPAIGN_IDENTITY_UNAVAILABLE)
+
+    cohort_size = len(cohort)
+    reached = list(cohort)
+    stages: list[dict] = []
+    # reason → the set of contact ids it excluded, so a contact blocked at two
+    # stages is one excluded contact rather than two.
+    excluded_by_reason: dict[str, set] = {}
+    excluded_ids: set = set()
+
+    def _exclude(reason: str, contact_id):
+        excluded_by_reason.setdefault(reason, set()).add(contact_id)
+        excluded_ids.add(contact_id)
+
+    for index, event in enumerate(COHORT_STAGES):
+        if index == 0:
+            stages.append(_stage_entry(
+                event, index, reached=cohort_size, cohort_size=cohort_size,
+                previous_event=None, previous_reached=None, stage_exclusions={}))
+            continue
+
+        previous_event = COHORT_STAGES[index - 1]
+        previous_reached = len(reached)
+        previous_ids = {c["contact_id"] for c in reached}
+        stage_exclusions: dict[str, set] = {}
+
+        def _stage_exclude(reason, contact, _bucket=stage_exclusions):
+            _bucket.setdefault(reason, set()).add(contact["contact_id"])
+            _exclude(reason, contact["contact_id"])
+
+        still_reached = []
+        for contact in reached:
+            anchor_date = contact["event_dates"].get(ANCHOR_EVENT)
+            stage_date = contact["event_dates"].get(event)
+            if stage_date is None:
+                # Only a contact whose CURRENT stage proves it got this far is a
+                # coverage gap. A contact that simply never advanced is an
+                # ordinary non-conversion and is not "excluded" from anything.
+                if _stage_reached(contact.get("lifecycle_stage"), event):
+                    _stage_exclude(EXCLUSION_MISSING_STAGE_DATE, contact)
+                continue
+            if anchor_date is not None and stage_date < anchor_date:
+                _stage_exclude(EXCLUSION_STAGE_BEFORE_ANCHOR, contact)
+                continue
+            still_reached.append(contact)
+
+        # Contacts holding a valid timestamp for THIS stage that the chain
+        # already dropped. Counting them here would break the subset invariant;
+        # dropping them silently would hide a real progression we can see. They
+        # are excluded AND named.
+        for contact in cohort:
+            if contact["contact_id"] in previous_ids:
+                continue
+            anchor_date = contact["event_dates"].get(ANCHOR_EVENT)
+            stage_date = contact["event_dates"].get(event)
+            if stage_date is None:
+                continue
+            if anchor_date is not None and stage_date < anchor_date:
+                continue
+            _stage_exclude(EXCLUSION_PRIOR_STAGE_UNPROVEN, contact)
+
+        reached = still_reached
+        stages.append(_stage_entry(
+            event, index, reached=len(reached), cohort_size=cohort_size,
+            previous_event=previous_event, previous_reached=previous_reached,
+            stage_exclusions=stage_exclusions))
+
+    anchorless = _contacts_without_anchor_date(populations, scope)
+    reasons = _exclusion_records(excluded_by_reason, anchorless)
+    final = stages[-1]
+    coverage_status = (COVERAGE_PARTIAL
+                       if (excluded_ids or anchorless) else COVERAGE_COMPLETE)
+
+    return {
+        "available": True,
+        "reason": None,
+        "anchor_event": ANCHOR_EVENT,
+        "anchor_label": EVENT_LABELS[ANCHOR_EVENT],
+        "anchor_definition": (
+            f"Contacts whose canonical HubSpot "
+            f"'{EVENT_HUBSPOT_PROPERTY[ANCHOR_EVENT]}' date falls inside the "
+            "selected window. Later stages are counted for these same contacts "
+            "whenever they occurred, inside the window or after it."),
+        "scope": scope,
+        "scope_label": SCOPE_LABELS[scope],
+        "cohort_size": cohort_size,
+        "stages": stages,
+        # End-to-end: of the anchored cohort, how many reached the FINAL stage.
+        "converted": final["reached"],
+        "rate_from_anchor_pct": final["rate_from_anchor_pct"],
+        "previous_stage_conversion_pct": final["previous_stage_conversion_pct"],
+        "basis": BASIS_COHORT,
+        "truth_status": _cohort_truth_status(coverage_status),
+        "coverage_status": coverage_status,
+        "excluded_contacts": len(excluded_ids),
+        "exclusion_reasons": reasons,
+        "canonical_source": FUNNEL_SOURCE,
+        "table": FUNNEL_TABLE,
+        "dedup_key": FUNNEL_DEDUP_KEY,
+        "rule_version": LIFECYCLE_RULE_VERSION,
+        "fallback_used": False,
+    }
+
+
+def _stage_entry(event, index, *, reached, cohort_size, previous_event,
+                 previous_reached, stage_exclusions) -> dict:
+    """One rung of the cohort progression, self-describing."""
+    return {
+        "event": event,
+        "label": EVENT_LABELS[event],
+        "stage_index": index,
+        "reached": reached,
+        # The anchor is the denominator, not a conversion of anything.
+        "converted": None if index == 0 else reached,
+        "rate_from_anchor_pct": (100.0 if (index == 0 and cohort_size)
+                                 else _pct(reached, cohort_size)),
+        "previous_event": previous_event,
+        "previous_stage_conversion_pct": (None if previous_event is None
+                                          else _pct(reached, previous_reached)),
+        "event_date_property": EVENT_HUBSPOT_PROPERTY[event],
+        "event_date_column": EVENT_DATE_COLUMN[event],
+        "excluded_contacts": len({cid for ids in stage_exclusions.values()
+                                  for cid in ids}),
+        "exclusion_reasons": {reason: len(ids)
+                              for reason, ids in sorted(stage_exclusions.items())},
+        "basis": BASIS_COHORT,
+    }
+
+
+def _exclusion_records(excluded_by_reason: dict, anchorless) -> list[dict]:
+    """Self-describing exclusion records.
+
+    Each record names the POPULATION it counts over. The anchorless contacts are
+    not cohort members — they could not be placed in any window — so summing them
+    into the cohort's excluded total would mix two populations in one integer.
+    They are reported as their own record instead.
+    """
+    records = [
+        {"reason": reason,
+         "population": "lead_cohort",
+         "contacts": len(ids),
+         "counts_toward_excluded_contacts": True,
+         "detail": _EXCLUSION_DETAIL[reason]}
+        for reason, ids in sorted(excluded_by_reason.items())
+    ]
+    if anchorless:
+        records.append({
+            "reason": EXCLUSION_MISSING_ANCHOR_DATE,
+            "population": "contacts_considered",
+            "contacts": anchorless,
+            "counts_toward_excluded_contacts": False,
+            "detail": _EXCLUSION_DETAIL[EXCLUSION_MISSING_ANCHOR_DATE],
+        })
+    return records
+
+
+_EXCLUSION_DETAIL = {
+    EXCLUSION_MISSING_ANCHOR_DATE: (
+        "The contact's current lifecycle stage proves it reached Lead, but "
+        "HubSpot holds no Lead-entry timestamp, so it cannot be placed in this "
+        "or any other window's cohort. Contact creation date is NOT substituted."),
+    EXCLUSION_MISSING_STAGE_DATE: (
+        "The contact's current lifecycle stage proves it reached this stage, but "
+        "HubSpot holds no entry timestamp for it. The transition is real and the "
+        "date is unknown, so the contact is disclosed here rather than counted "
+        "on an invented date."),
+    EXCLUSION_STAGE_BEFORE_ANCHOR: (
+        "The recorded stage-entry date precedes this cohort's Lead-entry date, so "
+        "it is not this cohort's progression."),
+    EXCLUSION_PRIOR_STAGE_UNPROVEN: (
+        "The contact has a valid entry date for this stage but no proven entry "
+        "for the stage before it, so counting it here would make a later stage "
+        "larger than the one it must be a subset of."),
+}
+
+
+def _cohort_truth_status(coverage_status: str) -> str:
+    """READY only when nothing was withheld. Partial coverage is NOT ready.
+
+    A funnel missing an unknown number of real transitions still answers the
+    question it was asked — it just answers it incompletely — so the page keeps
+    rendering it, under a status that says so.
+    """
+    from services import canonical_contract  # noqa: PLC0415
+
+    if coverage_status == COVERAGE_UNAVAILABLE:
+        return canonical_contract.TRUTH_UNAVAILABLE
+    if coverage_status == COVERAGE_PARTIAL:
+        return canonical_contract.TRUTH_NOT_READY
+    return canonical_contract.TRUTH_READY
+
+
+def _unavailable_cohort(scope: str, reason: str) -> dict:
+    """An unknowable cohort. Every count is NULL — never zero."""
+    from services import canonical_contract  # noqa: PLC0415
+
+    return {
+        "available": False,
+        "reason": reason,
+        "anchor_event": ANCHOR_EVENT,
+        "anchor_label": EVENT_LABELS[ANCHOR_EVENT],
+        "anchor_definition": None,
+        "scope": scope,
+        "scope_label": SCOPE_LABELS.get(scope),
+        "cohort_size": None,
+        "stages": [],
+        "converted": None,
+        "rate_from_anchor_pct": None,
+        "previous_stage_conversion_pct": None,
+        "basis": BASIS_UNAVAILABLE,
+        "truth_status": canonical_contract.TRUTH_UNAVAILABLE,
+        "coverage_status": COVERAGE_UNAVAILABLE,
+        "excluded_contacts": None,
+        "exclusion_reasons": [],
+        "canonical_source": FUNNEL_SOURCE,
+        "table": FUNNEL_TABLE,
+        "dedup_key": FUNNEL_DEDUP_KEY,
+        "rule_version": LIFECYCLE_RULE_VERSION,
+        "fallback_used": False,
+    }
+
+
 # ── Reconciliation status ────────────────────────────────────────────────────
 def reconciliation_status(populations: dict, *, available: bool) -> dict:
     """Status of the canonical funnel for this window.
@@ -604,6 +964,32 @@ def reconciliation_status(populations: dict, *, available: bool) -> dict:
     if reasons:
         return {"status": STATUS_PARTIAL, "reasons": reasons}
     return {"status": STATUS_RECONCILED, "reasons": []}
+
+
+def _cohort_block(populations: dict, scope: str, window: dict, *,
+                  available: bool, status: str | None) -> dict:
+    """The published ``lifecycle_cohort`` block: progression + window + stamp.
+
+    Fails closed twice over. An unreadable contact store yields NULL counts, and
+    so does a ``mismatch`` — a broken invariant must never render as an ordinary
+    funnel just because the arithmetic completed.
+    """
+    if not available:
+        block = _unavailable_cohort(scope, "canonical_contact_store_unavailable")
+    elif status == STATUS_MISMATCH:
+        block = _unavailable_cohort(scope, "funnel_invariant_mismatch")
+    else:
+        block = lead_cohort_progression(populations, scope)
+    return {
+        **block,
+        "window": {
+            "window_type": window["window_type"],
+            "window_key": window["window_key"],
+            "start_date": window["start_date"],
+            "end_date": window["end_date"],
+        },
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
 
 
 # ── Public entry point ───────────────────────────────────────────────────────
@@ -689,6 +1075,12 @@ def build(
         "events": events_payload,
         "counts_by_scope": counts if available else None,
         "conversions": build_conversions(populations, scope) if available else None,
+        # PR-ADS-155 §1. THE displayed funnel: one Lead-anchored cohort. It is
+        # built here, in the canonical service, so the Dashboard renders a
+        # contract rather than re-deriving lifecycle rules of its own.
+        "lifecycle_cohort": _cohort_block(populations, scope, window,
+                                          available=available,
+                                          status=status.get("status")),
         "coverage": populations["coverage"] if available else None,
         "reconciliation": status,
         "sync": sync_state,

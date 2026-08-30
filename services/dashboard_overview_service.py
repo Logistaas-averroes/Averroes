@@ -991,6 +991,8 @@ def build_dashboard_overview(window: str = "current_quarter",
         lifecycle_funnel.get("status") != "mismatch"
     _lifecycle_status = (canonical_contract.TRUTH_READY if _lifecycle_ready
                          else canonical_contract.TRUTH_NOT_READY)
+    _cohort_block = lifecycle_funnel.get("cohort") or {}
+    _disclosure = _mart_summary.get("revenue_disclosure") or {}
     metric_truth = canonical_contract.metric_truth_block(_resolved_window, [
         {"metric": "google_ads_spend_usd",
          "data_source": canonical_contract.SOURCE_CANONICAL_SPEND,
@@ -1025,6 +1027,36 @@ def build_dashboard_overview(window: str = "current_quarter",
            "scope": f"lifecycle_{_stage}",
            "truth_status": _lifecycle_status}
           for _stage in ("leads", "mqls", "sqls", "opportunities", "customers")],
+        # PR-ADS-155 §1/§3. The cohort funnel carries its OWN status, which is
+        # `not_ready` whenever HubSpot is missing stage-entry timestamps for
+        # contacts that demonstrably reached a stage. The page still renders it —
+        # incomplete is not unavailable — but under a status that says so, so a
+        # partial funnel can never pass as a complete one.
+        {"metric": "lifecycle_cohort",
+         "data_source": canonical_contract.SOURCE_CANONICAL_FUNNEL,
+         "scope": "lead_anchored_cohort",
+         # The coverage STATUS is published on the `lifecycle_cohort` block
+         # itself, with its counts and reasons, and the parity audit reads it
+         # there. It is not duplicated into the contract: `metric_contract` has
+         # one fixed shape, and a second home for the same fact is a second
+         # thing to keep in step.
+         "truth_status": (_cohort_block.get("truth_status")
+                          or canonical_contract.TRUTH_UNAVAILABLE),
+         "unavailable_reason": _cohort_block.get("reason")},
+        # PR-ADS-155 §5. The partial sum is a measurement of a NAMED subset, so
+        # it is `ready` on its own terms while the total stays `not_ready`. Two
+        # metrics because two facts; one status each.
+        {"metric": "known_revenue_usd",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_priced_deals_only",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if _disclosure.get("known_revenue_usd") is not None
+                          else canonical_contract.TRUTH_NOT_READY)},
+        {"metric": "revenue_unavailable_deals",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY if _population_ready
+                          else canonical_contract.TRUTH_NOT_READY)},
     ])
 
     return {
@@ -1061,6 +1093,80 @@ def build_dashboard_overview(window: str = "current_quarter",
         # A conversion is published only when the canonical service proves it is
         # cohort-safe; unrelated period totals are never divided.
         "lifecycle_funnel": lifecycle_funnel,
+        # PR-ADS-155 §1: the ONE narrowing structure the page may draw. Every
+        # count in it is a subset of the same Lead cohort, and every percentage
+        # in it was computed by the canonical funnel service — the frontend does
+        # no conversion arithmetic of its own.
+        "lifecycle_cohort": lifecycle_funnel.get("cohort"),
+        # PR-ADS-155 §2: closed-won outcomes, DELIBERATELY not part of the funnel
+        # above. A lifecycle Customer is a HubSpot contact-stage fact; a closed-won
+        # customer is a deal fact. No governed contact-to-deal cohort contract
+        # exists that would let one be drawn as a conversion of the other, so they
+        # are presented as separate sections and never joined by an arrow.
+        "commercial_outcomes": _commercial_outcomes(mart, revenue_connected),
+    }
+
+
+def _commercial_outcomes(mart: dict, revenue_connected: bool) -> dict:
+    """Closed-won outcomes, separated from lifecycle progression (§2) and
+    fail-closed about the unknown total (§5).
+
+    Two facts, published independently because they have different completeness:
+
+      * ``customers`` — every closed-won deal in the window. COMPLETE regardless
+        of what the deals are worth, so it keeps rendering while revenue does not.
+      * revenue — NULL whenever any won deal has no proven amount. The sum of the
+        priced ones travels beside it as ``known_revenue_usd``, under a label that
+        names its own denominator, and is never presented as the total.
+
+    Nothing here is a conversion of the lifecycle funnel. There is no
+    ``rate_from_lifecycle_customer`` field and there must not be one until a
+    governed contact-to-deal cohort contract proves that relationship.
+    """
+    summary = mart.get("summary") or {}
+    disclosure = summary.get("revenue_disclosure") or {}
+    if not revenue_connected:
+        # An unwired integration proves nothing about the business. Counts are
+        # NULL, never the mart's 0/0.0 aggregates over an empty ledger.
+        return {
+            "available": False,
+            "reason": "revenue_integration_not_connected",
+            "customers": None,
+            "customers_available": False,
+            "closed_won_deals": None,
+            "revenue_proven_deals": None,
+            "revenue_unavailable_deals": None,
+            "known_revenue_usd": None,
+            "known_revenue_label": None,
+            "total_revenue_usd": None,
+            "total_revenue_publishable": False,
+            "unavailable_reason": "revenue_integration_not_connected",
+            "violation_codes": [],
+            "connected_to_lifecycle_funnel": False,
+            "source": canonical_revenue.CANONICAL_SOURCE,
+            "scope": revenue_scope.SCOPE_ALL_SOURCE,
+        }
+    return {
+        "available": bool(disclosure.get("available")),
+        "reason": None if disclosure.get("available") else disclosure.get("unavailable_reason"),
+        # The count survives an unknown total: see `revenue_total_publishable`.
+        "customers": summary.get("customers"),
+        "customers_available": summary.get("customers") is not None,
+        "closed_won_deals": disclosure.get("closed_won_deals"),
+        "revenue_proven_deals": disclosure.get("revenue_proven_deals"),
+        "revenue_unavailable_deals": disclosure.get("revenue_unavailable_deals"),
+        "known_revenue_usd": disclosure.get("known_revenue_usd"),
+        "known_revenue_label": disclosure.get("known_revenue_label"),
+        "total_revenue_usd": disclosure.get("total_revenue_usd"),
+        "total_revenue_publishable": bool(disclosure.get("total_revenue_publishable")),
+        "unavailable_reason": disclosure.get("unavailable_reason"),
+        "unavailable_detail": disclosure.get("unavailable_detail"),
+        "violation_codes": disclosure.get("violation_codes") or [],
+        # Read by the frontend contract test: the page may never draw a funnel
+        # arrow from lifecycle Customer into this section.
+        "connected_to_lifecycle_funnel": False,
+        "source": canonical_revenue.CANONICAL_SOURCE,
+        "scope": revenue_scope.SCOPE_ALL_SOURCE,
     }
 
 
@@ -1085,7 +1191,7 @@ def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
         logger.warning("[dashboard_overview] canonical lifecycle funnel failed: %s", exc)
         return {**empty, "available": False, "status": "unavailable",
                 "scope": "all_source", "conversions": None,
-                "definitions": None, "sync": None}
+                "definitions": None, "sync": None, "cohort": None}
 
     status = (payload.get("reconciliation") or {}).get("status")
     available = bool(payload.get("available"))
@@ -1112,4 +1218,9 @@ def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
         } for e in empty},
         "sync": payload.get("sync"),
         "campaign_identity_available": payload.get("campaign_identity_available"),
+        # PR-ADS-155 §1: THE funnel the Dashboard renders — one Lead-anchored
+        # cohort followed forward. The five counts above remain available as
+        # independent stage-entry totals, but they are no longer drawn as a
+        # pipeline, because they never were one.
+        "cohort": payload.get("lifecycle_cohort"),
     }

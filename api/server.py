@@ -47,6 +47,7 @@ Protected endpoints (require authenticated session):
   GET  /api/search-terms/ngrams   — Read-only n-gram analysis over stored search_terms (requires auth).
   GET  /api/search-term-evidence/flagged — Canonical Flagged / Waste view over deduplicated search_terms facts (requires auth; PR-ADS-153D).
   GET  /api/audit/revenue-truth   — Admin-only canonical deal-ledger reconciliation vs legacy revenue ledgers (read-only; shadow mode; PR-ADS-153E-A).
+  GET  /api/audit/missing-deal-amounts — Admin-only list of closed-won deals with no proven amount, i.e. exactly what blocks the revenue total (read-only; PR-ADS-155).
   POST /api/search-term-evidence/review  — Record ONE local search-term review decision (local DB only; never a Google Ads mutation; PR-ADS-153D).
   GET  /api/gclid-attribution     — Paginated GCLID attribution rows from gclid_attribution table (requires auth).
   GET  /api/gclid-coverage        — GCLID coverage snapshots from gclid_coverage_snapshots table (requires auth).
@@ -8723,6 +8724,55 @@ def api_audit_revenue_truth(
         log.error("[api/audit/revenue-truth] failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500,
                             detail="revenue reconciliation unavailable") from exc
+
+
+# ── PR-ADS-155 §6: which closed-won deals block the revenue total ────────────
+@app.get("/api/audit/missing-deal-amounts")
+def api_audit_missing_deal_amounts(
+    request: Request,
+    window: str = Query(default="all_time",
+                        description="Business window: current_quarter|last_quarter|"
+                                    "last_6_months|ytd|all_time"),
+) -> dict[str, Any]:
+    """Every closed-won deal whose amount could not be proven (PR-ADS-155 §6).
+
+    The revenue total for a window is withheld whenever a won deal in it has no
+    proven amount. In production that is 14 deals out of 181, and withholding
+    without naming them leaves an operator with a blocked number and no way to
+    unblock it. This lists exactly which records to fix, with a HubSpot link to
+    each, so the fix is a few minutes of data entry rather than an investigation.
+
+    Read-only, in the strongest sense: it contacts no external platform, writes
+    nothing to HubSpot, and never guesses an amount — not from the company, the
+    campaign, the account's previous deals, associated contacts, or by dividing
+    the known revenue. A missing amount is reported as missing.
+
+    Exposes no contact names or email addresses: deal id, deal name, close date,
+    stage, amount/currency status and the canonical reason only.
+    """
+    check_admin_or_token(request)
+    from analysis.business_windows import WINDOW_KEYS  # noqa: PLC0415
+
+    if window not in WINDOW_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown window '{window}'. Valid: {', '.join(WINDOW_KEYS)}")
+    try:
+        from services import canonical_revenue_service as canonical_revenue  # noqa: PLC0415
+
+        base = canonical_revenue.load_won_deals(window)
+        report = canonical_revenue.missing_amount_deals(base)
+        return {
+            **report,
+            "read_only": True,
+            # The §5 disclosure beside the list, so the reader sees the blocked
+            # total and its cause in one response rather than two.
+            "revenue_disclosure": canonical_revenue.revenue_disclosure(base),
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.error("[api/audit/missing-deal-amounts] failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500,
+                            detail="missing-amount report unavailable") from exc
 
 
 @app.get("/api/audit/sql-truth")

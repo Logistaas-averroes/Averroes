@@ -688,6 +688,122 @@ def parse_hubspot_timestamp(value):
     return dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
 
 
+# ---------------------------------------------------------------------------
+# PR-ADS-155 §4 — recovering stage-entry dates from HubSpot property history
+# ---------------------------------------------------------------------------
+# The audit that produced this code path
+# --------------------------------------
+# Some contacts carry a lifecycle stage that proves they reached MQL/SQL/etc.
+# while `hs_v2_date_entered_<stage>` is null, so the canonical funnel has a real
+# transition with no date. Two recovery routes were checked against the live
+# portal before any of this was written:
+#
+#   1. HubSpot's legacy per-stage date properties (`hs_lifecyclestage_lead_date`
+#      and friends). A property search against the connected portal returns NO
+#      such properties — the account exposes only the `hs_v2_date_entered_*` /
+#      `hs_v2_date_exited_*` / `hs_v2_latest_time_in_*` family. This route does
+#      not exist here.
+#
+#   2. Property HISTORY on `lifecyclestage`. HubSpot retains version history for
+#      the property: each historical value with the timestamp it was set and the
+#      source that set it, exposed through `propertiesWithHistory` on the CRM
+#      read API (confirmed present on the installed SDK's batch-read model). A
+#      version whose value IS a funnel stage is HubSpot's own record of the
+#      transition into that stage — the same evidence `hs_v2_date_entered_*` is
+#      derived from, read from the other end.
+#
+# So route 2 is real evidence and route 1 is not. What route 2 cannot promise is
+# COMPLETENESS: history depth is bounded by HubSpot's retention, and a contact
+# set straight to a later stage never had a version for the stages it skipped.
+# Where no matching version exists, this returns nothing for that stage. The
+# timestamp then stays NULL and the cohort keeps reporting it as a coverage gap.
+#
+# Read-only. This uses the CRM READ API only. There is no write path to HubSpot
+# anywhere in this module's history support.
+HUBSPOT_LIFECYCLE_HISTORY_PROPERTY = "lifecyclestage"
+
+# HubSpot caps a batch read that requests property history well below the
+# ordinary 100-record batch limit. 50 is the documented ceiling and is used as a
+# hard bound rather than a default a caller can raise past it.
+HUBSPOT_HISTORY_BATCH_LIMIT = 50
+
+
+def fetch_lifecycle_stage_history(contact_ids, *, client=None) -> dict:
+    """Read `lifecyclestage` version history for up to 50 contacts. READ-ONLY.
+
+    Returns ``{contact_id: [version, ...]}`` where each version is
+    ``{"value", "timestamp", "source_type", "source_id", "updated_by_user_id"}``
+    with ``timestamp`` an aware datetime. Versions are returned newest-first,
+    exactly as HubSpot orders them.
+
+    A contact HubSpot returns no history for is present in the mapping with an
+    empty list — "we asked and there is nothing" is a finding, and must not be
+    confused with "we did not ask", which is the absence of the key.
+
+    Raises ``HubSpotRetryableError`` on a non-rate-limit API failure. A partial
+    read is never returned as a complete one.
+    """
+    ids = [str(c).strip() for c in (contact_ids or []) if str(c or "").strip()]
+    if not ids:
+        return {}
+    if len(ids) > HUBSPOT_HISTORY_BATCH_LIMIT:
+        raise ValueError(
+            f"at most {HUBSPOT_HISTORY_BATCH_LIMIT} contacts per history read; "
+            f"got {len(ids)}")
+
+    client = client or get_client()
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = client.crm.contacts.batch_api.read(
+                batch_read_input_simple_public_object_id={
+                    "inputs": [{"id": cid} for cid in ids],
+                    "properties": [HUBSPOT_LIFECYCLE_HISTORY_PROPERTY],
+                    "properties_with_history": [HUBSPOT_LIFECYCLE_HISTORY_PROPERTY],
+                }
+            )
+            break
+        except ApiException as exc:
+            if exc.status == 429 and attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+            raise HubSpotRetryableError(
+                f"HubSpot contact history read failed (status={exc.status}): {exc}"
+            ) from exc
+    else:  # pragma: no cover — the loop always breaks or raises
+        raise HubSpotRetryableError("HubSpot contact history read exhausted retries")
+
+    out = {cid: [] for cid in ids}
+    for result in (getattr(response, "results", None) or []):
+        record = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+        contact_id = str(record.get("id") or "").strip()
+        if not contact_id:
+            continue
+        history = (record.get("properties_with_history")
+                   or record.get("propertiesWithHistory") or {})
+        versions = history.get(HUBSPOT_LIFECYCLE_HISTORY_PROPERTY) or []
+        out[contact_id] = [_normalise_history_version(v) for v in versions]
+    return out
+
+
+def _normalise_history_version(version) -> dict:
+    """One HubSpot property-history version, normalised. Pure.
+
+    The raw value is preserved verbatim — the stage is normalised by
+    ``analysis.crm_lifecycle`` at the point of use, not guessed here — and the
+    HubSpot source fields are carried through so a recovered date can always be
+    traced to the change that produced it.
+    """
+    raw = version.to_dict() if hasattr(version, "to_dict") else dict(version or {})
+    return {
+        "value": raw.get("value"),
+        "timestamp": parse_hubspot_timestamp(raw.get("timestamp")),
+        "source_type": raw.get("source_type") or raw.get("sourceType"),
+        "source_id": raw.get("source_id") or raw.get("sourceId"),
+        "updated_by_user_id": (raw.get("updated_by_user_id")
+                               or raw.get("updatedByUserId")),
+    }
+
+
 def _completion_sentinel(watermark_ms, total_yielded, page_index, reanchored):
     """The explicit end-of-result-set marker. An empty page, so it can never
     write rows or move a watermark — it only proves the scan finished."""
