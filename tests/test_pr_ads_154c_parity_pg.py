@@ -265,7 +265,12 @@ def test_f3_pg_one_null_amount_makes_the_window_total_unknown(pg):
 
     raw = cr.summarize_deals(base["deals"], "all_source")
     assert raw["won_deals"] == 3
-    assert raw["revenue_usd"] == 3000.0          # the PARTIAL sum
+    # PR-ADS-154C-F3-F1 §2: the proven sum is the DIAGNOSTIC and has its own
+    # field; the TOTAL is unknown, because 3,000 plus an unproven amount is not
+    # a number. Both are asserted, so a future change cannot quietly move the
+    # partial figure back into the total's name.
+    assert raw["known_revenue_usd"] == 3000.0
+    assert raw["revenue_usd"] is None
     assert raw["currency_unavailable_deals"] == 1
     assert raw["currency_complete"] is False
 
