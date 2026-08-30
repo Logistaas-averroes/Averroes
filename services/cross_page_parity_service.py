@@ -1160,9 +1160,14 @@ def _lifecycle_coverage_disclosures(consumers: dict) -> list[dict]:
         status = cohort.get("coverage_status")
         if status == "complete":
             continue
+        # An UNAVAILABLE cohort is not a partial one, and must not be labelled as
+        # though we had measured a gap in it. It is reported under the same code
+        # family the absent-metric classifier uses, so one vocabulary describes
+        # "could not read" wherever it appears.
         rows.append({
             "consumer": name,
-            "code": V_LIFECYCLE_PARTIAL,
+            "code": (V_LIFECYCLE_PARTIAL if status == "partial"
+                     else V_DB_UNREADABLE),
             "coverage_status": status,
             "truth_status": cohort.get("truth_status"),
             "cohort_size": cohort.get("cohort_size"),
@@ -1172,7 +1177,10 @@ def _lifecycle_coverage_disclosures(consumers: dict) -> list[dict]:
                 "the lifecycle cohort is published but incomplete: HubSpot holds "
                 "no stage-entry timestamp for some contacts that demonstrably "
                 "reached a stage. No substitute date is used, and the missing "
-                "transitions are excluded and counted rather than imputed."),
+                "transitions are excluded and counted rather than imputed."
+                if status == "partial" else
+                "the lifecycle cohort could not be built, so its coverage is "
+                "UNKNOWN — not partial, and not complete."),
         })
     return rows
 

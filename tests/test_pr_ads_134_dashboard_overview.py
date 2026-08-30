@@ -789,11 +789,30 @@ def test_channel_mix_never_renders_roas():
 
 
 def test_funnel_conversion_never_fakes_zero():
-    fn = _slice(JS, "function dashConversion", 400)
-    assert "return null" in fn
-    funnel = _slice(JS, "function renderDashFunnel", 2400)
-    for stage in ("Leads", "SQLs", "Customers", "Closed-Won Revenue"):
-        assert stage in funnel
+    """PR-ADS-155 §1/§2 changed the mechanism; the requirement is unchanged.
+
+    The browser-side `dashConversion` helper is gone: the Dashboard funnel is now
+    one Lead-anchored cohort whose every percentage is computed by the canonical
+    service, so there is nothing left in the browser to fake a zero WITH. What is
+    asserted instead is that a missing rate renders as a muted arrow rather than
+    "0%", and a missing count as "Unavailable" rather than 0.
+
+    The stage labels moved with the structure: Leads/MQLs/SQLs/Opportunities/
+    Lifecycle Customers are the cohort; Customers and Closed-Won Revenue are now
+    a separate Commercial Outcomes section, not funnel stages.
+    """
+    assert "function dashConversion" not in JS
+    cohort = _slice(JS, "function renderDashLifecycleCohort", 3000)
+    # A null rate is a muted arrow, never "0%".
+    assert "dash-funnel__conv--muted" in cohort
+    assert "step === null || step === undefined" in cohort
+    # A null count renders Unavailable — `dashValue` owns that rule.
+    assert "dashValue(s.reached, fmtCount)" in cohort
+
+    outcomes = _slice(JS, "function renderDashCommercialOutcomes", 3000)
+    for cell in ("Closed-Won Customers", "Total Closed-Won Revenue"):
+        assert cell in outcomes
+    assert "dashValue(o.total_revenue_usd, fmtMoney)" in outcomes
 
 
 def test_signals_and_cards_link_to_evidence_pages():
