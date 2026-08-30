@@ -113,8 +113,13 @@ def test_f3_1_countries_sqls_are_a_country_attributed_identity():
     """Requirement 1. The real-country total is its OWN identity and scope."""
     spec = parity.METRIC_IDENTITIES["country_attributed_sqls"]
     assert spec["scope"] == "country_attributed_sqls"
-    assert spec["canonical_source"] == contract_mod.SOURCE_CANONICAL_GEO
+    # PR-ADS-154C-F3-F1 §3: the SQLs ORIGINATE in the canonical lead population
+    # the decision mart aggregates and are then partitioned by country. Geo
+    # decides the partition; it does not produce the SQL.
+    assert spec["canonical_source"] == contract_mod.SOURCE_REVENUE_DECISION_MART
     assert spec["consumers"] == [("dashboard/countries", "kpis.sqls")]
+    # Geo remains a PREREQUISITE, where a prerequisite belongs.
+    assert spec["coverage_proof"] == parity.PROOF_COUNTRY_SQLS
 
 
 def test_f3_2_countries_is_out_of_the_full_campaign_attributable_comparison():
@@ -347,7 +352,8 @@ def test_f3_13_the_mart_no_longer_publishes_a_partial_known_dollar_sum(monkeypat
 
     base = canonical_revenue.load_won_deals("all_time", now=NOW)
     raw = canonical_revenue.summarize_deals(base["deals"], "all_source")
-    assert raw["revenue_usd"] == 3000.0            # the partial sum still exists
+    assert raw["known_revenue_usd"] == 3000.0      # the proven sum still exists
+    assert raw["revenue_usd"] is None              # but it is not the total
     assert raw["currency_unavailable_deals"] == 1
     assert raw["currency_complete"] is False
 
@@ -771,22 +777,24 @@ def test_f3f1_1_the_scope_ladder_carries_the_publishable_verdict(monkeypatch):
     assert ladder["available"] is True
 
     for scope, block in ladder["scopes"].items():
-        assert "revenue_total_publishable" in block, scope
+        assert "revenue_total_available" in block, scope
         # The verdict must equal what the public function says for that scope —
         # one rule, not two that happen to agree today.
         expected = canonical_revenue.revenue_total_publishable(base, scope)
-        assert block["revenue_total_publishable"] == expected["publishable"], scope
+        assert block["revenue_total_available"] == expected["publishable"], scope
         assert block["revenue_total_unavailable_reason"] == expected["reason"], scope
         assert block["revenue_total_violation_codes"] == expected["violation_codes"], scope
 
     all_source = ladder["scopes"][revenue_scope.SCOPE_ALL_SOURCE]
-    assert all_source["revenue_total_publishable"] is False
+    assert all_source["revenue_total_available"] is False
     assert (all_source["revenue_total_unavailable_reason"]
             == canonical_revenue.REASON_REVENUE_INCOMPLETE)
     assert all_source["revenue_total_violation_codes"] == [
         canonical_revenue.V_CURRENCY_UNPROVEN_DEALS]
-    # The arithmetic is untouched: the partial sum is still reported beside it.
-    assert all_source["revenue_usd"] == 2000.0
+    # The arithmetic is untouched: the proven sum is still reported beside it,
+    # under a name that cannot be mistaken for a complete total.
+    assert all_source["known_revenue_usd"] == 2000.0
+    assert all_source["revenue_usd"] is None
     assert all_source["currency_unavailable_deals"] == 1
 
 
@@ -796,7 +804,7 @@ def test_f3f1_2_a_complete_population_publishes_on_every_scope(monkeypatch):
     patch_canonical_ledger(monkeypatch, [_deal(0), _deal(1)])
     ladder = canonical_revenue.get_scope_ladder(
         base=canonical_revenue.load_won_deals("all_time", now=NOW))
-    assert all(b["revenue_total_publishable"] is True
+    assert all(b["revenue_total_available"] is True
                for b in ladder["scopes"].values()), ladder["scopes"]
     assert all(b["revenue_total_unavailable_reason"] is None
                for b in ladder["scopes"].values())
@@ -817,7 +825,7 @@ def test_f3f1_3_the_mart_reads_the_verdict_rather_than_re_deriving_it(monkeypatc
     def withheld(*a, **kw):
         ladder = real_ladder(*a, **kw)
         for block in (ladder.get("scopes") or {}).values():
-            block["revenue_total_publishable"] = False
+            block["revenue_total_available"] = False
             block["revenue_total_unavailable_reason"] = "a_reason_only_the_ladder_knows"
             # Deliberately left consistent-looking: zero unproven amounts.
             block["currency_unavailable_deals"] = 0
@@ -910,3 +918,163 @@ def test_f3f1_5_the_public_function_and_the_ladder_cannot_drift():
                         if isinstance(c, ast.Call)}
     assert "revenue_total_publishable" in called_by_ladder, (
         "get_scope_ladder must consult the shared decision, not describe it")
+
+
+def test_f3f1_6_the_diagnostic_sum_no_longer_occupies_the_totals_field(monkeypatch):
+    """§2. `known_revenue_usd` is the proven sum; `revenue_usd` is the TOTAL.
+
+    Two names, because one name for two facts is how a partial figure came to be
+    consumed as a complete one.
+    """
+    rows = [_deal(0), _deal(1), _deal(2, amount=None)]
+    _patch_durable(monkeypatch)
+    patch_canonical_ledger(monkeypatch, rows)
+    base = canonical_revenue.load_won_deals("all_time", now=NOW)
+    summary = canonical_revenue.summarize_deals(base["deals"], "all_source")
+
+    assert summary["known_revenue_usd"] == 2000.0
+    assert summary["revenue_usd"] is None
+    assert summary["currency_complete"] is False
+    assert summary["currency_unavailable_deals"] == 1
+    assert summary["won_deals"] == 3          # the count is untouched
+
+
+def test_f3f1_7_a_complete_population_reports_the_same_figure_in_both(monkeypatch):
+    """When nothing is unproven the two agree — the split adds a distinction,
+    not a discrepancy."""
+    _patch_durable(monkeypatch)
+    patch_canonical_ledger(monkeypatch, [_deal(0), _deal(1)])
+    base = canonical_revenue.load_won_deals("all_time", now=NOW)
+    summary = canonical_revenue.summarize_deals(base["deals"], "all_source")
+    assert summary["known_revenue_usd"] == summary["revenue_usd"] == 2000.0
+    assert summary["currency_complete"] is True
+
+
+@pytest.mark.parametrize("consumer,path", list(_REVENUE_PATHS.items()))
+def test_f3f1_8_no_executive_kpi_can_consume_the_diagnostic_sum(
+        monkeypatch, consumer, path):
+    """§2's acceptance test: trace every executive revenue KPI through the
+    canonical publishability decision.
+
+    The proven sum is 2000.0 and is reachable in the payload; no headline may be
+    equal to it, because the total over this population is unknown.
+    """
+    built = _build_all(monkeypatch, "all_time",
+                       [_deal(0), _deal(1), _deal(2, amount=None)])
+    value = parity._dig(built[consumer].get("payload") or {}, path)
+    assert value is None, f"{consumer}.{path} published {value!r}"
+    assert value != 2000.0
+
+
+def test_f3f1_9_every_withheld_revenue_contract_carries_reason_and_codes(
+        monkeypatch):
+    """§4. The reason and the machine-readable codes come from the canonical
+    helper, so six pages cannot describe one refusal six ways."""
+    built = _build_all(monkeypatch, "all_time",
+                       [_deal(0), _deal(1), _deal(2, amount=None)])
+
+    checked = 0
+    for name in ("dashboard/overview", "dashboard/revenue", "dashboard/deals",
+                 "revenue_decision_mart"):
+        blocks = ((built[name].get("payload") or {})
+                  .get(contract_mod.METRIC_TRUTH_KEY) or {})
+        block = blocks.get("closed_won_revenue_usd")
+        assert block, name
+        assert block["truth_status"] == contract_mod.TRUTH_NOT_READY, name
+        assert (block.get("unavailable_reason")
+                == canonical_revenue.REASON_REVENUE_INCOMPLETE), name
+        assert (block.get("violation_codes")
+                == [canonical_revenue.V_CURRENCY_UNPROVEN_DEALS]), name
+        checked += 1
+    assert checked == 4
+
+
+def test_f3f1_10_the_contract_helper_normalizes_violation_codes():
+    """§4. Deterministic, de-duplicated, and a bare string is one code."""
+    resolved = {"key": "ytd", "start_date": "2026-01-01",
+                "end_date": "2026-06-01", "timezone": "Europe/London"}
+
+    block = contract_mod.metric_contract(
+        metric="m", data_source="x", scope="s", resolved=resolved,
+        truth_status=contract_mod.TRUTH_NOT_READY, unavailable_reason="why",
+        violation_codes=["b", "a", "b", None, ""])
+    assert block["violation_codes"] == ["a", "b"]
+
+    assert contract_mod.metric_contract(
+        metric="m", data_source="x", scope="s", resolved=resolved,
+        violation_codes="solo")["violation_codes"] == ["solo"]
+
+    # Absent rather than an empty list, so a ready contract stays clean.
+    assert "violation_codes" not in contract_mod.metric_contract(
+        metric="m", data_source="x", scope="s", resolved=resolved)
+
+
+def test_f3f1_11_revenue_incomplete_is_a_registered_unavailable_reason():
+    """§4. A reason the product can return must be a reason the product names."""
+    assert (canonical_revenue.REASON_REVENUE_INCOMPLETE
+            in canonical_revenue.ALL_UNAVAILABLE_REASONS)
+
+
+def test_f3f1_12_the_audit_reports_the_contracts_own_violation_codes(monkeypatch):
+    """§4. The parity report surfaces the exact codes the contract published,
+    rather than a description the audit invented."""
+    built = _build_all(monkeypatch, "all_time",
+                       [_deal(0), _deal(1), _deal(2, amount=None)])
+    monkeypatch.setattr(parity, "_build_consumers", lambda w, n: built)
+    out = parity.audit_window("all_time", now=NOW)
+
+    entry = next(m for m in out["metrics"] if m["metric"] == "closed_won_revenue_usd")
+    for reading in entry["readings"]:
+        if reading["value"] is None and reading.get("truth_status"):
+            assert reading["violation_codes"] == [
+                canonical_revenue.V_CURRENCY_UNPROVEN_DEALS], reading["consumer"]
+            assert (reading["unavailable_reason"]
+                    == canonical_revenue.REASON_REVENUE_INCOMPLETE)
+
+
+def test_f3f1_13_country_sql_readiness_needs_lead_proof_and_country_coverage(
+        monkeypatch):
+    """§3. Two dependencies, and naming only one would certify the figure on
+    half its evidence."""
+    _patch_durable(monkeypatch)
+    patch_canonical_ledger(monkeypatch, [_deal(1)])
+    spec = parity.METRIC_IDENTITIES["country_attributed_sqls"]
+
+    # Both proven.
+    consumers = parity._build_consumers("current_quarter", NOW)
+    assert parity._coverage_proven(consumers, spec)[0] is True
+
+    # Lead population unproven → not proven, whatever geo says.
+    mart = consumers["revenue_decision_mart"]["payload"]
+    mart["readiness"]["lead_metrics_status"] = "db_empty"
+    proven, detail = parity._coverage_proven(consumers, spec)
+    assert proven is False and "lead population" in detail
+
+    # Lead population proven, country reconciliation not → still not proven.
+    mart["readiness"]["lead_metrics_status"] = "db"
+    mart["spend_truth"]["country_spend_status"] = "mismatch"
+    proven, detail = parity._coverage_proven(consumers, spec)
+    assert proven is False and "country reconciliation" in detail
+
+
+def test_f3f1_14_the_focused_ci_step_runs_the_f3_suite():
+    """§5. The full suite passing is not the requested focused gate."""
+    import yaml
+
+    workflows = sorted((_ROOT / ".github" / "workflows").glob("*.yml"))
+    assert workflows, "no workflow files found"
+
+    suite = "tests/test_pr_ads_154c_f3_country_sql_and_revenue_gate.py"
+    found = []
+    for wf in workflows:
+        doc = yaml.safe_load(wf.read_text())
+        for job in (doc.get("jobs") or {}).values():
+            for step in (job.get("steps") or []):
+                run = step.get("run") or ""
+                name = step.get("name") or ""
+                if suite in run and "Contract tests" in name:
+                    found.append((wf.name, name))
+    assert found, (
+        f"{suite} is not executed by any focused 'Contract tests' step")
+    # And the step says so, so a reader of the CI log knows what ran.
+    assert any("154C-F3" in name for _, name in found), found

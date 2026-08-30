@@ -297,9 +297,9 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
     # so customers stay published. Blanking a count we did measure would be its
     # own fabrication.
     all_source_revenue_ok = bool(ladder_available
-                                 and all_source.get("revenue_total_publishable"))
+                                 and all_source.get("revenue_total_available"))
     attributed_revenue_ok = bool(ladder_available
-                                 and attributed.get("revenue_total_publishable"))
+                                 and attributed.get("revenue_total_available"))
     # spend_usd is STRICTLY the canonical USD spend. We never fall back to the
     # revenue-attribution summary["spend"], which is the native diagnostic figure
     # (GBP) whenever FX is incomplete — labelling native GBP as USD would be a
@@ -328,6 +328,13 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
             None if all_source_revenue_ok else (
                 all_source.get("revenue_total_unavailable_reason")
                 if ladder_available else ladder.get("reason"))),
+        # PR-ADS-154C-F3-F1 §4: the machine-readable half of the same refusal,
+        # from the canonical helper. Every page that withholds revenue republishes
+        # these rather than inventing its own vocabulary for one decision.
+        "revenue_total_violation_codes": (
+            [] if all_source_revenue_ok else (
+                all_source.get("revenue_total_violation_codes") or []
+                if ladder_available else sorted(ladder.get("violation_codes") or []))),
         "currency_unavailable_deals": (all_source.get("currency_unavailable_deals")
                                        if ladder_available else None),
         "ambiguous_associations": (all_source.get("ambiguous_associations")
@@ -632,7 +639,8 @@ def build_revenue_decision_mart(
                  "truth_status": (canonical_contract.TRUTH_READY
                                   if summary.get("revenue_total_available")
                                   else canonical_contract.TRUTH_NOT_READY),
-                 "unavailable_reason": summary.get("revenue_total_unavailable_reason")},
+                 "unavailable_reason": summary.get("revenue_total_unavailable_reason"),
+                 "violation_codes": summary.get("revenue_total_violation_codes")},
                 {"metric": "customers",
                  "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
                  "scope": "all_source_business_revenue",

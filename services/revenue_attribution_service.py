@@ -2309,9 +2309,15 @@ def build_revenue_deals(window: str, now: datetime | None = None) -> dict:
         # always distinguished "no closed-won deals here" from "these deals were
         # worth nothing", and the cutover does not change that.
         "won_revenue": totals["revenue_usd"] if revenue_wired else None,
+        # PR-ADS-154C-F3-F1 §2: the average divides PROVEN revenue by the count
+        # of PROVEN deals — `known_revenue_usd`, not the total. The total is now
+        # None whenever any amount is unproven, and dividing None would raise;
+        # dividing the proven sum by every won deal would report an average
+        # lower than any real deal.
         "average_deal_value": (
-            round(totals["revenue_usd"] / totals["revenue_deals"], 2)
-            if totals["revenue_deals"] else None
+            round(totals["known_revenue_usd"] / totals["revenue_deals"], 2)
+            if (totals["revenue_deals"] and totals["known_revenue_usd"] is not None)
+            else None
         ),
         # Renamed from `exact_gclid_count`: this is the GCLID-attributable SUBSET
         # of an all-source population, and the lattice guarantees it is a subset.

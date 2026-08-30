@@ -273,8 +273,9 @@ def _payloads(**overrides):
                  "country_attributed_revenue"),
                 ("country_attributed_customers", _GEO, "country_attributed_revenue"),
                 ("country_attributed_spend_usd", _GEO, "country_attributed_spend"),
-                ("country_attributed_sqls", _GEO, "country_attributed_sqls"),
-                ("country_unattributed_residual_sqls", _GEO,
+                # PR-ADS-154C-F3-F1 §3: mart-origin, geo-partitioned.
+                ("country_attributed_sqls", _MART, "country_attributed_sqls"),
+                ("country_unattributed_residual_sqls", _MART,
                  "country_unattributed_residual_sqls"))},
         "dashboard/deals": {
             "window": dict(_WIN), "read_only": True,
@@ -1293,7 +1294,8 @@ def test_f2_4c_every_identity_names_its_own_evidence():
 
     known = {parity.PROOF_CAMPAIGN_SPEND, parity.PROOF_GEO_SPEND,
              parity.PROOF_COUNTRY_REVENUE, parity.PROOF_DEAL_LEDGER,
-             parity.PROOF_MART_LEAD_FUNNEL, parity.PROOF_LIFECYCLE_FUNNEL}
+             parity.PROOF_MART_LEAD_FUNNEL, parity.PROOF_LIFECYCLE_FUNNEL,
+             parity.PROOF_COUNTRY_SQLS}
     for key, spec in METRIC_IDENTITIES.items():
         assert spec.get("coverage_proof") in known, key
 

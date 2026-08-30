@@ -124,6 +124,10 @@ PROOF_COUNTRY_REVENUE = "country_reconciliation_and_deal_ledger"
 PROOF_DEAL_LEDGER = "canonical_deal_ledger"
 PROOF_MART_LEAD_FUNNEL = "mart_lead_population"
 PROOF_LIFECYCLE_FUNNEL = "canonical_contact_funnel"
+#: PR-ADS-154C-F3-F1 §3. Country SQLs need the mart's lead population proven AND
+#: the country assignment that partitions it — the figure has two dependencies
+#: and naming only one of them would certify it on half its evidence.
+PROOF_COUNTRY_SQLS = "mart_lead_population_and_country_assignment"
 
 #: Metric identities. Each entry is ONE question, and every consumer listed must
 #: answer it identically. Consumers are (label, dotted path into the payload).
@@ -266,20 +270,27 @@ METRIC_IDENTITIES = {
     },
     # The two halves of the country split. They are separate identities, and
     # together they must account for the whole — see SQL_CONSERVATION below.
+    # PR-ADS-154C-F3-F1 §3: these are DECISION-MART figures. The SQLs originate
+    # in the canonical HubSpot lead population the mart aggregates, and are then
+    # PARTITIONED by country assignment. Declaring canonical geo as their source
+    # said they were Google Ads geo-spend facts, which they are not — geo decides
+    # which side of the partition an SQL falls on, it does not produce the SQL.
+    # Geo coverage remains a prerequisite through `coverage_proof`, where a
+    # prerequisite belongs; the data ORIGIN is stated truthfully.
     "country_attributed_sqls": {
         "label": "SQLs attributed to a real country",
-        "canonical_source": SOURCE_CANONICAL_GEO,
+        "canonical_source": SOURCE_REVENUE_DECISION_MART,
         "scope": "country_attributed_sqls",
-        "coverage_proof": PROOF_MART_LEAD_FUNNEL,
+        "coverage_proof": PROOF_COUNTRY_SQLS,
         "consumers": [
             ("dashboard/countries", "kpis.sqls"),
         ],
     },
     "country_unattributed_residual_sqls": {
         "label": "SQLs that could not be assigned to a country (governed residual)",
-        "canonical_source": SOURCE_CANONICAL_GEO,
+        "canonical_source": SOURCE_REVENUE_DECISION_MART,
         "scope": "country_unattributed_residual_sqls",
-        "coverage_proof": PROOF_MART_LEAD_FUNNEL,
+        "coverage_proof": PROOF_COUNTRY_SQLS,
         "consumers": [
             ("dashboard/countries", "residual.sqls"),
         ],
@@ -622,7 +633,7 @@ def _coverage_proven(consumers: dict, spec: dict) -> tuple[bool, str]:
     if proof == PROOF_DEAL_LEDGER:
         return _ledger_ok()
 
-    if proof == PROOF_MART_LEAD_FUNNEL:
+    def _mart_lead_population_proven() -> tuple[bool, str]:
         # "It published a number" is not proof — an empty contacts table publishes
         # 0 on every page, which is unanimity about a population nobody measured.
         # `lead_metrics_status` distinguishes the three cases the mart already
@@ -641,6 +652,15 @@ def _coverage_proven(consumers: dict, spec: dict) -> tuple[bool, str]:
         return False, (f"the mart's lead population is {status!r} "
                        f"(lead_metrics_ready={readiness.get('lead_metrics_ready')!r}), "
                        "so no lead or SQL count over this window was measured")
+
+    if proof == PROOF_MART_LEAD_FUNNEL:
+        return _mart_lead_population_proven()
+
+    if proof == PROOF_COUNTRY_SQLS:
+        ok, detail = _mart_lead_population_proven()
+        if not ok:
+            return False, detail
+        return _country_ok()
 
     if proof == PROOF_LIFECYCLE_FUNNEL:
         # Same distinction one authority over. The funnel service reports

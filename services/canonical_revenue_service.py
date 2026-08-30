@@ -88,6 +88,10 @@ REASON_UNKNOWN_SCOPE = "unknown_scope"
 REASON_LEDGER_UNREADABLE = "canonical_ledger_unreadable"
 REASON_SYNC_STATE_UNREADABLE = "canonical_sync_state_unreadable"
 REASON_COVERAGE_NOT_PROVEN = "canonical_coverage_not_proven"
+#: Why a scope's revenue TOTAL is not publishable even though the population IS
+#: readable: a deal in it has no proven amount, so the total is unknown.
+REASON_REVENUE_INCOMPLETE = "canonical_revenue_amounts_incomplete"
+V_CURRENCY_UNPROVEN_DEALS = "currency_unproven_deals_in_population"
 
 ALL_UNAVAILABLE_REASONS = (
     REASON_UNKNOWN_WINDOW,
@@ -95,6 +99,10 @@ ALL_UNAVAILABLE_REASONS = (
     REASON_LEDGER_UNREADABLE,
     REASON_SYNC_STATE_UNREADABLE,
     REASON_COVERAGE_NOT_PROVEN,
+    # PR-ADS-154C-F3-F1 §4. A readable population whose TOTAL is unknown because
+    # a deal in it has no proven amount. Distinct from every reason above: those
+    # say the population could not be read, this one says it could.
+    REASON_REVENUE_INCOMPLETE,
 )
 
 
@@ -336,14 +344,27 @@ def summarize_deals(deals, scope=DEFAULT_SCOPE) -> dict:
         if row.get("association_status") == "lookup_failed":
             failed += 1
 
+    # PR-ADS-154C-F3-F1 §2. `revenue_usd` used to be the sum of the deals whose
+    # currency WAS proven, published as soon as one such deal existed — a
+    # partial known-dollar sum that read like a complete total and was consumed
+    # as one. The two facts are now separate fields and cannot be confused:
+    #
+    #   known_revenue_usd  the diagnostic: what the PROVEN deals are worth.
+    #                      Always a number when any amount was proven, and what
+    #                      reconciliation compares populations with.
+    #   revenue_usd        the TOTAL: None whenever any deal in scope has no
+    #                      proven amount, because then the total is unknown —
+    #                      not zero, not the sum of the rest.
+    #
+    # A total over zero proven deals is 0.0 only when there were also no
+    # unproven ones; otherwise every deal's value is unknown and so is the total.
+    known_revenue = (round(revenue, 2)
+                     if revenue_deals or not currency_unavailable else None)
     return {
         **scope_descriptor(scope),
         "won_deals": len(rows),
-        # A total over ZERO proven deals is 0.0 only when there were also no
-        # unproven ones; otherwise every deal's value is unknown and the total
-        # is unknown too, not $0.
-        "revenue_usd": (round(revenue, 2)
-                        if revenue_deals or not currency_unavailable else None),
+        "known_revenue_usd": known_revenue,
+        "revenue_usd": None if currency_unavailable else known_revenue,
         "revenue_deals": revenue_deals,
         "currency_unavailable_deals": currency_unavailable,
         "currency_complete": currency_unavailable == 0,
@@ -470,7 +491,7 @@ def get_scope_ladder(window=None, *, start=None, end=None, now=None,
     for s in SCOPE_ORDER:
         summary = summarize_deals(deals, s)
         verdict = revenue_total_publishable(base, s, summary=summary)
-        summary["revenue_total_publishable"] = verdict["publishable"]
+        summary["revenue_total_available"] = verdict["publishable"]
         summary["revenue_total_unavailable_reason"] = verdict["reason"]
         summary["revenue_total_unavailable_detail"] = verdict["detail"]
         summary["revenue_total_violation_codes"] = verdict["violation_codes"]
@@ -586,11 +607,6 @@ def summable_revenue(row):
     if is_summable(row.get("currency_status")) and row.get("revenue_usd") is not None:
         return float(row["revenue_usd"])
     return None
-
-
-#: Why a scope's revenue TOTAL is not publishable, even though the population is.
-REASON_REVENUE_INCOMPLETE = "canonical_revenue_amounts_incomplete"
-V_CURRENCY_UNPROVEN_DEALS = "currency_unproven_deals_in_population"
 
 
 def _revenue_total_verdict(summary: dict, scope) -> dict:

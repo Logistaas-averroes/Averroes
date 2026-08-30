@@ -340,7 +340,8 @@ def _build_channels_and_platforms(source_groups: list, google_spend: dict,
     return channel_rows, platforms
 
 
-def _build_kpis(channel_rows: list, *, revenue_available: bool = True) -> dict:
+def _build_kpis(channel_rows: list, *, revenue_available: bool = True,
+                revenue_total_available: bool = True) -> dict:
     """Hero KPIs derived FROM the channel rows so they reconcile exactly with the
     channel mix, platform matrix and trend (all built from the Revenue-by-Source
     taxonomy) — never a mart total on a different denominator.
@@ -370,7 +371,12 @@ def _build_kpis(channel_rows: list, *, revenue_available: bool = True) -> dict:
     total_customers = (None if customers_incomplete
                        else sum((c.get("customers") or 0) for c in channel_rows))
 
-    revenue_incomplete = any(c.get("won_revenue_usd") is None for c in channel_rows)
+    # PR-ADS-154C-F3-F1 §1: the canonical verdict gates the REVENUE TOTAL and
+    # nothing else. `won_deals` is complete whatever the amounts are, so the
+    # customer count above is untouched — withholding a number we did measure
+    # would be its own fabrication.
+    revenue_incomplete = (not revenue_total_available) or any(
+        c.get("won_revenue_usd") is None for c in channel_rows)
     total_revenue = 0.0
     spend_connected_revenue = 0.0
     revenue_only_revenue = 0.0
@@ -850,7 +856,17 @@ def build_dashboard_channels(window: str = "current_quarter",
     # Hero KPIs derive from the channel rows so they reconcile with the mix /
     # matrix / trend (all Revenue-by-Source), never a mart total on a different
     # denominator (mart SQLs are campaign-based; these are source-based).
-    kpis = _build_kpis(channel_rows, revenue_available=amounts_verifiable)
+    # PR-ADS-154C-F3-F1 §1/§4. This page builds its totals from the source-group
+    # taxonomy rather than the mart, so it had its own idea of when a revenue
+    # total was publishable. It now also consults the ONE canonical verdict, and
+    # republishes that verdict's reason and codes — so a reader gets the same
+    # answer, and the same explanation, whichever page they are looking at.
+    _canonical_base = canonical_revenue.load_won_deals(window, now=now)
+    _revenue_verdict = canonical_revenue.revenue_total_publishable(
+        _canonical_base, revenue_scope.SCOPE_ALL_SOURCE)
+    kpis = _build_kpis(
+        channel_rows, revenue_available=amounts_verifiable,
+        revenue_total_available=bool(_revenue_verdict["publishable"]))
     top_channel, top_platform = _top_channel_and_platform(channel_rows, platforms)
     kpis["top_channel"] = top_channel
     kpis["top_platform"] = top_platform
@@ -887,14 +903,20 @@ def build_dashboard_channels(window: str = "current_quarter",
         "end_date": window_block.get("end_date"), "timezone": window_block.get("timezone"),
     }
     _mt = canonical_contract.metric_truth_block(_resolved_window, [
-        *[{"metric": m,
-           "data_source": canonical_contract.SOURCE_REVENUE_BY_SOURCE,
-           "scope": "all_source_business_revenue",
-           "truth_status": (canonical_contract.TRUTH_READY
-                            if kpis.get(field) is not None
-                            else canonical_contract.TRUTH_NOT_READY)}
-          for m, field in (("closed_won_revenue_usd", "closed_won_revenue_usd"),
-                           ("customers", "total_customers"))],
+        {"metric": "closed_won_revenue_usd",
+         "data_source": canonical_contract.SOURCE_REVENUE_BY_SOURCE,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("closed_won_revenue_usd") is not None
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": _revenue_verdict["reason"],
+         "violation_codes": _revenue_verdict["violation_codes"]},
+        {"metric": "customers",
+         "data_source": canonical_contract.SOURCE_REVENUE_BY_SOURCE,
+         "scope": "all_source_business_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("total_customers") is not None
+                          else canonical_contract.TRUTH_NOT_READY)},
         {"metric": "source_group_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_BY_SOURCE,
          "scope": "source_group_sqls",

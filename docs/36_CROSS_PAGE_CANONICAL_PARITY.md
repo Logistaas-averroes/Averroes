@@ -101,8 +101,8 @@ and each must publish `metric_truth.<identity>` naming the authority it read.
 | `country_attributed_won_revenue_usd` | country-attributed | canonical geo | countries `kpis.won_revenue_usd` |
 | `country_attributed_customers` | country-attributed | canonical geo | countries `kpis.customers` |
 | `campaign_attributable_sqls` | campaign-attributable | mart | overview, revenue, campaigns, deals `kpis.sqls`, mart `summary.sqls` |
-| `country_attributed_sqls` | assigned to a real country | canonical geo | countries `kpis.sqls` |
-| `country_unattributed_residual_sqls` | governed residual | canonical geo | countries `residual.sqls` |
+| `country_attributed_sqls` | assigned to a real country | **decision mart** (geo partitions it) | countries `kpis.sqls` |
+| `country_unattributed_residual_sqls` | governed residual | **decision mart** (geo partitions it) | countries `residual.sqls` |
 | `campaign_attributable_leads` | campaign-attributable | mart | overview `kpis.leads`, mart `summary.leads` |
 | `source_group_sqls` | channel taxonomy | revenue by source | channels `kpis.total_sqls` |
 | `lifecycle_{leads,mqls,sqls,opportunities,customers}` | one per stage | canonical contact funnel | overview `kpis.lifecycle_*` |
@@ -374,6 +374,7 @@ forgot to say what backs it.
 | `canonical_deal_ledger` | canonical deal-ledger availability |
 | `mart_lead_population` | `readiness.lead_metrics_ready` **and** `lead_metrics_status == "db"` |
 | `canonical_contact_funnel` | the funnel is available **and** `lifecycle_funnel.sync.available` is true |
+| `mart_lead_population_and_country_assignment` | the mart's lead population **and** an accepted country reconciliation |
 
 #### "It published a number" is not proof
 
@@ -508,6 +509,62 @@ rejected on identical evidence. **Nothing in the gate was weakened**, and two
 tests hold it that way: one asserts the signature, one drives all five windows
 through a real PostgreSQL schema in both the healthy and the incomplete-bootstrap
 state.
+
+### Country SQLs come from the mart, not from geo (PR-ADS-154C-F3-F1)
+
+The first cut of F3 declared `SOURCE_CANONICAL_GEO` for both country SQL
+identities. That was wrong about the data's origin: the SQLs are the canonical
+HubSpot lead population the decision mart aggregates, **partitioned** by country
+assignment. Geo decides which side of the partition an SQL falls on; it does not
+produce the SQL. Both the registry and the Countries service now declare
+`canonical.revenue_decision_mart`.
+
+Geo has not stopped mattering — it moved to where a prerequisite belongs. The
+`mart_lead_population_and_country_assignment` proof requires **both** the mart's
+lead population and an accepted country reconciliation, because the figure has
+two dependencies and naming only one would certify it on half its evidence.
+
+### One rule, one implementation (PR-ADS-154C-F3-F1)
+
+`revenue_total_publishable` existed but was not called: `get_scope_ladder` never
+consulted it, and the mart re-derived the same condition privately. A shared rule
+nobody calls is a fifth copy of it.
+
+`_revenue_total_verdict` now holds the rule once. The **scope ladder** applies it
+to every scope and publishes the verdict beside the arithmetic —
+`revenue_total_available`, `revenue_total_unavailable_reason`,
+`revenue_total_violation_codes`, `currency_unavailable_deals`. Since the ladder
+is what every ROAS and business-total consumer reads, that is what makes it the
+production decision. The mart, Overview, Revenue, Deals and Channels all read
+that verdict; none of them decides revenue completeness itself.
+
+`_COUNT_READERS` in the F3 suite classifies every production module that reads
+`currency_unavailable_deals` as **disclosure** or **decision**. Exactly one may
+be `decision`, and a disclosure module may not branch on the raw count. A new
+reader has to be classified before the suite passes.
+
+### Two fields, because they are two facts
+
+```
+known_revenue_usd   the DIAGNOSTIC — what the deals with proven amounts are worth
+revenue_usd         the TOTAL — None whenever any deal in scope is unproven
+```
+
+`summarize_deals` used to return the proven sum as `revenue_usd` as soon as one
+proven deal existed, so a partial figure occupied the total's field name and was
+consumed as one. Reconciliation still compares populations with
+`known_revenue_usd`; no headline, KPI, mart total or metric contract may publish
+it as revenue.
+
+### Withheld metrics carry machine-readable codes
+
+`canonical_contract.metric_contract` accepts `violation_codes`, normalises them
+to a sorted de-duplicated list, and omits the field entirely when there are none.
+Every withheld revenue contract republishes the canonical helper's reason
+(`canonical_revenue_amounts_incomplete`, now in `ALL_UNAVAILABLE_REASONS`) and
+its codes, so six pages cannot describe one refusal six different ways, and the
+parity audit reports the contract's own codes rather than a description it
+invented.
 
 ### `ok=true` means everything was checked
 

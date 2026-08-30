@@ -170,10 +170,20 @@ def _build_kpis(summary: dict, revenue_connected: bool, sqls_not_closed_won,
                 amount_unknown: bool) -> dict:
     sqls = summary.get("sqls")
     customers = summary.get("customers") if revenue_connected else None
-    # Closed-won revenue is the canonical mart total, but the mart coerces a null
-    # deal amount to $0 — so if the raw ledger has any null-amount closed-won deal,
-    # the total is incomplete and is withheld (Unavailable), never a lowered $0.
-    won = (None if (not revenue_connected or amount_unknown)
+    # PR-ADS-154C-F3-F1 §1. This used to re-derive completeness from the raw
+    # ledger rows because "the mart coerces a null deal amount to $0" — which
+    # was true, and is no longer: the mart publishes `won_revenue_usd: None`
+    # and `revenue_total_available: False` whenever any amount is unproven,
+    # from the one canonical verdict in `revenue_total_publishable`.
+    #
+    # The page therefore reads that verdict instead of holding a second opinion
+    # about the same population. `amount_unknown` stays as a belt-and-braces
+    # input — it can only ever withhold MORE, never publish something the
+    # canonical decision refused — so a page-local rule can no longer be the
+    # reason an executive total appears.
+    revenue_total_available = bool(summary.get("revenue_total_available"))
+    won = (None if (not revenue_connected or amount_unknown
+                    or not revenue_total_available)
            else _round2(summary.get("won_revenue_usd")))
     return {
         "sqls": sqls,
@@ -678,7 +688,8 @@ def build_dashboard_deals(window: str = "current_quarter",
          "scope": "all_source_business_revenue",
          "truth_status": (canonical_contract.TRUTH_READY if _revenue_total_ready
                           else canonical_contract.TRUTH_NOT_READY),
-         "unavailable_reason": summary.get("revenue_total_unavailable_reason")},
+         "unavailable_reason": summary.get("revenue_total_unavailable_reason"),
+         "violation_codes": summary.get("revenue_total_violation_codes")},
         {"metric": "customers",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "all_source_business_revenue",

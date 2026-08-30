@@ -1053,15 +1053,21 @@ def build_dashboard_countries(window: str = "current_quarter",
         # a subset was the whole population, and the parity audit correctly
         # reported the difference as a mismatch between two numbers that were
         # both right about different questions.
+        # PR-ADS-154C-F3-F1 §3: these SQLs come from the canonical lead
+        # population the DECISION MART aggregates, partitioned by country
+        # assignment. Geo decides which side of the partition an SQL falls on;
+        # it does not produce the SQL, so naming it as the source misstated the
+        # data's origin. Geo coverage stays a prerequisite in the audit's
+        # `coverage_proof`, where a prerequisite belongs.
         {"metric": "country_attributed_sqls",
-         "data_source": canonical_contract.SOURCE_CANONICAL_GEO,
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "country_attributed_sqls",
          "truth_status": (canonical_contract.TRUTH_READY
                           if kpis.get("sqls") is not None
                           else canonical_contract.TRUTH_NOT_READY),
          "customer_id": spend_truth.get("customer_id")},
         {"metric": "country_unattributed_residual_sqls",
-         "data_source": canonical_contract.SOURCE_CANONICAL_GEO,
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "country_unattributed_residual_sqls",
          "truth_status": (canonical_contract.TRUTH_READY
                           if residual.get("sqls") is not None

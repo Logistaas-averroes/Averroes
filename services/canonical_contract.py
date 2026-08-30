@@ -155,7 +155,8 @@ def metric_contract(*, metric: str, data_source: str, scope: str,
                     customer_id: str | None = None,
                     currency: str = REPORTING_CURRENCY,
                     fallback_used: bool = False,
-                    unavailable_reason: str | None = None) -> dict:
+                    unavailable_reason: str | None = None,
+                    violation_codes=None) -> dict:
     """The provenance block for ONE metric within a response.
 
     PR-ADS-154C-F1. A single response-level ``data_source`` cannot describe a
@@ -188,7 +189,28 @@ def metric_contract(*, metric: str, data_source: str, scope: str,
     }
     if unavailable_reason:
         block["unavailable_reason"] = unavailable_reason
+    # PR-ADS-154C-F3-F1 §4. A withheld metric says WHY in machine-readable form,
+    # from the canonical helper that made the decision — not from a string each
+    # dashboard hand-assembles, which is how six pages come to describe one
+    # refusal six different ways. Normalised to a sorted, de-duplicated list so
+    # two contracts describing the same refusal compare equal.
+    codes = _normalize_violation_codes(violation_codes)
+    if codes:
+        block["violation_codes"] = codes
     return block
+
+
+def _normalize_violation_codes(codes) -> list:
+    """Deterministic list from anything a caller reasonably hands over.
+
+    A bare string is one code, not five characters. Order and duplicates are
+    removed so a contract cannot differ from an identical one by accident.
+    """
+    if codes is None:
+        return []
+    if isinstance(codes, str):
+        codes = [codes]
+    return sorted({str(c) for c in codes if c})
 
 
 def metric_truth_block(resolved: dict, entries: list[dict]) -> dict:

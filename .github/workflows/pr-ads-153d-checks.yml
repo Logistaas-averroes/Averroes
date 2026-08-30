@@ -119,7 +119,7 @@ jobs:
       # The 153E-B contract suite is the CUTOVER guard: it fails CI if a
       # migrated consumer reaches for a retired legacy revenue table or
       # provider again, or stops reading the one shared canonical contract.
-      - name: Contract tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154 + 154B + 154B-F1 + 154C)
+      - name: Contract tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154 + 154B + 154B-F1 + 154C + 154C-F3)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_waste_consolidation.py \
@@ -132,6 +132,7 @@ jobs:
             tests/test_pr_ads_154b_truth_readiness.py \
             tests/test_pr_ads_154b_f1_residual_truth_readiness.py \
             tests/test_pr_ads_154c_cross_page_parity.py \
+            tests/test_pr_ads_154c_f3_country_sql_and_revenue_gate.py \
             tests/test_pr_ads_129_roas_availability_geo_reconciliation.py -q
 
       - name: Full suite (known-failing-on-main deselected)

@@ -108,7 +108,12 @@ POPULATION = [D1, D2, D3, D4, D5]
 
 # Proven USD across the whole business: 10,000 + 4,000 + 25,000 + 1,000.
 # d4 is a won CUSTOMER whose value is unknown, so it is counted and not valued.
-ALL_SOURCE_REVENUE = 40000.0
+#
+# PR-ADS-154C-F3-F1 §2: this is the DIAGNOSTIC known-dollar sum, and it now lives
+# in `known_revenue_usd`. `revenue_usd` is the TOTAL, which is None here because
+# d4's amount was never proven — 40,000 plus an unknown amount is not a number.
+ALL_SOURCE_KNOWN_REVENUE = 40000.0
+ALL_SOURCE_REVENUE = ALL_SOURCE_KNOWN_REVENUE   # legacy alias, same figure
 ALL_SOURCE_WON_DEALS = 5
 
 
@@ -214,12 +219,16 @@ def test_2_business_total_consumers_agree_on_won_deals_and_revenue(monkeypatch):
     by_source = build_revenue_by_source(WINDOW, now=NOW)
 
     assert contract["won_deals"] == ALL_SOURCE_WON_DEALS
-    assert contract["revenue_usd"] == ALL_SOURCE_REVENUE
+    assert contract["known_revenue_usd"] == ALL_SOURCE_KNOWN_REVENUE
+    assert contract["revenue_usd"] is None      # one amount unproven
 
     # Deals page, mart top-line and Revenue by Source all report the SAME
     # business population — that agreement is the whole point of the cutover.
     assert deals["summary"]["deal_count"] == ALL_SOURCE_WON_DEALS
-    assert deals["summary"]["won_revenue"] == ALL_SOURCE_REVENUE
+    # PR-ADS-154C-F3-F1 §2: `won_revenue` is an executive TOTAL, so it is
+    # withheld while d4's amount is unproven. The proven sum is still
+    # reachable through the contract's `known_revenue_usd`, asserted above.
+    assert deals["summary"]["won_revenue"] is None
     assert mart["summary"]["customers"] == ALL_SOURCE_WON_DEALS
     recon = by_source["canonical_reconciliation"]
     assert recon["canonical_won_deals"] == ALL_SOURCE_WON_DEALS
@@ -245,8 +254,10 @@ def test_2_business_total_consumers_agree_on_won_deals_and_revenue(monkeypatch):
     assert (mart["summary"]["revenue_total_unavailable_reason"]
             == canonical_revenue.REASON_REVENUE_INCOMPLETE)
     assert mart["summary"]["currency_unavailable_deals"] == 1
-    # The partial sum still exists as a diagnostic; it is simply not the total.
-    assert contract["revenue_usd"] == ALL_SOURCE_REVENUE
+    # The proven sum still exists as a diagnostic; it is simply not the total,
+    # and since PR-ADS-154C-F3-F1 §2 it no longer occupies the total's field name.
+    assert contract["known_revenue_usd"] == ALL_SOURCE_KNOWN_REVENUE
+    assert contract["revenue_usd"] is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,7 +270,8 @@ def test_3_non_gclid_won_deals_are_in_all_source_totals():
     # d2, d3 and d5 have no GCLID at all and are still counted.
     without_gclid = [d for d in POPULATION if not d["gclid"]]
     assert len(without_gclid) == 3
-    assert summary["revenue_usd"] == ALL_SOURCE_REVENUE
+    assert summary["known_revenue_usd"] == ALL_SOURCE_KNOWN_REVENUE
+    assert summary["revenue_usd"] is None
 
 
 def test_4_gclid_attribution_is_a_strict_subset_of_all_source():
@@ -284,7 +296,10 @@ def test_5_missing_gclid_does_not_remove_a_deal_from_business_totals():
         POPULATION, revenue_scope.SCOPE_ALL_SOURCE)
     assert everything["won_deals"] > with_gclid["won_deals"]
     # The GCLID-less deals carry real money that must not vanish.
-    assert everything["revenue_usd"] > (with_gclid["revenue_usd"] or 0.0)
+    # Compared on the DIAGNOSTIC sum: both scopes contain d4, whose amount is
+    # unproven, so both totals are correctly None and a total-vs-total
+    # comparison would be comparing two unknowns.
+    assert everything["known_revenue_usd"] > (with_gclid["known_revenue_usd"] or 0.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -307,7 +322,8 @@ def test_7_unproven_currency_is_unavailable_never_zero():
     assert summary["currency_complete"] is False
     # d4 is a customer whose value is unknown: counted, never valued at $0.
     assert summary["won_deals"] == ALL_SOURCE_WON_DEALS
-    assert summary["revenue_usd"] == ALL_SOURCE_REVENUE
+    assert summary["known_revenue_usd"] == ALL_SOURCE_KNOWN_REVENUE
+    assert summary["revenue_usd"] is None
     row = canonical_revenue.deal_display_row(D4)
     assert row["revenue_usd"] is None
     assert row["currency_status"] == "unavailable"
@@ -704,7 +720,8 @@ def test_16_duplicate_deal_rows_cannot_duplicate_revenue():
     summary = canonical_revenue.summarize_deals(
         _dedupe_by_deal_id(doubled), revenue_scope.SCOPE_ALL_SOURCE)
     assert summary["won_deals"] == ALL_SOURCE_WON_DEALS
-    assert summary["revenue_usd"] == ALL_SOURCE_REVENUE
+    assert summary["known_revenue_usd"] == ALL_SOURCE_KNOWN_REVENUE
+    assert summary["revenue_usd"] is None
 
     # And the storage layer makes the duplicate impossible in the first place.
     schema = (_ROOT / "db" / "schema.py").read_text()
