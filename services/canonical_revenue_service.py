@@ -88,6 +88,10 @@ REASON_UNKNOWN_SCOPE = "unknown_scope"
 REASON_LEDGER_UNREADABLE = "canonical_ledger_unreadable"
 REASON_SYNC_STATE_UNREADABLE = "canonical_sync_state_unreadable"
 REASON_COVERAGE_NOT_PROVEN = "canonical_coverage_not_proven"
+#: Why a scope's revenue TOTAL is not publishable even though the population IS
+#: readable: a deal in it has no proven amount, so the total is unknown.
+REASON_REVENUE_INCOMPLETE = "canonical_revenue_amounts_incomplete"
+V_CURRENCY_UNPROVEN_DEALS = "currency_unproven_deals_in_population"
 
 ALL_UNAVAILABLE_REASONS = (
     REASON_UNKNOWN_WINDOW,
@@ -95,6 +99,10 @@ ALL_UNAVAILABLE_REASONS = (
     REASON_LEDGER_UNREADABLE,
     REASON_SYNC_STATE_UNREADABLE,
     REASON_COVERAGE_NOT_PROVEN,
+    # PR-ADS-154C-F3-F1 §4. A readable population whose TOTAL is unknown because
+    # a deal in it has no proven amount. Distinct from every reason above: those
+    # say the population could not be read, this one says it could.
+    REASON_REVENUE_INCOMPLETE,
 )
 
 
@@ -336,14 +344,27 @@ def summarize_deals(deals, scope=DEFAULT_SCOPE) -> dict:
         if row.get("association_status") == "lookup_failed":
             failed += 1
 
+    # PR-ADS-154C-F3-F1 §2. `revenue_usd` used to be the sum of the deals whose
+    # currency WAS proven, published as soon as one such deal existed — a
+    # partial known-dollar sum that read like a complete total and was consumed
+    # as one. The two facts are now separate fields and cannot be confused:
+    #
+    #   known_revenue_usd  the diagnostic: what the PROVEN deals are worth.
+    #                      Always a number when any amount was proven, and what
+    #                      reconciliation compares populations with.
+    #   revenue_usd        the TOTAL: None whenever any deal in scope has no
+    #                      proven amount, because then the total is unknown —
+    #                      not zero, not the sum of the rest.
+    #
+    # A total over zero proven deals is 0.0 only when there were also no
+    # unproven ones; otherwise every deal's value is unknown and so is the total.
+    known_revenue = (round(revenue, 2)
+                     if revenue_deals or not currency_unavailable else None)
     return {
         **scope_descriptor(scope),
         "won_deals": len(rows),
-        # A total over ZERO proven deals is 0.0 only when there were also no
-        # unproven ones; otherwise every deal's value is unknown and the total
-        # is unknown too, not $0.
-        "revenue_usd": (round(revenue, 2)
-                        if revenue_deals or not currency_unavailable else None),
+        "known_revenue_usd": known_revenue,
+        "revenue_usd": None if currency_unavailable else known_revenue,
         "revenue_deals": revenue_deals,
         "currency_unavailable_deals": currency_unavailable,
         "currency_complete": currency_unavailable == 0,
@@ -460,7 +481,21 @@ def get_scope_ladder(window=None, *, start=None, end=None, now=None,
         }
 
     deals = base.get("deals") or []
-    scopes = {s: summarize_deals(deals, s) for s in SCOPE_ORDER}
+    # PR-ADS-154C-F3-F1: every scope carries the publishable VERDICT, from
+    # `revenue_total_publishable`, beside its arithmetic. The ladder is what
+    # every ROAS and business-total consumer reads, so attaching the decision
+    # here is what makes it THE decision rather than a function that merely
+    # exists — the mart had grown a private copy of the same rule, which is the
+    # fifth copy of a rule this programme was consolidating.
+    scopes = {}
+    for s in SCOPE_ORDER:
+        summary = summarize_deals(deals, s)
+        verdict = revenue_total_publishable(base, s, summary=summary)
+        summary["revenue_total_available"] = verdict["publishable"]
+        summary["revenue_total_unavailable_reason"] = verdict["reason"]
+        summary["revenue_total_unavailable_detail"] = verdict["detail"]
+        summary["revenue_total_violation_codes"] = verdict["violation_codes"]
+        scopes[s] = summary
     return {
         "available": True,
         "reason": None,
@@ -574,12 +609,90 @@ def summable_revenue(row):
     return None
 
 
+def _revenue_total_verdict(summary: dict, scope) -> dict:
+    """THE rule, over one already-aggregated scope summary.
+
+    Split out so :func:`revenue_total_publishable` and :func:`get_scope_ladder`
+    share one implementation rather than one calling the other's shape back into
+    existence. Every publishable verdict in the codebase comes from here.
+    """
+    unproven = summary.get("currency_unavailable_deals") or 0
+    if unproven:
+        return {
+            "publishable": False,
+            "reason": REASON_REVENUE_INCOMPLETE,
+            "detail": (
+                f"{unproven} of {summary.get('won_deals')} closed-won deal(s) in "
+                f"scope '{summary.get('scope', scope)}' have no proven amount, so "
+                "the window total is unknown — the sum of the rest is a partial "
+                "figure and is not published as the total"),
+            "violation_codes": [V_CURRENCY_UNPROVEN_DEALS],
+            "currency_unavailable_deals": unproven,
+        }
+    return {
+        "publishable": True,
+        "reason": None,
+        "detail": None,
+        "violation_codes": [],
+        "currency_unavailable_deals": 0,
+    }
+
+
+def revenue_total_publishable(base: dict, scope=DEFAULT_SCOPE, *,
+                              summary: dict | None = None) -> dict:
+    """THE one decision: may a production page publish this scope's revenue total?
+
+    PR-ADS-154C-F3. Two conditions, and the second was the live defect.
+
+    **1. The population must be available.** A page must never publish revenue
+    when :func:`load_won_deals` refused to release the population.
+
+    **2. Every deal in it must have a proven amount.** ``summarize_deals``
+    returns ``revenue_usd`` as the sum of the deals whose currency WAS proven —
+    a partial known-dollar sum — whenever at least one such deal exists. Over a
+    population holding 181 won deals of which one has no proven amount, that is
+    a number smaller than the truth, published under the heading "Closed-Won
+    Revenue" with ``truth_status: ready``.
+
+    Channels, Campaigns, Countries and Deals already refused it, each with its
+    own "never a partial sum implying completeness" rule; the mart, Overview and
+    Revenue did not, which is precisely why All Time showed
+    ``$878,324.80`` on three pages and ``unavailable`` on four. One rule, applied
+    once, replaces four private copies and the mart's silent exception.
+
+    Returns ``{publishable, reason, detail, violation_codes, currency_unavailable_deals}``.
+    ``publishable`` False means the total is UNKNOWN — never zero, never partial.
+
+    The COUNT is deliberately not governed here. ``won_deals`` is complete
+    whatever the amounts are, so a page may keep publishing customers while
+    withholding revenue; blanking a count we did measure would be its own
+    fabrication.
+
+    ``summary`` lets a caller that has already aggregated this scope — the scope
+    ladder does, for every scope — pass it in rather than have it recomputed.
+    The rule applied is identical either way; only the arithmetic is reused.
+    """
+    if not base.get("available"):
+        return {
+            "publishable": False,
+            "reason": base.get("reason") or REASON_LEDGER_UNREADABLE,
+            "detail": base.get("detail"),
+            "violation_codes": sorted(base.get("violation_codes") or []),
+            "currency_unavailable_deals": None,
+        }
+
+    if summary is None:
+        summary = summarize_deals(base.get("deals") or [], scope)
+    return _revenue_total_verdict(summary, scope)
+
+
 __all__ = [
     "CANONICAL_SOURCE", "SUMMABLE_CURRENCY_STATUSES",
     "REASON_UNKNOWN_WINDOW", "REASON_UNKNOWN_SCOPE",
     "REASON_LEDGER_UNREADABLE", "REASON_SYNC_STATE_UNREADABLE",
-    "REASON_COVERAGE_NOT_PROVEN", "ALL_UNAVAILABLE_REASONS",
+    "REASON_COVERAGE_NOT_PROVEN", "REASON_REVENUE_INCOMPLETE",
+    "V_CURRENCY_UNPROVEN_DEALS", "ALL_UNAVAILABLE_REASONS",
     "unavailable", "load_won_deals", "summarize_deals", "build_snapshot",
     "get_revenue_snapshot", "get_scope_ladder", "deal_display_row",
-    "canonical_deal_rows", "summable_revenue",
+    "canonical_deal_rows", "summable_revenue", "revenue_total_publishable",
 ]

@@ -274,7 +274,32 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
     ladder = core.get("attribution_coverage") or {}
     scopes = ladder.get("scopes") or {}
     all_source = scopes.get(revenue_scope.SCOPE_ALL_SOURCE) or {}
+    attributed = scopes.get(revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE) or {}
     ladder_available = bool(ladder.get("available"))
+
+    # PR-ADS-154C-F3. `summarize_deals` returns the sum of the deals whose
+    # currency WAS proven as soon as at least one such deal exists. Over a
+    # population holding one deal with no proven amount, that is a partial figure
+    # — smaller than the truth — and the mart published it as the business total
+    # under `truth_status: ready`. Channels, Campaigns, Countries and Deals each
+    # already refused a partial sum; the mart, and therefore the Overview and
+    # Revenue pages that read it, were the exception. That is how All Time came
+    # to show $878,324.80 on three pages and "unavailable" on four.
+    #
+    # PR-ADS-154C-F3-F1: the verdict is READ from the scope ladder, which gets it
+    # from `canonical_revenue_service.revenue_total_publishable`. The first cut
+    # of this fix re-derived the same condition here — a fifth private copy of
+    # the rule the shared function existed to consolidate, and the exact shape of
+    # drift that let the mart diverge from four other consumers in the first
+    # place. The mart now decides nothing about revenue completeness.
+    #
+    # The COUNT is unaffected: `won_deals` is complete whatever the amounts are,
+    # so customers stay published. Blanking a count we did measure would be its
+    # own fabrication.
+    all_source_revenue_ok = bool(ladder_available
+                                 and all_source.get("revenue_total_available"))
+    attributed_revenue_ok = bool(ladder_available
+                                 and attributed.get("revenue_total_available"))
     # spend_usd is STRICTLY the canonical USD spend. We never fall back to the
     # revenue-attribution summary["spend"], which is the native diagnostic figure
     # (GBP) whenever FX is incomplete — labelling native GBP as USD would be a
@@ -289,19 +314,38 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
         # Business totals — all_source. None (not 0) when the canonical ledger
         # could not be read or its coverage is unproven.
         "customers": all_source.get("won_deals") if ladder_available else None,
-        "won_revenue_usd": all_source.get("revenue_usd") if ladder_available else None,
+        "won_revenue_usd": all_source.get("revenue_usd") if all_source_revenue_ok else None,
         "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
         "revenue_source": canonical_revenue.CANONICAL_SOURCE,
         "revenue_available": ladder_available,
+        # Separate from `revenue_available`: the POPULATION can be readable while
+        # its total is unknown because a deal in it has no proven amount.
+        "revenue_total_available": all_source_revenue_ok,
+        "attributed_revenue_total_available": attributed_revenue_ok,
+        # The reason comes from the ladder's verdict too, so the mart cannot
+        # describe a refusal it did not make.
+        "revenue_total_unavailable_reason": (
+            None if all_source_revenue_ok else (
+                all_source.get("revenue_total_unavailable_reason")
+                if ladder_available else ladder.get("reason"))),
+        # PR-ADS-154C-F3-F1 §4: the machine-readable half of the same refusal,
+        # from the canonical helper. Every page that withholds revenue republishes
+        # these rather than inventing its own vocabulary for one decision.
+        "revenue_total_violation_codes": (
+            [] if all_source_revenue_ok else (
+                all_source.get("revenue_total_violation_codes") or []
+                if ladder_available else sorted(ladder.get("violation_codes") or []))),
         "currency_unavailable_deals": (all_source.get("currency_unavailable_deals")
                                        if ladder_available else None),
         "ambiguous_associations": (all_source.get("ambiguous_associations")
                                    if ladder_available else None),
         "failed_associations": (all_source.get("failed_associations")
                                 if ladder_available else None),
-        # Advertising subset — the ROAS numerator and its scope.
+        # Advertising subset — the ROAS numerator and its scope. Same rule: a
+        # partial sum is not the subset's total either.
         "attributed_customers": summary.get("customers"),
-        "attributed_won_revenue_usd": _round2(summary.get("won_revenue")),
+        "attributed_won_revenue_usd": (_round2(summary.get("won_revenue"))
+                                       if attributed_revenue_ok else None),
         "attributed_revenue_scope": revenue_scope.SCOPE_CAMPAIGN_ATTRIBUTABLE,
         "roas": summary.get("roas"),
     }
@@ -583,12 +627,20 @@ def build_revenue_decision_mart(
                                   if spend_truth.get("campaign_spend_status") == "verified"
                                   else canonical_contract.TRUTH_NOT_READY),
                  "customer_id": spend_truth.get("customer_id")},
+                # PR-ADS-154C-F3: the REVENUE contract follows
+                # `revenue_total_available`, not `revenue_available`. The
+                # population can be readable while its total is unknown because
+                # a deal in it has no proven amount — and a `ready` contract over
+                # a withheld figure is the contradiction the parity audit exists
+                # to catch.
                 {"metric": "closed_won_revenue_usd",
                  "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
                  "scope": "all_source_business_revenue",
                  "truth_status": (canonical_contract.TRUTH_READY
-                                  if summary.get("revenue_available")
-                                  else canonical_contract.TRUTH_NOT_READY)},
+                                  if summary.get("revenue_total_available")
+                                  else canonical_contract.TRUTH_NOT_READY),
+                 "unavailable_reason": summary.get("revenue_total_unavailable_reason"),
+                 "violation_codes": summary.get("revenue_total_violation_codes")},
                 {"metric": "customers",
                  "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
                  "scope": "all_source_business_revenue",

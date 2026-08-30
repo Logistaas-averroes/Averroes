@@ -150,32 +150,37 @@ def build_unit_economics(window: str = "current_quarter",
         base.get("deals"), revenue_scope.SCOPE_ALL_SOURCE)
     scoped = canonical_revenue.summarize_deals(base.get("deals"), scope)
 
+    # PR-ADS-154C-F3-F1 §2. `revenue_usd` is now the TOTAL — None whenever any
+    # deal in scope has no proven amount — and `known_revenue_usd` is the
+    # diagnostic sum of the proven ones. This page publishes both, so a reader
+    # can see the proven figure without it standing in for a total nobody knows.
+    _SCOPE_FIELDS = (
+        "scope", "scope_label", "won_deals", "revenue_usd", "known_revenue_usd",
+        "revenue_deals", "currency_unavailable_deals", "currency_complete",
+        "ambiguous_associations", "failed_associations")
+
     business = {
-        **{k: all_source[k] for k in (
-            "scope", "scope_label", "won_deals", "revenue_usd", "revenue_deals",
-            "currency_unavailable_deals", "currency_complete",
-            "ambiguous_associations", "failed_associations")},
+        **{k: all_source[k] for k in _SCOPE_FIELDS},
         # Average deal value divides by the deals whose value was PROVEN, not by
         # every won deal — dividing proven revenue by an unproven-inclusive count
-        # would report an average lower than any real deal.
-        "avg_deal_value_usd": _avg(all_source["revenue_usd"],
+        # would report an average lower than any real deal. It is therefore the
+        # one place the proven sum is the right numerator.
+        "avg_deal_value_usd": _avg(all_source["known_revenue_usd"],
                                    all_source["revenue_deals"]),
     }
 
     customers = scoped["won_deals"]
     cac = compute_cac(spend_usd, customers) if spend_usd is not None else None
     advertising = {
-        **{k: scoped[k] for k in (
-            "scope", "scope_label", "won_deals", "revenue_usd", "revenue_deals",
-            "currency_unavailable_deals", "currency_complete",
-            "ambiguous_associations", "failed_associations")},
+        **{k: scoped[k] for k in _SCOPE_FIELDS},
         "customers": customers,
         "spend_usd": spend_usd,
         "spend_state": spend_truth.get("state"),
         "cac": round(cac, 2) if cac else None,
         "roas": (round(scoped["revenue_usd"] / spend_usd, 2)
                  if (spend_usd and scoped["revenue_usd"] is not None) else None),
-        "avg_deal_value_usd": _avg(scoped["revenue_usd"], scoped["revenue_deals"]),
+        "avg_deal_value_usd": _avg(scoped["known_revenue_usd"],
+                                   scoped["revenue_deals"]),
         # Every metric below needs per-deal recurring revenue.
         "ltv_to_cac": None,
         "payback_months": None,

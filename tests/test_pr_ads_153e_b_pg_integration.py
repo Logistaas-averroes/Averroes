@@ -261,7 +261,11 @@ def test_unproven_currency_round_trips_as_null_never_zero(pg):
     snapshot = canonical_revenue.get_revenue_snapshot(
         "all_time", now=NOW, include_deals=True)
     assert snapshot["won_deals"] == 2                    # both are customers
-    assert snapshot["revenue_usd"] == 250.0              # only one has a value
+    # PR-ADS-154C-F3-F1 §2: only one deal has a value, so the proven sum is 250
+    # and the window TOTAL is unknown — not 250, which would understate it by an
+    # unknown amount, and not 0.
+    assert snapshot["known_revenue_usd"] == 250.0
+    assert snapshot["revenue_usd"] is None
     assert snapshot["currency_unavailable_deals"] == 1
     unproven = next(d for d in snapshot["deals"] if d["deal_id"] == "unproven")
     assert unproven["revenue_usd"] is None

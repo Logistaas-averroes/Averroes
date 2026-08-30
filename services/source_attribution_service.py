@@ -463,7 +463,11 @@ def build_revenue_by_source(window: str, now: datetime | None = None) -> dict:
     displayed_customers = sum(g["customers"] for g in groups)
     displayed_revenue = round(
         sum(g["won_revenue"] for g in groups if g["won_revenue"] is not None), 2)
-    canonical_revenue_usd = canonical_totals["revenue_usd"]
+    # PR-ADS-154C-F3-F1 §2: reconciliation compares what the buckets DISPLAY
+    # against what the canonical population proves, so it wants the
+    # diagnostic known-dollar sum — the same figure it always used, now
+    # under a name that cannot be mistaken for a complete total.
+    canonical_revenue_usd = canonical_totals["known_revenue_usd"]
     reconciliation = {
         "scope": revenue_scope.SCOPE_ALL_SOURCE,
         "source": canonical_revenue.CANONICAL_SOURCE,

@@ -563,6 +563,13 @@ def _build_kpis(country_rows: list, residual: dict, spend_truth: dict,
                                   "currency": spend_truth.get("native_currency") or "GBP"},
         "verified_spend_usd": verified_usd,
         "sqls": total_sqls,
+        # PR-ADS-154C-F3: name the population. This is the sum over REAL country
+        # rows; the SQLs that could not be assigned to a country are in
+        # `residual.sqls`, and the two together are the campaign-attributable
+        # total. Without this the KPI reads as "SQLs" and is quietly a subset —
+        # the same trap the Overview closed with `sqls_scope` in PR-ADS-152.
+        "sqls_scope": "country_attributed_sqls",
+        "sqls_residual": residual.get("sqls"),
         "customers": total_customers,
         "won_revenue_usd": total_won,
         "geo_roas": geo_roas,
@@ -1039,12 +1046,33 @@ def build_dashboard_countries(window: str = "current_quarter",
                           if (_geo_ready and kpis.get("verified_spend_usd") is not None)
                           else canonical_contract.TRUTH_NOT_READY),
          "customer_id": spend_truth.get("customer_id")},
-        {"metric": "campaign_attributable_sqls",
+        # PR-ADS-154C-F3: this page's SQL headline is the REAL-COUNTRY total —
+        # 14 against the mart's 16 in the production quarter — because the SQLs
+        # it could not assign to a country are held in the residual below, never
+        # spread across countries. Declaring it `campaign_attributable_sqls` said
+        # a subset was the whole population, and the parity audit correctly
+        # reported the difference as a mismatch between two numbers that were
+        # both right about different questions.
+        # PR-ADS-154C-F3-F1 §3: these SQLs come from the canonical lead
+        # population the DECISION MART aggregates, partitioned by country
+        # assignment. Geo decides which side of the partition an SQL falls on;
+        # it does not produce the SQL, so naming it as the source misstated the
+        # data's origin. Geo coverage stays a prerequisite in the audit's
+        # `coverage_proof`, where a prerequisite belongs.
+        {"metric": "country_attributed_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
-         "scope": "campaign_attributable_sqls",
+         "scope": "country_attributed_sqls",
          "truth_status": (canonical_contract.TRUTH_READY
                           if kpis.get("sqls") is not None
-                          else canonical_contract.TRUTH_NOT_READY)},
+                          else canonical_contract.TRUTH_NOT_READY),
+         "customer_id": spend_truth.get("customer_id")},
+        {"metric": "country_unattributed_residual_sqls",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "country_unattributed_residual_sqls",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if residual.get("sqls") is not None
+                          else canonical_contract.TRUTH_NOT_READY),
+         "customer_id": spend_truth.get("customer_id")},
     ])
 
     return {

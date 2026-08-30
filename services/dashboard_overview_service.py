@@ -974,7 +974,14 @@ def build_dashboard_overview(window: str = "current_quarter",
         "end_date": window_block.get("end_date"), "timezone": window_block.get("timezone"),
     }
     _spend_ready = (spend_truth.get("campaign_spend_status") == "verified")
-    _revenue_ready = bool((mart.get("summary") or {}).get("revenue_available"))
+    # PR-ADS-154C-F3: the population being readable (`revenue_available`) and its
+    # TOTAL being known (`revenue_total_available`) are different facts. The count
+    # is complete whatever the amounts are; the total is not, when any deal's
+    # currency was never proven. Two flags, so a withheld total can never be
+    # published under a `ready` contract.
+    _mart_summary = mart.get("summary") or {}
+    _population_ready = bool(_mart_summary.get("revenue_available"))
+    _revenue_ready = bool(_mart_summary.get("revenue_total_available"))
     # The mart's lead/SQL population is withheld wholesale when the business event
     # date is unsafe, so "did it publish a count" is the readiness question.
     _lead_ready = (summary.get("leads") is not None or summary.get("sqls") is not None)
@@ -995,11 +1002,13 @@ def build_dashboard_overview(window: str = "current_quarter",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "all_source_business_revenue",
          "truth_status": (canonical_contract.TRUTH_READY if _revenue_ready
-                          else canonical_contract.TRUTH_NOT_READY)},
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": _mart_summary.get("revenue_total_unavailable_reason"),
+         "violation_codes": _mart_summary.get("revenue_total_violation_codes")},
         {"metric": "customers",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "all_source_business_revenue",
-         "truth_status": (canonical_contract.TRUTH_READY if _revenue_ready
+         "truth_status": (canonical_contract.TRUTH_READY if _population_ready
                           else canonical_contract.TRUTH_NOT_READY)},
         {"metric": "campaign_attributable_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
