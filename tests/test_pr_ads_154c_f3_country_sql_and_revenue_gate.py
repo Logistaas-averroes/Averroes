@@ -35,6 +35,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from services import canonical_contract as contract_mod  # noqa: E402
+from analysis import revenue_scope  # noqa: E402
 from services import canonical_revenue_service as canonical_revenue  # noqa: E402
 from services import cross_page_parity_service as parity  # noqa: E402
 from tests.canonical_ledger_fixtures import (  # noqa: E402
@@ -747,3 +748,165 @@ def test_f3_27_both_formats_against_the_six_required_fixtures(monkeypatch, capsy
     p, t = _cli_both_formats(monkeypatch, capsys, "6. deliberate fallback attempt", mutate=fallback)
     assert "legacy_source_supplied_production_total" in p["violation_codes"]
     assert "legacy_source_supplied_production_total" in t
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-154C-F3-F1 — the shared decision is the PRODUCTION decision
+#
+# The first cut of F3 added `revenue_total_publishable` and then did not call
+# it: `get_scope_ladder` never consulted it, and the mart re-derived the same
+# condition in a private `_revenue_complete`. A shared rule nobody calls is a
+# fifth copy of the rule, not a consolidation of the other four — and drift
+# between copies is what let the mart diverge from Channels, Campaigns,
+# Countries and Deals in the first place.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_f3f1_1_the_scope_ladder_carries_the_publishable_verdict(monkeypatch):
+    """Every scope states whether its total may be published, and why not."""
+    _patch_durable(monkeypatch)
+    patch_canonical_ledger(monkeypatch, [_deal(0), _deal(1), _deal(2, amount=None)])
+
+    base = canonical_revenue.load_won_deals("all_time", now=NOW)
+    ladder = canonical_revenue.get_scope_ladder(base=base)
+    assert ladder["available"] is True
+
+    for scope, block in ladder["scopes"].items():
+        assert "revenue_total_publishable" in block, scope
+        # The verdict must equal what the public function says for that scope —
+        # one rule, not two that happen to agree today.
+        expected = canonical_revenue.revenue_total_publishable(base, scope)
+        assert block["revenue_total_publishable"] == expected["publishable"], scope
+        assert block["revenue_total_unavailable_reason"] == expected["reason"], scope
+        assert block["revenue_total_violation_codes"] == expected["violation_codes"], scope
+
+    all_source = ladder["scopes"][revenue_scope.SCOPE_ALL_SOURCE]
+    assert all_source["revenue_total_publishable"] is False
+    assert (all_source["revenue_total_unavailable_reason"]
+            == canonical_revenue.REASON_REVENUE_INCOMPLETE)
+    assert all_source["revenue_total_violation_codes"] == [
+        canonical_revenue.V_CURRENCY_UNPROVEN_DEALS]
+    # The arithmetic is untouched: the partial sum is still reported beside it.
+    assert all_source["revenue_usd"] == 2000.0
+    assert all_source["currency_unavailable_deals"] == 1
+
+
+def test_f3f1_2_a_complete_population_publishes_on_every_scope(monkeypatch):
+    """The control — no scope withholds when every amount is proven."""
+    _patch_durable(monkeypatch)
+    patch_canonical_ledger(monkeypatch, [_deal(0), _deal(1)])
+    ladder = canonical_revenue.get_scope_ladder(
+        base=canonical_revenue.load_won_deals("all_time", now=NOW))
+    assert all(b["revenue_total_publishable"] is True
+               for b in ladder["scopes"].values()), ladder["scopes"]
+    assert all(b["revenue_total_unavailable_reason"] is None
+               for b in ladder["scopes"].values())
+
+
+def test_f3f1_3_the_mart_reads_the_verdict_rather_than_re_deriving_it(monkeypatch):
+    """Flip ONLY the ladder's verdict and the mart must follow it.
+
+    The arithmetic is left saying the total is fine, so a mart that recomputed
+    completeness from `currency_unavailable_deals` would publish the figure and
+    fail here. This is the test the private `_revenue_complete` would not pass.
+    """
+    _patch_durable(monkeypatch)
+    patch_canonical_ledger(monkeypatch, [_deal(0), _deal(1)])
+
+    real_ladder = canonical_revenue.get_scope_ladder
+
+    def withheld(*a, **kw):
+        ladder = real_ladder(*a, **kw)
+        for block in (ladder.get("scopes") or {}).values():
+            block["revenue_total_publishable"] = False
+            block["revenue_total_unavailable_reason"] = "a_reason_only_the_ladder_knows"
+            # Deliberately left consistent-looking: zero unproven amounts.
+            block["currency_unavailable_deals"] = 0
+        return ladder
+    monkeypatch.setattr(canonical_revenue, "get_scope_ladder", withheld)
+
+    from services.revenue_decision_mart import build_revenue_decision_mart
+    summary = build_revenue_decision_mart(
+        window="all_time", view="campaign", now=NOW)["summary"]
+
+    assert summary["won_revenue_usd"] is None
+    assert summary["attributed_won_revenue_usd"] is None
+    assert summary["revenue_total_available"] is False
+    assert summary["revenue_total_unavailable_reason"] == "a_reason_only_the_ladder_knows"
+    assert summary["customers"] == 2          # the count is not governed by it
+
+
+#: Production modules that read `currency_unavailable_deals`, and what each does
+#: with it. DISCLOSURE means it copies the count into a response so a reader can
+#: see how big the gap is; DECISION means it decides whether a revenue total may
+#: be published. Exactly one module is allowed to make the decision.
+#:
+#: A new reader has to be classified here, which is the point: the mart's private
+#: `_revenue_complete` was a DECISION that nobody had to declare.
+_COUNT_READERS = {
+    "services/canonical_revenue_service.py": "decision",
+    "services/revenue_decision_mart.py": "disclosure",
+    "services/canonical_unit_economics_service.py": "disclosure",
+    "services/revenue_attribution_service.py": "disclosure",
+    "services/source_attribution_service.py": "disclosure",
+}
+
+
+def test_f3f1_4_only_one_module_decides_revenue_completeness():
+    """The static guard, anchored on the field the rule is made of.
+
+    Copying the count into a response is fine and several pages do it. Deciding
+    from it whether to publish a total is what may happen in exactly one place,
+    and a module that starts doing so has to be reclassified here first.
+    """
+    unregistered = []
+    for f in _production_files():
+        rel = str(f.relative_to(_ROOT))
+        tree = ast.parse(f.read_text())
+        if any(isinstance(n, ast.Constant)
+               and n.value == "currency_unavailable_deals" for n in ast.walk(tree)):
+            if rel not in _COUNT_READERS:
+                unregistered.append(rel)
+    assert not unregistered, (
+        "these modules read `currency_unavailable_deals` without being "
+        "classified as disclosure or decision: " + ", ".join(unregistered))
+    assert [k for k, v in _COUNT_READERS.items() if v == "decision"] == [
+        "services/canonical_revenue_service.py"]
+
+    # Every module classified `disclosure` must be exactly that: no branch may
+    # test the raw count. This is what the mart's `_revenue_complete` did.
+    for rel, kind in _COUNT_READERS.items():
+        if kind != "disclosure":
+            continue
+        tree = ast.parse((_ROOT / rel).read_text())
+        for node in ast.walk(tree):
+            # Only the CONDITION, never the branch bodies. `x.get("currency_
+            # unavailable_deals") if available else None` is disclosure guarded
+            # by availability, which is exactly what a page should do.
+            if isinstance(node, (ast.If, ast.IfExp)):
+                tests = [node.test]
+            elif isinstance(node, ast.BoolOp):
+                tests = list(node.values)
+            else:
+                continue
+            names = {n.value for t in tests for n in ast.walk(t)
+                     if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+            assert "currency_unavailable_deals" not in names, (
+                f"{rel}:{node.lineno} branches on the raw count instead of "
+                "reading the ladder's `revenue_total_publishable` verdict")
+
+
+def test_f3f1_5_the_public_function_and_the_ladder_cannot_drift():
+    """One implementation, structurally: both paths reach `_revenue_total_verdict`."""
+    tree = ast.parse((_ROOT / "services" / "canonical_revenue_service.py").read_text())
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+    called_by_public = {getattr(c.func, "id", getattr(c.func, "attr", None))
+                        for c in ast.walk(fns["revenue_total_publishable"])
+                        if isinstance(c, ast.Call)}
+    assert "_revenue_total_verdict" in called_by_public
+
+    called_by_ladder = {getattr(c.func, "id", getattr(c.func, "attr", None))
+                        for c in ast.walk(fns["get_scope_ladder"])
+                        if isinstance(c, ast.Call)}
+    assert "revenue_total_publishable" in called_by_ladder, (
+        "get_scope_ladder must consult the shared decision, not describe it")

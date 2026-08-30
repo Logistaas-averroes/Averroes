@@ -460,7 +460,21 @@ def get_scope_ladder(window=None, *, start=None, end=None, now=None,
         }
 
     deals = base.get("deals") or []
-    scopes = {s: summarize_deals(deals, s) for s in SCOPE_ORDER}
+    # PR-ADS-154C-F3-F1: every scope carries the publishable VERDICT, from
+    # `revenue_total_publishable`, beside its arithmetic. The ladder is what
+    # every ROAS and business-total consumer reads, so attaching the decision
+    # here is what makes it THE decision rather than a function that merely
+    # exists — the mart had grown a private copy of the same rule, which is the
+    # fifth copy of a rule this programme was consolidating.
+    scopes = {}
+    for s in SCOPE_ORDER:
+        summary = summarize_deals(deals, s)
+        verdict = revenue_total_publishable(base, s, summary=summary)
+        summary["revenue_total_publishable"] = verdict["publishable"]
+        summary["revenue_total_unavailable_reason"] = verdict["reason"]
+        summary["revenue_total_unavailable_detail"] = verdict["detail"]
+        summary["revenue_total_violation_codes"] = verdict["violation_codes"]
+        scopes[s] = summary
     return {
         "available": True,
         "reason": None,
@@ -579,7 +593,37 @@ REASON_REVENUE_INCOMPLETE = "canonical_revenue_amounts_incomplete"
 V_CURRENCY_UNPROVEN_DEALS = "currency_unproven_deals_in_population"
 
 
-def revenue_total_publishable(base: dict, scope=DEFAULT_SCOPE) -> dict:
+def _revenue_total_verdict(summary: dict, scope) -> dict:
+    """THE rule, over one already-aggregated scope summary.
+
+    Split out so :func:`revenue_total_publishable` and :func:`get_scope_ladder`
+    share one implementation rather than one calling the other's shape back into
+    existence. Every publishable verdict in the codebase comes from here.
+    """
+    unproven = summary.get("currency_unavailable_deals") or 0
+    if unproven:
+        return {
+            "publishable": False,
+            "reason": REASON_REVENUE_INCOMPLETE,
+            "detail": (
+                f"{unproven} of {summary.get('won_deals')} closed-won deal(s) in "
+                f"scope '{summary.get('scope', scope)}' have no proven amount, so "
+                "the window total is unknown — the sum of the rest is a partial "
+                "figure and is not published as the total"),
+            "violation_codes": [V_CURRENCY_UNPROVEN_DEALS],
+            "currency_unavailable_deals": unproven,
+        }
+    return {
+        "publishable": True,
+        "reason": None,
+        "detail": None,
+        "violation_codes": [],
+        "currency_unavailable_deals": 0,
+    }
+
+
+def revenue_total_publishable(base: dict, scope=DEFAULT_SCOPE, *,
+                              summary: dict | None = None) -> dict:
     """THE one decision: may a production page publish this scope's revenue total?
 
     PR-ADS-154C-F3. Two conditions, and the second was the live defect.
@@ -607,6 +651,10 @@ def revenue_total_publishable(base: dict, scope=DEFAULT_SCOPE) -> dict:
     whatever the amounts are, so a page may keep publishing customers while
     withholding revenue; blanking a count we did measure would be its own
     fabrication.
+
+    ``summary`` lets a caller that has already aggregated this scope — the scope
+    ladder does, for every scope — pass it in rather than have it recomputed.
+    The rule applied is identical either way; only the arithmetic is reused.
     """
     if not base.get("available"):
         return {
@@ -617,28 +665,9 @@ def revenue_total_publishable(base: dict, scope=DEFAULT_SCOPE) -> dict:
             "currency_unavailable_deals": None,
         }
 
-    summary = summarize_deals(base.get("deals") or [], scope)
-    unproven = summary.get("currency_unavailable_deals") or 0
-    if unproven:
-        return {
-            "publishable": False,
-            "reason": REASON_REVENUE_INCOMPLETE,
-            "detail": (
-                f"{unproven} of {summary.get('won_deals')} closed-won deal(s) in "
-                f"scope '{summary.get('scope', scope)}' have no proven amount, so "
-                "the window total is unknown — the sum of the rest is a partial "
-                "figure and is not published as the total"),
-            "violation_codes": [V_CURRENCY_UNPROVEN_DEALS],
-            "currency_unavailable_deals": unproven,
-        }
-
-    return {
-        "publishable": True,
-        "reason": None,
-        "detail": None,
-        "violation_codes": [],
-        "currency_unavailable_deals": 0,
-    }
+    if summary is None:
+        summary = summarize_deals(base.get("deals") or [], scope)
+    return _revenue_total_verdict(summary, scope)
 
 
 __all__ = [

@@ -286,14 +286,20 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
     # Revenue pages that read it, were the exception. That is how All Time came
     # to show $878,324.80 on three pages and "unavailable" on four.
     #
+    # PR-ADS-154C-F3-F1: the verdict is READ from the scope ladder, which gets it
+    # from `canonical_revenue_service.revenue_total_publishable`. The first cut
+    # of this fix re-derived the same condition here — a fifth private copy of
+    # the rule the shared function existed to consolidate, and the exact shape of
+    # drift that let the mart diverge from four other consumers in the first
+    # place. The mart now decides nothing about revenue completeness.
+    #
     # The COUNT is unaffected: `won_deals` is complete whatever the amounts are,
     # so customers stay published. Blanking a count we did measure would be its
     # own fabrication.
-    def _revenue_complete(block: dict) -> bool:
-        return ladder_available and not (block.get("currency_unavailable_deals") or 0)
-
-    all_source_revenue_ok = _revenue_complete(all_source)
-    attributed_revenue_ok = _revenue_complete(attributed)
+    all_source_revenue_ok = bool(ladder_available
+                                 and all_source.get("revenue_total_publishable"))
+    attributed_revenue_ok = bool(ladder_available
+                                 and attributed.get("revenue_total_publishable"))
     # spend_usd is STRICTLY the canonical USD spend. We never fall back to the
     # revenue-attribution summary["spend"], which is the native diagnostic figure
     # (GBP) whenever FX is incomplete — labelling native GBP as USD would be a
@@ -316,10 +322,12 @@ def _summary_block(core: dict, spend_truth: dict) -> dict:
         # its total is unknown because a deal in it has no proven amount.
         "revenue_total_available": all_source_revenue_ok,
         "attributed_revenue_total_available": attributed_revenue_ok,
+        # The reason comes from the ladder's verdict too, so the mart cannot
+        # describe a refusal it did not make.
         "revenue_total_unavailable_reason": (
             None if all_source_revenue_ok else (
-                canonical_revenue.REASON_REVENUE_INCOMPLETE if ladder_available
-                else ladder.get("reason"))),
+                all_source.get("revenue_total_unavailable_reason")
+                if ladder_available else ladder.get("reason"))),
         "currency_unavailable_deals": (all_source.get("currency_unavailable_deals")
                                        if ladder_available else None),
         "ambiguous_associations": (all_source.get("ambiguous_associations")
