@@ -44,6 +44,71 @@ _TIMESTAMP_FIELDS = (
     "date_entered_sql", "date_entered_opportunity", "date_entered_customer",
 )
 
+# ── PR-ADS-155 §4 — stage dates recovered from HubSpot property history ──────
+# `hubspot_contact_funnel.date_entered_*` is owned by the contact sync, whose
+# upsert refreshes every column from the newest HubSpot read. A recovered
+# timestamp stored there would be erased by the next incremental sync, because
+# HubSpot still returns null for the property it was recovered for. Recovery
+# therefore lives in its own table and is COALESCED in here, at the one read
+# every funnel consumer goes through.
+#
+# The base column always wins. Property history is consulted only where HubSpot's
+# own `hs_v2_date_entered_*` property is absent, so recovery can fill a gap and
+# can never overwrite a primary fact.
+#
+# Every row also reports WHICH source supplied each date
+# (`date_entered_*_from_history`), so a recovered timestamp is never
+# indistinguishable from a directly-read one downstream.
+RECOVERY_TABLE = "hubspot_lifecycle_stage_history"
+
+
+def _recovery_join() -> str:
+    """A per-contact pivot of the recovery table, one column per funnel event.
+
+    ``MAX`` over a ``UNIQUE (contact_id, funnel_event)`` table is a formality —
+    there is at most one row per pair — but it keeps the pivot valid if that
+    constraint is ever relaxed, rather than silently multiplying contact rows.
+    """
+    cols = ",\n                       ".join(
+        f"MAX(entered_at) FILTER (WHERE funnel_event = '{e}') "
+        f"AS recovered_{EVENT_DATE_COLUMN[e]}"
+        for e in FUNNEL_EVENTS
+    )
+    return f"""
+        LEFT JOIN (
+            SELECT contact_id,
+                   {cols}
+            FROM {RECOVERY_TABLE}
+            GROUP BY contact_id
+        ) h ON h.contact_id = f.contact_id
+    """
+
+
+def _funnel_select() -> str:
+    """The canonical projection: base columns, with stage dates coalesced."""
+    date_cols = {EVENT_DATE_COLUMN[e] for e in FUNNEL_EVENTS}
+    parts = []
+    for col in _FUNNEL_COLUMNS:
+        if col in date_cols:
+            parts.append(f"COALESCE(f.{col}, h.recovered_{col}) AS {col}")
+            parts.append(
+                f"(f.{col} IS NULL AND h.recovered_{col} IS NOT NULL) "
+                f"AS {col}_from_history")
+        else:
+            parts.append(f"f.{col}")
+    return ", ".join(parts)
+
+
+def _effective_date_sql(event) -> str:
+    """The stage-entry expression a window predicate must filter on.
+
+    The predicate and the projection must use the SAME expression. Filtering on
+    the base column while selecting the coalesced one would return a contact's
+    recovered date but decide its window membership without it.
+    """
+    col = EVENT_DATE_COLUMN[event]
+    return f"COALESCE(f.{col}, h.recovered_{col})"
+
 
 def _rows_as_dicts(cur) -> list[dict]:
     cols = [d[0] for d in cur.description]
@@ -92,17 +157,17 @@ def fetch_funnel_contacts(start: date | None, end: date | None) -> dict:
     (All Time). Rows also carry every later-stage date regardless of window, so
     cohort-safe conversions can be computed downstream.
     """
-    date_columns = [EVENT_DATE_COLUMN[e] for e in FUNNEL_EVENTS]
+    date_exprs = [_effective_date_sql(e) for e in FUNNEL_EVENTS]
     window_clause = " OR ".join(
         f"""(
-            {col} IS NOT NULL
-            AND ({col} >= COALESCE(%s::timestamptz, {col}))
-            AND (%s::date IS NULL OR {col} < (%s::date + INTERVAL '1 day'))
+            {expr} IS NOT NULL
+            AND ({expr} >= COALESCE(%s::timestamptz, {expr}))
+            AND (%s::date IS NULL OR {expr} < (%s::date + INTERVAL '1 day'))
         )"""
-        for col in date_columns
+        for expr in date_exprs
     )
     params: list = []
-    for _ in date_columns:
+    for _ in date_exprs:
         params.extend([start, end, end])
 
     try:
@@ -112,14 +177,16 @@ def fetch_funnel_contacts(start: date | None, end: date | None) -> dict:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT {", ".join(_FUNNEL_COLUMNS)}
-                    FROM {FUNNEL_TABLE}
+                    SELECT {_funnel_select()}
+                    FROM {FUNNEL_TABLE} f
+                    {_recovery_join()}
                     WHERE {window_clause}
                     """,
                     params,
                 )
                 rows = [_normalise_row(r) for r in _rows_as_dicts(cur)]
-        return {"available": True, "rows": rows, "table": FUNNEL_TABLE}
+        return {"available": True, "rows": rows, "table": FUNNEL_TABLE,
+                "recovery_table": RECOVERY_TABLE}
     except Exception as exc:  # noqa: BLE001
         log.error("fetch_funnel_contacts failed: %s", exc)
         return _unavailable(rows=[])
@@ -133,13 +200,144 @@ def fetch_all_funnel_contacts() -> dict:
                 return _unavailable(rows=[])
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT {', '.join(_FUNNEL_COLUMNS)} FROM {FUNNEL_TABLE}"
+                    f"""
+                    SELECT {_funnel_select()}
+                    FROM {FUNNEL_TABLE} f
+                    {_recovery_join()}
+                    """
                 )
                 rows = [_normalise_row(r) for r in _rows_as_dicts(cur)]
-        return {"available": True, "rows": rows, "table": FUNNEL_TABLE}
+        return {"available": True, "rows": rows, "table": FUNNEL_TABLE,
+                "recovery_table": RECOVERY_TABLE}
     except Exception as exc:  # noqa: BLE001
         log.error("fetch_all_funnel_contacts failed: %s", exc)
         return _unavailable(rows=[])
+
+
+# ── PR-ADS-155 §4 — reads that drive the stage-date recovery command ─────────
+RECOVERY_STATE_TABLE = "hubspot_lifecycle_history_recovery_state"
+RECOVERY_SCOPE = "lifecycle_stage_history"
+
+
+def fetch_contacts_missing_stage_dates(*, after_contact_id=None,
+                                       limit: int = 200) -> dict:
+    """Contacts with at least one NULL stage-entry date, ordered by contact id.
+
+    A stable ascending order over the durable HubSpot identity is what makes the
+    recovery command resumable: the cursor is the last contact id processed, so
+    a stopped run continues from exactly where it left off without rescanning.
+
+    The rows returned are the STORED values, deliberately without the recovery
+    COALESCE. This read exists to find gaps still to be worked, and joining
+    already-recovered dates in would hide the rows a re-run should skip while
+    also hiding the ones it should still attempt.
+    """
+    date_columns = [EVENT_DATE_COLUMN[e] for e in FUNNEL_EVENTS]
+    missing_clause = " OR ".join(f"{col} IS NULL" for col in date_columns)
+    params: list = []
+    cursor_clause = ""
+    if after_contact_id:
+        cursor_clause = "AND contact_id > %s"
+        params.append(str(after_contact_id))
+    params.append(int(limit))
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows=[])
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT contact_id, lifecycle_stage, {", ".join(date_columns)}
+                    FROM {FUNNEL_TABLE}
+                    WHERE ({missing_clause})
+                    {cursor_clause}
+                    ORDER BY contact_id ASC
+                    LIMIT %s
+                    """,
+                    params,
+                )
+                rows = _rows_as_dicts(cur)
+        return {"available": True, "rows": rows, "table": FUNNEL_TABLE}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_contacts_missing_stage_dates failed: %s", exc)
+        return _unavailable(rows=[])
+
+
+def fetch_lifecycle_recovery_state() -> dict:
+    """The durable recovery checkpoint.
+
+    ``available=False`` means the checkpoint could not be READ. A run must fail
+    closed on that rather than start from the beginning, which would rescan work
+    already done and, worse, report a fresh run's counts as the whole picture.
+
+    An available checkpoint with ``row=None`` is a different and legitimate
+    state: the command has never run.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "reason": "database_unavailable",
+                        "row": None}
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM {RECOVERY_STATE_TABLE} WHERE scope = %s",
+                    (RECOVERY_SCOPE,))
+                rows = _rows_as_dicts(cur)
+        return {"available": True, "row": rows[0] if rows else None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_lifecycle_recovery_state failed: %s", exc)
+        return {"available": False, "reason": str(exc), "row": None}
+
+
+def save_lifecycle_recovery_state(state: dict) -> dict:
+    """Advance the durable recovery checkpoint. Counts ACCUMULATE across runs.
+
+    A bounded command is meant to be run repeatedly, so each run's totals are
+    added to the stored ones. Overwriting them would make the last small run
+    look like the whole history of the recovery.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO {RECOVERY_STATE_TABLE} (
+                        scope, last_contact_id, contacts_examined,
+                        contacts_recovered, contacts_without_history,
+                        events_recovered, last_run_id, last_run_at,
+                        last_run_mode, last_error, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, NOW())
+                    ON CONFLICT (scope) DO UPDATE SET
+                        last_contact_id          = EXCLUDED.last_contact_id,
+                        contacts_examined        = {RECOVERY_STATE_TABLE}.contacts_examined
+                                                   + EXCLUDED.contacts_examined,
+                        contacts_recovered       = {RECOVERY_STATE_TABLE}.contacts_recovered
+                                                   + EXCLUDED.contacts_recovered,
+                        contacts_without_history = {RECOVERY_STATE_TABLE}.contacts_without_history
+                                                   + EXCLUDED.contacts_without_history,
+                        events_recovered         = {RECOVERY_STATE_TABLE}.events_recovered
+                                                   + EXCLUDED.events_recovered,
+                        last_run_id              = EXCLUDED.last_run_id,
+                        last_run_at              = NOW(),
+                        last_run_mode            = EXCLUDED.last_run_mode,
+                        last_error               = EXCLUDED.last_error,
+                        updated_at               = NOW()
+                    """,
+                    (RECOVERY_SCOPE, state.get("last_contact_id"),
+                     state.get("contacts_examined") or 0,
+                     state.get("contacts_recovered") or 0,
+                     state.get("contacts_without_history") or 0,
+                     state.get("events_recovered") or 0,
+                     state.get("last_run_id"), state.get("last_run_mode"),
+                     state.get("last_error")))
+            conn.commit()
+        return {"ok": True, "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("save_lifecycle_recovery_state failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
 
 
 def fetch_coverage_summary() -> dict:

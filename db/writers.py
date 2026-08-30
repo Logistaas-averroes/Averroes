@@ -3215,6 +3215,89 @@ def upsert_hubspot_contact_funnel(rows: list, *,
                 "error": str(exc)[:300]}
 
 
+# ---------------------------------------------------------------------------
+# PR-ADS-155 §4 — stage-entry dates recovered from HubSpot property history
+# ---------------------------------------------------------------------------
+_STAGE_HISTORY_COLUMNS = (
+    "contact_id", "funnel_event", "entered_at",
+    "hubspot_property", "hubspot_value", "hubspot_source_type",
+    "hubspot_source_id", "hubspot_updated_by_user_id",
+    "lifecycle_rule_version",
+)
+
+
+def upsert_lifecycle_stage_history(rows: list, *, run_id: str) -> dict:
+    """Persist recovered stage-entry timestamps. LOCAL DATABASE ONLY.
+
+    This never writes to HubSpot — it records evidence READ from HubSpot's own
+    property history into a table the contact sync does not own. It deliberately
+    does not write ``hubspot_contact_funnel.date_entered_*``: that column is
+    refreshed from the newest HubSpot read on every incremental sync, so a value
+    placed there would be erased on the next run.
+
+    Idempotent on ``(contact_id, funnel_event)``: a re-run rewrites the same row
+    rather than appending a second one, which is what makes a bounded command
+    safe to run repeatedly over an overlapping range.
+
+    A row without a real timestamp is REJECTED rather than stored as NULL — this
+    table exists to hold proven transitions, and an undated row in it would be a
+    recovered date that recovered nothing.
+
+    Returns the same structured result shape as the contact-funnel writer, so an
+    unavailable database is never reported as "wrote nothing".
+    """
+    prepared = []
+    for r in rows or []:
+        contact_id = str((r or {}).get("contact_id") or "").strip()
+        event = str((r or {}).get("funnel_event") or "").strip()
+        entered_at = _parse_ts_or_none((r or {}).get("entered_at"))
+        if not contact_id or not event or entered_at is None:
+            continue
+        prepared.append((
+            contact_id, event, entered_at,
+            r.get("hubspot_property") or "lifecyclestage",
+            r.get("hubspot_value"), r.get("hubspot_source_type"),
+            r.get("hubspot_source_id"), r.get("hubspot_updated_by_user_id"),
+            r.get("lifecycle_rule_version"), run_id,
+        ))
+
+    if not prepared:
+        return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
+
+    columns = ", ".join(_STAGE_HISTORY_COLUMNS) + ", recovery_run_id"
+    placeholders = ", ".join(["%s"] * (len(_STAGE_HISTORY_COLUMNS) + 1))
+    update_set = ",\n                        ".join(
+        f"{col} = EXCLUDED.{col}" for col in _STAGE_HISTORY_COLUMNS
+        if col not in ("contact_id", "funnel_event"))
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                        "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                cur.executemany(
+                    f"""
+                    INSERT INTO hubspot_lifecycle_stage_history ({columns})
+                    VALUES ({placeholders})
+                    ON CONFLICT (contact_id, funnel_event) DO UPDATE SET
+                        {update_set},
+                        recovery_run_id = EXCLUDED.recovery_run_id,
+                        recovered_at    = NOW(),
+                        updated_at      = NOW()
+                    """,
+                    prepared,
+                )
+                persisted = cur.rowcount if cur.rowcount is not None else len(prepared)
+            conn.commit()
+        return {"ok": True, "attempted": len(prepared),
+                "persisted": max(0, int(persisted)), "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("upsert_lifecycle_stage_history failed: %s", exc)
+        return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                "error": str(exc)[:300]}
+
+
 _FUNNEL_SYNC_STATE_FIELDS = {
     "bootstrap_status", "bootstrap_started_at", "bootstrap_completed_at",
     "last_modified_watermark", "last_incremental_at", "earliest_created_at",

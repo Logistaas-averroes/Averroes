@@ -90,7 +90,12 @@ REASON_SYNC_STATE_UNREADABLE = "canonical_sync_state_unreadable"
 REASON_COVERAGE_NOT_PROVEN = "canonical_coverage_not_proven"
 #: Why a scope's revenue TOTAL is not publishable even though the population IS
 #: readable: a deal in it has no proven amount, so the total is unknown.
-REASON_REVENUE_INCOMPLETE = "canonical_revenue_amounts_incomplete"
+#:
+#: PR-ADS-155 §5 renamed the VALUE from ``canonical_revenue_amounts_incomplete``
+#: to name the cause rather than the symptom. "Incomplete amounts" describes the
+#: total; ``closed_won_deals_missing_amount`` describes the 14 source records an
+#: operator has to go and price, which is the only action that resolves it.
+REASON_REVENUE_INCOMPLETE = "closed_won_deals_missing_amount"
 V_CURRENCY_UNPROVEN_DEALS = "currency_unproven_deals_in_population"
 
 ALL_UNAVAILABLE_REASONS = (
@@ -686,6 +691,252 @@ def revenue_total_publishable(base: dict, scope=DEFAULT_SCOPE, *,
     return _revenue_total_verdict(summary, scope)
 
 
+# ── PR-ADS-155 §5 — the fail-closed revenue disclosure ───────────────────────
+#: The label under which the partial sum — and ONLY the partial sum — may appear.
+#: It names its own denominator, so it cannot be read as a window total.
+KNOWN_REVENUE_LABEL_TEMPLATE = "Known revenue from {revenue_deals} priced deals"
+
+
+def revenue_disclosure(base: dict, scope=DEFAULT_SCOPE, *,
+                       summary: dict | None = None) -> dict:
+    """The full, honest picture of one scope's closed-won revenue.
+
+    PR-ADS-155 §5. All-Time revenue is CORRECTLY unavailable: 14 of the 181
+    closed-won deals carry no amount in HubSpot, so the window total is unknown.
+    The failure mode this block exists to prevent is not the withholding — it is
+    presenting the withholding as though nothing were measurable, or presenting
+    the $878,324.80 we DID measure as if it were the total.
+
+    Both are avoided by publishing the parts separately, each labelled by what it
+    actually counts:
+
+        ``closed_won_deals``           every won deal in scope. Complete.
+        ``revenue_proven_deals``       those with a proven amount and currency.
+        ``revenue_unavailable_deals``  those without. The actionable number.
+        ``known_revenue_usd``          what the PROVEN deals are worth. A real
+                                       measurement of a named subset — never a
+                                       total, and never labelled as one.
+        ``known_revenue_label``        the ONLY caption it may carry, naming its
+                                       own denominator.
+        ``total_revenue_usd``          NULL whenever any deal is unpriced. Not
+                                       zero, not the sum of the rest.
+        ``total_revenue_publishable``  the canonical verdict, from
+                                       :func:`revenue_total_publishable`.
+        ``unavailable_reason`` / ``violation_codes``  why, in machine-readable
+                                       form, so every consumer republishes ONE
+                                       refusal rather than inventing its own.
+
+    The count is never gated on the total: 181 customers is a complete fact even
+    while their combined value is not.
+    """
+    if not base.get("available"):
+        return _disclosure_block(None, revenue_total_publishable(base, scope),
+                                 scope=scope, context=base)
+
+    if summary is None:
+        summary = summarize_deals(base.get("deals") or [], scope)
+    return _disclosure_block(summary, _revenue_total_verdict(summary, scope),
+                             scope=scope, context=base)
+
+
+def disclosure_from_ladder(ladder: dict, scope=DEFAULT_SCOPE) -> dict:
+    """The same §5 disclosure, built from an already-computed scope ladder.
+
+    Consumers that hold a :func:`get_scope_ladder` result must not re-read the
+    ledger to obtain this block, and must not assemble their own version of it
+    from the ladder's fields — that is how the mart came to hold a private copy
+    of the publishable rule in the first place. The ladder already carries the
+    verdict per scope; this reshapes it, and decides nothing.
+    """
+    if not ladder.get("available"):
+        verdict = {
+            "publishable": False,
+            "reason": ladder.get("reason") or REASON_LEDGER_UNREADABLE,
+            "detail": ladder.get("detail"),
+            "violation_codes": sorted(ladder.get("violation_codes") or []),
+        }
+        return _disclosure_block(None, verdict, scope=scope, context=ladder)
+
+    summary = (ladder.get("scopes") or {}).get(normalize_scope(scope)) or {}
+    verdict = {
+        "publishable": bool(summary.get("revenue_total_available")),
+        "reason": summary.get("revenue_total_unavailable_reason"),
+        "detail": summary.get("revenue_total_unavailable_detail"),
+        "violation_codes": summary.get("revenue_total_violation_codes") or [],
+    }
+    return _disclosure_block(summary, verdict, scope=scope, context=ladder)
+
+
+def _disclosure_block(summary, verdict, *, scope, context) -> dict:
+    """Shape the §5 fields. Decides nothing — ``verdict`` already decided.
+
+    ``summary`` is ``None`` for a refused read, and then every count is NULL. A
+    refused read carries no population, so reporting zeros here would count an
+    empty list and publish it as a measurement.
+    """
+    available = summary is not None
+    proven = (summary.get("revenue_deals") or 0) if available else None
+    known = summary.get("known_revenue_usd") if available else None
+    return {
+        "available": available,
+        "scope": (summary.get("scope") if available else None) or scope,
+        "source": CANONICAL_SOURCE,
+        "closed_won_deals": summary.get("won_deals") if available else None,
+        "revenue_proven_deals": proven,
+        "revenue_unavailable_deals": (summary.get("currency_unavailable_deals")
+                                      if available else None),
+        "known_revenue_usd": known,
+        "known_revenue_label": (
+            None if known is None
+            else KNOWN_REVENUE_LABEL_TEMPLATE.format(revenue_deals=proven)),
+        # The ONE field a page may render under a "total revenue" heading.
+        "total_revenue_usd": (summary.get("revenue_usd")
+                              if available and verdict["publishable"] else None),
+        "total_revenue_publishable": bool(verdict["publishable"]),
+        "unavailable_reason": verdict["reason"],
+        "unavailable_detail": verdict.get("detail"),
+        "violation_codes": verdict["violation_codes"],
+        "window": context.get("window"),
+        "window_start": context.get("window_start"),
+        "window_end": context.get("window_end"),
+        "as_of": context.get("as_of"),
+        "fallback_used": False,
+    }
+
+
+# ── PR-ADS-155 §6 — the actionable missing-amount report ─────────────────────
+AMOUNT_STATUS_MISSING = "missing"
+AMOUNT_STATUS_PRESENT = "present"
+CURRENCY_CODE_MISSING = "missing"
+CURRENCY_CODE_PRESENT = "present"
+
+#: Used only when the ledger stored no reason at all. Every other row reports the
+#: canonical ``analysis.deal_currency`` reason VERBATIM. Those reasons already
+#: separate the operator actions ("HubSpot never gave us an amount" vs "no FX
+#: rate for that close date"), and a second vocabulary here would be exactly the
+#: kind of parallel taxonomy this programme exists to remove.
+MISSING_REASON_UNRECORDED = "currency_reason_not_recorded"
+
+#: HubSpot's deal record URL. ``0-3`` is HubSpot's own object-type id for deals.
+_HUBSPOT_DEAL_URL = "https://app.hubspot.com/contacts/{portal_id}/record/0-3/{deal_id}"
+
+
+def hubspot_portal_id() -> str | None:
+    """The configured HubSpot portal id, or ``None`` when it is not known.
+
+    A record URL is only "safely constructible" when the portal it points into is
+    a configured fact. Guessing one would hand an operator a link to somebody
+    else's CRM, so an unknown portal yields no URL at all rather than a plausible
+    one.
+    """
+    import os  # noqa: PLC0415
+
+    configured = (os.getenv("HUBSPOT_PORTAL_ID") or "").strip()
+    if configured:
+        return configured
+    try:
+        import yaml  # noqa: PLC0415
+
+        with open("config/thresholds.yaml", encoding="utf-8") as fh:
+            accounts = (yaml.safe_load(fh) or {}).get("accounts") or {}
+    except Exception as exc:  # noqa: BLE001
+        log.debug("portal id unavailable from thresholds.yaml: %s", exc)
+        return None
+    portal = str(accounts.get("hubspot_id") or "").strip()
+    return portal or None
+
+
+def missing_amount_deals(base: dict, scope=DEFAULT_SCOPE) -> dict:
+    """Every closed-won deal in scope whose amount could not be proven.
+
+    PR-ADS-155 §6. The revenue total is withheld because of a fixed, small,
+    nameable set of source records — 14 of them in production. Withholding
+    without naming them leaves an operator with a blocked number and no way to
+    unblock it, so the same canonical read that refuses the total also lists
+    exactly what has to change, in HubSpot, for it to become publishable.
+
+    Read-only in the strongest sense: this NEVER writes to HubSpot, and it never
+    guesses an amount — not from the company, not from the campaign, not from the
+    account's previous deals, not from associated contacts, and not by dividing
+    the known revenue. A missing amount is reported as missing.
+    """
+    if not base.get("available"):
+        return {
+            "available": False,
+            "reason": base.get("reason") or REASON_LEDGER_UNREADABLE,
+            "detail": base.get("detail"),
+            "scope": scope,
+            "source": CANONICAL_SOURCE,
+            # NULL, not 0: a refused read proves nothing about how many deals
+            # are unpriced.
+            "deal_count": None,
+            "deals": None,
+            "window": base.get("window"),
+            "window_start": base.get("window_start"),
+            "window_end": base.get("window_end"),
+            "as_of": base.get("as_of"),
+            "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+            "fallback_used": False,
+        }
+
+    scope = normalize_scope(scope)
+    portal_id = hubspot_portal_id()
+    deals = []
+    for row in filter_deals(base.get("deals") or [], scope):
+        status = row.get("currency_status") or CURRENCY_UNAVAILABLE
+        if is_summable(status) and row.get("revenue_usd") is not None:
+            continue
+        deal_id = row.get("deal_id")
+        has_amount = row.get("amount_raw") is not None
+        currency_code = row.get("deal_currency_code")
+        deals.append({
+            "deal_id": deal_id,
+            "deal_name": row.get("deal_name"),
+            "deal_close_date": row.get("deal_close_date"),
+            "deal_stage_label": row.get("deal_stage_label"),
+            "amount_status": (AMOUNT_STATUS_PRESENT if has_amount
+                              else AMOUNT_STATUS_MISSING),
+            # Two separate facts, because they are two separate fixes: HubSpot
+            # never gave us a number, versus it gave us a number in a currency we
+            # could not convert.
+            "currency_code_status": (CURRENCY_CODE_PRESENT if currency_code
+                                     else CURRENCY_CODE_MISSING),
+            "currency_status": status,
+            "currency_code": currency_code,
+            # The canonical `analysis.deal_currency` reason, verbatim.
+            "reason": row.get("currency_reason") or MISSING_REASON_UNRECORDED,
+            # Omitted, not guessed, when the portal is unknown.
+            "hubspot_record_url": (
+                _HUBSPOT_DEAL_URL.format(portal_id=portal_id, deal_id=deal_id)
+                if portal_id and deal_id else None),
+            "acquisition_group": row.get("acquisition_group"),
+            "canonical_source": CANONICAL_SOURCE,
+            # Explicit and always False: no amount on this row came from anywhere
+            # but HubSpot, and none was inferred.
+            "fallback_used": False,
+        })
+
+    deals.sort(key=lambda d: (str(d.get("deal_close_date") or ""),
+                              str(d.get("deal_id") or "")))
+    return {
+        "available": True,
+        "reason": None,
+        "detail": None,
+        "scope": scope,
+        "source": CANONICAL_SOURCE,
+        "deal_count": len(deals),
+        "deals": deals,
+        "hubspot_portal_id": portal_id,
+        "window": base.get("window"),
+        "window_start": base.get("window_start"),
+        "window_end": base.get("window_end"),
+        "as_of": base.get("as_of"),
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "writes_performed": False,
+        "fallback_used": False,
+    }
+
+
 __all__ = [
     "CANONICAL_SOURCE", "SUMMABLE_CURRENCY_STATUSES",
     "REASON_UNKNOWN_WINDOW", "REASON_UNKNOWN_SCOPE",
@@ -695,4 +946,9 @@ __all__ = [
     "unavailable", "load_won_deals", "summarize_deals", "build_snapshot",
     "get_revenue_snapshot", "get_scope_ladder", "deal_display_row",
     "canonical_deal_rows", "summable_revenue", "revenue_total_publishable",
+    # PR-ADS-155 §5/§6
+    "revenue_disclosure", "disclosure_from_ladder",
+    "missing_amount_deals", "hubspot_portal_id",
+    "KNOWN_REVENUE_LABEL_TEMPLATE", "MISSING_REASON_UNRECORDED",
+    "AMOUNT_STATUS_MISSING", "AMOUNT_STATUS_PRESENT",
 ]

@@ -110,6 +110,18 @@ def _render(outcome: dict) -> None:
             if c["status"] == "broken":
                 print(f"             {c['detail']}")
 
+        # PR-ADS-155 §7. Quantified source-system gaps, printed separately from
+        # violations. Partial lifecycle history is a disclosed fact about
+        # HubSpot's records, not a disagreement between pages, and printing it
+        # under VIOLATION would make it indistinguishable from one.
+        for c in result.get("coverage_disclosures") or []:
+            print(f"       [~] coverage    {c['consumer']}: {c['code']} "
+                  f"(cohort={c.get('cohort_size')}, "
+                  f"excluded={c.get('excluded_contacts')})")
+            for r in c.get("exclusion_reasons") or []:
+                print(f"             {r['contacts']}x {r['reason']} "
+                      f"[{r['population']}]")
+
         for v in result["violations"]:
             where = v.get("metric") or v.get("consumer") or "-"
             print(f"       VIOLATION {v['code']}  ({where}): {v.get('detail','')}")
@@ -139,11 +151,25 @@ def _render(outcome: dict) -> None:
         print("  differently. A window mismatch means they answered different")
         print("  questions while using the same window name. An identity")
         print("  registered as distinct by design is never compared at all.")
-        print("  `canonical_source_unavailable` means no consumer could publish")
-        print("  the metric — an honest outage. `value_published_while_source_")
-        print("  unavailable` is the opposite and worse: a page published a")
-        print("  number its own contract says it had no source for, and two such")
-        print("  pages can agree with each other perfectly.")
+        print("  `value_published_while_source_unavailable` is the worst of")
+        print("  them: a page published a number its own contract says it had")
+        print("  no source for, and two such pages can agree perfectly.")
+        print("")
+        print("  PR-ADS-155 §7 — an absent metric names WHICH problem it is,")
+        print("  because four different people fix these four things:")
+        print("    canonical_database_unreadable")
+        print("        the canonical store could not be read — an engineer.")
+        print("    revenue_population_unavailable")
+        print("        readable, but this window's coverage is unproven — a backfill.")
+        print("    revenue_total_unpublishable_missing_amount")
+        print("        the population is COMPLETE; its total is unknown because")
+        print("        closed-won deals in it carry no amount. Fixed by pricing")
+        print("        those deals in HubSpot — see")
+        print("        `python -m scripts.report_missing_deal_amounts`.")
+        print("    canonical_source_unavailable")
+        print("        the catch-all: nobody published it and the contracts do")
+        print("        not say why. Still a violation — an absence we cannot")
+        print("        explain is not an absence we have accounted for.")
     print("=" * 74 + "\n")
 
 
