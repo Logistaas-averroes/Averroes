@@ -341,3 +341,143 @@ records remain unpriced** — that is a violation, under its own precise code.
 8. The 14 unpriced deals are fixed **in HubSpot**, by whoever owns them. Once
    priced, the ledger sync picks up the amounts and the total becomes publishable
    with no code change.
+
+---
+
+# PR-ADS-155-F1 — post-deployment repairs
+
+PR-ADS-155 deployed successfully. Validating it against production exposed four
+bounded defects.
+
+## 1 & 2 — the standalone commands never opened the database
+
+Both new commands shipped without initializing the connection pool. A standalone
+`python -m` process is not the web app: nothing has called `init_pool`, so
+`db.connection._pool` is `None`, every `get_conn()` yields `None`, and each read
+degrades quietly to "unavailable".
+
+That is the right behaviour for one optional write and catastrophic for a whole
+command. `scripts.report_missing_deal_amounts` read an empty sync state and
+reported:
+
+```
+UNAVAILABLE: canonical_coverage_not_proven
+deal sync state unavailable — coverage cannot be verified
+REPORT_EXIT=2
+```
+
+over a healthy ledger holding 181 closed-won deals. It turned **"we never opened
+the database"** into an assertion about the **data**. Wrapped in an explicit
+`init_pool()` the same command returned the correct 181 / 167 / 14.
+
+### The fix
+
+`ensure_database_ready()` moved from `scheduler/incremental_sync.py` into
+`db/connection.py`, beside the pool it initializes, so all three entry points
+share one implementation. The scheduler keeps its name and contract as a thin
+delegation — a second copy is how two entry points come to disagree about what
+"ready" means.
+
+It **probes**, not merely initializes: `init_pool()` swallows its own failure,
+and a pool that exists is still not a database that answers. `SELECT 1` is the
+evidence.
+
+Both commands now:
+
+* initialize and probe inside `main()` — never at import time, so importing the
+  module cannot open a connection as a side effect;
+* exit non-zero on failure with a **redacted** detail (a DSN carries a password);
+* state that the affected count is **UNKNOWN, not zero** — a refused read carries
+  no population, and "0 deals missing an amount" over one would be a fabricated
+  all-clear;
+* keep their existing exit-code contracts.
+
+Schema creation is unchanged: `init_db()` at app startup remains authoritative.
+Neither command creates tables.
+
+## 3 — scoped revenue contracts declared nothing, or contradicted themselves
+
+| Identity | Before | Problem |
+|---|---|---|
+| `campaign_attributed_won_revenue_usd` | null, `not_ready`, **no reason, no codes** | the audit saw the withholding but not why |
+| `country_attributed_won_revenue_usd` | null, **`ready`** | a contract contradicting the number beside it |
+
+Countries derived readiness from **geo coverage**, which says the spend side is
+placed and is silent on whether the deals behind the revenue carry proven
+amounts.
+
+### The fix
+
+`canonical_revenue_service.total_verdict_for_population()` generalises the
+canonical rule to **any** closed-won population, not only a lattice scope.
+`campaign_attributable` is a scope in `analysis.revenue_scope` and got its
+verdict free from the ladder; `country_attributed` is a different axis and had no
+way to ask the contract "is THIS population's total publishable?", so it
+approximated the question locally and got it wrong.
+`_revenue_total_verdict` now delegates to it — still exactly one rule.
+
+Two conditions, in order: the population must be readable, and every deal in it
+must have a proven amount.
+
+The country verdict is computed over the **country rows** — what the KPI
+actually sums. Deriving it from the deal grouping looked equivalent and is not: a
+deal can map to a country that has no mart row, so the verdict would describe a
+population the published figure never included.
+
+Revenue and customers now carry **separate statuses**. A count is complete
+whatever the amounts are, so customers may stay ready while the total is
+withheld; blanking a number we did measure would be its own fabrication.
+
+**A scoped total is never blocked by inheritance.** A narrower population with no
+unpriced deal stays `ready` even while the all-source total is unavailable — that
+is proved from its own deals.
+
+## 4 — the parity audit's generic fallback
+
+With every revenue consumer declaring its blocker, All-Time emits
+`revenue_total_unpublishable_missing_amount` and **no revenue metric** falls back
+to `canonical_source_unavailable`. `revenue_integration_not_connected` became
+classifiable too (population unavailable). The generic code is **kept** for
+genuinely unclassified failures, and the audit stays red while the 14 deals are
+unpriced.
+
+## 5 — the lifecycle dry run could not explain its own zero
+
+The first production dry run examined 50 contacts and reported
+`no_history_version_for_stage` 36 times — which conflated four different findings
+and therefore proved none of them.
+
+**The request and response paths were audited against the installed SDK first:**
+
+* the request model serializes `properties_with_history` → `propertiesWithHistory`;
+* the batch response's `SimplePublicObject` carries `properties_with_history` as
+  `dict[str, list[ValueWithTimestamp]]`.
+
+So history is genuinely requested and genuinely deserialized — **the zero is real
+data, not a connector defect.** What was broken was the reporting.
+
+Four connector states, per contact asked:
+
+| State | Meaning |
+|---|---|
+| `history_contact_not_returned` | HubSpot's response omitted this contact entirely |
+| `history_payload_missing` | returned, with no `lifecyclestage` history payload |
+| `history_payload_empty` | the key IS present and the list is empty |
+| `history_payload_present` | versions returned and inspected |
+
+Five per-`(contact, stage)` reasons: the three payload states above, plus
+`history_present_no_matching_stage_version` (the only one that is real evidence
+the transition was never recorded), `history_version_without_timestamp`, and
+`matching_stage_version_recovered`. A failed request is
+`history_request_unavailable` — nothing is proven by it.
+
+The report publishes both breakdowns under **separate, named denominators**:
+payload states count contacts, gap reasons count `(contact, stage)` pairs.
+Merging them would be the same conflation this section removes.
+
+`source_label` (HubSpot's own account of the change, e.g. a workflow name) is now
+carried and stored alongside source type and id.
+
+Still true, unchanged: no proxy timestamp is ever invented, the writer rejects an
+undated row rather than storing a NULL, `--apply` writes only to the local
+database, and there is no HubSpot write path anywhere in the recovery.
