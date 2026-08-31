@@ -279,39 +279,21 @@ def ensure_database_ready() -> tuple[bool, str | None]:
     ``False``, before contacting any external platform: with no durable
     persistence, a pull is quota spent to produce nothing, and reporting on it
     would describe work whose results were discarded.
+
+    PR-ADS-155-F1 moved the implementation to :mod:`db.connection`, beside the
+    pool it initializes, because two more standalone commands needed exactly
+    this and a second copy is how two entry points come to disagree about what
+    "ready" means. This wrapper keeps the name the scheduler and its tests use;
+    the contract is unchanged.
     """
-    # PR-ADS-154A: every exception interpolated below is REDACTED first. A
-    # connection failure can carry the DSN, and a DSN carries the password —
-    # and this detail is operator-facing: it reaches the logs and the JSON
-    # report. The write path was redacted from the start; this path was not,
-    # which meant the safety depended on which of two failures happened to
-    # occur. `safe_db_error` also collapses newlines and caps the length.
     from db.writers import safe_db_error  # noqa: PLC0415
 
     try:
-        from db.connection import get_conn, init_pool  # noqa: PLC0415
+        from db.connection import ensure_database_ready as _ready  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001
         return False, f"db.connection import failed: {safe_db_error(exc)}"
 
-    try:
-        init_pool()
-    except Exception as exc:  # noqa: BLE001
-        return False, f"init_pool failed: {safe_db_error(exc)}"
-
-    try:
-        with get_conn() as conn:
-            if conn is None:
-                return False, ("connection pool is not available "
-                               "(no DATABASE_URL, or the database is unreachable)")
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                row = cur.fetchone()
-        if not row or row[0] != 1:
-            return False, "readiness probe returned no result"
-    except Exception as exc:  # noqa: BLE001
-        return False, f"readiness probe failed: {safe_db_error(exc)}"
-
-    return True, None
+    return _ready()
 
 
 def _aborted_before_start(*, reason: str, run_reason: str, started_at: str,

@@ -952,13 +952,35 @@ def test_a8_the_readiness_detail_is_redacted_too(monkeypatch):
 
 
 def test_a9_both_abort_paths_route_their_detail_through_the_redactor():
-    """Asserted on the source: a new abort path must not reintroduce the gap."""
-    body = _SYNC_SRC[_SYNC_SRC.index("def ensure_database_ready"):]
-    body = body[:body.index("\ndef ", 1)]
-    code = "\n".join(ln for ln in body.splitlines()
-                     if not ln.strip().startswith("#"))
-    # Every interpolated exception is wrapped.
-    assert "{exc}" not in code, (
-        "ensure_database_ready must not interpolate a raw exception — "
-        "a connection error can carry the DSN")
-    assert code.count("safe_db_error(exc)") == 3
+    """Asserted on the source: a new abort path must not reintroduce the gap.
+
+    PR-ADS-155-F1 moved the probe itself into ``db.connection`` so three entry
+    points share one implementation, leaving the scheduler with a thin wrapper.
+    The invariant is unchanged and is still asserted over EVERY abort path — it
+    now simply spans both files, so a new unredacted path in either one fails
+    this test rather than slipping through the seam between them.
+    """
+    from pathlib import Path as _Path
+
+    conn_src = (_ROOT / "db" / "connection.py").read_text()
+
+    def _fn(source: str, name: str) -> str:
+        body = source[source.index(f"def {name}"):]
+        cut = body.find("\ndef ", 1)
+        body = body if cut == -1 else body[:cut]
+        return "\n".join(ln for ln in body.splitlines()
+                         if not ln.strip().startswith("#"))
+
+    wrapper = _fn(_SYNC_SRC, "ensure_database_ready")
+    shared = _fn(conn_src, "ensure_database_ready")
+
+    for where, code in (("scheduler", wrapper), ("db.connection", shared)):
+        assert "{exc}" not in code, (
+            f"{where}.ensure_database_ready must not interpolate a raw "
+            "exception — a connection error can carry the DSN")
+
+    # Three abort paths still exist in total: the import guard in the wrapper,
+    # and init_pool + probe failure in the shared implementation.
+    assert wrapper.count("safe_db_error(exc)") == 1
+    assert shared.count("safe_db_error(exc)") == 2
+    assert _Path is not None  # keep the import meaningful for linters

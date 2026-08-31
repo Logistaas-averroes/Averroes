@@ -3221,7 +3221,7 @@ def upsert_hubspot_contact_funnel(rows: list, *,
 _STAGE_HISTORY_COLUMNS = (
     "contact_id", "funnel_event", "entered_at",
     "hubspot_property", "hubspot_value", "hubspot_source_type",
-    "hubspot_source_id", "hubspot_updated_by_user_id",
+    "hubspot_source_id", "hubspot_source_label", "hubspot_updated_by_user_id",
     "lifecycle_rule_version",
 )
 
@@ -3257,7 +3257,8 @@ def upsert_lifecycle_stage_history(rows: list, *, run_id: str) -> dict:
             contact_id, event, entered_at,
             r.get("hubspot_property") or "lifecyclestage",
             r.get("hubspot_value"), r.get("hubspot_source_type"),
-            r.get("hubspot_source_id"), r.get("hubspot_updated_by_user_id"),
+            r.get("hubspot_source_id"), r.get("hubspot_source_label"),
+            r.get("hubspot_updated_by_user_id"),
             r.get("lifecycle_rule_version"), run_id,
         ))
 

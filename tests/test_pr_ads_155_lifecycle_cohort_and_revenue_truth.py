@@ -316,6 +316,12 @@ def test_15_a_matching_history_version_recovers_the_real_timestamp():
 
 
 def test_16_no_matching_version_recovers_nothing_and_says_why():
+    """History WAS returned and holds no version for the stage.
+
+    PR-ADS-155-F1 renamed this reason from `no_history_version_for_stage` to
+    `history_present_no_matching_stage_version`, because the old name was also
+    being used for "HubSpot returned nothing at all" — see test_39..test_42.
+    """
     row = {"contact_id": "c1", "lifecycle_stage": "salesqualifiedlead",
            "date_entered_lead": date(2026, 1, 1), "date_entered_mql": None,
            "date_entered_sql": date(2026, 3, 1),
@@ -323,8 +329,12 @@ def test_16_no_matching_version_recovers_nothing_and_says_why():
     recovered, unresolved = recovery.select_recovered_events(
         row, [_version("lead", date(2026, 1, 1))])
     assert recovered == []
-    assert unresolved == [{"funnel_event": funnel.EVENT_MQL,
-                           "reason": recovery.NO_HISTORY_VERSION}]
+    assert len(unresolved) == 1
+    assert unresolved[0]["funnel_event"] == funnel.EVENT_MQL
+    assert unresolved[0]["reason"] == recovery.NO_HISTORY_VERSION
+    assert recovery.NO_HISTORY_VERSION == "history_present_no_matching_stage_version"
+    # It reports how much history it actually saw, so the finding is checkable.
+    assert unresolved[0]["history_versions_seen"] == 1
 
 
 def test_17_recovery_never_writes_to_hubspot():

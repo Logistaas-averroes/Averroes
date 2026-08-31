@@ -1211,6 +1211,8 @@ CREATE TABLE IF NOT EXISTS hubspot_lifecycle_stage_history (
   hubspot_value             TEXT NOT NULL,          -- the stage value in that version
   hubspot_source_type       TEXT,                   -- e.g. FORM, IMPORT, AUTOMATION, CRM_UI
   hubspot_source_id         TEXT,
+  -- HubSpot's own human-readable account of the change (e.g. a workflow name).
+  hubspot_source_label      TEXT,
   hubspot_updated_by_user_id TEXT,
 
   -- Lineage of the recovery run itself.

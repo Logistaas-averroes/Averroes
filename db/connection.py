@@ -91,3 +91,66 @@ def get_conn():
                 _pool.putconn(conn)
             except Exception:  # noqa: BLE001
                 pass
+
+
+def ensure_database_ready() -> tuple[bool, str | None]:
+    """Initialize the connection pool and PROVE it can serve a query.
+
+    Returns ``(ready, detail)``. ``detail`` is None when ready.
+
+    Why this exists
+    ---------------
+    A standalone ``python -m …`` process is not the Flask app: nothing has
+    called :func:`init_pool`, so the module-level ``_pool`` is ``None`` and every
+    :func:`get_conn` yields ``None``. Each database call then degrades quietly to
+    "unavailable", which is right for one optional write and catastrophic for a
+    whole command — PR-ADS-155-F1 was raised because
+    ``python -m scripts.report_missing_deal_amounts`` reported
+    ``canonical_coverage_not_proven`` against a perfectly healthy ledger, purely
+    because nothing had initialized the pool in that process.
+
+    So the pool is not merely initialized — it is **PROBED**. :func:`init_pool`
+    swallows its own failure and leaves ``_pool = None``, and a pool that exists
+    is still not a database that answers, so "we called init_pool" is not
+    evidence. ``SELECT 1`` is.
+
+    Read-only and side-effect free. A caller must abort on ``False`` rather than
+    continue: with no readable database, every count it would report is an
+    artifact of an empty result set, not a measurement.
+
+    Lives here, beside the pool it initializes, so that every entry point shares
+    ONE implementation. ``scheduler.incremental_sync.ensure_database_ready``
+    delegates to this function rather than keeping a second copy.
+    """
+    # PR-ADS-154A: every exception interpolated below is REDACTED first. A
+    # connection failure can carry the DSN, and a DSN carries the password —
+    # and this detail is operator-facing: it reaches logs, JSON reports and
+    # stderr. `safe_db_error` also collapses newlines and caps the length.
+    #
+    # Imported inside the function on purpose: `db.writers` imports this module,
+    # so a module-level import here would be a cycle.
+    try:
+        from db.writers import safe_db_error
+    except Exception:  # noqa: BLE001  — redaction must never be the thing that fails
+        def safe_db_error(exc, limit: int = 300) -> str:
+            return " ".join(str(exc).split())[:limit]
+
+    try:
+        init_pool()
+    except Exception as exc:  # noqa: BLE001
+        return False, f"init_pool failed: {safe_db_error(exc)}"
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False, ("connection pool is not available "
+                               "(no DATABASE_URL, or the database is unreachable)")
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                row = cur.fetchone()
+        if not row or row[0] != 1:
+            return False, "readiness probe returned no result"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"readiness probe failed: {safe_db_error(exc)}"
+
+    return True, None

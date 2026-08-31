@@ -288,6 +288,47 @@ def _deal_attribution(deal: dict, *, residual: bool) -> str:
             else "needs_review")
 
 
+#: The country-attributed revenue population is unreadable because the revenue
+#: integration is not wired at all — distinct from "the ledger refused" and from
+#: "a deal in it has no amount". Three causes, three reasons.
+REASON_REVENUE_NOT_CONNECTED = "revenue_integration_not_connected"
+
+
+def _country_revenue_total_verdict(country_rows: list, *, deal_proof_available: bool,
+                                   revenue_connected: bool, canonical: dict) -> dict:
+    """Is the COUNTRY-ATTRIBUTED revenue total publishable? (PR-ADS-155-F1)
+
+    Decided over the country rows — the population the KPI actually sums — using
+    the canonical rule, so the contract can never declare a readiness the number
+    beside it contradicts.
+
+    A row withholds its revenue for exactly two reasons (see
+    ``_build_country_rows``): the revenue integration is not connected, or one of
+    that country's deals has an unknown amount. They are separated here because
+    they send an operator to two different places.
+    """
+    if not deal_proof_available:
+        return canonical_revenue.total_verdict_for_population(
+            won_deals=None, unpriced_deals=None,
+            scope="country_attributed_revenue",
+            population_available=False,
+            unavailable_reason=canonical.get("reason"),
+            unavailable_detail=canonical.get("detail"),
+            violation_codes=canonical.get("violation_codes"))
+    if not revenue_connected:
+        return canonical_revenue.total_verdict_for_population(
+            won_deals=None, unpriced_deals=None,
+            scope="country_attributed_revenue",
+            population_available=False,
+            unavailable_reason=REASON_REVENUE_NOT_CONNECTED,
+            unavailable_detail=("the revenue integration is not connected, so no "
+                                "country's closed-won revenue is readable"))
+    unpriced = sum(1 for r in country_rows if r.get("won_revenue_usd") is None)
+    return canonical_revenue.total_verdict_for_population(
+        won_deals=len(country_rows), unpriced_deals=unpriced,
+        scope="country_attributed_revenue")
+
+
 def _group_deals_by_country(deals_rows: list) -> tuple[dict, set, list, bool]:
     """Group closed-won deals onto canonical country keys, else the residual.
 
@@ -924,6 +965,22 @@ def _assemble(window: str, now: datetime | None) -> dict:
         mart_real_rows, geo_maps, geo_available, deals_by_key, unknown_amount_keys,
         country_roas_unblockable, revenue_connected, native_currency)
 
+    # PR-ADS-155-F1. The country-attributed revenue TOTAL gets its verdict from
+    # its own population, via the canonical rule — not from geo readiness. Geo
+    # readiness says the spend side is placed; it is silent on whether the deals
+    # behind the revenue carry proven amounts, which is why this page published
+    # `truth_status: ready` beside a null revenue value.
+    #
+    # The population is the COUNTRY ROWS, because that is exactly what the KPI
+    # sums. Deriving it from the deal grouping instead looked equivalent and is
+    # not: a deal can map to a country that has no mart row, so it would make the
+    # verdict describe a population the published figure never included.
+    _country_revenue_verdict = _country_revenue_total_verdict(
+        country_rows,
+        deal_proof_available=deal_proof_available,
+        revenue_connected=revenue_connected,
+        canonical=canonical)
+
     residual = _build_residual(summary, country_rows, spend_truth, mart_residual_row,
                                residual_amount_unknown, revenue_connected)
     kpis = _build_kpis(country_rows, residual, spend_truth, country_roas_unblockable,
@@ -938,6 +995,9 @@ def _assemble(window: str, now: datetime | None) -> dict:
         "kpis": kpis,
         "country_roas_unblockable": country_roas_unblockable,
         "deal_proof_available": deal_proof_available,
+        # PR-ADS-155-F1: the scoped verdict, so the contract builder states the
+        # page's own truth rather than re-deriving it from a spend-side flag.
+        "country_revenue_verdict": _country_revenue_verdict,
         "revenue_source": canonical_revenue.CANONICAL_SOURCE,
         "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
         "revenue_unavailable_reason": (None if deal_proof_available
@@ -1005,6 +1065,7 @@ def build_dashboard_countries(window: str = "current_quarter",
     residual = core["residual"]
     kpis = core["kpis"]
     deal_proof_available = core["deal_proof_available"]
+    _revenue_connected = bool(readiness.get("revenue_integration_connected"))
 
     period_change = _build_period_change(window, ref_now, kpis)
     regional_mix = _build_regional_mix(country_rows, core["country_roas_unblockable"])
@@ -1026,14 +1087,50 @@ def build_dashboard_countries(window: str = "current_quarter",
     _country_revenue_status = (canonical_contract.TRUTH_READY
                                if _country_revenue_ready
                                else canonical_contract.TRUTH_NOT_READY)
+    # PR-ADS-155-F1. The REVENUE metric and the CUSTOMER metric shared one status,
+    # which is wrong in both directions. A count is complete whatever the amounts
+    # are, so customers may stay ready while the total is withheld; and the total
+    # is not ready merely because geo coverage is placed. Two facts, two statuses,
+    # each proved from what it actually depends on.
+    _country_revenue_verdict = core.get("country_revenue_verdict") or {}
+    _country_total_ok = bool(_country_revenue_ready
+                             and _country_revenue_verdict.get("publishable"))
     _mt = canonical_contract.metric_truth_block(core["window_block"], [
-        *[{"metric": m,
-           "data_source": canonical_contract.SOURCE_CANONICAL_GEO,
-           "scope": "country_attributed_revenue",
-           "truth_status": _country_revenue_status,
-           "customer_id": spend_truth.get("customer_id")}
-          for m in ("country_attributed_won_revenue_usd",
-                    "country_attributed_customers")],
+        # The total: ready only when geo coverage is placed AND every
+        # country-attributed won deal has a proven amount. Withheld carries the
+        # canonical reason and codes, so the audit can tell an unpriced-deal
+        # blocker apart from a geo outage.
+        {"metric": "country_attributed_won_revenue_usd",
+         "data_source": canonical_contract.SOURCE_CANONICAL_GEO,
+         "scope": "country_attributed_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY if _country_total_ok
+                          else canonical_contract.TRUTH_NOT_READY),
+         # When the scoped verdict names a blocker, that is the reason. When the
+         # verdict is fine but geo coverage is not placed, the reason is the geo
+         # gate's — never left blank, which is what forced the audit's generic
+         # catch-all in production.
+         "unavailable_reason": (None if _country_total_ok else (
+             _country_revenue_verdict.get("reason")
+             or canonical_revenue.REASON_COVERAGE_NOT_PROVEN)),
+         "violation_codes": ([] if _country_total_ok
+                             else _country_revenue_verdict.get("violation_codes") or []),
+         "customer_id": spend_truth.get("customer_id")},
+        # The count, on its own readiness. Blanking a number we did measure would
+        # be its own fabrication. It states a reason when withheld for the same
+        # reason the total does: an absence nobody explains forces the audit back
+        # to its generic catch-all for a blocker the page already knows.
+        {"metric": "country_attributed_customers",
+         "data_source": canonical_contract.SOURCE_CANONICAL_GEO,
+         "scope": "country_attributed_revenue",
+         "truth_status": _country_revenue_status,
+         "unavailable_reason": (None if _country_revenue_ready else (
+             core.get("revenue_unavailable_reason") if not deal_proof_available
+             else REASON_REVENUE_NOT_CONNECTED if not _revenue_connected
+             else canonical_revenue.REASON_COVERAGE_NOT_PROVEN)),
+         "violation_codes": ([] if _country_revenue_ready
+                             else (core.get("revenue_violation_codes") or []
+                                   if not deal_proof_available else [])),
+         "customer_id": spend_truth.get("customer_id")},
         # Country-attributed SPEND is a different question from the full-account
         # denominator the Overview and the mart publish: this figure is the sum of
         # the per-country rows, and geographic_view does not place location-less

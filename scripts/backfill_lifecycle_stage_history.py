@@ -51,8 +51,44 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
 
+
+def _database_ready() -> tuple[bool, str | None]:
+    """Initialize AND probe the database before reading contacts or HubSpot.
+
+    PR-ADS-155-F1, same omission as the missing-amount report: a standalone
+    ``python -m`` process has never called ``init_pool``, so this command read
+    an empty contact list and could have reported "0 contacts with gaps" over a
+    database it never opened. Worse for this command than for the report — it
+    spends HubSpot quota, and a run whose local writes silently no-op burns that
+    quota to produce nothing.
+    """
+    from db.connection import ensure_database_ready
+
+    return ensure_database_ready()
+
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 2000
+
+#: Plain-English meaning of each evidence state, so the breakdown is readable by
+#: whoever runs the command rather than only by whoever wrote it.
+_STATE_MEANING = {
+    "history_contact_not_returned":
+        "HubSpot's response did not include this contact at all",
+    "history_payload_missing":
+        "returned, but with no lifecyclestage history payload",
+    "history_payload_empty":
+        "returned an EMPTY history — HubSpot holds no versions",
+    "history_payload_present":
+        "history was returned and was inspected",
+    "history_present_no_matching_stage_version":
+        "history exists but holds no version for this stage",
+    "history_version_without_timestamp":
+        "a matching version exists but carries no usable timestamp",
+    "matching_stage_version_recovered":
+        "HubSpot's own recorded transition timestamp was ingested",
+    "history_request_unavailable":
+        "the HubSpot request itself failed — nothing was proven",
+}
 
 
 def _render(result: dict) -> None:
@@ -89,14 +125,27 @@ def _render(result: dict) -> None:
         if len(recovered) > 25:
             print(f"    … and {len(recovered) - 25} more")
 
-    unresolved = result.get("unresolved") or []
-    if unresolved:
-        by_reason: dict = {}
-        for row in unresolved:
-            by_reason[row["reason"]] = by_reason.get(row["reason"], 0) + 1
-        print("\n  NOT RECOVERABLE — left NULL, reported as a coverage gap")
-        for reason, count in sorted(by_reason.items()):
-            print(f"    {count:>5}  {reason}")
+    # PR-ADS-155-F1: a zero must be readable. These are the states that explain
+    # WHY nothing was recovered, and they are the basis for deciding whether
+    # --apply is worth running at all.
+    evidence = result.get("evidence_states") or {}
+    per_contact = evidence.get("per_contact_payload_state") or {}
+    if per_contact:
+        print("\n  HUBSPOT EVIDENCE — per contact asked")
+        for state, count in per_contact.items():
+            print(f"    {count:>5}  {state}  — {_STATE_MEANING.get(state, '')}")
+
+    per_stage = evidence.get("per_stage_gap_reason") or {}
+    if per_stage:
+        print("\n  OUTCOME — per (contact, missing stage)")
+        for reason, count in per_stage.items():
+            print(f"    {count:>5}  {reason}  — {_STATE_MEANING.get(reason, '')}")
+
+    if result.get("events_recovered") == 0 and per_contact:
+        print("\n  Nothing was recovered. Read the states above before deciding:")
+        print("  an absent payload is not the same finding as an empty history,")
+        print("  and neither is the same as history that holds no version for")
+        print("  the stage. Every unrecovered timestamp stays NULL.")
 
     if result.get("mode") == "dry_run":
         print("\n  DRY RUN: nothing was written to the local database, and nothing")
@@ -122,6 +171,14 @@ def main() -> int:
     if args.limit < 1 or args.limit > MAX_LIMIT:
         print(f"--limit must be between 1 and {MAX_LIMIT}", file=sys.stderr)
         return EXIT_USAGE
+
+    # Before the contact read and before any HubSpot call.
+    ready, detail = _database_ready()
+    if not ready:
+        print(f"database unavailable: {detail}", file=sys.stderr)
+        print("No contact was examined and no HubSpot call was made. The number "
+              "of recoverable timestamps is UNKNOWN, not zero.", file=sys.stderr)
+        return EXIT_FAILED
 
     from services import lifecycle_history_recovery_service as recovery
 

@@ -67,6 +67,7 @@ from analysis.crm_lifecycle import (
     LIFECYCLE_RULE_VERSION,
     normalize_lifecycle_stage,
 )
+from connectors import hubspot_pull as hubspot_states
 
 log = logging.getLogger(__name__)
 
@@ -74,10 +75,32 @@ SCOPE = "lifecycle_stage_history"
 MODE_DRY_RUN = "dry_run"
 MODE_APPLY = "apply"
 
-#: Why one contact/stage produced no recovered row. Reported, never silently
-#: dropped: "HubSpot has no record of this transition" is a finding.
-NO_HISTORY_VERSION = "no_history_version_for_stage"
+# ── PR-ADS-155-F1 — evidence states, told apart ─────────────────────────────
+# The first production dry run examined 50 contacts and reported
+# `no_history_version_for_stage` 36 times — which conflated four different
+# findings and therefore proved none of them. "HubSpot never returned this
+# contact", "it returned no history payload", "it returned an empty history" and
+# "it returned history that contains no version for this stage" are four facts
+# with four different follow-ups, and only the last two are evidence that the
+# transition was never recorded.
+#
+# The connector reports the payload-level state per contact; these are the
+# per-(contact, stage) reasons the report publishes.
+HISTORY_REQUEST_UNAVAILABLE = "history_request_unavailable"
+HISTORY_PAYLOAD_MISSING = "history_payload_missing"
+HISTORY_PAYLOAD_EMPTY = "history_payload_empty"
+NO_HISTORY_VERSION = "history_present_no_matching_stage_version"
+MATCHING_VERSION_RECOVERED = "matching_stage_version_recovered"
 NO_TIMESTAMP_ON_VERSION = "history_version_without_timestamp"
+
+#: Connector payload state → the reason an unrecovered stage reports.
+#: A state absent from this map is deliberately NOT defaulted: an unknown state
+#: is reported as itself rather than folded into the nearest familiar reason.
+_PAYLOAD_STATE_REASON = {
+    hubspot_states.HISTORY_CONTACT_ABSENT: HISTORY_PAYLOAD_MISSING,
+    hubspot_states.HISTORY_PROPERTY_ABSENT: HISTORY_PAYLOAD_MISSING,
+    hubspot_states.HISTORY_EMPTY: HISTORY_PAYLOAD_EMPTY,
+}
 
 #: HubSpot's per-request ceiling for a batch read that includes property history.
 BATCH_SIZE = 50
@@ -136,7 +159,12 @@ def select_recovered_events(row: dict, versions: list) -> tuple[list, list]:
         candidates = by_stage.get(EVENT_STAGE[event]) or []
         dated = [v for v in candidates if v.get("timestamp") is not None]
         if not candidates:
-            unresolved.append({"funnel_event": event, "reason": NO_HISTORY_VERSION})
+            # History WAS returned and contains no version for this stage. This
+            # is the only one of the five states that is real evidence the
+            # transition was never recorded — the payload-level states are
+            # decided by the caller from the connector's own report.
+            unresolved.append({"funnel_event": event, "reason": NO_HISTORY_VERSION,
+                               "history_versions_seen": len(versions or [])})
             continue
         if not dated:
             unresolved.append({"funnel_event": event,
@@ -146,6 +174,7 @@ def select_recovered_events(row: dict, versions: list) -> tuple[list, list]:
         recovered.append({
             "contact_id": row.get("contact_id"),
             "funnel_event": event,
+            # HubSpot's OWN recorded timestamp, carried through unchanged.
             "entered_at": best["timestamp"],
             "hubspot_property": "lifecyclestage",
             # The raw value HubSpot recorded, not our normalised form, so the row
@@ -153,8 +182,10 @@ def select_recovered_events(row: dict, versions: list) -> tuple[list, list]:
             "hubspot_value": best.get("value"),
             "hubspot_source_type": best.get("source_type"),
             "hubspot_source_id": best.get("source_id"),
+            "hubspot_source_label": best.get("source_label"),
             "hubspot_updated_by_user_id": best.get("updated_by_user_id"),
             "lifecycle_rule_version": LIFECYCLE_RULE_VERSION,
+            "evidence_state": MATCHING_VERSION_RECOVERED,
         })
     return recovered, unresolved
 
@@ -202,6 +233,11 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
     recovered_rows: list = []
     unresolved_rows: list = []
     contacts_without_history = 0
+    # PR-ADS-155-F1: the evidence breakdown. A run that recovers nothing must be
+    # able to say WHY it recovered nothing, per state, or its zero is unreadable.
+    payload_states: dict = {}
+    contacts_with_history_and_match = 0
+    contacts_with_history_no_match = 0
     last_contact_id = cursor
 
     try:
@@ -213,25 +249,41 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
             for row in batch:
                 examined += 1
                 last_contact_id = row["contact_id"]
-                versions = history.get(row["contact_id"])
-                if not versions:
-                    # Asked, and HubSpot holds nothing. A finding, not a failure.
+                entry = history.get(row["contact_id"]) or {}
+                state = entry.get("state") or hubspot_states.HISTORY_CONTACT_ABSENT
+                payload_states[state] = payload_states.get(state, 0) + 1
+
+                if state != hubspot_states.HISTORY_PRESENT:
+                    # HubSpot returned no usable history payload for this contact.
+                    # WHICH kind of nothing it returned is preserved: an absent
+                    # record and an affirmatively empty history are different
+                    # findings, and only the latter says "no transition was ever
+                    # recorded". Neither is a connector failure, and neither is
+                    # evidence about a specific stage.
                     contacts_without_history += 1
+                    reason = _PAYLOAD_STATE_REASON.get(state, state)
                     unresolved_rows.extend(
-                        {"contact_id": row["contact_id"],
-                         "funnel_event": e, "reason": NO_HISTORY_VERSION}
+                        {"contact_id": row["contact_id"], "funnel_event": e,
+                         "reason": reason, "payload_state": state}
                         for e in missing_events(row))
                     continue
-                found, unresolved = select_recovered_events(row, versions)
+
+                found, unresolved = select_recovered_events(
+                    row, entry.get("versions") or [])
+                if found:
+                    contacts_with_history_and_match += 1
+                else:
+                    contacts_with_history_no_match += 1
                 recovered_rows.extend(found)
-                unresolved_rows.extend({"contact_id": row["contact_id"], **u}
-                                       for u in unresolved)
+                unresolved_rows.extend(
+                    {"contact_id": row["contact_id"], "payload_state": state, **u}
+                    for u in unresolved)
     except Exception as exc:  # noqa: BLE001
         # A partial pass is never reported as a completed one, and the cursor is
         # not advanced past work that was not finished.
         log.error("[lifecycle_history_recovery] HubSpot read failed: %s", exc)
-        return _failed(run_id, mode, started, "hubspot_read_failed", str(exc),
-                       examined=examined)
+        return _failed(run_id, mode, started, HISTORY_REQUEST_UNAVAILABLE,
+                       str(exc), examined=examined)
 
     persisted = 0
     write_error = None
@@ -274,6 +326,15 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
         "contacts_examined": examined,
         "contacts_with_gaps": len(rows),
         "contacts_without_history": contacts_without_history,
+        # PR-ADS-155-F1: the evidence breakdown. Production's first dry run
+        # recovered 0 of 50 and could not say whether HubSpot had answered at
+        # all. These counts make a zero readable, and they are the ONLY basis on
+        # which an operator should decide whether `--apply` is worth running.
+        "payload_states": dict(sorted(payload_states.items())),
+        "contacts_with_history_and_match": contacts_with_history_and_match,
+        "contacts_with_history_no_match": contacts_with_history_no_match,
+        "evidence_states": _evidence_summary(payload_states, unresolved_rows,
+                                             recovered_rows),
         "contacts_recovered": contacts_recovered,
         "events_recovered": len(recovered_rows),
         "events_persisted": persisted,
@@ -282,6 +343,27 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
         "recovered": recovered_rows,
         "source_system": "hubspot_property_history",
         "lifecycle_rule_version": LIFECYCLE_RULE_VERSION,
+    }
+
+
+def _evidence_summary(payload_states: dict, unresolved_rows: list,
+                      recovered_rows: list) -> dict:
+    """Every evidence state this run observed, counted over what it counts.
+
+    Deliberately two different denominators, each labelled: the payload states
+    are per CONTACT (HubSpot answers once per contact), the stage reasons are per
+    (contact, stage) gap. Reporting both under one heading would be the same
+    conflation this section exists to remove.
+    """
+    per_stage: dict = {}
+    for row in unresolved_rows:
+        reason = row.get("reason")
+        per_stage[reason] = per_stage.get(reason, 0) + 1
+    if recovered_rows:
+        per_stage[MATCHING_VERSION_RECOVERED] = len(recovered_rows)
+    return {
+        "per_contact_payload_state": dict(sorted(payload_states.items())),
+        "per_stage_gap_reason": dict(sorted(per_stage.items())),
     }
 
 

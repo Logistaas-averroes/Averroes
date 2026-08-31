@@ -591,6 +591,11 @@ def build_revenue_decision_mart(
 
     window_block = _window_block(core)
     core_health = core.get("source_health") or {}
+    # PR-ADS-155-F1: the campaign-attributable scope's own §5 disclosure, already
+    # built by `_summary_block` from the scope ladder. Read here so the attributed
+    # revenue contract can state the SAME refusal the summary states, rather than
+    # withholding the value while naming no reason.
+    _attributed_disclosure = summary.get("attributed_revenue_disclosure") or {}
     return {
         "view": view,
         "window": window_block,
@@ -659,16 +664,35 @@ def build_revenue_decision_mart(
                 # The advertising SUBSET. Same authority, different population —
                 # so it carries its own scope and is never compared with the
                 # all-source pair above.
-                *[{"metric": m,
-                   "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
-                   "scope": "campaign_attributable_revenue",
-                   "truth_status": (canonical_contract.TRUTH_READY
-                                    if summary.get(field) is not None
-                                    else canonical_contract.TRUTH_NOT_READY)}
-                  for m, field in (
-                      ("campaign_attributed_won_revenue_usd",
-                       "attributed_won_revenue_usd"),
-                      ("campaign_attributed_customers", "attributed_customers"))],
+                # PR-ADS-155-F1: the REVENUE half now carries the scoped refusal
+                # it was already making silently. It was `not_ready` with no
+                # `unavailable_reason` and no `violation_codes`, so the parity
+                # audit could see the withholding but not why — and fell back to
+                # the generic `canonical_source_unavailable` for a blocker the
+                # system already knew precisely. The reason comes from the scope
+                # ladder's own verdict for `campaign_attributable`; the mart
+                # decides nothing.
+                {"metric": "campaign_attributed_won_revenue_usd",
+                 "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+                 "scope": "campaign_attributable_revenue",
+                 "truth_status": (
+                     canonical_contract.TRUTH_READY
+                     if summary.get("attributed_won_revenue_usd") is not None
+                     else canonical_contract.TRUTH_NOT_READY),
+                 "unavailable_reason": (
+                     None if summary.get("attributed_won_revenue_usd") is not None
+                     else _attributed_disclosure.get("unavailable_reason")),
+                 "violation_codes": (
+                     [] if summary.get("attributed_won_revenue_usd") is not None
+                     else _attributed_disclosure.get("violation_codes") or [])},
+                # The COUNT is complete whatever the amounts are.
+                {"metric": "campaign_attributed_customers",
+                 "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+                 "scope": "campaign_attributable_revenue",
+                 "truth_status": (
+                     canonical_contract.TRUTH_READY
+                     if summary.get("attributed_customers") is not None
+                     else canonical_contract.TRUTH_NOT_READY)},
                 # The mart's lead population, from which every page's "SQLs"
                 # headline derives. Distinct from the canonical contact funnel's
                 # lifecycle stages, which are dated by their own stage-entry
