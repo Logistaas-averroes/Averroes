@@ -564,3 +564,81 @@ amount, so the deal count already catches every case. But the failure this whole
 section exists to remove is a contract claiming readiness beside a value the page
 could not compute — so if any published row withholds its revenue, the total is
 **not publishable, whatever the deal arithmetic said**.
+
+---
+
+# PR-ADS-155-F1-F2 — the last raw database-error logging path
+
+## The defect
+
+`db.connection.init_pool()` logged its failure raw:
+
+```python
+log.error("Failed to initialise database connection pool: %s", exc)
+```
+
+psycopg2 embeds the DSN in several connection failures — a failed password
+authentication among them — and a DSN carries the password. That line could put
+a live production credential into the Render logs.
+
+**F1-F1's redaction did not help.** It guarded the value
+`ensure_database_ready()` *returns*; `init_pool()` had already logged the raw
+exception on the way there. And the F1-F1 regression test could not have caught
+it, because it monkeypatches `init_pool` itself and so never runs its internal
+logging.
+
+An earlier manual leak scan also passed, by luck rather than by design: the
+exception that happened to fire was a connection-refused, whose psycopg2 message
+does not include the DSN. A password-authentication failure does.
+
+## Why the redactor had to move
+
+`db.writers` imports `db.connection`. So `db.connection` could never import the
+redactor back — which is precisely why `init_pool` had no way to reach it and
+logged raw instead. The cycle was the cause, not an incidental detail.
+
+`db/redaction.py` imports **nothing from the `db` package** (only `re`), so every
+module in it can import it at module scope with no possibility of a cycle:
+
+```
+db.redaction        ← imports nothing from db
+   ↑          ↑
+db.connection   db.writers   (re-exports `safe_db_error` under the same name)
+```
+
+The scheduler, both standalone CLIs and the parity audit are untouched — they
+still `from db.writers import safe_db_error`, and get the same object.
+
+## The redactor no longer raises
+
+`safe_db_error` now returns a constant if redaction itself fails, instead of
+propagating an exception that would carry the original text — DSN and all — to
+whatever was logging it. A redactor that can fail is a redactor that leaks on the
+day it fails.
+
+## What an operator sees
+
+```
+Failed to initialise database connection pool: connection to server failed:
+[redacted] FATAL: password authentication failed for user "appuser"
+```
+
+The diagnosis survives; the credential does not.
+
+## Proof
+
+`test_31` drives the **real** `init_pool()` with a patched
+`psycopg2.pool.ThreadedConnectionPool` that raises a DSN-bearing error, then
+reads the captured log records and asserts that neither the password, the
+`user:pass@host` form, nor the full DSN appears anywhere — and that `_pool`
+stays `None` with no traceback attached.
+
+Verified as a **negative control**: reverting the one-line fix makes `test_31`
+fail with the password plainly visible in the captured log. The test catches the
+defect it was written for.
+
+`test_32` proves the same end to end through `ensure_database_ready()` (returns
+`False`, nothing leaked into either the detail or the logs), `test_33` through
+the documented CLI (exit 2, its documented unavailable code), `test_34` that the
+redactor is cycle-free and is the single implementation behind all three names,
+and `test_35` that it never raises.
