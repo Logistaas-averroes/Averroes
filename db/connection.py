@@ -30,6 +30,12 @@ import os
 import psycopg2
 import psycopg2.pool
 
+# PR-ADS-155-F1-F2. Imported at MODULE scope, and safe to: `db.redaction`
+# imports nothing from the `db` package, so there is no cycle. The redactor
+# previously lived in `db.writers`, which imports THIS module — which is why
+# `init_pool` had no way to reach it and logged its exception raw.
+from db.redaction import safe_db_error
+
 log = logging.getLogger(__name__)
 
 _pool = None
@@ -54,7 +60,15 @@ def init_pool() -> None:
         _pool = psycopg2.pool.ThreadedConnectionPool(1, 10, url)
         log.info("Database connection pool initialised")
     except Exception as exc:  # noqa: BLE001
-        log.error("Failed to initialise database connection pool: %s", exc)
+        # PR-ADS-155-F1-F2: REDACTED, never raw. psycopg2 embeds the DSN in
+        # several connection failures (a failed password authentication among
+        # them), and a DSN carries the password — so the previous
+        # `log.error(..., exc)` could put a live production credential into the
+        # Render logs. This is the earliest place the secret could escape:
+        # redacting only what `ensure_database_ready` RETURNS was too late,
+        # because this line had already run.
+        log.error("Failed to initialise database connection pool: %s",
+                  safe_db_error(exc))
         _pool = None
 
 
@@ -127,18 +141,20 @@ def ensure_database_ready() -> tuple[bool, str | None]:
     # and this detail is operator-facing: it reaches logs, JSON reports and
     # stderr. `safe_db_error` also collapses newlines and caps the length.
     #
-    # Imported inside the function on purpose: `db.writers` imports this module,
-    # so a module-level import here would be a cycle.
+    # PR-ADS-155-F1-F2: the redactor is now a module-scope import (see the top
+    # of this file), so the ordinary path cannot fail. This re-resolves it
+    # defensively anyway, because the guarantee this function makes is about
+    # what it RETURNS, and a NameError here would propagate the original
+    # exception — DSN and all — to whatever was logging it.
     #
-    # PR-ADS-155-F1-F1: the fallback used to stringify the exception when the
-    # import failed. That inverted the whole point — the one path where the
-    # redactor is unavailable is exactly the path that must reveal LESS, not
-    # more, and a connection error is the failure most likely to carry the DSN.
-    # An unredactable error now yields a CONSTANT: the caller still learns which
-    # step failed (the prefixes below say so), and learns nothing about the
-    # credentials. A diagnosis is worth having; it is not worth a password.
+    # PR-ADS-155-F1-F1: the fallback used to stringify the exception. That
+    # inverted the whole point — the one path where the redactor is unavailable
+    # is exactly the path that must reveal LESS, not more. An unredactable error
+    # yields a CONSTANT: the caller still learns which step failed (the prefixes
+    # below say so), and learns nothing about the credentials. A diagnosis is
+    # worth having; it is not worth a password.
     try:
-        from db.writers import safe_db_error
+        from db.redaction import safe_db_error
     except Exception:  # noqa: BLE001  — redaction must never be the thing that fails
         def safe_db_error(exc, limit: int = 300) -> str:  # noqa: ARG001
             return ("[error text withheld: the redactor could not be imported, "

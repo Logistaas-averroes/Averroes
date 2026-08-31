@@ -726,7 +726,10 @@ def test_25_an_unredactable_error_reveals_nothing(monkeypatch):
     real_import = builtins.__import__
 
     def _no_redactor(name, *args, **kwargs):
-        if name == "db.writers":
+        # PR-ADS-155-F1-F2 moved the redactor to `db.redaction` so
+        # `db.connection` could import it without a cycle. The guarantee under
+        # test is unchanged: when the redactor cannot be reached, reveal LESS.
+        if name == "db.redaction":
             raise ImportError("simulated: the redactor is unavailable")
         return real_import(name, *args, **kwargs)
 
@@ -735,6 +738,8 @@ def test_25_an_unredactable_error_reveals_nothing(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", _no_redactor)
     monkeypatch.setattr(connection, "init_pool", _boom)
+    # The module-scope binding must not rescue the fallback path under test.
+    monkeypatch.delattr(connection, "safe_db_error", raising=False)
 
     ready, detail = connection.ensure_database_ready()
     monkeypatch.undo()
@@ -843,3 +848,131 @@ def test_30_the_country_disclosure_publishes_deal_denominators(pg):
         assert (disclosure["revenue_proven_deals"]
                 + disclosure["revenue_unavailable_deals"]
                 == disclosure["closed_won_deals"])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-155-F1-F2 — the last raw-exception logging path
+# ═════════════════════════════════════════════════════════════════════════════
+_LEAKY_DSN = "postgresql://appuser:hunter2@host/database"
+
+
+def test_31_init_pool_never_logs_the_raw_exception(monkeypatch, caplog):
+    """The REAL `init_pool`, with a driver that raises a DSN-bearing error.
+
+    The F1-F1 redaction guarded what `ensure_database_ready` RETURNS, and the
+    test for it monkeypatched `init_pool` itself — so it could never have caught
+    this. `init_pool` caught and logged the original exception on the way to
+    that safe return, which put the credential in the logs regardless.
+
+    This exercises the real implementation and reads the log records.
+    """
+    import logging
+
+    import psycopg2.pool
+
+    import db.connection as connection
+
+    def _leaky(*_a, **_kw):
+        raise RuntimeError(
+            f"connection to server failed: {_LEAKY_DSN} FATAL: "
+            "password authentication failed for user \"appuser\"")
+
+    monkeypatch.setattr(connection, "_pool", None, raising=False)
+    monkeypatch.setattr(psycopg2.pool, "ThreadedConnectionPool", _leaky)
+    monkeypatch.setenv("DATABASE_URL", _LEAKY_DSN)
+
+    with caplog.at_level(logging.DEBUG):
+        connection.init_pool()
+
+    logged = "\n".join(
+        [r.getMessage() for r in caplog.records]
+        + [str(getattr(r, "exc_text", "") or "") for r in caplog.records])
+
+    for leaked in ("hunter2", "appuser:hunter2", _LEAKY_DSN,
+                   "postgresql://appuser"):
+        assert leaked not in logged, f"{leaked!r} reached the logs: {logged!r}"
+    # It still says what failed — a diagnosis without a credential.
+    assert "Failed to initialise database connection pool" in logged
+    assert "[redacted]" in logged
+    # And the failure stayed controlled.
+    assert connection._pool is None
+    assert not any(r.exc_info for r in caplog.records), (
+        "a traceback would carry the original exception text")
+
+
+def test_32_a_leaky_pool_failure_still_fails_closed_end_to_end(monkeypatch, caplog):
+    """`ensure_database_ready` returns False, with nothing leaked either way."""
+    import logging
+
+    import psycopg2.pool
+
+    import db.connection as connection
+
+    def _leaky(*_a, **_kw):
+        raise RuntimeError(f"could not connect using {_LEAKY_DSN}")
+
+    monkeypatch.setattr(connection, "_pool", None, raising=False)
+    monkeypatch.setattr(psycopg2.pool, "ThreadedConnectionPool", _leaky)
+    monkeypatch.setenv("DATABASE_URL", _LEAKY_DSN)
+
+    with caplog.at_level(logging.DEBUG):
+        ready, detail = connection.ensure_database_ready()
+
+    assert ready is False
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    for leaked in ("hunter2", "appuser:hunter2", _LEAKY_DSN):
+        assert leaked not in detail, f"{leaked!r} leaked into the returned detail"
+        assert leaked not in logged, f"{leaked!r} leaked into the logs"
+    assert connection._pool is None
+
+
+def test_33_the_standalone_command_exits_unavailable_on_a_leaky_dsn():
+    """End to end through the documented command, with its documented code."""
+    res = _run_module(_REPORT_CMD, "--window", "all_time",
+                      env_extra={"DATABASE_URL": _LEAKY_DSN})
+    combined = res.stdout + res.stderr
+    assert res.returncode == 2, combined          # EXIT_UNAVAILABLE
+    for leaked in ("hunter2", "appuser:hunter2", _LEAKY_DSN, "postgresql://"):
+        assert leaked not in combined, f"{leaked!r} reached operator output"
+    assert "Traceback" not in combined
+    assert "UNKNOWN, not zero" in combined
+
+
+def test_34_the_redactor_is_importable_without_a_cycle_and_is_the_only_copy():
+    """One implementation, reachable from `db.connection` at module scope.
+
+    The cycle is what forced the raw log line: `db.writers` imports
+    `db.connection`, so the redactor could not live in `db.writers` and be used
+    by `db.connection`. `db.redaction` imports nothing from the package.
+    """
+    import db.connection as connection
+    import db.redaction as redaction
+    import db.writers as writers
+
+    assert connection.safe_db_error is redaction.safe_db_error
+    assert writers.safe_db_error is redaction.safe_db_error
+
+    src = (_ROOT / "db" / "redaction.py").read_text(encoding="utf-8")
+    assert "from db." not in src and "import db" not in src, (
+        "db.redaction must not import from the db package, or the cycle returns")
+
+    # `init_pool` interpolates the REDACTED text and nothing else.
+    conn_src = (_ROOT / "db" / "connection.py").read_text(encoding="utf-8")
+    body = conn_src[conn_src.index("def init_pool"):]
+    body = body[:body.index("\n@contextlib") if "\n@contextlib" in body
+                else body.index("\ndef ", 1)]
+    assert "%s\",\n                  safe_db_error(exc))" in body or \
+           "safe_db_error(exc)" in body
+    assert '", exc)' not in body, "init_pool must never log the raw exception"
+
+
+def test_35_the_redactor_never_raises():
+    """A redactor that can fail is a redactor that leaks on the day it fails."""
+    from db.redaction import UNREDACTABLE, safe_db_error
+
+    class _Hostile(Exception):
+        def __str__(self):
+            raise RuntimeError("__str__ exploded")
+
+    assert safe_db_error(_Hostile()) == UNREDACTABLE
+    assert "hunter2" not in safe_db_error(_Hostile())
