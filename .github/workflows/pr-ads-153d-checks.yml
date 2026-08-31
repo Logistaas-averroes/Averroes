@@ -62,7 +62,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -72,7 +72,8 @@ jobs:
             tests/test_pr_ads_153f_pg_integration.py \
             tests/test_pr_ads_154a_run_type_pg_integration.py \
             tests/test_pr_ads_154b_coverage_repair_pg.py \
-            tests/test_pr_ads_154c_parity_pg.py -q \
+            tests/test_pr_ads_154c_parity_pg.py \
+            tests/test_pr_ads_155_f1_cli_init_and_scoped_provenance.py -q \
             --junitxml=pg-results.xml
 
       # A skipped database suite is not merge evidence. If the cluster could not
@@ -108,7 +109,8 @@ jobs:
                            "tests.test_pr_ads_153f_pg_integration",
                            "tests.test_pr_ads_154a_run_type_pg_integration",
                            "tests.test_pr_ads_154b_coverage_repair_pg",
-                           "tests.test_pr_ads_154c_parity_pg"):
+                           "tests.test_pr_ads_154c_parity_pg",
+                           "tests.test_pr_ads_155_f1_cli_init_and_scoped_provenance"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):
                   sys.exit(f"{required} contributed no test cases — it was "

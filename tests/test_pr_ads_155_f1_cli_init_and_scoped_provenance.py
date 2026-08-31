@@ -296,7 +296,7 @@ def test_11_country_revenue_null_cannot_publish_truth_status_ready():
     assert "unavailable_reason" in block and "violation_codes" in block
 
 
-def test_12_a_publishable_scoped_population_stays_ready(pg):
+def test_12_a_publishable_scoped_population_stays_ready():
     """A narrower scope with no unpriced deal keeps its total.
 
     The blocker is NOT inherited blindly from the all-source population: it is
