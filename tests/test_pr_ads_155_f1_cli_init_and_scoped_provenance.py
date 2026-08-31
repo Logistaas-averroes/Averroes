@@ -297,7 +297,7 @@ def test_11_country_revenue_null_cannot_publish_truth_status_ready():
         [{"won_revenue_usd": None, "deals": []}],
         deal_proof_available=True, revenue_connected=True, canonical={})
     assert guarded["publishable"] is False
-    assert "withhold their" in guarded["detail"]
+    assert "withhold their closed-won revenue" in guarded["detail"]
 
     # And the source itself: the revenue metric may not take the geo-derived
     # status that produced `ready` over a withheld value.

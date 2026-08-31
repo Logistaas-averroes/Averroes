@@ -333,32 +333,22 @@ def _country_revenue_total_verdict(country_rows: list, *, deal_proof_available: 
                                 "country's closed-won revenue is readable"))
 
     counts = country_attributed_deal_counts(country_rows)
-    verdict = canonical_revenue.total_verdict_for_population(
+    # Belt and braces, decided by the canonical module. By construction a row is
+    # blanked only because one of ITS deals has no proven amount, so the deal
+    # count already catches every case — but a contract claiming readiness beside
+    # a total the page could not sum is the exact defect this rule prevents, so
+    # the row-level fact is passed in rather than assumed away.
+    #
+    # It is passed, not applied here: exactly one module decides revenue
+    # completeness (PR-ADS-154C-F3-F1 §4). Assembling the verdict in this file
+    # would make it a second decider, which `test_f3f1_4` correctly refuses.
+    return canonical_revenue.total_verdict_for_population(
         won_deals=counts["closed_won_deals"],
         unpriced_deals=counts["revenue_unavailable_deals"],
-        scope="country_attributed_revenue")
-
-    # Belt and braces. By construction a row is blanked only because one of ITS
-    # deals has no proven amount, so the deal count already catches every case.
-    # But the failure this whole section exists to remove is a contract claiming
-    # readiness beside a value the page could not compute, so the invariant is
-    # ENFORCED rather than assumed: if any published row withholds its revenue,
-    # the total is not publishable, whatever the deal arithmetic said.
-    withheld_rows = sum(1 for r in (country_rows or [])
-                        if r.get("won_revenue_usd") is None)
-    if withheld_rows and verdict["publishable"]:
-        return {
-            "publishable": False,
-            "reason": canonical_revenue.REASON_REVENUE_INCOMPLETE,
-            "detail": (
-                f"{withheld_rows} published country row(s) withhold their "
-                "closed-won revenue, so the country-attributed total cannot be "
-                "summed — the sum of the rest is a partial figure and is not "
-                "published as the total"),
-            "violation_codes": [canonical_revenue.V_CURRENCY_UNPROVEN_DEALS],
-            "currency_unavailable_deals": counts["revenue_unavailable_deals"],
-        }
-    return verdict
+        scope="country_attributed_revenue",
+        unsummable_parts=sum(1 for r in (country_rows or [])
+                             if r.get("won_revenue_usd") is None),
+        parts_label="country row")
 
 
 def country_attributed_deal_counts(country_rows: list) -> dict:
