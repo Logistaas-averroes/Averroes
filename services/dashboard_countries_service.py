@@ -306,6 +306,14 @@ def _country_revenue_total_verdict(country_rows: list, *, deal_proof_available: 
     ``_build_country_rows``): the revenue integration is not connected, or one of
     that country's deals has an unknown amount. They are separated here because
     they send an operator to two different places.
+
+    PR-ADS-155-F1-F1 — the denominators are DEALS, not rows. The first cut passed
+    ``won_deals=len(country_rows)`` and counted rows whose revenue was withheld,
+    which produced the right blocking boolean and a false disclosure: "1 of 5
+    closed-won deal(s) have no proven amount" over five COUNTRIES that between
+    them might hold ninety deals. The verdict is a statement about deals, so it
+    is computed from the deals attached to the published rows — the same
+    population the KPI sums, at the grain the sentence claims.
     """
     if not deal_proof_available:
         return canonical_revenue.total_verdict_for_population(
@@ -323,10 +331,61 @@ def _country_revenue_total_verdict(country_rows: list, *, deal_proof_available: 
             unavailable_reason=REASON_REVENUE_NOT_CONNECTED,
             unavailable_detail=("the revenue integration is not connected, so no "
                                 "country's closed-won revenue is readable"))
-    unpriced = sum(1 for r in country_rows if r.get("won_revenue_usd") is None)
-    return canonical_revenue.total_verdict_for_population(
-        won_deals=len(country_rows), unpriced_deals=unpriced,
+
+    counts = country_attributed_deal_counts(country_rows)
+    verdict = canonical_revenue.total_verdict_for_population(
+        won_deals=counts["closed_won_deals"],
+        unpriced_deals=counts["revenue_unavailable_deals"],
         scope="country_attributed_revenue")
+
+    # Belt and braces. By construction a row is blanked only because one of ITS
+    # deals has no proven amount, so the deal count already catches every case.
+    # But the failure this whole section exists to remove is a contract claiming
+    # readiness beside a value the page could not compute, so the invariant is
+    # ENFORCED rather than assumed: if any published row withholds its revenue,
+    # the total is not publishable, whatever the deal arithmetic said.
+    withheld_rows = sum(1 for r in (country_rows or [])
+                        if r.get("won_revenue_usd") is None)
+    if withheld_rows and verdict["publishable"]:
+        return {
+            "publishable": False,
+            "reason": canonical_revenue.REASON_REVENUE_INCOMPLETE,
+            "detail": (
+                f"{withheld_rows} published country row(s) withhold their "
+                "closed-won revenue, so the country-attributed total cannot be "
+                "summed — the sum of the rest is a partial figure and is not "
+                "published as the total"),
+            "violation_codes": [canonical_revenue.V_CURRENCY_UNPROVEN_DEALS],
+            "currency_unavailable_deals": counts["revenue_unavailable_deals"],
+        }
+    return verdict
+
+
+def country_attributed_deal_counts(country_rows: list) -> dict:
+    """Real closed-won deal counts for the published country population.
+
+    The deals attached to the country ROWS, which is exactly the population the
+    country revenue KPI sums. Deals that mapped to no country live in the
+    residual and are not part of this total; deals that mapped to a country with
+    no mart row never reach a published row and are not part of it either.
+
+    A deal is "priced" when its proof row carries an amount. ``_deal_proof_row``
+    already applies the canonical currency rule — it stores ``amount_usd`` only
+    where the ledger proved one — so this counts the same fact the row displays
+    rather than re-deriving a second currency judgement here.
+    """
+    closed_won = 0
+    unpriced = 0
+    for row in country_rows or []:
+        for deal in (row.get("deals") or []):
+            closed_won += 1
+            if deal.get("amount_usd") is None:
+                unpriced += 1
+    return {
+        "closed_won_deals": closed_won,
+        "revenue_proven_deals": closed_won - unpriced,
+        "revenue_unavailable_deals": unpriced,
+    }
 
 
 def _group_deals_by_country(deals_rows: list) -> tuple[dict, set, list, bool]:
@@ -998,6 +1057,14 @@ def _assemble(window: str, now: datetime | None) -> dict:
         # PR-ADS-155-F1: the scoped verdict, so the contract builder states the
         # page's own truth rather than re-deriving it from a spend-side flag.
         "country_revenue_verdict": _country_revenue_verdict,
+        # PR-ADS-155-F1-F1: the real deal denominators behind that verdict, so
+        # the disclosure counts DEALS and a reader can check the arithmetic
+        # rather than take the verdict's word for it.
+        "country_revenue_deal_counts": (
+            country_attributed_deal_counts(country_rows)
+            if deal_proof_available and revenue_connected else {
+                "closed_won_deals": None, "revenue_proven_deals": None,
+                "revenue_unavailable_deals": None}),
         "revenue_source": canonical_revenue.CANONICAL_SOURCE,
         "revenue_scope": revenue_scope.SCOPE_ALL_SOURCE,
         "revenue_unavailable_reason": (None if deal_proof_available
@@ -1192,6 +1259,24 @@ def build_dashboard_countries(window: str = "current_quarter",
         # false when the deal ledger could not be read, so drawers must not claim
         # a country has no deals.
         "deal_proof_available": deal_proof_available,
+        # PR-ADS-155-F1-F1: the DEAL denominators behind the country revenue
+        # verdict — complete count, priced, unpriced. Published so the withheld
+        # total's disclosure counts deals rather than countries, and so a reader
+        # can check the arithmetic instead of trusting the verdict's word.
+        "country_revenue_disclosure": {
+            **(core.get("country_revenue_deal_counts") or {}),
+            "scope": "country_attributed_revenue",
+            "total_revenue_usd": (kpis.get("won_revenue_usd")
+                                  if _country_total_ok else None),
+            "total_revenue_publishable": _country_total_ok,
+            "unavailable_reason": (None if _country_total_ok
+                                   else _country_revenue_verdict.get("reason")),
+            "violation_codes": ([] if _country_total_ok
+                                else _country_revenue_verdict.get(
+                                    "violation_codes") or []),
+            "source": canonical_revenue.CANONICAL_SOURCE,
+            "fallback_used": False,
+        },
         "kpis": kpis,
         "period_change": period_change,
         "countries": country_rows,

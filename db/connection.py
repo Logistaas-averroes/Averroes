@@ -129,11 +129,20 @@ def ensure_database_ready() -> tuple[bool, str | None]:
     #
     # Imported inside the function on purpose: `db.writers` imports this module,
     # so a module-level import here would be a cycle.
+    #
+    # PR-ADS-155-F1-F1: the fallback used to stringify the exception when the
+    # import failed. That inverted the whole point — the one path where the
+    # redactor is unavailable is exactly the path that must reveal LESS, not
+    # more, and a connection error is the failure most likely to carry the DSN.
+    # An unredactable error now yields a CONSTANT: the caller still learns which
+    # step failed (the prefixes below say so), and learns nothing about the
+    # credentials. A diagnosis is worth having; it is not worth a password.
     try:
         from db.writers import safe_db_error
     except Exception:  # noqa: BLE001  — redaction must never be the thing that fails
-        def safe_db_error(exc, limit: int = 300) -> str:
-            return " ".join(str(exc).split())[:limit]
+        def safe_db_error(exc, limit: int = 300) -> str:  # noqa: ARG001
+            return ("[error text withheld: the redactor could not be imported, "
+                    "so this message cannot be proven free of credentials]")
 
     try:
         init_pool()

@@ -280,12 +280,24 @@ def test_11_country_revenue_null_cannot_publish_truth_status_ready():
     """The contradiction production showed: ready beside a null value."""
     from services import dashboard_countries_service as countries
 
+    # Realistic rows: a country withholds its revenue because one of ITS deals
+    # has no proven amount.
     verdict = countries._country_revenue_total_verdict(
-        [{"won_revenue_usd": 100.0}, {"won_revenue_usd": None}],
+        [{"won_revenue_usd": 100.0, "deals": [{"deal_id": "a", "amount_usd": 100.0}]},
+         {"won_revenue_usd": None, "deals": [{"deal_id": "b", "amount_usd": None}]}],
         deal_proof_available=True, revenue_connected=True, canonical={})
     assert verdict["publishable"] is False
     assert verdict["reason"] == canonical_revenue.REASON_REVENUE_INCOMPLETE
     assert verdict["violation_codes"] == [canonical_revenue.V_CURRENCY_UNPROVEN_DEALS]
+
+    # PR-ADS-155-F1-F1: the invariant is ENFORCED, not merely implied by the
+    # deal arithmetic. A row withholding its revenue can never coexist with a
+    # publishable total, even if the deal counts somehow said otherwise.
+    guarded = countries._country_revenue_total_verdict(
+        [{"won_revenue_usd": None, "deals": []}],
+        deal_proof_available=True, revenue_connected=True, canonical={})
+    assert guarded["publishable"] is False
+    assert "withhold their" in guarded["detail"]
 
     # And the source itself: the revenue metric may not take the geo-derived
     # status that produced `ready` over a withheld value.
@@ -594,3 +606,240 @@ def test_21_bounded_windows_still_audit_against_a_live_database(pg):
         assert "coverage_disclosures" in result
     # It reached a real database: no window reports the ledger as unreadable.
     assert parity.V_DB_UNREADABLE not in outcome["violation_codes"], outcome
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-155-F1-F1 — the three follow-up defects
+# ═════════════════════════════════════════════════════════════════════════════
+_PRE_F1_TABLE = """
+    CREATE TABLE hubspot_lifecycle_stage_history (
+      id                        SERIAL PRIMARY KEY,
+      contact_id                TEXT NOT NULL,
+      funnel_event              TEXT NOT NULL,
+      entered_at                TIMESTAMPTZ NOT NULL,
+      hubspot_property          TEXT NOT NULL DEFAULT 'lifecyclestage',
+      hubspot_value             TEXT NOT NULL,
+      hubspot_source_type       TEXT,
+      hubspot_source_id         TEXT,
+      hubspot_updated_by_user_id TEXT,
+      recovery_run_id           TEXT NOT NULL,
+      recovered_at              TIMESTAMPTZ DEFAULT NOW(),
+      lifecycle_rule_version    TEXT,
+      source_system             TEXT NOT NULL DEFAULT 'hubspot_property_history',
+      updated_at                TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (contact_id, funnel_event)
+    )
+"""
+
+
+def _column_exists(table: str, column: str) -> bool:
+    from db.connection import get_conn
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = %s AND column_name = %s", (table, column))
+        return cur.fetchone() is not None
+
+
+def test_22_the_source_label_column_is_added_to_an_existing_table(pg):
+    """The migration defect, reproduced against the EXACT pre-PR169 schema.
+
+    PR-ADS-155 already created this table in production, so
+    `CREATE TABLE IF NOT EXISTS` is a no-op there and would never have added the
+    column — the first `--apply` run would have failed on a column production
+    does not have. Emptiness is irrelevant: the TABLE exists.
+    """
+    from db.connection import get_conn
+    from db.schema import init_db
+
+    # Drop the version the pg fixture created and recreate the pre-PR169 shape.
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS hubspot_lifecycle_stage_history")
+        cur.execute(_PRE_F1_TABLE)
+
+    assert not _column_exists("hubspot_lifecycle_stage_history",
+                              "hubspot_source_label"), "precondition"
+
+    init_db()
+    assert _column_exists("hubspot_lifecycle_stage_history",
+                          "hubspot_source_label"), (
+        "schema initialization must ALTER the existing table, not rely on "
+        "CREATE TABLE IF NOT EXISTS")
+
+
+def test_23_a_recovered_row_with_the_new_column_persists_and_reinit_is_idempotent(pg):
+    from datetime import datetime, timezone as tz
+
+    from db import writers
+    from db.connection import get_conn
+    from db.schema import init_db
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS hubspot_lifecycle_stage_history")
+        cur.execute(_PRE_F1_TABLE)
+    init_db()
+
+    res = writers.upsert_lifecycle_stage_history([{
+        "contact_id": "c1", "funnel_event": "mql",
+        "entered_at": datetime(2026, 2, 14, tzinfo=tz.utc),
+        "hubspot_value": "marketingqualifiedlead",
+        "hubspot_source_type": "AUTOMATION", "hubspot_source_id": "wf-9",
+        "hubspot_source_label": "Lifecycle workflow",
+        "lifecycle_rule_version": "v1",
+    }], run_id="run-1")
+    assert res["ok"] is True and res["persisted"] == 1, res
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT hubspot_source_label FROM "
+                    "hubspot_lifecycle_stage_history WHERE contact_id = 'c1'")
+        assert cur.fetchone()[0] == "Lifecycle workflow"
+
+    # Idempotent: a second initialization neither fails nor disturbs the row.
+    init_db()
+    init_db()
+    assert _column_exists("hubspot_lifecycle_stage_history",
+                          "hubspot_source_label")
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*), MAX(hubspot_source_label) FROM "
+                    "hubspot_lifecycle_stage_history")
+        count, label = cur.fetchone()
+    assert (count, label) == (1, "Lifecycle workflow")
+
+
+def test_24_the_migration_is_declared_as_an_alter_not_only_a_create():
+    src = (_ROOT / "db" / "schema.py").read_text(encoding="utf-8")
+    assert ("ALTER TABLE hubspot_lifecycle_stage_history\n"
+            "  ADD COLUMN IF NOT EXISTS hubspot_source_label TEXT;") in src
+
+
+def test_25_an_unredactable_error_reveals_nothing(monkeypatch):
+    """When the redactor itself cannot be imported, reveal LESS, not more.
+
+    The fallback used to stringify the exception — inverting the point, on the
+    exact path where a connection error is most likely to carry the DSN.
+    """
+    import builtins
+
+    import db.connection as connection
+
+    dsn = "postgresql://user:secret@host/database"
+    real_import = builtins.__import__
+
+    def _no_redactor(name, *args, **kwargs):
+        if name == "db.writers":
+            raise ImportError("simulated: the redactor is unavailable")
+        return real_import(name, *args, **kwargs)
+
+    def _boom():
+        raise RuntimeError(f"could not connect: {dsn} timed out")
+
+    monkeypatch.setattr(builtins, "__import__", _no_redactor)
+    monkeypatch.setattr(connection, "init_pool", _boom)
+
+    ready, detail = connection.ensure_database_ready()
+    monkeypatch.undo()
+
+    assert ready is False
+    for leaked in (dsn, "secret", "user:secret", "host/database"):
+        assert leaked not in detail, f"{leaked!r} leaked into {detail!r}"
+    # It still says WHICH step failed — a diagnosis worth having, without a
+    # password.
+    assert "init_pool failed" in detail
+    assert "redactor" in detail
+
+
+def test_26_the_redactor_fallback_never_stringifies_the_exception():
+    src = (_ROOT / "db" / "connection.py").read_text(encoding="utf-8")
+    body = src[src.index("def ensure_database_ready"):]
+    fallback = body[body.index("except Exception:"):body.index("try:", body.index("except Exception:"))]
+    assert "str(exc)" not in fallback, (
+        "the no-redactor fallback must never stringify the original exception")
+
+
+def _country_row(key, deals):
+    """A published country row carrying its closed-won deal proof rows."""
+    unknown = any(d.get("amount_usd") is None for d in deals)
+    return {
+        "country_key": key,
+        "won_revenue_usd": None if unknown else sum(d["amount_usd"] for d in deals),
+        "deals": deals,
+    }
+
+
+def _proof(deal_id, amount):
+    return {"deal_id": deal_id, "amount_usd": amount}
+
+
+def test_27_country_denominators_count_deals_not_country_rows():
+    """Five countries holding ninety deals is not "1 of 5 deals"."""
+    from services import dashboard_countries_service as countries
+
+    rows = [
+        _country_row("us", [_proof("d1", 100.0), _proof("d2", 200.0),
+                            _proof("d3", 300.0)]),
+        _country_row("gb", [_proof("d4", 50.0), _proof("d5", None)]),
+        _country_row("de", [_proof("d6", 75.0)]),
+    ]
+    counts = countries.country_attributed_deal_counts(rows)
+    assert counts["closed_won_deals"] == 6
+    assert counts["revenue_proven_deals"] == 5
+    assert counts["revenue_unavailable_deals"] == 1
+
+    verdict = countries._country_revenue_total_verdict(
+        rows, deal_proof_available=True, revenue_connected=True, canonical={})
+    assert verdict["publishable"] is False
+    # The sentence now counts DEALS, at the grain it claims.
+    assert "1 of 6 closed-won deal(s)" in verdict["detail"], verdict["detail"]
+    assert "of 3 " not in verdict["detail"], "3 is the country count, not a deal count"
+
+
+def test_28_multiple_deals_in_one_country_with_one_unpriced_withholds_the_total():
+    from services import dashboard_countries_service as countries
+
+    rows = [_country_row("us", [_proof("d1", 100.0), _proof("d2", 200.0),
+                                _proof("d3", None)])]
+    counts = countries.country_attributed_deal_counts(rows)
+    assert (counts["closed_won_deals"], counts["revenue_unavailable_deals"]) == (3, 1)
+    verdict = countries._country_revenue_total_verdict(
+        rows, deal_proof_available=True, revenue_connected=True, canonical={})
+    assert verdict["publishable"] is False
+    assert verdict["reason"] == canonical_revenue.REASON_REVENUE_INCOMPLETE
+    # The country row itself still withholds its revenue, never a lowered sum.
+    assert rows[0]["won_revenue_usd"] is None
+
+
+def test_29_an_all_priced_country_population_stays_ready():
+    from services import dashboard_countries_service as countries
+
+    rows = [
+        _country_row("us", [_proof("d1", 100.0), _proof("d2", 200.0)]),
+        _country_row("gb", [_proof("d3", 50.0)]),
+    ]
+    counts = countries.country_attributed_deal_counts(rows)
+    assert counts == {"closed_won_deals": 3, "revenue_proven_deals": 3,
+                      "revenue_unavailable_deals": 0}
+    verdict = countries._country_revenue_total_verdict(
+        rows, deal_proof_available=True, revenue_connected=True, canonical={})
+    assert verdict["publishable"] is True
+    assert verdict["reason"] is None
+    assert rows[0]["won_revenue_usd"] == 300.0
+
+
+def test_30_the_country_disclosure_publishes_deal_denominators(pg):
+    """End to end through the real page, against a live database."""
+    from services import dashboard_countries_service as countries
+
+    payload = countries.build_dashboard_countries("all_time")
+    disclosure = payload["country_revenue_disclosure"]
+    for field in ("closed_won_deals", "revenue_proven_deals",
+                  "revenue_unavailable_deals", "total_revenue_usd",
+                  "total_revenue_publishable", "unavailable_reason",
+                  "violation_codes"):
+        assert field in disclosure, field
+    assert disclosure["scope"] == "country_attributed_revenue"
+    assert disclosure["fallback_used"] is False
+    # Conservation: priced + unpriced == the complete count, whenever known.
+    if disclosure["closed_won_deals"] is not None:
+        assert (disclosure["revenue_proven_deals"]
+                + disclosure["revenue_unavailable_deals"]
+                == disclosure["closed_won_deals"])

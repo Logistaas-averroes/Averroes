@@ -1228,6 +1228,15 @@ CREATE TABLE IF NOT EXISTS hubspot_lifecycle_stage_history (
 CREATE INDEX IF NOT EXISTS idx_hlsh_contact ON hubspot_lifecycle_stage_history(contact_id);
 CREATE INDEX IF NOT EXISTS idx_hlsh_event   ON hubspot_lifecycle_stage_history(funnel_event);
 
+-- PR-ADS-155-F1-F1. PR-ADS-155 already created this table in production, so the
+-- `CREATE TABLE IF NOT EXISTS` above is a NO-OP there and never adds a column to
+-- it. Adding `hubspot_source_label` to the CREATE body alone would therefore
+-- have shipped a writer referencing a column production does not have, and the
+-- first `--apply` run would have failed on it. Emptiness is irrelevant: what
+-- matters is that the TABLE exists, not that it holds rows.
+ALTER TABLE hubspot_lifecycle_stage_history
+  ADD COLUMN IF NOT EXISTS hubspot_source_label TEXT;
+
 -- Durable, resumable checkpoint for the recovery command, so a bounded run can
 -- be stopped and restarted without rescanning contacts it already resolved.
 -- `contacts_without_history` is recorded explicitly: "we looked and HubSpot had

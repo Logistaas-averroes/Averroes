@@ -481,3 +481,86 @@ carried and stored alongside source type and id.
 Still true, unchanged: no proxy timestamp is ever invented, the writer rejects an
 undated row rather than storing a NULL, `--apply` writes only to the local
 database, and there is no HubSpot write path anywhere in the recovery.
+
+---
+
+# PR-ADS-155-F1-F1 — three follow-up corrections
+
+## 1 — the `hubspot_source_label` column was never going to reach production
+
+`hubspot_lifecycle_stage_history` was **created by PR-ADS-155**, so it already
+exists in production. PR-ADS-155-F1 added `hubspot_source_label` only inside the
+`CREATE TABLE IF NOT EXISTS` body — which is a **no-op on an existing table**.
+The writer would have referenced a column production does not have, and the first
+`--apply` run would have failed on it.
+
+Emptiness was the wrong thing to reason about, and my PR description said so
+incorrectly: what matters is that the **table** exists, not that it holds rows.
+
+The fix uses the repository's established mechanism — an inline, idempotent
+statement in `_DDL`, run by `init_db()` on every app startup:
+
+```sql
+ALTER TABLE hubspot_lifecycle_stage_history
+  ADD COLUMN IF NOT EXISTS hubspot_source_label TEXT;
+```
+
+**This is an additive migration of an existing production table**, not merely a
+`CREATE TABLE IF NOT EXISTS` change. It is proved against the exact pre-F1
+schema: drop to that shape, run `init_db()`, assert the column appears, insert a
+recovered row carrying it, then run `init_db()` twice more and assert both the
+column and the row are unchanged.
+
+## 2 — the redactor fallback leaked what it was meant to protect
+
+`ensure_database_ready()` fell back to `str(exc)` when importing `safe_db_error`
+failed. That inverted the point: the one path where the redactor is unavailable
+is exactly the path that must reveal **less**, and a connection error is the
+failure most likely to carry the DSN.
+
+An unredactable error now returns a **constant**:
+
+```
+[error text withheld: the redactor could not be imported, so this message
+ cannot be proven free of credentials]
+```
+
+The caller still learns which step failed — the `init_pool failed:` /
+`readiness probe failed:` prefixes remain — and learns nothing about the
+credentials. A diagnosis is worth having; it is not worth a password.
+
+## 3 — the country revenue disclosure counted countries as deals
+
+The verdict passed `won_deals=len(country_rows)` and counted rows whose revenue
+was withheld. The blocking boolean was right and the **sentence was false**:
+
+> 1 of 5 closed-won deal(s) in scope 'country_attributed_revenue' have no proven
+> amount
+
+…over five **countries** that between them might hold ninety deals.
+
+`country_attributed_deal_counts()` now counts the real closed-won deals attached
+to the published country rows — the same population the KPI sums, at the grain
+the sentence claims — and publishes all three denominators:
+
+| Field | Meaning |
+|---|---|
+| `closed_won_deals` | every country-attributed won deal |
+| `revenue_proven_deals` | those with a proven amount |
+| `revenue_unavailable_deals` | those without |
+
+They are exposed on the Countries response as `country_revenue_disclosure`, so a
+reader can check the arithmetic rather than trust the verdict's word:
+`priced + unpriced == complete`.
+
+Deals in the residual (mapped to no country) are excluded — they are not part of
+the country-attributed total and have their own disclosure. Deals that mapped to
+a country with **no mart row** never reach a published row and are excluded too.
+
+### The invariant is enforced, not assumed
+
+By construction a row is blanked only because one of *its* deals has no proven
+amount, so the deal count already catches every case. But the failure this whole
+section exists to remove is a contract claiming readiness beside a value the page
+could not compute — so if any published row withholds its revenue, the total is
+**not publishable, whatever the deal arithmetic said**.
