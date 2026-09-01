@@ -727,18 +727,49 @@ HUBSPOT_LIFECYCLE_HISTORY_PROPERTY = "lifecyclestage"
 # hard bound rather than a default a caller can raise past it.
 HUBSPOT_HISTORY_BATCH_LIMIT = 50
 
+# ── PR-ADS-155-F1 — per-contact EVIDENCE STATES ─────────────────────────────
+# The first cut returned `{contact_id: [versions]}` and defaulted every
+# requested contact to `[]`. That made four different facts indistinguishable,
+# and a production dry run over 50 contacts reported "no history version for
+# stage" 36 times without anyone being able to say which of them HubSpot had
+# actually answered. These are four different findings with four different
+# follow-ups, so they are four different states:
+#
+#   HISTORY_CONTACT_ABSENT  HubSpot's response did not include this contact at
+#                           all (deleted, merged, or not visible to this token).
+#                           We asked and got no record — not "no history".
+#   HISTORY_PROPERTY_ABSENT the contact came back, but carries no
+#                           `propertiesWithHistory` for `lifecyclestage`. Either
+#                           history was not returned, or the property has never
+#                           been set on this contact.
+#   HISTORY_EMPTY           the history key IS present and the list is empty.
+#                           HubSpot affirmatively holds no versions.
+#   HISTORY_PRESENT         versions were returned; whether any of them MATCHES a
+#                           funnel stage is the service's question, not this one.
+HISTORY_CONTACT_ABSENT = "history_contact_not_returned"
+HISTORY_PROPERTY_ABSENT = "history_payload_missing"
+HISTORY_EMPTY = "history_payload_empty"
+HISTORY_PRESENT = "history_payload_present"
+
 
 def fetch_lifecycle_stage_history(contact_ids, *, client=None) -> dict:
     """Read `lifecyclestage` version history for up to 50 contacts. READ-ONLY.
 
-    Returns ``{contact_id: [version, ...]}`` where each version is
-    ``{"value", "timestamp", "source_type", "source_id", "updated_by_user_id"}``
-    with ``timestamp`` an aware datetime. Versions are returned newest-first,
-    exactly as HubSpot orders them.
+    Returns ``{contact_id: {"state": <evidence state>, "versions": [...]}}``.
+    Each version is ``{"value", "timestamp", "source_type", "source_id",
+    "source_label", "updated_by_user_id"}`` with ``timestamp`` an aware
+    datetime, ordered exactly as HubSpot returned them.
 
-    A contact HubSpot returns no history for is present in the mapping with an
-    empty list — "we asked and there is nothing" is a finding, and must not be
-    confused with "we did not ask", which is the absence of the key.
+    The state is reported per contact and is never inferred from an empty list:
+    "HubSpot did not return this contact", "it returned it with no history
+    payload" and "it returned an empty history" are three different facts, and
+    only the third is evidence that no transition was ever recorded.
+
+    Request/response shape verified against the installed SDK: the request model
+    serializes ``properties_with_history`` to ``propertiesWithHistory``, and the
+    batch response's ``SimplePublicObject`` carries ``properties_with_history``
+    as ``dict[str, list[ValueWithTimestamp]]`` — so history is genuinely
+    requested and genuinely deserialized, not dropped in transit.
 
     Raises ``HubSpotRetryableError`` on a non-rate-limit API failure. A partial
     read is never returned as a complete one.
@@ -772,16 +803,31 @@ def fetch_lifecycle_stage_history(contact_ids, *, client=None) -> dict:
     else:  # pragma: no cover — the loop always breaks or raises
         raise HubSpotRetryableError("HubSpot contact history read exhausted retries")
 
-    out = {cid: [] for cid in ids}
+    # Default: HubSpot did not return this contact. Overwritten below for every
+    # contact it did return, so the default can never be mistaken for evidence.
+    out = {cid: {"state": HISTORY_CONTACT_ABSENT, "versions": []} for cid in ids}
     for result in (getattr(response, "results", None) or []):
         record = result.to_dict() if hasattr(result, "to_dict") else dict(result)
         contact_id = str(record.get("id") or "").strip()
         if not contact_id:
             continue
-        history = (record.get("properties_with_history")
-                   or record.get("propertiesWithHistory") or {})
+        # `to_dict()` emits snake_case; a raw JSON dict emits camelCase. Both are
+        # accepted so the parsing does not depend on which one the caller passed.
+        history = record.get("properties_with_history")
+        if history is None:
+            history = record.get("propertiesWithHistory")
+        if not isinstance(history, dict) \
+                or HUBSPOT_LIFECYCLE_HISTORY_PROPERTY not in history:
+            out[contact_id] = {"state": HISTORY_PROPERTY_ABSENT, "versions": []}
+            continue
         versions = history.get(HUBSPOT_LIFECYCLE_HISTORY_PROPERTY) or []
-        out[contact_id] = [_normalise_history_version(v) for v in versions]
+        if not versions:
+            out[contact_id] = {"state": HISTORY_EMPTY, "versions": []}
+            continue
+        out[contact_id] = {
+            "state": HISTORY_PRESENT,
+            "versions": [_normalise_history_version(v) for v in versions],
+        }
     return out
 
 
@@ -799,6 +845,8 @@ def _normalise_history_version(version) -> dict:
         "timestamp": parse_hubspot_timestamp(raw.get("timestamp")),
         "source_type": raw.get("source_type") or raw.get("sourceType"),
         "source_id": raw.get("source_id") or raw.get("sourceId"),
+        # HubSpot's human-readable account of the change (e.g. a workflow name).
+        "source_label": raw.get("source_label") or raw.get("sourceLabel"),
         "updated_by_user_id": (raw.get("updated_by_user_id")
                                or raw.get("updatedByUserId")),
     }

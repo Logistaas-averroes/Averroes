@@ -50,6 +50,24 @@ EXIT_UNAVAILABLE = 2
 EXIT_USAGE = 3
 
 
+def _database_ready() -> tuple[bool, str | None]:
+    """Initialize AND probe the database before any canonical read.
+
+    PR-ADS-155-F1. This command shipped without it, and the omission produced
+    exactly the failure this whole programme exists to prevent: a standalone
+    ``python -m`` process has never called ``init_pool``, so every ``get_conn``
+    yielded ``None``, the ledger's sync state read as unavailable, and the
+    command reported ``canonical_coverage_not_proven`` — an assertion about the
+    DATA — over a database it had never actually opened. The ledger was healthy.
+
+    A probe, not just an init: ``init_pool`` swallows its own failure, and a pool
+    that exists is still not a database that answers.
+    """
+    from db.connection import ensure_database_ready
+
+    return ensure_database_ready()
+
+
 def _render(report: dict, disclosure: dict) -> None:
     print("=" * 78)
     print("  CLOSED-WON DEALS WITH NO PROVEN AMOUNT")
@@ -124,6 +142,17 @@ def main() -> int:
         print(f"Unknown window '{args.window}'. Valid: {', '.join(WINDOW_KEYS)}",
               file=sys.stderr)
         return EXIT_USAGE
+
+    # Before any canonical read. An unreadable database must abort with a
+    # controlled non-zero exit, never proceed to report zero affected records —
+    # a refused read carries no population, and "0 deals missing an amount" over
+    # one would be a fabricated all-clear.
+    ready, detail = _database_ready()
+    if not ready:
+        print(f"database unavailable: {detail}", file=sys.stderr)
+        print("The number of closed-won deals missing an amount is UNKNOWN, "
+              "not zero.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
 
     from services import canonical_revenue_service as canonical_revenue
 

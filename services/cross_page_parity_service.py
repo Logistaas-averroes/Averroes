@@ -130,6 +130,13 @@ _UNAVAILABLE_CLASSES = {
          "the population IS available and complete, but closed-won deals inside "
          "it have no amount in HubSpot, so the total is unknown. This is not an "
          "outage: it is resolved by pricing those deals at source"),
+    # PR-ADS-155-F1: the revenue integration is not wired at all, so no scoped
+    # revenue population exists to read. Classifiable, and emphatically not the
+    # same as "we could not tell" — an operator connects the integration.
+    "revenue_integration_not_connected":
+        ("population_unavailable", V_POPULATION_UNAVAILABLE,
+         "the revenue integration is not connected, so no closed-won population "
+         "is readable for this scope"),
 }
 
 

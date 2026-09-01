@@ -807,6 +807,10 @@ def build_dashboard_campaigns(window: str = "current_quarter",
         "key": window_block.get("key"), "start_date": window_block.get("start_date"),
         "end_date": window_block.get("end_date"), "timezone": window_block.get("timezone"),
     }
+    # PR-ADS-155-F1: the campaign-attributable scope's canonical §5 disclosure,
+    # carried through the mart from the scope ladder.
+    _attributed_disclosure = ((mart.get("summary") or {})
+                              .get("attributed_revenue_disclosure") or {})
     _mt = canonical_contract.metric_truth_block(_resolved_window, [
         {"metric": "google_ads_spend_usd",
          "data_source": canonical_contract.SOURCE_CANONICAL_SPEND,
@@ -815,14 +819,30 @@ def build_dashboard_campaigns(window: str = "current_quarter",
                           if spend_truth.get("campaign_spend_status") == "verified"
                           else canonical_contract.TRUTH_NOT_READY),
          "customer_id": spend_truth.get("customer_id")},
-        *[{"metric": m,
-           "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
-           "scope": "campaign_attributable_revenue",
-           "truth_status": (canonical_contract.TRUTH_READY
-                            if kpis.get(field) is not None
-                            else canonical_contract.TRUTH_NOT_READY)}
-          for m, field in (("campaign_attributed_won_revenue_usd", "won_revenue_usd"),
-                           ("campaign_attributed_customers", "customers"))],
+        # PR-ADS-155-F1. The revenue metric was `not_ready` with no reason and no
+        # violation codes, so the parity audit could see it withheld but not why,
+        # and fell back to the generic `canonical_source_unavailable` for a
+        # blocker the system already knew exactly. The reason comes from the
+        # mart's campaign-attributable disclosure — the scope ladder's own
+        # verdict — so this page republishes ONE refusal rather than inventing a
+        # second vocabulary for it.
+        {"metric": "campaign_attributed_won_revenue_usd",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("won_revenue_usd") is not None
+                          else canonical_contract.TRUTH_NOT_READY),
+         "unavailable_reason": (None if kpis.get("won_revenue_usd") is not None
+                                else _attributed_disclosure.get("unavailable_reason")),
+         "violation_codes": ([] if kpis.get("won_revenue_usd") is not None
+                             else _attributed_disclosure.get("violation_codes") or [])},
+        # The COUNT is complete whatever the amounts are, so it keeps its own status.
+        {"metric": "campaign_attributed_customers",
+         "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
+         "scope": "campaign_attributable_revenue",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if kpis.get("customers") is not None
+                          else canonical_contract.TRUTH_NOT_READY)},
         {"metric": "campaign_attributable_sqls",
          "data_source": canonical_contract.SOURCE_REVENUE_DECISION_MART,
          "scope": "campaign_attributable_sqls",

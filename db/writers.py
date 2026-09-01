@@ -176,34 +176,13 @@ def _map_source_type(hs_source: str, campaign_name: Optional[str]) -> str:
 # Public write functions
 # ---------------------------------------------------------------------------
 
-_DB_SECRET_RE = re.compile(
-    r"(postgres(?:ql)?://[^\s'\"]+)"     # a DSN, credentials and all
-    r"|(password\s*=\s*\S+)"             # libpq keyword form
-    r"|(://[^/\s:]+:[^@\s]+@)",          # any user:pass@host
-    re.IGNORECASE,
-)
-
-
-def safe_db_error(exc: BaseException, limit: int = 300) -> str:
-    """A database error message safe to put in an API response or a log.
-
-    PR-ADS-154A. Callers need to know WHY a write failed — "value too long for
-    type character varying(20)" is the entire diagnosis of the production
-    failure, and withholding it would have left an operator guessing. But a
-    connection error can carry the DSN, and a DSN carries the password, so the
-    text is redacted before it travels anywhere.
-
-    Redacts DSNs, libpq keyword pairs that assign a password, and
-    ``user:secret@host`` forms, then caps the length so a driver's
-    multi-kilobyte context dump cannot flood a response body.
-
-    (The keyword form is described rather than spelled: review tools mask the
-    literal as a suspected secret, which made this very sentence unreadable in
-    the PR diff. The pattern itself is in ``_DB_SECRET_RE`` above.)
-    """
-    text = " ".join(str(exc).split())          # collapse newlines/tabs
-    text = _DB_SECRET_RE.sub("[redacted]", text)
-    return text[:limit]
+# PR-ADS-155-F1-F2: the redactor MOVED to `db.redaction`, which imports nothing
+# from the `db` package. It lived here while only write paths needed it, but
+# this module imports `db.connection`, so `db.connection` could never import it
+# back — and `db.connection.init_pool` is where the most dangerous message is
+# produced. It is re-exported under the same name so the existing importers
+# (the scheduler, two CLIs, the parity audit) are untouched.
+from db.redaction import _DB_SECRET_RE, safe_db_error  # noqa: F401,E402
 
 
 def write_run_detailed(run_data: dict) -> tuple[Optional[int], Optional[str]]:
@@ -3221,7 +3200,7 @@ def upsert_hubspot_contact_funnel(rows: list, *,
 _STAGE_HISTORY_COLUMNS = (
     "contact_id", "funnel_event", "entered_at",
     "hubspot_property", "hubspot_value", "hubspot_source_type",
-    "hubspot_source_id", "hubspot_updated_by_user_id",
+    "hubspot_source_id", "hubspot_source_label", "hubspot_updated_by_user_id",
     "lifecycle_rule_version",
 )
 
@@ -3257,7 +3236,8 @@ def upsert_lifecycle_stage_history(rows: list, *, run_id: str) -> dict:
             contact_id, event, entered_at,
             r.get("hubspot_property") or "lifecyclestage",
             r.get("hubspot_value"), r.get("hubspot_source_type"),
-            r.get("hubspot_source_id"), r.get("hubspot_updated_by_user_id"),
+            r.get("hubspot_source_id"), r.get("hubspot_source_label"),
+            r.get("hubspot_updated_by_user_id"),
             r.get("lifecycle_rule_version"), run_id,
         ))
 

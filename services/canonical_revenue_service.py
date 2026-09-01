@@ -614,26 +614,88 @@ def summable_revenue(row):
     return None
 
 
-def _revenue_total_verdict(summary: dict, scope) -> dict:
-    """THE rule, over one already-aggregated scope summary.
+def total_verdict_for_population(*, won_deals, unpriced_deals, scope,
+                                 population_available: bool = True,
+                                 unavailable_reason: str | None = None,
+                                 unavailable_detail: str | None = None,
+                                 violation_codes=None,
+                                 unsummable_parts: int = 0,
+                                 parts_label: str = "component") -> dict:
+    """THE rule, over ANY closed-won population — not only a lattice scope.
 
-    Split out so :func:`revenue_total_publishable` and :func:`get_scope_ladder`
-    share one implementation rather than one calling the other's shape back into
-    existence. Every publishable verdict in the codebase comes from here.
+    PR-ADS-155-F1. ``campaign_attributable`` is a scope in
+    ``analysis.revenue_scope``, so its verdict came free from the ladder.
+    ``country_attributed`` is not: it is a different axis, grouped by the deal's
+    own country evidence, and the Countries page had no way to ask the canonical
+    contract "is THIS population's total publishable?". It therefore derived its
+    contract from geo readiness instead, and published
+    ``truth_status: ready`` beside a ``null`` revenue value — a contract that
+    contradicts the number it describes.
+
+    This generalises the rule so any consumer holding a scoped population can get
+    the SAME verdict, computed the same way, rather than inventing a local
+    approximation of it. :func:`_revenue_total_verdict` now delegates here, so
+    there is still exactly one implementation.
+
+    Three conditions, in order:
+
+    1. **The population must be readable.** An unreadable one yields the caller's
+       own reason — the ledger's, not a substituted one — and counts stay NULL.
+    2. **Every deal in it must have a proven amount.** Otherwise the total is
+       unknown: not zero, and not the sum of the priced remainder.
+    3. **Every PART the caller would sum must itself be summable.**
+       ``unsummable_parts`` is for a consumer whose total is a sum of aggregates
+       rather than of deals — the Countries page adds up per-country rows. If any
+       row withholds its revenue, the page cannot compute the total no matter
+       what the deal arithmetic says, and a contract claiming readiness beside a
+       value the page could not compute is the exact defect this rule exists to
+       prevent.
+
+       By construction the deal count already catches every such case, so this is
+       belt and braces. It lives HERE rather than in the page because exactly one
+       module decides revenue completeness (PR-ADS-154C-F3-F1 §4): a caller that
+       assembled this verdict itself would be a second decider, which the static
+       guard in `test_f3f1_4` correctly refuses.
     """
-    unproven = summary.get("currency_unavailable_deals") or 0
+    if not population_available:
+        return {
+            "publishable": False,
+            "reason": unavailable_reason or REASON_LEDGER_UNREADABLE,
+            "detail": unavailable_detail,
+            "violation_codes": sorted(set(violation_codes or [])),
+            # NULL, not 0: an unreadable population proves nothing about how many
+            # of its deals are unpriced.
+            "currency_unavailable_deals": None,
+        }
+
+    unproven = int(unpriced_deals or 0)
     if unproven:
         return {
             "publishable": False,
             "reason": REASON_REVENUE_INCOMPLETE,
             "detail": (
-                f"{unproven} of {summary.get('won_deals')} closed-won deal(s) in "
-                f"scope '{summary.get('scope', scope)}' have no proven amount, so "
-                "the window total is unknown — the sum of the rest is a partial "
-                "figure and is not published as the total"),
+                f"{unproven} of {won_deals} closed-won deal(s) in scope "
+                f"'{scope}' have no proven amount, so the window total is "
+                "unknown — the sum of the rest is a partial figure and is not "
+                "published as the total"),
             "violation_codes": [V_CURRENCY_UNPROVEN_DEALS],
             "currency_unavailable_deals": unproven,
         }
+
+    unsummable = int(unsummable_parts or 0)
+    if unsummable:
+        return {
+            "publishable": False,
+            "reason": REASON_REVENUE_INCOMPLETE,
+            "detail": (
+                f"{unsummable} published {parts_label}(s) in scope '{scope}' "
+                "withhold their closed-won revenue, so the total cannot be "
+                "summed — the sum of the rest is a partial figure and is not "
+                "published as the total"),
+            "violation_codes": [V_CURRENCY_UNPROVEN_DEALS],
+            "currency_unavailable_deals": unproven,
+        }
+
     return {
         "publishable": True,
         "reason": None,
@@ -641,6 +703,20 @@ def _revenue_total_verdict(summary: dict, scope) -> dict:
         "violation_codes": [],
         "currency_unavailable_deals": 0,
     }
+
+
+def _revenue_total_verdict(summary: dict, scope) -> dict:
+    """THE rule, over one already-aggregated scope summary.
+
+    Split out so :func:`revenue_total_publishable` and :func:`get_scope_ladder`
+    share one implementation rather than one calling the other's shape back into
+    existence. Delegates to :func:`total_verdict_for_population`, which is the
+    same rule stated over a bare population so non-lattice scopes can use it too.
+    """
+    return total_verdict_for_population(
+        won_deals=summary.get("won_deals"),
+        unpriced_deals=summary.get("currency_unavailable_deals") or 0,
+        scope=summary.get("scope", scope))
 
 
 def revenue_total_publishable(base: dict, scope=DEFAULT_SCOPE, *,
@@ -946,6 +1022,7 @@ __all__ = [
     "unavailable", "load_won_deals", "summarize_deals", "build_snapshot",
     "get_revenue_snapshot", "get_scope_ladder", "deal_display_row",
     "canonical_deal_rows", "summable_revenue", "revenue_total_publishable",
+    "total_verdict_for_population",
     # PR-ADS-155 §5/§6
     "revenue_disclosure", "disclosure_from_ladder",
     "missing_amount_deals", "hubspot_portal_id",

@@ -341,3 +341,304 @@ records remain unpriced** — that is a violation, under its own precise code.
 8. The 14 unpriced deals are fixed **in HubSpot**, by whoever owns them. Once
    priced, the ledger sync picks up the amounts and the total becomes publishable
    with no code change.
+
+---
+
+# PR-ADS-155-F1 — post-deployment repairs
+
+PR-ADS-155 deployed successfully. Validating it against production exposed four
+bounded defects.
+
+## 1 & 2 — the standalone commands never opened the database
+
+Both new commands shipped without initializing the connection pool. A standalone
+`python -m` process is not the web app: nothing has called `init_pool`, so
+`db.connection._pool` is `None`, every `get_conn()` yields `None`, and each read
+degrades quietly to "unavailable".
+
+That is the right behaviour for one optional write and catastrophic for a whole
+command. `scripts.report_missing_deal_amounts` read an empty sync state and
+reported:
+
+```
+UNAVAILABLE: canonical_coverage_not_proven
+deal sync state unavailable — coverage cannot be verified
+REPORT_EXIT=2
+```
+
+over a healthy ledger holding 181 closed-won deals. It turned **"we never opened
+the database"** into an assertion about the **data**. Wrapped in an explicit
+`init_pool()` the same command returned the correct 181 / 167 / 14.
+
+### The fix
+
+`ensure_database_ready()` moved from `scheduler/incremental_sync.py` into
+`db/connection.py`, beside the pool it initializes, so all three entry points
+share one implementation. The scheduler keeps its name and contract as a thin
+delegation — a second copy is how two entry points come to disagree about what
+"ready" means.
+
+It **probes**, not merely initializes: `init_pool()` swallows its own failure,
+and a pool that exists is still not a database that answers. `SELECT 1` is the
+evidence.
+
+Both commands now:
+
+* initialize and probe inside `main()` — never at import time, so importing the
+  module cannot open a connection as a side effect;
+* exit non-zero on failure with a **redacted** detail (a DSN carries a password);
+* state that the affected count is **UNKNOWN, not zero** — a refused read carries
+  no population, and "0 deals missing an amount" over one would be a fabricated
+  all-clear;
+* keep their existing exit-code contracts.
+
+Schema creation is unchanged: `init_db()` at app startup remains authoritative.
+Neither command creates tables.
+
+## 3 — scoped revenue contracts declared nothing, or contradicted themselves
+
+| Identity | Before | Problem |
+|---|---|---|
+| `campaign_attributed_won_revenue_usd` | null, `not_ready`, **no reason, no codes** | the audit saw the withholding but not why |
+| `country_attributed_won_revenue_usd` | null, **`ready`** | a contract contradicting the number beside it |
+
+Countries derived readiness from **geo coverage**, which says the spend side is
+placed and is silent on whether the deals behind the revenue carry proven
+amounts.
+
+### The fix
+
+`canonical_revenue_service.total_verdict_for_population()` generalises the
+canonical rule to **any** closed-won population, not only a lattice scope.
+`campaign_attributable` is a scope in `analysis.revenue_scope` and got its
+verdict free from the ladder; `country_attributed` is a different axis and had no
+way to ask the contract "is THIS population's total publishable?", so it
+approximated the question locally and got it wrong.
+`_revenue_total_verdict` now delegates to it — still exactly one rule.
+
+Two conditions, in order: the population must be readable, and every deal in it
+must have a proven amount.
+
+The country verdict is computed over the **country rows** — what the KPI
+actually sums. Deriving it from the deal grouping looked equivalent and is not: a
+deal can map to a country that has no mart row, so the verdict would describe a
+population the published figure never included.
+
+Revenue and customers now carry **separate statuses**. A count is complete
+whatever the amounts are, so customers may stay ready while the total is
+withheld; blanking a number we did measure would be its own fabrication.
+
+**A scoped total is never blocked by inheritance.** A narrower population with no
+unpriced deal stays `ready` even while the all-source total is unavailable — that
+is proved from its own deals.
+
+## 4 — the parity audit's generic fallback
+
+With every revenue consumer declaring its blocker, All-Time emits
+`revenue_total_unpublishable_missing_amount` and **no revenue metric** falls back
+to `canonical_source_unavailable`. `revenue_integration_not_connected` became
+classifiable too (population unavailable). The generic code is **kept** for
+genuinely unclassified failures, and the audit stays red while the 14 deals are
+unpriced.
+
+## 5 — the lifecycle dry run could not explain its own zero
+
+The first production dry run examined 50 contacts and reported
+`no_history_version_for_stage` 36 times — which conflated four different findings
+and therefore proved none of them.
+
+**The request and response paths were audited against the installed SDK first:**
+
+* the request model serializes `properties_with_history` → `propertiesWithHistory`;
+* the batch response's `SimplePublicObject` carries `properties_with_history` as
+  `dict[str, list[ValueWithTimestamp]]`.
+
+So history is genuinely requested and genuinely deserialized — **the zero is real
+data, not a connector defect.** What was broken was the reporting.
+
+Four connector states, per contact asked:
+
+| State | Meaning |
+|---|---|
+| `history_contact_not_returned` | HubSpot's response omitted this contact entirely |
+| `history_payload_missing` | returned, with no `lifecyclestage` history payload |
+| `history_payload_empty` | the key IS present and the list is empty |
+| `history_payload_present` | versions returned and inspected |
+
+Five per-`(contact, stage)` reasons: the three payload states above, plus
+`history_present_no_matching_stage_version` (the only one that is real evidence
+the transition was never recorded), `history_version_without_timestamp`, and
+`matching_stage_version_recovered`. A failed request is
+`history_request_unavailable` — nothing is proven by it.
+
+The report publishes both breakdowns under **separate, named denominators**:
+payload states count contacts, gap reasons count `(contact, stage)` pairs.
+Merging them would be the same conflation this section removes.
+
+`source_label` (HubSpot's own account of the change, e.g. a workflow name) is now
+carried and stored alongside source type and id.
+
+Still true, unchanged: no proxy timestamp is ever invented, the writer rejects an
+undated row rather than storing a NULL, `--apply` writes only to the local
+database, and there is no HubSpot write path anywhere in the recovery.
+
+---
+
+# PR-ADS-155-F1-F1 — three follow-up corrections
+
+## 1 — the `hubspot_source_label` column was never going to reach production
+
+`hubspot_lifecycle_stage_history` was **created by PR-ADS-155**, so it already
+exists in production. PR-ADS-155-F1 added `hubspot_source_label` only inside the
+`CREATE TABLE IF NOT EXISTS` body — which is a **no-op on an existing table**.
+The writer would have referenced a column production does not have, and the first
+`--apply` run would have failed on it.
+
+Emptiness was the wrong thing to reason about, and my PR description said so
+incorrectly: what matters is that the **table** exists, not that it holds rows.
+
+The fix uses the repository's established mechanism — an inline, idempotent
+statement in `_DDL`, run by `init_db()` on every app startup:
+
+```sql
+ALTER TABLE hubspot_lifecycle_stage_history
+  ADD COLUMN IF NOT EXISTS hubspot_source_label TEXT;
+```
+
+**This is an additive migration of an existing production table**, not merely a
+`CREATE TABLE IF NOT EXISTS` change. It is proved against the exact pre-F1
+schema: drop to that shape, run `init_db()`, assert the column appears, insert a
+recovered row carrying it, then run `init_db()` twice more and assert both the
+column and the row are unchanged.
+
+## 2 — the redactor fallback leaked what it was meant to protect
+
+`ensure_database_ready()` fell back to `str(exc)` when importing `safe_db_error`
+failed. That inverted the point: the one path where the redactor is unavailable
+is exactly the path that must reveal **less**, and a connection error is the
+failure most likely to carry the DSN.
+
+An unredactable error now returns a **constant**:
+
+```
+[error text withheld: the redactor could not be imported, so this message
+ cannot be proven free of credentials]
+```
+
+The caller still learns which step failed — the `init_pool failed:` /
+`readiness probe failed:` prefixes remain — and learns nothing about the
+credentials. A diagnosis is worth having; it is not worth a password.
+
+## 3 — the country revenue disclosure counted countries as deals
+
+The verdict passed `won_deals=len(country_rows)` and counted rows whose revenue
+was withheld. The blocking boolean was right and the **sentence was false**:
+
+> 1 of 5 closed-won deal(s) in scope 'country_attributed_revenue' have no proven
+> amount
+
+…over five **countries** that between them might hold ninety deals.
+
+`country_attributed_deal_counts()` now counts the real closed-won deals attached
+to the published country rows — the same population the KPI sums, at the grain
+the sentence claims — and publishes all three denominators:
+
+| Field | Meaning |
+|---|---|
+| `closed_won_deals` | every country-attributed won deal |
+| `revenue_proven_deals` | those with a proven amount |
+| `revenue_unavailable_deals` | those without |
+
+They are exposed on the Countries response as `country_revenue_disclosure`, so a
+reader can check the arithmetic rather than trust the verdict's word:
+`priced + unpriced == complete`.
+
+Deals in the residual (mapped to no country) are excluded — they are not part of
+the country-attributed total and have their own disclosure. Deals that mapped to
+a country with **no mart row** never reach a published row and are excluded too.
+
+### The invariant is enforced, not assumed
+
+By construction a row is blanked only because one of *its* deals has no proven
+amount, so the deal count already catches every case. But the failure this whole
+section exists to remove is a contract claiming readiness beside a value the page
+could not compute — so if any published row withholds its revenue, the total is
+**not publishable, whatever the deal arithmetic said**.
+
+---
+
+# PR-ADS-155-F1-F2 — the last raw database-error logging path
+
+## The defect
+
+`db.connection.init_pool()` logged its failure raw:
+
+```python
+log.error("Failed to initialise database connection pool: %s", exc)
+```
+
+psycopg2 embeds the DSN in several connection failures — a failed password
+authentication among them — and a DSN carries the password. That line could put
+a live production credential into the Render logs.
+
+**F1-F1's redaction did not help.** It guarded the value
+`ensure_database_ready()` *returns*; `init_pool()` had already logged the raw
+exception on the way there. And the F1-F1 regression test could not have caught
+it, because it monkeypatches `init_pool` itself and so never runs its internal
+logging.
+
+An earlier manual leak scan also passed, by luck rather than by design: the
+exception that happened to fire was a connection-refused, whose psycopg2 message
+does not include the DSN. A password-authentication failure does.
+
+## Why the redactor had to move
+
+`db.writers` imports `db.connection`. So `db.connection` could never import the
+redactor back — which is precisely why `init_pool` had no way to reach it and
+logged raw instead. The cycle was the cause, not an incidental detail.
+
+`db/redaction.py` imports **nothing from the `db` package** (only `re`), so every
+module in it can import it at module scope with no possibility of a cycle:
+
+```
+db.redaction        ← imports nothing from db
+   ↑          ↑
+db.connection   db.writers   (re-exports `safe_db_error` under the same name)
+```
+
+The scheduler, both standalone CLIs and the parity audit are untouched — they
+still `from db.writers import safe_db_error`, and get the same object.
+
+## The redactor no longer raises
+
+`safe_db_error` now returns a constant if redaction itself fails, instead of
+propagating an exception that would carry the original text — DSN and all — to
+whatever was logging it. A redactor that can fail is a redactor that leaks on the
+day it fails.
+
+## What an operator sees
+
+```
+Failed to initialise database connection pool: connection to server failed:
+[redacted] FATAL: password authentication failed for user "appuser"
+```
+
+The diagnosis survives; the credential does not.
+
+## Proof
+
+`test_31` drives the **real** `init_pool()` with a patched
+`psycopg2.pool.ThreadedConnectionPool` that raises a DSN-bearing error, then
+reads the captured log records and asserts that neither the password, the
+`user:pass@host` form, nor the full DSN appears anywhere — and that `_pool`
+stays `None` with no traceback attached.
+
+Verified as a **negative control**: reverting the one-line fix makes `test_31`
+fail with the password plainly visible in the captured log. The test catches the
+defect it was written for.
+
+`test_32` proves the same end to end through `ensure_database_ready()` (returns
+`False`, nothing leaked into either the detail or the logs), `test_33` through
+the documented CLI (exit 2, its documented unavailable code), `test_34` that the
+redactor is cycle-free and is the single implementation behind all three names,
+and `test_35` that it never raises.
