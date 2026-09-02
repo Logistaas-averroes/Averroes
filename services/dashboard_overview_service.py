@@ -1347,6 +1347,30 @@ def _lifecycle_previous_period(window: str, now: datetime | None) -> dict:
     }
 
 
+def _activity_unavailable_reason(lifecycle_funnel: dict) -> str:
+    """WHY the activity block is withheld, at the precision the funnel offers.
+
+    Three different failures, three different answers, because they call for
+    three different responses: a broken invariant is a data-quality
+    investigation, an unreadable contact store is an outage, and a funnel build
+    that raised is a defect in the service. Collapsing the last two into one
+    generic reason would tell an operator to check the wrong thing — and the
+    frontend already carries a distinct label for each, so the distinction would
+    have been thrown away one line before it was needed.
+    """
+    if lifecycle_funnel.get("status") == "mismatch":
+        return "canonical_funnel_mismatch"
+    # The funnel's own reconciliation names the failure precisely on both
+    # unavailable paths: `canonical_contact_store_unavailable` when the store
+    # could not be read, `canonical_funnel_read_failed` when the build raised.
+    declared = (lifecycle_funnel.get("reconciliation") or {}).get("reasons") or []
+    for reason in declared:
+        if reason in ("canonical_funnel_read_failed",
+                      "canonical_contact_store_unavailable"):
+            return reason
+    return "canonical_contact_store_unavailable"
+
+
 def _lifecycle_activity_block(lifecycle_funnel: dict, window: str,
                               now: datetime | None) -> dict:
     """Lifecycle ACTIVITY in this window, with governed conversions beside it.
@@ -1412,8 +1436,15 @@ def _lifecycle_activity_block(lifecycle_funnel: dict, window: str,
             "previous_period": _delta_metric(entered, prev_counts.get(event)),
         })
 
+    # Fail closed as ONE block. A `mismatch` leaves the funnel payload's own
+    # `conversions` populated — the invariant that broke was a scope-nesting
+    # one, and the arithmetic still completed — so decorating them here would
+    # publish rates over a population whose counts this same block has just
+    # withheld, and hand the page `available: false` beside
+    # `conversions_available: true`. If the counts are not fit to show, the
+    # percentages measured over them are not either.
     conversions = []
-    for conversion in (lifecycle_funnel.get("conversions") or []):
+    for conversion in (lifecycle_funnel.get("conversions") or []) if available else ():
         from_event = conversion.get("from_event")
         to_event = conversion.get("to_event")
         from_label = ((definitions.get(from_event) or {}).get("label")
@@ -1432,10 +1463,7 @@ def _lifecycle_activity_block(lifecycle_funnel: dict, window: str,
 
     return {
         "available": available,
-        "reason": None if available else (
-            "canonical_funnel_mismatch"
-            if lifecycle_funnel.get("status") == "mismatch"
-            else "canonical_contact_store_unavailable"),
+        "reason": None if available else _activity_unavailable_reason(lifecycle_funnel),
         "basis": LIFECYCLE_ACTIVITY_BASIS,
         # Stated, not implied. The renderer reads this rather than deciding for
         # itself whether a rise is a defect.

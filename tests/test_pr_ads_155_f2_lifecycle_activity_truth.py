@@ -398,6 +398,76 @@ def test_9_a_missing_cohort_denominator_fails_closed(monkeypatch):
     assert "!activity.available" in src
 
 
+def test_9b_a_mismatch_withholds_the_conversions_as_well_as_the_counts(monkeypatch):
+    """Fail closed as ONE block, not half of one.
+
+    A `mismatch` is a broken invariant, not a failed read: the funnel payload
+    still carries `conversions`, because the arithmetic completed. Decorating
+    them here would publish rates measured over a population whose counts this
+    same block has just withheld, and hand the page `available: false` beside
+    `conversions_available: true`. If the counts are not fit to show, the
+    percentages over them are not either.
+    """
+    pops = _pops(_production_shaped_rows())
+    block = _funnel_block(pops)
+    # A real mismatch shape: conversions present, counts withheld by status.
+    block["status"] = funnel.STATUS_MISMATCH
+    block["reconciliation"] = {"status": funnel.STATUS_MISMATCH,
+                               "reasons": ["scope_nesting_broken:mql"]}
+    for event in _EVENTS:
+        block[event] = None
+    assert block["conversions"], "the fixture must carry conversions to be a test"
+
+    monkeypatch.setattr(overview, "_lifecycle_previous_period",
+                        lambda _w, _n: {"available": False, "label": None,
+                                        "window": None, "counts": {},
+                                        "reason": "Previous period unavailable."})
+    activity = overview._lifecycle_activity_block(block, "current_quarter", None)
+
+    assert activity["available"] is False
+    assert activity["reason"] == "canonical_funnel_mismatch"
+    assert activity["conversions"] == []
+    assert activity["conversions_available"] is False
+    assert _entered(activity) == [None] * 5
+
+
+@pytest.mark.parametrize("status,reasons,expected", [
+    ("unavailable", ["canonical_funnel_read_failed"], "canonical_funnel_read_failed"),
+    ("unavailable", ["canonical_contact_store_unavailable"],
+     "canonical_contact_store_unavailable"),
+    ("mismatch", ["scope_nesting_broken:sql"], "canonical_funnel_mismatch"),
+    ("unavailable", [], "canonical_contact_store_unavailable"),
+])
+def test_9c_each_way_of_being_unavailable_keeps_its_own_name(
+        status, reasons, expected, monkeypatch):
+    """Three failures, three answers — they call for three different responses.
+
+    A broken invariant is a data-quality investigation, an unreadable contact
+    store is an outage, and a funnel build that raised is a defect in the
+    service. Collapsing the last two would send an operator to check the wrong
+    thing, and the frontend already carries a distinct label for each.
+    """
+    block = _funnel_block(_pops([]), available=False)
+    block["status"] = status
+    block["reconciliation"] = {"status": status, "reasons": list(reasons)}
+
+    monkeypatch.setattr(overview, "_lifecycle_previous_period",
+                        lambda _w, _n: {"available": False, "label": None,
+                                        "window": None, "counts": {},
+                                        "reason": "Previous period unavailable."})
+    activity = overview._lifecycle_activity_block(block, "current_quarter", None)
+
+    assert activity["available"] is False
+    assert activity["reason"] == expected
+    # Whichever failure it is, nothing is published over it.
+    assert activity["conversions"] == []
+    assert _entered(activity) == [None] * 5
+
+    # And the renderer has a distinct sentence for each, rather than one
+    # catch-all that would describe two of them wrongly.
+    assert expected in _activity_renderer()
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # §5 — a trend is a trend
 # ═════════════════════════════════════════════════════════════════════════════
