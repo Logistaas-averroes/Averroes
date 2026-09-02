@@ -775,3 +775,23 @@ All-Time revenue remains `null` with `closed_won_deals_missing_amount` and
 `currency_unproven_deals_in_population` while any of the 14 closed-won deals
 lacks a proven amount, and the known $878,324.80 continues to appear only under
 the backend's own label naming its 167-deal denominator.
+
+## Failing closed as one block
+
+Two corrections found on review, both about the withheld state rather than the
+published one:
+
+* A funnel `mismatch` is a broken invariant, not a failed read — the arithmetic
+  completed, so the payload still carries `conversions`. The activity block
+  withheld the counts and then decorated the rates measured over them, which
+  gave the page `available: false` beside `conversions_available: true`. If the
+  counts are not fit to show, the percentages over them are not either.
+* `canonical_funnel_read_failed` was being folded into
+  `canonical_contact_store_unavailable`. Those send an operator to different
+  places — a defect in the service versus an outage — and the frontend already
+  carried a distinct label for each, so the distinction was discarded one line
+  before it was needed. `_activity_unavailable_reason` reads the funnel's own
+  reconciliation reasons instead.
+
+`test_9b` and `test_9c` cover both, and were validated as negative controls:
+reverting either fix makes the matching case fail.
