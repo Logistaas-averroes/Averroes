@@ -642,3 +642,156 @@ defect it was written for.
 the documented CLI (exit 2, its documented unavailable code), `test_34` that the
 redactor is cycle-free and is the single implementation behind all three names,
 and `test_35` that it never raises.
+
+---
+
+# PR-ADS-155-F2 — lifecycle activity, and the two ratios that were not conversions
+
+## The data was right. The presentation was not.
+
+For `current_quarter` the canonical CRM funnel returned stage-**entry** counts of
+
+| Stage | Entered during the window |
+|---|---|
+| Lead | 352 |
+| MQL | **553** |
+| SQL | 42 |
+| Opportunity | **46** |
+| Lifecycle Customer | 17 |
+
+and, separately, cohort conversions of 82.95%, 6.69%, 11.90% and 2.17%.
+
+Both are true, and they are not in tension. A stage-entry count answers *how many
+contacts entered this stage during the selected period*; a cohort conversion
+answers *of the contacts that entered the earlier stage during the period, how
+many later reached the next one*. A contact can enter MQL this quarter having
+entered Lead two years ago, so MQL entries legitimately exceed Lead entries, and
+Opportunity legitimately exceeds SQL.
+
+PR-ADS-155 §1 had already stopped the Dashboard from drawing those five totals as
+one narrowing pipeline: the strip became a single Lead-anchored cohort, which is
+monotonic by construction. What it did not do was give the window's actual
+activity anywhere to live — so the five counts were published in the API and
+rendered nowhere.
+
+## The exact calculation that was misleading
+
+Two of them, both in `dashboard_overview_service.build_dashboard_overview`:
+
+```python
+"sql_rate":      _rate(summary.get("sqls"), summary.get("leads")),
+"customer_rate": _rate(customers,           summary.get("leads")),
+```
+
+and, in `static/app.js`, on the Customers KPI card:
+
+```js
+const customerRate = k.customer_rate !== null && k.customer_rate !== undefined
+  ? `${(k.customer_rate * 100).toFixed(1)}% of leads` : "";
+…
+sub: customerRate || "Closed-won deals",
+```
+
+* `sql_rate` divided two **independent window totals** — contacts that became
+  SQLs in the window over contacts that became leads in the window. Those are
+  two different populations; their quotient is a conversion of nothing. (It was
+  computed in JS and then not displayed, which made it dead code publishing a
+  wrong number through the API.)
+* `customer_rate` divided closed-won **deals** by lead **contacts**. Beyond being
+  two populations it is two **grains**, and the page rendered it as
+  “20.0% of leads” directly beneath Closed-Won Revenue — drawing in words the
+  arrow from lifecycle progression into commercial outcome that PR-ADS-155 §2
+  forbids drawing at all.
+
+Both keys survive for backward compatibility and are now permanently `None`,
+each beside a `*_unavailable_reason` of `cross_population_ratio_not_governed`, so
+a consumer reads “not published, and here is why” rather than silently losing a
+field.
+
+## What replaces them
+
+A new `lifecycle_activity` block on `/api/dashboard/overview`:
+
+```jsonc
+{
+  "basis": "stage_entry_events",
+  "monotonic_expected": false,          // stated, not implied
+  "stages": [
+    {"event": "lead", "label": "Leads",
+     "activity_label": "Leads entered during this period",
+     "entered": 352,
+     "missing_entry_date_contacts": 0,
+     "previous_period": {"status": "ok", "delta_pct": 0.17, "direction": "up"}},
+    …
+  ],
+  "conversions": [                      // the canonical collection, decorated
+    {"from_event": "lead", "to_event": "mql",
+     "cohort_size": 352, "converted": 292, "rate_pct": 82.95,
+     "basis": "cohort", "available": true, "reason": null,
+     "from_label": "Leads", "to_label": "MQLs",
+     "cohort_label": "in the Leads cohort"}
+  ],
+  "reconciliation": {"status": "partial", "reasons": ["missing_stage_entry_date"]},
+  "coverage": {…}, "sync": {…},
+  "connected_to_commercial_outcomes": false
+}
+```
+
+Three separate things, kept separate on the page:
+
+* **stage cards** carry activity counts, in lifecycle order, never sorted,
+  capped or clamped to descend;
+* **connectors** carry the canonical cohort conversion *with its denominator* —
+  `82.95% · 292 of 352 in the Leads cohort` — read whole from
+  `canonical_crm_funnel_service.build_conversions`. The renderer contains no
+  division at all, which `test_22` enforces statically;
+* **trend badges** carry previous-period movement, live *inside* a stage card
+  rather than between two of them, and fail closed when the baseline is zero or
+  unreadable (`_delta_metric` already refuses both).
+
+## Coverage is disclosed at the grain the gap has
+
+`reconciliation.reasons` now travels with the status, so “partial” can say
+*which* limitation it means, and every stage card publishes
+`missing_entry_date_contacts` — the contacts whose current stage proves they
+reached that stage while HubSpot holds no entry timestamp for it. A contact now
+at SQL is counted at Lead, MQL and SQL, because it must have passed through all
+three; reporting it only at SQL would understate the missing evidence.
+
+Those contacts are absent from **every** window's totals, and no date is invented
+to give them one. Production's lifecycle-history dry run inspected 50 such
+contacts and recovered 0 events, with an evidence state of
+`history_payload_missing` — HubSpot returned no history object at all, which is
+not the same as an empty history and must never be read as one.
+
+## What did not change
+
+The Lead-anchored cohort panel (PR-ADS-155 §1), the commercial-outcomes panel
+(§2), every canonical metric contract, the revenue fail-closed rule and the
+parity registry. `lifecycle_activity` is not a parity identity: it is a
+presentation contract over figures the audit already checks elsewhere.
+
+All-Time revenue remains `null` with `closed_won_deals_missing_amount` and
+`currency_unproven_deals_in_population` while any of the 14 closed-won deals
+lacks a proven amount, and the known $878,324.80 continues to appear only under
+the backend's own label naming its 167-deal denominator.
+
+## Failing closed as one block
+
+Two corrections found on review, both about the withheld state rather than the
+published one:
+
+* A funnel `mismatch` is a broken invariant, not a failed read — the arithmetic
+  completed, so the payload still carries `conversions`. The activity block
+  withheld the counts and then decorated the rates measured over them, which
+  gave the page `available: false` beside `conversions_available: true`. If the
+  counts are not fit to show, the percentages over them are not either.
+* `canonical_funnel_read_failed` was being folded into
+  `canonical_contact_store_unavailable`. Those send an operator to different
+  places — a defect in the service versus an outage — and the frontend already
+  carried a distinct label for each, so the distinction was discarded one line
+  before it was needed. `_activity_unavailable_reason` reads the funnel's own
+  reconciliation reasons instead.
+
+`test_9b` and `test_9c` cover both, and were validated as negative controls:
+reverting either fix makes the matching case fail.

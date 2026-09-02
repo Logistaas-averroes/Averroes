@@ -2266,6 +2266,7 @@ function renderDashboardOverview() {
         ${renderDashSignals(d)}
       </aside>
     </div>
+    ${renderDashLifecycleActivity(d)}
     ${renderDashLifecycleCohort(d)}
     ${renderDashCommercialOutcomes(d)}
     <div class="dash-lower-grid">
@@ -2384,12 +2385,14 @@ function renderDashKpiRow(d) {
     ? `${escapeHtml(fmtCompactCurrency(native.amount, native.currency || "GBP"))} native`
     : "Native spend unavailable";
 
-  const sqlRate = k.sql_rate !== null && k.sql_rate !== undefined
-    ? `${(k.sql_rate * 100).toFixed(1)}% of leads`
-    : "SQL rate unavailable";
-  const customerRate = k.customer_rate !== null && k.customer_rate !== undefined
-    ? `${(k.customer_rate * 100).toFixed(1)}% of leads`
-    : "";
+  // PR-ADS-155-F2 §2: the two "% of leads" sub-lines that used to sit here are
+  // gone. `sql_rate` divided campaign-attributable SQLs by mart leads — two
+  // independent window totals — and `customer_rate` divided closed-won DEALS by
+  // lead CONTACTS, which crossed both populations and grains and drew, in
+  // words, the arrow from lifecycle progression into commercial outcome that
+  // §2 forbids drawing at all. Both are permanently null on the contract now,
+  // with a reason. Progression is shown as a cohort conversion in the Lifecycle
+  // Activity panel, measured by the canonical funnel service over a real cohort.
 
   const cards = [
     {
@@ -2416,7 +2419,9 @@ function renderDashKpiRow(d) {
       key: "customers",
       label: "Customers",
       value: dashValue(k.customers, fmtCount),
-      sub: customerRate || "Closed-won deals",
+      // Closed-won DEALS. Never "n% of leads": leads are contacts, and a deal
+      // is not a lifecycle stage a contact converts into (PR-ADS-155-F2 §2).
+      sub: "Closed-won deals",
       delta: dashDeltaChip("customers", pc),
       spark: "",
       source: "HubSpot Closed-Won",
@@ -2433,8 +2438,10 @@ function renderDashKpiRow(d) {
         ? "Reconciliation required"
         : dashValue(k.google_ads_source_sqls, fmtCount),
       // When the campaign-attributable subset is null (identity contract
-      // unavailable) show an honest "unavailable" — NOT sqlRate, which belongs to
-      // the old narrower campaign-attributable population (PR-ADS-152).
+      // unavailable) show an honest "unavailable" — NOT the retired `sql_rate`,
+      // which belonged to the narrower campaign-attributable population
+      // (PR-ADS-152) and was a quotient of two independent totals besides
+      // (PR-ADS-155-F2 §2).
       sub: (k.campaign_attributable_sqls === null || k.campaign_attributable_sqls === undefined)
         ? "Campaign attribution unavailable"
         : `${escapeHtml(fmtCount(k.campaign_attributable_sqls))} safely campaign-attributable`,
@@ -2709,6 +2716,220 @@ function wireDashChartHover(root, d) {
     tooltip.style.top = "8px";
   });
   wrap.addEventListener("pointerleave", hide);
+}
+
+/**
+ * PR-ADS-155-F2 §1/§2 — lifecycle ACTIVITY in the selected window.
+ *
+ * What this is, and what it deliberately is not
+ * --------------------------------------------
+ * Five stage-entry counts: how many contacts entered Lead, MQL, SQL,
+ * Opportunity and Customer DURING this window. They are five independent
+ * populations, so they do not descend and are not made to. On production this
+ * quarter they run 352 → 553 → 42 → 46 → 17, MQL above Lead, because a contact
+ * can enter MQL now having entered Lead two years ago. That is correct data.
+ *
+ * The percentages between the cards are therefore NOT the ratio of one card to
+ * the next — that quotient compares two different populations and means
+ * nothing. Each one is the canonical funnel service's cohort conversion, read
+ * whole from `lifecycle_activity.conversions`, and each is rendered beside the
+ * cohort it was measured over so the denominator is never left to the reader's
+ * imagination. This function performs no arithmetic on any count.
+ *
+ * Previous-period movement is a third, separate thing. It sits INSIDE a stage
+ * card, labelled as a comparison, never between two cards where a reader would
+ * take it for progression.
+ */
+function renderDashLifecycleActivity(d) {
+  const activity = d.lifecycle_activity || null;
+  if (!activity || !activity.available) {
+    return `
+      <section class="dash-panel dash-activity-panel dash-anim" aria-label="Lifecycle activity">
+        <div class="dash-panel__header">
+          <div>
+            <h3 class="dash-panel__title">Lifecycle Activity</h3>
+            <p class="dash-panel__sub">${escapeHtml(DASH_ACTIVITY_SUBTITLE)}</p>
+          </div>
+        </div>
+        <p class="empty-state">${dashValue(null)} — ${escapeHtml(
+          dashActivityReasonLabel((activity || {}).reason))}</p>
+      </section>`;
+  }
+
+  const stages = Array.isArray(activity.stages) ? activity.stages : [];
+  const conversions = Array.isArray(activity.conversions) ? activity.conversions : [];
+  const byPair = {};
+  conversions.forEach((c) => { byPair[`${c.from_event}>${c.to_event}`] = c; });
+
+  const cells = stages.map((s, i) => {
+    const previous = i === 0 ? null : stages[i - 1];
+    const chip = previous
+      ? dashActivityConversion(byPair[`${previous.event}>${s.event}`])
+      : "";
+    const gap = s.missing_entry_date_contacts
+      ? `<div class="dash-activity__gap" title="These contacts reached ${escapeHtml(
+          s.label)} but HubSpot holds no entry timestamp, so no window can count them. No substitute date is used.">${escapeHtml(
+          String(s.missing_entry_date_contacts))} without an entry date</div>`
+      : "";
+    return `
+      ${chip}
+      <div class="dash-activity__stage" style="--funnel-accent:${DASH_FUNNEL_RAMP[i % DASH_FUNNEL_RAMP.length]}">
+        <div class="dash-activity__stage-label">${escapeHtml(s.label || s.event || "")}</div>
+        <div class="dash-activity__stage-value">${dashValue(s.entered, fmtCount)}</div>
+        <div class="dash-activity__stage-sub">${escapeHtml(
+          s.activity_label || "Entered during this period")}</div>
+        ${dashActivityTrend(s.previous_period, activity.previous_period)}
+        ${gap}
+      </div>`;
+  }).join("");
+
+  return `
+    <section class="dash-panel dash-activity-panel dash-anim" aria-label="Lifecycle activity">
+      <div class="dash-panel__header">
+        <div>
+          <h3 class="dash-panel__title">Lifecycle Activity</h3>
+          <p class="dash-panel__sub">${escapeHtml(DASH_ACTIVITY_SUBTITLE)}</p>
+        </div>
+        ${dashActivityCoverageBadge(activity)}
+      </div>
+      <div class="dash-activity">${cells}</div>
+      <p class="dash-activity__legend">Percentages between stages are cohort
+        conversions from the canonical CRM funnel, each measured over the cohort
+        named beside it — never one card divided by another.</p>
+      ${dashActivityCoverageDisclosure(activity)}
+    </section>`;
+}
+
+const DASH_ACTIVITY_SUBTITLE =
+  "How many contacts entered each lifecycle stage during this window. "
+  + "Five independent populations — a later stage can exceed an earlier one, "
+  + "and that is not an error.";
+
+function dashActivityReasonLabel(reason) {
+  const labels = {
+    canonical_contact_store_unavailable: "the canonical contact store could not be read",
+    canonical_funnel_mismatch: "a funnel invariant broke, so no count is rendered",
+    canonical_funnel_read_failed: "the canonical funnel could not be built",
+  };
+  return labels[reason] || "canonical lifecycle activity is not available";
+}
+
+/**
+ * One connector. Fails closed: an unavailable conversion says so, and is never
+ * rendered as 0%. A genuine zero — cohort proven, nobody progressed — renders
+ * as 0%, because that is a measurement and withholding it would be its own lie.
+ */
+function dashActivityConversion(conversion) {
+  if (!conversion || !conversion.available
+      || conversion.rate_pct === null || conversion.rate_pct === undefined
+      || conversion.cohort_size === null || conversion.cohort_size === undefined
+      || conversion.converted === null || conversion.converted === undefined) {
+    const reason = dashActivityConversionReason((conversion || {}).reason);
+    return `
+      <div class="dash-activity__conv dash-activity__conv--muted" title="${escapeHtml(reason)}">
+        <span class="dash-activity__conv-rate">Unavailable</span>
+        <span class="dash-activity__conv-basis">${escapeHtml(reason)}</span>
+      </div>`;
+  }
+  return `
+    <div class="dash-activity__conv" title="Cohort conversion from the canonical CRM funnel: of the ${escapeHtml(
+      String(conversion.cohort_size))} contacts that entered ${escapeHtml(conversion.from_label || "")} in this window, ${escapeHtml(
+      String(conversion.converted))} went on to enter ${escapeHtml(conversion.to_label || "")}.">
+      <span class="dash-activity__conv-rate">${escapeHtml(String(conversion.rate_pct))}%</span>
+      <span class="dash-activity__conv-basis">${escapeHtml(String(conversion.converted))} of ${escapeHtml(
+        String(conversion.cohort_size))} ${escapeHtml(conversion.cohort_label || "")}</span>
+    </div>`;
+}
+
+function dashActivityConversionReason(reason) {
+  const labels = {
+    empty_cohort: "no contacts entered the earlier stage in this window, so there is no cohort to measure",
+    unsupported_transition: "this transition is not a governed lifecycle progression",
+  };
+  return labels[reason] || "the canonical cohort conversion is not available";
+}
+
+/**
+ * §5 — a trend, labelled as a trend. It lives inside the card, not between two
+ * cards, and a missing or zero baseline is stated rather than turned into a
+ * percentage: a decline against nothing is not a decline.
+ */
+function dashActivityTrend(metric, previousPeriod) {
+  const label = (previousPeriod && previousPeriod.label) || "vs previous period";
+  if (!metric || metric.status !== "ok"
+      || metric.delta_pct === null || metric.delta_pct === undefined) {
+    return '<div class="dash-activity__trend dash-activity__trend--none">No comparison</div>';
+  }
+  const pct = metric.delta_pct * 100;
+  const magnitude = Math.abs(pct) >= 100 ? 0 : 1;
+  const text = `${pct > 0 ? "+" : ""}${pct.toFixed(magnitude)}%`;
+  const tone = metric.direction === "up"
+    ? "dash-activity__trend--up"
+    : (metric.direction === "down" ? "dash-activity__trend--down" : "");
+  return `<div class="dash-activity__trend ${tone}">${escapeHtml(text)} ${escapeHtml(label)}</div>`;
+}
+
+/** §6 — partial historical coverage, stated on the face of the panel. */
+function dashActivityCoverageBadge(activity) {
+  const status = ((activity || {}).reconciliation || {}).status;
+  if (status === "partial") {
+    return '<span class="dash-badge dash-badge--warn" title="Some contacts reached a '
+      + 'lifecycle stage that HubSpot holds no entry timestamp for. They are excluded '
+      + 'from every window’s stage-entry total and listed below — no substitute '
+      + 'date is ever used.">Partial historical coverage</span>';
+  }
+  if (status === "reconciled") {
+    return '<span class="dash-badge dash-badge--ok">Complete stage-entry coverage</span>';
+  }
+  return '<span class="dash-badge dash-badge--muted">Coverage unknown</span>';
+}
+
+function dashActivityReconciliationLabel(reason) {
+  const labels = {
+    missing_stage_entry_date: "Contacts reached a lifecycle stage with no entry timestamp in HubSpot",
+    unknown_lifecycle_stage: "Contacts hold a lifecycle stage this funnel does not recognise",
+    campaign_identity_unavailable: "The Google Ads campaign-identity contract could not be consulted",
+    canonical_contact_store_unavailable: "The canonical contact store could not be read",
+    canonical_funnel_read_failed: "The canonical funnel could not be built",
+  };
+  if (labels[reason]) return labels[reason];
+  if (typeof reason === "string" && reason.indexOf("scope_nesting_broken:") === 0) {
+    return `A scope nesting invariant broke at ${reason.split(":")[1]}`;
+  }
+  return reason;
+}
+
+function dashActivityCoverageDisclosure(activity) {
+  const recon = activity.reconciliation || {};
+  const reasons = Array.isArray(recon.reasons) ? recon.reasons : [];
+  const stages = Array.isArray(activity.stages) ? activity.stages : [];
+  const gaps = stages.filter((s) => s.missing_entry_date_contacts);
+  if (!reasons.length && !gaps.length) return "";
+  const reasonItems = reasons.map((r) => `
+    <li class="dash-coverage__item">
+      <span class="dash-coverage__count">·</span>
+      <span class="dash-coverage__reason">${escapeHtml(
+        dashActivityReconciliationLabel(r))}</span>
+      <span class="dash-coverage__detail"></span>
+    </li>`).join("");
+  const gapItems = gaps.map((s) => `
+    <li class="dash-coverage__item">
+      <span class="dash-coverage__count">${escapeHtml(
+        String(s.missing_entry_date_contacts))}</span>
+      <span class="dash-coverage__reason">Reached ${escapeHtml(s.label)}, no entry timestamp</span>
+      <span class="dash-coverage__detail">Excluded from the ${escapeHtml(
+        s.label)} stage-entry total for every window</span>
+    </li>`).join("");
+  return `
+    <details class="dash-coverage">
+      <summary class="dash-coverage__summary">Historical coverage — what these counts can and cannot include</summary>
+      <ul class="dash-coverage__list">${reasonItems}${gapItems}</ul>
+      <p class="dash-coverage__note">A missing stage-entry timestamp is never replaced
+        with contact creation date, current-stage date, or an ingestion timestamp: the
+        transition is real, the date is unknown, and it is reported as unknown. Cohort
+        conversions above are measured on the evidence that does exist, and stage-entry
+        totals across one window are not expected to behave like a single closed cohort.</p>
+    </details>`;
 }
 
 /**

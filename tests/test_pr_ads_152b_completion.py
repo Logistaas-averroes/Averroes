@@ -349,8 +349,17 @@ def test_keyword_coverage_mismatch_shows_reconciliation_required():
 # Correction 2 — Dashboard Google Ads-source SQL headline has NO mislabelled delta
 # ═════════════════════════════════════════════════════════════════════════════
 def _ga_source_card():
+    """The Google Ads-source SQL card entry, sliced at its own closing brace.
+
+    This took a fixed 1100-character window, which made the test a hostage to
+    comment length rather than to the code it checks: PR-ADS-155-F2 added two
+    explanatory lines above `delta: ""` and pushed it past the cut-off, failing
+    a case about a delta that had not moved. The card ends where the object
+    literal ends, so slice there.
+    """
     i = _APP.index('key: "google_ads_source_sqls"')
-    return _APP[i:i + 1100]
+    end = _APP.index("\n    },", i)
+    return _APP[i:end]
 
 
 def test_dashboard_ga_source_card_has_no_campaign_attributable_delta():
