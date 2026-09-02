@@ -923,6 +923,13 @@ def build_dashboard_overview(window: str = "current_quarter",
     # stay on their existing revenue contract until PR-ADS-153E — a lifecycle
     # customer is NOT a revenue customer and must never be silently substituted.
     lifecycle_funnel = _lifecycle_funnel_block(window, now=now)
+    # PR-ADS-155-F2 §1/§2: stage-entry ACTIVITY, with the canonical cohort
+    # conversions beside it. Built here so the page renders a contract instead
+    # of arranging five independent totals into a shape they do not have.
+    # `ref_now`, not `now`: the previous-period comparison is resolved from the
+    # SAME reference instant the revenue mart's comparison uses, so the two
+    # cannot describe different previous periods on the same page.
+    lifecycle_activity = _lifecycle_activity_block(lifecycle_funnel, window, ref_now)
 
     kpis = {
         # USD spend is strictly canonical: None whenever FX/coverage is unsafe.
@@ -945,8 +952,30 @@ def build_dashboard_overview(window: str = "current_quarter",
         "sqls": summary.get("sqls"),
         "sqls_scope": _canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
         "customers": customers,
-        "sql_rate": _rate(summary.get("sqls"), summary.get("leads")),
-        "customer_rate": _rate(customers, summary.get("leads")),
+        # ── PR-ADS-155-F2 §2 — two retired ratios ────────────────────────────
+        # Both used to be `_rate(...)` quotients, and both were published as
+        # conversions on the KPI row under the label "% of leads":
+        #
+        #   sql_rate      = campaign-attributable SQLs ÷ mart leads. Two
+        #                   INDEPENDENT window totals. A contact counted as an
+        #                   SQL this quarter may have become a lead last year,
+        #                   so the quotient is not a conversion of anything —
+        #                   it is one population measured against another.
+        #   customer_rate = closed-won DEALS ÷ mart leads (CONTACTS). Beyond
+        #                   being two populations it is two GRAINS, and it drew
+        #                   exactly the arrow §2 forbids: from lifecycle
+        #                   progression into a commercial outcome, as though a
+        #                   deal were a lifecycle stage a contact converts into.
+        #
+        # The keys stay for backward compatibility and are permanently NULL with
+        # a reason, so an existing consumer reads "not published, and here is
+        # why" rather than silently losing a field. Cohort-safe progression is
+        # published on `lifecycle_activity.conversions`, measured by the
+        # canonical funnel service over a real cohort.
+        "sql_rate": None,
+        "sql_rate_unavailable_reason": REASON_CROSS_POPULATION_RATIO,
+        "customer_rate": None,
+        "customer_rate_unavailable_reason": REASON_CROSS_POPULATION_RATIO,
 
         # ── PR-ADS-153C: canonical CRM lifecycle funnel ──────────────────────
         # Each count is a stage-ENTRY event on its own event date. These are the
@@ -1043,6 +1072,19 @@ def build_dashboard_overview(window: str = "current_quarter",
          "truth_status": (_cohort_block.get("truth_status")
                           or canonical_contract.TRUTH_UNAVAILABLE),
          "unavailable_reason": _cohort_block.get("reason")},
+        # PR-ADS-155-F2 §1/§2. Activity is a DIFFERENT reading from the cohort
+        # and carries its own status: five stage-entry populations plus the
+        # canonical conversions measured over them. It is `ready` whenever the
+        # funnel is readable — a non-monotonic row is correct data, not a
+        # degraded one, and marking it `not_ready` for rising would be the same
+        # mistake in a new place.
+        {"metric": "lifecycle_activity",
+         "data_source": canonical_contract.SOURCE_CANONICAL_FUNNEL,
+         "scope": "stage_entry_activity",
+         "truth_status": (canonical_contract.TRUTH_READY
+                          if lifecycle_activity.get("available")
+                          else canonical_contract.TRUTH_UNAVAILABLE),
+         "unavailable_reason": lifecycle_activity.get("reason")},
         # PR-ADS-155 §5. The partial sum is a measurement of a NAMED subset, so
         # it is `ready` on its own terms while the total stays `not_ready`. Two
         # metrics because two facts; one status each.
@@ -1098,6 +1140,12 @@ def build_dashboard_overview(window: str = "current_quarter",
         # in it was computed by the canonical funnel service — the frontend does
         # no conversion arithmetic of its own.
         "lifecycle_cohort": lifecycle_funnel.get("cohort"),
+        # PR-ADS-155-F2 §1/§2: stage-entry ACTIVITY — five independent
+        # populations, published as such, with the canonical cohort conversions
+        # beside them. The cohort block above answers "of one Lead cohort, how
+        # far did it get"; this answers "what happened in this window". Two
+        # questions, two contracts, neither derived from the other's counts.
+        "lifecycle_activity": lifecycle_activity,
         # PR-ADS-155 §2: closed-won outcomes, DELIBERATELY not part of the funnel
         # above. A lifecycle Customer is a HubSpot contact-stage fact; a closed-won
         # customer is a deal fact. No governed contact-to-deal cohort contract
@@ -1191,7 +1239,10 @@ def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
         logger.warning("[dashboard_overview] canonical lifecycle funnel failed: %s", exc)
         return {**empty, "available": False, "status": "unavailable",
                 "scope": "all_source", "conversions": None,
-                "definitions": None, "sync": None, "cohort": None}
+                "definitions": None, "sync": None, "cohort": None,
+                "coverage": None,
+                "reconciliation": {"status": "unavailable",
+                                   "reasons": ["canonical_funnel_read_failed"]}}
 
     status = (payload.get("reconciliation") or {}).get("status")
     available = bool(payload.get("available"))
@@ -1212,6 +1263,12 @@ def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
         "window": payload.get("window"),
         "conversions": payload.get("conversions") if available else None,
         "coverage": payload.get("coverage"),
+        # PR-ADS-155-F2 §6: the reconciliation VERDICT plus its reasons, not just
+        # the one-word status. "partial" on its own cannot tell a reader whether
+        # stage-entry dates are missing, a lifecycle stage was unrecognised, or
+        # the campaign-identity contract was unreachable — three different
+        # limitations that call for three different responses.
+        "reconciliation": payload.get("reconciliation"),
         "definitions": {e: {
             "label": (events.get(e) or {}).get("label"),
             "event_date_property": (events.get(e) or {}).get("event_date_property"),
@@ -1223,4 +1280,178 @@ def _lifecycle_funnel_block(window: str, *, now=None) -> dict:
         # independent stage-entry totals, but they are no longer drawn as a
         # pipeline, because they never were one.
         "cohort": payload.get("lifecycle_cohort"),
+    }
+
+
+# ── PR-ADS-155-F2 — lifecycle ACTIVITY, and why it is not a funnel ───────────
+#: The five stage-entry populations, in lifecycle order.
+LIFECYCLE_STAGE_EVENTS = ("lead", "mql", "sql", "opportunity", "customer")
+
+#: What the activity counts are counts OF. Named on the block so a reader is
+#: never left to infer it from the layout.
+LIFECYCLE_ACTIVITY_BASIS = "stage_entry_events"
+
+#: Why a ratio between two Dashboard totals is no longer published. See
+#: :func:`_lifecycle_activity_block` for the argument.
+REASON_CROSS_POPULATION_RATIO = "cross_population_ratio_not_governed"
+
+
+def _lifecycle_previous_period(window: str, now: datetime | None) -> dict:
+    """Stage-entry counts for the PREVIOUS comparable window, or nothing.
+
+    PR-ADS-155-F2 §5. Previous-period movement and lifecycle conversion are
+    different measurements, and the Dashboard had no way to show the first for a
+    lifecycle stage — so any percentage a reader saw beside a stage had to be a
+    conversion, whether or not that was the question they were asking.
+
+    One extra canonical build, at the same shifted reference instant
+    :func:`_previous_window_reference` gives the revenue mart, so both
+    comparisons describe the same previous period. Fails closed: an unreadable
+    previous window yields no counts at all rather than zeros, because "we could
+    not read last quarter" and "last quarter was empty" produce opposite
+    trend arrows from the same missing data.
+    """
+    # Coerced here as well as by the caller: this helper is reachable from a
+    # test or a future caller that passes the raw argument, and a bare None
+    # reaches `now.year` inside the window resolver.
+    ref = _previous_window_reference(window, _coerce_utc(now))
+    if ref is None:
+        return {"available": False, "label": None, "window": None, "counts": {},
+                "reason": "All Time has no previous period to compare against."}
+
+    prev_key, prev_now, label, _note = ref
+    try:
+        from services import canonical_crm_funnel_service as _funnel  # noqa: PLC0415
+
+        payload = _funnel.build(_funnel.WINDOW_BUSINESS, prev_key,
+                                scope=_funnel.SCOPE_ALL_SOURCE, now=prev_now)
+    except Exception as exc:  # noqa: BLE001 — a comparison is optional; truth is not
+        logger.warning("[dashboard_overview] previous-period lifecycle funnel "
+                       "failed: %s", exc)
+        return {"available": False, "label": label, "window": None, "counts": {},
+                "reason": "Previous period unavailable."}
+
+    status = (payload.get("reconciliation") or {}).get("status")
+    if not payload.get("available") or status == "mismatch":
+        return {"available": False, "label": label, "window": None, "counts": {},
+                "reason": "Previous period unavailable."}
+
+    events = payload.get("events") or {}
+    return {
+        "available": True,
+        "label": label,
+        "window": payload.get("window"),
+        "counts": {e: (events.get(e) or {}).get("count")
+                   for e in LIFECYCLE_STAGE_EVENTS},
+        "reason": None,
+    }
+
+
+def _lifecycle_activity_block(lifecycle_funnel: dict, window: str,
+                              now: datetime | None) -> dict:
+    """Lifecycle ACTIVITY in this window, with governed conversions beside it.
+
+    PR-ADS-155-F2 §1/§2. The five stage-entry totals are five INDEPENDENT
+    populations — "who entered Lead in this window", "who entered MQL in this
+    window", and so on. A contact can enter MQL this quarter having entered Lead
+    two years ago, so on production these counts legitimately went 352 → 553 →
+    42 → 46 → 17: MQL above Lead, Opportunity above SQL. Nothing is wrong with
+    that data. What was wrong was drawing it as one descending pipeline, where a
+    rise reads as a broken number and the space between two cards reads as a
+    conversion rate.
+
+    So this block states the shape rather than implying it:
+
+    * ``basis`` names what is being counted, and ``monotonic_expected`` is
+      ``False`` — non-monotonic activity is the NORMAL case, not an anomaly, and
+      no count is ever reordered, capped or forced to descend to make the row
+      look like a funnel.
+    * every conversion comes from the canonical funnel's own ``conversions``
+      collection, each with the cohort it was measured over. A rate here is never
+      one card's total divided by another's: those are two different populations,
+      and their quotient answers no question anyone asked.
+    * previous-period movement travels per stage under its own key, so a trend
+      can be shown as a trend and never mistaken for progression.
+
+    Fails closed throughout: an unreadable funnel yields ``available: False``
+    with NULL counts, never zeros.
+    """
+    available = bool(lifecycle_funnel.get("available")) and \
+        lifecycle_funnel.get("status") != "mismatch"
+    definitions = lifecycle_funnel.get("definitions") or {}
+    coverage = lifecycle_funnel.get("coverage") or {}
+    missing_by_stage = coverage.get("stage_reached_without_entry_date") or {}
+    previous = (_lifecycle_previous_period(window, now) if available
+                else {"available": False, "label": None, "window": None,
+                      "counts": {}, "reason": "Previous period unavailable."})
+    prev_counts = previous.get("counts") or {}
+
+    stages = []
+    for event in LIFECYCLE_STAGE_EVENTS:
+        definition = definitions.get(event) or {}
+        label = definition.get("label") or event.upper()
+        entered = lifecycle_funnel.get(event) if available else None
+        stages.append({
+            "event": event,
+            "label": label,
+            # The label states the QUESTION the number answers. "Leads: 352"
+            # and "Leads entered during this period: 352" are the same figure
+            # and different claims, and only the second one is true. The noun
+            # is the canonical event label, not a second vocabulary invented
+            # here to read more smoothly.
+            "activity_label": f"{label} entered during this period",
+            "entered": entered,
+            "available": entered is not None,
+            "event_date_property": definition.get("event_date_property"),
+            # Contacts whose CURRENT stage proves they reached this one, for
+            # which HubSpot holds no entry timestamp. They are absent from
+            # `entered` for every window — no date means no window can claim
+            # them — and that absence is disclosed here rather than imputed.
+            "missing_entry_date_contacts": (missing_by_stage.get(event)
+                                            if available else None),
+            "previous_period": _delta_metric(entered, prev_counts.get(event)),
+        })
+
+    conversions = []
+    for conversion in (lifecycle_funnel.get("conversions") or []):
+        from_event = conversion.get("from_event")
+        to_event = conversion.get("to_event")
+        from_label = ((definitions.get(from_event) or {}).get("label")
+                      or (from_event or "").upper())
+        to_label = ((definitions.get(to_event) or {}).get("label")
+                    or (to_event or "").upper())
+        conversions.append({
+            **conversion,
+            "from_label": from_label,
+            "to_label": to_label,
+            # The denominator travels WITH the rate. A bare "6.69%" invites the
+            # reader to supply their own denominator, and the nearest number on
+            # the page is the wrong one.
+            "cohort_label": f"in the {from_label} cohort",
+        })
+
+    return {
+        "available": available,
+        "reason": None if available else (
+            "canonical_funnel_mismatch"
+            if lifecycle_funnel.get("status") == "mismatch"
+            else "canonical_contact_store_unavailable"),
+        "basis": LIFECYCLE_ACTIVITY_BASIS,
+        # Stated, not implied. The renderer reads this rather than deciding for
+        # itself whether a rise is a defect.
+        "monotonic_expected": False,
+        "scope": lifecycle_funnel.get("scope"),
+        "scope_label": lifecycle_funnel.get("scope_label"),
+        "window": lifecycle_funnel.get("window"),
+        "stages": stages,
+        "conversions": conversions,
+        "conversions_available": bool(conversions),
+        "coverage": lifecycle_funnel.get("coverage"),
+        "reconciliation": lifecycle_funnel.get("reconciliation"),
+        "sync": lifecycle_funnel.get("sync"),
+        "previous_period": {k: v for k, v in previous.items() if k != "counts"},
+        "canonical_source": canonical_contract.SOURCE_CANONICAL_FUNNEL,
+        # Read by the frontend contract test: activity counts are contact-stage
+        # facts and are never joined to closed-won deal facts by an arrow.
+        "connected_to_commercial_outcomes": False,
     }

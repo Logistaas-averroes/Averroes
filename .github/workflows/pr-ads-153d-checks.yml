@@ -62,7 +62,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -73,7 +73,8 @@ jobs:
             tests/test_pr_ads_154a_run_type_pg_integration.py \
             tests/test_pr_ads_154b_coverage_repair_pg.py \
             tests/test_pr_ads_154c_parity_pg.py \
-            tests/test_pr_ads_155_f1_cli_init_and_scoped_provenance.py -q \
+            tests/test_pr_ads_155_f1_cli_init_and_scoped_provenance.py \
+            tests/test_pr_ads_155_f2_lifecycle_activity_truth.py -q \
             --junitxml=pg-results.xml
 
       # A skipped database suite is not merge evidence. If the cluster could not
@@ -110,7 +111,8 @@ jobs:
                            "tests.test_pr_ads_154a_run_type_pg_integration",
                            "tests.test_pr_ads_154b_coverage_repair_pg",
                            "tests.test_pr_ads_154c_parity_pg",
-                           "tests.test_pr_ads_155_f1_cli_init_and_scoped_provenance"):
+                           "tests.test_pr_ads_155_f1_cli_init_and_scoped_provenance",
+                           "tests.test_pr_ads_155_f2_lifecycle_activity_truth"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):
                   sys.exit(f"{required} contributed no test cases — it was "
@@ -121,7 +123,7 @@ jobs:
       # The 153E-B contract suite is the CUTOVER guard: it fails CI if a
       # migrated consumer reaches for a retired legacy revenue table or
       # provider again, or stops reading the one shared canonical contract.
-      - name: Contract tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154 + 154B + 154B-F1 + 154C + 154C-F3 + 155 + 155-F1)
+      - name: Contract tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154 + 154B + 154B-F1 + 154C + 154C-F3 + 155 + 155-F1 + 155-F2)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_waste_consolidation.py \
@@ -137,6 +139,7 @@ jobs:
             tests/test_pr_ads_154c_f3_country_sql_and_revenue_gate.py \
             tests/test_pr_ads_155_lifecycle_cohort_and_revenue_truth.py \
             tests/test_pr_ads_155_f1_cli_init_and_scoped_provenance.py \
+            tests/test_pr_ads_155_f2_lifecycle_activity_truth.py \
             tests/test_pr_ads_129_roas_availability_geo_reconciliation.py -q
 
       - name: Full suite (known-failing-on-main deselected)

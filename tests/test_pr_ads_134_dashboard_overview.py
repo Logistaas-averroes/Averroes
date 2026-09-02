@@ -350,10 +350,23 @@ def test_kpis_come_from_canonical_safe_sources(monkeypatch):
     assert k["closed_won_revenue_usd"] == 9000.0
     assert out["google_ads_conversion_value_used"] is False
     assert out["source_truth"] == "revenue_decision_mart"
-    # Pipeline counts + honest rates.
     assert (k["leads"], k["sqls"], k["customers"]) == (5, 2, 1)
-    assert k["sql_rate"] == 0.4
-    assert k["customer_rate"] == 0.2
+    # PR-ADS-155-F2 §2. This case used to assert `sql_rate == 0.4` and
+    # `customer_rate == 0.2` under the heading "honest rates". Neither was one.
+    # `sql_rate` divided two INDEPENDENT window totals (contacts that became
+    # SQLs in the window ÷ contacts that became leads in the window), and
+    # `customer_rate` divided closed-won DEALS by lead CONTACTS — two
+    # populations and two grains — while the page rendered it as "20% of leads".
+    #
+    # The assertion is not dropped, it is inverted: both keys survive for
+    # backward compatibility and must now be permanently NULL with a stated
+    # reason, so a consumer reads "not published, and here is why" instead of
+    # quietly losing a field. Governed progression is asserted against
+    # `lifecycle_activity.conversions` in the F2 suite.
+    assert k["sql_rate"] is None
+    assert k["customer_rate"] is None
+    assert k["sql_rate_unavailable_reason"] == "cross_population_ratio_not_governed"
+    assert k["customer_rate_unavailable_reason"] == "cross_population_ratio_not_governed"
     assert out["read_only"] is True
 
 

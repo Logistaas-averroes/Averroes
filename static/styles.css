@@ -6508,6 +6508,104 @@ body.is-revenue-page #monitoring-banner {
 .dash-coverage__detail { color: var(--text-muted); }
 .dash-coverage__note { font-size: 11px; color: var(--text-muted); margin-top: 8px; }
 
+/* ── PR-ADS-155-F2 §1/§2: lifecycle ACTIVITY (five independent populations) ─
+   Deliberately NOT the funnel strip above. The stage cells are equal-width and
+   share one accent weight, so nothing in the layout implies a narrowing shape
+   that the counts do not have — MQL above Lead is normal here. The connector
+   carries its own denominator on a second line rather than a bare percentage.  */
+.dash-activity-panel { margin-top: var(--space-5); }
+/* Five stages and the four connectors between them, in ONE row: a grid rather
+   than a wrapping flex line, because a wrapped row puts a connector at the end
+   of one line and the stage it belongs to at the start of the next, which is
+   exactly the reading-order confusion this panel exists to remove. */
+.dash-activity {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr) auto) minmax(0, 1fr);
+  align-items: stretch;
+  gap: var(--space-2);
+}
+.dash-activity__stage {
+  min-width: 0;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--funnel-accent, var(--brand-sky-accent));
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+.dash-activity__stage-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.dash-activity__stage-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-top: 2px;
+}
+.dash-activity__stage-value .dash-unavailable { font-size: 15px; }
+.dash-activity__stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.dash-activity__gap {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--warning-fg, #b45309);
+  margin-top: 3px;
+  cursor: help;
+}
+/* A trend sits INSIDE the card. It is never placed between two cards, where a
+   reader would take a period-over-period change for a conversion. */
+.dash-activity__trend {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-top: 5px;
+}
+.dash-activity__trend--none { color: var(--text-muted); font-weight: 500; }
+.dash-activity__trend--up { color: var(--success-fg, #15803d); }
+.dash-activity__trend--down { color: var(--warning-fg, #b45309); }
+.dash-activity__conv {
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 0 2px;
+  max-width: 108px;
+  text-align: center;
+}
+.dash-activity__conv-rate {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.dash-activity__conv-basis { font-size: 10px; color: var(--text-muted); line-height: 1.25; }
+.dash-activity__conv--muted .dash-activity__conv-rate { color: var(--text-muted); font-weight: 600; }
+.dash-activity__legend {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: var(--space-3);
+}
+/* Narrow viewports: one column, and each connector spans the full width between
+   the two cards it joins so the reading order stays stage → conversion → stage
+   rather than collapsing into ambiguity. The breakpoint is 900px rather than the
+   usual 720 because nine cells in a row are cramped well before a phone. */
+@media (max-width: 900px) {
+  .dash-activity { grid-template-columns: minmax(0, 1fr); }
+  .dash-activity__stage { width: 100%; }
+  .dash-activity__conv {
+    align-self: stretch;
+    max-width: none;
+    flex-direction: row;
+    justify-content: center;
+    gap: 8px;
+    padding: 2px 0;
+  }
+}
+
 /* ── PR-ADS-155 §2/§5: commercial outcomes, separate from the funnel ─────── */
 .dash-outcomes-panel { margin-top: var(--space-5); }
 .dash-outcomes {
