@@ -33,23 +33,32 @@ def run_weekly_report():
 
     try:
         # Step 1: Pull Google Ads data (30-day window)
+        #
+        # PR-ADS-156-F1 §6: search terms are NOT pulled here. This step used to
+        # call `pull_search_terms(days_back=60)` and then, ~150 lines later, the
+        # canonical service pulled the same 60 days again — two Google Ads
+        # queries per weekly run for one dataset, and two answers that nothing
+        # reconciled. The analysis below now reads the rows the canonical sync
+        # actually persisted, so the snapshot and the database describe the same
+        # observation by construction rather than by coincidence.
         print(
             "Step 1/6: Pulling Google Ads data via direct Google Ads API "
-            "(campaigns/keywords/geo=30d, search_terms=60d)..."
+            "(campaigns/keywords/geo=30d; search_terms=60d, pulled once by the "
+            "canonical service below)..."
         )
         from connectors.google_ads_source import (
             pull_campaign_performance,
-            pull_search_terms,
             pull_keyword_performance,
             pull_geo_performance,
             save_output as google_ads_save,
         )
         campaigns = pull_campaign_performance(days_back=30)
-        search_terms = pull_search_terms(days_back=60)
         keywords = pull_keyword_performance(days_back=30)
         geos = pull_geo_performance(days_back=30)
-        google_ads_save(campaigns, search_terms, keywords, geos)
-        print(f"  Google Ads API pull complete — {len(campaigns)} campaign rows, {len(search_terms)} search terms")
+        # `None` for search terms leaves data/ads_search_terms.json untouched
+        # until the canonical sync below has actually persisted this week's rows.
+        google_ads_save(campaigns, None, keywords, geos)
+        print(f"  Google Ads API pull complete — {len(campaigns)} campaign rows")
 
         # Step 2: Pull HubSpot CRM data (30-day window)
         print("Step 2/6: Pulling HubSpot CRM data (30 days)...")
@@ -194,24 +203,47 @@ def run_weekly_report():
         #
         # The 60-day weekly recovery window is preserved: different triggers may
         # ask for different windows, they simply no longer carry different rules
-        # for what a successful sync means. The service owns the pull, so this
-        # issues one additional read-only Google Ads query per weekly run; the
-        # rows pulled at Step 1 remain the input to the JSON snapshot and the
-        # n-gram analysis, which are analysis outputs and not canonical facts.
+        # for what a successful sync means.
+        #
+        # PR-ADS-156-F1 §6: this is the ONLY search-term pull in the weekly run.
+        # `include_rows=True` returns the rows that were persisted, and they are
+        # adopted only when the sync reports ok — everything downstream (the
+        # JSON snapshot, waste detection, the n-gram findings in the report)
+        # then describes rows that are genuinely in the database. Analysis over
+        # transient rows is analysis nobody can audit afterwards.
+        search_terms = []
+        search_terms_available = False
         try:
             from services.search_term_sync_service import (  # noqa: PLC0415
                 sync_recent_search_terms,
             )
-            st = sync_recent_search_terms("weekly", days=60, run_id=run_id)
+            st = sync_recent_search_terms("weekly", days=60, run_id=run_id,
+                                          include_rows=True)
             if st.get("ok"):
+                search_terms = st.get("rows") or []
+                search_terms_available = True
                 log.info("[weekly] Canonical search-term sync: %s", {
                     k: st.get(k) for k in
                     ("date_from", "date_to", "fetched", "written", "verified_empty")})
             else:
-                log.error("[weekly] Canonical search-term sync failed: %s",
-                          st.get("error"))
+                log.error(
+                    "[weekly] Canonical search-term sync failed (%s) — "
+                    "search-term analysis is unavailable for this run",
+                    st.get("error"))
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write search terms failed: %s", db_exc)
+
+        # The local JSON snapshot is written from the SAME rows, and only when
+        # they were persisted. Overwriting last week's snapshot with an empty
+        # list because this week's pull failed would destroy the only remaining
+        # copy of the previous observation.
+        if search_terms_available:
+            google_ads_save(None, search_terms, None, None)
+            print(f"  Snapshot saved — {len(search_terms)} persisted search terms")
+        else:
+            log.warning("[weekly] search-term snapshot not refreshed — the "
+                        "canonical sync did not persist rows this run")
+            print("  Search-term snapshot NOT refreshed (canonical sync failed)")
 
         # Step 3: Waste detection
         print("Step 3/6: Running waste detection...")
@@ -394,7 +426,15 @@ def run_weekly_report():
         print("Step 6/6: Generating weekly report (deterministic advisor)...")
         from analysis.advisor import generate_weekly_report
         from analysis.rule_advisor import compute_ngram_findings
-        ngram_findings = compute_ngram_findings(search_terms)
+        # PR-ADS-156-F1 §6: n-grams over the PERSISTED rows, or not at all.
+        # `None` reaches the report as "unavailable"; an empty list would reach
+        # it as "no wasteful n-grams this week", which is a different claim and
+        # one this run has no evidence for.
+        ngram_findings = (compute_ngram_findings(search_terms)
+                          if search_terms_available else None)
+        if not search_terms_available:
+            log.warning("[weekly] n-gram findings omitted — the canonical "
+                        "search-term sync did not persist rows this run")
         report_path = generate_weekly_report(ngram_data=ngram_findings)
 
         print(f"\n{'='*60}")

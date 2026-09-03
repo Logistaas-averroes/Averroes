@@ -761,6 +761,13 @@ def write_search_terms(
         currency_code = raw.get("currency_code") or None
         source_system = raw.get("source") or "unknown"
 
+        # PR-ADS-156-F1 §5: the Google Ads account identity. Nullable, because
+        # historical rows genuinely do not carry one and guessing it would be
+        # inventing provenance — the audit reports those as historical
+        # disclosure rather than pretending they belong to this account.
+        raw_customer_id = raw.get("customer_id")
+        customer_id = str(raw_customer_id).strip() or None if raw_customer_id else None
+
         rows.append((
             run_id,
             source_date,
@@ -770,6 +777,7 @@ def write_search_terms(
             keyword,
             match_type,
             search_term,
+            customer_id,
             spend_usd,
             clicks,
             impressions,
@@ -800,11 +808,11 @@ def write_search_terms(
     _upsert_sql = """
         INSERT INTO search_terms (
             run_id, source_date, campaign_name, campaign_id,
-            ad_group, keyword, match_type, search_term,
+            ad_group, keyword, match_type, search_term, customer_id,
             spend_usd, clicks, impressions, conversions,
             cost_micros, currency_code, source_system,
             sync_batch_id
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (
             source_date,
             COALESCE(campaign_name, ''),
@@ -829,6 +837,10 @@ def write_search_terms(
                                      search_terms.source_system),
             campaign_id   = COALESCE(EXCLUDED.campaign_id,
                                      search_terms.campaign_id),
+            -- COALESCE, not overwrite: a re-sync that somehow lacks the account
+            -- identity must not erase one that was already proven.
+            customer_id   = COALESCE(EXCLUDED.customer_id,
+                                     search_terms.customer_id),
             updated_at    = NOW()
     """
 
@@ -1193,18 +1205,70 @@ def start_sync_batch(
         return 0
 
 
+def _honour_verified_empty(batch_id: int, claimed, status: str, row_count: int,
+                           fetched_count, prepared_count, rejected_count) -> bool:
+    """Whether a ``verified_empty=True`` claim may be stored durably.
+
+    PR-ADS-156-F1 §2. The marker means one specific thing: the source query
+    COMPLETED and the account had nothing for the interval. Anything else that
+    happens to produce zero rows — a failed pull, a swallowed exception, a
+    partial write, a batch whose counters were never reported — must not be
+    recorded as proof of emptiness, because downstream the marker is read as
+    coverage.
+
+    So the claim is honoured only when every count agrees with it AND the counts
+    were actually stated. A caller that omits them has not measured the pull; an
+    unmeasured pull is not evidence, and silently defaulting the counters to
+    zero here would manufacture exactly the certainty this column exists to
+    withhold.
+    """
+    if not claimed:
+        return False
+    consistent = (
+        status == "success"
+        and (row_count or 0) == 0
+        and fetched_count == 0
+        and prepared_count == 0
+        and rejected_count == 0
+    )
+    if not consistent:
+        log.warning(
+            "finish_sync_batch: refusing verified_empty=True for batch_id=%s — "
+            "status=%r row_count=%r fetched=%r prepared=%r rejected=%r "
+            "(verified empty requires a SUCCESSFUL pull with all four at zero, "
+            "explicitly reported)",
+            batch_id, status, row_count, fetched_count, prepared_count, rejected_count,
+        )
+        return False
+    return True
+
+
 def finish_sync_batch(
     batch_id: int,
     status: str,
     row_count: int = 0,
     error_message: Optional[str] = None,
     last_source_date=None,
+    *,
+    verified_empty: bool = False,
+    fetched_count: Optional[int] = None,
+    prepared_count: Optional[int] = None,
+    rejected_count: Optional[int] = None,
 ) -> bool:
     """Mark a sync_batches row as finished and update sync_state.
 
     status must be 'success' or 'failed'.
     Returns True on success, False on DB unavailable or invalid batch_id.
     Never raises.
+
+    PR-ADS-156-F1 §2 — the four keyword-only arguments are OPTIONAL and default
+    to the pre-existing behaviour, so every caller written before them keeps
+    working unchanged: no counters are recorded and ``verified_empty`` stays
+    FALSE. ``row_count`` continues to mean the WRITTEN count.
+
+    A ``verified_empty=True`` claim is validated against the counts before it is
+    stored (see :func:`_honour_verified_empty`) rather than trusted, so no caller
+    — canonical or otherwise — can record an unproven interval as proven.
     """
     if not batch_id:
         log.warning("finish_sync_batch called with invalid batch_id=%r", batch_id)
@@ -1214,6 +1278,10 @@ def finish_sync_batch(
     if status not in ("success", "failed"):
         log.warning("finish_sync_batch: invalid status %r for batch_id=%s", status, batch_id)
         return False
+
+    verified_empty_value = _honour_verified_empty(
+        batch_id, verified_empty, status, row_count,
+        fetched_count, prepared_count, rejected_count)
 
     last_source_date_value = _to_date_or_none(last_source_date)
     if last_source_date is not None and last_source_date_value is None:
@@ -1232,14 +1300,22 @@ def finish_sync_batch(
                 cur.execute(
                     """
                     UPDATE sync_batches
-                    SET finished_at   = NOW(),
-                        status        = %s,
-                        row_count     = %s,
-                        error_message = %s
+                    SET finished_at    = NOW(),
+                        status         = %s,
+                        row_count      = %s,
+                        error_message  = %s,
+                        verified_empty = %s,
+                        -- COALESCE so a caller that reports no counters leaves
+                        -- whatever is already recorded intact, rather than
+                        -- overwriting a measured count with NULL.
+                        fetched_count  = COALESCE(%s, fetched_count),
+                        prepared_count = COALESCE(%s, prepared_count),
+                        rejected_count = COALESCE(%s, rejected_count)
                     WHERE id = %s
                     RETURNING source, dataset, date_to
                     """,
-                    (status, row_count or 0, error_message, batch_id),
+                    (status, row_count or 0, error_message, verified_empty_value,
+                     fetched_count, prepared_count, rejected_count, batch_id),
                 )
                 batch_row = cur.fetchone()
                 if not batch_row:
@@ -1286,8 +1362,10 @@ def finish_sync_batch(
                     )
 
         log.info(
-            "finish_sync_batch — batch_id=%s source=%s dataset=%s status=%s row_count=%s",
-            batch_id, source, dataset, status, row_count,
+            "finish_sync_batch — batch_id=%s source=%s dataset=%s status=%s "
+            "row_count=%s verified_empty=%s fetched=%s prepared=%s rejected=%s",
+            batch_id, source, dataset, status, row_count, verified_empty_value,
+            fetched_count, prepared_count, rejected_count,
         )
         return True
     except Exception as exc:  # noqa: BLE001

@@ -194,3 +194,157 @@ Every path in this document reads Google Ads and writes only local tables. No
 bid, budget, keyword, negative keyword, campaign or ad-group state is ever
 modified, and every evidence result carries `external_writes_performed: false`.
 A static test asserts no mutation verb is reachable from any of these modules.
+
+---
+
+# PR-ADS-156-F1 — closing the false-green freshness paths
+
+The structure above stood; the certification did not. Five paths could still
+report a stale or unproven dataset as healthy, and each one is closed by naming
+a quantity that used to be conflated with another.
+
+## 1. Coverage is not the newest row
+
+Freshness was derived from `MAX(source_date)`. That is wrong in both directions,
+and each direction certifies something untrue:
+
+* a dataset can be **current and empty**. Google Ads had nothing for a quiet
+  fortnight; the interval was queried and came back empty. Judged by the newest
+  row, a healthy account looks stale.
+* a dataset can be **stale and full**. Rows persist; syncs do not. An old
+  successful zero-row batch leaves no row at all, so the newest row belongs to
+  whatever ran before it — and the dataset reports the freshness of a sync that
+  stopped happening.
+
+Three quantities are now published and validated separately:
+
+| Field | Meaning | Role |
+|---|---|---|
+| `coverage_through` | `MAX(date_to)` over **successful** canonical batches | **freshness is measured from this** |
+| `data_last_seen` | newest persisted source row date, nullable | reported, never a freshness signal |
+| `verified_empty` | durable proof the queried interval returned zero canonical rows | read from the batch column, never inferred |
+
+`coverage_through` is `MAX(date_to)`, not the `date_to` of whichever batch ran
+last: a backfill repairing an old month runs last and covers an older range, and
+taking its `date_to` would *retract* coverage the daily runs had established.
+
+A stale `coverage_through` fails **even when the table is legitimately empty**.
+A current `coverage_through` passes **even when the newest row is older**.
+
+## 2. Verified-empty is durable evidence
+
+`sync_batches` gains four columns, added by an idempotent `ADD COLUMN IF NOT
+EXISTS` migration through the normal `init_db()` path:
+
+```sql
+verified_empty BOOLEAN NOT NULL DEFAULT FALSE
+fetched_count  INTEGER
+prepared_count INTEGER
+rejected_count INTEGER
+```
+
+`row_count` continues to mean the **written** count. The other three say what it
+was written from, so "0 rows" stops being one number with three possible
+meanings.
+
+The `FALSE` default is the point, not a side effect: every batch already in
+production predates the marker, and some historical successful zero-row batches
+were recorded while the evidence pipeline was unavailable. They stay unproven.
+
+`finish_sync_batch` takes the four as **optional keyword arguments**; every
+existing caller keeps working unchanged and records nothing it did not measure.
+A `verified_empty=True` claim is *validated before it is stored* — the writer
+requires a successful status with fetched, prepared, rejected and written all
+explicitly zero. A caller that omits the counters has not measured the pull, and
+an unmeasured pull is not evidence, so the claim is refused and logged.
+
+## 3. Persistence violations are reachable
+
+Emitted from the durable counters on the latest batch, not guessed at:
+
+| Code | Condition |
+|---|---|
+| `fetched_rows_not_persisted` | `fetched_count > 0` and `row_count = 0` |
+| `partial_persistence` | `prepared_count ≠ row_count`, or `rejected_count > 0` |
+| `canonical_sync_failed` | latest attempted batch failed |
+| `unproven_empty_interval` | success, nothing written, nothing fetched, **no** durable marker |
+| `legacy_source_active` | a production path reads a retired evidence source |
+
+`legacy_source_active` was previously declared and unreachable — the only
+implementation of "is a legacy source active?" lived in a test module. In JSON,
+a declared violation nothing can raise reads as a check that ran and passed. The
+scan and its allowlist now live in `analysis/legacy_source_guard.py`, and the
+audit command and the regression suite execute the **same function**.
+
+## 4. Certification is scoped; history is disclosed
+
+Identity, currency and duplication checks used to scan the whole table. That
+makes quarantined Windsor-era rows — rows nobody will repair, which the evidence
+services already exclude — permanently block the new pipeline, and a check that
+can never go green is a check nobody reads.
+
+* **Certified**: canonical-provenance rows (`source_system = 'google_ads_api'`)
+  inside the certified interval — the range of the latest successful batch.
+  Their defects are **blocking**.
+* **Disclosed**: everything else, counted and labelled per `source_system`
+  (`legacy_rows_present`). Never relabelled canonical, never repaired here, and
+  never the reason current freshness fails.
+
+Nothing historical is backfilled, rewritten or deleted.
+
+## 5. Search-term identity is real
+
+`search_terms` gains a nullable `customer_id`, bringing it to parity with
+`keyword_daily_facts`. A newly ingested canonical row must carry:
+
+source date · non-empty search term · campaign ID · ad-group identity (the
+`ad_group` name, which is what the current natural key stores) · Google Ads
+customer ID · `source = google_ads_api` provenance.
+
+Rows missing any of these are rejected by reason and counted in
+`rejected_count`; nothing is dropped quietly. Historical rows stay NULL — a
+back-filled guess would be inventing provenance — and are reported as
+disclosure, never reinterpreted as current canonical failures.
+
+## 6. One search-term pull per scheduler execution
+
+The weekly and monthly runs pulled search terms **twice**: once at step 1 for
+the JSON snapshot, and again through the canonical service later in the run.
+Two queries for one dataset is two answers nothing reconciles.
+
+Each run now performs exactly one canonical pull, with `include_rows=True`, and
+the rows it returns are the ones analysed — the junk-query check, the n-grams
+and the reports all read what was actually persisted. Rows are adopted only
+after the `ok` check: `rows` holds what the pull *prepared*, which on a partial
+write is not what the database holds.
+
+When the sync fails, downstream search-term analysis is **unavailable**, not
+empty: `ngram_data=None` reaches the report as "unavailable", and
+`data/ads_search_terms.json` is left untouched rather than overwritten with `[]`
+— which would destroy the last surviving copy of the previous observation and
+make an outage look like a quiet week. `save_output` now distinguishes `None`
+("not measured, leave the file alone") from `[]` ("measured as empty").
+
+Each trigger keeps its own window: daily 14 days, weekly 60, monthly 30.
+
+## 7. One account calendar
+
+`search_term_sync_service._account_today` resolved a canonical window and, on
+**any** exception, quietly returned the UTC date. Between 23:00 and 00:00 UTC in
+British Summer Time those are different days, so a transient failure could shift
+the requested interval by one date and record the wrong day as covered —
+silently, because the fallback logged at DEBUG.
+
+It is now a thin alias for `analysis.account_time.account_today`, the helper
+Campaign and Keyword Evidence already use. There is no fallback: keyword and
+search-term intervals resolve through one function or not at all.
+
+## Failure and recovery (F1 additions)
+
+| Symptom | Meaning | Action |
+|---|---|---|
+| `canonical_source_stale` | **proven coverage** is old, whatever the rows say | re-run; the rolling window recovers it |
+| `unproven_empty_interval` | a zero-row success with no durable marker | re-run through the canonical service, which records the marker |
+| `partial_persistence` | prepared ≠ written, or rows rejected | read `rejected_count` and the batch error |
+| `legacy_source_active` | a production path reads a retired source | remove the read, or justify it in the allowlist |
+| `legacy_rows_present` (disclosure) | historical rows outside the certified interval | none — informational |

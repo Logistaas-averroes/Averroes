@@ -137,13 +137,13 @@ def normalize_search_term_row(row: dict) -> dict | None:
     Returns None when search_term is blank or null — callers must skip these.
 
     Input fields (from fetch_search_terms):
-        date, campaign_id, campaign_name, ad_group_id, ad_group_name,
-        search_term, impressions, clicks, cost_micros, spend,
+        date, customer_id, campaign_id, campaign_name, ad_group_id,
+        ad_group_name, search_term, impressions, clicks, cost_micros, spend,
         currency_code, conversions
 
     Output fields:
-        date, search_term, campaign, campaign_id (str), ad_group,
-        ad_group_id (str), impressions, clicks, cost_micros, spend,
+        date, search_term, customer_id (str), campaign, campaign_id (str),
+        ad_group, ad_group_id (str), impressions, clicks, cost_micros, spend,
         currency_code, conversions, source="google_ads_api"
 
     Field discipline:
@@ -164,6 +164,9 @@ def normalize_search_term_row(row: dict) -> dict | None:
     return {
         "date": row.get("date"),
         "search_term": search_term,
+        # PR-ADS-156-F1 §5: the Google Ads account identity, carried through so
+        # the canonical row can prove which account it describes.
+        "customer_id": normalize_id(row.get("customer_id")),
         "campaign": row.get("campaign_name"),
         "campaign_id": normalize_id(row.get("campaign_id")),
         "ad_group": row.get("ad_group_name"),
@@ -417,8 +420,9 @@ def pull_geo_performance(days_back: int = 30) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def save_output(campaigns: list, search_terms: list, keywords: list, geos: list):
-    """Save all Google Ads data to the data/ directory.
+def save_output(campaigns: list | None, search_terms: list | None,
+                keywords: list | None, geos: list | None):
+    """Save Google Ads data to the data/ directory.
 
     Writes the same compatibility files expected by downstream analysis logic:
         data/ads_campaigns.json
@@ -426,22 +430,30 @@ def save_output(campaigns: list, search_terms: list, keywords: list, geos: list)
         data/ads_keywords.json
         data/ads_geos.json
 
+    PR-ADS-156-F1 §6: passing ``None`` for a dataset LEAVES ITS FILE UNTOUCHED,
+    which is different from passing ``[]`` (a genuinely empty result, written).
+    A caller whose pull failed must not overwrite the previous snapshot with an
+    empty list — that would destroy the last surviving copy of the previous
+    observation and make an outage look like a quiet week. Every dataset the
+    caller did measure is still written in the same call.
+
     This is local app output only.  No writes to Google Ads.
     No database writes.
     """
     os.makedirs("data", exist_ok=True)
 
-    with open("data/ads_campaigns.json", "w") as f:
-        json.dump(campaigns, f, indent=2)
+    written = {}
+    for name, rows in (("campaigns", campaigns), ("search_terms", search_terms),
+                       ("keywords", keywords), ("geos", geos)):
+        if rows is None:
+            continue
+        with open(f"data/ads_{name}.json", "w") as f:
+            json.dump(rows, f, indent=2)
+        written[name] = len(rows)
 
-    with open("data/ads_search_terms.json", "w") as f:
-        json.dump(search_terms, f, indent=2)
-
-    with open("data/ads_keywords.json", "w") as f:
-        json.dump(keywords, f, indent=2)
-
-    with open("data/ads_geos.json", "w") as f:
-        json.dump(geos, f, indent=2)
-
-    logger.info("Saved Google Ads data to data/ (%d campaigns, %d search terms, %d keywords, %d geos)",
-                len(campaigns or []), len(search_terms or []), len(keywords or []), len(geos or []))
+    logger.info("Saved Google Ads data to data/ (%s); not refreshed: %s",
+                ", ".join(f"{k}={v}" for k, v in written.items()) or "nothing",
+                ", ".join(n for n, r in (("campaigns", campaigns),
+                                         ("search_terms", search_terms),
+                                         ("keywords", keywords), ("geos", geos))
+                          if r is None) or "nothing")

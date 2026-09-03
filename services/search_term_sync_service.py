@@ -47,6 +47,11 @@ import logging
 import os
 from datetime import date, datetime, timedelta
 
+# PR-ADS-156-F1 §7: THE account-local date helper, the same object Campaign and
+# Keyword Evidence resolve their window boundaries with. Imported directly so
+# there is no second implementation to drift, and no code path in this module
+# that can decide a different day is "today".
+from analysis.account_time import account_today
 from services.dataset_keys import SEARCH_TERMS_DATASET, SEARCH_TERMS_SOURCE
 
 logger = logging.getLogger(__name__)
@@ -64,26 +69,43 @@ DEFAULT_LOOKBACK_DAYS = max(
 #: Why a fetched row could not be stored durably. Reported, never silently
 #: dropped: a row the pull returned and the database does not hold is a gap in
 #: the evidence, whatever the reason.
+#:
+#: PR-ADS-156-F1 §5 — the last four are canonical IDENTITY. A non-empty string
+#: in the `search_term` column was never proof that a row describes a knowable
+#: event: without the account, the campaign and the ad group, "shipping to
+#: france" is a phrase, not an observation anyone can act on or reconcile. The
+#: natural key is built from these fields, so a row missing one is also a row
+#: that cannot be upserted deterministically.
 REJECT_BLANK_SEARCH_TERM = "blank_search_term"
 REJECT_UNPARSEABLE_DATE = "unparseable_source_date"
+REJECT_MISSING_CUSTOMER_ID = "missing_customer_identity"
+REJECT_MISSING_CAMPAIGN_ID = "missing_campaign_identity"
+REJECT_MISSING_AD_GROUP = "missing_ad_group_identity"
+REJECT_MISSING_PROVENANCE = "missing_canonical_provenance"
+
+#: The one provenance label a NEW canonical row may carry. Rows stamped
+#: anything else came from somewhere that is not the canonical Google Ads API
+#: path, and this service is the canonical path.
+CANONICAL_PROVENANCE = SEARCH_TERMS_SOURCE
 
 _DATE_KEYS = ("source_date", "date")
 
 
 def _account_today(now: datetime | None = None) -> date:
     """Today in the ACCOUNT's calendar, which is the calendar Google Ads reports
-    against. Resolved through the one canonical helper rather than ``date.today``
-    so a window here cannot mean a different day from a window anywhere else."""
-    try:
-        from services import canonical_contract  # noqa: PLC0415
+    against.
 
-        resolved = canonical_contract.resolve_canonical_window("current_quarter", now=now)
-        end = resolved.get("end_date")
-        if end:
-            return date.fromisoformat(str(end)[:10])
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("account-local today unavailable (%s); using UTC date", exc)
-    return (now or datetime.utcnow()).date()
+    PR-ADS-156-F1 §7 — this is a thin alias for the shared
+    :func:`analysis.account_time.account_today`, the helper Campaign and Keyword
+    Evidence already use. It previously resolved a canonical window and, on ANY
+    exception, quietly returned the UTC date instead. Between 23:00 and 00:00
+    UTC in British Summer Time those are different days, so a transient failure
+    could shift the requested interval by one date and record the wrong day as
+    covered — silently, because the fallback logged at DEBUG. There is no
+    fallback now: keyword and search-term intervals resolve through one function
+    or not at all.
+    """
+    return account_today(now)
 
 
 def _parse_source_date(value):
@@ -99,29 +121,71 @@ def _parse_source_date(value):
         return None
 
 
-def classify_rows(rows: list | None) -> tuple[list, dict]:
-    """Split fetched rows into what can be stored durably and what cannot.
+def _text(row: dict, *keys) -> str:
+    """First non-blank value among ``keys``, trimmed. '' when none is present."""
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
 
-    Applies the writer's OWN two rejection rules ahead of the write, because
+
+def classify_rows(rows: list | None) -> tuple[list, dict]:
+    """Split fetched rows into what can be stored durably as CANONICAL evidence
+    and what cannot.
+
+    Applies the writer's own rejection rules ahead of the write, because
     ``write_search_terms`` returns a single integer: without this the service
     could report "wrote 12 of 12" while the connector had handed it 15 rows and
     three had been dropped inside the writer. A count that describes only the
     rows that survived is not a measurement of the pull.
+
+    PR-ADS-156-F1 §5 — and it checks IDENTITY, not just presence of a string.
+    A search term with no account, no campaign and no ad group is a phrase
+    someone typed, not an observation: it cannot be attributed, reconciled
+    against spend, or upserted deterministically, because the natural key is
+    built from those same fields. Rejections are counted by reason and reported
+    in ``rejected_count``; nothing is dropped quietly.
     """
     prepared, rejected = [], {}
+
+    def reject(reason):
+        rejected[reason] = rejected.get(reason, 0) + 1
+
     for row in rows or []:
-        term = (row.get("search_term") or "").strip()
-        if not term:
-            rejected[REJECT_BLANK_SEARCH_TERM] = rejected.get(REJECT_BLANK_SEARCH_TERM, 0) + 1
+        if not _text(row, "search_term", "term"):
+            reject(REJECT_BLANK_SEARCH_TERM)
             continue
+
         source_date = None
         for key in _DATE_KEYS:
             source_date = _parse_source_date(row.get(key))
             if source_date is not None:
                 break
         if source_date is None:
-            rejected[REJECT_UNPARSEABLE_DATE] = rejected.get(REJECT_UNPARSEABLE_DATE, 0) + 1
+            reject(REJECT_UNPARSEABLE_DATE)
             continue
+
+        if not _text(row, "customer_id"):
+            reject(REJECT_MISSING_CUSTOMER_ID)
+            continue
+        if not _text(row, "campaign_id"):
+            reject(REJECT_MISSING_CAMPAIGN_ID)
+            continue
+        # Ad-group identity from the fields the CURRENT schema stores. The
+        # `search_terms` table keys on the ad-group NAME (there is no
+        # `ad_group_id` column), so the name is what has to be there; the
+        # connector's id is accepted as equivalent proof when it is present.
+        if not _text(row, "ad_group", "ad_group_name", "ad_group_id"):
+            reject(REJECT_MISSING_AD_GROUP)
+            continue
+        if _text(row, "source", "source_system") != CANONICAL_PROVENANCE:
+            reject(REJECT_MISSING_PROVENANCE)
+            continue
+
         prepared.append(row)
     return prepared, rejected
 
@@ -210,10 +274,12 @@ def sync_search_terms(date_from: date, date_to: date, sync_type: str, *,
         rows = pull_search_terms_range(date_from.isoformat(), date_to.isoformat())
     except Exception as exc:  # noqa: BLE001
         logger.error("search-term pull failed (%s → %s): %s", date_from, date_to, exc)
+        # NOT verified_empty, and the counters stay NULL rather than zero: a
+        # pull that failed measured nothing, and a recorded zero would read
+        # downstream as "we looked and there was nothing".
         w.finish_sync_batch(batch_id=batch_id, status="failed", row_count=0,
-                            error_message=f"search-term pull failed: {exc}"[:1000])
-        # NOT verified_empty. The pull returned no rows because it failed, and
-        # the whole point of that flag is to mean the opposite.
+                            error_message=f"search-term pull failed: {exc}"[:1000],
+                            verified_empty=False)
         return _result(batch_id=batch_id, error=str(exc), **span)
 
     fetched = len(rows or [])
@@ -226,7 +292,13 @@ def sync_search_terms(date_from: date, date_to: date, sync_type: str, *,
         # because the interval is now proven — that is the difference between
         # this and a failure, and it is the only reason the flag exists.
         w.finish_sync_batch(batch_id=batch_id, status="success", row_count=0,
-                            last_source_date=date_to)
+                            last_source_date=date_to,
+                            # PR-ADS-156-F1 §2: recorded DURABLY, not left to be
+                            # inferred later from `success AND row_count = 0`.
+                            # Historical batches share that shape without
+                            # sharing the meaning.
+                            verified_empty=True, fetched_count=0,
+                            prepared_count=0, rejected_count=0)
         logger.info("search-term sync (%s → %s): verified empty (0 rows)",
                     date_from, date_to)
         return _result(ok=True, batch_id=batch_id, verified_empty=True,
@@ -255,7 +327,12 @@ def sync_search_terms(date_from: date, date_to: date, sync_type: str, *,
         # A failed sync must never advance the proven-coverage watermark: the
         # interval was attempted, not covered.
         last_source_date=(latest or date_to) if ok else None,
-        error_message=None if ok else error[:1000])
+        error_message=None if ok else error[:1000],
+        # A pull that returned rows is never verified-empty, whatever happened
+        # to them afterwards. The counters are recorded either way — they are
+        # what makes "wrote 0" distinguishable from "there was nothing".
+        verified_empty=False, fetched_count=fetched,
+        prepared_count=prepared, rejected_count=rejected)
 
     if ok:
         logger.info("search-term sync (%s → %s): wrote %d row(s), latest %s",

@@ -160,8 +160,12 @@ def sync_keyword_daily_facts(date_from: date, date_to: date, sync_type: str, *,
     except Exception as exc:  # noqa: BLE001
         logger.error("keyword pull failed (%s → %s): %s", date_from, date_to, exc)
         if batch_id:
+            # PR-ADS-156-F1 §2: explicitly NOT verified-empty, and the counters
+            # stay NULL rather than zero — a failed pull measured nothing, and a
+            # stored zero would later read as "we looked and there was nothing".
             w.finish_sync_batch(batch_id=batch_id, status="failed", row_count=0,
-                                error_message=f"keyword pull failed: {exc}")
+                                error_message=f"keyword pull failed: {exc}",
+                                verified_empty=False)
         return {"ok": False, "fetched": 0, "prepared": 0, "written": 0,
                 "skipped_missing_identity": 0, "skipped_no_date": 0,
                 "db_unavailable": False, "error": str(exc),
@@ -205,7 +209,17 @@ def sync_keyword_daily_facts(date_from: date, date_to: date, sync_type: str, *,
         # Watermark advances to date_to on success (incl. a verified-empty range);
         # a failed sync must NOT advance the proven-coverage watermark (§6).
         last_source_date=date_to if ok else None,
-        error_message=None if ok else f"{error}: {stats}")
+        error_message=None if ok else f"{error}: {stats}",
+        # PR-ADS-156-F1 §2 — durable evidence of what the pull saw. `row_count`
+        # above is the WRITTEN count; these three say what it was written from,
+        # so "0 rows" stops being one number with three possible meanings.
+        # `verified_empty` is claimed only for a SUCCESSFUL pull that fetched
+        # nothing, and the writer re-checks that claim against these counts
+        # before storing it.
+        verified_empty=bool(ok and fetched == 0),
+        fetched_count=fetched,
+        prepared_count=stats.get("prepared", 0),
+        rejected_count=skipped)
 
     return {"ok": ok, "batch_id": batch_id or None,
             "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),

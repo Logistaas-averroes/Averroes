@@ -36,6 +36,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+from analysis import legacy_source_guard  # noqa: E402
 from scheduler import incremental_sync as sync  # noqa: E402
 from services import dataset_keys  # noqa: E402
 from services import freshness_service  # noqa: E402
@@ -65,21 +66,11 @@ def _code_only(rel: str) -> str:
     A guard that greps raw text fails on the paragraph explaining what was
     removed, which is both wrong and a strong incentive to delete the
     explanation. The check is about what the code DOES.
+
+    PR-ADS-156-F1 §3: delegates to the shared guard so this suite and the audit
+    command strip prose the same way.
     """
-    src = (_ROOT / rel).read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    docstrings = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
-                             ast.ClassDef)):
-            doc = ast.get_docstring(node, clean=False)
-            if doc:
-                docstrings.add(doc)
-    code = "\n".join(ln for ln in src.splitlines()
-                      if not ln.strip().startswith("#"))
-    for doc in docstrings:
-        code = code.replace(doc, "")
-    return code
+    return legacy_source_guard.code_only(_ROOT / rel)
 
 
 def _called_names(tree: ast.Module) -> set[str]:
@@ -148,12 +139,80 @@ def _install_fake_writers(monkeypatch, fake):
         monkeypatch.setattr(real, name, getattr(fake, name))
 
 
-def _rows(n, *, day="2026-02-10", term="widget"):
-    return [{"search_term": f"{term}-{i}", "source_date": day,
-             "campaign_name": "C", "campaign_id": "111", "ad_group": "AG",
-             "keyword": "kw", "match_type": "EXACT", "cost_micros": 1000,
-             "currency_code": "GBP", "clicks": 1, "impressions": 10,
-             "conversions": 0, "source": "google_ads_api"} for i in range(n)]
+def _sync_fixture(**overrides) -> dict:
+    """A healthy, current canonical sync record in the F1 shape.
+
+    Built here rather than spelled out at each call site so a case states only
+    the ONE fact it is about — an old coverage date, a missing counter — instead
+    of restating a dozen healthy fields around it.
+    """
+    facts = {
+        "sync_status": "success",
+        "latest_successful_sync": "2026-03-01T06:00:00+00:00",
+        "sync_error": None,
+        "latest_requested_interval": {"date_from": "2026-02-16",
+                                      "date_to": "2026-03-01"},
+        "latest_batch_status": "success",
+        "latest_batch_row_count": 3,
+        "latest_batch_fetched_count": 3,
+        "latest_batch_prepared_count": 3,
+        "latest_batch_rejected_count": 0,
+        "latest_batch_verified_empty": False,
+        "latest_proven_source_date": "2026-03-01",
+        "coverage_through": "2026-03-01",
+        "certified_interval": {"date_from": "2026-02-16", "date_to": "2026-03-01"},
+        "verified_empty": False,
+        "verified_empty_intervals": 0,
+        "unproven_empty_intervals": 0,
+        "failed_batches": 0,
+    }
+    facts.update(overrides)
+    return facts
+
+
+def _data_fixture(*, current=None, historical=None, **overrides) -> dict:
+    """Table facts in the F1 certified/historical split."""
+    clean = {"row_count": 0, "distinct_source_dates": 0,
+             "min_source_date": None, "max_source_date": None,
+             "rows_missing_identity": 0, "rows_missing_currency_provenance": 0,
+             "duplicate_natural_key_groups": 0}
+    facts = {
+        "row_count": 0, "min_source_date": None, "max_source_date": None,
+        "data_last_seen": None,
+        "current": {**clean, **(current or {})},
+        "historical": {**clean, "rows_inside_interval_non_canonical": 0,
+                       "by_source_system": [], **(historical or {})},
+    }
+    facts.update(overrides)
+    facts.setdefault("data_last_seen", facts.get("max_source_date"))
+    if "max_source_date" in overrides and "data_last_seen" not in overrides:
+        facts["data_last_seen"] = overrides["max_source_date"]
+    return facts
+
+
+def _rows(n, *, day="2026-02-10", term="widget", **overrides):
+    """Fully-identified canonical search-term rows.
+
+    PR-ADS-156-F1 §5 added account/campaign/ad-group identity to what the
+    service accepts, so the fixture carries it: a row without those is no longer
+    a canonical row, and tests about persistence should not be quietly testing
+    rejection instead. ``overrides`` lets a case strip one field deliberately.
+    """
+    base = {"source_date": day,
+            "customer_id": "555", "campaign_name": "C", "campaign_id": "111",
+            "ad_group": "AG", "ad_group_id": "222",
+            "keyword": "kw", "match_type": "EXACT", "cost_micros": 1000,
+            "currency_code": "GBP", "clicks": 1, "impressions": 10,
+            "conversions": 0, "source": "google_ads_api"}
+    rows = []
+    for i in range(n):
+        # Distinct terms when several are asked for (the natural key needs
+        # them); the exact term when one is. Overrides land LAST so a case can
+        # blank a field deliberately without the suffix rescuing it.
+        row = {**base, "search_term": f"{term}-{i}" if n > 1 else term}
+        row.update(overrides)
+        rows.append(row)
+    return rows
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -367,18 +426,22 @@ def test_14_stale_canonical_data_is_reported_stale_even_with_rows():
     today = date(2026, 3, 1)
     assert _stale("2026-01-01", 8, today) is True
     assert _stale(today.isoformat(), 8, today) is False
+    # Never covered is `canonical_sync_never_run`, not stale — one problem, one
+    # code.
+    assert _stale(None, 8, today) is False
 
     verdict = _assess(
         "search_terms", "search_terms", "google_ads_api", "search_terms",
-        {"sync_status": "success", "latest_successful_sync": "2026-01-02",
-         "sync_error": None, "latest_requested_interval": None,
-         "latest_batch_status": "success", "latest_batch_row_count": 400,
-         "latest_proven_source_date": "2026-01-01",
-         "verified_empty_intervals": 0, "failed_batches": 0},
-        {"row_count": 400, "distinct_source_dates": 30,
-         "min_source_date": "2025-12-02", "max_source_date": "2026-01-01",
-         "rows_missing_identity": 0, "rows_missing_currency_provenance": 0,
-         "duplicate_natural_key_groups": 0},
+        _sync_fixture(latest_successful_sync="2026-01-02",
+                      latest_batch_row_count=400, latest_batch_fetched_count=400,
+                      latest_batch_prepared_count=400,
+                      coverage_through="2026-01-01",
+                      certified_interval={"date_from": "2025-12-19",
+                                          "date_to": "2026-01-01"},
+                      latest_proven_source_date="2026-01-01"),
+        _data_fixture(row_count=400, max_source_date="2026-01-01",
+                      min_source_date="2025-12-02",
+                      current={"row_count": 400, "distinct_source_dates": 30}),
         stale_after_days=8, today=today, registered=True)
 
     assert verdict["stale"] is True
@@ -440,9 +503,9 @@ def test_16_missing_source_identity_fails_closed():
     """A row with no search term cannot be stored under the natural key, and is
     reported rather than dropped."""
     prepared, rejected = st_sync.classify_rows([
-        {"search_term": "ok", "source_date": "2026-02-10"},
-        {"search_term": "   ", "source_date": "2026-02-10"},
-        {"search_term": "no-date", "source_date": None},
+        *_rows(1, term="ok"),
+        *_rows(1, term="blank", search_term="   "),
+        *_rows(1, term="no-date", source_date=None),
     ])
     assert len(prepared) == 1
     assert rejected[st_sync.REJECT_BLANK_SEARCH_TERM] == 1
@@ -452,15 +515,12 @@ def test_16_missing_source_identity_fails_closed():
 
     verdict = _assess(
         "keyword_facts", "keyword_daily_facts", "google_ads_api", "keyword_facts",
-        {"sync_status": "success", "latest_successful_sync": "2026-03-01",
-         "sync_error": None, "latest_requested_interval": None,
-         "latest_batch_status": "success", "latest_batch_row_count": 10,
-         "latest_proven_source_date": "2026-03-01",
-         "verified_empty_intervals": 0, "failed_batches": 0},
-        {"row_count": 10, "distinct_source_dates": 3,
-         "min_source_date": "2026-02-27", "max_source_date": "2026-03-01",
-         "rows_missing_identity": 4, "rows_missing_currency_provenance": 0,
-         "duplicate_natural_key_groups": 0},
+        _sync_fixture(latest_batch_row_count=10, latest_batch_fetched_count=10,
+                      latest_batch_prepared_count=10),
+        _data_fixture(row_count=10, min_source_date="2026-02-27",
+                      max_source_date="2026-03-01",
+                      current={"row_count": 10, "distinct_source_dates": 3,
+                               "rows_missing_identity": 4}),
         stale_after_days=8, today=date(2026, 3, 1), registered=True)
     assert "missing_identity" in verdict["violation_codes"]
 
@@ -470,15 +530,12 @@ def test_17_missing_currency_lineage_is_disclosed_and_excluded():
 
     verdict = _assess(
         "search_terms", "search_terms", "google_ads_api", "search_terms",
-        {"sync_status": "success", "latest_successful_sync": "2026-03-01",
-         "sync_error": None, "latest_requested_interval": None,
-         "latest_batch_status": "success", "latest_batch_row_count": 10,
-         "latest_proven_source_date": "2026-03-01",
-         "verified_empty_intervals": 0, "failed_batches": 0},
-        {"row_count": 10, "distinct_source_dates": 3,
-         "min_source_date": "2026-02-27", "max_source_date": "2026-03-01",
-         "rows_missing_identity": 0, "rows_missing_currency_provenance": 3,
-         "duplicate_natural_key_groups": 0},
+        _sync_fixture(latest_batch_row_count=10, latest_batch_fetched_count=10,
+                      latest_batch_prepared_count=10),
+        _data_fixture(row_count=10, min_source_date="2026-02-27",
+                      max_source_date="2026-03-01",
+                      current={"row_count": 10, "distinct_source_dates": 3,
+                               "rows_missing_currency_provenance": 3}),
         stale_after_days=8, today=date(2026, 3, 1), registered=True)
 
     assert "unproven_currency_lineage" in verdict["violation_codes"]
@@ -602,8 +659,14 @@ def test_25_a_healthy_current_window_fixture_exits_zero(pg):  # noqa: F811
     assert payload["ok"] is True
     assert payload["violation_codes"] == []
     by_name = {d["dataset"]: d for d in payload["datasets"]}
-    assert by_name["search_terms"]["duplicate_natural_key_groups"] == 0
-    assert by_name["keyword_facts"]["duplicate_natural_key_groups"] == 0
+    assert by_name["search_terms"]["current"]["duplicate_natural_key_groups"] == 0
+    assert by_name["keyword_facts"]["current"]["duplicate_natural_key_groups"] == 0
+    # F1 §1: coverage is what freshness was judged on, and the newest stored row
+    # is reported beside it rather than instead of it.
+    for ds in payload["datasets"]:
+        assert ds["coverage_through"] is not None
+        assert ds["stale"] is False
+        assert "data_last_seen" in ds
     # All-time history is DISCLOSED, never claimed complete.
     assert any(d["code"] == "history_coverage_unproven"
                for d in payload["disclosures"])
@@ -648,58 +711,21 @@ def test_27_the_existing_contract_surfaces_are_intact():
 # ═════════════════════════════════════════════════════════════════════════════
 # §10 — static legacy-source guard
 # ═════════════════════════════════════════════════════════════════════════════
-#: Modules allowed to touch retired providers or the legacy snapshot, and why.
-#: Deliberately narrow: audit, reconciliation, migration and historical
-#: diagnostics are the four reasons legacy access is legitimate, and each entry
-#: names which one it is.
-_LEGACY_ACCESS_ALLOWLIST = {
-    "scripts/backfill_windsor.py": "migration — historical Windsor import",
-    "scripts/import_windsor_mcp_search_terms.py": "migration — one-off MCP import",
-    "connectors/windsor_pull.py": "retired connector, retained for history",
-    "connectors/gclid_match.py": "historical diagnostic over the legacy JSON",
-    "db/keyword_repository.py": "audit — counts legacy snapshot rows",
-    "db/revenue_repository.py": "legacy keyword-theme snapshot for the "
-                                "campaign page (non-evidence)",
-    "db/writers.py": "writer for the legacy snapshot, still consumed",
-    "api/server.py": "legacy snapshot consumers + legacy state reported as legacy",
-    "scripts/audit_production_reality.py": "audit — production reality report",
-    # PR-ADS-156 §5 required an INSPECTION before stopping the scheduled legacy
-    # writes, and the inspection found four live consumers: the aggregated
-    # keyword endpoint, the campaign drill-down preview, the keyword-review
-    # action queue, and the keyword-theme snapshot behind the Campaigns page.
-    # None of them is Keyword Evidence. Stopping the writes would have starved
-    # all four, which is the "silently remove it" the section forbids — so the
-    # writes stay, documented and non-authoritative, and this guard's job is to
-    # stop NEW ones appearing rather than to pretend these do not exist.
-    "scheduler/weekly.py": "legacy snapshot writer — four live non-evidence "
-                           "consumers, documented in docs/38",
-    "scheduler/monthly.py": "legacy snapshot writer — four live non-evidence "
-                            "consumers, documented in docs/38",
-    "scripts/verify_search_terms_pipeline.py": "diagnostic — reports legacy state",
-}
-
-_PRODUCTION_DIRS = ("scheduler", "services")
+# PR-ADS-156-F1 §3: the allowlist and the scan moved into
+# `analysis/legacy_source_guard`, so the audit command and this suite execute
+# the SAME function. They used to be two implementations of one rule — and the
+# audit's `legacy_source_active` code was declared with nothing able to raise
+# it, which in JSON reads as a check that ran and passed.
+_LEGACY_ACCESS_ALLOWLIST = legacy_source_guard.LEGACY_ACCESS_ALLOWLIST
+_PRODUCTION_DIRS = legacy_source_guard.PRODUCTION_DIRS
 
 
 def test_28_no_production_path_newly_reads_a_retired_source():
     """§10. Fails if scheduler or service code imports Windsor, writes
     production Keyword Evidence into the legacy snapshot, or silently falls back
     from canonical facts to a legacy table."""
-    offenders = []
-    for directory in _PRODUCTION_DIRS:
-        for path in sorted((_ROOT / directory).rglob("*.py")):
-            rel = str(path.relative_to(_ROOT))
-            if rel in _LEGACY_ACCESS_ALLOWLIST:
-                continue
-            code = _code_only(rel)
-            lowered = code.lower()
-            if "windsor_pull" in lowered or "import windsor" in lowered:
-                offenders.append(f"{rel}: imports a retired provider")
-            if "from keywords" in lowered or "into keywords" in lowered:
-                offenders.append(f"{rel}: reads/writes the legacy keyword snapshot")
-            if "write_keywords(" in code:
-                offenders.append(f"{rel}: writes the legacy keyword snapshot")
-    assert offenders == [], offenders
+    offenders = legacy_source_guard.scan_legacy_sources()
+    assert offenders == [], [f["detail"] for f in offenders]
 
 
 def test_28b_the_allowlist_is_narrow_and_every_entry_is_justified():
@@ -758,9 +784,9 @@ def _scalar(sql, params=()):
 _ST_INSERT = """
     INSERT INTO search_terms
         (source_date, campaign_name, campaign_id, ad_group, keyword, match_type,
-         search_term, cost_micros, currency_code, source_system, clicks,
-         impressions, conversions)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'google_ads_api', 1, 10, 0)
+         search_term, cost_micros, currency_code, customer_id, source_system,
+         clicks, impressions, conversions)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, '555', 'google_ads_api', 1, 10, 0)
     ON CONFLICT (source_date, COALESCE(campaign_name, ''), COALESCE(campaign_id, ''),
                  COALESCE(ad_group, ''), COALESCE(keyword, ''),
                  COALESCE(match_type, ''), search_term)
@@ -771,8 +797,10 @@ _KW_INSERT = """
     INSERT INTO keyword_daily_facts
         (source_date, customer_id, campaign_id, ad_group_id, criterion_id,
          campaign_name, ad_group_name, keyword_text, match_type,
-         cost_micros, currency_code, clicks, impressions, conversions)
-    VALUES (%s, %s, %s, %s, %s, %s, 'AG', 'kw', 'EXACT', 1000, 'GBP', 1, 10, 0)
+         cost_micros, currency_code, source_system, clicks, impressions,
+         conversions)
+    VALUES (%s, %s, %s, %s, %s, %s, 'AG', 'kw', 'EXACT', 1000, 'GBP',
+            'google_ads_api', 1, 10, 0)
     ON CONFLICT (source_date, customer_id, campaign_id, ad_group_id, criterion_id)
     DO UPDATE SET clicks = EXCLUDED.clicks, updated_at = NOW()
 """
@@ -787,9 +815,14 @@ def _seed_healthy(today: date) -> None:
         _exec(_KW_INSERT, (day, "555", "111", "222", f"333{offset}", "Camp A"))
     for source, dataset in (("google_ads_api", "search_terms"),
                             ("google_ads_api", "keyword_facts")):
+        # F1 §2/§3: the durable counters are part of a healthy batch now. A
+        # batch that recorded only `row_count` cannot distinguish "wrote 3 of 3"
+        # from "wrote 3 of 40", so the fixture states all four.
         _exec("INSERT INTO sync_batches (source, dataset, sync_type, status, "
-              "row_count, date_from, date_to, started_at, finished_at) "
-              "VALUES (%s, %s, 'daily', 'success', 3, %s, %s, NOW(), NOW())",
+              "row_count, fetched_count, prepared_count, rejected_count, "
+              "verified_empty, date_from, date_to, started_at, finished_at) "
+              "VALUES (%s, %s, 'daily', 'success', 3, 3, 3, 0, FALSE, %s, %s, "
+              "NOW(), NOW())",
               (source, dataset, today - timedelta(days=13), today))
         _exec("INSERT INTO sync_state (source, dataset, status, "
               "last_successful_sync_at, last_source_date) "
@@ -866,10 +899,18 @@ def test_12c_only_successful_batches_advance_proven_coverage(pg):  # noqa: F811
     with get_conn() as conn, conn.cursor() as cur:
         facts = _sync_facts(cur, "google_ads_api", "search_terms")
 
-    # The latest CANONICAL batch is the successful one, and it is verified-empty.
+    # The latest CANONICAL batch is the successful one, and proven coverage
+    # comes from it.
     assert facts["latest_batch_status"] == "success"
     assert facts["latest_proven_source_date"] == "2026-02-14"
-    assert facts["verified_empty_intervals"] == 1
+    assert facts["coverage_through"] == "2026-02-14"
+    # F1 §2: it is NOT counted as verified-empty. These raw inserts carry no
+    # durable marker, which is precisely the shape of the historical batches
+    # recorded while the evidence pipeline was unavailable — a successful
+    # zero-row row that proves nothing about what the source returned.
+    assert facts["verified_empty_intervals"] == 0
+    assert facts["unproven_empty_intervals"] == 1
+    assert facts["verified_empty"] is False
     assert facts["failed_batches"] == 1
     # The canonical state is the one read; the legacy Windsor row — dated in the
     # FUTURE here, to make the point — cannot displace it.

@@ -101,25 +101,37 @@ def run_daily_pulse():
         # consolidation costs no extra Google Ads call.
         print("Step 4/6: Checking for new junk search terms...")
         search_terms = []
+        search_terms_available = False
         try:
             from services.search_term_sync_service import (  # noqa: PLC0415
                 sync_recent_search_terms,
             )
             st = sync_recent_search_terms("daily", run_id=run_id, include_rows=True)
-            search_terms = st.get("rows") or []
+            # PR-ADS-156-F1 §6: the ok check comes BEFORE the rows are adopted.
+            # `rows` holds what the pull PREPARED, which on a partial write is
+            # not what the database holds — analysing those would draw
+            # conclusions from rows nobody can look up afterwards, and would
+            # report junk terms as if the evidence behind them were durable.
             if st.get("ok"):
+                search_terms = st.get("rows") or []
+                search_terms_available = True
                 log.info("[daily] Canonical search-term sync: %s", {
                     k: st.get(k) for k in
                     ("date_from", "date_to", "fetched", "written", "verified_empty")})
             else:
-                log.warning("[daily] Canonical search-term sync failed: %s",
-                            st.get("error"))
+                log.warning(
+                    "[daily] Canonical search-term sync failed (%s) — junk-term "
+                    "detection is unavailable for this run rather than run over "
+                    "rows that were not persisted", st.get("error"))
         except Exception as exc:  # noqa: BLE001
             log.warning("[daily] Daily search_terms sync failed: %s", exc)
 
-        new_junk = detect_junk_terms(search_terms)
-        label = "junk term" if len(new_junk) == 1 else "junk terms"
-        print(f"  → {len(new_junk)} new {label} found.")
+        new_junk = detect_junk_terms(search_terms) if search_terms_available else []
+        if not search_terms_available:
+            print("  → junk-term check unavailable (search-term sync failed).")
+        else:
+            label = "junk term" if len(new_junk) == 1 else "junk terms"
+            print(f"  → {len(new_junk)} new {label} found.")
 
         # PR-ADS-146A: keep durable keyword facts current daily via the ONE shared
         # sync path — re-pull a rolling recent range (today + previous 29
@@ -172,6 +184,10 @@ def run_daily_pulse():
             "date": datetime.utcnow().strftime("%Y-%m-%d"),
             "anomalies": anomalies,
             "new_junk_terms": new_junk,
+            # PR-ADS-156-F1 §6: an empty junk list means two different things.
+            # Stated so a reader is never left to guess whether the day was
+            # clean or the pull failed.
+            "new_junk_terms_available": search_terms_available,
             "crm_delta": crm_delta,
             "budget_pacing": budget_pacing,
         }
