@@ -151,10 +151,15 @@ def _build_executive_summary(waste, lead_quality, campaign_truth, report_type: s
             f"Confirmed waste identified: **{_fmt_usd(cw)}**. "
             f"Suspected additional waste: **{_fmt_usd(sw)}**."
         )
-        if waste.get("data_source") == "keywords_fallback":
+        # PR-ADS-156-F2 §1/§4: the keyword fallback is gone. Waste detection no
+        # longer substitutes a keyword population when search terms are missing,
+        # because that answers a different question under the same heading. When
+        # the evidence did not arrive the report says so, and so does this.
+        if waste.get("search_term_evidence_available") is False:
             lines.append(
-                "> ⚠️ Waste figures are based on keyword-level data (search term data unavailable). "
-                "Actual waste may be 20–40% higher."
+                "> ⚠️ Search-term waste analysis was NOT performed this run: "
+                "canonical search-term evidence was not persisted. This is not a "
+                "finding of zero waste, and no previous snapshot was reused."
             )
 
     if lead_quality:
@@ -338,10 +343,12 @@ def _build_data_gaps(waste, lead_quality, campaign_truth) -> str:
 
     if waste is None:
         gaps.append("Waste detection output missing — `outputs/waste_report.json` not found.")
-    elif waste.get("data_source") == "keywords_fallback":
+    elif waste.get("search_term_evidence_available") is False:
         gaps.append(
-            "Search term data unavailable from Windsor. Waste analysis ran on keyword-level "
-            "data only. True waste figures may be 20–40% higher than shown."
+            "Canonical search-term evidence was not persisted for this run, so no "
+            "search-term waste analysis was performed. No previous snapshot was "
+            "reused and no keyword-level substitute was used — the figures are "
+            "absent rather than approximate."
         )
 
     if lead_quality is None:

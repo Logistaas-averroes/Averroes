@@ -67,7 +67,11 @@ def test_weekly_empty_search_terms_marks_success_not_success_empty(monkeypatch):
     monkeypatch.setattr("connectors.gclid_match.run_gclid_match", lambda: {"matched": [], "coverage": {}})
     monkeypatch.setattr("connectors.gclid_match.save_output", lambda *a, **k: None)
 
-    monkeypatch.setattr("analysis.core.run_waste_detection", lambda: {"confirmed_waste_items": []})
+    # PR-ADS-156-F2 §1: the schedulers now hand waste detection the canonical
+    # rows and an availability flag, so the stub accepts them. A zero-argument
+    # stub would raise TypeError and mask whatever this fixture is really about.
+    monkeypatch.setattr("analysis.core.run_waste_detection",
+                        lambda *a, **k: {"confirmed_waste_items": []})
     monkeypatch.setattr("analysis.core.run_lead_quality", lambda: None)
     monkeypatch.setattr("analysis.core.run_campaign_truth", lambda: {"campaigns": []})
     monkeypatch.setattr("analysis.advisor.generate_weekly_report", lambda **_: "outputs/fake_report.md")

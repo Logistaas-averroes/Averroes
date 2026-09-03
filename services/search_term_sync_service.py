@@ -201,6 +201,20 @@ def _max_source_date(rows: list) -> date | None:
     return max(dates) if dates else None
 
 
+#: PR-ADS-156-F2 §2. The batch row is where coverage and verified-empty proof
+#: LIVE. If the final update does not land, the pull may well have happened and
+#: the rows may well be stored, but nothing durable says so — and every reader
+#: downstream (freshness, the audit, `evidence_status`) works from the batch, not
+#: from the caller's memory of the return value.
+BATCH_FINALIZATION_FAILED = "batch_finalization_failed"
+
+_FINALIZATION_ERROR = (
+    "rows may be stored, but the sync batch could not be finalized: coverage "
+    "and verified-empty proof were NOT durably recorded, so this interval is "
+    "not certified"
+)
+
+
 def _result(**kwargs) -> dict:
     """One result shape, whatever happened — so a caller never has to test for
     the presence of a key before reading a count."""
@@ -221,6 +235,12 @@ def _result(**kwargs) -> dict:
         "latest_source_date": None,
         "db_unavailable": False,
         "error": None,
+        # PR-ADS-156-F2 §2 — whether the batch row itself was finalized, and
+        # whether rows nevertheless reached the table. The two are separate
+        # facts: an operator needs to know that data may exist even though this
+        # run cannot certify it.
+        "batch_finalized": False,
+        "rows_possibly_written": 0,
         # Stated on every result, successful or not. This service reads Google
         # Ads and writes only local tables.
         "external_writes_performed": False,
@@ -291,18 +311,30 @@ def sync_search_terms(date_from: date, date_to: date, sync_type: str, *,
         # Verified empty: asked, answered, nothing there. The watermark advances
         # because the interval is now proven — that is the difference between
         # this and a failure, and it is the only reason the flag exists.
-        w.finish_sync_batch(batch_id=batch_id, status="success", row_count=0,
-                            last_source_date=date_to,
-                            # PR-ADS-156-F1 §2: recorded DURABLY, not left to be
-                            # inferred later from `success AND row_count = 0`.
-                            # Historical batches share that shape without
-                            # sharing the meaning.
-                            verified_empty=True, fetched_count=0,
-                            prepared_count=0, rejected_count=0)
+        finalized = w.finish_sync_batch(
+            batch_id=batch_id, status="success", row_count=0,
+            last_source_date=date_to,
+            # PR-ADS-156-F1 §2: recorded DURABLY, not left to be inferred later
+            # from `success AND row_count = 0`. Historical batches share that
+            # shape without sharing the meaning.
+            verified_empty=True, fetched_count=0,
+            prepared_count=0, rejected_count=0)
+        if not finalized:
+            # PR-ADS-156-F2 §2: verified-empty that was not written down is not
+            # verified anything. The claim only means something because it is
+            # durable; returning ok=True here would report an interval as proven
+            # on the strength of a value that exists nowhere but this variable.
+            logger.error("search-term sync (%s → %s): verified-empty result "
+                         "could not be finalized", date_from, date_to)
+            return _result(batch_id=batch_id, verified_empty=False,
+                           error=f"{BATCH_FINALIZATION_FAILED}: the interval "
+                                 "returned no rows, but that proof was not "
+                                 "durably recorded",
+                           **({"rows": []} if include_rows else {}), **span)
         logger.info("search-term sync (%s → %s): verified empty (0 rows)",
                     date_from, date_to)
         return _result(ok=True, batch_id=batch_id, verified_empty=True,
-                       latest_source_date=None,
+                       latest_source_date=None, batch_finalized=True,
                        **({"rows": []} if include_rows else {}), **span)
 
     written = w.write_search_terms(run_id, prepared_rows, sync_batch_id=batch_id)
@@ -320,7 +352,7 @@ def sync_search_terms(date_from: date, date_to: date, sync_type: str, *,
 
     ok = error is None
     latest = _max_source_date(prepared_rows) if ok else None
-    w.finish_sync_batch(
+    finalized = w.finish_sync_batch(
         batch_id=batch_id,
         status="success" if ok else "failed",
         row_count=written,
@@ -334,6 +366,24 @@ def sync_search_terms(date_from: date, date_to: date, sync_type: str, *,
         verified_empty=False, fetched_count=fetched,
         prepared_count=prepared, rejected_count=rejected)
 
+    if ok and not finalized:
+        # PR-ADS-156-F2 §2 — the rows very probably reached the table; the
+        # CERTIFICATE did not. Reporting success here is the subtlest false
+        # green of all, because the data would be fine and only the proof of it
+        # missing, so nothing else would ever notice. Both facts are returned:
+        # `written` stays 0 (this run certifies nothing) while
+        # `rows_possibly_written` says what may be there.
+        logger.error("search-term sync (%s → %s): wrote %d row(s) but the batch "
+                     "could not be finalized — %s",
+                     date_from, date_to, written, _FINALIZATION_ERROR)
+        return _result(batch_id=batch_id, fetched=fetched, prepared=prepared,
+                       written=0, rows_possibly_written=written,
+                       rejected=rejected, rejected_reasons=rejected_reasons,
+                       skipped=rejected, verified_empty=False,
+                       error=f"{BATCH_FINALIZATION_FAILED}: {_FINALIZATION_ERROR}",
+                       latest_source_date=None,
+                       **({"rows": prepared_rows} if include_rows else {}), **span)
+
     if ok:
         logger.info("search-term sync (%s → %s): wrote %d row(s), latest %s",
                     date_from, date_to, written, latest)
@@ -344,6 +394,8 @@ def sync_search_terms(date_from: date, date_to: date, sync_type: str, *,
                    written=written, rejected=rejected,
                    rejected_reasons=rejected_reasons, skipped=rejected,
                    verified_empty=False, error=error,
+                   batch_finalized=bool(finalized),
+                   rows_possibly_written=written,
                    latest_source_date=latest.isoformat() if latest else None,
                    **({"rows": prepared_rows} if include_rows else {}), **span)
 
@@ -369,7 +421,9 @@ def sync_recent_search_terms(sync_type: str = "daily", *,
 
 
 __all__ = [
-    "DEFAULT_LOOKBACK_DAYS",
+    "DEFAULT_LOOKBACK_DAYS", "BATCH_FINALIZATION_FAILED", "CANONICAL_PROVENANCE",
     "REJECT_BLANK_SEARCH_TERM", "REJECT_UNPARSEABLE_DATE",
+    "REJECT_MISSING_CUSTOMER_ID", "REJECT_MISSING_CAMPAIGN_ID",
+    "REJECT_MISSING_AD_GROUP", "REJECT_MISSING_PROVENANCE",
     "classify_rows", "sync_search_terms", "sync_recent_search_terms",
 ]

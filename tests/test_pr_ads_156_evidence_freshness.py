@@ -787,7 +787,12 @@ _ST_INSERT = """
          search_term, cost_micros, currency_code, customer_id, source_system,
          clicks, impressions, conversions)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, '555', 'google_ads_api', 1, 10, 0)
-    ON CONFLICT (source_date, COALESCE(campaign_name, ''), COALESCE(campaign_id, ''),
+    -- PR-ADS-156-F2 §3: the account is part of the natural key, so the conflict
+    -- target names it too. A target that does not match a unique index is a
+    -- runtime error, which is exactly how this fixture proves the index, the
+    -- writer and the audit still agree.
+    ON CONFLICT (source_date, COALESCE(customer_id, ''),
+                 COALESCE(campaign_name, ''), COALESCE(campaign_id, ''),
                  COALESCE(ad_group, ''), COALESCE(keyword, ''),
                  COALESCE(match_type, ''), search_term)
     DO UPDATE SET clicks = EXCLUDED.clicks, updated_at = NOW()

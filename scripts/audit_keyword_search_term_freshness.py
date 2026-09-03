@@ -61,7 +61,12 @@ Exit codes
 ----------
     0  current canonical freshness AND persistence are proven
     1  at least one violation
-    2  the database could not be read (nothing was measured, so nothing passes)
+    2  nothing could be measured — the database could not be read, or the
+       account calendar could not be resolved (PR-ADS-156-F2 §5). Freshness is a
+       comparison against the ACCOUNT's today, and this command will not
+       substitute the UTC date for it: around midnight in British Summer Time
+       those are different days, and an audit answering on the wrong calendar is
+       worse than one that refuses to answer, because a refusal is visible.
 
 Unproven ALL-TIME history is reported separately and does not block a zero exit:
 "we have not proven every historical date" is a true and useful statement about
@@ -101,6 +106,11 @@ V_UNPROVEN_CURRENCY = "unproven_currency_lineage"
 V_DUPLICATE_NATURAL_KEY = "duplicate_natural_key"
 V_LEGACY_SOURCE_ACTIVE = "legacy_source_active"
 V_FRESHNESS_KEY_MISMATCH = "freshness_key_mismatch"
+#: PR-ADS-156-F2 §5. Freshness is a comparison against the ACCOUNT's today. When
+#: that date cannot be resolved there is no correct default: any substitute is a
+#: date some interval will be measured against, and a wrong comparison produces
+#: a confident wrong answer rather than a visible failure.
+V_ACCOUNT_CALENDAR_UNRESOLVED = "account_calendar_unresolved"
 
 #: Reported, never counted as a violation. An unproven historical range is a
 #: disclosure about coverage; treating it as a failure would make the command
@@ -301,10 +311,17 @@ _SEARCH_TERM_MEASURES = """
 # The natural key is the unique index from db/schema.py, spelled the same way —
 # COALESCE included, because two NULLs are not equal in SQL and a key that
 # ignores that would report zero duplicates over rows the index treats as one.
+#
+# PR-ADS-156-F2 §3: `customer_id` included, matching the rebuilt
+# `idx_search_terms_unique_fact` and the writer's ON CONFLICT target exactly. An
+# audit grouping on a NARROWER key than the index would report two accounts'
+# distinct observations as a duplicate — a violation an operator cannot fix,
+# because the rows are correct and only the check is wrong.
 _SEARCH_TERM_DUPLICATES = """
     SELECT COUNT(*)::int FROM (
         SELECT 1 FROM search_terms WHERE {scope}
-        GROUP BY source_date, COALESCE(campaign_name, ''),
+        GROUP BY source_date, COALESCE(customer_id, ''),
+                 COALESCE(campaign_name, ''),
                  COALESCE(campaign_id, ''), COALESCE(ad_group, ''),
                  COALESCE(keyword, ''), COALESCE(match_type, ''), search_term
         HAVING COUNT(*) > 1
@@ -598,6 +615,49 @@ def _assess(name: str, table: str, source: str, dataset: str,
     }
 
 
+def _base_report(generated_at: str, timezone_name: str | None,
+                 customer_id: str | None) -> dict:
+    return {
+        "generated_at": generated_at,
+        "account_timezone": timezone_name,
+        "configured_customer_id": customer_id,
+        "read_only": True,
+        "external_writes_performed": False,
+    }
+
+
+def _account_calendar(now: datetime | None) -> tuple[date | None, str | None, str | None]:
+    """The account's today and timezone, or ``(None, None, reason)``.
+
+    PR-ADS-156-F2 §5. Resolved through the SAME shared helper the canonical
+    services use, so the audit and the syncs cannot disagree about which day it
+    is — an audit that judges freshness on a different calendar from the one the
+    data was requested on measures a boundary that does not exist.
+
+    Returns a reason instead of raising, and never a substitute date. There is
+    no correct default here: any date this function invents is a date some
+    interval will be compared against, and a wrong comparison produces a
+    confident wrong answer.
+    """
+    from analysis.account_time import ACCOUNT_TZ, account_today  # noqa: PLC0415
+
+    try:
+        from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+        ZoneInfo(ACCOUNT_TZ)   # the tz database must actually be present
+    except Exception as exc:  # noqa: BLE001
+        return None, None, f"timezone {ACCOUNT_TZ!r} unavailable: {exc}"
+
+    try:
+        today = account_today(now)
+    except Exception as exc:  # noqa: BLE001
+        return None, ACCOUNT_TZ, f"account date unresolved: {exc}"
+
+    if not isinstance(today, date):
+        return None, ACCOUNT_TZ, f"account date resolved to {today!r}, not a date"
+    return today, ACCOUNT_TZ, None
+
+
 def _legacy_source_violations() -> list[dict]:
     """§3 — production code still reading a retired evidence source.
 
@@ -616,17 +676,10 @@ def run_audit(*, stale_after_days: int = DEFAULT_STALE_AFTER_DAYS,
               now: datetime | None = None) -> dict:
     """Inspect both canonical evidence datasets. Read-only."""
     from db.connection import get_conn  # noqa: PLC0415
-    from services import canonical_contract  # noqa: PLC0415
     from services.dataset_keys import is_registered_pair  # noqa: PLC0415
 
     generated_at = datetime.now(tz=timezone.utc).isoformat()
-    timezone_name, customer_id = None, None
-    try:
-        resolved = canonical_contract.resolve_canonical_window("current_quarter", now=now)
-        timezone_name = resolved.get("timezone")
-        today = date.fromisoformat(str(resolved.get("end_date"))[:10])
-    except Exception:  # noqa: BLE001
-        today = (now or datetime.now(tz=timezone.utc)).date()
+    customer_id = None
     try:
         import os  # noqa: PLC0415
 
@@ -634,18 +687,37 @@ def run_audit(*, stale_after_days: int = DEFAULT_STALE_AFTER_DAYS,
     except Exception:  # noqa: BLE001
         pass
 
+    # PR-ADS-156-F2 §5 — the account calendar, or nothing.
+    #
+    # This used to catch any resolution error and use the UTC date instead. The
+    # sync service was taught to fail closed rather than do that in F1, and the
+    # reason applies with equal force here: between 23:00 and 00:00 UTC in
+    # British Summer Time the account day and the UTC day differ, so a silent
+    # substitution moves the staleness boundary by a full day. An audit that
+    # answers on the wrong calendar is worse than one that refuses to answer,
+    # because a refusal is visible and a wrong date is not.
+    today, timezone_name, calendar_error = _account_calendar(now)
+    if today is None:
+        return {
+            **_base_report(generated_at, timezone_name, customer_id),
+            "ok": False, "database_available": False, "datasets": [],
+            "violations": [{"code": V_ACCOUNT_CALENDAR_UNRESOLVED, "dataset": None,
+                            "detail": f"the effective account calendar could not "
+                                      f"be resolved ({calendar_error}) — freshness "
+                                      "is a comparison against the account's "
+                                      "today, and this command will not "
+                                      "substitute the UTC date for it"}],
+            "violation_codes": [V_ACCOUNT_CALENDAR_UNRESOLVED],
+            "disclosures": [], "legacy": {},
+            "legacy_source_findings": _legacy_source_violations(),
+        }
+
     # The static scan needs no database, so it runs regardless — an unreadable
     # database is not a reason to stop reporting a legacy read that is right
     # there in the source.
     legacy_violations = _legacy_source_violations()
 
-    base = {
-        "generated_at": generated_at,
-        "account_timezone": timezone_name,
-        "configured_customer_id": customer_id,
-        "read_only": True,
-        "external_writes_performed": False,
-    }
+    base = _base_report(generated_at, timezone_name, customer_id)
 
     def _unavailable(detail: str) -> dict:
         violations = [{"code": V_TABLE_UNAVAILABLE, "dataset": None,

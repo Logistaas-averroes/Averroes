@@ -43,7 +43,44 @@ _ROOT = Path(__file__).resolve().parents[1]
 #: Directories whose contents are PRODUCTION paths — the code that runs to serve
 #: a page or complete a scheduled run. `scripts/` is deliberately excluded: a
 #: one-off migration or an audit command reading legacy rows is the point of it.
-PRODUCTION_DIRS = ("scheduler", "services")
+#:
+#: PR-ADS-156-F2 §4 widened this from ("scheduler", "services"). `analysis/` and
+#: `api/` shape what a user sees just as directly — a legacy read there reaches
+#: the page by a different route, not a less real one. `db/` is included because
+#: that is where a legacy REPOSITORY HELPER would be introduced, and a helper is
+#: how an indirect read enters a service that never mentions the legacy table.
+PRODUCTION_DIRS = ("scheduler", "services", "analysis", "api", "db")
+
+#: Retired providers and legacy evidence helpers, by the names a caller would
+#: use. Detected as imports OR as calls, because a service that imports a
+#: repository module and calls `repo.fetch_legacy_keywords(...)` never contains
+#: the string "FROM keywords" — the literal-SQL scan alone would clear it.
+RETIRED_PROVIDER_NAMES: frozenset[str] = frozenset({
+    "windsor_pull", "windsor_mcp", "backfill_windsor",
+    "import_windsor_mcp_search_terms",
+})
+
+#: Legacy keyword/search-term repository helpers. A production evidence path
+#: calling one of these is reading the legacy snapshot at one remove.
+LEGACY_REPOSITORY_HELPERS: frozenset[str] = frozenset({
+    "fetch_keyword_theme_snapshot",
+    "fetch_legacy_keyword_snapshot",
+    "write_keywords",
+})
+
+#: The retired local snapshots. Consuming one as CURRENT evidence is the defect
+#: PR-ADS-156-F2 §1 closed inside waste detection; this stops it reappearing
+#: anywhere else.
+LEGACY_SNAPSHOT_FILES: frozenset[str] = frozenset({
+    "ads_search_terms.json", "ads_keywords.json", "windsor_search_terms.json",
+})
+
+#: Keyword-population fallbacks inside search-term evidence. Substituting one
+#: population for another turns "no wasteful searches" into a keyword report
+#: wearing a search-term label.
+KEYWORD_FALLBACK_MARKERS: frozenset[str] = frozenset({
+    "keywords_fallback", "keyword_fallback",
+})
 
 #: Modules allowed to touch retired providers or the legacy snapshot, and why.
 #: Deliberately narrow: audit, reconciliation, migration and historical
@@ -75,12 +112,26 @@ LEGACY_ACCESS_ALLOWLIST: dict[str, str] = {
     "scheduler/monthly.py": "legacy snapshot writer — four live non-evidence "
                             "consumers, documented in docs/38",
     "scripts/verify_search_terms_pipeline.py": "diagnostic — reports legacy state",
+    # PR-ADS-156-F2 §4 widened the scan to analysis/, api/ and db/, and to
+    # indirect reads by NAME. These two are the consequences, and both are the
+    # documented non-evidence consumers rather than new holes.
+    "analysis/legacy_source_guard.py": "the guard itself — it must name the "
+                                       "retired providers, legacy helpers and "
+                                       "snapshots it detects",
+    "services/dashboard_campaigns_service.py":
+        "legacy keyword-theme snapshot behind the Campaigns page — one of the "
+        "four inspected non-evidence consumers (PR-ADS-156 §5), historical and "
+        "never a Keyword Evidence input",
 }
 
 #: Machine-readable reasons, so a caller can group findings without parsing prose.
 REASON_RETIRED_PROVIDER_IMPORT = "retired_provider_import"
 REASON_LEGACY_SNAPSHOT_ACCESS = "legacy_snapshot_access"
 REASON_LEGACY_SNAPSHOT_WRITE = "legacy_snapshot_write"
+#: PR-ADS-156-F2 §4 — the indirect routes.
+REASON_LEGACY_REPOSITORY_CALL = "legacy_repository_call"
+REASON_LEGACY_SNAPSHOT_FILE = "legacy_snapshot_file_consumed"
+REASON_KEYWORD_FALLBACK = "keyword_fallback_in_search_term_evidence"
 
 
 def code_only(path: Path | str) -> str:
@@ -112,14 +163,57 @@ def code_only(path: Path | str) -> str:
     return code
 
 
+def _imported_and_called(tree: ast.AST) -> tuple[set[str], set[str]]:
+    """Every name this module imports, and every name it calls.
+
+    PR-ADS-156-F2 §4 — the literal-SQL scan alone clears a service that imports
+    a repository module and calls ``repo.fetch_legacy_keywords(...)``: the
+    string "FROM keywords" is in the repository, not in the service. Names are
+    what actually cross a module boundary, so names are what this looks at.
+    """
+    imported: set[str] = set()
+    called: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported.update(alias.name.split("."))
+                if alias.asname:
+                    imported.add(alias.asname)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imported.update(node.module.split("."))
+            for alias in node.names:
+                imported.add(alias.name)
+                if alias.asname:
+                    imported.add(alias.asname)
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                called.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                called.add(func.attr)
+    return imported, called
+
+
 def scan_legacy_sources(root: Path | str | None = None,
                         directories: tuple[str, ...] = PRODUCTION_DIRS) -> list[dict]:
-    """Every unauthorised legacy read in the production directories.
+    """Every unauthorised legacy evidence read in the production directories.
 
     Returns ``[{"path", "reason", "detail"}, …]``, sorted by path, and an empty
     list when nothing is found — which is a real all-clear here, because unlike
     a database read this scan cannot be refused: the files are either on disk
     and parsed, or the repository is not there at all.
+
+    Six shapes, all in CODE (comments and docstrings are stripped first):
+
+      * a retired provider imported OR called — by name, so an indirect call
+        through an imported module is caught as well as a literal SQL string;
+      * the legacy ``keywords`` snapshot read or written in SQL;
+      * ``write_keywords(`` outside the documented allowlist;
+      * a legacy keyword/search-term REPOSITORY HELPER imported or called —
+        the indirect route that a literal-SQL scan cannot see;
+      * a retired local JSON snapshot consumed as current evidence;
+      * a keyword-population fallback inside search-term evidence.
     """
     base = Path(root) if root else _ROOT
     findings: list[dict] = []
@@ -133,24 +227,56 @@ def scan_legacy_sources(root: Path | str | None = None,
                 continue
             code = code_only(path)
             lowered = code.lower()
-            if "windsor_pull" in lowered or "import windsor" in lowered:
-                findings.append({
-                    "path": rel, "reason": REASON_RETIRED_PROVIDER_IMPORT,
-                    "detail": f"{rel} imports the retired Windsor provider"})
+            try:
+                imported, called = _imported_and_called(ast.parse(code))
+            except SyntaxError:
+                imported, called = set(), set()
+            names = imported | called
+
+            def add(reason, detail):
+                findings.append({"path": rel, "reason": reason, "detail": detail})
+
+            hit = sorted(names & RETIRED_PROVIDER_NAMES)
+            if hit or "import windsor" in lowered:
+                add(REASON_RETIRED_PROVIDER_IMPORT,
+                    f"{rel} imports or calls the retired Windsor provider"
+                    + (f" ({', '.join(hit)})" if hit else ""))
             if "from keywords" in lowered or "into keywords" in lowered:
-                findings.append({
-                    "path": rel, "reason": REASON_LEGACY_SNAPSHOT_ACCESS,
-                    "detail": f"{rel} reads or writes the legacy `keywords` snapshot"})
+                add(REASON_LEGACY_SNAPSHOT_ACCESS,
+                    f"{rel} reads or writes the legacy `keywords` snapshot")
             if "write_keywords(" in code:
-                findings.append({
-                    "path": rel, "reason": REASON_LEGACY_SNAPSHOT_WRITE,
-                    "detail": f"{rel} writes the legacy `keywords` snapshot"})
+                add(REASON_LEGACY_SNAPSHOT_WRITE,
+                    f"{rel} writes the legacy `keywords` snapshot")
+
+            helpers = sorted(names & LEGACY_REPOSITORY_HELPERS)
+            if helpers:
+                add(REASON_LEGACY_REPOSITORY_CALL,
+                    f"{rel} imports or calls a legacy evidence repository helper "
+                    f"({', '.join(helpers)}) — an indirect read of the legacy "
+                    "snapshot")
+
+            snapshots = sorted(f for f in LEGACY_SNAPSHOT_FILES if f in code)
+            if snapshots:
+                add(REASON_LEGACY_SNAPSHOT_FILE,
+                    f"{rel} consumes a retired local snapshot "
+                    f"({', '.join(snapshots)}) — a file on disk is not current "
+                    "canonical evidence")
+
+            fallbacks = sorted(m for m in KEYWORD_FALLBACK_MARKERS if m in lowered)
+            if fallbacks:
+                add(REASON_KEYWORD_FALLBACK,
+                    f"{rel} substitutes a keyword population for search terms "
+                    f"({', '.join(fallbacks)}) — a verified-empty search-term "
+                    "interval is a measurement, not a gap to fill")
     return sorted(findings, key=lambda f: (f["path"], f["reason"]))
 
 
 __all__ = [
     "PRODUCTION_DIRS", "LEGACY_ACCESS_ALLOWLIST",
+    "RETIRED_PROVIDER_NAMES", "LEGACY_REPOSITORY_HELPERS",
+    "LEGACY_SNAPSHOT_FILES", "KEYWORD_FALLBACK_MARKERS",
     "REASON_RETIRED_PROVIDER_IMPORT", "REASON_LEGACY_SNAPSHOT_ACCESS",
-    "REASON_LEGACY_SNAPSHOT_WRITE",
+    "REASON_LEGACY_SNAPSHOT_WRITE", "REASON_LEGACY_REPOSITORY_CALL",
+    "REASON_LEGACY_SNAPSHOT_FILE", "REASON_KEYWORD_FALLBACK",
     "code_only", "scan_legacy_sources",
 ]

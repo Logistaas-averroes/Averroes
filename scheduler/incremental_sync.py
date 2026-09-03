@@ -1155,6 +1155,14 @@ def _evidence_dataset_result(label: str, stats: dict, *, requested_from,
         # A successful query over an interval with no eligible rows. Success,
         # and NOT the same as a failure that also returned nothing.
         "verified_empty": bool(stats.get("verified_empty")),
+        # PR-ADS-156-F2 §2 — whether the batch row itself was finalized, and
+        # what may nevertheless be in the table if it was not. `rows_written`
+        # above is what this run CERTIFIES; these two say what happened when the
+        # rows landed but the certificate did not, which is the one failure the
+        # data alone can never reveal.
+        "batch_finalized": bool(stats.get("batch_finalized")),
+        "rows_possibly_written": stats.get("rows_possibly_written",
+                                           stats.get("written", 0)),
         "db_unavailable": bool(stats.get("db_unavailable")),
         "error": (stats.get("error") or None) if not ok else None,
         # This dataset's own verdict, so a reader never has to derive

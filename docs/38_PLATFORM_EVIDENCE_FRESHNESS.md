@@ -348,3 +348,145 @@ search-term intervals resolve through one function or not at all.
 | `partial_persistence` | prepared ≠ written, or rows rejected | read `rejected_count` and the batch error |
 | `legacy_source_active` | a production path reads a retired source | remove the read, or justify it in the allowlist |
 | `legacy_rows_present` (disclosure) | historical rows outside the certified interval | none — informational |
+
+---
+
+# PR-ADS-156-F2 — the remaining stale-analysis and durability gaps
+
+F1 closed five false-green paths. Five more remained, each a place where
+something was assumed rather than checked.
+
+## 1. Waste detection was reading the snapshot F1 preserved
+
+F1 stopped the weekly and monthly schedulers overwriting
+`data/ads_search_terms.json` when the canonical sync failed, so an outage could
+not masquerade as a quiet week. `run_waste_detection()` then **reloaded that
+preserved file** and published findings from it stamped with the current run's
+timestamp. The snapshot was protected from being destroyed and immediately
+reused as though it were current — the same falsehood from the other side.
+
+The canonical input is now **passed in**, with an explicit availability flag:
+
+| Input | Behaviour |
+|---|---|
+| `search_term_evidence_available=False` (or no rows at all) | no analysis; the report is marked unavailable and carries no items |
+| rows supplied, available | exactly those rows are analysed — the ones the sync persisted |
+| `[]` supplied, available | a verified-empty population: zero findings, no substitution |
+
+The **keyword fallback is gone with the snapshot read**. An empty search-term
+population used to silently become a keyword-level analysis, which answers a
+different question under the same heading: a verified-empty interval is a
+genuine measurement *of search terms*, not a gap to be filled with a different
+population. `analysis/rule_advisor.py` now reports the unavailable state instead
+of the removed "20–40% higher" fallback warning.
+
+The unavailable report is **written**, not skipped. Leaving the previous
+`waste_report.json` in place would be worse than either alternative: its own
+`generated_at` is what every reader uses to judge currency, so a preserved
+report reads as this week's findings. An explicitly empty, explicitly
+unavailable report cannot be mistaken for either.
+
+And a `waste_terms` sync batch is finished **`failed`**, never `success`, when
+the evidence never arrived — a `success` advances a freshness watermark, and
+doing that from evidence that does not exist reports the dataset current over an
+interval nobody measured.
+
+## 2. An unfinalized batch is not a covered interval
+
+`finish_sync_batch` returns a Boolean and both canonical services ignored it. So
+a run could fetch (or verify empty), have its final batch update fail, and still
+return `ok=True` — reporting the interval covered while coverage and
+verified-empty proof were never durably recorded.
+
+This is the subtlest false green of all, because the DATA would be fine and only
+the proof of it missing, so nothing else in the system would ever notice.
+
+Every relevant result is now captured. On a finalization failure both services
+return `ok=false`, `verified_empty=false` and a `batch_finalization_failed`
+reason, and `evidence_status` cannot read ready. For a non-empty pull whose rows
+were written, both facts travel separately:
+
+| Field | Meaning |
+|---|---|
+| `written` | what this run **certifies** — `0` |
+| `rows_possibly_written` | what may nevertheless be in the table |
+| `batch_finalized` | whether the certificate persisted |
+
+Reporting only the first would be a false green; reporting only the second would
+send someone hunting for data that is already there.
+
+## 3. The account belongs in the natural key
+
+F1 declared `customer_id` part of canonical search-term identity and made the
+service reject rows without it — but the UNIQUE index did not contain it. The
+contract said two accounts are distinguishable while the index said they are the
+same row: two otherwise identical observations from different Google Ads
+customers would silently upsert over each other. That is worse than having no
+customer column, because the contract invites people to rely on it.
+
+`idx_search_terms_unique_fact` is rebuilt, **keeping its name** (the repository
+and the evidence service document the dedup key by that name), to:
+
+```
+source_date · customer_id · campaign_name · campaign_id · ad_group ·
+keyword · match_type · search_term      (COALESCE on every nullable column)
+```
+
+The writer's `ON CONFLICT` target and the audit's duplicate grouping use exactly
+the same key — a target that does not match a unique index is a runtime error,
+one that matches the *wrong* index silently merges accounts, and an audit
+grouping on a narrower key reports correct rows as duplicates. The null-twin
+supersession delete is scoped by account too, so an id-bearing row from one
+customer cannot delete another customer's row.
+
+The migration is guarded on the index **definition**, so it rebuilds once and a
+redeploy is a no-op. Adding a column to a unique key can only make it more
+permissive, so the rebuild cannot fail on existing rows, and DDL is transactional
+in PostgreSQL, so there is no window without a unique key. Historical rows keep
+`customer_id IS NULL` — no account identity is invented for them.
+
+## 4. The legacy guard now sees indirect reads
+
+The shared guard read literal SQL in two directories. A service that imports a
+repository module and calls `repo.fetch_keyword_theme_snapshot(...)` contains no
+legacy SQL at all — the SQL is in the repository — so it passed cleanly.
+
+Names are what cross a module boundary, so names are what the guard reads now.
+It detects, by import **or** call:
+
+* retired providers (`windsor_pull`, `windsor_mcp`, …);
+* legacy keyword/search-term repository helpers;
+* consumption of a retired local JSON snapshot as current evidence;
+* a keyword-population fallback inside search-term evidence;
+
+plus the original literal-SQL and `write_keywords(` checks. `PRODUCTION_DIRS`
+widened from `scheduler`/`services` to include `analysis`, `api` and `db` — a
+legacy read in those reaches the page by a different route, not a less real one.
+
+Two allowlist entries were added and justified: the guard module itself (it must
+name the markers it detects) and `services/dashboard_campaigns_service.py` (the
+keyword-theme snapshot behind the Campaigns page — one of the four inspected
+non-evidence consumers). The CLI audit and the tests still execute the same
+function.
+
+## 5. The audit answers on the account's calendar or not at all
+
+F1 removed the silent UTC fallback from the sync service. The audit still had
+one: it caught canonical-window resolution errors and used the UTC date.
+
+Around midnight in British Summer Time the account day and the UTC day differ,
+so substituting one for the other moves the staleness boundary by a full day —
+silently. The audit now resolves today through the same
+`analysis.account_time.account_today` the services use. When the effective
+account calendar cannot be resolved it emits `account_calendar_unresolved`,
+reports the audit unavailable, and exits `2`. An audit that refuses to answer is
+visible; a wrong date is not.
+
+## Failure and recovery (F2 additions)
+
+| Symptom | Meaning | Action |
+|---|---|---|
+| `batch_finalization_failed` | rows may be stored; the certificate is not | re-run the sync — the upsert is idempotent |
+| `account_calendar_unresolved` | the account's today could not be resolved | check `tzdata` in the image; no freshness verdict is produced until it is |
+| `legacy_source_active` (indirect) | a production path calls a legacy helper | remove the call, or justify it in the allowlist |
+| `waste_report.json` with `search_term_evidence_available: false` | the run had no search-term evidence | not a finding of zero waste; fix the sync and re-run |

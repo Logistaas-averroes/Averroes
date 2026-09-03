@@ -246,9 +246,21 @@ def run_weekly_report():
             print("  Search-term snapshot NOT refreshed (canonical sync failed)")
 
         # Step 3: Waste detection
+        #
+        # PR-ADS-156-F2 §1: the canonical rows are PASSED IN. This step used to
+        # call `run_waste_detection()` with no arguments, and that function
+        # reloaded data/ads_search_terms.json itself — so on a failed sync it
+        # analysed the snapshot F1 had deliberately preserved and published the
+        # findings under this run's timestamp. Protecting the file from being
+        # destroyed and then reusing it as current evidence is the same untruth
+        # from the other side.
         print("Step 3/6: Running waste detection...")
         from analysis.core import run_waste_detection
-        waste_output = run_waste_detection()
+        waste_output = run_waste_detection(
+            search_terms,
+            search_term_evidence_available=search_terms_available)
+        if not search_terms_available:
+            print("  → search-term waste analysis unavailable (canonical sync failed)")
 
         # Write waste terms to database.
         # PR-ADS-153F: wrapped in a real sync batch. `waste_terms` has always had
@@ -262,12 +274,24 @@ def run_weekly_report():
             run_id=run_id,
         )
         try:
-            if run_id is not None and waste_output:
-                db_writers.write_waste_terms(run_id, waste_output.get("confirmed_waste_items", []))
-            if waste_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=waste_batch_id, status="success",
-                    row_count=len((waste_output or {}).get("confirmed_waste_items", [])))
+            if not search_terms_available:
+                # PR-ADS-156-F2 §1: no successful current batch from evidence
+                # that does not exist. A `success` here would advance the
+                # waste_terms watermark over an interval nobody measured, and
+                # the freshness page would show the dataset as current.
+                if waste_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=waste_batch_id, status="failed",
+                        error_message="canonical search-term evidence unavailable "
+                                      "— no waste analysis was performed for this "
+                                      "interval")
+            else:
+                if run_id is not None and waste_output:
+                    db_writers.write_waste_terms(run_id, waste_output.get("confirmed_waste_items", []))
+                if waste_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=waste_batch_id, status="success",
+                        row_count=len((waste_output or {}).get("confirmed_waste_items", [])))
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write after Step 3 failed: %s", db_exc)
             if waste_batch_id:

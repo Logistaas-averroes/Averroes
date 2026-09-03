@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 from services.dataset_keys import (  # noqa: E402
     KEYWORD_FACTS_DATASET, KEYWORD_FACTS_SOURCE,
 )
+#: PR-ADS-156-F2 §2 — the same reason code the search-term service uses, so an
+#: operator meets one name for one failure whichever dataset raised it.
+BATCH_FINALIZATION_FAILED = "batch_finalization_failed"
+
 BOOTSTRAP_JOB_TYPE = "keyword_bootstrap"
 DEFAULT_INCREMENTAL_DAYS = 30   # today + previous 29 account-local dates
 
@@ -202,7 +206,7 @@ def sync_keyword_daily_facts(date_from: date, date_to: date, sync_type: str, *,
         else:
             error = "keyword-fact sync did not complete cleanly"
 
-    w.finish_sync_batch(
+    finalized = w.finish_sync_batch(
         batch_id=batch_id,
         status="success" if ok else "failed",
         row_count=stats.get("written", 0),
@@ -221,11 +225,41 @@ def sync_keyword_daily_facts(date_from: date, date_to: date, sync_type: str, *,
         prepared_count=stats.get("prepared", 0),
         rejected_count=skipped)
 
+    # PR-ADS-156-F2 §2 — the batch row is where coverage and verified-empty
+    # proof LIVE. If the final update did not land, the rows may well be stored
+    # and nothing durable says so; every reader downstream (freshness, the
+    # audit, `evidence_status`) works from the batch, not from this return
+    # value. Reporting success here is the subtlest false green of all, because
+    # the data would be fine and only the proof of it missing.
+    if ok and not finalized:
+        written_rows = stats.get("written", 0)
+        logger.error(
+            "keyword sync (%s → %s): wrote %d row(s) but the batch could not be "
+            "finalized — coverage was NOT durably recorded",
+            date_from, date_to, written_rows)
+        return {"ok": False, "batch_id": batch_id or None,
+                "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+                "currency_incomplete_rows": 0,
+                "error": f"{BATCH_FINALIZATION_FAILED}: rows may be stored, but "
+                         "the sync batch could not be finalized, so this "
+                         "interval is not certified",
+                **stats,
+                # This run certifies nothing; `rows_possibly_written` says what
+                # may nevertheless be in the table.
+                "written": 0, "rows_possibly_written": written_rows,
+                "batch_finalized": False,
+                "verified_empty": False,
+                "external_writes_performed": False,
+                "source": KEYWORD_FACTS_SOURCE,
+                "dataset": KEYWORD_FACTS_DATASET}
+
     return {"ok": ok, "batch_id": batch_id or None,
             "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
             "currency_incomplete_rows": sum(1 for r in (rows or []) if not r.get("currency_code")),
             "error": error,
             **stats,
+            "batch_finalized": bool(finalized),
+            "rows_possibly_written": stats.get("written", 0),
             # PR-ADS-156 §3: stated, not inferred from `written == 0`. A pull
             # that failed also wrote nothing, and the two must never read the
             # same. This is true only when the query SUCCEEDED and the account

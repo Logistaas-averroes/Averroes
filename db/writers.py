@@ -813,8 +813,15 @@ def write_search_terms(
             cost_micros, currency_code, source_system,
             sync_batch_id
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        -- PR-ADS-156-F2 §3: the conflict target is the natural key, and the
+        -- natural key now carries the ACCOUNT. It must match
+        -- `idx_search_terms_unique_fact` expression for expression — a target
+        -- that does not correspond to a unique index is a runtime error, and
+        -- one that corresponds to the WRONG index silently merges two accounts'
+        -- observations into one row.
         ON CONFLICT (
             source_date,
+            COALESCE(customer_id,   ''),
             COALESCE(campaign_name, ''),
             COALESCE(campaign_id,   ''),
             COALESCE(ad_group,      ''),
@@ -837,10 +844,6 @@ def write_search_terms(
                                      search_terms.source_system),
             campaign_id   = COALESCE(EXCLUDED.campaign_id,
                                      search_terms.campaign_id),
-            -- COALESCE, not overwrite: a re-sync that somehow lacks the account
-            -- identity must not erase one that was already proven.
-            customer_id   = COALESCE(EXCLUDED.customer_id,
-                                     search_terms.customer_id),
             updated_at    = NOW()
     """
 
@@ -852,8 +855,14 @@ def write_search_terms(
     # id-bearing row, the ambiguous NULL-campaign_id twin is superseded and
     # removed (the precise id-bearing identity wins). Two DISTINCT ids (10, 20)
     # sharing a display name are untouched — both are real, distinct facts.
+    #
+    # PR-ADS-156-F2 §3: scoped by ACCOUNT as well. The account is now part of
+    # the natural key, so an id-bearing row from one customer must not supersede
+    # an ambiguous row belonging to a different one — that would be deleting
+    # another account's observation on the strength of a shared campaign name.
     _null_twin_keys = [
-        (r[1], r[2], r[4], r[5], r[6], r[7])   # (date, name, ad_group, kw, mt, term)
+        # (date, name, ad_group, kw, mt, term, customer_id)
+        (r[1], r[2], r[4], r[5], r[6], r[7], r[8])
         for r in rows if r[3] is not None and str(r[3]).strip()
     ]
     _null_twin_delete = """
@@ -865,6 +874,7 @@ def write_search_terms(
           AND COALESCE(keyword,       '') = COALESCE(%s, '')
           AND COALESCE(match_type,    '') = COALESCE(%s, '')
           AND search_term = %s
+          AND COALESCE(customer_id,   '') = COALESCE(%s, '')
     """
 
     try:

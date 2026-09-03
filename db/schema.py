@@ -1738,6 +1738,59 @@ ALTER TABLE search_terms ADD COLUMN IF NOT EXISTS customer_id TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_search_terms_customer_date
   ON search_terms (customer_id, source_date);
+
+-- PR-ADS-156-F2 §3: put the account into the search-term natural key.
+--
+-- F1 declared `customer_id` part of canonical search-term identity and made the
+-- service reject rows without it — but the UNIQUE index did not contain it. So
+-- the contract said two accounts are distinguishable while the index said they
+-- are the same row: two otherwise identical observations from different Google
+-- Ads customers would silently upsert over each other, and the survivor would
+-- carry whichever account wrote last. That is worse than having no customer
+-- column, because the contract invites people to rely on it.
+--
+-- The index KEEPS ITS NAME. Several places document
+-- `idx_search_terms_unique_fact` as the dedup key by that name — the search-term
+-- repository, the evidence service's provenance block — and renaming it would
+-- leave those labels pointing at an index that no longer exists. Only the
+-- definition changes.
+--
+-- Guarded on the definition rather than on existence, so this rebuilds exactly
+-- once and a redeploy is a no-op. DDL is transactional in PostgreSQL, so the
+-- DROP and CREATE are atomic: there is no window in which the table sits
+-- without a unique key.
+--
+-- Adding a column to a unique key can only make it MORE permissive, so any data
+-- that satisfied the old index satisfies this one — the rebuild cannot fail on
+-- existing rows, and no row is moved, merged or deleted.
+--
+-- COALESCE on every nullable column, matching the old index exactly: two NULLs
+-- are not equal in SQL, so a key without it would treat unlabelled rows as
+-- distinct and let genuine duplicates through. Historical rows keep
+-- `customer_id IS NULL` and therefore collapse to '' here — they remain exactly
+-- as unique as they were before, and no account identity is invented for them.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+         WHERE schemaname = current_schema()
+           AND indexname = 'idx_search_terms_unique_fact'
+           AND indexdef LIKE '%customer_id%') THEN
+    DROP INDEX IF EXISTS idx_search_terms_unique_fact;
+    CREATE UNIQUE INDEX idx_search_terms_unique_fact
+      ON search_terms (
+        source_date,
+        COALESCE(customer_id,    ''),
+        COALESCE(campaign_name,  ''),
+        COALESCE(campaign_id,    ''),
+        COALESCE(ad_group,       ''),
+        COALESCE(keyword,        ''),
+        COALESCE(match_type,     ''),
+        search_term
+      );
+    RAISE NOTICE 'idx_search_terms_unique_fact rebuilt with customer_id';
+  END IF;
+END $$;
 """
 
 
