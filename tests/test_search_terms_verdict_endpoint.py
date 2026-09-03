@@ -177,7 +177,11 @@ class TestBuildSearchTermsVerdictDB:
         # Query results in order:
         # rows_7d, rows_14d, rows_30d, rows_60d, rows_requested(1d),
         # MAX(source_date), blank rows, spend rows, click rows,
-        # sync_state row (None), sync_batches row (None), runs row (None)
+        # CANONICAL sync_state, CANONICAL sync_batches, LEGACY sync_state, runs
+        #
+        # PR-ADS-156 §8 added the legacy row: historical Windsor state is still
+        # reported, under a key that says legacy, so it can be seen without
+        # deciding freshness.
         query_results = [
             (150,),   # rows_7d
             (400,),   # rows_14d
@@ -188,8 +192,9 @@ class TestBuildSearchTermsVerdictDB:
             (0,),     # blank_search_term_rows
             (100,),   # spend_rows
             (80,),    # click_rows
-            None,     # sync_state (no row)
-            None,     # sync_batches (no row)
+            None,     # canonical sync_state (no row)
+            None,     # canonical sync_batches (no row)
+            None,     # legacy sync_state (no row)
             None,     # runs (no row)
         ]
         cursor = self._make_cursor(query_results)
@@ -204,12 +209,22 @@ class TestBuildSearchTermsVerdictDB:
         # The api total_rows_in_window reflects the 1-day count
         assert result["api"]["total_rows_in_window"] == 25
 
-    def test_windsor_mcp_sync_visible_in_verdict(self):
-        """When windsor_mcp has the latest sync, the verdict endpoint surfaces it."""
-        # Query results in order for days=60 (standard):
-        # rows_7d, rows_14d, rows_30d, rows_60d (no rows_requested since days=60),
-        # MAX(source_date), blank rows, spend rows, click rows,
-        # sync_state row (windsor_mcp success), sync_batches row (windsor_mcp), runs row
+    def test_legacy_windsor_sync_is_reported_but_never_the_current_source(self):
+        """PR-ADS-156 §8 inverted this case, and the inversion is the fix.
+
+        It used to assert `sync_source == "windsor_mcp"` — that the verdict
+        surfaced the retired provider's row AS the current sync. That was the
+        defect: Windsor has written nothing since PR-ADS-154, so the Search
+        Terms verdict was being computed from a row that could only get older,
+        while the canonical `google_ads_api/search_terms` state sat unread.
+
+        The historical row is not hidden — it is real evidence of how the table
+        was first populated — but it now travels under `legacy_sync_state`,
+        where it cannot be mistaken for present freshness.
+        """
+        # Query order: rows_7d/14d/30d/60d, MAX(source_date), blank, spend,
+        # clicks, CANONICAL sync_state, CANONICAL sync_batches, LEGACY
+        # sync_state, runs.
         query_results = [
             (0,),    # rows_7d
             (0,),    # rows_14d
@@ -219,8 +234,9 @@ class TestBuildSearchTermsVerdictDB:
             (0,),                # blank_search_term_rows
             (50,),               # spend_rows
             (40,),               # click_rows
-            ("windsor_mcp", "success", "2026-05-10 08:00:00"),  # sync_state row
-            ("windsor_mcp", "success", 250, "2026-05-10 08:00:00"),  # sync_batches row
+            ("google_ads_api", "success", "2026-05-10 08:00:00"),      # canonical state
+            ("google_ads_api", "success", 250, "2026-05-10 08:00:00"),  # canonical batch
+            ("windsor_mcp", "success", "2024-01-02 08:00:00"),          # legacy state
             None,                # runs row (no weekly run)
         ]
         cursor = self._make_cursor(query_results)
@@ -230,7 +246,12 @@ class TestBuildSearchTermsVerdictDB:
             from api.server import _build_search_terms_verdict
             result = _build_search_terms_verdict(days=60)
 
-        assert result["sync"]["sync_source"] == "windsor_mcp"
+        # The CURRENT source is canonical.
+        assert result["sync"]["sync_source"] == "google_ads_api"
         assert result["sync"]["sync_state_status"] == "success"
-        assert result["sync"]["latest_batch_source"] == "windsor_mcp"
+        assert result["sync"]["latest_batch_source"] == "google_ads_api"
         assert result["sync"]["latest_batch_row_count"] == 250
+        # The retired provider is visible, and visibly historical.
+        legacy = result["sync"]["legacy_sync_state"]
+        assert legacy["source"] == "windsor_mcp"
+        assert "historical only" in legacy["note"]

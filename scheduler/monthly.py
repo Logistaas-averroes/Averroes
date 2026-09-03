@@ -209,46 +209,24 @@ def run_monthly_report():
             log.error("DB write keywords failed: %s", db_exc)
 
         # Write search term rows to database (non-fatal)
-        # Google Ads API honours the requested window (days_back=30) directly.
+        #
+        # PR-ADS-156 §5: persistence goes through the ONE shared canonical
+        # search-term service — the third inline copy of pull → batch → write →
+        # judge → finish is gone. The 30-day monthly recovery window is
+        # preserved; only the rules are now shared.
         try:
-            st_batch_id = None
-            window_end = datetime.utcnow().date()
-            # days_back=30 means 30 inclusive days (today − 29 through today).
-            window_start = window_end - timedelta(days=29)
-            st_batch_id = db_writers.start_sync_batch(
-                source="google_ads_api",
-                dataset="search_terms",
-                sync_type="monthly",
-                date_from=window_start,
-                date_to=window_end,
-                run_id=run_id,
+            from services.search_term_sync_service import (  # noqa: PLC0415
+                sync_recent_search_terms,
             )
-            st_count = db_writers.write_search_terms(
-                run_id=run_id,
-                search_term_rows=search_terms,
-                sync_batch_id=st_batch_id or None,
-            )
-            if not persistence_succeeded(search_terms, st_count):
-                raise RuntimeError(
-                    f"Monthly search_terms persistence failed or wrote 0 rows "
-                    f"for non-empty fetch ({len(search_terms or [])} rows)"
-                )
-            last_source_date = max_source_date(search_terms, fallback_date=window_end)
-            if st_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=st_batch_id,
-                    status="success",
-                    row_count=st_count,
-                    last_source_date=last_source_date,
-                )
-            log.info("Wrote %d search term rows to database (run_id=%s)", st_count, run_id)
+            st = sync_recent_search_terms("monthly", days=30, run_id=run_id)
+            if st.get("ok"):
+                log.info("Canonical search-term sync (run_id=%s): %s", run_id, {
+                    k: st.get(k) for k in
+                    ("date_from", "date_to", "fetched", "written", "verified_empty")})
+            else:
+                log.error("Canonical search-term sync failed (run_id=%s): %s",
+                          run_id, st.get("error"))
         except Exception as db_exc:  # noqa: BLE001
-            if st_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=st_batch_id,
-                    status="failed",
-                    error_message=str(db_exc)[:1000],
-                )
             log.error("DB write search terms failed: %s", db_exc)
 
     except Exception as e:

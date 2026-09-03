@@ -58,6 +58,8 @@ from services.dataset_keys import (
     DEAL_LEDGER_DATASET, DEAL_LEDGER_SOURCE,
     FX_DAILY_RATES_DATASET, FX_SOURCE,
     GCLID_MATCHES_DATASET, GCLID_SOURCE,
+    KEYWORD_FACTS_DATASET, KEYWORD_FACTS_SOURCE,
+    SEARCH_TERMS_DATASET, SEARCH_TERMS_SOURCE,
     SOURCE_CLASSIFICATION_DATASET, SOURCE_CLASSIFICATION_SOURCE,
 )
 
@@ -167,21 +169,32 @@ RETIRED_DATASETS: dict[str, dict] = {
     "windsor/search_terms": {
         "status": "retired",
         "replaced_by": "google_ads_api/search_terms",
-        "note": ("Windsor.ai is no longer a production source. Search terms "
-                 "come from the Google Ads API connector; that dataset is "
-                 "refreshed by the weekly scheduler, not by this incremental "
-                 "run, so no incremental entry replaces this one."),
+        # PR-ADS-156: this note used to say search terms were refreshed "by the
+        # weekly scheduler, not by this incremental run, so no incremental entry
+        # replaces this one". That was true when it was written and stopped
+        # being true here: the replacement now runs in THIS run, every day,
+        # through the shared canonical service. A registry that describes the
+        # system as it used to be is worse than one with a gap in it, because a
+        # reader has no reason to doubt it.
+        "note": ("Windsor.ai is no longer a production source. Search terms come "
+                 "from the direct Google Ads API through the shared canonical "
+                 "sync service, refreshed on a rolling recovery window by THIS "
+                 "incremental run (as well as by the daily/weekly/monthly "
+                 "schedulers, which call the same service)."),
     },
     "windsor/keywords": {
         "status": "retired",
-        "replaced_by": None,
-        "note": ("Windsor.ai is no longer a production source. NO canonical "
-                 "Google Ads API incremental persistence path exists for "
-                 "keywords today: `keyword_daily_facts` is written by the "
-                 "weekly/monthly schedulers, not by this run. Reported as "
-                 "unsupported rather than quietly kept on Windsor or reported "
-                 "successful. Building an incremental keyword path is out of "
-                 "scope for this hotfix."),
+        "replaced_by": "google_ads_api/keyword_facts",
+        # PR-ADS-156: this claimed "NO canonical Google Ads API incremental
+        # persistence path exists for keywords today". `keyword_sync_service`
+        # existed and was already the single durable writer; what was missing
+        # was a call from this run, which is now here.
+        "note": ("Windsor.ai is no longer a production source. Durable keyword "
+                 "facts come from the direct Google Ads API through "
+                 "`keyword_sync_service`, refreshed on the established 30-day "
+                 "correction window by THIS incremental run. The legacy "
+                 "`keywords` snapshot is a different, non-authoritative dataset "
+                 "and is never Keyword Evidence."),
     },
 }
 
@@ -202,6 +215,8 @@ LABEL_DEAL_LEDGER = f"{DEAL_LEDGER_SOURCE}/{DEAL_LEDGER_DATASET}"
 LABEL_SOURCE_CLASSIFICATION = (
     f"{SOURCE_CLASSIFICATION_SOURCE}/{SOURCE_CLASSIFICATION_DATASET}")
 LABEL_GCLID_MATCHES = f"{GCLID_SOURCE}/{GCLID_MATCHES_DATASET}"
+LABEL_KEYWORD_FACTS = f"{KEYWORD_FACTS_SOURCE}/{KEYWORD_FACTS_DATASET}"
+LABEL_SEARCH_TERMS = f"{SEARCH_TERMS_SOURCE}/{SEARCH_TERMS_DATASET}"
 
 
 #: Every (source, dataset) pair this scheduler stamps on ``sync_batches``.
@@ -224,6 +239,24 @@ ACTIVE_SYNC_PAIRS: tuple[tuple[str, str], ...] = (
     (CANONICAL_SPEND_SOURCE, CANONICAL_SPEND_DATASET),
     (FX_SOURCE, FX_DAILY_RATES_DATASET),
     (CANONICAL_GEO_SOURCE, CANONICAL_GEO_DATASET),
+)
+
+#: Pairs this run SCHEDULES but whose batches are opened by the owning service
+#: rather than by this module.
+#:
+#: PR-ADS-156 makes an exclusion that was previously only a sentence in the
+#: comment above into a checkable list. `ACTIVE_SYNC_PAIRS` is enumerated by a
+#: contract test that AST-scans THIS file for `start_sync_batch` calls, so a pair
+#: stamped inside a service would fail it — and the temptation would be to relax
+#: the test, which is the one guard standing between a mistyped key and a dataset
+#: that silently reports "never run" forever.
+#:
+#: So they are declared separately and checked separately: still enumerable,
+#: still proven registered, without weakening the assertion that this module
+#: stamps exactly what it says it stamps.
+SERVICE_OWNED_SYNC_PAIRS: tuple[tuple[str, str], ...] = (
+    (KEYWORD_FACTS_SOURCE, KEYWORD_FACTS_DATASET),
+    (SEARCH_TERMS_SOURCE, SEARCH_TERMS_DATASET),
 )
 
 
@@ -541,6 +574,19 @@ def run_daily_incremental_sync(
         errors=errors,
     )
 
+    # ── google_ads_api/keyword_facts + google_ads_api/search_terms — PR-ADS-156.
+    # The two Platform Evidence datasets. Until this PR neither was refreshed by
+    # the primary incremental run: keyword facts waited for the weekly/monthly
+    # scheduler and search terms for one of three schedulers that each had their
+    # own rules, so a successful daily run proved nothing about either page.
+    #
+    # Placed AFTER canonical spend and FX deliberately. Both are read-only pulls
+    # that write only their own tables, so they cannot affect the executive
+    # contracts above; running them last means an evidence outage can never
+    # delay the spend, FX and geo chain that revenue truth depends on.
+    datasets[LABEL_KEYWORD_FACTS] = _sync_keyword_facts(run_id=run_id, errors=errors)
+    datasets[LABEL_SEARCH_TERMS] = _sync_search_terms(run_id=run_id, errors=errors)
+
     # ── mailchimp — read-only email-marketing refresh (PR-ADS-151). Pulls recent
     # campaigns + refreshes recent reports + snapshots audiences. Skipped cleanly
     # when Mailchimp is not configured. GET-only; local DB writes only.
@@ -554,6 +600,9 @@ def run_daily_incremental_sync(
     # exactly — every dataset that ran, ran cleanly — so nothing downstream that
     # reads it changes behaviour.
     truth = build_truth_block(datasets)
+    # PR-ADS-156 §6: a THIRD question, answered separately again. Executive
+    # truth is untouched by it — see `build_evidence_block`.
+    evidence = build_evidence_block(datasets)
 
     # Reflect the true final state on the local run record.
     db_writers.update_run(run_id, {
@@ -570,6 +619,7 @@ def run_daily_incremental_sync(
         # the two questions it was answering.
         "execution_status": overall_status,
         **truth,
+        **evidence,
         "run_type": RUN_TYPE,
         "run_reason": run_reason,
         "run_id": run_id,
@@ -586,9 +636,11 @@ def run_daily_incremental_sync(
 
     log.info(
         "[incremental_sync] finished execution_status=%s truth_status=%s "
-        "geo_ready=%s gaps=%s datasets=%s errors=%d",
-        overall_status, truth["truth_status"], truth["geo_ready"],
-        truth["gap_codes"], list(datasets.keys()), len(errors),
+        "evidence_status=%s geo_ready=%s gaps=%s evidence_gaps=%s "
+        "datasets=%s errors=%d",
+        overall_status, truth["truth_status"], evidence["evidence_status"],
+        truth["geo_ready"], truth["gap_codes"], evidence["evidence_gap_codes"],
+        list(datasets.keys()), len(errors),
     )
     return summary
 
@@ -1063,6 +1115,113 @@ def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:
         return {"status": "failed", "error": str(exc)[:500]}
 
 
+# ── PR-ADS-156 §2 — the two Platform Evidence datasets ──────────────────────
+# Both delegate to their owning service rather than pulling and writing here.
+# This module's job is to SCHEDULE them and to disclose what happened; the rules
+# for what a successful sync means live once, next to the writer, so a second
+# definition cannot appear in a scheduler.
+#
+# The disclosure below is deliberately uniform across both datasets: an operator
+# reading the run report should not have to learn two vocabularies to answer the
+# same question about two datasets.
+
+def _evidence_dataset_result(label: str, stats: dict, *, requested_from,
+                             requested_to, errors: list) -> dict:
+    """Shape one evidence service's stats into the run report's dataset entry.
+
+    ``verified_empty`` travels as its own field rather than being inferred from
+    ``rows_written == 0`` downstream. A failed pull writes zero rows too, and
+    the entire point of the flag is that those two are not the same event.
+    """
+    ok = bool(stats.get("ok"))
+    status = "success" if ok else "failed"
+    if not ok:
+        err = f"{label}: {stats.get('error') or 'evidence sync failed'}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+    return {
+        "status": status,
+        "source": stats.get("source"),
+        "dataset": stats.get("dataset"),
+        "date_from": stats.get("date_from") or str(requested_from),
+        "date_to": stats.get("date_to") or str(requested_to),
+        "rows_fetched": stats.get("fetched", 0),
+        "rows_prepared": stats.get("prepared", 0),
+        "rows_written": stats.get("written", 0),
+        "rows_rejected": stats.get("rejected", stats.get("skipped", 0)),
+        "rejected_reasons": stats.get("rejected_reasons") or {},
+        "latest_source_date": stats.get("latest_source_date"),
+        "sync_batch_id": stats.get("batch_id"),
+        # A successful query over an interval with no eligible rows. Success,
+        # and NOT the same as a failure that also returned nothing.
+        "verified_empty": bool(stats.get("verified_empty")),
+        "db_unavailable": bool(stats.get("db_unavailable")),
+        "error": (stats.get("error") or None) if not ok else None,
+        # This dataset's own verdict, so a reader never has to derive
+        # authority from where the entry happens to sit in the report.
+        "authoritative": True,
+        # Read-only against Google Ads. Stated on every run, successful or not.
+        "external_writes_performed": False,
+    }
+
+
+def _sync_keyword_facts(*, run_id, errors: list) -> dict:
+    """Refresh durable ``keyword_daily_facts`` on the established correction window.
+
+    PR-ADS-156 §3. Delegates to `keyword_sync_service` — the same function the
+    weekly, monthly, bootstrap and admin-refresh paths already call. No second
+    keyword writer is created here, and the 30-day window is the service's own
+    ``DEFAULT_INCREMENTAL_DAYS`` rather than a number chosen again in this file.
+    """
+    from services.keyword_sync_service import (  # noqa: PLC0415
+        DEFAULT_INCREMENTAL_DAYS, sync_recent_keyword_facts,
+    )
+
+    try:
+        stats = sync_recent_keyword_facts(
+            "daily", days=DEFAULT_INCREMENTAL_DAYS, run_id=run_id)
+    except Exception as exc:  # noqa: BLE001
+        err = f"{LABEL_KEYWORD_FACTS}: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+        return {"status": "failed", "error": str(exc)[:500],
+                "verified_empty": False, "external_writes_performed": False,
+                "authoritative": True}
+    return _evidence_dataset_result(
+        LABEL_KEYWORD_FACTS, stats,
+        requested_from=stats.get("date_from"), requested_to=stats.get("date_to"),
+        errors=errors)
+
+
+def _sync_search_terms(*, run_id, errors: list) -> dict:
+    """Refresh durable ``search_terms`` on a rolling recovery window.
+
+    PR-ADS-156 §4. Delegates to the shared canonical search-term service, which
+    is now also what the daily, weekly and monthly schedulers call. The window is
+    wider than the interval between runs, so a missed day is recovered by the
+    next run instead of leaving a permanent hole; the write is an upsert on the
+    natural key, so overlapping runs cost time and not correctness.
+    """
+    from services.search_term_sync_service import (  # noqa: PLC0415
+        DEFAULT_LOOKBACK_DAYS, sync_recent_search_terms,
+    )
+
+    try:
+        stats = sync_recent_search_terms(
+            "daily", days=DEFAULT_LOOKBACK_DAYS, run_id=run_id)
+    except Exception as exc:  # noqa: BLE001
+        err = f"{LABEL_SEARCH_TERMS}: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+        return {"status": "failed", "error": str(exc)[:500],
+                "verified_empty": False, "external_writes_performed": False,
+                "authoritative": True}
+    return _evidence_dataset_result(
+        LABEL_SEARCH_TERMS, stats,
+        requested_from=stats.get("date_from"), requested_to=stats.get("date_to"),
+        errors=errors)
+
+
 def _sync_fx_rates(*, run_id, date_to, errors: list) -> dict:
     """Refresh daily GBP→USD FX rates for a small lookback window (PR-ADS-119).
 
@@ -1326,6 +1485,78 @@ TRUTH_UNKNOWN = "unknown"
 #: earlier in :func:`build_truth_block`. It is written to the broader condition
 #: deliberately, so the invariant holds if that earlier branch ever changes.
 GAP_NOT_READY_WITHOUT_REASON = "geo_truth_not_ready_without_reason"
+
+
+# ── PR-ADS-156 §6 — evidence readiness, kept OUT of executive truth ─────────
+#: Gap codes for the Platform Evidence datasets. Deliberately their own
+#: vocabulary: a keyword pull that failed says nothing about whether the HubSpot
+#: revenue ledger or the canonical campaign-spend contract is usable, and folding
+#: it into `gap_codes` would make it look as though it did.
+EVIDENCE_GAP_KEYWORD_FACTS = "keyword_facts_refresh_failed"
+EVIDENCE_GAP_SEARCH_TERMS = "search_terms_refresh_failed"
+EVIDENCE_GAP_NOT_RUN = "evidence_refresh_did_not_run"
+
+EVIDENCE_READY = "ready"
+EVIDENCE_PARTIAL = "partial"
+EVIDENCE_NOT_READY = "not_ready"
+
+
+def build_evidence_block(datasets: dict) -> dict:
+    """Did the two Platform Evidence datasets refresh? A separate question.
+
+    PR-ADS-156 §6. Keyword and search-term freshness must be visible when it
+    fails — that is the whole point of scheduling them — but it must not
+    redefine executive truth. A search-term outage does not make closed-won
+    revenue unusable, and reporting it as `truth_status: not_ready` would be a
+    false alarm on the figure the business actually steers by, while burying the
+    true alarm about the page that IS broken.
+
+    The converse matters just as much: a failed evidence refresh is never
+    suppressed because the executive contracts happen to be fine. Both states
+    are published, side by side, each answering its own question.
+
+    ``not_ready`` and ``partial`` are distinct: one dataset down is a page out of
+    date, both down is the evidence layer out of date, and an operator triages
+    those differently.
+    """
+    entries = {
+        EVIDENCE_GAP_KEYWORD_FACTS: datasets.get(LABEL_KEYWORD_FACTS),
+        EVIDENCE_GAP_SEARCH_TERMS: datasets.get(LABEL_SEARCH_TERMS),
+    }
+    gaps, ok_count, present = [], 0, 0
+    for gap_code, entry in entries.items():
+        if not isinstance(entry, dict):
+            # The run never reached this dataset. Reported as its own gap rather
+            # than as a failure: nobody looked, which is not the same as looking
+            # and finding nothing.
+            gaps.append(EVIDENCE_GAP_NOT_RUN)
+            continue
+        present += 1
+        if entry.get("status") == "success":
+            ok_count += 1
+        else:
+            gaps.append(gap_code)
+
+    if present == 0:
+        status = EVIDENCE_NOT_READY
+    elif ok_count == present and not gaps:
+        status = EVIDENCE_READY
+    elif ok_count == 0:
+        status = EVIDENCE_NOT_READY
+    else:
+        status = EVIDENCE_PARTIAL
+
+    return {
+        "evidence_status": status,
+        "evidence_gap_codes": sorted(set(gaps)),
+        "evidence_datasets": {
+            LABEL_KEYWORD_FACTS: (datasets.get(LABEL_KEYWORD_FACTS) or {}).get("status"),
+            LABEL_SEARCH_TERMS: (datasets.get(LABEL_SEARCH_TERMS) or {}).get("status"),
+        },
+        # Stated here as well as per dataset: whatever happened to the evidence
+        # refresh, nothing was written to Google Ads.
+        "evidence_external_writes_performed": False,
+    }
 
 
 def build_truth_block(datasets: dict) -> dict:

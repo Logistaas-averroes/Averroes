@@ -184,66 +184,33 @@ def run_weekly_report():
             log.error("[weekly] DB write keywords failed: %s", db_exc)
 
         # Write search term rows to database
+        #
+        # PR-ADS-156 §5: persistence goes through the ONE shared canonical
+        # search-term service. What used to be here was the second of three
+        # inline copies of pull → batch → write → judge → finish, and it was the
+        # copy that recorded a zero-row pull as `success` while writing the error
+        # message "evidence pipeline unavailable" — so a legitimately quiet week
+        # and a broken connector left the same durable record.
+        #
+        # The 60-day weekly recovery window is preserved: different triggers may
+        # ask for different windows, they simply no longer carry different rules
+        # for what a successful sync means. The service owns the pull, so this
+        # issues one additional read-only Google Ads query per weekly run; the
+        # rows pulled at Step 1 remain the input to the JSON snapshot and the
+        # n-gram analysis, which are analysis outputs and not canonical facts.
         try:
-            st_batch_id = None
-            window_end = datetime.utcnow().date()
-            window_start = window_end - timedelta(days=59)
-            st_batch_id = db_writers.start_sync_batch(
-                source="google_ads_api",
-                dataset="search_terms",
-                sync_type="weekly",
-                date_from=window_start,
-                date_to=window_end,
-                run_id=run_id,
+            from services.search_term_sync_service import (  # noqa: PLC0415
+                sync_recent_search_terms,
             )
-
-            st_count = db_writers.write_search_terms(
-                run_id=run_id,
-                search_term_rows=search_terms,
-                sync_batch_id=st_batch_id or None,
-            )
-
-            # PR-ADS-065: Distinguish empty pull from write failure
-            fetched_count = len(search_terms or [])
-            if fetched_count == 0:
-                # Windsor returned nothing — record success with row_count=0 and warning message.
-                if st_batch_id:
-                    db_writers.finish_sync_batch(
-                        batch_id=st_batch_id,
-                        status="success",
-                        row_count=0,
-                        last_source_date=window_end,
-                        error_message=(
-                            "Google Ads API returned zero search-term rows for last 60 days; "
-                            "evidence pipeline unavailable."
-                        ),
-                    )
-                log.warning(
-                    "[weekly] Google Ads API search-term pull returned 0 rows; "
-                    "marking sync as success with row_count=0"
-                )
-            elif not persistence_succeeded(search_terms, st_count):
-                raise RuntimeError(
-                    f"Weekly search_terms persistence failed: "
-                    f"fetched {fetched_count} rows but wrote {st_count}"
-                )
+            st = sync_recent_search_terms("weekly", days=60, run_id=run_id)
+            if st.get("ok"):
+                log.info("[weekly] Canonical search-term sync: %s", {
+                    k: st.get(k) for k in
+                    ("date_from", "date_to", "fetched", "written", "verified_empty")})
             else:
-                last_source_date = max_source_date(search_terms, fallback_date=window_end)
-                if st_batch_id:
-                    db_writers.finish_sync_batch(
-                        batch_id=st_batch_id,
-                        status="success",
-                        row_count=st_count,
-                        last_source_date=last_source_date,
-                    )
-                log.info("[weekly] Wrote %d search term rows to database", st_count)
+                log.error("[weekly] Canonical search-term sync failed: %s",
+                          st.get("error"))
         except Exception as db_exc:  # noqa: BLE001
-            if st_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=st_batch_id,
-                    status="failed",
-                    error_message=str(db_exc)[:1000],
-                )
             log.error("[weekly] DB write search terms failed: %s", db_exc)
 
         # Step 3: Waste detection

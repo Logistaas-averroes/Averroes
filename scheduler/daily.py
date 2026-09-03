@@ -88,66 +88,38 @@ def run_daily_pulse():
         print(f"  → {len(anomalies)} {label} found.")
 
         # 3. Check for new junk terms (quick pattern match)
+        #
+        # PR-ADS-156 §5: persistence goes through the ONE shared canonical
+        # search-term service. This block used to pull its own 2-day window and
+        # then open a batch, write, judge success and finish the batch inline —
+        # the third copy of those rules in the repository, and the three copies
+        # had already drifted (a zero-row pull was "success" here, "evidence
+        # pipeline unavailable" in the weekly run, and fatal only in the
+        # monthly one).
+        #
+        # The junk check reads the rows this same pull already fetched, so the
+        # consolidation costs no extra Google Ads call.
         print("Step 4/6: Checking for new junk search terms...")
-        from connectors.google_ads_source import pull_search_terms
-        search_terms = pull_search_terms(days_back=2)
+        search_terms = []
+        try:
+            from services.search_term_sync_service import (  # noqa: PLC0415
+                sync_recent_search_terms,
+            )
+            st = sync_recent_search_terms("daily", run_id=run_id, include_rows=True)
+            search_terms = st.get("rows") or []
+            if st.get("ok"):
+                log.info("[daily] Canonical search-term sync: %s", {
+                    k: st.get(k) for k in
+                    ("date_from", "date_to", "fetched", "written", "verified_empty")})
+            else:
+                log.warning("[daily] Canonical search-term sync failed: %s",
+                            st.get("error"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[daily] Daily search_terms sync failed: %s", exc)
+
         new_junk = detect_junk_terms(search_terms)
         label = "junk term" if len(new_junk) == 1 else "junk terms"
         print(f"  → {len(new_junk)} new {label} found.")
-
-        # Track Google Ads search_terms daily sync
-        st_batch_id = db_writers.start_sync_batch(
-            source="google_ads_api",
-            dataset="search_terms",
-            sync_type="daily",
-            date_from=today - timedelta(days=1),
-            date_to=today,
-            run_id=run_id,
-        )
-        try:
-            st_count = db_writers.write_search_terms(
-                run_id, search_terms, sync_batch_id=st_batch_id or None,
-            )
-            # PR-ADS-065: Distinguish empty pull from write failure
-            fetched_count = len(search_terms or [])
-            if fetched_count == 0:
-                # Google Ads API returned nothing for the daily 2-day window.
-                if st_batch_id:
-                    db_writers.finish_sync_batch(
-                        batch_id=st_batch_id,
-                        status="success",
-                        row_count=0,
-                        last_source_date=today,
-                        error_message=(
-                            "Google Ads API returned zero search-term rows for daily pull; "
-                            "this may be normal for the 2-day window (today-1 through today) "
-                            "or may indicate issues."
-                        ),
-                    )
-                log.info("[daily] Google Ads API search-term daily pull returned 0 rows (success)")
-            elif not persistence_succeeded(search_terms, st_count):
-                raise RuntimeError(
-                    f"Google Ads search_terms persistence failed: "
-                    f"fetched {fetched_count} rows but wrote {st_count}"
-                )
-            else:
-                log.info("[daily] Wrote %d search term rows to database", st_count)
-                last_st_date = max_source_date(search_terms, fallback_date=today)
-                if st_batch_id:
-                    db_writers.finish_sync_batch(
-                        batch_id=st_batch_id,
-                        status="success",
-                        row_count=st_count,
-                        last_source_date=last_st_date,
-                    )
-        except Exception as exc:  # noqa: BLE001
-            if st_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=st_batch_id,
-                    status="failed",
-                    error_message=str(exc)[:1000],
-                )
-            log.warning("[daily] Daily search_terms sync failed: %s", exc)
 
         # PR-ADS-146A: keep durable keyword facts current daily via the ONE shared
         # sync path — re-pull a rolling recent range (today + previous 29

@@ -110,11 +110,30 @@ class TestSearchTermsVerdict:
         )
         assert verdict == Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT
 
-    def test_unknown_fallback(self):
-        verdict, _ = compute_search_terms_verdict(
+    def test_a_failed_canonical_sync_is_named_not_swallowed_as_unknown(self):
+        """PR-ADS-156 §8: `sync_status="failed"` used to fall through to UNKNOWN.
+
+        This exact input — the canonical batch recorded FAILED and no rows in
+        the window — is the clearest signal the pipeline can produce, and the
+        verdict for it was "Could not determine pipeline state from available
+        evidence". The evidence was available; nothing read it.
+        """
+        verdict, reason = compute_search_terms_verdict(
             db_available=True,
             db_rows_window=0,
             sync_status="failed",
+            latest_weekly_run="2026-05-25 07:00:00",
+        )
+        assert verdict == Verdict.CANONICAL_SYNC_FAILED
+        assert "NOT covered" in reason
+
+    def test_unknown_fallback_is_kept_for_a_genuinely_unreadable_state(self):
+        """The catch-all still exists — it is simply no longer the answer to a
+        question the evidence could have answered."""
+        verdict, _ = compute_search_terms_verdict(
+            db_available=True,
+            db_rows_window=0,
+            sync_status=None,
             latest_weekly_run="2026-05-25 07:00:00",
         )
         assert verdict == Verdict.UNKNOWN

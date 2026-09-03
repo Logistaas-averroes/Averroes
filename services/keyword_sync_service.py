@@ -31,8 +31,13 @@ from datetime import date, datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
-KEYWORD_FACTS_SOURCE = "google_ads_api"
-KEYWORD_FACTS_DATASET = "keyword_facts"
+# PR-ADS-156: imported from the ONE registry rather than spelled again here.
+# Two spellings of a (source, dataset) pair is precisely the drift that made
+# canonical campaign spend report "never run" for weeks while its table filled
+# up normally — the writer stamped one key and the freshness config read another.
+from services.dataset_keys import (  # noqa: E402
+    KEYWORD_FACTS_DATASET, KEYWORD_FACTS_SOURCE,
+)
 BOOTSTRAP_JOB_TYPE = "keyword_bootstrap"
 DEFAULT_INCREMENTAL_DAYS = 30   # today + previous 29 account-local dates
 
@@ -146,7 +151,9 @@ def sync_keyword_daily_facts(date_from: date, date_to: date, sync_type: str, *,
                 "written": 0, "skipped_missing_identity": 0, "skipped_no_date": 0,
                 "db_unavailable": True, "error": msg,
                 "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
-                "currency_incomplete_rows": 0}
+                "currency_incomplete_rows": 0, "verified_empty": False,
+                "external_writes_performed": False,
+                "source": KEYWORD_FACTS_SOURCE, "dataset": KEYWORD_FACTS_DATASET}
 
     try:
         rows = pull_keyword_performance_range(date_from.isoformat(), date_to.isoformat())
@@ -158,7 +165,11 @@ def sync_keyword_daily_facts(date_from: date, date_to: date, sync_type: str, *,
         return {"ok": False, "fetched": 0, "prepared": 0, "written": 0,
                 "skipped_missing_identity": 0, "skipped_no_date": 0,
                 "db_unavailable": False, "error": str(exc),
-                "date_from": date_from.isoformat(), "date_to": date_to.isoformat()}
+                "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+                # A FAILED pull also returns no rows. It is never verified empty.
+                "currency_incomplete_rows": 0, "verified_empty": False,
+                "external_writes_performed": False,
+                "source": KEYWORD_FACTS_SOURCE, "dataset": KEYWORD_FACTS_DATASET}
 
     stats = w.write_keyword_daily_facts(run_id=run_id, keyword_rows=rows,
                                         sync_batch_id=batch_id or None)
@@ -200,7 +211,16 @@ def sync_keyword_daily_facts(date_from: date, date_to: date, sync_type: str, *,
             "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
             "currency_incomplete_rows": sum(1 for r in (rows or []) if not r.get("currency_code")),
             "error": error,
-            **stats}
+            **stats,
+            # PR-ADS-156 §3: stated, not inferred from `written == 0`. A pull
+            # that failed also wrote nothing, and the two must never read the
+            # same. This is true only when the query SUCCEEDED and the account
+            # had no eligible keyword rows for the interval — a measurement.
+            "verified_empty": bool(ok and fetched == 0),
+            # Read-only against Google Ads; the only writes are local.
+            "external_writes_performed": False,
+            "source": KEYWORD_FACTS_SOURCE,
+            "dataset": KEYWORD_FACTS_DATASET}
 
 
 def sync_recent_keyword_facts(sync_type: str = "daily", *, days: int = DEFAULT_INCREMENTAL_DAYS,

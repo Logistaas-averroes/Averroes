@@ -132,6 +132,11 @@ class TestSummaryShape:
             # geo went stale the moment the window advanced.
             "google_ads_api/canonical_geo",
             "google_ads_api/geo_reconciliation",
+            # PR-ADS-156: the two Platform Evidence datasets. Until this PR a
+            # successful primary run proved nothing about either page, because
+            # neither was refreshed here at all.
+            "google_ads_api/keyword_facts",
+            "google_ads_api/search_terms",
             "mailchimp/refresh",
         }
         assert set(result["datasets"].keys()) == expected
@@ -431,7 +436,13 @@ class TestUnsupportedDatasets:
         assert (result["datasets"]["windsor/campaigns"]["replaced_by"]
                 == "google_ads_api/canonical_spend")
         # No canonical incremental path exists for keywords — stated, not faked.
-        assert result["datasets"]["windsor/keywords"]["replaced_by"] is None
+        # PR-ADS-156 inverted this. The entry used to say "NO canonical Google
+        # Ads API incremental persistence path exists for keywords today", and
+        # asserting `replaced_by is None` locked that claim in. The path existed
+        # (`keyword_sync_service`); what was missing was a call from this run,
+        # which is now here — so the registry must name the replacement.
+        assert (result["datasets"]["windsor/keywords"]["replaced_by"]
+                == "google_ads_api/keyword_facts")
 
     def test_gclid_matches_persisted_not_skipped(self, monkeypatch):
         # PR-ADS-114: gclid/matches now has a real persistence path (closed-won
@@ -811,6 +822,36 @@ def _patch_all_datasets_success(
                 "missing_geo_dates": [], "reason": "reconciled"}
     monkeypatch.setattr(
         "services.google_ads_geo_sync_service.build_geo_reconciliation", _geo_recon_stub)
+
+    # PR-ADS-156: the two Platform Evidence datasets, patched at the service
+    # seam like every other external step and mirroring the source_pull failure
+    # mode so the all-fail scenario still drives both to failure. A healthy
+    # fixture describes a VERIFIED-EMPTY interval — a successful query with no
+    # eligible rows — which is a success, and deliberately not the same event as
+    # a pull that returned nothing because it broke.
+    def _keyword_facts_stub(*a, **kw):
+        if source_pull:
+            source_pull()  # raises in the all-fail scenario
+        return {"ok": True, "source": "google_ads_api", "dataset": "keyword_facts",
+                "batch_id": 1, "date_from": "2026-01-01", "date_to": "2026-01-30",
+                "fetched": 0, "prepared": 0, "written": 0,
+                "skipped_missing_identity": 0, "skipped_no_date": 0,
+                "verified_empty": True, "error": None,
+                "external_writes_performed": False}
+    monkeypatch.setattr(
+        "services.keyword_sync_service.sync_recent_keyword_facts", _keyword_facts_stub)
+
+    def _search_terms_stub(*a, **kw):
+        if source_pull:
+            source_pull()  # raises in the all-fail scenario
+        return {"ok": True, "source": "google_ads_api", "dataset": "search_terms",
+                "batch_id": 1, "date_from": "2026-01-17", "date_to": "2026-01-30",
+                "fetched": 0, "prepared": 0, "written": 0, "rejected": 0,
+                "rejected_reasons": {}, "skipped": 0, "verified_empty": True,
+                "latest_source_date": None, "error": None,
+                "external_writes_performed": False}
+    monkeypatch.setattr(
+        "services.search_term_sync_service.sync_recent_search_terms", _search_terms_stub)
 
     # DB writers
     monkeypatch.setattr("db.writers.write_campaigns", campaign_write or _default_write)
