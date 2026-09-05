@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import ast
 import json
-import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -47,7 +46,7 @@ from tests.test_pr_ads_153e_a_pg_integration import (  # noqa: E402,F401
     _have_postgres, pg,
 )
 from tests.test_pr_ads_156_f3_account_identity_cutover import (  # noqa: E402
-    ACCOUNT, DAY, OTHER_ACCOUNT, _TWIN_COLUMNS, _exec, _init_db, _rows_of,
+    ACCOUNT, DAY, OTHER_ACCOUNT, _TWIN_COLUMNS, _exec, _init_db,
     _run_audit, _scalar, _seed_batch, _seed_pre_cutover_twin,
 )
 
