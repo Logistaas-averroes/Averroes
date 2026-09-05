@@ -520,3 +520,217 @@ def test_7c_quality_counts_are_taken_over_the_claimed_population(pg, monkeypatch
     # …and does not silently join the canonical totals.
     assert db["rows_with_spend"] == 2   # both of this account's rows have spend
     assert scope_mod.claimed_scope().available is True
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §3 — the endpoints, executed against a real database
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# The F3 endpoint tests asserted over the AST: that `_canonical_search_term_scope`
+# appeared in the handler and that a fail-closed branch existed. That proves the
+# call was written. It cannot prove the composed SQL binds its parameters in the
+# right order — and parameter order is exactly what breaks when a scope predicate
+# is spliced into a hand-built WHERE clause, because `psycopg2` fills `%s` by
+# position and a predicate inserted at the front shifts every argument after it.
+# A misordered query does not raise; it filters on the wrong values and returns a
+# plausible number.
+#
+# So these run the handlers over PostgreSQL, seeded with the four rows that
+# matter, and assert on results.
+
+def _api_client():
+    try:
+        from fastapi.testclient import TestClient
+    except ImportError:  # pragma: no cover - environment guard
+        pytest.skip("fastapi[testclient] not available")
+    import os
+
+    os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
+    try:
+        from api.server import app
+    except Exception as exc:  # noqa: BLE001 - environment guard
+        pytest.skip(f"api.server import failed: {exc}")
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def _viewer_cookies():
+    import os
+
+    from starlette.responses import Response as StarletteResponse
+
+    from api.auth import set_session
+
+    os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
+    r = StarletteResponse()
+    set_session(r, "testviewer", "viewer")
+    for part in r.headers.get("set-cookie", "").split(";"):
+        part = part.strip()
+        if part.startswith("ads_session="):
+            return {"ads_session": part.split("=", 1)[1]}
+    return {}
+
+
+def _seed_mixed_population():
+    """The four rows the cutover has to tell apart, on today's date so every
+    endpoint's default window contains them.
+
+    Only the first belongs in any total. The second is its own pre-cutover twin
+    — same observation, no account — and is the row that doubled every metric.
+    """
+    today = date.today()
+    _insert(customer_id=ACCOUNT, source_date=today, spend_usd=5.0, clicks=3,
+            impressions=40)
+    _insert(customer_id=None, source_date=today, spend_usd=5.0, clicks=3,
+            impressions=40)
+    _insert(customer_id=OTHER_ACCOUNT, source_date=today, spend_usd=11.0,
+            clicks=7, impressions=90, search_term="another account term")
+    _insert(customer_id=None, source_system="windsor", source_date=today,
+            spend_usd=13.0, clicks=9, impressions=110,
+            search_term="windsor era term")
+    assert _scalar("SELECT COUNT(*) FROM search_terms") == 4
+
+
+@_needs_pg
+def test_13_raw_search_terms_returns_only_the_canonical_row(pg, monkeypatch):  # noqa: F811
+    """One row out, not four — and specifically the one carrying the account."""
+    _init_db(pg, monkeypatch)
+    _seed_mixed_population()
+
+    client = _api_client()
+    r = client.get("/api/search-terms?days=30&limit=500",
+                   cookies=_viewer_cookies())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    rows = body["rows"]
+
+    assert len(rows) == 1, [row["search_term"] for row in rows]
+    assert rows[0]["search_term"] == "freight forwarding software"
+    assert rows[0]["spend_usd"] == pytest.approx(5.0)
+    # The other three are not in the payload under any label.
+    terms = {row["search_term"] for row in rows}
+    assert "another account term" not in terms
+    assert "windsor era term" not in terms
+
+
+@_needs_pg
+def test_13b_a_filter_argument_still_binds_to_the_right_column(pg, monkeypatch):  # noqa: F811
+    """Parameter order, tested by making it matter.
+
+    The scope contributes its own placeholders at the FRONT of the WHERE clause.
+    If the handler appended the caller's filter values in the wrong order, the
+    query would silently compare the search text against a date or an account
+    id — and return zero rows, which looks exactly like "no matches".
+    """
+    _init_db(pg, monkeypatch)
+    _seed_mixed_population()
+    _insert(customer_id=ACCOUNT, source_date=date.today(), spend_usd=2.0,
+            search_term="second canonical term", campaign_name="brand - de",
+            match_type="EXACT")
+
+    client, cookies = _api_client(), _viewer_cookies()
+
+    hit = client.get("/api/search-terms?days=30&limit=500&q=forwarding",
+                     cookies=cookies).json()
+    assert [r["search_term"] for r in hit["rows"]] == \
+        ["freight forwarding software"]
+
+    by_campaign = client.get(
+        "/api/search-terms?days=30&limit=500&campaign=brand - de",
+        cookies=cookies).json()
+    assert [r["search_term"] for r in by_campaign["rows"]] == \
+        ["second canonical term"]
+
+    by_match = client.get(
+        "/api/search-terms?days=30&limit=500&match_type=EXACT",
+        cookies=cookies).json()
+    assert [r["search_term"] for r in by_match["rows"]] == \
+        ["second canonical term"]
+
+    # A filter matching nothing returns nothing — proving the empty results
+    # above are real filtering, not a misbound parameter matching nothing.
+    assert client.get("/api/search-terms?days=30&q=zzz-no-such-term",
+                      cookies=cookies).json()["rows"] == []
+
+
+@_needs_pg
+def test_14_the_summary_totals_are_not_doubled(pg, monkeypatch):  # noqa: F811
+    """The number a person reads and acts on.
+
+    Unscoped this reported 34.0 spend over 4 terms. The twin alone accounted
+    for 5.0 of that — the same clicks and the same impressions counted twice,
+    from SQL that looked entirely reasonable.
+    """
+    _init_db(pg, monkeypatch)
+    _seed_mixed_population()
+
+    r = _api_client().get("/api/search-terms/summary?days=30",
+                          cookies=_viewer_cookies())
+    assert r.status_code == 200, r.text
+    summary = r.json()["summary"]
+
+    assert summary["total_terms"] == 1
+    assert summary["unique_search_terms"] == 1
+    assert summary["total_spend_usd"] == pytest.approx(5.0)
+    assert summary["total_clicks"] == 3
+    assert summary["total_impressions"] == 40
+
+    # The denominator behind the derived rates is the same single row, so the
+    # averages describe one observation rather than an average of a fact and
+    # its own duplicate.
+    assert r.json()["data_quality"]["rows_in_window"] == 1
+
+
+@_needs_pg
+def test_15_ngrams_are_built_from_canonical_rows_only(pg, monkeypatch):  # noqa: F811
+    """N-grams aggregate text, so an excluded row does not merely add to a
+    total — it invents a phrase that no canonical row contains, and puts it in
+    front of someone deciding what to add as a negative keyword."""
+    _init_db(pg, monkeypatch)
+    _seed_mixed_population()
+
+    r = _api_client().get("/api/search-terms/ngrams?days=30",
+                          cookies=_viewer_cookies())
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    grams = {g["ngram"] for g in body["rows"]}
+    assert grams, body
+    assert any("freight" in g for g in grams)
+    # Words that exist ONLY in the excluded rows must not appear at all.
+    assert not any("windsor" in g for g in grams)
+    assert not any("another" in g for g in grams)
+    assert not any("account" in g for g in grams)
+
+    for gram in body["rows"]:
+        # Spend and row counts are summed per n-gram; the twin would have
+        # doubled every one of them.
+        assert gram["total_spend_usd"] == pytest.approx(5.0), gram["ngram"]
+        assert gram["row_count"] == 1, gram["ngram"]
+
+
+@_needs_pg
+@pytest.mark.parametrize("path", ["/api/search-terms",
+                                  "/api/search-terms/summary",
+                                  "/api/search-terms/ngrams"])
+def test_15b_every_endpoint_fails_closed_on_an_unresolved_account(
+        pg, monkeypatch, path):  # noqa: F811
+    """Executed, not inspected. With no account configured each endpoint
+    returns an empty, explicitly-unavailable payload — not the whole table, and
+    not a 500."""
+    _init_db(pg, monkeypatch)
+    _seed_mixed_population()
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+
+    r = _api_client().get(f"{path}?days=30", cookies=_viewer_cookies())
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    # `rows` carries the fact rows for two of the three endpoints and the
+    # n-gram aggregates for the third, so one assertion covers all of them.
+    assert not body.get("rows")
+    summary = body.get("summary") or {}
+    assert not summary.get("total_terms")
+    assert not summary.get("total_spend_usd")
+    # And it SAYS so, rather than presenting an empty table as an answer.
+    blob = json.dumps(body)
+    assert scope_mod.REASON_CUSTOMER_NOT_CONFIGURED in blob, blob[:600]
