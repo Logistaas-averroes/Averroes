@@ -1,0 +1,492 @@
+# 38 — Platform Evidence: keyword and search-term freshness
+
+PR-ADS-156. The canonical ownership contract for the two Platform Evidence
+datasets: who writes them, when, under which keys, and what "fresh" means.
+
+---
+
+## The contradiction this document replaces
+
+`keyword_daily_facts` and `search_terms` were already canonical, already had
+direct Google Ads API services, and were already registered in the freshness
+configuration. What was missing was a caller: the primary production command,
+`python -m scheduler.incremental_sync`, refreshed neither. Its retired-dataset
+registry said so in terms that had stopped being true —
+
+> search terms … refreshed by the weekly scheduler, not by this incremental run
+>
+> NO canonical Google Ads API incremental persistence path exists for keywords today
+
+— the second of which was simply wrong: `keyword_sync_service` existed and was
+the single durable writer. A successful daily run therefore proved nothing about
+either evidence page.
+
+Search terms were worse than unscheduled. Three schedulers each held an inline
+copy of pull → open batch → write → judge → finish, and the copies had drifted:
+
+| Trigger | Window | A zero-row pull was… |
+|---|---|---|
+| daily | 2 days | `success` |
+| weekly | 60 days | `success`, with the message "evidence pipeline unavailable" |
+| monthly | 30 days | fatal |
+
+Three windows is fine. Three definitions of success is not, and a two-day window
+cannot recover a missed run: one skipped daily leaves a permanent hole, because
+nothing ever asks for that date again.
+
+---
+
+## Ownership, after
+
+| Dataset | Canonical table | Owning service | Natural key |
+|---|---|---|---|
+| `google_ads_api/keyword_facts` | `keyword_daily_facts` | `services/keyword_sync_service.py` | `(source_date, customer_id, campaign_id, ad_group_id, criterion_id)` |
+| `google_ads_api/search_terms` | `search_terms` | `services/search_term_sync_service.py` | `(source_date, campaign_name, campaign_id, ad_group, keyword, match_type, search_term)` |
+
+Both `(source, dataset)` pairs are spelled ONCE, in `services/dataset_keys.py`,
+and imported by the writers, the freshness configuration and the schedulers.
+Spelling a key in two places is what let canonical campaign spend report
+"never run" for weeks while its table filled up normally.
+
+### Triggers and recovery windows
+
+| Trigger | keyword_facts | search_terms |
+|---|---|---|
+| `scheduler.incremental_sync` (primary, daily) | 30 days | 14 days |
+| `scheduler.daily` | 30 days | 14 days |
+| `scheduler.weekly` | 30 days | 60 days |
+| `scheduler.monthly` | 30 days | 30 days |
+| admin refresh / bootstrap | explicit range | — |
+
+Different triggers may ask for different windows. None of them carries different
+rules for what a successful sync means. Every window is wider than the interval
+between runs, and every write is an upsert on the natural key, so a missed run is
+recovered by the next one and overlapping runs cost time, never correctness.
+
+`SEARCH_TERM_SYNC_LOOKBACK_DAYS` configures the search-term window; the floor is
+14 days and the code enforces it.
+
+---
+
+## Verified empty
+
+A Google Ads query that succeeds and returns no rows is a **measurement**: the
+interval was asked about and had no eligible query data. A query that fails
+returns no rows too. Collapsing the two is what let an outage look like a quiet
+week.
+
+* verified empty → `ok=True`, `verified_empty=True`, batch `success`, watermark
+  **advances** (the interval is now proven);
+* failure → `ok=False`, `verified_empty=False`, batch `failed`, watermark does
+  **not** advance.
+
+Row absence is never treated as proof of failure, and failure is never treated as
+proof of absence. A successful interval containing zero search terms is normal:
+Google Ads may simply have no eligible query data for it.
+
+---
+
+## Freshness
+
+Freshness is read from the canonical sync record and the data together:
+
+* `sync_state.last_source_date` — the proven watermark, advanced only by a
+  successful `finish_sync_batch`;
+* the latest `sync_batches` row for the pair — status and requested interval;
+* `MAX(source_date)` in the table — because a `success` row can sit above facts
+  that are a month old.
+
+**Rows in an old table are never "fresh".** That is the case an "are there rows"
+check calls healthy, and it is the case the audit command exists for.
+
+All-time history is **disclosed, never claimed**. The audit reports the stored
+range and the intervals canonical syncs covered; it does not assert that every
+historical date was queried, and `history_coverage_unproven` is a disclosure
+rather than a violation.
+
+---
+
+## Evidence truth is not executive truth
+
+`scheduler.incremental_sync` now answers three separate questions:
+
+| Field | Question |
+|---|---|
+| `execution_status` | did every step run cleanly? |
+| `truth_status` / `gap_codes` | is the canonical executive dataset usable? |
+| `evidence_status` / `evidence_gap_codes` | did the two evidence datasets refresh? |
+
+A search-term outage is visible in the dataset result, in `evidence_status`, in
+`evidence_gap_codes`, in the logs and in the audit command — and it does **not**
+make the HubSpot revenue ledger or the canonical campaign-spend contract
+`not_ready`. Nor is it suppressed because those happen to be fine.
+
+`evidence_status` is `ready` (both refreshed), `partial` (one), or `not_ready`
+(neither, or the run never reached them).
+
+---
+
+## The audit command
+
+```
+python -m scripts.audit_keyword_search_term_freshness --json
+python -m scripts.audit_keyword_search_term_freshness          # human-readable
+```
+
+Initialises its own pool. Exit `0` only when current canonical freshness AND
+persistence are proven; `1` on any violation; `2` when the database could not be
+read — because a "0 violations" result over an unopened database is a fabricated
+all-clear.
+
+Violation codes: `canonical_sync_never_run`, `canonical_sync_failed`,
+`canonical_source_stale`, `canonical_table_unavailable`,
+`fetched_rows_not_persisted`, `partial_persistence`, `missing_identity`,
+`unproven_currency_lineage`, `duplicate_natural_key`, `legacy_source_active`,
+`freshness_key_mismatch`. Disclosure: `history_coverage_unproven`.
+
+---
+
+## Legacy, and why the `keywords` snapshot writes stay
+
+§5 required an inspection before stopping the scheduled legacy writes. It found
+**four live consumers** of the legacy `keywords` snapshot, none of them Keyword
+Evidence:
+
+1. `/api/keywords` aggregated keyword endpoint (`api/server.py`);
+2. the campaign drill-down keyword preview (`api/server.py`);
+3. the keyword-review action queue (`api/server.py`);
+4. `fetch_keyword_theme_snapshot` → the Campaigns page keyword themes.
+
+Stopping the writes would have starved all four — the "silently remove it" §5
+forbids. So the weekly and monthly writes stay, **documented and
+non-authoritative**, and the static guard's job is to stop new legacy reads
+appearing and to keep the snapshot out of Keyword Evidence, which reads
+`keyword_daily_facts` and nothing else.
+
+Windsor is retired. Historical `windsor` / `windsor_mcp` sync rows are still
+reported — they are real evidence of how these tables were first populated — but
+under keys that say `legacy_sync_state`, where they cannot decide present
+freshness. No active path imports the Windsor connector.
+
+No legacy table is deleted or tombstoned.
+
+---
+
+## Failure and recovery
+
+| Symptom | Meaning | Action |
+|---|---|---|
+| `canonical_sync_never_run` | no state and no batch | run `python -m scheduler.incremental_sync` |
+| `canonical_sync_failed` | interval attempted, not covered | read the batch's error; re-run |
+| `canonical_source_stale` | rows exist, newest too old | re-run; the rolling window recovers it |
+| `fetched_rows_not_persisted` | pull succeeded, write did not | database problem — the batch is already `failed` |
+| `duplicate_natural_key` | overlapping runs duplicating | the unique index is missing or was dropped |
+| `unproven_currency_lineage` | rows with no currency | excluded from verified monetary totals |
+
+No backfill is required after deployment. The rolling recovery windows close
+ordinary gaps by themselves.
+
+---
+
+## Read-only guarantee
+
+Every path in this document reads Google Ads and writes only local tables. No
+bid, budget, keyword, negative keyword, campaign or ad-group state is ever
+modified, and every evidence result carries `external_writes_performed: false`.
+A static test asserts no mutation verb is reachable from any of these modules.
+
+---
+
+# PR-ADS-156-F1 — closing the false-green freshness paths
+
+The structure above stood; the certification did not. Five paths could still
+report a stale or unproven dataset as healthy, and each one is closed by naming
+a quantity that used to be conflated with another.
+
+## 1. Coverage is not the newest row
+
+Freshness was derived from `MAX(source_date)`. That is wrong in both directions,
+and each direction certifies something untrue:
+
+* a dataset can be **current and empty**. Google Ads had nothing for a quiet
+  fortnight; the interval was queried and came back empty. Judged by the newest
+  row, a healthy account looks stale.
+* a dataset can be **stale and full**. Rows persist; syncs do not. An old
+  successful zero-row batch leaves no row at all, so the newest row belongs to
+  whatever ran before it — and the dataset reports the freshness of a sync that
+  stopped happening.
+
+Three quantities are now published and validated separately:
+
+| Field | Meaning | Role |
+|---|---|---|
+| `coverage_through` | `MAX(date_to)` over **successful** canonical batches | **freshness is measured from this** |
+| `data_last_seen` | newest persisted source row date, nullable | reported, never a freshness signal |
+| `verified_empty` | durable proof the queried interval returned zero canonical rows | read from the batch column, never inferred |
+
+`coverage_through` is `MAX(date_to)`, not the `date_to` of whichever batch ran
+last: a backfill repairing an old month runs last and covers an older range, and
+taking its `date_to` would *retract* coverage the daily runs had established.
+
+A stale `coverage_through` fails **even when the table is legitimately empty**.
+A current `coverage_through` passes **even when the newest row is older**.
+
+## 2. Verified-empty is durable evidence
+
+`sync_batches` gains four columns, added by an idempotent `ADD COLUMN IF NOT
+EXISTS` migration through the normal `init_db()` path:
+
+```sql
+verified_empty BOOLEAN NOT NULL DEFAULT FALSE
+fetched_count  INTEGER
+prepared_count INTEGER
+rejected_count INTEGER
+```
+
+`row_count` continues to mean the **written** count. The other three say what it
+was written from, so "0 rows" stops being one number with three possible
+meanings.
+
+The `FALSE` default is the point, not a side effect: every batch already in
+production predates the marker, and some historical successful zero-row batches
+were recorded while the evidence pipeline was unavailable. They stay unproven.
+
+`finish_sync_batch` takes the four as **optional keyword arguments**; every
+existing caller keeps working unchanged and records nothing it did not measure.
+A `verified_empty=True` claim is *validated before it is stored* — the writer
+requires a successful status with fetched, prepared, rejected and written all
+explicitly zero. A caller that omits the counters has not measured the pull, and
+an unmeasured pull is not evidence, so the claim is refused and logged.
+
+## 3. Persistence violations are reachable
+
+Emitted from the durable counters on the latest batch, not guessed at:
+
+| Code | Condition |
+|---|---|
+| `fetched_rows_not_persisted` | `fetched_count > 0` and `row_count = 0` |
+| `partial_persistence` | `prepared_count ≠ row_count`, or `rejected_count > 0` |
+| `canonical_sync_failed` | latest attempted batch failed |
+| `unproven_empty_interval` | success, nothing written, nothing fetched, **no** durable marker |
+| `legacy_source_active` | a production path reads a retired evidence source |
+
+`legacy_source_active` was previously declared and unreachable — the only
+implementation of "is a legacy source active?" lived in a test module. In JSON,
+a declared violation nothing can raise reads as a check that ran and passed. The
+scan and its allowlist now live in `analysis/legacy_source_guard.py`, and the
+audit command and the regression suite execute the **same function**.
+
+## 4. Certification is scoped; history is disclosed
+
+Identity, currency and duplication checks used to scan the whole table. That
+makes quarantined Windsor-era rows — rows nobody will repair, which the evidence
+services already exclude — permanently block the new pipeline, and a check that
+can never go green is a check nobody reads.
+
+* **Certified**: canonical-provenance rows (`source_system = 'google_ads_api'`)
+  inside the certified interval — the range of the latest successful batch.
+  Their defects are **blocking**.
+* **Disclosed**: everything else, counted and labelled per `source_system`
+  (`legacy_rows_present`). Never relabelled canonical, never repaired here, and
+  never the reason current freshness fails.
+
+Nothing historical is backfilled, rewritten or deleted.
+
+## 5. Search-term identity is real
+
+`search_terms` gains a nullable `customer_id`, bringing it to parity with
+`keyword_daily_facts`. A newly ingested canonical row must carry:
+
+source date · non-empty search term · campaign ID · ad-group identity (the
+`ad_group` name, which is what the current natural key stores) · Google Ads
+customer ID · `source = google_ads_api` provenance.
+
+Rows missing any of these are rejected by reason and counted in
+`rejected_count`; nothing is dropped quietly. Historical rows stay NULL — a
+back-filled guess would be inventing provenance — and are reported as
+disclosure, never reinterpreted as current canonical failures.
+
+## 6. One search-term pull per scheduler execution
+
+The weekly and monthly runs pulled search terms **twice**: once at step 1 for
+the JSON snapshot, and again through the canonical service later in the run.
+Two queries for one dataset is two answers nothing reconciles.
+
+Each run now performs exactly one canonical pull, with `include_rows=True`, and
+the rows it returns are the ones analysed — the junk-query check, the n-grams
+and the reports all read what was actually persisted. Rows are adopted only
+after the `ok` check: `rows` holds what the pull *prepared*, which on a partial
+write is not what the database holds.
+
+When the sync fails, downstream search-term analysis is **unavailable**, not
+empty: `ngram_data=None` reaches the report as "unavailable", and
+`data/ads_search_terms.json` is left untouched rather than overwritten with `[]`
+— which would destroy the last surviving copy of the previous observation and
+make an outage look like a quiet week. `save_output` now distinguishes `None`
+("not measured, leave the file alone") from `[]` ("measured as empty").
+
+Each trigger keeps its own window: daily 14 days, weekly 60, monthly 30.
+
+## 7. One account calendar
+
+`search_term_sync_service._account_today` resolved a canonical window and, on
+**any** exception, quietly returned the UTC date. Between 23:00 and 00:00 UTC in
+British Summer Time those are different days, so a transient failure could shift
+the requested interval by one date and record the wrong day as covered —
+silently, because the fallback logged at DEBUG.
+
+It is now a thin alias for `analysis.account_time.account_today`, the helper
+Campaign and Keyword Evidence already use. There is no fallback: keyword and
+search-term intervals resolve through one function or not at all.
+
+## Failure and recovery (F1 additions)
+
+| Symptom | Meaning | Action |
+|---|---|---|
+| `canonical_source_stale` | **proven coverage** is old, whatever the rows say | re-run; the rolling window recovers it |
+| `unproven_empty_interval` | a zero-row success with no durable marker | re-run through the canonical service, which records the marker |
+| `partial_persistence` | prepared ≠ written, or rows rejected | read `rejected_count` and the batch error |
+| `legacy_source_active` | a production path reads a retired source | remove the read, or justify it in the allowlist |
+| `legacy_rows_present` (disclosure) | historical rows outside the certified interval | none — informational |
+
+---
+
+# PR-ADS-156-F2 — the remaining stale-analysis and durability gaps
+
+F1 closed five false-green paths. Five more remained, each a place where
+something was assumed rather than checked.
+
+## 1. Waste detection was reading the snapshot F1 preserved
+
+F1 stopped the weekly and monthly schedulers overwriting
+`data/ads_search_terms.json` when the canonical sync failed, so an outage could
+not masquerade as a quiet week. `run_waste_detection()` then **reloaded that
+preserved file** and published findings from it stamped with the current run's
+timestamp. The snapshot was protected from being destroyed and immediately
+reused as though it were current — the same falsehood from the other side.
+
+The canonical input is now **passed in**, with an explicit availability flag:
+
+| Input | Behaviour |
+|---|---|
+| `search_term_evidence_available=False` (or no rows at all) | no analysis; the report is marked unavailable and carries no items |
+| rows supplied, available | exactly those rows are analysed — the ones the sync persisted |
+| `[]` supplied, available | a verified-empty population: zero findings, no substitution |
+
+The **keyword fallback is gone with the snapshot read**. An empty search-term
+population used to silently become a keyword-level analysis, which answers a
+different question under the same heading: a verified-empty interval is a
+genuine measurement *of search terms*, not a gap to be filled with a different
+population. `analysis/rule_advisor.py` now reports the unavailable state instead
+of the removed "20–40% higher" fallback warning.
+
+The unavailable report is **written**, not skipped. Leaving the previous
+`waste_report.json` in place would be worse than either alternative: its own
+`generated_at` is what every reader uses to judge currency, so a preserved
+report reads as this week's findings. An explicitly empty, explicitly
+unavailable report cannot be mistaken for either.
+
+And a `waste_terms` sync batch is finished **`failed`**, never `success`, when
+the evidence never arrived — a `success` advances a freshness watermark, and
+doing that from evidence that does not exist reports the dataset current over an
+interval nobody measured.
+
+## 2. An unfinalized batch is not a covered interval
+
+`finish_sync_batch` returns a Boolean and both canonical services ignored it. So
+a run could fetch (or verify empty), have its final batch update fail, and still
+return `ok=True` — reporting the interval covered while coverage and
+verified-empty proof were never durably recorded.
+
+This is the subtlest false green of all, because the DATA would be fine and only
+the proof of it missing, so nothing else in the system would ever notice.
+
+Every relevant result is now captured. On a finalization failure both services
+return `ok=false`, `verified_empty=false` and a `batch_finalization_failed`
+reason, and `evidence_status` cannot read ready. For a non-empty pull whose rows
+were written, both facts travel separately:
+
+| Field | Meaning |
+|---|---|
+| `written` | what this run **certifies** — `0` |
+| `rows_possibly_written` | what may nevertheless be in the table |
+| `batch_finalized` | whether the certificate persisted |
+
+Reporting only the first would be a false green; reporting only the second would
+send someone hunting for data that is already there.
+
+## 3. The account belongs in the natural key
+
+F1 declared `customer_id` part of canonical search-term identity and made the
+service reject rows without it — but the UNIQUE index did not contain it. The
+contract said two accounts are distinguishable while the index said they are the
+same row: two otherwise identical observations from different Google Ads
+customers would silently upsert over each other. That is worse than having no
+customer column, because the contract invites people to rely on it.
+
+`idx_search_terms_unique_fact` is rebuilt, **keeping its name** (the repository
+and the evidence service document the dedup key by that name), to:
+
+```
+source_date · customer_id · campaign_name · campaign_id · ad_group ·
+keyword · match_type · search_term      (COALESCE on every nullable column)
+```
+
+The writer's `ON CONFLICT` target and the audit's duplicate grouping use exactly
+the same key — a target that does not match a unique index is a runtime error,
+one that matches the *wrong* index silently merges accounts, and an audit
+grouping on a narrower key reports correct rows as duplicates. The null-twin
+supersession delete is scoped by account too, so an id-bearing row from one
+customer cannot delete another customer's row.
+
+The migration is guarded on the index **definition**, so it rebuilds once and a
+redeploy is a no-op. Adding a column to a unique key can only make it more
+permissive, so the rebuild cannot fail on existing rows, and DDL is transactional
+in PostgreSQL, so there is no window without a unique key. Historical rows keep
+`customer_id IS NULL` — no account identity is invented for them.
+
+## 4. The legacy guard now sees indirect reads
+
+The shared guard read literal SQL in two directories. A service that imports a
+repository module and calls `repo.fetch_keyword_theme_snapshot(...)` contains no
+legacy SQL at all — the SQL is in the repository — so it passed cleanly.
+
+Names are what cross a module boundary, so names are what the guard reads now.
+It detects, by import **or** call:
+
+* retired providers (`windsor_pull`, `windsor_mcp`, …);
+* legacy keyword/search-term repository helpers;
+* consumption of a retired local JSON snapshot as current evidence;
+* a keyword-population fallback inside search-term evidence;
+
+plus the original literal-SQL and `write_keywords(` checks. `PRODUCTION_DIRS`
+widened from `scheduler`/`services` to include `analysis`, `api` and `db` — a
+legacy read in those reaches the page by a different route, not a less real one.
+
+Two allowlist entries were added and justified: the guard module itself (it must
+name the markers it detects) and `services/dashboard_campaigns_service.py` (the
+keyword-theme snapshot behind the Campaigns page — one of the four inspected
+non-evidence consumers). The CLI audit and the tests still execute the same
+function.
+
+## 5. The audit answers on the account's calendar or not at all
+
+F1 removed the silent UTC fallback from the sync service. The audit still had
+one: it caught canonical-window resolution errors and used the UTC date.
+
+Around midnight in British Summer Time the account day and the UTC day differ,
+so substituting one for the other moves the staleness boundary by a full day —
+silently. The audit now resolves today through the same
+`analysis.account_time.account_today` the services use. When the effective
+account calendar cannot be resolved it emits `account_calendar_unresolved`,
+reports the audit unavailable, and exits `2`. An audit that refuses to answer is
+visible; a wrong date is not.
+
+## Failure and recovery (F2 additions)
+
+| Symptom | Meaning | Action |
+|---|---|---|
+| `batch_finalization_failed` | rows may be stored; the certificate is not | re-run the sync — the upsert is idempotent |
+| `account_calendar_unresolved` | the account's today could not be resolved | check `tzdata` in the image; no freshness verdict is produced until it is |
+| `legacy_source_active` (indirect) | a production path calls a legacy helper | remove the call, or justify it in the allowlist |
+| `waste_report.json` with `search_term_evidence_available: false` | the run had no search-term evidence | not a finding of zero waste; fix the sync and re-run |

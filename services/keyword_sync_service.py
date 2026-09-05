@@ -31,8 +31,17 @@ from datetime import date, datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
-KEYWORD_FACTS_SOURCE = "google_ads_api"
-KEYWORD_FACTS_DATASET = "keyword_facts"
+# PR-ADS-156: imported from the ONE registry rather than spelled again here.
+# Two spellings of a (source, dataset) pair is precisely the drift that made
+# canonical campaign spend report "never run" for weeks while its table filled
+# up normally — the writer stamped one key and the freshness config read another.
+from services.dataset_keys import (  # noqa: E402
+    KEYWORD_FACTS_DATASET, KEYWORD_FACTS_SOURCE,
+)
+#: PR-ADS-156-F2 §2 — the same reason code the search-term service uses, so an
+#: operator meets one name for one failure whichever dataset raised it.
+BATCH_FINALIZATION_FAILED = "batch_finalization_failed"
+
 BOOTSTRAP_JOB_TYPE = "keyword_bootstrap"
 DEFAULT_INCREMENTAL_DAYS = 30   # today + previous 29 account-local dates
 
@@ -146,19 +155,29 @@ def sync_keyword_daily_facts(date_from: date, date_to: date, sync_type: str, *,
                 "written": 0, "skipped_missing_identity": 0, "skipped_no_date": 0,
                 "db_unavailable": True, "error": msg,
                 "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
-                "currency_incomplete_rows": 0}
+                "currency_incomplete_rows": 0, "verified_empty": False,
+                "external_writes_performed": False,
+                "source": KEYWORD_FACTS_SOURCE, "dataset": KEYWORD_FACTS_DATASET}
 
     try:
         rows = pull_keyword_performance_range(date_from.isoformat(), date_to.isoformat())
     except Exception as exc:  # noqa: BLE001
         logger.error("keyword pull failed (%s → %s): %s", date_from, date_to, exc)
         if batch_id:
+            # PR-ADS-156-F1 §2: explicitly NOT verified-empty, and the counters
+            # stay NULL rather than zero — a failed pull measured nothing, and a
+            # stored zero would later read as "we looked and there was nothing".
             w.finish_sync_batch(batch_id=batch_id, status="failed", row_count=0,
-                                error_message=f"keyword pull failed: {exc}")
+                                error_message=f"keyword pull failed: {exc}",
+                                verified_empty=False)
         return {"ok": False, "fetched": 0, "prepared": 0, "written": 0,
                 "skipped_missing_identity": 0, "skipped_no_date": 0,
                 "db_unavailable": False, "error": str(exc),
-                "date_from": date_from.isoformat(), "date_to": date_to.isoformat()}
+                "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+                # A FAILED pull also returns no rows. It is never verified empty.
+                "currency_incomplete_rows": 0, "verified_empty": False,
+                "external_writes_performed": False,
+                "source": KEYWORD_FACTS_SOURCE, "dataset": KEYWORD_FACTS_DATASET}
 
     stats = w.write_keyword_daily_facts(run_id=run_id, keyword_rows=rows,
                                         sync_batch_id=batch_id or None)
@@ -187,20 +206,69 @@ def sync_keyword_daily_facts(date_from: date, date_to: date, sync_type: str, *,
         else:
             error = "keyword-fact sync did not complete cleanly"
 
-    w.finish_sync_batch(
+    finalized = w.finish_sync_batch(
         batch_id=batch_id,
         status="success" if ok else "failed",
         row_count=stats.get("written", 0),
         # Watermark advances to date_to on success (incl. a verified-empty range);
         # a failed sync must NOT advance the proven-coverage watermark (§6).
         last_source_date=date_to if ok else None,
-        error_message=None if ok else f"{error}: {stats}")
+        error_message=None if ok else f"{error}: {stats}",
+        # PR-ADS-156-F1 §2 — durable evidence of what the pull saw. `row_count`
+        # above is the WRITTEN count; these three say what it was written from,
+        # so "0 rows" stops being one number with three possible meanings.
+        # `verified_empty` is claimed only for a SUCCESSFUL pull that fetched
+        # nothing, and the writer re-checks that claim against these counts
+        # before storing it.
+        verified_empty=bool(ok and fetched == 0),
+        fetched_count=fetched,
+        prepared_count=stats.get("prepared", 0),
+        rejected_count=skipped)
+
+    # PR-ADS-156-F2 §2 — the batch row is where coverage and verified-empty
+    # proof LIVE. If the final update did not land, the rows may well be stored
+    # and nothing durable says so; every reader downstream (freshness, the
+    # audit, `evidence_status`) works from the batch, not from this return
+    # value. Reporting success here is the subtlest false green of all, because
+    # the data would be fine and only the proof of it missing.
+    if ok and not finalized:
+        written_rows = stats.get("written", 0)
+        logger.error(
+            "keyword sync (%s → %s): wrote %d row(s) but the batch could not be "
+            "finalized — coverage was NOT durably recorded",
+            date_from, date_to, written_rows)
+        return {"ok": False, "batch_id": batch_id or None,
+                "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+                "currency_incomplete_rows": 0,
+                "error": f"{BATCH_FINALIZATION_FAILED}: rows may be stored, but "
+                         "the sync batch could not be finalized, so this "
+                         "interval is not certified",
+                **stats,
+                # This run certifies nothing; `rows_possibly_written` says what
+                # may nevertheless be in the table.
+                "written": 0, "rows_possibly_written": written_rows,
+                "batch_finalized": False,
+                "verified_empty": False,
+                "external_writes_performed": False,
+                "source": KEYWORD_FACTS_SOURCE,
+                "dataset": KEYWORD_FACTS_DATASET}
 
     return {"ok": ok, "batch_id": batch_id or None,
             "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
             "currency_incomplete_rows": sum(1 for r in (rows or []) if not r.get("currency_code")),
             "error": error,
-            **stats}
+            **stats,
+            "batch_finalized": bool(finalized),
+            "rows_possibly_written": stats.get("written", 0),
+            # PR-ADS-156 §3: stated, not inferred from `written == 0`. A pull
+            # that failed also wrote nothing, and the two must never read the
+            # same. This is true only when the query SUCCEEDED and the account
+            # had no eligible keyword rows for the interval — a measurement.
+            "verified_empty": bool(ok and fetched == 0),
+            # Read-only against Google Ads; the only writes are local.
+            "external_writes_performed": False,
+            "source": KEYWORD_FACTS_SOURCE,
+            "dataset": KEYWORD_FACTS_DATASET}
 
 
 def sync_recent_keyword_facts(sync_type: str = "daily", *, days: int = DEFAULT_INCREMENTAL_DAYS,

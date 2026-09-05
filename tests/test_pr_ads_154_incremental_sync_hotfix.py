@@ -260,8 +260,21 @@ def test_3b_the_retired_datasets_are_recorded_not_silently_dropped(monkeypatch):
         assert "replaced_by" in record, name
 
     # keywords has NO canonical replacement, and says so rather than pretending.
-    assert sync.RETIRED_DATASETS["windsor/keywords"]["replaced_by"] is None
-    assert "no canonical" in sync.RETIRED_DATASETS["windsor/keywords"]["note"].lower()
+    # PR-ADS-156 inverted this deliberately. The note this asserted against
+    # said "NO canonical Google Ads API incremental persistence path exists for
+    # keywords today"; the path existed in `keyword_sync_service` and only the
+    # call from this run was missing. A registry entry that describes the system
+    # as it used to be is worse than a gap, because nothing prompts a reader to
+    # doubt it — so the replacement is now named.
+    assert (sync.RETIRED_DATASETS["windsor/keywords"]["replaced_by"]
+            == "google_ads_api/keyword_facts")
+    # …and the note now names the canonical path rather than denying one exists.
+    note = sync.RETIRED_DATASETS["windsor/keywords"]["note"].lower()
+    assert "no canonical" not in note
+    assert "keyword_sync_service" in note
+    # Every entry still names its replacement or says plainly there is none.
+    for name, record in sync.RETIRED_DATASETS.items():
+        assert record["replaced_by"] is None or "/" in record["replaced_by"], name
 
 
 def test_3c_retired_never_counts_as_success_or_failure():
@@ -706,7 +719,10 @@ def test_10b_the_report_keys_are_the_labels(monkeypatch):
                  "_sync_gclid_attribution", "_sync_deal_ledger",
                  "_sync_source_classification", "_sync_canonical_spend",
                  "_sync_fx_rates", "_sync_canonical_geo",
-                 "_publish_geo_reconciliation", "_sync_mailchimp"):
+                 "_publish_geo_reconciliation", "_sync_mailchimp",
+                 # PR-ADS-156: the two Platform Evidence datasets now run here
+                 # too, so a healthy-path fixture has to describe them.
+                 "_sync_keyword_facts", "_sync_search_terms"):
         monkeypatch.setattr(sync, name, lambda **k: {"status": "success"})
 
     keys = set(sync.run_daily_incremental_sync(run_reason="test")["datasets"])
@@ -831,7 +847,10 @@ def test_a4_a_successful_run_record_proceeds_and_emits_the_canonical_type(monkey
                  "_sync_gclid_attribution", "_sync_deal_ledger",
                  "_sync_source_classification", "_sync_canonical_spend",
                  "_sync_fx_rates", "_sync_canonical_geo",
-                 "_publish_geo_reconciliation", "_sync_mailchimp"):
+                 "_publish_geo_reconciliation", "_sync_mailchimp",
+                 # PR-ADS-156: the two Platform Evidence datasets now run here
+                 # too, so a healthy-path fixture has to describe them.
+                 "_sync_keyword_facts", "_sync_search_terms"):
         monkeypatch.setattr(sync, name, lambda **k: {"status": "success"})
 
     out = sync.run_daily_incremental_sync(run_reason="test")

@@ -6286,15 +6286,25 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
                 row = cur.fetchone()
                 db_info["click_rows"] = int(row[0]) if row else 0
 
-                # Sync state — include both windsor (REST) and windsor_mcp (MCP import)
-                # to show the most recent successful sync regardless of source.
+                # PR-ADS-156 §8 — CANONICAL sync state.
+                #
+                # This read `source IN ('windsor', 'windsor_mcp')` and nothing
+                # else. Windsor was retired in PR-ADS-154, so the verdict for
+                # the Search Terms page was computed from rows no active path
+                # writes: `sync_state_status` could only ever describe the last
+                # Windsor run, however long ago, while the canonical
+                # `google_ads_api/search_terms` state sat unread beside it.
+                from services.dataset_keys import (  # noqa: PLC0415
+                    SEARCH_TERMS_DATASET, SEARCH_TERMS_SOURCE,
+                )
+
                 cur.execute(
                     "SELECT source, status, last_successful_sync_at "
                     "FROM sync_state "
-                    "WHERE source IN ('windsor', 'windsor_mcp') "
-                    "  AND dataset = 'search_terms' "
+                    "WHERE source = %s AND dataset = %s "
                     "ORDER BY last_successful_sync_at DESC NULLS LAST "
-                    "LIMIT 1"
+                    "LIMIT 1",
+                    (SEARCH_TERMS_SOURCE, SEARCH_TERMS_DATASET),
                 )
                 row = cur.fetchone()
                 if row:
@@ -6302,13 +6312,13 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
                     sync_info["sync_state_status"] = row[1]
                     sync_info["last_successful_sync_at"] = str(row[2]) if row[2] else None
 
-                # Latest sync batch — include both sources, most recent first
+                # Latest CANONICAL sync batch.
                 cur.execute(
                     "SELECT source, status, row_count, started_at "
                     "FROM sync_batches "
-                    "WHERE source IN ('windsor', 'windsor_mcp') "
-                    "  AND dataset = 'search_terms' "
-                    "ORDER BY started_at DESC LIMIT 1"
+                    "WHERE source = %s AND dataset = %s "
+                    "ORDER BY started_at DESC LIMIT 1",
+                    (SEARCH_TERMS_SOURCE, SEARCH_TERMS_DATASET),
                 )
                 row = cur.fetchone()
                 if row:
@@ -6316,6 +6326,27 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
                     sync_info["latest_batch_status"] = row[1]
                     sync_info["latest_batch_row_count"] = row[2]
                     sync_info["latest_batch_started_at"] = str(row[3]) if row[3] else None
+
+                # Historical Windsor / Windsor-MCP rows are still REPORTED —
+                # they are genuine evidence of how this table was first
+                # populated — but under a key that says legacy, so they can
+                # never be read as the current source or decide freshness.
+                cur.execute(
+                    "SELECT source, status, last_successful_sync_at "
+                    "FROM sync_state "
+                    "WHERE source IN ('windsor', 'windsor_mcp') "
+                    "  AND dataset = 'search_terms' "
+                    "ORDER BY last_successful_sync_at DESC NULLS LAST LIMIT 1"
+                )
+                row = cur.fetchone()
+                if row:
+                    sync_info["legacy_sync_state"] = {
+                        "source": row[0],
+                        "status": row[1],
+                        "last_successful_sync_at": str(row[2]) if row[2] else None,
+                        "note": ("historical only — retired provider, never "
+                                 "current freshness"),
+                    }
 
                 # Latest weekly run for verdict logic
                 cur.execute(
@@ -6357,12 +6388,21 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
     next_actions = {
         Verdict.OK: "Search Terms pipeline is healthy. Proceed to Waste Terms/N-Grams confidence.",
         Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT: "Run scheduler (daily or weekly) to trigger first Search Terms sync after deployment.",
-        Verdict.WINDSOR_PULL_EMPTY: "Verify Windsor plan/API access or use MCP payload import path.",
-        Verdict.WINDSOR_PULL_MISSING_SEARCH_TERM_FIELD: "Check Windsor field mapping — search_term field not present in response.",
-        Verdict.FILE_EMPTY: "Check Windsor pull — ads_search_terms.json is empty.",
-        Verdict.DB_WRITE_FAILED: "Check write_search_terms() — Windsor returned rows but DB has none.",
+        # PR-ADS-156 §8: provider-neutral next actions. Every one of these used
+        # to send the operator to Windsor — a source production retired, whose
+        # plan, field mapping and JSON file no longer exist. An instruction
+        # nobody can carry out is worse than none: it looks like a diagnosis.
+        Verdict.SOURCE_PULL_EMPTY: "Verify Google Ads API access and the configured customer ID, then re-run the canonical search-term sync.",
+        Verdict.SOURCE_MISSING_SEARCH_TERM_FIELD: "Check the Google Ads search_term_view field mapping — search_term not present in the response.",
+        Verdict.FILE_EMPTY: "The legacy JSON snapshot is empty. It is not a production source; check the canonical google_ads_api/search_terms sync instead.",
+        Verdict.DB_WRITE_FAILED: "The pull returned rows and none were persisted. Check write_search_terms() and the search_terms table.",
         Verdict.DB_HAS_ROWS_API_EMPTY: "Check /api/search-terms endpoint filtering — DB has rows but API returns empty.",
-        Verdict.FRESH_BUT_EMPTY: "Sync reports success but zero rows found. Check Windsor pull or scheduler logic.",
+        Verdict.FRESH_BUT_EMPTY: "The canonical sync reports success but wrote no rows and did not record a verified-empty interval. Inspect the latest sync batch.",
+        Verdict.VERIFIED_EMPTY: "Healthy: the interval was queried and Google Ads reported no eligible search terms. No action unless rows were expected.",
+        Verdict.CANONICAL_SYNC_FAILED: "The canonical google_ads_api/search_terms batch failed — the interval is NOT covered. Re-run the incremental sync and read its error.",
+        Verdict.CANONICAL_SYNC_NEVER_RUN: "No canonical search-term sync state exists. Run python -m scheduler.incremental_sync.",
+        Verdict.STALE: "Rows exist but the newest source_date is older than the freshness threshold. Re-run the incremental sync.",
+        Verdict.PARTIAL_HISTORY: "Current window is healthy; all-time history is not proven complete. Disclosed, not a failure.",
         Verdict.DB_UNAVAILABLE: "Fix database connection before checking Search Terms pipeline.",
         Verdict.UNKNOWN: "Unable to determine pipeline state. Run verify_search_terms_pipeline.py manually.",
     }

@@ -519,9 +519,15 @@ def test_writer_never_raises_on_bad_cost_micros_and_defaults_source(monkeypatch)
          "cost_micros": "50", "source": "google_ads_api"},
     ])
     assert n == 2                                    # did not raise / abort
-    # Tuple layout: (...,, cost_micros[12], currency_code[13], source_system[14], ...)
+    # Tuple layout, PR-ADS-156-F1 onwards:
+    #   … search_term[7], customer_id[8], spend_usd[9], clicks[10],
+    #   impressions[11], conversions[12], cost_micros[13], currency_code[14],
+    #   source_system[15], sync_batch_id[16]
+    # `customer_id` was inserted after `search_term` when search-term rows
+    # gained the Google Ads account identity, shifting the currency-lineage
+    # fields by one. The assertions below are unchanged in substance.
     by_term = {r[7]: r for r in captured["rows"]}
-    assert by_term["x"][12] is None                  # empty string → None (not a crash)
-    assert by_term["x"][14] == "unknown"             # documented default
-    assert by_term["y"][12] == 50
-    assert by_term["y"][14] == "google_ads_api"
+    assert by_term["x"][13] is None                  # empty string → None (not a crash)
+    assert by_term["x"][15] == "unknown"             # documented default
+    assert by_term["y"][13] == 50
+    assert by_term["y"][15] == "google_ads_api"

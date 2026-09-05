@@ -239,7 +239,24 @@ CREATE TABLE IF NOT EXISTS sync_batches (
     status        TEXT NOT NULL DEFAULT 'running',
     row_count     INTEGER DEFAULT 0,
     error_message TEXT,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+
+    -- PR-ADS-156-F1 §2: durable proof of what the pull actually saw.
+    --
+    -- `row_count` remains the WRITTEN count. Without the three counters beside
+    -- it, "row_count = 0" is ambiguous — it is the same number whether nothing
+    -- was there, nothing could be stored, or the query never really ran.
+    --
+    -- `verified_empty` is that distinction made explicit and durable. It is
+    -- NOT NULL DEFAULT FALSE on purpose: every batch already in the table
+    -- predates the marker, and a historical successful zero-row batch is not
+    -- evidence that Google returned no data — some of them were recorded while
+    -- the evidence pipeline was unavailable. Defaulting to FALSE keeps those
+    -- rows unproven rather than retroactively certifying them.
+    verified_empty BOOLEAN NOT NULL DEFAULT FALSE,
+    fetched_count  INTEGER,
+    prepared_count INTEGER,
+    rejected_count INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_batches_source_dataset ON sync_batches(source, dataset);
@@ -278,6 +295,11 @@ CREATE TABLE IF NOT EXISTS search_terms (
   keyword          TEXT,
   match_type       TEXT,
   search_term      TEXT          NOT NULL,
+
+  -- PR-ADS-156-F1 §5: the Google Ads account this row was observed in.
+  -- Nullable because historical rows do not know it; required on newly
+  -- ingested canonical rows (see the migration at the foot of this file).
+  customer_id      TEXT,
   spend_usd        NUMERIC(10,2) DEFAULT 0,
   clicks           INTEGER       DEFAULT 0,
   impressions      INTEGER       DEFAULT 0,
@@ -1680,6 +1702,93 @@ BEGIN
   IF current_len IS NOT NULL AND current_len < 64 THEN
     ALTER TABLE runs ALTER COLUMN run_type TYPE VARCHAR(64);
     RAISE NOTICE 'runs.run_type widened from VARCHAR(%) to VARCHAR(64)', current_len;
+  END IF;
+END $$;
+
+-- PR-ADS-156-F1 §2: durable verified-empty evidence on existing databases.
+--
+-- `CREATE TABLE IF NOT EXISTS` above only shapes NEW databases; production's
+-- `sync_batches` already exists, so the four columns are added here too. Purely
+-- additive and idempotent — `ADD COLUMN IF NOT EXISTS` is a no-op on a redeploy,
+-- no row is rewritten, and no existing column changes meaning.
+--
+-- Every batch that already exists keeps `verified_empty = FALSE`. That is the
+-- point rather than a side effect: a zero-row success recorded before this
+-- marker existed proves nothing about what Google returned, and inferring
+-- otherwise from `status = 'success' AND row_count = 0` is exactly the
+-- false-green path this column closes.
+ALTER TABLE sync_batches ADD COLUMN IF NOT EXISTS verified_empty BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE sync_batches ADD COLUMN IF NOT EXISTS fetched_count  INTEGER;
+ALTER TABLE sync_batches ADD COLUMN IF NOT EXISTS prepared_count INTEGER;
+ALTER TABLE sync_batches ADD COLUMN IF NOT EXISTS rejected_count INTEGER;
+
+-- PR-ADS-156-F1 §5: the Google Ads account a search-term row was observed in.
+--
+-- `keyword_daily_facts` has carried `customer_id NOT NULL` since PR-ADS-146A;
+-- `search_terms` never did, so "canonical identity" for a search term could not
+-- be checked against the account at all — a row from any account looked the
+-- same as a row from this one.
+--
+-- Added NULLABLE deliberately. Historical rows genuinely do not know their
+-- account, and back-filling a guess would be inventing provenance. They stay
+-- NULL and are reported as historical disclosure (§4); only NEWLY ingested
+-- canonical rows are required to carry it, and the writer rejects them if they
+-- do not. The natural key is unchanged, so no existing row moves.
+ALTER TABLE search_terms ADD COLUMN IF NOT EXISTS customer_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_search_terms_customer_date
+  ON search_terms (customer_id, source_date);
+
+-- PR-ADS-156-F2 §3: put the account into the search-term natural key.
+--
+-- F1 declared `customer_id` part of canonical search-term identity and made the
+-- service reject rows without it — but the UNIQUE index did not contain it. So
+-- the contract said two accounts are distinguishable while the index said they
+-- are the same row: two otherwise identical observations from different Google
+-- Ads customers would silently upsert over each other, and the survivor would
+-- carry whichever account wrote last. That is worse than having no customer
+-- column, because the contract invites people to rely on it.
+--
+-- The index KEEPS ITS NAME. Several places document
+-- `idx_search_terms_unique_fact` as the dedup key by that name — the search-term
+-- repository, the evidence service's provenance block — and renaming it would
+-- leave those labels pointing at an index that no longer exists. Only the
+-- definition changes.
+--
+-- Guarded on the definition rather than on existence, so this rebuilds exactly
+-- once and a redeploy is a no-op. DDL is transactional in PostgreSQL, so the
+-- DROP and CREATE are atomic: there is no window in which the table sits
+-- without a unique key.
+--
+-- Adding a column to a unique key can only make it MORE permissive, so any data
+-- that satisfied the old index satisfies this one — the rebuild cannot fail on
+-- existing rows, and no row is moved, merged or deleted.
+--
+-- COALESCE on every nullable column, matching the old index exactly: two NULLs
+-- are not equal in SQL, so a key without it would treat unlabelled rows as
+-- distinct and let genuine duplicates through. Historical rows keep
+-- `customer_id IS NULL` and therefore collapse to '' here — they remain exactly
+-- as unique as they were before, and no account identity is invented for them.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+         WHERE schemaname = current_schema()
+           AND indexname = 'idx_search_terms_unique_fact'
+           AND indexdef LIKE '%customer_id%') THEN
+    DROP INDEX IF EXISTS idx_search_terms_unique_fact;
+    CREATE UNIQUE INDEX idx_search_terms_unique_fact
+      ON search_terms (
+        source_date,
+        COALESCE(customer_id,    ''),
+        COALESCE(campaign_name,  ''),
+        COALESCE(campaign_id,    ''),
+        COALESCE(ad_group,       ''),
+        COALESCE(keyword,        ''),
+        COALESCE(match_type,     ''),
+        search_term
+      );
+    RAISE NOTICE 'idx_search_terms_unique_fact rebuilt with customer_id';
   END IF;
 END $$;
 """

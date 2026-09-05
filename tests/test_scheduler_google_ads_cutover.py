@@ -122,32 +122,40 @@ class TestReviewFeedbackWindowSemantics:
         assert "campaigns/keywords/geo=30d" in src
         assert "search_terms=60d" in src
 
-    def test_daily_search_terms_pull_uses_two_days(self):
+    def test_daily_search_terms_window_is_a_recovery_window_not_two_days(self):
+        """PR-ADS-156 §4/§5 replaced the 2-day daily pull, and the reason matters.
+
+        This case used to require `pull_search_terms(days_back=2)` in
+        `scheduler/daily.py`, and its sibling required the string "2-day window".
+        Both encoded a window that could not recover a missed run: two days of
+        lookback means one skipped daily run leaves a permanent hole in the
+        durable table, because nothing ever asks for that date again.
+
+        The assertion is inverted rather than dropped. The daily scheduler now
+        holds NO pull or window of its own — persistence goes through the one
+        shared canonical service, whose rolling recovery window is at least a
+        fortnight — so what is asserted here is that the scheduler no longer
+        carries a private window at all.
+        """
+        from services.search_term_sync_service import DEFAULT_LOOKBACK_DAYS
+
         tree = _parse_source("scheduler/daily.py")
-        matching_calls = 0
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if not isinstance(func, ast.Name) or func.id != "pull_search_terms":
-                continue
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                assert node.func.id != "pull_search_terms", (
+                    "scheduler/daily.py must not pull search terms itself — the "
+                    "shared canonical service owns the pull and the window")
 
-            matching_calls += 1
-            days_back_arg = next((kw for kw in node.keywords if kw.arg == "days_back"), None)
-            assert days_back_arg is not None, "daily pull_search_terms call must set days_back"
-            assert isinstance(days_back_arg.value, ast.Constant)
-            assert days_back_arg.value.value == 2, (
-                "scheduler/daily.py must use pull_search_terms(days_back=2)"
-            )
-        assert matching_calls > 0, "pull_search_terms() call not found in scheduler/daily.py"
-
-    def test_daily_window_wording_matches_two_day_window(self):
         src = _read_source("scheduler/daily.py")
+        assert "sync_recent_search_terms" in src
+        # And the shared window is wide enough to recover a missed run.
+        assert DEFAULT_LOOKBACK_DAYS >= 14
+
+    def test_daily_no_longer_describes_a_private_window(self):
+        """The wording followed the window out of this file."""
         literals = _all_string_literals(_parse_source("scheduler/daily.py"))
-        assert all("1-day window" not in literal for literal in literals)
-        assert "# Windsor returned nothing for daily 1-day window." not in src
-        assert "2-day window" in src
-        assert "today-1 through today" in src
+        for stale in ("1-day window", "2-day window", "today-1 through today"):
+            assert all(stale not in literal for literal in literals), stale
 
 
 # ---------------------------------------------------------------------------

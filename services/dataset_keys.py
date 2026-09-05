@@ -134,6 +134,31 @@ CANONICAL_SPEND_DATASET = "canonical_spend"
 CANONICAL_GEO_SOURCE = PLATFORM_EVIDENCE_SOURCE
 CANONICAL_GEO_DATASET = "canonical_geo"
 
+# ── PR-ADS-156: the two Platform Evidence datasets ──────────────────────────
+# Both keys already existed in VALID_SYNC_DATASETS and in the freshness
+# configuration, and both were spelled as string literals at every writer — the
+# schedulers, the freshness config and the diagnostics each wrote
+# `"google_ads_api"` / `"search_terms"` by hand. That is the exact shape of the
+# drift this module exists to prevent: nothing was wrong yet, and nothing would
+# have told us on the day one of them was mistyped.
+#
+# Canonical durable keyword facts (`keyword_daily_facts`) — the table Keyword
+# Evidence reads. NOT the legacy `keywords` snapshot, which is a different
+# dataset key below and is never authoritative for evidence.
+KEYWORD_FACTS_SOURCE = PLATFORM_EVIDENCE_SOURCE
+KEYWORD_FACTS_DATASET = "keyword_facts"
+
+# Canonical durable search terms (`search_terms`).
+SEARCH_TERMS_SOURCE = PLATFORM_EVIDENCE_SOURCE
+SEARCH_TERMS_DATASET = "search_terms"
+
+# The LEGACY per-run keyword snapshot (`keywords`). Registered because live
+# non-evidence surfaces still read it (campaign drill-down previews, keyword
+# themes, the keyword-review queue), so its rows must keep resolving. It is
+# never the source of a Keyword Evidence figure.
+LEGACY_KEYWORD_SNAPSHOT_SOURCE = PLATFORM_EVIDENCE_SOURCE
+LEGACY_KEYWORD_SNAPSHOT_DATASET = "keywords"
+
 # The durable scope key for canonical geo run/checkpoint state
 # (google_ads_geo_sync_state.scope). Not a sync_batches key — named here so a
 # second geo dataset cannot quietly reuse the same state row.
@@ -168,6 +193,9 @@ __all__ = [
     "is_registered_pair",
     "CANONICAL_SPEND_SOURCE", "CANONICAL_SPEND_DATASET",
     "CANONICAL_GEO_SOURCE", "CANONICAL_GEO_DATASET", "CANONICAL_GEO_SCOPE",
+    "KEYWORD_FACTS_SOURCE", "KEYWORD_FACTS_DATASET",
+    "SEARCH_TERMS_SOURCE", "SEARCH_TERMS_DATASET",
+    "LEGACY_KEYWORD_SNAPSHOT_SOURCE", "LEGACY_KEYWORD_SNAPSHOT_DATASET",
     "FX_SOURCE", "FX_DAILY_RATES_DATASET",
     "DEAL_LEDGER_SOURCE", "DEAL_LEDGER_DATASET",
     "SOURCE_CLASSIFICATION_SOURCE", "SOURCE_CLASSIFICATION_DATASET",

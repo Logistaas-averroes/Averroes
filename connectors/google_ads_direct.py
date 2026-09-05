@@ -259,6 +259,10 @@ def fetch_search_terms(start_date: str, end_date: str) -> list:
         cost_micros = row.metrics.cost_micros
         result.append({
             "date": row.segments.date,
+            # PR-ADS-156-F1 §5: the account the query ran against. Reported per
+            # row so the writer stores the identity that was actually queried,
+            # rather than a later reader assuming the currently-configured one.
+            "customer_id": customer_id,
             "campaign_id": row.campaign.id,
             "campaign_name": row.campaign.name,
             "ad_group_id": row.ad_group.id,

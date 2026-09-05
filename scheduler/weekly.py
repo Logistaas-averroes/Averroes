@@ -33,23 +33,32 @@ def run_weekly_report():
 
     try:
         # Step 1: Pull Google Ads data (30-day window)
+        #
+        # PR-ADS-156-F1 §6: search terms are NOT pulled here. This step used to
+        # call `pull_search_terms(days_back=60)` and then, ~150 lines later, the
+        # canonical service pulled the same 60 days again — two Google Ads
+        # queries per weekly run for one dataset, and two answers that nothing
+        # reconciled. The analysis below now reads the rows the canonical sync
+        # actually persisted, so the snapshot and the database describe the same
+        # observation by construction rather than by coincidence.
         print(
             "Step 1/6: Pulling Google Ads data via direct Google Ads API "
-            "(campaigns/keywords/geo=30d, search_terms=60d)..."
+            "(campaigns/keywords/geo=30d; search_terms=60d, pulled once by the "
+            "canonical service below)..."
         )
         from connectors.google_ads_source import (
             pull_campaign_performance,
-            pull_search_terms,
             pull_keyword_performance,
             pull_geo_performance,
             save_output as google_ads_save,
         )
         campaigns = pull_campaign_performance(days_back=30)
-        search_terms = pull_search_terms(days_back=60)
         keywords = pull_keyword_performance(days_back=30)
         geos = pull_geo_performance(days_back=30)
-        google_ads_save(campaigns, search_terms, keywords, geos)
-        print(f"  Google Ads API pull complete — {len(campaigns)} campaign rows, {len(search_terms)} search terms")
+        # `None` for search terms leaves data/ads_search_terms.json untouched
+        # until the canonical sync below has actually persisted this week's rows.
+        google_ads_save(campaigns, None, keywords, geos)
+        print(f"  Google Ads API pull complete — {len(campaigns)} campaign rows")
 
         # Step 2: Pull HubSpot CRM data (30-day window)
         print("Step 2/6: Pulling HubSpot CRM data (30 days)...")
@@ -184,72 +193,74 @@ def run_weekly_report():
             log.error("[weekly] DB write keywords failed: %s", db_exc)
 
         # Write search term rows to database
+        #
+        # PR-ADS-156 §5: persistence goes through the ONE shared canonical
+        # search-term service. What used to be here was the second of three
+        # inline copies of pull → batch → write → judge → finish, and it was the
+        # copy that recorded a zero-row pull as `success` while writing the error
+        # message "evidence pipeline unavailable" — so a legitimately quiet week
+        # and a broken connector left the same durable record.
+        #
+        # The 60-day weekly recovery window is preserved: different triggers may
+        # ask for different windows, they simply no longer carry different rules
+        # for what a successful sync means.
+        #
+        # PR-ADS-156-F1 §6: this is the ONLY search-term pull in the weekly run.
+        # `include_rows=True` returns the rows that were persisted, and they are
+        # adopted only when the sync reports ok — everything downstream (the
+        # JSON snapshot, waste detection, the n-gram findings in the report)
+        # then describes rows that are genuinely in the database. Analysis over
+        # transient rows is analysis nobody can audit afterwards.
+        search_terms = []
+        search_terms_available = False
         try:
-            st_batch_id = None
-            window_end = datetime.utcnow().date()
-            window_start = window_end - timedelta(days=59)
-            st_batch_id = db_writers.start_sync_batch(
-                source="google_ads_api",
-                dataset="search_terms",
-                sync_type="weekly",
-                date_from=window_start,
-                date_to=window_end,
-                run_id=run_id,
+            from services.search_term_sync_service import (  # noqa: PLC0415
+                sync_recent_search_terms,
             )
-
-            st_count = db_writers.write_search_terms(
-                run_id=run_id,
-                search_term_rows=search_terms,
-                sync_batch_id=st_batch_id or None,
-            )
-
-            # PR-ADS-065: Distinguish empty pull from write failure
-            fetched_count = len(search_terms or [])
-            if fetched_count == 0:
-                # Windsor returned nothing — record success with row_count=0 and warning message.
-                if st_batch_id:
-                    db_writers.finish_sync_batch(
-                        batch_id=st_batch_id,
-                        status="success",
-                        row_count=0,
-                        last_source_date=window_end,
-                        error_message=(
-                            "Google Ads API returned zero search-term rows for last 60 days; "
-                            "evidence pipeline unavailable."
-                        ),
-                    )
-                log.warning(
-                    "[weekly] Google Ads API search-term pull returned 0 rows; "
-                    "marking sync as success with row_count=0"
-                )
-            elif not persistence_succeeded(search_terms, st_count):
-                raise RuntimeError(
-                    f"Weekly search_terms persistence failed: "
-                    f"fetched {fetched_count} rows but wrote {st_count}"
-                )
+            st = sync_recent_search_terms("weekly", days=60, run_id=run_id,
+                                          include_rows=True)
+            if st.get("ok"):
+                search_terms = st.get("rows") or []
+                search_terms_available = True
+                log.info("[weekly] Canonical search-term sync: %s", {
+                    k: st.get(k) for k in
+                    ("date_from", "date_to", "fetched", "written", "verified_empty")})
             else:
-                last_source_date = max_source_date(search_terms, fallback_date=window_end)
-                if st_batch_id:
-                    db_writers.finish_sync_batch(
-                        batch_id=st_batch_id,
-                        status="success",
-                        row_count=st_count,
-                        last_source_date=last_source_date,
-                    )
-                log.info("[weekly] Wrote %d search term rows to database", st_count)
+                log.error(
+                    "[weekly] Canonical search-term sync failed (%s) — "
+                    "search-term analysis is unavailable for this run",
+                    st.get("error"))
         except Exception as db_exc:  # noqa: BLE001
-            if st_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=st_batch_id,
-                    status="failed",
-                    error_message=str(db_exc)[:1000],
-                )
             log.error("[weekly] DB write search terms failed: %s", db_exc)
 
+        # The local JSON snapshot is written from the SAME rows, and only when
+        # they were persisted. Overwriting last week's snapshot with an empty
+        # list because this week's pull failed would destroy the only remaining
+        # copy of the previous observation.
+        if search_terms_available:
+            google_ads_save(None, search_terms, None, None)
+            print(f"  Snapshot saved — {len(search_terms)} persisted search terms")
+        else:
+            log.warning("[weekly] search-term snapshot not refreshed — the "
+                        "canonical sync did not persist rows this run")
+            print("  Search-term snapshot NOT refreshed (canonical sync failed)")
+
         # Step 3: Waste detection
+        #
+        # PR-ADS-156-F2 §1: the canonical rows are PASSED IN. This step used to
+        # call `run_waste_detection()` with no arguments, and that function
+        # reloaded data/ads_search_terms.json itself — so on a failed sync it
+        # analysed the snapshot F1 had deliberately preserved and published the
+        # findings under this run's timestamp. Protecting the file from being
+        # destroyed and then reusing it as current evidence is the same untruth
+        # from the other side.
         print("Step 3/6: Running waste detection...")
         from analysis.core import run_waste_detection
-        waste_output = run_waste_detection()
+        waste_output = run_waste_detection(
+            search_terms,
+            search_term_evidence_available=search_terms_available)
+        if not search_terms_available:
+            print("  → search-term waste analysis unavailable (canonical sync failed)")
 
         # Write waste terms to database.
         # PR-ADS-153F: wrapped in a real sync batch. `waste_terms` has always had
@@ -263,12 +274,24 @@ def run_weekly_report():
             run_id=run_id,
         )
         try:
-            if run_id is not None and waste_output:
-                db_writers.write_waste_terms(run_id, waste_output.get("confirmed_waste_items", []))
-            if waste_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=waste_batch_id, status="success",
-                    row_count=len((waste_output or {}).get("confirmed_waste_items", [])))
+            if not search_terms_available:
+                # PR-ADS-156-F2 §1: no successful current batch from evidence
+                # that does not exist. A `success` here would advance the
+                # waste_terms watermark over an interval nobody measured, and
+                # the freshness page would show the dataset as current.
+                if waste_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=waste_batch_id, status="failed",
+                        error_message="canonical search-term evidence unavailable "
+                                      "— no waste analysis was performed for this "
+                                      "interval")
+            else:
+                if run_id is not None and waste_output:
+                    db_writers.write_waste_terms(run_id, waste_output.get("confirmed_waste_items", []))
+                if waste_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=waste_batch_id, status="success",
+                        row_count=len((waste_output or {}).get("confirmed_waste_items", [])))
         except Exception as db_exc:  # noqa: BLE001
             log.error("[weekly] DB write after Step 3 failed: %s", db_exc)
             if waste_batch_id:
@@ -427,7 +450,15 @@ def run_weekly_report():
         print("Step 6/6: Generating weekly report (deterministic advisor)...")
         from analysis.advisor import generate_weekly_report
         from analysis.rule_advisor import compute_ngram_findings
-        ngram_findings = compute_ngram_findings(search_terms)
+        # PR-ADS-156-F1 §6: n-grams over the PERSISTED rows, or not at all.
+        # `None` reaches the report as "unavailable"; an empty list would reach
+        # it as "no wasteful n-grams this week", which is a different claim and
+        # one this run has no evidence for.
+        ngram_findings = (compute_ngram_findings(search_terms)
+                          if search_terms_available else None)
+        if not search_terms_available:
+            log.warning("[weekly] n-gram findings omitted — the canonical "
+                        "search-term sync did not persist rows this run")
         report_path = generate_weekly_report(ngram_data=ngram_findings)
 
         print(f"\n{'='*60}")

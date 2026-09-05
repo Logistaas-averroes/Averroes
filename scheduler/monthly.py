@@ -43,23 +43,32 @@ def run_monthly_report():
     run_id = None
 
     # Step 1: Pull Google Ads data (30-day window)
+    #
+    # PR-ADS-156-F1 §6: search terms are NOT pulled here. This step used to call
+    # `pull_search_terms(days_back=30)` and the canonical service then pulled the
+    # same 30 days again later in the run — two Google Ads queries for one
+    # dataset, and two answers nothing reconciled. The analysis further down now
+    # reads the rows the canonical sync persisted, so the snapshot and the
+    # database describe the same observation by construction.
     log.info("Step 1/6 START: Pulling Google Ads data via direct Google Ads API (30 days)...")
+    search_terms = []
+    search_terms_available = False
     try:
         from connectors.google_ads_source import (
             pull_campaign_performance,
-            pull_search_terms,
             pull_keyword_performance,
             pull_geo_performance,
             save_output as google_ads_save,
         )
         campaigns = pull_campaign_performance(days_back=30)
-        search_terms = pull_search_terms(days_back=30)
         keywords = pull_keyword_performance(days_back=30)
         geos = pull_geo_performance(days_back=30)
-        google_ads_save(campaigns, search_terms, keywords, geos)
+        # `None` leaves data/ads_search_terms.json alone until the canonical
+        # sync below has actually persisted this month's rows.
+        google_ads_save(campaigns, None, keywords, geos)
         log.info(
             f"Step 1/6 END: Google Ads API pull complete — "
-            f"{len(campaigns)} campaign rows, {len(search_terms)} search terms"
+            f"{len(campaigns)} campaign rows"
         )
     except Exception as e:
         log.error(f"Step 1/6 FAILED: Google Ads API pull error — {e}")
@@ -209,46 +218,36 @@ def run_monthly_report():
             log.error("DB write keywords failed: %s", db_exc)
 
         # Write search term rows to database (non-fatal)
-        # Google Ads API honours the requested window (days_back=30) directly.
+        #
+        # PR-ADS-156 §5: persistence goes through the ONE shared canonical
+        # search-term service — the third inline copy of pull → batch → write →
+        # judge → finish is gone. The 30-day monthly recovery window is
+        # preserved; only the rules are now shared.
+        #
+        # PR-ADS-156-F1 §6: and this is the ONLY search-term pull in the monthly
+        # run. `include_rows=True` returns what was persisted; the rows are
+        # adopted only when the sync reports ok, so the snapshot and the n-gram
+        # findings never describe rows the database does not hold.
         try:
-            st_batch_id = None
-            window_end = datetime.utcnow().date()
-            # days_back=30 means 30 inclusive days (today − 29 through today).
-            window_start = window_end - timedelta(days=29)
-            st_batch_id = db_writers.start_sync_batch(
-                source="google_ads_api",
-                dataset="search_terms",
-                sync_type="monthly",
-                date_from=window_start,
-                date_to=window_end,
-                run_id=run_id,
+            from services.search_term_sync_service import (  # noqa: PLC0415
+                sync_recent_search_terms,
             )
-            st_count = db_writers.write_search_terms(
-                run_id=run_id,
-                search_term_rows=search_terms,
-                sync_batch_id=st_batch_id or None,
-            )
-            if not persistence_succeeded(search_terms, st_count):
-                raise RuntimeError(
-                    f"Monthly search_terms persistence failed or wrote 0 rows "
-                    f"for non-empty fetch ({len(search_terms or [])} rows)"
-                )
-            last_source_date = max_source_date(search_terms, fallback_date=window_end)
-            if st_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=st_batch_id,
-                    status="success",
-                    row_count=st_count,
-                    last_source_date=last_source_date,
-                )
-            log.info("Wrote %d search term rows to database (run_id=%s)", st_count, run_id)
+            st = sync_recent_search_terms("monthly", days=30, run_id=run_id,
+                                          include_rows=True)
+            if st.get("ok"):
+                search_terms = st.get("rows") or []
+                search_terms_available = True
+                log.info("Canonical search-term sync (run_id=%s): %s", run_id, {
+                    k: st.get(k) for k in
+                    ("date_from", "date_to", "fetched", "written", "verified_empty")})
+                google_ads_save(None, search_terms, None, None)
+            else:
+                log.error(
+                    "Canonical search-term sync failed (run_id=%s): %s — "
+                    "search-term analysis is unavailable for this run and the "
+                    "previous snapshot is left in place",
+                    run_id, st.get("error"))
         except Exception as db_exc:  # noqa: BLE001
-            if st_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=st_batch_id,
-                    status="failed",
-                    error_message=str(db_exc)[:1000],
-                )
             log.error("DB write search terms failed: %s", db_exc)
 
     except Exception as e:
@@ -288,9 +287,20 @@ def run_monthly_report():
     # Step 3: Waste detection
     log.info("Step 3/6 START: Running waste detection...")
     try:
+        # PR-ADS-156-F2 §1: the canonical rows are PASSED IN. This step used to
+        # call `run_waste_detection()` with no arguments, and that function
+        # reloaded data/ads_search_terms.json itself — so on a failed sync it
+        # analysed the snapshot F1 had deliberately preserved and published the
+        # findings under this run's timestamp.
         from analysis.core import run_waste_detection
-        waste_output = run_waste_detection()
-        log.info("Step 3/6 END: Waste detection complete")
+        waste_output = run_waste_detection(
+            search_terms,
+            search_term_evidence_available=search_terms_available)
+        if search_terms_available:
+            log.info("Step 3/6 END: Waste detection complete")
+        else:
+            log.warning("Step 3/6 END: search-term waste analysis unavailable — "
+                        "the canonical sync did not persist rows this run")
 
         # Write waste terms to database.
         # PR-ADS-153F: wrapped in a real `(analysis, waste_terms)` sync batch —
@@ -302,12 +312,23 @@ def run_monthly_report():
             run_id=run_id,
         )
         try:
-            if run_id is not None and waste_output:
-                db_writers.write_waste_terms(run_id, waste_output.get("confirmed_waste_items", []))
-            if waste_batch_id:
-                db_writers.finish_sync_batch(
-                    batch_id=waste_batch_id, status="success",
-                    row_count=len((waste_output or {}).get("confirmed_waste_items", [])))
+            if not search_terms_available:
+                # PR-ADS-156-F2 §1: no successful current batch from evidence
+                # that does not exist — a `success` here would advance the
+                # waste_terms watermark over an interval nobody measured.
+                if waste_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=waste_batch_id, status="failed",
+                        error_message="canonical search-term evidence unavailable "
+                                      "— no waste analysis was performed for this "
+                                      "interval")
+            else:
+                if run_id is not None and waste_output:
+                    db_writers.write_waste_terms(run_id, waste_output.get("confirmed_waste_items", []))
+                if waste_batch_id:
+                    db_writers.finish_sync_batch(
+                        batch_id=waste_batch_id, status="success",
+                        row_count=len((waste_output or {}).get("confirmed_waste_items", [])))
         except Exception as db_exc:  # noqa: BLE001
             log.error("DB write after Step 3 failed: %s", db_exc)
             if waste_batch_id:
@@ -491,7 +512,14 @@ def run_monthly_report():
     try:
         from analysis.advisor import generate_monthly_report
         from analysis.rule_advisor import compute_ngram_findings
-        ngram_findings = compute_ngram_findings(search_terms)
+        # PR-ADS-156-F1 §6: n-grams over the PERSISTED rows, or not at all.
+        # `None` reaches the report as "unavailable"; an empty list would reach
+        # it as "no wasteful n-grams this month" — a claim this run cannot make.
+        ngram_findings = (compute_ngram_findings(search_terms)
+                          if search_terms_available else None)
+        if not search_terms_available:
+            log.warning("n-gram findings omitted — the canonical search-term "
+                        "sync did not persist rows this run")
         report_path = generate_monthly_report(ngram_data=ngram_findings)
     except Exception as e:
         log.error(f"Step 6/6 FAILED: Advisor error — {e}")
