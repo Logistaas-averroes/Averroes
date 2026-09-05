@@ -34,9 +34,10 @@ campaigns can never collide (PR-ADS-153D §24).
 
 Why ad group is evidence, not identity
 --------------------------------------
-The canonical FACT key includes ad group, keyword and match type
-(``idx_search_terms_unique_fact``) — that is the grain of one ingested row, and
-it is what makes ingestion idempotent. The durable REVIEW identity is
+The canonical FACT key includes the Google Ads account, ad group, keyword and
+match type (``idx_search_terms_unique_fact``; ``customer_id`` added by
+PR-ADS-156-F2/F3) — that is the grain of one ingested row, and it is what makes
+ingestion idempotent. The durable REVIEW identity is
 deliberately coarser, because it is the thing a human reviews and acts on:
 
   * PR-ADS-153D §17 defines the action object as search term + campaign;

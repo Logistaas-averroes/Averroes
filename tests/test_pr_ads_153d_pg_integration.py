@@ -189,6 +189,11 @@ def _fact(term="freight forwarder jobs", *, source_date="2026-07-10",
         "keyword": keyword,
         "match_type": match_type,
         "search_term": term,
+        # PR-ADS-156-F3 §2: canonical rows carry the ACCOUNT. Without it these
+        # rows fall outside the account-scoped canonical population, which is
+        # the correct new behaviour — a fixture that omits it is describing
+        # pre-cutover history, not the facts these tests are about.
+        "customer_id": "555",
         "spend_usd": spend,
         "clicks": clicks,
         "impressions": impressions,

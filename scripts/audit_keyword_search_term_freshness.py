@@ -112,6 +112,24 @@ V_FRESHNESS_KEY_MISMATCH = "freshness_key_mismatch"
 #: a confident wrong answer rather than a visible failure.
 V_ACCOUNT_CALENDAR_UNRESOLVED = "account_calendar_unresolved"
 
+# ── PR-ADS-156-F3 §5 — the cutover vocabulary ───────────────────────────────
+#: The configured Google Ads account could not be resolved, so there is no
+#: population to certify. Not "everything" — nothing.
+V_ACCOUNT_NOT_CONFIGURED = "google_ads_customer_not_configured"
+
+#: An EXACT pre-cutover twin still coexists with its complete replacement. The
+#: distinct failure F3 exists to catch: ingestion is correct, readers may even
+#: be filtering it out, and the table still holds two rows for one observation.
+#: Blocking, because reader filtering must never be able to certify a cutover
+#: that did not happen.
+V_NULL_CUSTOMER_TWIN = "pre_cutover_null_customer_twin"
+
+#: A null-account canonical-provenance row inside the certified interval with NO
+#: complete replacement. Genuinely historical. Disclosed, never counted, never
+#: repaired here, and never given an invented account id — reporting it as a
+#: violation would make this command permanently red over rows nobody can fix.
+D_UNMATCHED_NULL_CUSTOMER = "unmatched_null_customer_rows_excluded"
+
 #: Reported, never counted as a violation. An unproven historical range is a
 #: disclosure about coverage; treating it as a failure would make the command
 #: permanently red for a dataset whose current window is perfectly healthy, and
@@ -335,6 +353,64 @@ _SEARCH_TERM_DUPLICATES = """
 _CANONICAL_SCOPE = ("COALESCE(source_system, '') = %s AND source_date >= %s "
                     "AND source_date <= %s")
 
+# PR-ADS-156-F3 §5: the certified population is ACCOUNT-SCOPED. The provenance
+# scope above is what the first production audit measured, and it was right to
+# fail — but after F3 scopes every reader by account, provenance alone would
+# stop being enough: the 16,100 null-account twins would simply fall outside
+# `current`, `rows_missing_identity` would read 0, and the audit would certify a
+# cutover that had not happened. Reader filtering must never be able to hide a
+# failed supersession, so the audit measures BOTH populations and reports them
+# under different names.
+_ACCOUNT_SCOPE = _CANONICAL_SCOPE + " AND customer_id = ANY(%s)"
+
+# An EXACT pre-cutover twin: a null-account row of canonical provenance that has
+# a complete replacement sharing every other natural-key component. This is the
+# shape supersession removes, and its continued existence is the proof that the
+# cutover is incomplete — whatever the readers show.
+_SEARCH_TERM_TWINS = """
+    SELECT COUNT(*)::int
+      FROM search_terms AS twin
+     WHERE twin.customer_id IS NULL
+       AND COALESCE(twin.source_system, '') = %s
+       AND twin.source_date >= %s
+       AND twin.source_date <= %s
+       AND EXISTS (
+           SELECT 1 FROM search_terms AS canonical
+            WHERE canonical.customer_id = ANY(%s)
+              AND COALESCE(canonical.source_system, '') = %s
+              AND canonical.source_date = twin.source_date
+              AND COALESCE(canonical.campaign_name, '') = COALESCE(twin.campaign_name, '')
+              AND COALESCE(canonical.campaign_id,   '') = COALESCE(twin.campaign_id,   '')
+              AND COALESCE(canonical.ad_group,      '') = COALESCE(twin.ad_group,      '')
+              AND COALESCE(canonical.keyword,       '') = COALESCE(twin.keyword,       '')
+              AND COALESCE(canonical.match_type,    '') = COALESCE(twin.match_type,    '')
+              AND canonical.search_term = twin.search_term
+              AND canonical.id <> twin.id)
+"""
+
+# A null-account canonical-provenance row inside the interval with NO complete
+# replacement. Genuinely historical: disclosed, never counted, never repaired
+# here, and never given an invented account id. Reporting these as violations
+# would make the audit permanently red for rows nobody can fix.
+_SEARCH_TERM_ORPHANS = """
+    SELECT COUNT(*)::int
+      FROM search_terms AS twin
+     WHERE twin.customer_id IS NULL
+       AND twin.source_date >= %s
+       AND twin.source_date <= %s
+       AND NOT EXISTS (
+           SELECT 1 FROM search_terms AS canonical
+            WHERE canonical.customer_id = ANY(%s)
+              AND canonical.source_date = twin.source_date
+              AND COALESCE(canonical.campaign_name, '') = COALESCE(twin.campaign_name, '')
+              AND COALESCE(canonical.campaign_id,   '') = COALESCE(twin.campaign_id,   '')
+              AND COALESCE(canonical.ad_group,      '') = COALESCE(twin.ad_group,      '')
+              AND COALESCE(canonical.keyword,       '') = COALESCE(twin.keyword,       '')
+              AND COALESCE(canonical.match_type,    '') = COALESCE(twin.match_type,    '')
+              AND canonical.search_term = twin.search_term
+              AND canonical.id <> twin.id)
+"""
+
 
 def _measure(cur, measures_sql: str, dup_sql: str, scope: str,
              params: tuple) -> dict:
@@ -360,7 +436,8 @@ def _by_source_system(cur, table: str) -> list[dict]:
 
 
 def _data_facts(cur, table: str, measures_sql: str, dup_sql: str,
-                cert_from: date | None, cert_to: date | None) -> dict:
+                cert_from: date | None, cert_to: date | None,
+                customer_ids: list | None = None) -> dict:
     """Everything the table can say about itself, split into what this run
     CERTIFIES and what it merely DISCLOSES.
 
@@ -375,9 +452,23 @@ def _data_facts(cur, table: str, measures_sql: str, dup_sql: str,
     """
     if cert_from and cert_to:
         params = (CANONICAL_PROVENANCE, cert_from, cert_to)
-        current = _measure(cur, measures_sql, dup_sql, _CANONICAL_SCOPE, params)
-        historical = _measure(cur, measures_sql, dup_sql,
-                              f"NOT ({_CANONICAL_SCOPE})", params)
+        # PR-ADS-156-F3 §5 — `current` is now ACCOUNT-scoped, and the
+        # provenance-only population is measured beside it as
+        # `interval_canonical_provenance`. Keeping only the first would let the
+        # narrower filter hide a failed supersession; keeping only the second
+        # would blame this account for another's rows.
+        if customer_ids:
+            account_params = (*params, list(customer_ids))
+            current = _measure(cur, measures_sql, dup_sql, _ACCOUNT_SCOPE,
+                               account_params)
+            historical = _measure(cur, measures_sql, dup_sql,
+                                  f"NOT ({_ACCOUNT_SCOPE})", account_params)
+        else:
+            account_params = params
+            current = _measure(cur, measures_sql, dup_sql, _CANONICAL_SCOPE, params)
+            historical = _measure(cur, measures_sql, dup_sql,
+                                  f"NOT ({_CANONICAL_SCOPE})", params)
+        provenance = _measure(cur, measures_sql, dup_sql, _CANONICAL_SCOPE, params)
         inside = _one(cur, f"SELECT COUNT(*)::int FROM {table} "
                            f"WHERE source_date >= %s AND source_date <= %s "
                            f"  AND COALESCE(source_system, '') <> %s",
@@ -388,6 +479,7 @@ def _data_facts(cur, table: str, measures_sql: str, dup_sql: str,
         # historical until a successful canonical batch says otherwise — which
         # is a truthful "unknown", not a silent pass.
         current = _measure(cur, measures_sql, dup_sql, "FALSE", ())
+        provenance = _measure(cur, measures_sql, dup_sql, "FALSE", ())
         historical = _measure(cur, measures_sql, dup_sql, "TRUE", ())
         historical["rows_inside_interval_non_canonical"] = 0
 
@@ -402,18 +494,39 @@ def _data_facts(cur, table: str, measures_sql: str, dup_sql: str,
         # §1 — the newest stored row. Reported, and NOT a freshness signal.
         "data_last_seen": _iso(total[2]) if total else None,
         "current": current,
+        # Every canonical-provenance row in the interval, account or not. The
+        # population the cutover has to be complete over.
+        "interval_canonical_provenance": provenance,
         "historical": historical,
     }
 
 
-def _keyword_data_facts(cur, cert_from, cert_to) -> dict:
+def _keyword_data_facts(cur, cert_from, cert_to, customer_ids=None) -> dict:
     return _data_facts(cur, "keyword_daily_facts", _KEYWORD_MEASURES,
-                       _KEYWORD_DUPLICATES, cert_from, cert_to)
+                       _KEYWORD_DUPLICATES, cert_from, cert_to, customer_ids)
 
 
-def _search_term_data_facts(cur, cert_from, cert_to) -> dict:
-    return _data_facts(cur, "search_terms", _SEARCH_TERM_MEASURES,
-                       _SEARCH_TERM_DUPLICATES, cert_from, cert_to)
+def _search_term_data_facts(cur, cert_from, cert_to, customer_ids=None) -> dict:
+    """Search-term facts, plus the two cutover counts §5 requires.
+
+    ``null_customer_twins`` is the blocking one: a pre-cutover row that still
+    coexists with its complete replacement. ``unmatched_null_customer_rows`` is
+    the disclosure: a null-account row with nothing to replace it, which is
+    history and must never be repaired, counted, or given an invented account.
+    """
+    facts = _data_facts(cur, "search_terms", _SEARCH_TERM_MEASURES,
+                        _SEARCH_TERM_DUPLICATES, cert_from, cert_to, customer_ids)
+    facts["null_customer_twins"] = 0
+    facts["unmatched_null_customer_rows"] = 0
+    if cert_from and cert_to and customer_ids:
+        row = _one(cur, _SEARCH_TERM_TWINS,
+                   (CANONICAL_PROVENANCE, cert_from, cert_to,
+                    list(customer_ids), CANONICAL_PROVENANCE))
+        facts["null_customer_twins"] = int(row[0]) if row else 0
+        row = _one(cur, _SEARCH_TERM_ORPHANS,
+                   (cert_from, cert_to, list(customer_ids)))
+        facts["unmatched_null_customer_rows"] = int(row[0]) if row else 0
+    return facts
 
 
 def _legacy_facts(cur) -> dict:
@@ -548,17 +661,56 @@ def _assess(name: str, table: str, source: str, dataset: str,
             "verified-empty marker — 'success with row_count 0' is not proof "
             "that the source returned nothing")
 
+    # ── The cutover (PR-ADS-156-F3 §5) ──────────────────────────────────────
+    #
+    # Identity is judged over every CANONICAL-PROVENANCE row in the interval,
+    # not over the account-scoped subset. Judging only the subset would let the
+    # narrower filter certify a cutover that never completed: the null-account
+    # rows would simply fall outside `current`, the count would read 0, and the
+    # audit would agree with readers that had merely stopped looking at them.
+    provenance = data.get("interval_canonical_provenance") or current
+    twins = data.get("null_customer_twins") or 0
+    unmatched = data.get("unmatched_null_customer_rows") or 0
+
+    # Three causes, three codes, no double-reporting. A row missing identity
+    # because its twin was never superseded is a SUPERSESSION failure; a row
+    # missing identity because it predates the account column and has no
+    # replacement is HISTORY. What is left over is the genuinely broken case:
+    # a row this account's own sync produced without full identity, which is
+    # the only one of the three that current ingestion could still be causing.
+    residual = max(0, (provenance.get("rows_missing_identity") or 0)
+                   - twins - unmatched)
+    if residual:
+        add(V_MISSING_IDENTITY,
+            f"{residual} canonical-provenance row(s) in the certified interval "
+            "lack the immutable identity the natural key is built from "
+            "(account, campaign, ad group, term), and are explained by neither "
+            "an un-superseded pre-cutover twin nor unmatched history")
+
+    if twins:
+        add(V_NULL_CUSTOMER_TWIN,
+            f"{twins} pre-cutover row(s) with no account still coexist with an "
+            "EXACT complete replacement in the certified interval — the "
+            "supersession has not run over them, so the table holds two rows "
+            "for one observation whatever the readers display")
+
+    if unmatched:
+        disclosures.append({
+            "code": D_UNMATCHED_NULL_CUSTOMER,
+            "dataset": f"{source}/{dataset}",
+            "detail": (
+                f"{unmatched} row(s) in the certified interval carry no account "
+                "and have no complete replacement. They are history: excluded "
+                "from every canonical metric, never relabelled, never repaired "
+                "here, and never given an invented account identity."),
+        })
+
     # ── Certified-interval data quality (§4: current rows only) ─────────────
     if current.get("duplicate_natural_key_groups"):
         add(V_DUPLICATE_NATURAL_KEY,
             f"{current['duplicate_natural_key_groups']} natural-key group(s) in "
             "the certified interval hold more than one row — overlapping syncs "
             "are duplicating instead of upserting")
-    if current.get("rows_missing_identity"):
-        add(V_MISSING_IDENTITY,
-            f"{current['rows_missing_identity']} canonical row(s) in the "
-            "certified interval lack the immutable identity the natural key is "
-            "built from (account, campaign, ad group, term)")
     if current.get("rows_missing_currency_provenance"):
         add(V_UNPROVEN_CURRENCY,
             f"{current['rows_missing_currency_provenance']} canonical row(s) in "
@@ -678,14 +830,15 @@ def run_audit(*, stale_after_days: int = DEFAULT_STALE_AFTER_DAYS,
     from db.connection import get_conn  # noqa: PLC0415
     from services.dataset_keys import is_registered_pair  # noqa: PLC0415
 
-    generated_at = datetime.now(tz=timezone.utc).isoformat()
-    customer_id = None
-    try:
-        import os  # noqa: PLC0415
+    from analysis.search_term_scope import (  # noqa: PLC0415
+        configured_customer_id, customer_id_candidates,
+    )
 
-        customer_id = (os.getenv("GOOGLE_ADS_CUSTOMER_ID") or "").strip() or None
-    except Exception:  # noqa: BLE001
-        pass
+    generated_at = datetime.now(tz=timezone.utc).isoformat()
+    # PR-ADS-156-F3 §1/§5 — resolved through the SAME helper every reader uses,
+    # so the audit certifies exactly the population the pages display.
+    customer_id = configured_customer_id()
+    account_candidates = customer_id_candidates(customer_id)
 
     # PR-ADS-156-F2 §5 — the account calendar, or nothing.
     #
@@ -717,7 +870,31 @@ def run_audit(*, stale_after_days: int = DEFAULT_STALE_AFTER_DAYS,
     # there in the source.
     legacy_violations = _legacy_source_violations()
 
+    # PR-ADS-156-F3 §1/§5 — no configured account, no certifiable population.
+    #
+    # Certifying "everything in the table" here would be the same mistake the
+    # readers were making, made by the check meant to catch it: with one account
+    # configured the two look identical, and they stop looking identical on the
+    # day it matters most.
+    if not account_candidates:
+        violations = [{"code": V_ACCOUNT_NOT_CONFIGURED, "dataset": None,
+                       "detail": "GOOGLE_ADS_CUSTOMER_ID is not configured, so "
+                                 "there is no account population to certify — "
+                                 "this command will not fall back to auditing "
+                                 "every account or to counting rows with no "
+                                 "account identity"},
+                      *legacy_violations]
+        return {
+            **_base_report(generated_at, timezone_name, customer_id),
+            "ok": False, "database_available": False, "datasets": [],
+            "violations": violations,
+            "violation_codes": sorted({v["code"] for v in violations}),
+            "disclosures": [], "legacy": {},
+            "legacy_source_findings": legacy_violations,
+        }
+
     base = _base_report(generated_at, timezone_name, customer_id)
+    base["canonical_customer_id_candidates"] = list(account_candidates)
 
     def _unavailable(detail: str) -> dict:
         violations = [{"code": V_TABLE_UNAVAILABLE, "dataset": None,
@@ -745,14 +922,17 @@ def run_audit(*, stale_after_days: int = DEFAULT_STALE_AFTER_DAYS,
                 keyword = _assess(
                     "keyword_facts", "keyword_daily_facts",
                     KEYWORD_FACTS_SOURCE, KEYWORD_FACTS_DATASET,
-                    kw_sync, _keyword_data_facts(cur, kw_from, kw_to),
+                    kw_sync,
+                    _keyword_data_facts(cur, kw_from, kw_to, account_candidates),
                     stale_after_days=stale_after_days, today=today,
                     registered=is_registered_pair(KEYWORD_FACTS_SOURCE,
                                                   KEYWORD_FACTS_DATASET))
                 search = _assess(
                     "search_terms", "search_terms",
                     SEARCH_TERMS_SOURCE, SEARCH_TERMS_DATASET,
-                    st_sync, _search_term_data_facts(cur, st_from, st_to),
+                    st_sync,
+                    _search_term_data_facts(cur, st_from, st_to,
+                                            account_candidates),
                     stale_after_days=stale_after_days, today=today,
                     registered=is_registered_pair(SEARCH_TERMS_SOURCE,
                                                   SEARCH_TERMS_DATASET))
@@ -819,6 +999,10 @@ def _print_human(report: dict) -> None:
               f"(disclosed, non-blocking)")
         print(f"   verified-empty runs  {ds.get('verified_empty_intervals')} "
               f"(unproven zero-row: {ds.get('unproven_empty_intervals')})")
+        if ds.get("null_customer_twins") is not None:
+            print(f"   null-account twins   {ds.get('null_customer_twins')} "
+                  f"(blocking) / unmatched history "
+                  f"{ds.get('unmatched_null_customer_rows')} (disclosed)")
         print(f"   stale                {ds.get('stale')}")
         print(f"   duplicate keys       {current.get('duplicate_natural_key_groups')}")
         print(f"   missing identity     {current.get('rows_missing_identity')}")

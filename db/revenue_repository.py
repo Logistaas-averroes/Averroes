@@ -1012,7 +1012,21 @@ def fetch_search_term_signals(start: date | None, end: date) -> dict:
 
     Returns {available, rows:[{search_term, campaign_name, spend_usd, clicks,
              conversions, is_flagged_waste, junk_category}]}.
+
+    PR-ADS-156-F3 §2: bounded by the ACCOUNT-SCOPED canonical population. This
+    read used a date window alone, so after the PR-ADS-156 cutover it returned
+    each term twice — the complete row and its pre-cutover null-account twin —
+    and the Campaigns tab bucketed both into value / waste / needs-review.
     """
+    from analysis.search_term_scope import (  # noqa: PLC0415
+        REASON_CUSTOMER_NOT_CONFIGURED, canonical_scope,
+    )
+
+    scope = canonical_scope(start, end)
+    if not scope.available:
+        logger.warning("fetch_search_term_signals unavailable: %s", scope.reason)
+        return {"available": False, "rows": [],
+                "reason": scope.reason or REASON_CUSTOMER_NOT_CONFIGURED}
     try:
         with get_conn() as conn:
             if conn is None:
@@ -1026,10 +1040,8 @@ def fetch_search_term_signals(start: date | None, end: date) -> dict:
                            is_flagged_waste, junk_category
                     FROM search_terms
                     WHERE source_date IS NOT NULL
-                      AND (%s::date IS NULL OR source_date >= %s::date)
-                      AND source_date <= %s::date
-                    """,
-                    (start, start, end),
+                      AND """ + scope.sql,
+                    scope.params,
                 )
                 return {"available": True, "rows": _rows_as_dicts(cur)}
     except Exception as exc:  # noqa: BLE001

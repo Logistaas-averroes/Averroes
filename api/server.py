@@ -3686,6 +3686,37 @@ def _decode_search_terms_cursor(token: str):
         raise ValueError(f"Invalid cursor: {exc}") from exc
 
 
+def _canonical_search_term_scope():
+    """The ACCOUNT-SCOPED canonical search-term predicate (PR-ADS-156-F3 §2).
+
+    Identity and provenance only — no date bound, because these endpoints
+    express their window relatively (``NOW() - INTERVAL``) and the scope
+    composes with whatever window the caller already built.
+
+    Every substantive search-term metric in this file goes through here.
+    Before it existed, each endpoint filtered on the date window alone, so once
+    PR-ADS-156 began writing account-bearing rows beside their account-less
+    predecessors every one of them counted both: raw rows, the summary totals,
+    the n-gram source population. The complete rows are not duplicates of the
+    old ones under the new key, which is exactly why nothing complained.
+    """
+    from analysis.search_term_scope import canonical_scope  # noqa: PLC0415
+
+    return canonical_scope()
+
+
+def _search_term_scope_unavailable(safe_empty: dict, scope) -> dict:
+    """Fail closed: unavailable with a reason, never a wider query."""
+    log.warning("[api/search-terms] canonical scope unavailable: %s", scope.reason)
+    payload = dict(safe_empty)
+    payload["canonical_scope_available"] = False
+    payload["unavailable_reason"] = scope.reason
+    quality = dict(payload.get("data_quality") or {})
+    quality["status"] = scope.reason
+    payload["data_quality"] = quality
+    return payload
+
+
 @app.get("/api/search-terms")
 def api_search_terms(
     user: dict = Depends(require_auth),
@@ -3763,6 +3794,10 @@ def api_search_terms(
         from db.writers import _canonicalise_campaign_name  # noqa: PLC0415
         campaign_key = _canonicalise_campaign_name(campaign.strip().lower())
 
+    scope = _canonical_search_term_scope()
+    if not scope.available:
+        return _search_term_scope_unavailable(_safe_empty, scope)
+
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
@@ -3773,8 +3808,12 @@ def api_search_terms(
                 # ── Build base WHERE clauses (window + filters; excludes cursor) ──
                 # all_time (days is None) omits the date bound entirely — no lower
                 # bound, never a fabricated empty window.
-                base_conditions: list[str] = []
-                base_params: list[Any] = []
+                #
+                # PR-ADS-156-F3 §2: the canonical account scope comes FIRST, so
+                # every count, page and aggregate below is over one account's
+                # complete rows and never over their pre-cutover twins.
+                base_conditions: list[str] = [scope.sql]
+                base_params: list[Any] = list(scope.params)
                 if days is not None:
                     base_conditions.append("source_date >= NOW() - INTERVAL '1 day' * %s")
                     base_params.append(days)
@@ -4014,6 +4053,10 @@ def api_search_terms_summary(
         from db.writers import _canonicalise_campaign_name  # noqa: PLC0415
         campaign_key = _canonicalise_campaign_name(campaign.strip().lower())
 
+    scope = _canonical_search_term_scope()
+    if not scope.available:
+        return _search_term_scope_unavailable(_safe_empty, scope)
+
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
@@ -4025,8 +4068,12 @@ def api_search_terms_summary(
                 # Used for the analysis_state breakdown so all three buckets
                 # are always visible even when the user filters by one state.
                 # all_time (days is None) omits the date bound — no lower bound.
-                base_conditions: list[str] = []
-                base_params: list[Any] = []
+                #
+                # PR-ADS-156-F3 §2: the canonical account scope comes FIRST, so
+                # the top-line totals and the analysis_state breakdown both
+                # describe one account's complete rows.
+                base_conditions: list[str] = [scope.sql]
+                base_params: list[Any] = list(scope.params)
                 if days is not None:
                     base_conditions.append("source_date >= NOW() - INTERVAL '1 day' * %s")
                     base_params.append(days)
@@ -4313,6 +4360,10 @@ def api_search_terms_ngrams(
         "db_unavailable": True,
     }
 
+    scope = _canonical_search_term_scope()
+    if not scope.available:
+        return _search_term_scope_unavailable(_safe_empty, scope)
+
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
@@ -4322,8 +4373,13 @@ def api_search_terms_ngrams(
             with conn.cursor() as cur:
                 # ── Build WHERE clauses ───────────────────────────────────
                 # all_time (days is None) omits the date bound — no lower bound.
-                conditions: list[str] = []
-                params: list[Any] = []
+                #
+                # PR-ADS-156-F3 §2: the canonical account scope comes FIRST. An
+                # n-gram is a count of phrases across the source rows, so a
+                # duplicated population does not merely inflate a total — it
+                # changes which phrases rank as wasteful.
+                conditions: list[str] = [scope.sql]
+                params: list[Any] = list(scope.params)
                 if days is not None:
                     conditions.append("source_date >= NOW() - INTERVAL '1 day' * %s")
                     params.append(days)
@@ -6247,12 +6303,31 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
 
             db_info["available"] = True
 
+            # PR-ADS-156-F3 §2: every COUNT below is over the ACCOUNT-SCOPED
+            # canonical population. These numbers back a VERDICT about whether
+            # the pipeline is healthy, so counting a row and its pre-cutover
+            # null-account twin would make an incomplete cutover look like a
+            # doubly-healthy one. The unscoped rows are reported separately,
+            # under a key that says what they are.
+            from analysis.search_term_scope import (  # noqa: PLC0415
+                canonical_scope, unscoped_history_scope,
+            )
+
+            st_scope = canonical_scope()
+            db_info["canonical_scope_available"] = st_scope.available
+            db_info["canonical_customer_id"] = st_scope.customer_id
+            if not st_scope.available:
+                db_info["canonical_scope_reason"] = st_scope.reason
+
+            scope_sql = st_scope.sql if st_scope.available else "FALSE"
+            scope_params = tuple(st_scope.params)
+
             with conn.cursor() as cur:
                 for window, key in [(7, "rows_7d"), (14, "rows_14d"), (30, "rows_30d"), (60, "rows_60d")]:
                     cur.execute(
-                        "SELECT COUNT(*) FROM search_terms "
-                        "WHERE source_date >= NOW() - INTERVAL '1 day' * %s",
-                        (window,),
+                        "SELECT COUNT(*) FROM search_terms WHERE " + scope_sql +
+                        " AND source_date >= NOW() - INTERVAL '1 day' * %s",
+                        (*scope_params, window),
                     )
                     row = cur.fetchone()
                     db_info[key] = int(row[0]) if row else 0
@@ -6260,31 +6335,60 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
                 # For non-standard windows run an exact count
                 if days not in (7, 14, 30, 60):
                     cur.execute(
-                        "SELECT COUNT(*) FROM search_terms "
-                        "WHERE source_date >= NOW() - INTERVAL '1 day' * %s",
-                        (days,),
+                        "SELECT COUNT(*) FROM search_terms WHERE " + scope_sql +
+                        " AND source_date >= NOW() - INTERVAL '1 day' * %s",
+                        (*scope_params, days),
                     )
                     row = cur.fetchone()
                     db_info["rows_requested"] = int(row[0]) if row else 0
 
-                cur.execute("SELECT MAX(source_date) FROM search_terms")
+                cur.execute("SELECT MAX(source_date) FROM search_terms WHERE "
+                            + scope_sql, scope_params)
                 row = cur.fetchone()
                 db_info["latest_source_date"] = str(row[0]) if row and row[0] else None
 
                 cur.execute(
-                    "SELECT COUNT(*) FROM search_terms "
-                    "WHERE search_term IS NULL OR TRIM(search_term) = ''"
+                    "SELECT COUNT(*) FROM search_terms WHERE " + scope_sql +
+                    " AND (search_term IS NULL OR TRIM(search_term) = '')",
+                    scope_params,
                 )
                 row = cur.fetchone()
                 db_info["blank_search_term_rows"] = int(row[0]) if row else 0
 
-                cur.execute("SELECT COUNT(*) FROM search_terms WHERE spend_usd > 0")
+                cur.execute("SELECT COUNT(*) FROM search_terms WHERE "
+                            + scope_sql + " AND spend_usd > 0", scope_params)
                 row = cur.fetchone()
                 db_info["spend_rows"] = int(row[0]) if row else 0
 
-                cur.execute("SELECT COUNT(*) FROM search_terms WHERE clicks > 0")
+                cur.execute("SELECT COUNT(*) FROM search_terms WHERE "
+                            + scope_sql + " AND clicks > 0", scope_params)
                 row = cur.fetchone()
                 db_info["click_rows"] = int(row[0]) if row else 0
+
+                # Disclosure, never a total: rows in the same recent window
+                # that are NOT canonical for this account. Reported so an
+                # operator can see an incomplete cutover rather than infer it
+                # from a number that looks fine because the filter hid it.
+                history = unscoped_history_scope()
+                if history.available:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM search_terms WHERE "
+                        + history.sql +
+                        " AND source_date >= NOW() - INTERVAL '1 day' * %s",
+                        (*history.params, days),
+                    )
+                    row = cur.fetchone()
+                    db_info["unscoped_historical_rows_in_window"] = (
+                        int(row[0]) if row else 0)
+                    cur.execute(
+                        "SELECT COUNT(*) FROM search_terms "
+                        " WHERE customer_id IS NULL AND source_system = %s"
+                        "   AND source_date >= NOW() - INTERVAL '1 day' * %s",
+                        ("google_ads_api", days),
+                    )
+                    row = cur.fetchone()
+                    db_info["null_customer_rows_in_window"] = (
+                        int(row[0]) if row else 0)
 
                 # PR-ADS-156 §8 — CANONICAL sync state.
                 #

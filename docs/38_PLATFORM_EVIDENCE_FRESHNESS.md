@@ -490,3 +490,159 @@ visible; a wrong date is not.
 | `account_calendar_unresolved` | the account's today could not be resolved | check `tzdata` in the image; no freshness verdict is produced until it is |
 | `legacy_source_active` (indirect) | a production path calls a legacy helper | remove the call, or justify it in the allowlist |
 | `waste_report.json` with `search_term_evidence_available: false` | the run had no search-term evidence | not a finding of zero waste; fix the sync and re-run |
+
+---
+
+# PR-ADS-156-F3 — completing the search-term account-identity cutover
+
+## Exact root cause
+
+The ingestion side of PR-ADS-156 worked. The first production sync on
+`31dad24` fetched and wrote **16,267** search terms and **3,895** keyword facts,
+rejected nothing, left zero missing identities on the latest batch, and reported
+`evidence_status: ready` with no external writes.
+
+The freshness audit failed anyway, and it was right to:
+
+| Diagnosis | Value |
+|---|---|
+| latest batch | `1378` |
+| certified window | `2026-08-23 → 2026-09-05` |
+| total rows in that window | **32,367** |
+| rows missing identity | **16,100** |
+| missing identities in the latest batch | 0 |
+| missing identities from earlier batches | 16,100 |
+| missing `customer_id` | 16,100 |
+| missing campaign id / ad group / search term | 0 / 0 / 0 |
+
+F2 put `customer_id` into the natural key. Under the NEW key a complete row and
+its account-less predecessor are **different rows**, so the complete rows did
+not conflict with the old ones, did not supersede them, and both populations
+stayed — almost exactly one stale twin per new row.
+
+**The new ingestion is correct. The cutover is incomplete.**
+
+And it was never only an audit-display problem: every reader that queried
+`search_terms` on a date window alone counted both copies.
+
+## 1. One canonical scope
+
+`analysis/search_term_scope.py` defines the population, and every reader
+composes it. A row is canonical only when it proves all four:
+
+* `source_system = 'google_ads_api'`;
+* a non-empty account identity;
+* that identity equals the effective configured Google Ads customer;
+* complete campaign / ad-group / search-term identity.
+
+Both exact spellings of the account are accepted (`1234567890` and
+`123-456-7890`) because which one reached the column depends on how the variable
+was typed that day — a fixed candidate set, never a pattern, never NULL.
+
+When the account cannot be resolved the scope is **unavailable**. It does not
+widen to every account and does not admit null-account rows. There is one
+configured account today, which makes "just read everything" look harmless; that
+is the trap, because the day a second account exists every historical total
+silently changes meaning and nothing marks when it happened.
+
+No account id is ever invented for a historical row.
+
+## 2. Every production reader
+
+| Reader | Route |
+|---|---|
+| `/api/search-terms` (rows + count) | scope seeded into `base_conditions` |
+| `/api/search-terms/summary` | scope seeded into both the filtered and base clauses |
+| `/api/search-terms/ngrams` | scope seeded into `conditions` |
+| Search Terms diagnostics verdict | every count scoped; unscoped rows reported separately |
+| `fetch_search_term_aggregates` | `canonical_scope(start, end)` |
+| `fetch_search_term_daily_costs` | `canonical_scope(start, end)` |
+| `fetch_search_term_daily_for_campaign` | `canonical_scope(start, end)` |
+| `revenue_repository.fetch_search_term_signals` | `canonical_scope(start, end)` |
+| Search Terms + Patterns evidence | via the scoped repository |
+| Flagged / Waste evidence + Action Queue | via the scoped repository |
+| Dashboard Campaign search-term signals | via `fetch_search_term_signals` |
+
+`fetch_legacy_currency_audit` stays deliberately unscoped — it is the diagnostic
+that reports legacy rows, and scoping it would hide the thing it exists to show.
+
+Legacy and unscoped rows are disclosed, never counted. An n-gram is a count of
+phrases across the source rows, so a duplicated population does not merely
+inflate a total — it changes which phrases rank as wasteful.
+
+## 3. Deterministic supersession of exact twins
+
+`write_search_terms` now supersedes a `customer_id IS NULL` twin, and only when
+**every** other natural-key component matches exactly — source date, campaign
+name, campaign id, ad group, keyword, match type, search term — and the twin
+carries canonical Google Ads provenance.
+
+Before the twin is removed, its durable LOCAL analysis state is carried across:
+`is_flagged_waste`, `junk_category`, `matched_pattern`. Those exist nowhere
+upstream; deleting the twin without them would silently un-review work someone
+did. `COALESCE`, so a decision already on the canonical row always wins.
+
+Never touched: a row belonging to another non-null customer; a Windsor or
+unknown-provenance row; a row differing in any key component; an unmatched
+historical row. The `DELETE` is gated on an `EXISTS` for the replacement, so a
+twin is removed only because its complete counterpart is demonstrably present.
+
+Upsert, carry-over and delete run in **one transaction**, and repeating the sync
+changes nothing but timestamps. There is no startup deletion and no blanket
+`UPDATE customer_id = …`: the ordinary rolling window closes the gap as the
+source returns each complete replacement.
+
+## 4. One declared key
+
+`SEARCH_TERMS_NATURAL_KEY` moved into `analysis/search_term_scope.py` beside the
+scope it describes, and now reads:
+
+```
+source_date + COALESCE(customer_id,'') + COALESCE(campaign_name,'') +
+COALESCE(campaign_id,'') + COALESCE(ad_group,'') + COALESCE(keyword,'') +
+COALESCE(match_type,'') + search_term
+```
+
+The repository re-exports it, the evidence service's provenance payload declares
+the account-first grain with `account_scoped: true`, and the identity module says
+so too. A contract describing a key that no longer exists is worse than none,
+because people act on it.
+
+## 5. A strict, explanatory audit
+
+The audit measures **both** populations. The account-scoped one is what it
+certifies; the provenance-only one is what the cutover has to be complete over.
+Measuring only the first would let the narrower filter certify a cutover that
+never happened — the null-account rows would simply fall outside `current`,
+`rows_missing_identity` would read 0, and the audit would agree with readers
+that had merely stopped looking at them.
+
+Three causes, three codes, no double-reporting:
+
+| Code | Meaning | Blocking |
+|---|---|---|
+| `pre_cutover_null_customer_twin` | a null-account row still coexists with its EXACT replacement | yes |
+| `missing_identity` | this account's own row lacks full identity, explained by neither a twin nor history | yes |
+| `unmatched_null_customer_rows_excluded` | a null-account row with no replacement — history | disclosure |
+| `google_ads_customer_not_configured` | no account to certify; not "everything" — nothing | exit 2 |
+
+Freshness is still measured from successful batch coverage, never the newest
+row, and the command remains strictly read-only.
+
+## Production procedure after merge
+
+No manual SQL delete. No historical backfill.
+
+1. Confirm the deployed merge SHA.
+2. Run one normal incremental sync.
+3. Confirm the latest search-term batch still has zero missing identities.
+4. Confirm exact null-customer twins in its covered interval are zero.
+5. Run `python -m scripts.audit_keyword_search_term_freshness`.
+6. Require both datasets `ok=true`, no blocking violation codes, exit `0`.
+7. Confirm `external_writes_performed` remains false.
+8. Run the cross-page parity regression. The already-deferred all-time
+   missing-deal-amount exception is unrelated and unchanged.
+
+Unmatched historical rows will remain, disclosed and uncounted. That is the
+correct end state: they describe observations nobody can attribute to an
+account, and inventing one for them would be fabricating provenance.

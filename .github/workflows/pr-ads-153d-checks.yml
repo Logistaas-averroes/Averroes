@@ -62,7 +62,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -78,6 +78,7 @@ jobs:
             tests/test_pr_ads_156_evidence_freshness.py \
             tests/test_pr_ads_156_f1_freshness_truth.py \
             tests/test_pr_ads_156_f2_stale_analysis_and_durability.py \
+            tests/test_pr_ads_156_f3_account_identity_cutover.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -120,6 +121,7 @@ jobs:
                            "tests.test_pr_ads_156_evidence_freshness",
                            "tests.test_pr_ads_156_f1_freshness_truth",
                            "tests.test_pr_ads_156_f2_stale_analysis_and_durability",
+                           "tests.test_pr_ads_156_f3_account_identity_cutover",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):
@@ -131,7 +133,7 @@ jobs:
       # The 153E-B contract suite is the CUTOVER guard: it fails CI if a
       # migrated consumer reaches for a retired legacy revenue table or
       # provider again, or stops reading the one shared canonical contract.
-      - name: Contract tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154 + 154B + 154B-F1 + 154C + 154C-F3 + 155 + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2)
+      - name: Contract tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154 + 154B + 154B-F1 + 154C + 154C-F3 + 155 + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_waste_consolidation.py \
@@ -151,6 +153,8 @@ jobs:
             tests/test_pr_ads_156_evidence_freshness.py \
             tests/test_pr_ads_156_f1_freshness_truth.py \
             tests/test_pr_ads_156_f2_stale_analysis_and_durability.py \
+            tests/test_pr_ads_156_f3_account_identity_cutover.py \
+            tests/test_pr_ads_144_search_terms_revamp.py \
             tests/test_rule_advisor_doctrine.py \
             tests/test_scheduler_google_ads_cutover.py \
             tests/test_pr_ads_145_search_terms_completion.py \
