@@ -191,6 +191,14 @@ def _patch_revattr(monkeypatch, *, canonical, geo_rows, coverage, revenue_rows):
              "coverage_start": None, "coverage_end": None}
     spend = {"available": True, "rows": geo_rows, "coverage_start": None, "coverage_end": None}
     revenue = {"available": True, "rows": revenue_rows, "coverage_start": None, "coverage_end": None}
+    # The CONFIGURED account is the effective one — `canonical_customer_id` is
+    # `_scope_customer_id or canonical["customer_id"]`, and the configured id
+    # wins by design. So the environment has to agree with the fixture's
+    # canonical payload; a test whose configured account contradicts its own
+    # data is describing a situation that cannot occur in production.
+    configured = (canonical or {}).get("customer_id")
+    if configured:
+        monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", str(configured))
     try:
         monkeypatch.setattr("db.revenue_repository.fetch_campaign_country_spend", lambda s, e: spend)
         monkeypatch.setattr("db.revenue_repository.fetch_lead_quality", lambda s, e: leads)
