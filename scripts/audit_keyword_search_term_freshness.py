@@ -130,6 +130,13 @@ V_NULL_CUSTOMER_TWIN = "pre_cutover_null_customer_twin"
 #: violation would make this command permanently red over rows nobody can fix.
 D_UNMATCHED_NULL_CUSTOMER = "unmatched_null_customer_rows_excluded"
 
+#: Null-account rows inside the interval that are NOT of canonical Google Ads
+#: provenance. Reported so the payload accounts for every row an operator can
+#: see, and kept arithmetically inert: they are outside the population the
+#: canonical missing-identity residual is computed over, so subtracting them
+#: would let one unmatched Windsor row cancel one malformed Google Ads row.
+D_NONCANONICAL_NULL_CUSTOMER = "noncanonical_null_customer_rows_reported"
+
 #: Reported, never counted as a violation. An unproven historical range is a
 #: disclosure about coverage; treating it as a failure would make the command
 #: permanently red for a dataset whose current window is perfectly healthy, and
@@ -388,19 +395,33 @@ _SEARCH_TERM_TWINS = """
               AND canonical.id <> twin.id)
 """
 
-# A null-account canonical-provenance row inside the interval with NO complete
+# A null-account CANONICAL-PROVENANCE row inside the interval with NO complete
 # replacement. Genuinely historical: disclosed, never counted, never repaired
 # here, and never given an invented account id. Reporting these as violations
 # would make the audit permanently red for rows nobody can fix.
+#
+# Both sides carry the provenance predicate, and that is load-bearing rather
+# than tidy. `_assess` SUBTRACTS this count from
+# `provenance.rows_missing_identity`, which counts only `google_ads_api` rows —
+# so if this query also counted Windsor or unknown-provenance rows, a single
+# unmatched Windsor row could cancel a genuinely malformed Google Ads row and
+# the audit would pass. Two populations may only be subtracted when one is a
+# subset of the other; here that is enforced in the SQL, not assumed.
+#
+# The replacement must likewise be canonical AND belong to the configured
+# account: a Windsor row is not a replacement for anything, and another
+# account's row is somebody else's observation.
 _SEARCH_TERM_ORPHANS = """
     SELECT COUNT(*)::int
       FROM search_terms AS twin
      WHERE twin.customer_id IS NULL
+       AND COALESCE(twin.source_system, '') = %s
        AND twin.source_date >= %s
        AND twin.source_date <= %s
        AND NOT EXISTS (
            SELECT 1 FROM search_terms AS canonical
             WHERE canonical.customer_id = ANY(%s)
+              AND COALESCE(canonical.source_system, '') = %s
               AND canonical.source_date = twin.source_date
               AND COALESCE(canonical.campaign_name, '') = COALESCE(twin.campaign_name, '')
               AND COALESCE(canonical.campaign_id,   '') = COALESCE(twin.campaign_id,   '')
@@ -409,6 +430,18 @@ _SEARCH_TERM_ORPHANS = """
               AND COALESCE(canonical.match_type,    '') = COALESCE(twin.match_type,    '')
               AND canonical.search_term = twin.search_term
               AND canonical.id <> twin.id)
+"""
+
+# Non-canonical rows with no account, inside the interval. Counted purely so the
+# disclosure can say how many there are; NEVER subtracted from anything, because
+# they are not part of the canonical-provenance population the residual is
+# computed over.
+_SEARCH_TERM_NONCANONICAL_HISTORY = """
+    SELECT COUNT(*)::int FROM search_terms
+     WHERE customer_id IS NULL
+       AND COALESCE(source_system, '') <> %s
+       AND source_date >= %s
+       AND source_date <= %s
 """
 
 
@@ -513,19 +546,30 @@ def _search_term_data_facts(cur, cert_from, cert_to, customer_ids=None) -> dict:
     coexists with its complete replacement. ``unmatched_null_customer_rows`` is
     the disclosure: a null-account row with nothing to replace it, which is
     history and must never be repaired, counted, or given an invented account.
+
+    Both are restricted to canonical Google Ads provenance, because `_assess`
+    subtracts them from a canonical-provenance count. A third number,
+    ``noncanonical_null_customer_rows``, exists only to be reported: Windsor and
+    unknown-provenance history is visible in the payload but is arithmetically
+    inert, so it can never cancel a malformed canonical row.
     """
     facts = _data_facts(cur, "search_terms", _SEARCH_TERM_MEASURES,
                         _SEARCH_TERM_DUPLICATES, cert_from, cert_to, customer_ids)
     facts["null_customer_twins"] = 0
     facts["unmatched_null_customer_rows"] = 0
+    facts["noncanonical_null_customer_rows"] = 0
     if cert_from and cert_to and customer_ids:
         row = _one(cur, _SEARCH_TERM_TWINS,
                    (CANONICAL_PROVENANCE, cert_from, cert_to,
                     list(customer_ids), CANONICAL_PROVENANCE))
         facts["null_customer_twins"] = int(row[0]) if row else 0
         row = _one(cur, _SEARCH_TERM_ORPHANS,
-                   (cert_from, cert_to, list(customer_ids)))
+                   (CANONICAL_PROVENANCE, cert_from, cert_to,
+                    list(customer_ids), CANONICAL_PROVENANCE))
         facts["unmatched_null_customer_rows"] = int(row[0]) if row else 0
+        row = _one(cur, _SEARCH_TERM_NONCANONICAL_HISTORY,
+                   (CANONICAL_PROVENANCE, cert_from, cert_to))
+        facts["noncanonical_null_customer_rows"] = int(row[0]) if row else 0
     return facts
 
 
@@ -671,6 +715,12 @@ def _assess(name: str, table: str, source: str, dataset: str,
     provenance = data.get("interval_canonical_provenance") or current
     twins = data.get("null_customer_twins") or 0
     unmatched = data.get("unmatched_null_customer_rows") or 0
+    # Reported below, deliberately NOT part of any subtraction. Windsor and
+    # unknown-provenance history is not in the population `rows_missing_identity`
+    # is measured over, so letting it reduce the residual would let one unmatched
+    # Windsor row cancel one malformed Google Ads row and turn the audit green on
+    # a defect that is still there.
+    noncanonical = data.get("noncanonical_null_customer_rows") or 0
 
     # Three causes, three codes, no double-reporting. A row missing identity
     # because its twin was never superseded is a SUPERSESSION failure; a row
@@ -703,6 +753,18 @@ def _assess(name: str, table: str, source: str, dataset: str,
                 "and have no complete replacement. They are history: excluded "
                 "from every canonical metric, never relabelled, never repaired "
                 "here, and never given an invented account identity."),
+        })
+
+    if noncanonical:
+        disclosures.append({
+            "code": D_NONCANONICAL_NULL_CUSTOMER,
+            "dataset": f"{source}/{dataset}",
+            "detail": (
+                f"{noncanonical} row(s) in the certified interval carry no "
+                "account and were not produced by the Google Ads API. They are "
+                "reported for visibility only: they are outside the canonical "
+                "population entirely, so they neither certify anything nor "
+                "reduce the count of malformed canonical rows."),
         })
 
     # ── Certified-interval data quality (§4: current rows only) ─────────────
@@ -1002,7 +1064,9 @@ def _print_human(report: dict) -> None:
         if ds.get("null_customer_twins") is not None:
             print(f"   null-account twins   {ds.get('null_customer_twins')} "
                   f"(blocking) / unmatched history "
-                  f"{ds.get('unmatched_null_customer_rows')} (disclosed)")
+                  f"{ds.get('unmatched_null_customer_rows')} (disclosed) / "
+                  f"non-canonical {ds.get('noncanonical_null_customer_rows')} "
+                  f"(reported, inert)")
         print(f"   stale                {ds.get('stale')}")
         print(f"   duplicate keys       {current.get('duplicate_natural_key_groups')}")
         print(f"   missing identity     {current.get('rows_missing_identity')}")
