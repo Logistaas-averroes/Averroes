@@ -734,3 +734,200 @@ def test_15b_every_endpoint_fails_closed_on_an_unresolved_account(
     # And it SAYS so, rather than presenting an empty table as an answer.
     blob = json.dumps(body)
     assert scope_mod.REASON_CUSTOMER_NOT_CONFIGURED in blob, blob[:600]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §4 — the suite-wide account default must not be able to hide fail-closed
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# `tests/conftest.py` gives the session a configured Google Ads account, which is
+# right: production always has one, and without it every scoped read would take
+# the unavailable branch and hundreds of assertions about page content would pass
+# or fail for a reason unrelated to what they test.
+#
+# The cost is that a default which is always present makes fail-closed behaviour
+# untestable by default — no test would notice a consumer that quietly stopped
+# handling an unresolved account, because no test would ever see one. Narrowing
+# the fixture is not the answer (most suites genuinely need it), so the answer is
+# an explicit guard: prove the default yields to any test that removes it, prove
+# every scoped consumer fails closed when it does, and prove that list cannot
+# fall behind the code.
+
+#: Every function that resolves a search-term scope, and therefore every place
+#: an unresolved account must produce "unavailable" rather than a wider query.
+#: `test_19` asserts this is EXHAUSTIVE against the source tree, so a new
+#: consumer cannot be added without either handling the absent-account case or
+#: failing this suite.
+SCOPED_CONSUMERS = {
+    "db/revenue_repository.py::fetch_search_term_signals",
+    "db/search_term_repository.py::fetch_search_term_aggregates",
+    "db/search_term_repository.py::fetch_search_term_daily_costs",
+    "db/search_term_repository.py::fetch_search_term_daily_for_campaign",
+    "api/server.py::_canonical_search_term_scope",
+    "api/server.py::_build_search_terms_verdict",
+    "scripts/audit_search_term_waste_truth.py::_canonical_facts",
+    "scripts/verify_search_terms_pipeline.py::_check_db",
+    # The scope module's own complement helper, which delegates to
+    # `canonical_scope` and therefore inherits its unavailable result.
+    "analysis/search_term_scope.py::unscoped_history_scope",
+}
+
+
+def test_18_the_session_default_yields_to_any_test_that_speaks(monkeypatch):
+    """The fixture sets the account only when it is ABSENT, so a test that
+    overrides or deletes it gets exactly the environment it asked for.
+
+    If this ever stopped being true, every fail-closed test in the repository
+    would silently start exercising the configured path instead — passing, and
+    proving nothing.
+    """
+    from tests.conftest import TEST_GOOGLE_ADS_CUSTOMER_ID
+
+    # The default is in force by default.
+    assert scope_mod.configured_customer_id() == TEST_GOOGLE_ADS_CUSTOMER_ID
+
+    # An override wins.
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", "999")
+    assert scope_mod.configured_customer_id() == "999"
+    assert scope_mod.canonical_scope(DAY, DAY).customer_id_candidates == ("999",)
+
+    # And a deletion is a real deletion — the fixture does not put it back.
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+    assert scope_mod.configured_customer_id() is None
+    assert scope_mod.canonical_scope(DAY, DAY).available is False
+
+
+def test_18b_an_empty_or_blank_account_is_absent_not_configured(monkeypatch):
+    """A variable set to "" or whitespace is the shape a misconfigured
+    deployment actually takes — an unset variable is the tidy case, and the
+    untidy one must not be treated as a configured account."""
+    for value in ("", "   ", "\t"):
+        monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", value)
+        assert scope_mod.configured_customer_id() is None
+        scope = scope_mod.canonical_scope(DAY, DAY)
+        assert scope.available is False
+        assert scope.reason == scope_mod.REASON_CUSTOMER_NOT_CONFIGURED
+        assert scope.sql == "FALSE"
+        assert scope.params == ()
+        assert scope_mod.claimed_scope(DAY, DAY).available is False
+
+
+def test_19_the_fail_closed_registry_is_exhaustive():
+    """The guard that keeps the guard honest.
+
+    Every function resolving a scope is enumerated from source and compared
+    against SCOPED_CONSUMERS. A new consumer added without a fail-closed test
+    fails here — which is the whole point, because the session default means it
+    would otherwise never meet an unresolved account in any test run.
+    """
+    found = set()
+    for directory in ("db", "api", "services", "scripts", "analysis"):
+        for path in sorted((_ROOT / directory).rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            rel = str(path.relative_to(_ROOT))
+            for fn in [n for n in ast.walk(tree)
+                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+                for call in ast.walk(fn):
+                    if not isinstance(call, ast.Call):
+                        continue
+                    name = (getattr(call.func, "id", None)
+                            or getattr(call.func, "attr", None))
+                    if name in ("canonical_scope", "claimed_scope",
+                                "unscoped_history_scope"):
+                        found.add(f"{rel}::{fn.name}")
+                        break
+
+    missing = found - SCOPED_CONSUMERS
+    assert not missing, (
+        "New scoped consumer(s) with no fail-closed coverage: "
+        + ", ".join(sorted(missing))
+        + ". Add a case asserting each returns unavailable with "
+          "GOOGLE_ADS_CUSTOMER_ID removed, then list it in SCOPED_CONSUMERS.")
+    stale = SCOPED_CONSUMERS - found
+    assert not stale, f"SCOPED_CONSUMERS lists functions that no longer exist: {stale}"
+
+
+def test_20_every_repository_reader_fails_closed_with_the_default_removed(
+        monkeypatch):
+    """The repositories, with the session default explicitly taken away.
+
+    No database is needed: an unresolved account must be answered before a
+    connection is opened, and a reader that got as far as querying would be
+    doing so with no account predicate at all.
+    """
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+
+    import db.revenue_repository as revenue_repo
+    import db.search_term_repository as repo
+
+    results = {
+        "fetch_search_term_aggregates":
+            repo.fetch_search_term_aggregates(DAY - timedelta(days=7), DAY),
+        "fetch_search_term_daily_costs":
+            repo.fetch_search_term_daily_costs(DAY - timedelta(days=7), DAY),
+        "fetch_search_term_daily_for_campaign":
+            repo.fetch_search_term_daily_for_campaign(
+                DAY - timedelta(days=7), DAY, "brand - uk"),
+        "fetch_search_term_signals":
+            revenue_repo.fetch_search_term_signals(DAY - timedelta(days=7), DAY),
+    }
+    for name, result in results.items():
+        assert result["available"] is False, name
+        assert result["reason"] == scope_mod.REASON_CUSTOMER_NOT_CONFIGURED, name
+        assert result["rows"] == [], name
+
+
+@_needs_pg
+def test_20b_a_populated_table_does_not_change_that(pg, monkeypatch):  # noqa: F811
+    """The dangerous version of the same case.
+
+    With rows in the table, an unscoped reader would return them and look
+    perfectly healthy. Fail-closed has to mean unavailable even when there is
+    plenty to return — that is the only case where it matters.
+    """
+    _init_db(pg, monkeypatch)
+    _seed_mixed_population()
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+
+    import db.search_term_repository as repo
+
+    result = repo.fetch_search_term_aggregates(date.today() - timedelta(days=7),
+                                               date.today())
+    assert result["available"] is False
+    assert result["rows"] == []
+    # The rows are still there — they were withheld, not missing.
+    assert _scalar("SELECT COUNT(*) FROM search_terms") == 4
+
+
+@_needs_pg
+def test_21_the_operational_audits_fail_closed_over_a_populated_table(
+        pg, monkeypatch):  # noqa: F811
+    """The last category: the commands an operator runs by hand.
+
+    All three refuse to answer rather than answering about every account, and
+    each says which of the two it is doing.
+    """
+    _init_db(pg, monkeypatch)
+    _seed_mixed_population()
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+    import importlib
+
+    verify = importlib.reload(
+        importlib.import_module("scripts.verify_search_terms_pipeline"))
+    db = verify._check_db(30)
+    assert db["scope_available"] is False
+    assert db["rows_requested_window"] == 0
+
+    waste = importlib.reload(
+        importlib.import_module("scripts.audit_search_term_waste_truth"))
+    assert waste._canonical_facts(
+        date.today() - timedelta(days=7), date.today())["available"] is False
+
+    # The freshness audit runs in a subprocess, so its environment is set
+    # explicitly rather than inherited from this process.
+    res = _run_audit("--json", env_extra={"DATABASE_URL": pg.url,
+                                          "GOOGLE_ADS_CUSTOMER_ID": ""})
+    assert res.returncode == 2, res.stdout + res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["violation_codes"] == [audit.V_ACCOUNT_NOT_CONFIGURED]
+    assert payload["datasets"] == []

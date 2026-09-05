@@ -646,3 +646,94 @@ No manual SQL delete. No historical backfill.
 Unmatched historical rows will remain, disclosed and uncounted. That is the
 correct end state: they describe observations nobody can attribute to an
 account, and inventing one for them would be fabricating provenance.
+
+---
+
+# PR-ADS-156-F3 review corrections
+
+Four findings from the F3 review. One was an arithmetic defect that could turn
+the audit green over a database that still had the problem; three were places
+the cutover had been carried less far than the tests suggested.
+
+## 1. The residual may only be reduced by subsets of its own population
+
+`missing_identity` is reported over the residual — the canonical-provenance rows
+missing identity, minus those already explained as un-superseded twins and minus
+unmatched history — so that one broken row produces one code rather than three.
+
+That subtraction is valid only while both subtrahends are **subsets of the
+minuend**. The orphan query was provenance-blind: it counted every account-less
+row in the window, including Windsor and unlabelled ones. So one unmatched
+Windsor row could cancel one genuinely malformed Google Ads row, and the audit
+would certify a cutover it had not verified.
+
+Both cutover queries now bind canonical provenance on **both sides**, and the
+candidate replacement must also carry the configured account — another account's
+row is a different observation, not a supersession, and a Windsor row is not a
+replacement for anything.
+
+| Count | Population | Used for |
+|---|---|---|
+| `null_customer_twins` | account-less, canonical, HAS an exact canonical replacement for this account | blocking violation, subtracted |
+| `unmatched_null_customer_rows` | account-less, canonical, no replacement | disclosure, subtracted |
+| `noncanonical_null_customer_rows` | account-less, NOT canonical provenance | disclosure only — never subtracted |
+
+The third is deliberately inert. It is reported so the payload accounts for
+every row an operator can see, and a source-level test asserts it can never be
+added to the residual later.
+
+## 2. Operational commands read what the product reads
+
+`verify_search_terms_pipeline` and `audit_search_term_waste_truth` still bounded
+on `source_date` alone. During the cutover they reported roughly double — so the
+command an operator runs to check the pipeline would have confirmed the
+duplicated table as healthy.
+
+Both now compose their predicates from `analysis.search_term_scope` and fail
+closed on an unresolved account, the verifier under its own
+`ACCOUNT_NOT_CONFIGURED` verdict (exit 2), checked **before** the row counts so a
+configuration problem is never reported as an empty pipeline.
+
+Quality counts moved to a new `claimed_scope()` — correct provenance, correct
+account, identity-completeness clauses deliberately omitted. Counting malformed
+rows inside a filter that requires them to be well-formed reads zero forever over
+any table: **a filter must not contain the thing it is measuring.**
+
+A static guard, `scan_unscoped_search_term_readers`, now prevents the next one.
+It scans `scripts/` as well as the production directories, judges fully literal
+queries exactly (their whole predicate is visible) and variable-built ones by
+whether their function obtains a scope, ignores writers, migrations and schema
+operations, and exempts only allowlisted historical diagnostics —
+`fetch_legacy_currency_audit`, whose entire purpose is to count what the
+canonical scope excludes.
+
+## 3. Endpoint tests execute, they do not inspect
+
+The F3 endpoint tests asserted over the AST. That proves a call was written; it
+cannot prove the composed SQL binds its parameters in the right order — and
+order is what breaks when a predicate is spliced into a hand-built WHERE clause,
+because placeholders fill by position and a predicate inserted at the front
+shifts every argument after it. A misordered query does not raise. It compares
+the search text against a date and returns nothing, which looks like "no
+matches".
+
+All three endpoints now run against PostgreSQL seeded with one canonical row,
+its exact pre-cutover twin, another account's row and a Windsor row.
+
+## 4. The suite-wide account default cannot hide fail-closed
+
+`tests/conftest.py` gives the session a configured account, which is right —
+without one every scoped read would take the unavailable branch by accident. The
+cost is that a default which is always present makes fail-closed untestable by
+default: nothing would notice a consumer that stopped handling an unresolved
+account, because nothing would ever hand it one.
+
+The fixture is kept and the claim is now enforced: the default is proven to
+yield to any test that deletes it; every repository reader, endpoint and
+operational command is asserted unavailable with it removed, **including over a
+populated table** — the only case where fail-closed matters; and the registry of
+scoped consumers is checked for exhaustiveness against the source tree, so a new
+one cannot be added without coverage.
+
+Nothing in this change writes to Google Ads or HubSpot, deletes historical rows,
+invents an account identity, or performs a backfill.

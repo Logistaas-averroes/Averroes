@@ -17,6 +17,28 @@ This does NOT hide the fail-closed path. It sets the variable only when it is
 absent, so a case that deliberately unsets or overrides it — the F3 test that
 proves an unresolved account produces unavailable rather than unscoped totals —
 still gets exactly the environment it asks for.
+
+Why that sentence is not enough
+-------------------------------
+The F3 review made the fair objection that a default which is always present
+makes fail-closed behaviour untestable BY DEFAULT: no test would notice a
+consumer that quietly stopped handling an unresolved account, because no test
+would ever hand it one. "It only sets the variable when absent" is a claim about
+this file; it says nothing about whether anything still checks the other branch.
+
+So the claim is now enforced elsewhere, in
+``tests/test_pr_ads_156_f3_review_corrections.py`` §4:
+
+  * the default is proven to yield to any test that overrides or deletes it;
+  * every repository reader, endpoint and operational command is asserted to
+    return unavailable with the variable removed — including over a POPULATED
+    table, which is the only case where fail-closed matters;
+  * and the list of scoped consumers is checked for EXHAUSTIVENESS against the
+    source tree, so a new one cannot be added without fail-closed coverage.
+
+That last check is the one that makes this fixture safe to keep. Without it the
+registry would fall behind the code silently, which is the same failure as the
+default itself: a guard that no longer guards anything, still passing.
 """
 
 from __future__ import annotations
