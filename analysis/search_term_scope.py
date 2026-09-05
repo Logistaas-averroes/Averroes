@@ -214,6 +214,46 @@ def canonical_scope(start: date | None = None, end: date | None = None, *,
     )
 
 
+def claimed_scope(start: date | None = None, end: date | None = None, *,
+                  alias: str = "", configured: str | None = None) -> SearchTermScope:
+    """Rows that CLAIM to be this account's canonical rows: correct provenance
+    and correct account, with the identity-completeness clauses omitted.
+
+    This exists for one purpose — measuring ingestion quality. A count of
+    malformed canonical rows cannot be taken over ``canonical_scope``, because
+    that scope already requires complete identity: the count would be zero by
+    construction and the check would pass forever over a table full of broken
+    rows. A filter must never contain the thing it is measuring.
+
+    Use ``canonical_scope`` for every total a person reads. Use this ONLY to ask
+    "how many rows that should be canonical are not", and say so in the key you
+    publish it under.
+    """
+    candidates = customer_id_candidates(configured)
+    if not candidates:
+        return SearchTermScope(
+            available=False, sql="FALSE", params=(),
+            reason=REASON_CUSTOMER_NOT_CONFIGURED, alias=alias)
+
+    conditions = [
+        f"{_col(alias, 'source_system')} = %s",
+        f"{_col(alias, 'customer_id')} = ANY(%s)",
+    ]
+    params: list = [CANONICAL_PROVENANCE, candidates]
+    if start is not None:
+        conditions.append(f"{_col(alias, 'source_date')} >= %s")
+        params.append(start)
+    if end is not None:
+        conditions.append(f"{_col(alias, 'source_date')} <= %s")
+        params.append(end)
+
+    return SearchTermScope(
+        available=True, sql=" AND ".join(conditions), params=tuple(params),
+        customer_id=candidates[0] if len(candidates) == 1 else (
+            configured if configured is not None else configured_customer_id()),
+        customer_id_candidates=tuple(candidates), alias=alias)
+
+
 def unscoped_history_scope(start: date | None = None, end: date | None = None, *,
                            alias: str = "",
                            configured: str | None = None) -> SearchTermScope:
@@ -252,5 +292,5 @@ __all__ = [
     "CANONICAL_PROVENANCE", "REASON_CUSTOMER_NOT_CONFIGURED",
     "SEARCH_TERMS_NATURAL_KEY", "NATURAL_KEY_NON_ACCOUNT_COLUMNS",
     "SearchTermScope", "configured_customer_id", "customer_id_candidates",
-    "canonical_scope", "unscoped_history_scope",
+    "canonical_scope", "claimed_scope", "unscoped_history_scope",
 ]

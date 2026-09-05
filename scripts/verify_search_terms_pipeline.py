@@ -88,6 +88,12 @@ class Verdict:
     CANONICAL_SYNC_FAILED = "CANONICAL_SYNC_FAILED"
     #: No canonical sync state at all — never run against this database.
     CANONICAL_SYNC_NEVER_RUN = "CANONICAL_SYNC_NEVER_RUN"
+
+    #: PR-ADS-156-F3 review §2 — the Google Ads account this command reports on
+    #: cannot be resolved, so there is no canonical population to count. Its own
+    #: verdict rather than DB_UNAVAILABLE (the database is fine) or UNKNOWN (the
+    #: cause is known exactly, and it is fixable in one environment variable).
+    ACCOUNT_NOT_CONFIGURED = "ACCOUNT_NOT_CONFIGURED"
     #: Rows exist, but the newest one is older than the staleness threshold. An
     #: old table is not evidence of a recent sync.
     STALE = "STALE"
@@ -121,11 +127,26 @@ def compute_search_terms_verdict(
     stale: bool = False,
     max_source_date: Optional[str] = None,
     history_complete: Optional[bool] = None,
+    scope_available: bool = True,
 ) -> tuple[str, str]:
     """Compute pipeline verdict and reason from gathered evidence.
 
     Returns (verdict, reason) tuple.
     """
+    # PR-ADS-156-F3 review §2 — checked FIRST, and deliberately so. Without a
+    # resolved account every row count below is zero, and zero rows would be
+    # read as an empty or broken pipeline: the command would report a data
+    # problem for what is a configuration problem, and send an operator looking
+    # for the wrong thing entirely.
+    if not scope_available:
+        return (
+            Verdict.ACCOUNT_NOT_CONFIGURED,
+            "GOOGLE_ADS_CUSTOMER_ID is not configured, so the canonical "
+            "search-term population cannot be identified. No row counts are "
+            "reported: counting every account's rows would answer a different "
+            "question than the one asked.",
+        )
+
     # DB unavailable
     if not db_available:
         return Verdict.DB_UNAVAILABLE, "Database connection unavailable"
@@ -260,8 +281,30 @@ def _check_db(days: int) -> dict[str, Any]:
 
     try:
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from analysis.search_term_scope import canonical_scope, claimed_scope
         from db.connection import get_conn
     except Exception:
+        return result
+
+    # PR-ADS-156-F3 review §2 — an operator running this command is asking the
+    # same question the dashboard asks, and must be given the same population.
+    # Every count below was bounded on the date window alone, so during the
+    # cutover it reported roughly double what the product displayed: an operator
+    # verifying the pipeline would have seen 32,367 healthy rows and concluded
+    # everything was fine, from the very command meant to catch it.
+    scope = canonical_scope()
+    claimed = claimed_scope()
+    result["scope_available"] = scope.available
+    result["scope_customer_id"] = scope.customer_id
+    if not scope.available:
+        # Fail closed. Counting every account's rows because this one cannot be
+        # resolved would answer a different question than the one asked, and
+        # would answer it confidently.
+        result["scope_reason"] = scope.reason
+        result["error"] = (
+            "canonical search-term scope unavailable "
+            f"({scope.reason}) — no row counts are reported, because a count "
+            "over an unresolved account is not the count that was asked for")
         return result
 
     try:
@@ -271,43 +314,64 @@ def _check_db(days: int) -> dict[str, Any]:
             result["available"] = True
 
             with conn.cursor() as cur:
-                # Row counts by window
+                # Row counts by window, over the CANONICAL population only.
                 for window, key in [(7, "rows_7d"), (14, "rows_14d"), (30, "rows_30d"), (60, "rows_60d")]:
                     cur.execute(
-                        "SELECT COUNT(*) FROM search_terms "
-                        "WHERE source_date >= NOW() - INTERVAL '1 day' * %s",
-                        (window,),
+                        "SELECT COUNT(*) FROM search_terms WHERE "
+                        + scope.and_("source_date >= NOW() - INTERVAL '1 day' * %s"),
+                        (*scope.params, window),
                     )
                     row = cur.fetchone()
                     result[key] = int(row[0]) if row else 0
 
-                # Max source_date
-                cur.execute("SELECT MAX(source_date) FROM search_terms")
+                # Max source_date — of a canonical row. The newest row overall
+                # could be a Windsor row, and reporting that as the pipeline's
+                # high-water mark is how a stopped pipeline looks current.
+                cur.execute(
+                    "SELECT MAX(source_date) FROM search_terms WHERE " + scope.sql,
+                    scope.params)
                 row = cur.fetchone()
                 result["max_source_date"] = str(row[0]) if row and row[0] else None
 
-                # Blank search_term count
+                # Quality counts are taken over the CLAIMED population — right
+                # provenance, right account, identity completeness deliberately
+                # NOT required. Taking them inside `canonical_scope` would filter
+                # on the very defect being counted, so every one would read zero
+                # forever no matter how broken the table was.
                 cur.execute(
-                    "SELECT COUNT(*) FROM search_terms "
-                    "WHERE search_term IS NULL OR TRIM(search_term) = ''"
-                )
+                    "SELECT COUNT(*) FROM search_terms WHERE "
+                    + claimed.and_("search_term IS NULL OR TRIM(search_term) = ''"),
+                    claimed.params)
                 row = cur.fetchone()
                 result["blank_search_term_count"] = int(row[0]) if row else 0
 
-                # Null campaign count
-                cur.execute("SELECT COUNT(*) FROM search_terms WHERE campaign_name IS NULL")
+                cur.execute(
+                    "SELECT COUNT(*) FROM search_terms WHERE "
+                    + claimed.and_("campaign_name IS NULL"), claimed.params)
                 row = cur.fetchone()
                 result["null_campaign_count"] = int(row[0]) if row else 0
 
-                # Rows with spend > 0
-                cur.execute("SELECT COUNT(*) FROM search_terms WHERE spend_usd > 0")
+                cur.execute(
+                    "SELECT COUNT(*) FROM search_terms WHERE "
+                    + scope.and_("spend_usd > 0"), scope.params)
                 row = cur.fetchone()
                 result["rows_with_spend"] = int(row[0]) if row else 0
 
-                # Rows with clicks > 0
-                cur.execute("SELECT COUNT(*) FROM search_terms WHERE clicks > 0")
+                cur.execute(
+                    "SELECT COUNT(*) FROM search_terms WHERE "
+                    + scope.and_("clicks > 0"), scope.params)
                 row = cur.fetchone()
                 result["rows_with_clicks"] = int(row[0]) if row else 0
+
+                # Disclosure, never added to any count above: what the old
+                # date-only queries would have swept in. Reported so an operator
+                # comparing this command against a raw row count is not left
+                # wondering where the difference went.
+                cur.execute(
+                    "SELECT COUNT(*) FROM search_terms WHERE customer_id IS NULL "
+                    "AND source_date >= NOW() - INTERVAL '1 day' * %s", (days,))
+                row = cur.fetchone()
+                result["null_customer_rows_in_window"] = int(row[0]) if row else 0
 
                 # Latest weekly run
                 cur.execute(
@@ -395,9 +459,9 @@ def _check_db(days: int) -> dict[str, Any]:
                     result["rows_requested_window"] = int(result[f"rows_{days}d"])
                 else:
                     cur.execute(
-                        "SELECT COUNT(*) FROM search_terms "
-                        "WHERE source_date >= NOW() - INTERVAL '1 day' * %s",
-                        (days,),
+                        "SELECT COUNT(*) FROM search_terms WHERE "
+                        + scope.and_("source_date >= NOW() - INTERVAL '1 day' * %s"),
+                        (*scope.params, days),
                     )
                     row = cur.fetchone()
                     result["rows_requested_window"] = int(row[0]) if row else 0
@@ -643,6 +707,7 @@ def run_verification(
         stale=_is_stale(db_info, stale_after_days),
         max_source_date=db_info.get("max_source_date"),
         history_complete=db_info.get("history_complete"),
+        scope_available=db_info.get("scope_available", True),
     )
 
     report["verdict"] = verdict
@@ -726,7 +791,8 @@ def main() -> int:
         # acceptable RESULT depends on what the operator expected, so it is not
         # silently green: it exits 0 only when explicitly accepted.
         return EXIT_OK if args.accept_verified_empty else EXIT_FAILED
-    if verdict == Verdict.DB_UNAVAILABLE:
+    # Both are "this command could not answer", not "the answer is bad".
+    if verdict in (Verdict.DB_UNAVAILABLE, Verdict.ACCOUNT_NOT_CONFIGURED):
         return EXIT_UNAVAILABLE
     return EXIT_FAILED
 

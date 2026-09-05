@@ -321,3 +321,202 @@ def test_4d_the_residual_subtracts_only_canonical_populations():
     # Clamped at zero rather than allowed to wrap into a pass.
     assert isinstance(assign.value, ast.Call)
     assert getattr(assign.value.func, "id", None) == "max"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §2 — operational commands read the same population the product reads
+# ═════════════════════════════════════════════════════════════════════════════
+def test_5_no_unscoped_search_term_reader_exists():
+    """The contract guard, run over the real tree.
+
+    An empty result here is a genuine all-clear: unlike a database read this
+    scan cannot be refused — the files are either parsed or the repository is
+    not there.
+    """
+    from analysis.legacy_source_guard import scan_unscoped_search_term_readers
+
+    findings = scan_unscoped_search_term_readers()
+    assert findings == [], "\n".join(f["detail"] for f in findings)
+
+
+def test_5b_the_guard_catches_a_new_unscoped_reader(tmp_path):
+    """A guard nobody has seen fail is a guard nobody knows works.
+
+    The synthetic module below is the exact shape the review found in the
+    operational scripts: a literal query bounded on `source_date` alone.
+    """
+    from analysis.legacy_source_guard import (
+        REASON_UNSCOPED_SEARCH_TERM_READ, scan_unscoped_search_term_readers,
+    )
+
+    pkg = tmp_path / "services"
+    pkg.mkdir()
+    (pkg / "new_reader.py").write_text(
+        "def total(cur, start, end):\n"
+        "    cur.execute('SELECT SUM(spend_usd) FROM search_terms '\n"
+        "                'WHERE source_date >= %s AND source_date <= %s',\n"
+        "                (start, end))\n"
+        "    return cur.fetchone()[0]\n", encoding="utf-8")
+
+    findings = scan_unscoped_search_term_readers(
+        root=tmp_path, directories=("services",))
+    assert len(findings) == 1
+    assert findings[0]["reason"] == REASON_UNSCOPED_SEARCH_TERM_READ
+    assert findings[0]["function"] == "total"
+    assert "never mentions `customer_id`" in findings[0]["detail"]
+
+
+def test_5c_the_guard_accepts_the_scoped_form_and_ignores_writes(tmp_path):
+    """Both halves matter. A guard that flagged correct code would be turned
+    off within a week, and one that flagged the writer's supersession DELETE
+    would be flagging the very mechanism that fixes the problem."""
+    from analysis.legacy_source_guard import scan_unscoped_search_term_readers
+
+    pkg = tmp_path / "services"
+    pkg.mkdir()
+    (pkg / "scoped_reader.py").write_text(
+        "from analysis.search_term_scope import canonical_scope\n"
+        "def total(cur, start, end):\n"
+        "    scope = canonical_scope(start, end)\n"
+        "    if not scope.available:\n"
+        "        return None\n"
+        "    cur.execute('SELECT SUM(spend_usd) FROM search_terms WHERE '\n"
+        "                + scope.sql, scope.params)\n"
+        "    return cur.fetchone()[0]\n", encoding="utf-8")
+    (pkg / "writer.py").write_text(
+        "def supersede(cur):\n"
+        "    cur.execute('DELETE FROM search_terms WHERE customer_id IS NULL')\n",
+        encoding="utf-8")
+
+    assert scan_unscoped_search_term_readers(
+        root=tmp_path, directories=("services",)) == []
+
+
+def test_5d_every_scope_exemption_names_why_it_is_historical():
+    """An allowlist nobody maintains is a hole with documentation attached."""
+    from analysis.legacy_source_guard import SEARCH_TERM_SCOPE_ALLOWLIST
+
+    assert SEARCH_TERM_SCOPE_ALLOWLIST, "an empty allowlist would be suspicious"
+    for entry, reason in SEARCH_TERM_SCOPE_ALLOWLIST.items():
+        assert len(reason) > 40, f"{entry} is exempt without a real reason"
+        # The two legitimate categories, named in the reason itself.
+        assert any(w in reason.lower() for w in ("historical", "guard itself")), \
+            f"{entry} is exempt for a reason that is not a historical diagnostic"
+
+
+def test_6_the_verification_command_fails_closed_without_an_account(monkeypatch):
+    """Zero rows because nothing was configured must not read as zero rows
+    because the pipeline is broken. Those call for opposite responses, and only
+    one of them is fixed by an environment variable."""
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+    import importlib
+
+    verify = importlib.import_module("scripts.verify_search_terms_pipeline")
+    db = verify._check_db(30)
+    assert db["scope_available"] is False
+    assert db["scope_reason"] == scope_mod.REASON_CUSTOMER_NOT_CONFIGURED
+    assert db["rows_requested_window"] == 0
+    assert db["available"] is False
+
+    verdict, reason = verify.compute_search_terms_verdict(
+        db_available=False, scope_available=False)
+    assert verdict == verify.Verdict.ACCOUNT_NOT_CONFIGURED
+    assert "GOOGLE_ADS_CUSTOMER_ID" in reason
+
+
+def test_6b_the_waste_truth_audit_fails_closed_without_an_account(monkeypatch):
+    """Same rule, second command. `_canonical_facts` is NAMED canonical, so
+    returning an unscoped total from it would be the most direct untruth in the
+    codebase."""
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+    import importlib
+
+    waste = importlib.import_module("scripts.audit_search_term_waste_truth")
+    facts = waste._canonical_facts(DAY - timedelta(days=30), DAY)
+    assert facts["available"] is False
+    assert facts["reason"] == scope_mod.REASON_CUSTOMER_NOT_CONFIGURED
+
+
+@_needs_pg
+def test_7_the_verification_command_counts_canonical_rows_only(pg, monkeypatch):  # noqa: F811
+    """Executed, not inspected.
+
+    A twin, a foreign account and a Windsor row alongside one canonical row.
+    Before the fix this command reported 4 and called the pipeline healthy —
+    the operator's own verification would have confirmed the doubled table.
+    """
+    _init_db(pg, monkeypatch)
+    today = date.today()
+    _insert(customer_id=ACCOUNT, source_date=today)
+    _insert(customer_id=None, source_date=today)                    # twin
+    _insert(customer_id=OTHER_ACCOUNT, source_date=today,
+            search_term="another account")
+    _insert(customer_id=None, source_system="windsor", source_date=today,
+            search_term="windsor row")
+    assert _scalar("SELECT COUNT(*) FROM search_terms") == 4
+
+    import importlib
+
+    verify = importlib.reload(
+        importlib.import_module("scripts.verify_search_terms_pipeline"))
+    db = verify._check_db(30)
+
+    assert db["scope_available"] is True
+    assert db["rows_requested_window"] == 1
+    assert db["rows_30d"] == 1
+    # The excluded rows are disclosed rather than silently dropped, so an
+    # operator comparing this against a raw count is not left guessing.
+    assert db["null_customer_rows_in_window"] == 2
+
+
+@_needs_pg
+def test_7b_the_waste_truth_audit_counts_canonical_rows_only(pg, monkeypatch):  # noqa: F811
+    """The same fixture through the second command, including the money."""
+    _init_db(pg, monkeypatch)
+    _insert(customer_id=ACCOUNT, spend_usd=5.0)
+    _insert(customer_id=None, spend_usd=5.0)                        # twin
+    _insert(customer_id=OTHER_ACCOUNT, spend_usd=5.0,
+            search_term="another account")
+    _insert(customer_id=None, source_system="windsor", spend_usd=5.0,
+            search_term="windsor row")
+
+    import importlib
+
+    waste = importlib.reload(
+        importlib.import_module("scripts.audit_search_term_waste_truth"))
+    facts = waste._canonical_facts(DAY - timedelta(days=7), DAY)
+
+    assert facts["available"] is True
+    assert facts["fact_rows"] == 1
+    # 5.0, not 20.0. This is the number the retired page published.
+    assert facts["spend_usd"] == pytest.approx(5.0)
+    assert facts["unique_identities"] == 1
+
+
+@_needs_pg
+def test_7c_quality_counts_are_taken_over_the_claimed_population(pg, monkeypatch):  # noqa: F811
+    """A count of malformed rows cannot be taken inside a filter that requires
+    them to be well-formed: it would read zero forever, over any table.
+
+    `claimed_scope` is provenance and account WITHOUT the completeness clauses,
+    which is the only population over which "how many are broken" is a question
+    with an answer.
+    """
+    _init_db(pg, monkeypatch)
+    _insert(customer_id=ACCOUNT)                                    # healthy
+    _insert(customer_id=ACCOUNT, campaign_name=None,
+            search_term="no campaign name")                         # malformed
+    _insert(customer_id=None, campaign_name=None,
+            search_term="historical, not ours")                     # excluded
+
+    import importlib
+
+    verify = importlib.reload(
+        importlib.import_module("scripts.verify_search_terms_pipeline"))
+    db = verify._check_db(30)
+
+    # The account's own malformed row is visible…
+    assert db["null_campaign_count"] == 1
+    # …and does not silently join the canonical totals.
+    assert db["rows_with_spend"] == 2   # both of this account's rows have spend
+    assert scope_mod.claimed_scope().available is True
