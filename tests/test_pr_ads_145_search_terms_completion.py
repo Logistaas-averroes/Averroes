@@ -500,7 +500,14 @@ def test_writer_never_raises_on_bad_cost_micros_and_defaults_source(monkeypatch)
     captured = {}
 
     class _Cur:
+        rowcount = 0
         def executemany(self, sql, rows): captured["rows"] = rows
+        # PR-ADS-156-F4 runs the residual-twin reconciliation as two single
+        # statements after the upsert, so this double needs `execute` too.
+        # Recorded rather than ignored, so the sweep staying inside the same
+        # cursor — and therefore the same transaction — is visible here.
+        def execute(self, sql, params=None):
+            captured.setdefault("executed", []).append(sql)
         def __enter__(self): return self
         def __exit__(self, *a): return False
 

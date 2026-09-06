@@ -837,3 +837,161 @@ scope factory, they use what it returns.
 
 Nothing in this change alters ingestion, deletes production rows, runs a
 backfill, or touches Platform Evidence UI.
+
+---
+
+# PR-ADS-156-F4 — residual exact twins across the certified interval
+
+## Root cause
+
+F3 reduced the production duplicate population from **16,100** exact
+account-less twins to exactly **one**, and the audit kept blocking with
+`pre_cutover_null_customer_twin`:
+
+| | |
+|---|---|
+| source_date | 2026-09-04 |
+| campaign | `global - competitors` (id `23094767513`) |
+| ad_group | `Competitors List` |
+| keyword / match_type | empty / empty |
+| search_term | `winfleet` |
+| legacy twin | id 330284, run/batch 164 / 1355 |
+| canonical row | id 331967, run/batch 166 / **1378** |
+| latest successful batch | **1405** |
+
+The canonical row still carrying batch 1378 is the whole diagnosis. Batch 1405
+covered that date and **did not return this identity**.
+
+Google Ads search-term reporting is **mutable**: an identity present in one pull
+can be absent from the next. An older canonical observation therefore stays
+stored while disappearing from later pulls — and F3 supersedes twins only for
+identities present in the **current input rows**. The key that would have
+matched this twin was never in a later pull, so per-row supersession could not
+reach it, and it sat inside a newly certified interval untouched.
+
+That is not a flaw in F3's rule. It is a gap in its **reach**.
+
+## The change
+
+The reconciliation is now performed by **interval** as well as by input row,
+inside the same write transaction. It asks a different question — not "did this
+pull mention that identity" but "does this interval still hold an exact twin of
+a canonical row".
+
+Every safety condition is unchanged. A twin is superseded only when it is
+account-less, carries canonical Google Ads provenance, and matches a replacement
+on **all seven** remaining natural-key components; the replacement must belong to
+the configured account (exact hyphenated or unhyphenated spelling), carry
+canonical provenance, and have complete campaign / ad-group / term identity. The
+`DELETE` is gated on an `EXISTS`, so an unmatched historical row has nothing to
+satisfy it.
+
+The audit is **not weakened anywhere**. It stops blocking because the condition
+it reports genuinely stops being true.
+
+### Before / after, on a real database
+
+Fixture: the production pair, plus 24 unmatched account-less rows standing in
+for the disclosed history.
+
+| | before | after |
+|---|---|---|
+| `violation_codes` | `pre_cutover_null_customer_twin` | *(none for identity)* |
+| `null_customer_twins` | **1** | **0** |
+| `unmatched_null_customer_rows` | 24 | **24** — untouched |
+| `current.row_count` | 1 | 2 |
+| `duplicate_natural_key_groups` | 0 | 0 |
+| rows missing identity (provenance) | 25 | 24 |
+| **total rows in table** | 26 | **26** |
+
+26 → 26 is the point: one twin removed, one upstream row written. The disclosed
+history is exactly as it was.
+
+## Bounds, counts and failure
+
+* The **requested** interval is passed explicitly from the sync service, not
+  inferred from the returned rows — inferring it would shrink the swept span by
+  precisely the dates whose identities went missing, which is the entire class
+  of row this exists to reach. Without explicit bounds the prepared rows' own
+  span is used: still bounded, never table-wide.
+* An **unresolved account sweeps nothing**. There is no fallback to matching
+  every account.
+* `row_count` still means **upstream rows written** and stays comparable with
+  `fetched` and `prepared`. Superseded twins are reconciliation actions, not
+  source rows, and are logged separately as `residual_twins_superseded=<count>`.
+* The sweep runs in the **same transaction** as the upsert. If it fails, the
+  upsert rolls back with it and the writer returns 0, which the sync service
+  reads as failed persistence and records a `failed` batch. A reconciliation
+  that did not complete never leaves an interval certified.
+
+## Not done here
+
+No manual SQL cleanup, no production migration, no historical backfill, and no
+special case for row `330284` or the term `winfleet` — there is no such literal
+in the implementation. The production row disappears because it satisfies the
+general rule.
+
+## Production procedure after deployment
+
+1. Confirm the deployed SHA.
+2. Run one incremental sync.
+3. Run `python -m scripts.audit_keyword_search_term_freshness`.
+
+Acceptance: sync exit `0`; fetched = prepared = written; rejected `0`; evidence
+status ready; null-account twins `0`; missing identity `0`; duplicate keys `0`;
+audit `ok = True` and exit `0`.
+
+## F4 review correction — the verified-empty path certifies an interval too
+
+`sync_search_terms` handles `fetched == 0` **before** it ever calls the writer.
+The first cut of F4 therefore left exactly one certified interval unreconciled:
+a verified-empty pull created a successful certified interval, never ran the
+residual reconciliation, and could leave an exact account-less twin sitting
+inside it while returning `ok=True` and `verified_empty=True`.
+
+That contradicts F4's own invariant — *a reconciliation that did not complete
+never leaves an interval certified* — and it is reachable rather than
+theoretical, for the same reason F4 exists: mutable reporting means a stored
+canonical identity and its twin can both sit inside an interval a later pull
+returns nothing for.
+
+Both paths now run the **same rule through the same helper**,
+`_execute_residual_twin_reconciliation`, which takes an open cursor so the
+caller owns the transaction. What differs is only the transaction: the non-empty
+path shares the upsert's; the empty path, having no upsert to share, gets one of
+its own via `reconcile_residual_search_term_twins`.
+
+### Why the entry point returns a result, not a count
+
+`write_search_terms` returns an integer, and `0` means both *nothing needed
+superseding* and *the write failed*. Those decide **opposite** things about
+certifying an interval, so a caller inferring success from the count would
+certify on failure. The entry point returns
+`{"ok": bool, "superseded": int, "reason": str | None}` instead.
+
+| Outcome | `ok` | Effect |
+|---|---|---|
+| reconciled, 0 or more twins | `True` | batch may finalize successful and verified empty |
+| database unavailable / SQL error | `False` | batch `failed`, `verified_empty=False`, no coverage advance |
+| no account resolves | `True`, `reason` set | nothing to reconcile; disclosed, audit remains the fail-closed gate |
+
+The third row is a judgement call worth naming: an unresolved account is not a
+reconciliation *failure*, it is the absence of a population to reconcile —
+exactly how `canonical_scope` treats it. It is reported so the caller can
+disclose it, and the freshness audit already exits `2` on an unconfigured
+account, so nothing is certified quietly.
+
+### Failure contract, verified-empty path
+
+On failure: batch finalized `failed`; `verified_empty=False`; **no**
+`last_source_date`, so proven coverage does not advance; `ok=False`; the reason
+disclosed under its own code `residual_twin_reconciliation_failed` rather than a
+generic persistence error — the pull may have been perfectly healthy, and
+"persistence failed" would send an operator to the wrong place. Any partial
+cleanup rolls back: the carry-over and the delete share one transaction, so an
+interrupted run cannot leave annotations moved onto a canonical row whose twin
+is still there.
+
+On success: `row_count=0`, `fetched=0`, `prepared=0`, `rejected=0` all unchanged
+— a superseded twin is never an upstream row — with the count reported as
+`residual_twins_superseded` on the result and in the log.

@@ -1049,14 +1049,23 @@ def test_22b_no_row_from_any_population_leaks_into_the_unavailable_payload(
     import api.server as server
 
     payload = server._build_search_terms_verdict(30)
-    blob = json.dumps(payload, default=str)
 
     assert payload["api"]["total_rows_in_window"] is None
     assert payload["db"].get("latest_source_date") is None
     assert payload["db"].get("unscoped_historical_rows_in_window") is None
     # The rows are all still in the table; they were withheld, not missing.
     assert _scalar("SELECT COUNT(*) FROM search_terms") == 4
+
     # Nothing from the seeded rows surfaced by any route.
+    #
+    # `generated_at` is dropped before the substring scan. It is an ISO
+    # timestamp with microseconds, so a short account id collides with it by
+    # chance — "…T08:15:19.045551+00:00" contains "555" — and the test would
+    # fail perhaps one run in a few hundred while the payload was perfectly
+    # correct. A flaky assertion about a leak is worse than none: it teaches
+    # people to re-run this suite rather than read it.
+    scanned = {k: v for k, v in payload.items() if k != "generated_at"}
+    blob = json.dumps(scanned, default=str)
     for leaked in ("windsor era term", "another account term", ACCOUNT,
                    OTHER_ACCOUNT):
         assert leaked not in blob, leaked

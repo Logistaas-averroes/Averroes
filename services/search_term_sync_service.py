@@ -208,6 +208,12 @@ def _max_source_date(rows: list) -> date | None:
 #: from the caller's memory of the return value.
 BATCH_FINALIZATION_FAILED = "batch_finalization_failed"
 
+#: PR-ADS-156-F4 review — the residual exact-twin reconciliation did not
+#: complete, so the interval is NOT certified. Its own code rather than a
+#: generic persistence error: the pull may have been perfectly healthy, and an
+#: operator reading "persistence failed" would go looking in the wrong place.
+RESIDUAL_RECONCILIATION_FAILED = "residual_twin_reconciliation_failed"
+
 _FINALIZATION_ERROR = (
     "rows may be stored, but the sync batch could not be finalized: coverage "
     "and verified-empty proof were NOT durably recorded, so this interval is "
@@ -241,6 +247,10 @@ def _result(**kwargs) -> dict:
         # run cannot certify it.
         "batch_finalized": False,
         "rows_possibly_written": 0,
+        # PR-ADS-156-F4 — reconciliation actions, reported separately from
+        # `written` so a superseded twin can never be mistaken for an upstream
+        # row this run fetched.
+        "residual_twins_superseded": 0,
         # Stated on every result, successful or not. This service reads Google
         # Ads and writes only local tables.
         "external_writes_performed": False,
@@ -308,6 +318,49 @@ def sync_search_terms(date_from: date, date_to: date, sync_type: str, *,
     rejected = sum(rejected_reasons.values())
 
     if fetched == 0:
+        # PR-ADS-156-F4 review — reconcile BEFORE certifying.
+        #
+        # This branch returns before `write_search_terms` is ever called, so it
+        # used to certify an interval without running the residual twin
+        # reconciliation at all. That is reachable, not theoretical: mutable
+        # reporting means a stored canonical identity and its account-less twin
+        # can both sit inside an interval a later pull returns nothing for. The
+        # invariant is that no interval is certified without being reconciled,
+        # and an empty pull certifies an interval like any other.
+        #
+        # There is no upsert transaction to share here, so the reconciliation
+        # gets one of its own — and an explicit ok/failure result, because the
+        # writer's integer cannot distinguish "nothing to supersede" from
+        # "the write failed" and those decide opposite things about certifying.
+        reconciled = w.reconcile_residual_search_term_twins(date_from, date_to)
+        if not reconciled.get("ok"):
+            logger.error("search-term sync (%s → %s): verified-empty pull could "
+                         "not be reconciled — %s",
+                         date_from, date_to, reconciled.get("reason"))
+            w.finish_sync_batch(
+                batch_id=batch_id, status="failed", row_count=0,
+                # No `last_source_date`: a failed reconciliation must not
+                # advance proven coverage over an interval it did not finish.
+                error_message=f"{RESIDUAL_RECONCILIATION_FAILED}: "
+                              f"{reconciled.get('reason')}"[:1000],
+                # The pull genuinely returned nothing, but this run does not get
+                # to record that as PROVEN: the certificate is the claim, and the
+                # claim is what could not be completed.
+                verified_empty=False, fetched_count=0,
+                prepared_count=0, rejected_count=0)
+            return _result(batch_id=batch_id, verified_empty=False,
+                           error=f"{RESIDUAL_RECONCILIATION_FAILED}: "
+                                 f"{reconciled.get('reason')}",
+                           residual_twins_superseded=0,
+                           **({"rows": []} if include_rows else {}), **span)
+
+        superseded = int(reconciled.get("superseded") or 0)
+        if superseded or reconciled.get("reason"):
+            logger.info("search-term sync (%s → %s): verified-empty interval "
+                        "reconciled, residual_twins_superseded=%d%s",
+                        date_from, date_to, superseded,
+                        f" ({reconciled['reason']})" if reconciled.get("reason") else "")
+
         # Verified empty: asked, answered, nothing there. The watermark advances
         # because the interval is now proven — that is the difference between
         # this and a failure, and it is the only reason the flag exists.
@@ -330,14 +383,24 @@ def sync_search_terms(date_from: date, date_to: date, sync_type: str, *,
                            error=f"{BATCH_FINALIZATION_FAILED}: the interval "
                                  "returned no rows, but that proof was not "
                                  "durably recorded",
+                           residual_twins_superseded=superseded,
                            **({"rows": []} if include_rows else {}), **span)
-        logger.info("search-term sync (%s → %s): verified empty (0 rows)",
-                    date_from, date_to)
+        logger.info("search-term sync (%s → %s): verified empty (0 rows), "
+                    "residual_twins_superseded=%d",
+                    date_from, date_to, superseded)
         return _result(ok=True, batch_id=batch_id, verified_empty=True,
                        latest_source_date=None, batch_finalized=True,
+                       residual_twins_superseded=superseded,
                        **({"rows": []} if include_rows else {}), **span)
 
-    written = w.write_search_terms(run_id, prepared_rows, sync_batch_id=batch_id)
+    # PR-ADS-156-F4: the REQUESTED interval is passed explicitly, because it is
+    # what this run is about to certify. The writer reconciles residual
+    # account-less twins across exactly that span — including identities Google
+    # Ads did not return this time, which per-row supersession can never reach.
+    # Deriving the bounds from the returned rows instead would shrink the swept
+    # interval by precisely the dates whose identities went missing.
+    written = w.write_search_terms(run_id, prepared_rows, sync_batch_id=batch_id,
+                                   interval_start=date_from, interval_end=date_to)
     written = int(written or 0)
 
     error = None
