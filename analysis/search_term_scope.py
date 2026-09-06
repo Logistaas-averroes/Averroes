@@ -261,6 +261,16 @@ def unscoped_history_scope(start: date | None = None, end: date | None = None, *
 
     Reported as disclosure — counted and labelled, never added to a total, never
     relabelled canonical, and never repaired or deleted by a reader.
+
+    NULL-safe by necessity. ``NOT (predicate)`` is not the complement of
+    ``predicate`` in SQL, because SQL is three-valued: the canonical predicate
+    contains ``customer_id = ANY(%s)``, which evaluates to NULL — not FALSE —
+    for a row with no account, so the whole conjunction is NULL and ``NOT NULL``
+    is NULL again. A row that is NULL under both predicates is counted by
+    NEITHER, and the exact rows that fall through are the pre-cutover
+    account-less twins this whole cutover is about. ``IS NOT TRUE`` maps both
+    FALSE and NULL to TRUE, which is the complement actually wanted: "every row
+    this scope does not certify".
     """
     scope = canonical_scope(start, end, alias=alias, configured=configured)
     if not scope.available:
@@ -275,10 +285,11 @@ def unscoped_history_scope(start: date | None = None, end: date | None = None, *
         window.append(f"{_col(alias, 'source_date')} <= %s")
         window_params.append(end)
 
-    # NOT(scope) alone would be enough, but the window has to be re-stated: the
-    # complement of a windowed predicate includes every row outside the window,
-    # and a disclosure about "this interval" must stay inside it.
-    sql = " AND ".join([*window, f"NOT ({scope.sql})"]) if window else f"NOT ({scope.sql})"
+    # The window has to be re-stated: the complement of a windowed predicate
+    # includes every row outside the window, and a disclosure about "this
+    # interval" must stay inside it.
+    complement = f"({scope.sql}) IS NOT TRUE"
+    sql = " AND ".join([*window, complement]) if window else complement
     return SearchTermScope(
         available=True, sql=sql,
         params=(*window_params, *scope.params),

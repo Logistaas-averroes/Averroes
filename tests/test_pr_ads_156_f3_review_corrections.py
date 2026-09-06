@@ -46,7 +46,7 @@ from tests.test_pr_ads_153e_a_pg_integration import (  # noqa: E402,F401
     _have_postgres, pg,
 )
 from tests.test_pr_ads_156_f3_account_identity_cutover import (  # noqa: E402
-    ACCOUNT, DAY, OTHER_ACCOUNT, _TWIN_COLUMNS, _exec, _init_db,
+    ACCOUNT, DAY, OTHER_ACCOUNT, _TWIN_COLUMNS, _exec, _init_db, _rows_of,
     _run_audit, _scalar, _seed_batch, _seed_pre_cutover_twin,
 )
 
@@ -930,3 +930,395 @@ def test_21_the_operational_audits_fail_closed_over_a_populated_table(
     payload = json.loads(res.stdout)
     assert payload["violation_codes"] == [audit.V_ACCOUNT_NOT_CONFIGURED]
     assert payload["datasets"] == []
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FINAL REVIEW §1 — the verdict endpoint fails closed on an unresolved account
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# `_build_search_terms_verdict` resolved the scope and recorded its availability
+# in the payload, then handed `compute_search_terms_verdict` a `db_available`
+# and a row count and nothing else. With no account the predicate is FALSE, so
+# every count is 0 — correctly — and the verdict function read those zeros as
+# evidence ABOUT THE PIPELINE: FRESH_BUT_EMPTY, or
+# NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT when no sync state existed either.
+#
+# Both send an operator to inspect a sync that is very probably healthy, over a
+# table that may be full of rows. The cause is one unset environment variable.
+# `db.canonical_scope_available: false` was already in the payload, which made
+# it worse rather than better: the truth was present and the headline verdict
+# contradicted it, and people act on headlines.
+
+def _admin_client_and_cookies():
+    """A TestClient plus an ADMIN cookie — the verdict endpoint is admin-only,
+    so a viewer session would be rejected before any of this is exercised."""
+    import os
+
+    from starlette.responses import Response as StarletteResponse
+
+    from api.auth import set_session
+
+    os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
+    r = StarletteResponse()
+    set_session(r, "testadmin", "admin")
+    cookies = {}
+    for part in r.headers.get("set-cookie", "").split(";"):
+        part = part.strip()
+        if part.startswith("ads_session="):
+            cookies["ads_session"] = part.split("=", 1)[1]
+    return _api_client(), cookies
+
+
+def _clear_verdict_cache():
+    """The endpoint memoises by `days` for 60s.
+
+    Without this a configured-account result computed by an earlier test would
+    be served straight back, and the fail-closed assertions below would pass
+    over a payload that never touched the code they are testing — the precise
+    shape of a test that proves nothing.
+    """
+    import api.server as server
+
+    with server._search_terms_verdict_cache_lock:
+        server._search_terms_verdict_cache.clear()
+
+
+#: Verdicts that would each be a specific untruth here: three assert something
+#: about the pipeline, and one claims the state could not be determined when it
+#: is known exactly.
+_MISLEADING_VERDICTS = ("OK", "UNKNOWN", "FRESH_BUT_EMPTY",
+                        "NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT")
+
+
+@_needs_pg
+def test_22_the_verdict_builder_fails_closed_over_a_populated_table(
+        pg, monkeypatch):  # noqa: F811
+    """Four rows in the table, no account configured.
+
+    This is the dangerous case: an unscoped or zero-reading answer looks
+    entirely plausible, and there is real data sitting right there to be
+    mis-attributed.
+    """
+    _init_db(pg, monkeypatch)
+    _seed_mixed_population()
+    _clear_verdict_cache()
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+
+    import api.server as server
+    from scripts.verify_search_terms_pipeline import Verdict
+
+    payload = server._build_search_terms_verdict(30)
+
+    assert payload["verdict"] == Verdict.ACCOUNT_NOT_CONFIGURED
+    assert payload["verdict"] not in _MISLEADING_VERDICTS
+    assert payload["db"]["canonical_scope_available"] is False
+    assert payload["db"]["canonical_scope_reason"] == \
+        scope_mod.REASON_CUSTOMER_NOT_CONFIGURED
+
+    # No canonical totals presented as proven values. Not zero — absent.
+    for key in ("rows_7d", "rows_14d", "rows_30d", "rows_60d",
+                "blank_search_term_rows", "spend_rows", "click_rows"):
+        assert payload["db"][key] is None, key
+    assert payload["db"]["canonical_counts_measured"] is False
+
+    # The reason explains the cause, and the next action is something an
+    # operator can actually carry out.
+    assert "GOOGLE_ADS_CUSTOMER_ID" in payload["reason"]
+    assert "GOOGLE_ADS_CUSTOMER_ID" in payload["next_action"]
+    assert payload["next_action"] != \
+        "Unable to determine pipeline state. Run verify_search_terms_pipeline.py manually."
+
+    # Database availability is still reported independently — the database is
+    # fine, and saying otherwise would send the operator somewhere else wrong.
+    assert payload["db"]["available"] is True
+
+
+@_needs_pg
+def test_22b_no_row_from_any_population_leaks_into_the_unavailable_payload(
+        pg, monkeypatch):  # noqa: F811
+    """The four seeded rows are the configured account's own, another
+    account's, null-account history and a Windsor row. None of them may appear
+    as a count, a date, or a spend total — including the configured account's,
+    because without a resolved account nothing proves that row is this
+    deployment's."""
+    _init_db(pg, monkeypatch)
+    _seed_mixed_population()
+    _clear_verdict_cache()
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+
+    import api.server as server
+
+    payload = server._build_search_terms_verdict(30)
+    blob = json.dumps(payload, default=str)
+
+    assert payload["api"]["total_rows_in_window"] is None
+    assert payload["db"].get("latest_source_date") is None
+    assert payload["db"].get("unscoped_historical_rows_in_window") is None
+    # The rows are all still in the table; they were withheld, not missing.
+    assert _scalar("SELECT COUNT(*) FROM search_terms") == 4
+    # Nothing from the seeded rows surfaced by any route.
+    for leaked in ("windsor era term", "another account term", ACCOUNT,
+                   OTHER_ACCOUNT):
+        assert leaked not in blob, leaked
+
+
+@_needs_pg
+def test_23_the_endpoint_returns_the_same_explicit_unavailable_verdict(
+        pg, monkeypatch):  # noqa: F811
+    """Through the HTTP route, not just the builder — including the cache,
+    which is the layer most able to serve a stale configured answer."""
+    _init_db(pg, monkeypatch)
+    _seed_mixed_population()
+    from scripts.verify_search_terms_pipeline import Verdict
+
+    client, cookies = _admin_client_and_cookies()
+
+    # Prime the cache with a CONFIGURED result first, so this test would fail
+    # if the endpoint served a cached payload across the configuration change.
+    _clear_verdict_cache()
+    primed = client.get("/api/system/search-terms-verdict?days=30",
+                        cookies=cookies)
+    assert primed.status_code == 200, primed.text
+    assert primed.json()["db"]["canonical_scope_available"] is True
+
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+    _clear_verdict_cache()
+
+    r = client.get("/api/system/search-terms-verdict?days=30", cookies=cookies)
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["verdict"] == Verdict.ACCOUNT_NOT_CONFIGURED
+    assert body["verdict"] not in _MISLEADING_VERDICTS
+    assert body["db"]["canonical_scope_available"] is False
+    assert body["db"]["canonical_scope_reason"] == \
+        scope_mod.REASON_CUSTOMER_NOT_CONFIGURED
+    assert body["db"]["rows_30d"] is None
+    assert "GOOGLE_ADS_CUSTOMER_ID" in body["next_action"]
+
+
+def test_23b_every_verdict_the_endpoint_can_return_has_a_next_action():
+    """A verdict with no next action falls back to the UNKNOWN instruction,
+    which tells an operator to run a script by hand for a state the code
+    already diagnosed. Read from source so a new verdict cannot be added
+    without one."""
+    src = (_ROOT / "api" / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "_build_search_terms_verdict")
+    mapping = next(
+        node.value for node in ast.walk(fn)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "next_actions"
+                for t in node.targets))
+    from scripts.verify_search_terms_pipeline import Verdict
+
+    # Compared by VALUE, not by attribute name. `Verdict` keeps the retired
+    # Windsor-era attribute names as aliases pointing at the provider-neutral
+    # strings, and the mapping is keyed by the string — so comparing names
+    # would report two aliases as uncovered when the lookup they perform
+    # already succeeds.
+    mapped = {getattr(Verdict, k.attr) for k in mapping.keys
+              if isinstance(k, ast.Attribute)}
+    declared = {value for name, value in vars(Verdict).items()
+                if name.isupper() and isinstance(value, str)}
+
+    assert Verdict.ACCOUNT_NOT_CONFIGURED in mapped
+    missing = declared - mapped
+    assert not missing, f"verdicts with no operator instruction: {sorted(missing)}"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FINAL REVIEW §2 — the historical complement must be NULL-safe
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# `NOT (predicate)` is not the complement of `predicate` in SQL, because SQL is
+# three-valued. The canonical predicate contains `customer_id = ANY(%s)`, which
+# is NULL — not FALSE — for a row with no account, so the conjunction is NULL
+# and `NOT NULL` is NULL again.
+#
+# A row that is NULL under both predicates is counted by NEITHER. The rows that
+# fell through are exactly the pre-cutover account-less twins this cutover is
+# about: invisible in the canonical totals, which is correct, and invisible in
+# the disclosure meant to reveal them, which is not.
+
+def _seed_four_historical_shapes():
+    """One row of every shape the complement has to place, all on one day.
+
+    Only the last belongs to the canonical population; the other four are
+    history and every one of them must appear in the disclosure.
+    """
+    today = date.today()
+    _insert(customer_id=None, source_date=today,
+            search_term="canonical provenance, no account")      # the NULL case
+    _insert(customer_id=None, source_system="windsor", source_date=today,
+            search_term="windsor row")
+    _insert(customer_id=OTHER_ACCOUNT, source_date=today,
+            search_term="another account, complete")
+    _insert(customer_id=ACCOUNT, source_date=today, campaign_id=None,
+            search_term="our account, incomplete identity")
+    _insert(customer_id=ACCOUNT, source_date=today,
+            search_term="the one canonical row")
+    assert _scalar("SELECT COUNT(*) FROM search_terms") == 5
+
+
+@_needs_pg
+def test_24_the_historical_scope_places_every_non_canonical_row(pg, monkeypatch):  # noqa: F811
+    """Canonical and historical must PARTITION the window: every row lands in
+    exactly one, and the two counts add up to the total."""
+    _init_db(pg, monkeypatch)
+    _seed_four_historical_shapes()
+    today = date.today()
+
+    canonical = scope_mod.canonical_scope(today, today)
+    history = scope_mod.unscoped_history_scope(today, today)
+    assert history.available is True
+
+    canonical_rows = _rows_of(
+        "SELECT search_term FROM search_terms WHERE " + canonical.sql,
+        canonical.params)
+    historical_rows = _rows_of(
+        "SELECT search_term FROM search_terms WHERE " + history.sql,
+        history.params)
+
+    assert {r[0] for r in canonical_rows} == {"the one canonical row"}
+    assert {r[0] for r in historical_rows} == {
+        "canonical provenance, no account",
+        "windsor row",
+        "another account, complete",
+        "our account, incomplete identity",
+    }
+    # A partition, not two overlapping filters: 1 + 4 = 5, nothing lost.
+    assert len(canonical_rows) + len(historical_rows) == 5
+
+
+@_needs_pg
+def test_24b_the_null_account_row_was_the_one_that_fell_through(pg, monkeypatch):  # noqa: F811
+    """The regression, isolated to the row that caused it.
+
+    `NOT (…)` evaluates to NULL for this row and PostgreSQL treats NULL as
+    not-matching, so it appeared in neither population. Asserted directly
+    against both spellings so the reason is visible, not just the symptom.
+    """
+    _init_db(pg, monkeypatch)
+    today = date.today()
+    _insert(customer_id=None, source_date=today, search_term="orphan")
+
+    canonical = scope_mod.canonical_scope(today, today)
+
+    # The old spelling — kept here only to demonstrate what it did.
+    old = _scalar("SELECT COUNT(*) FROM search_terms WHERE source_date >= %s "
+                  "AND source_date <= %s AND NOT (" + canonical.sql + ")",
+                  (today, today, *canonical.params))
+    new = _scalar("SELECT COUNT(*) FROM search_terms WHERE " +
+                  scope_mod.unscoped_history_scope(today, today).sql,
+                  scope_mod.unscoped_history_scope(today, today).params)
+
+    assert old == 0, "the old NOT(...) spelling should have missed this row"
+    assert new == 1, "IS NOT TRUE must place it in history"
+    # And it is not canonical either — which is what made the loss silent.
+    assert _scalar("SELECT COUNT(*) FROM search_terms WHERE " + canonical.sql,
+                   canonical.params) == 0
+
+
+@_needs_pg
+def test_24c_the_null_customer_count_is_a_subset_not_a_second_population(
+        pg, monkeypatch):  # noqa: F811
+    """`null_customer_rows_in_window` is a DIAGNOSTIC SUBSET of
+    `unscoped_historical_rows_in_window`, not another population beside it.
+
+    Now that the complement is NULL-safe the two overlap, so an operator who
+    adds them together double-counts. The subset relation is asserted here and
+    stated in the payload itself.
+    """
+    _init_db(pg, monkeypatch)
+    _seed_four_historical_shapes()
+    _clear_verdict_cache()
+
+    import api.server as server
+
+    db_info = server._build_search_terms_verdict(30)["db"]
+    historical = db_info["unscoped_historical_rows_in_window"]
+    null_account = db_info["null_customer_rows_in_window"]
+
+    # Four historical rows; one of them is the canonical-provenance row with no
+    # account, which is the null-account subset.
+    assert historical == 4
+    assert null_account == 1
+    assert null_account <= historical
+    assert "subset" in db_info["null_customer_rows_note"].lower()
+    assert "not" in db_info["null_customer_rows_note"].lower()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FINAL REVIEW §3 — the guard must check THIS query, not the function around it
+# ═════════════════════════════════════════════════════════════════════════════
+def test_25_calling_a_scope_factory_does_not_certify_an_unrelated_query(tmp_path):
+    """The hole the review named.
+
+    The function resolves a scope, checks its availability, and then runs a
+    completely different date-only dynamic query. The old guard accepted it,
+    because it only asked whether a `*_scope` call appeared anywhere in the
+    function — and calling a factory is not using its result.
+    """
+    from analysis.legacy_source_guard import (
+        REASON_UNSCOPED_SEARCH_TERM_READ, scan_unscoped_search_term_readers,
+    )
+
+    pkg = tmp_path / "services"
+    pkg.mkdir()
+    (pkg / "pretends.py").write_text(
+        "from analysis.search_term_scope import canonical_scope\n"
+        "def total(cur, start, end, extra_clause):\n"
+        "    scope = canonical_scope(start, end)\n"
+        "    if not scope.available:\n"
+        "        return None\n"
+        "    where = 'source_date >= %s AND source_date <= %s AND ' + extra_clause\n"
+        "    cur.execute('SELECT SUM(spend_usd) FROM search_terms WHERE ' + where,\n"
+        "                (start, end))\n"
+        "    return cur.fetchone()[0]\n", encoding="utf-8")
+
+    findings = scan_unscoped_search_term_readers(
+        root=tmp_path, directories=("services",))
+    assert len(findings) == 1, findings
+    assert findings[0]["reason"] == REASON_UNSCOPED_SEARCH_TERM_READ
+    assert findings[0]["function"] == "total"
+    assert "does not scope THIS query" in findings[0]["detail"]
+
+
+def test_25b_the_guard_follows_a_real_scope_chain(tmp_path):
+    """And the other half: the chain production actually writes —
+    scope into a condition list, into a joined WHERE string, into the query —
+    must still pass, or the guard is one people switch off."""
+    from analysis.legacy_source_guard import scan_unscoped_search_term_readers
+
+    pkg = tmp_path / "services"
+    pkg.mkdir()
+    (pkg / "chained.py").write_text(
+        "from analysis.search_term_scope import canonical_scope\n"
+        "def total(cur, start, end, campaign):\n"
+        "    scope = canonical_scope(start, end)\n"
+        "    if not scope.available:\n"
+        "        return None\n"
+        "    conditions = [scope.sql]\n"
+        "    params = list(scope.params)\n"
+        "    if campaign:\n"
+        "        conditions.append('campaign_name = %s')\n"
+        "        params.append(campaign)\n"
+        "    where_sql = ' AND '.join(conditions)\n"
+        "    query = 'SELECT SUM(spend_usd) FROM search_terms WHERE ' + where_sql\n"
+        "    cur.execute(query, params)\n"
+        "    return cur.fetchone()[0]\n", encoding="utf-8")
+
+    assert scan_unscoped_search_term_readers(
+        root=tmp_path, directories=("services",)) == []
+
+
+def test_25c_the_strengthened_guard_still_clears_the_real_tree():
+    """Zero findings under the stricter rule — the production readers do not
+    merely call a scope factory, they use what it returns."""
+    from analysis.legacy_source_guard import scan_unscoped_search_term_readers
+
+    findings = scan_unscoped_search_term_readers()
+    assert findings == [], "\n".join(f["detail"] for f in findings)

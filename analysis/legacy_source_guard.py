@@ -355,24 +355,70 @@ def _sql_expression(stmt: ast.stmt):
     return None
 
 
-def _derives_a_scope(func: ast.AST | None) -> bool:
-    """Whether the function obtains a scope from the shared module.
+def _assigned_names(target: ast.AST):
+    """Every plain name bound by an assignment target."""
+    for node in ast.walk(target):
+        if isinstance(node, ast.Name):
+            yield node.id
 
-    Deliberately function-level, and only reached for queries whose predicate is
-    assembled from a variable. Statement-level matching cannot follow
-    ``where_sql = " AND ".join(conditions)`` three lines up without implementing
-    dataflow, and a guard that reported those as violations would be a guard
-    everybody learns to ignore. The literal case below — which is the defect
-    this section actually found — is checked exactly.
-    """
-    if func is None:
-        return False
-    for node in ast.walk(func):
+
+def _mentions_a_scope_factory(value: ast.AST) -> bool:
+    for node in ast.walk(value):
         if isinstance(node, ast.Call):
-            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            name = (getattr(node.func, "id", None)
+                    or getattr(node.func, "attr", None))
             if name and name.endswith(SCOPE_FACTORY_SUFFIX):
                 return True
     return False
+
+
+def _scope_tainted_names(func: ast.AST | None) -> set[str]:
+    """Names inside ``func`` that carry a scope, directly or through a chain.
+
+    An intra-function taint analysis, run to a fixpoint. It exists because the
+    previous check was too weak to mean anything: it asked whether the function
+    called a ``*_scope`` factory ANYWHERE, so a function could resolve a scope,
+    ignore it, and run a date-only query three lines later with the guard's
+    blessing. Calling the factory is not using the result.
+
+    A name becomes tainted when it is assigned from an expression that either
+    calls a scope factory or references an already-tainted name. That follows
+    the real chains in this codebase — ``scope = canonical_scope(...)`` into
+    ``conditions = [scope.sql, ...]`` into ``where_sql = " AND ".join(conditions)``
+    into the query string — without needing to special-case any of their names.
+
+    Deliberately not a general dataflow analysis: it does not follow a scope
+    through a helper function, an attribute of ``self``, or a container mutated
+    by a method call it was not seeded with. Those come out as findings rather
+    than silent passes, which is the correct direction for a guard to be wrong
+    in — a false finding is argued about and then allowlisted with a reason,
+    while a false pass is never noticed at all.
+    """
+    if func is None:
+        return set()
+    tainted: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(func):
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if value is None:
+                continue
+            if not (_mentions_a_scope_factory(value)
+                    or any(isinstance(n, ast.Name) and n.id in tainted
+                           for n in ast.walk(value))):
+                continue
+            for target in targets:
+                for name in _assigned_names(target):
+                    if name not in tainted:
+                        tainted.add(name)
+                        changed = True
+    return tainted
 
 
 def scan_unscoped_search_term_readers(
@@ -426,13 +472,26 @@ def scan_unscoped_search_term_readers(
                     for n in ast.walk(sql_expr))
 
                 if dynamic:
-                    # The predicate comes from somewhere; require the function
-                    # to have got it from the shared scope module.
-                    if _derives_a_scope(func_node):
+                    # The predicate comes from somewhere. Require THIS query's
+                    # SQL expression to reference a scope-carrying name — not
+                    # merely that the function resolved a scope somewhere, which
+                    # a function can do and then ignore.
+                    tainted = _scope_tainted_names(func_node)
+                    referenced = {n.id for n in ast.walk(sql_expr)
+                                  if isinstance(n, ast.Name)}
+                    if referenced & tainted:
                         continue
-                    why = ("builds its predicate from a variable, and its "
-                           "enclosing function never obtains a scope from "
-                           "analysis.search_term_scope")
+                    if "customer_id" in lowered:
+                        # The dynamic part is elsewhere and the visible text
+                        # binds the account itself.
+                        continue
+                    why = ("builds its predicate from "
+                           + (", ".join(f"`{n}`" for n in sorted(referenced))
+                              if referenced else "an expression")
+                           + ", none of which carries a scope from "
+                             "analysis.search_term_scope — resolving a scope "
+                             "elsewhere in the function does not scope THIS "
+                             "query")
                 else:
                     # A fully literal query: the whole predicate is visible
                     # right here, so it can be judged exactly. This is the shape

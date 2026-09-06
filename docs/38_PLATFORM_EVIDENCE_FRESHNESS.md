@@ -737,3 +737,103 @@ one cannot be added without coverage.
 
 Nothing in this change writes to Google Ads or HubSpot, deletes historical rows,
 invents an account identity, or performs a backfill.
+
+---
+
+# PR-ADS-156-F3 final review correction
+
+Three findings. One was a SQL correctness bug that silently lost rows from both
+populations at once; one was a fail-closed path that existed in the payload but
+not in the verdict; one was a guard weak enough to certify what it was meant to
+catch.
+
+## 1. The verdict endpoint fails closed on an unresolved account
+
+`_build_search_terms_verdict()` resolved the scope, recorded
+`db.canonical_scope_available: false`, and then called
+`compute_search_terms_verdict()` without passing it. With no account the
+predicate is `FALSE`, so every count came back `0` — correctly — and the verdict
+function read those zeros as evidence **about the pipeline**.
+
+| | reviewed `b7c964d` | corrected |
+|---|---|---|
+| `verdict` | `NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT` | `ACCOUNT_NOT_CONFIGURED` |
+| `reason` | "No weekly run found and no sync state…" | names `GOOGLE_ADS_CUSTOMER_ID` |
+| `db.canonical_scope_available` | `false` | `false` |
+| `db.canonical_scope_reason` | `null` | `google_ads_customer_not_configured` |
+| `db.rows_30d` | `0` | `null` |
+| `db.spend_rows` | `0` | `null` |
+| `api.total_rows_in_window` | `0` | `null` |
+| `next_action` | "Run scheduler…" | "Set `GOOGLE_ADS_CUSTOMER_ID`…" |
+
+Measured over a table holding four rows. The truth was already in the payload
+and the headline contradicted it, which is worse than omitting it — people act
+on headlines. The old next action would have had an operator run a scheduler
+that was working.
+
+The scope is now resolved and **rejected before any population query runs**, and
+the counts are omitted rather than reported as zero: a zero here is not a
+measurement of this account's population, it is the absence of an account to
+measure. Database availability is still reported independently — the database is
+fine, and saying otherwise sends the operator somewhere else wrong.
+
+`ACCOUNT_NOT_CONFIGURED` and `API_HAS_ROWS_UI_LIKELY_FILTERED` both gained
+entries in `next_actions`; a test now asserts every declared verdict has an
+operator instruction, comparing by value so the retired Windsor-era aliases do
+not read as gaps.
+
+## 2. The historical complement is NULL-safe
+
+`unscoped_history_scope()` built `NOT (<canonical predicate>)`. That is not the
+complement of a predicate in SQL, because SQL is three-valued: the canonical
+predicate contains `customer_id = ANY(%s)`, which is **NULL — not FALSE** — for a
+row with no account, so the conjunction is NULL and `NOT NULL` is NULL again.
+
+A row that is NULL under both predicates is counted by **neither**. The rows
+that fell through are exactly the pre-cutover account-less twins this cutover is
+about: correctly invisible in the canonical totals, and wrongly invisible in the
+disclosure that exists to reveal them.
+
+Five rows — one canonical, one canonical-provenance with no account, one
+Windsor, one other account, one this account with incomplete identity:
+
+| | `NOT (…)` | `(…) IS NOT TRUE` |
+|---|---|---|
+| canonical | 1 | 1 |
+| historical | 3 | **4** |
+| **in neither population** | **1** | **0** |
+
+The two scopes now partition the window: every row lands in exactly one, and the
+counts add to the total.
+
+`null_customer_rows_in_window` is a **diagnostic subset** of
+`unscoped_historical_rows_in_window`, not a population beside it. Now that the
+complement is NULL-safe the two overlap, so the payload carries
+`null_customer_rows_note` saying so — two adjacent counts invite addition, and
+adding these double-counts the rows the cutover is about.
+
+## 3. The reader guard checks the query, not the function
+
+The guard accepted any dynamic query whose enclosing function called a `*_scope`
+factory anywhere. **Calling a factory is not using its result**: a function
+could resolve a scope, check `available`, and then run a date-only query three
+lines later with the guard's blessing.
+
+It now runs an intra-function taint analysis to a fixpoint. A name is
+scope-carrying when it is assigned from an expression that calls a scope factory
+or references an already-tainted name, and the query passes only when **its own
+SQL expression** references such a name. That follows the chain production
+actually writes — `scope` into `conditions` into `where_sql` into the query —
+without special-casing any of their names.
+
+It deliberately does not follow a scope through a helper function, through
+`self`, or into a container mutated by a method call it was not seeded with.
+Those surface as findings rather than silent passes, which is the correct
+direction for a guard to be wrong in: a false finding gets argued about and then
+allowlisted with a reason, while a false pass is never noticed at all.
+
+Still zero findings on the tree — the production readers do not merely call a
+scope factory, they use what it returns.
+
+Nothing in this change alters ingestion, deletes production rows, runs a
+backfill, or touches Platform Evidence UI.
