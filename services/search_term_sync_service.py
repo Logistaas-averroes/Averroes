@@ -337,7 +337,14 @@ def sync_search_terms(date_from: date, date_to: date, sync_type: str, *,
                        latest_source_date=None, batch_finalized=True,
                        **({"rows": []} if include_rows else {}), **span)
 
-    written = w.write_search_terms(run_id, prepared_rows, sync_batch_id=batch_id)
+    # PR-ADS-156-F4: the REQUESTED interval is passed explicitly, because it is
+    # what this run is about to certify. The writer reconciles residual
+    # account-less twins across exactly that span — including identities Google
+    # Ads did not return this time, which per-row supersession can never reach.
+    # Deriving the bounds from the returned rows instead would shrink the swept
+    # interval by precisely the dates whose identities went missing.
+    written = w.write_search_terms(run_id, prepared_rows, sync_batch_id=batch_id,
+                                   interval_start=date_from, interval_end=date_to)
     written = int(written or 0)
 
     error = None

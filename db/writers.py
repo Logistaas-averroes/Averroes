@@ -33,6 +33,9 @@ from db.connection import get_conn
 from analysis.search_term_scope import (
     CANONICAL_PROVENANCE as _ST_CANONICAL_PROVENANCE,
 )
+from analysis.search_term_scope import (
+    customer_id_candidates as _st_customer_id_candidates,
+)
 
 log = logging.getLogger(__name__)
 
@@ -683,6 +686,9 @@ def write_search_terms(
     run_id: Optional[int],
     search_term_rows: list,
     sync_batch_id: Optional[int] = None,
+    *,
+    interval_start: Optional[date] = None,
+    interval_end: Optional[date] = None,
 ) -> int:
     """Upsert raw search-term fact rows into the search_terms table.
 
@@ -697,7 +703,18 @@ def write_search_terms(
       source_system is inferred from the input row (``source`` field) and
       defaults to ``"unknown"`` for legacy rows.
 
-    Returns count of inserted/updated rows.
+    Residual twin reconciliation (PR-ADS-156-F4):
+      ``interval_start`` / ``interval_end`` are the interval the caller
+      REQUESTED and is about to certify. Within it, exact account-less twins are
+      superseded even when their identity was absent from this pull — see
+      ``_RESIDUAL_TWIN_*`` below for why that is necessary and why it is safe.
+      When omitted, the bounds are derived from the prepared rows, which is
+      still bounded and deterministic; the sweep is never table-wide.
+
+    Returns count of inserted/updated rows — the UPSTREAM rows written.
+    Superseded twins are reconciliation actions, not newly written source rows,
+    and are deliberately not added to this number: it feeds the sync batch's
+    `row_count`, which has to stay comparable with `fetched` and `prepared`.
     Returns 0 safely for empty input or DB unavailable.
     Never raises.
     """
@@ -949,6 +966,79 @@ def write_search_terms(
                         WHERE """ + _canonical_match + """
                           AND canonical.id <> twin.id)
     """
+    # ── PR-ADS-156-F4: residual twins across the CERTIFIED INTERVAL ─────────
+    #
+    # F3 supersedes a twin only for identities present in the current input
+    # rows, and that left a gap. Google Ads search-term reporting is MUTABLE: an
+    # identity returned by one pull can be absent from the next, while the
+    # canonical row that pull wrote stays stored. Its account-less twin is then
+    # never revisited — the current input no longer contains the key that would
+    # match it — even though it sits squarely inside the interval this run is
+    # about to certify.
+    #
+    # Production reduced 16,100 twins to exactly 1 that way: an identity written
+    # in batch 1378 and not returned in 1405, so batch 1405's per-row
+    # supersession never looked at it. The audit blocked, correctly.
+    #
+    # So the reconciliation is by INTERVAL rather than by input row. It asks a
+    # different question: not "did this pull mention that identity" but "does
+    # this interval still hold an exact twin of a canonical row". Nothing else
+    # is relaxed — the twin must still match on all seven remaining key
+    # components, still be account-less, still carry canonical provenance, and
+    # its replacement must still belong to the configured account with complete
+    # identity. An unmatched historical row has no replacement to satisfy the
+    # EXISTS and is untouched.
+    _residual_twin_match = """
+              twin.customer_id IS NULL
+          AND twin.source_system = %s
+          AND twin.source_date >= %s
+          AND twin.source_date <= %s
+    """
+
+    # `= ANY(%s)` over the exact spellings of the configured account, so a
+    # hyphenated and an unhyphenated id both resolve and nothing else does.
+    # The completeness clauses are the same three `canonical_scope` requires —
+    # a replacement missing campaign, ad group or term is not a replacement.
+    _residual_canonical_match = """
+              canonical.customer_id = ANY(%s)
+          AND canonical.source_system = %s
+          AND canonical.campaign_id  IS NOT NULL AND TRIM(canonical.campaign_id)  <> ''
+          AND canonical.ad_group     IS NOT NULL AND TRIM(canonical.ad_group)     <> ''
+          AND canonical.search_term  IS NOT NULL AND TRIM(canonical.search_term)  <> ''
+          AND canonical.source_date = twin.source_date
+          AND COALESCE(canonical.campaign_name, '') = COALESCE(twin.campaign_name, '')
+          AND COALESCE(canonical.campaign_id,   '') = COALESCE(twin.campaign_id,   '')
+          AND COALESCE(canonical.ad_group,      '') = COALESCE(twin.ad_group,      '')
+          AND COALESCE(canonical.keyword,       '') = COALESCE(twin.keyword,       '')
+          AND COALESCE(canonical.match_type,    '') = COALESCE(twin.match_type,    '')
+          AND canonical.search_term = twin.search_term
+          AND canonical.id <> twin.id
+    """
+
+    # Same precedence as the per-row carry-over: an annotation already on the
+    # canonical row wins, otherwise the twin's is carried across. These three
+    # columns exist nowhere upstream — they are the record of a human or a rule
+    # having judged this term — so deleting the twin without them would silently
+    # un-review somebody's work.
+    _residual_carry_over = """
+        UPDATE search_terms AS canonical
+           SET is_flagged_waste = COALESCE(canonical.is_flagged_waste,
+                                           twin.is_flagged_waste),
+               junk_category    = COALESCE(canonical.junk_category,
+                                           twin.junk_category),
+               matched_pattern  = COALESCE(canonical.matched_pattern,
+                                           twin.matched_pattern),
+               updated_at       = NOW()
+          FROM search_terms AS twin
+         WHERE """ + _residual_twin_match + " AND " + _residual_canonical_match
+
+    _residual_delete = """
+        DELETE FROM search_terms AS twin
+         WHERE """ + _residual_twin_match + """
+           AND EXISTS (SELECT 1 FROM search_terms AS canonical
+                        WHERE """ + _residual_canonical_match + """)
+    """
+
     _null_twin_delete = """
         DELETE FROM search_terms
         WHERE campaign_id IS NULL
@@ -960,6 +1050,18 @@ def write_search_terms(
           AND search_term = %s
           AND COALESCE(customer_id,   '') = COALESCE(%s, '')
     """
+
+    # The interval to reconcile. Explicit bounds from the sync service are
+    # preferred — they are what the run actually requested and is about to
+    # certify. Without them, the prepared rows' own span is used: still bounded,
+    # still deterministic, and never the whole table.
+    sweep_start = interval_start or min(r[1] for r in rows)
+    sweep_end = interval_end or max(r[1] for r in rows)
+    # Fail closed on an unresolved account. Sweeping without one would mean
+    # deciding which rows are "the account's" with no account to compare
+    # against, which is the one thing this whole cutover exists to prevent.
+    sweep_candidates = _st_customer_id_candidates()
+    residual_superseded = 0
 
     try:
         with get_conn() as conn:
@@ -977,16 +1079,40 @@ def write_search_terms(
                 if _twin_keys:
                     cur.executemany(_twin_carry_over, _twin_keys)
                     cur.executemany(_twin_delete, _twin_keys)
+
+                # PR-ADS-156-F4 — the interval sweep, in the SAME transaction.
+                # If it raises, the upsert above rolls back with it and this
+                # function returns 0, which the sync service reads as a failed
+                # persistence and records a `failed` batch. A reconciliation
+                # that did not complete must never leave a batch certified.
+                if sweep_candidates and sweep_start and sweep_end:
+                    sweep_params = (
+                        _ST_CANONICAL_PROVENANCE, sweep_start, sweep_end,
+                        list(sweep_candidates), _ST_CANONICAL_PROVENANCE,
+                    )
+                    cur.execute(_residual_carry_over, sweep_params)
+                    cur.execute(_residual_delete, sweep_params)
+                    # A single statement, so rowcount is exact here — unlike the
+                    # executemany paths above.
+                    residual_superseded = max(0, cur.rowcount or 0)
+
                 # executemany with ON CONFLICT makes rowcount unreliable for
                 # determining actual inserts vs updates; use len(rows) as the
                 # attempted-upsert count.
                 attempted = len(rows)
         log.info(
             "write_search_terms: upserted %d rows (run_id=%s) "
-            "[input=%d prepared=%d skipped_blank=%d written=%d]",
+            "[input=%d prepared=%d skipped_blank=%d written=%d "
+            "residual_twins_superseded=%d interval=%s..%s]",
             attempted, run_id, input_rows, prepared_rows,
             skipped_blank_search_term, attempted,
+            residual_superseded, sweep_start, sweep_end,
         )
+        if not sweep_candidates:
+            log.warning(
+                "write_search_terms: residual twin reconciliation skipped — "
+                "no configured Google Ads account to scope it by "
+                "(residual_twins_superseded=0)")
         return attempted
     except Exception as exc:  # noqa: BLE001
         log.error("write_search_terms failed (run_id=%s): %s", run_id, exc)

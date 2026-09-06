@@ -87,6 +87,7 @@ jobs:
             tests/test_pr_ads_156_f1_freshness_truth.py \
             tests/test_pr_ads_156_f2_stale_analysis_and_durability.py \
             tests/test_pr_ads_156_f3_account_identity_cutover.py \
+            tests/test_pr_ads_156_f4_residual_twin_sweep.py \
             tests/test_pr_ads_156_f3_review_corrections.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
@@ -131,6 +132,7 @@ jobs:
                            "tests.test_pr_ads_156_f1_freshness_truth",
                            "tests.test_pr_ads_156_f2_stale_analysis_and_durability",
                            "tests.test_pr_ads_156_f3_account_identity_cutover",
+                           "tests.test_pr_ads_156_f4_residual_twin_sweep",
                            "tests.test_pr_ads_156_f3_review_corrections",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
