@@ -130,7 +130,13 @@ class _FakeWriters:
         self.finished.append(kw)
         return True
 
-    def write_search_terms(self, run_id, rows, sync_batch_id=None):
+    def write_search_terms(self, run_id, rows, sync_batch_id=None, **kwargs):
+        # **kwargs so this double keeps standing in for the real writer as its
+        # signature grows. PR-ADS-156-F4 added keyword-only `interval_start` /
+        # `interval_end`; a stub that rejected them would fail the SERVICE for a
+        # limitation of the stub, which is the least informative way for a test
+        # to break.
+        self.write_kwargs = dict(kwargs)
         return len(rows) if self.written is None else self.written
 
 
