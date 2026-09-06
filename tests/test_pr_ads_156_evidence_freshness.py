@@ -117,10 +117,12 @@ def _patch_evidence_services(monkeypatch, *, keyword=None, search=None):
 class _FakeWriters:
     """A minimal stand-in for db.writers that records what it was asked to do."""
 
-    def __init__(self, *, batch_id=7, written=None):
+    def __init__(self, *, batch_id=7, written=None, reconciled=None):
         self.batch_id = batch_id
         self.written = written
         self.finished = []
+        self.reconciled = reconciled or {"ok": True, "superseded": 0,
+                                         "reason": None}
 
     def start_sync_batch(self, **kw):
         self.started = kw
@@ -139,11 +141,26 @@ class _FakeWriters:
         self.write_kwargs = dict(kwargs)
         return len(rows) if self.written is None else self.written
 
+    def reconcile_residual_search_term_twins(self, interval_start, interval_end):
+        """PR-ADS-156-F4 review — the verified-empty path now reconciles before
+        it certifies, so this double has to answer for that too.
+
+        Without it the REAL entry point ran against no database, correctly
+        returned `ok=False`, and every verified-empty case here failed for a
+        gap in the stub rather than anything about the service. The default is
+        a successful reconciliation finding nothing, which is what an empty
+        interval with no residual twins looks like; `reconciled` lets a case
+        ask for the failure branch instead.
+        """
+        self.reconciled_interval = (interval_start, interval_end)
+        return dict(self.reconciled)
+
 
 def _install_fake_writers(monkeypatch, fake):
     import db.writers as real
 
-    for name in ("start_sync_batch", "finish_sync_batch", "write_search_terms"):
+    for name in ("start_sync_batch", "finish_sync_batch", "write_search_terms",
+                 "reconcile_residual_search_term_twins"):
         monkeypatch.setattr(real, name, getattr(fake, name))
 
 
