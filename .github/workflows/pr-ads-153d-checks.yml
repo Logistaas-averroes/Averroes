@@ -22,7 +22,15 @@ jobs:
   suite:
     name: Test suite (excluding known-failing-on-main)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # PR-ADS-156-F3 review: raised from 30. The job does three passes — the
+    # targeted PostgreSQL step, the targeted contract step, then the full suite
+    # — and at 30 the first two (11m51s + 3m21s here) left the full suite about
+    # 14 minutes, which it no longer fits in. The job was cancelled at exactly
+    # 30m13s with every earlier step green, which is the worst way for this to
+    # fail: a timeout reports as `cancelled`, and a cancelled required check
+    # looks like an infrastructure hiccup rather than a suite that outgrew its
+    # budget. 45 restores real headroom.
+    timeout-minutes: 45
     steps:
       # Full history: the whitespace check below diffs against the base branch,
       # and actions/checkout fetches a single commit by default.
@@ -156,7 +164,6 @@ jobs:
             tests/test_pr_ads_156_f1_freshness_truth.py \
             tests/test_pr_ads_156_f2_stale_analysis_and_durability.py \
             tests/test_pr_ads_156_f3_account_identity_cutover.py \
-            tests/test_pr_ads_156_f3_review_corrections.py \
             tests/test_pr_ads_144_search_terms_revamp.py \
             tests/test_rule_advisor_doctrine.py \
             tests/test_scheduler_google_ads_cutover.py \
