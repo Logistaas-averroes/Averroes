@@ -570,8 +570,8 @@ def test_16_no_external_write_path_is_introduced():
         assert forbidden not in body, forbidden
 
     # And the sweep statements touch exactly one table.
-    start = src.index("_residual_twin_match")
-    sweep = src[start:src.index("_null_twin_delete", start)].lower()
+    start = src.index("_RESIDUAL_TWIN_MATCH = ")
+    sweep = src[start:src.index("RECONCILE_NO_ACCOUNT", start)].lower()
     assert "search_terms" in sweep
     for other in ("keyword_daily_facts", "hubspot", "deals", "leads", "runs"):
         assert other not in sweep, other
@@ -635,3 +635,329 @@ def test_18_without_explicit_bounds_the_sweep_stays_bounded_by_the_rows(
                    "AND source_date = %s", (DAY,)) == 0
     assert _scalar("SELECT COUNT(*) FROM search_terms WHERE customer_id IS NULL "
                    "AND source_date = %s", (OUTSIDE,)) == 1
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REVIEW CORRECTION — the verified-empty path certifies an interval too
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# `sync_search_terms` handles `fetched == 0` BEFORE it ever calls the writer, so
+# the first cut of F4 left one certified interval unreconciled: a verified-empty
+# pull created a successful certified interval, never ran the reconciliation,
+# and could leave an exact account-less twin sitting inside it while returning
+# ok=True and verified_empty=True.
+#
+# That directly contradicts F4's own invariant — "a reconciliation that did not
+# complete never leaves an interval certified" — and it is reachable rather than
+# theoretical: mutable reporting means a stored canonical identity and its twin
+# can both exist on a date a later pull returns nothing for.
+#
+# Both paths now run the SAME rule through the same helper. What differs is only
+# the transaction: the non-empty path shares the upsert's, and the empty path,
+# having no upsert to share, gets one of its own.
+
+def _empty_pull_sync(monkeypatch, *, start=INTERVAL_START, end=INTERVAL_END):
+    """Run `sync_search_terms` over a pull that returns ZERO rows, with the
+    batch-tracking calls captured rather than stubbed away — the point is what
+    gets certified, so the certificate has to be observable."""
+    import connectors.google_ads_source as source
+    import db.writers as writers
+    import services.search_term_sync_service as svc
+
+    finished = []
+    monkeypatch.setattr(writers, "start_sync_batch", lambda **kw: 9001)
+    monkeypatch.setattr(writers, "finish_sync_batch",
+                        lambda **kw: (finished.append(kw), True)[1])
+    monkeypatch.setattr(source, "pull_search_terms_range", lambda a, b: [],
+                        raising=False)
+
+    result = svc.sync_search_terms(start, end, "daily")
+    return result, finished
+
+
+@_needs_pg
+def test_19_a_verified_empty_pull_still_reconciles_the_interval(pg, monkeypatch):  # noqa: F811
+    """(1)(2)(3) The twin and its replacement are stored before the sync; the
+    pull returns nothing at all, so the identity is absent because the ENTIRE
+    current pull is empty — the strongest form of "absent from the input".
+
+    The interval is still certified, so it must still be reconciled.
+    """
+    _init_db(pg, monkeypatch)
+    _seed_the_production_shape()
+    assert _scalar("SELECT COUNT(*) FROM search_terms") == 2
+
+    result, finished = _empty_pull_sync(monkeypatch)
+
+    assert result["ok"] is True
+    assert result["verified_empty"] is True
+    assert result["residual_twins_superseded"] == 1
+
+    # (3) upstream counters untouched by a reconciliation action
+    assert result["fetched"] == 0
+    assert result["prepared"] == 0
+    assert result["rejected"] == 0
+    assert result["written"] == 0
+    assert finished[-1]["status"] == "success"
+    assert finished[-1]["row_count"] == 0
+    assert finished[-1]["verified_empty"] is True
+
+    # The twin is gone, its annotations carried onto the canonical row.
+    rows = _rows_of(
+        "SELECT customer_id, is_flagged_waste, junk_category, matched_pattern "
+        "FROM search_terms WHERE search_term = %s", (OMITTED["search_term"],))
+    assert len(rows) == 1
+    assert rows[0] == (ACCOUNT, True, "competitor", "winfleet")
+
+
+@_needs_pg
+def test_20_the_empty_path_leaves_every_protected_population_alone(
+        pg, monkeypatch):  # noqa: F811
+    """(4)(5) The same safety set as the non-empty path, because it is the same
+    rule: unmatched account-less history, another account's rows, and
+    non-canonical provenance all survive a verified-empty reconciliation."""
+    _init_db(pg, monkeypatch)
+    _seed_the_production_shape()
+    for i in range(24):
+        _insert(customer_id=None, search_term=f"unmatched history {i}")
+    _insert(customer_id=OTHER_ACCOUNT, search_term="another account term")
+    _insert(customer_id=None, source_system="windsor",
+            search_term="windsor twin shape")
+    _insert(customer_id=ACCOUNT, search_term="windsor twin shape")
+    _insert(customer_id=None, source_date=OUTSIDE, search_term="outside")
+    _insert(customer_id=ACCOUNT, source_date=OUTSIDE, search_term="outside")
+
+    result, _finished = _empty_pull_sync(monkeypatch)
+    assert result["ok"] is True
+    assert result["residual_twins_superseded"] == 1
+
+    assert _scalar("SELECT COUNT(*) FROM search_terms WHERE search_term "
+                   "LIKE %s", ("unmatched history%",)) == 24
+    assert _scalar("SELECT COUNT(*) FROM search_terms "
+                   "WHERE customer_id = %s", (OTHER_ACCOUNT,)) == 1
+    assert _scalar("SELECT COUNT(*) FROM search_terms WHERE customer_id IS NULL "
+                   "AND COALESCE(source_system, '') = 'windsor'") == 1
+    assert _scalar("SELECT COUNT(*) FROM search_terms WHERE customer_id IS NULL "
+                   "AND source_date = %s", (OUTSIDE,)) == 1
+
+
+@_needs_pg
+def test_21_a_failed_empty_reconciliation_never_certifies_the_interval(
+        pg, monkeypatch):  # noqa: F811
+    """(6)(7) The failure contract.
+
+    A reconciliation that could not complete must produce a FAILED batch, no
+    `verified_empty`, no coverage advancement, and no partial cleanup — and it
+    must say which of the two things went wrong, because a healthy pull whose
+    reconciliation failed is a different problem from a failed pull.
+    """
+    _init_db(pg, monkeypatch)
+    _seed_the_production_shape()
+    _insert(customer_id=None, is_flagged_waste=True, junk_category="carry",
+            search_term="second residual")
+    _insert(customer_id=ACCOUNT, search_term="second residual")
+    before = _scalar("SELECT COUNT(*) FROM search_terms")
+
+    import connectors.google_ads_source as source
+    import db.writers as writers
+    import services.search_term_sync_service as svc
+
+    finished = []
+    monkeypatch.setattr(writers, "start_sync_batch", lambda **kw: 9002)
+    monkeypatch.setattr(writers, "finish_sync_batch",
+                        lambda **kw: (finished.append(kw), True)[1])
+    monkeypatch.setattr(source, "pull_search_terms_range", lambda a, b: [],
+                        raising=False)
+    monkeypatch.setattr(
+        writers, "reconcile_residual_search_term_twins",
+        lambda s, e: {"ok": False, "superseded": 0,
+                      "reason": "simulated reconciliation failure"})
+
+    result = svc.sync_search_terms(INTERVAL_START, INTERVAL_END, "daily")
+
+    assert result["ok"] is False
+    assert result["verified_empty"] is False
+    assert svc.RESIDUAL_RECONCILIATION_FAILED in result["error"]
+    assert "simulated reconciliation failure" in result["error"]
+
+    assert finished[-1]["status"] == "failed"
+    assert finished[-1]["verified_empty"] is False
+    # No watermark: the interval was attempted, not covered.
+    assert finished[-1].get("last_source_date") is None
+
+    # (7) nothing partially cleaned up — the stub never touched the table.
+    assert _scalar("SELECT COUNT(*) FROM search_terms") == before
+
+
+@_needs_pg
+def test_21b_a_real_reconciliation_failure_rolls_back_completely(
+        pg, monkeypatch):  # noqa: F811
+    """(7) The same contract proved against a REAL failure inside the SQL, not
+    a stubbed result: the carry-over runs, the delete raises, and the
+    transaction takes the annotation update back with it.
+
+    A cleanup that half-applied would be the worst outcome of all — annotations
+    moved onto a canonical row whose twin is still there, so the next run sees
+    two annotated rows for one observation.
+    """
+    _init_db(pg, monkeypatch)
+    _insert(customer_id=None, is_flagged_waste=True, junk_category="from-twin",
+            matched_pattern="from-twin")
+    _insert(customer_id=ACCOUNT)          # no annotations of its own yet
+    before = _scalar("SELECT COUNT(*) FROM search_terms")
+
+    import db.writers as writers
+
+    original = writers.get_conn
+
+    class _FailingCursor:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=None):
+            if "DELETE FROM search_terms AS twin" in sql:
+                raise RuntimeError("simulated delete failure")
+            return self._inner.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+    class _Conn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def cursor(self):
+            return _FailingCursor(self._inner.cursor().__enter__())
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    class _Ctx:
+        def __enter__(self):
+            self._cm = original()
+            return _Conn(self._cm.__enter__())
+
+        def __exit__(self, *exc):
+            return self._cm.__exit__(*exc)
+
+    monkeypatch.setattr(writers, "get_conn", lambda: _Ctx())
+    outcome = writers.reconcile_residual_search_term_twins(
+        INTERVAL_START, INTERVAL_END)
+    monkeypatch.setattr(writers, "get_conn", original)
+
+    assert outcome["ok"] is False
+    assert outcome["superseded"] == 0
+    assert "simulated delete failure" in outcome["reason"]
+
+    # Nothing committed: the twin is still there AND the canonical row did not
+    # keep the annotations the carry-over had already written.
+    assert _scalar("SELECT COUNT(*) FROM search_terms") == before
+    canonical = _rows_of(
+        "SELECT is_flagged_waste, junk_category, matched_pattern "
+        "FROM search_terms WHERE customer_id = %s", (ACCOUNT,))
+    assert canonical == [(None, None, None)]
+
+
+@_needs_pg
+def test_22_the_verified_empty_reconciliation_is_idempotent(pg, monkeypatch):  # noqa: F811
+    """(8) An empty window recurs every day a campaign is paused. The second
+    and third runs must find nothing left and change nothing."""
+    _init_db(pg, monkeypatch)
+    _seed_the_production_shape()
+
+    first, _ = _empty_pull_sync(monkeypatch)
+    assert first["residual_twins_superseded"] == 1
+    after_first = _rows_of("SELECT id, customer_id, is_flagged_waste, "
+                           "junk_category FROM search_terms ORDER BY id")
+
+    second, _ = _empty_pull_sync(monkeypatch)
+    third, _ = _empty_pull_sync(monkeypatch)
+
+    assert second["residual_twins_superseded"] == 0
+    assert third["residual_twins_superseded"] == 0
+    assert second["ok"] is True and third["ok"] is True
+    assert _rows_of("SELECT id, customer_id, is_flagged_waste, junk_category "
+                    "FROM search_terms ORDER BY id") == after_first
+
+
+@_needs_pg
+def test_23_an_explicit_outcome_distinguishes_zero_from_failure(pg, monkeypatch):  # noqa: F811
+    """The reason the entry point returns a dict rather than an integer.
+
+    The writer's `0` means both "nothing needed superseding" and "the write
+    failed", and those decide opposite things about certifying an interval. A
+    caller that inferred success from the count would certify on failure.
+    """
+    _init_db(pg, monkeypatch)
+
+    import db.writers as writers
+
+    # Nothing to do: ok, zero.
+    nothing = writers.reconcile_residual_search_term_twins(
+        INTERVAL_START, INTERVAL_END)
+    assert nothing == {"ok": True, "superseded": 0, "reason": None}
+
+    # A real twin: ok, one.
+    _seed_the_production_shape()
+    one = writers.reconcile_residual_search_term_twins(
+        INTERVAL_START, INTERVAL_END)
+    assert one["ok"] is True and one["superseded"] == 1
+
+    # Same count as the first case, opposite meaning — and distinguishable.
+    monkeypatch.setattr(writers, "get_conn", lambda: (_ for _ in ()).throw(
+        RuntimeError("database exploded")))
+    failed = writers.reconcile_residual_search_term_twins(
+        INTERVAL_START, INTERVAL_END)
+    assert failed["ok"] is False
+    assert failed["superseded"] == 0
+    assert "database exploded" in failed["reason"]
+
+
+def test_24_both_certified_paths_run_the_same_reconciliation_helper():
+    """The structural guarantee behind all of the above: one rule, one helper.
+
+    Read from source, because the failure mode is silent — two copies of the
+    matching SQL would pass every test here while drifting apart on the next
+    change, and a cleanup rule that differs by caller is worse than one that is
+    merely wrong.
+    """
+    import ast
+
+    from analysis.legacy_source_guard import code_only
+
+    src = code_only(_ROOT / "db" / "writers.py")
+    tree = ast.parse(src)
+
+    def _calls(fn_name):
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == fn_name)
+        return {getattr(c.func, "id", None) or getattr(c.func, "attr", None)
+                for c in ast.walk(fn) if isinstance(c, ast.Call)}
+
+    helper = "_execute_residual_twin_reconciliation"
+    assert helper in _calls("write_search_terms")
+    assert helper in _calls("reconcile_residual_search_term_twins")
+
+    # And the interval matching SQL is defined exactly once. (F3's per-row
+    # supersession has its own, narrower delete that shares the `AS twin`
+    # phrasing — a different rule answering a different question, so it is
+    # counted by its own name rather than by the shared text.)
+    assert src.count("_RESIDUAL_TWIN_MATCH = ") == 1
+    assert src.count("_RESIDUAL_CANONICAL_MATCH = ") == 1
+    assert src.count("_RESIDUAL_CARRY_OVER = ") == 1
+    assert src.count("_RESIDUAL_DELETE = ") == 1
+    # The account and completeness clauses that make a replacement a
+    # replacement appear once, in that one definition.
+    assert src.count("canonical.customer_id = ANY(%s)") == 1
+
+    # The service reconciles before it finalizes the verified-empty batch.
+    svc = code_only(_ROOT / "services" / "search_term_sync_service.py")
+    reconcile_at = svc.index("reconcile_residual_search_term_twins")
+    finalize_at = svc.index("verified_empty=True, fetched_count=0")
+    assert reconcile_at < finalize_at

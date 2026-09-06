@@ -940,3 +940,58 @@ general rule.
 Acceptance: sync exit `0`; fetched = prepared = written; rejected `0`; evidence
 status ready; null-account twins `0`; missing identity `0`; duplicate keys `0`;
 audit `ok = True` and exit `0`.
+
+## F4 review correction — the verified-empty path certifies an interval too
+
+`sync_search_terms` handles `fetched == 0` **before** it ever calls the writer.
+The first cut of F4 therefore left exactly one certified interval unreconciled:
+a verified-empty pull created a successful certified interval, never ran the
+residual reconciliation, and could leave an exact account-less twin sitting
+inside it while returning `ok=True` and `verified_empty=True`.
+
+That contradicts F4's own invariant — *a reconciliation that did not complete
+never leaves an interval certified* — and it is reachable rather than
+theoretical, for the same reason F4 exists: mutable reporting means a stored
+canonical identity and its twin can both sit inside an interval a later pull
+returns nothing for.
+
+Both paths now run the **same rule through the same helper**,
+`_execute_residual_twin_reconciliation`, which takes an open cursor so the
+caller owns the transaction. What differs is only the transaction: the non-empty
+path shares the upsert's; the empty path, having no upsert to share, gets one of
+its own via `reconcile_residual_search_term_twins`.
+
+### Why the entry point returns a result, not a count
+
+`write_search_terms` returns an integer, and `0` means both *nothing needed
+superseding* and *the write failed*. Those decide **opposite** things about
+certifying an interval, so a caller inferring success from the count would
+certify on failure. The entry point returns
+`{"ok": bool, "superseded": int, "reason": str | None}` instead.
+
+| Outcome | `ok` | Effect |
+|---|---|---|
+| reconciled, 0 or more twins | `True` | batch may finalize successful and verified empty |
+| database unavailable / SQL error | `False` | batch `failed`, `verified_empty=False`, no coverage advance |
+| no account resolves | `True`, `reason` set | nothing to reconcile; disclosed, audit remains the fail-closed gate |
+
+The third row is a judgement call worth naming: an unresolved account is not a
+reconciliation *failure*, it is the absence of a population to reconcile —
+exactly how `canonical_scope` treats it. It is reported so the caller can
+disclose it, and the freshness audit already exits `2` on an unconfigured
+account, so nothing is certified quietly.
+
+### Failure contract, verified-empty path
+
+On failure: batch finalized `failed`; `verified_empty=False`; **no**
+`last_source_date`, so proven coverage does not advance; `ok=False`; the reason
+disclosed under its own code `residual_twin_reconciliation_failed` rather than a
+generic persistence error — the pull may have been perfectly healthy, and
+"persistence failed" would send an operator to the wrong place. Any partial
+cleanup rolls back: the carry-over and the delete share one transaction, so an
+interrupted run cannot leave annotations moved onto a canonical row whose twin
+is still there.
+
+On success: `row_count=0`, `fetched=0`, `prepared=0`, `rejected=0` all unchanged
+— a superseded twin is never an upstream row — with the count reported as
+`residual_twins_superseded` on the result and in the log.
