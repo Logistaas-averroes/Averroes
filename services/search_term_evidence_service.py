@@ -1951,9 +1951,15 @@ def build_flagged_search_terms(
         "review_state_available": review_available,
         "canonical_fact_source": {
             "table": "search_terms",
-            "grain": ("source_date + campaign_name + campaign_id + ad_group + "
-                      "keyword + match_type + search_term"),
+            # PR-ADS-156-F3 §4: the ACCOUNT leads the declared grain, because it
+            # leads the index. This payload told readers the key was
+            # account-less while `idx_search_terms_unique_fact` had already been
+            # rebuilt with `customer_id` — a contract describing a key that no
+            # longer exists is worse than none, because people act on it.
+            "grain": ("customer_id + source_date + campaign_name + campaign_id "
+                      "+ ad_group + keyword + match_type + search_term"),
             "dedup_key": "idx_search_terms_unique_fact",
+            "account_scoped": True,
             "unit_grain": "search_term × canonical campaign identity",
             "identity": "analysis/search_term_identity.term_identity_key",
         },

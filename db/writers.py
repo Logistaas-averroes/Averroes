@@ -26,6 +26,14 @@ from typing import Optional
 
 from db.connection import get_conn
 
+# PR-ADS-156-F3: the canonical search-term provenance, imported from the one
+# module that defines the canonical population rather than spelled again here.
+# `analysis.search_term_scope` is a leaf (os + dataclasses + datetime only), so
+# this cannot create a cycle.
+from analysis.search_term_scope import (
+    CANONICAL_PROVENANCE as _ST_CANONICAL_PROVENANCE,
+)
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -865,6 +873,82 @@ def write_search_terms(
         (r[1], r[2], r[4], r[5], r[6], r[7], r[8])
         for r in rows if r[3] is not None and str(r[3]).strip()
     ]
+
+    # PR-ADS-156-F3 §3: supersede the pre-cutover NULL-ACCOUNT twin.
+    #
+    # PR-ADS-156-F2 put `customer_id` into the natural key. Under the new key a
+    # complete row and its account-less predecessor are different rows, so the
+    # complete row did not conflict with it, did not replace it, and both
+    # populations coexisted — 16,100 stale twins beside 16,267 new rows in the
+    # first production window, which every date-only reader counted twice.
+    #
+    # A twin is superseded only on an EXACT match of all seven remaining key
+    # components AND canonical provenance. Nothing is inferred: a row that
+    # differs by so much as a match type is a different observation and is left
+    # alone, a row belonging to another account is never touched, and a row of
+    # unknown or Windsor provenance is never touched. No account id is ever
+    # stamped onto an unmatched historical row — it stays as history.
+    # Parameter order matches `_twin_match` then `_canonical_match`:
+    # (provenance, date, name, campaign_id, ad_group, kw, mt, term, customer_id)
+    _twin_keys = [
+        (_ST_CANONICAL_PROVENANCE,
+         r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8])
+        for r in rows if r[8] is not None and str(r[8]).strip()
+    ]
+
+    _twin_match = """
+              twin.customer_id IS NULL
+          AND twin.source_system = %s
+          AND twin.source_date = %s
+          AND COALESCE(twin.campaign_name, '') = COALESCE(%s, '')
+          AND COALESCE(twin.campaign_id,   '') = COALESCE(%s, '')
+          AND COALESCE(twin.ad_group,      '') = COALESCE(%s, '')
+          AND COALESCE(twin.keyword,       '') = COALESCE(%s, '')
+          AND COALESCE(twin.match_type,    '') = COALESCE(%s, '')
+          AND twin.search_term = %s
+    """
+
+    _canonical_match = """
+              canonical.customer_id = %s
+          AND canonical.source_date = twin.source_date
+          AND COALESCE(canonical.campaign_name, '') = COALESCE(twin.campaign_name, '')
+          AND COALESCE(canonical.campaign_id,   '') = COALESCE(twin.campaign_id,   '')
+          AND COALESCE(canonical.ad_group,      '') = COALESCE(twin.ad_group,      '')
+          AND COALESCE(canonical.keyword,       '') = COALESCE(twin.keyword,       '')
+          AND COALESCE(canonical.match_type,    '') = COALESCE(twin.match_type,    '')
+          AND canonical.search_term = twin.search_term
+    """
+
+    # Carry the durable LOCAL analysis state across before the twin goes.
+    # `is_flagged_waste`, `junk_category` and `matched_pattern` are the record of
+    # a human or a rule having judged this term; they exist nowhere upstream, so
+    # deleting the twin without them would silently un-review work someone did.
+    # COALESCE, so a classification already on the canonical row always wins —
+    # the newer judgement is never overwritten by the older one.
+    _twin_carry_over = """
+        UPDATE search_terms AS canonical
+           SET is_flagged_waste = COALESCE(canonical.is_flagged_waste,
+                                           twin.is_flagged_waste),
+               junk_category    = COALESCE(canonical.junk_category,
+                                           twin.junk_category),
+               matched_pattern  = COALESCE(canonical.matched_pattern,
+                                           twin.matched_pattern),
+               updated_at       = NOW()
+          FROM search_terms AS twin
+         WHERE """ + _twin_match + " AND " + _canonical_match + """
+           AND canonical.id <> twin.id
+    """
+
+    # EXISTS, not a bare DELETE: the twin is removed only because a complete
+    # replacement is demonstrably present in the same statement. An unmatched
+    # historical row is never deleted.
+    _twin_delete = """
+        DELETE FROM search_terms AS twin
+         WHERE """ + _twin_match + """
+           AND EXISTS (SELECT 1 FROM search_terms AS canonical
+                        WHERE """ + _canonical_match + """
+                          AND canonical.id <> twin.id)
+    """
     _null_twin_delete = """
         DELETE FROM search_terms
         WHERE campaign_id IS NULL
@@ -882,9 +966,17 @@ def write_search_terms(
             if conn is None:
                 return 0
             with conn.cursor() as cur:
+                # PR-ADS-156-F3 §3: upsert, carry over, supersede — in ONE
+                # transaction. `get_conn` commits on clean exit, so a failure
+                # anywhere here rolls back the whole set: there is no state in
+                # which a twin was deleted but its replacement never landed, or
+                # in which the annotation carry-over ran and the delete did not.
                 cur.executemany(_upsert_sql, rows)
                 if _null_twin_keys:
                     cur.executemany(_null_twin_delete, _null_twin_keys)
+                if _twin_keys:
+                    cur.executemany(_twin_carry_over, _twin_keys)
+                    cur.executemany(_twin_delete, _twin_keys)
                 # executemany with ON CONFLICT makes rowcount unreliable for
                 # determining actual inserts vs updates; use len(rows) as the
                 # attempted-upsert count.

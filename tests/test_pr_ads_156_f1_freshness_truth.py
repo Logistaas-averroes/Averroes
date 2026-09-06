@@ -68,8 +68,10 @@ def _assess(sync: dict, data: dict, *, today: date = TODAY,
 
 
 def _run_audit(*args, env_extra=None):
+    # PR-ADS-156-F3: the subprocess needs the configured account, or the audit
+    # correctly refuses to certify any population at all.
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/root",
-           "PYTHONPATH": str(_ROOT)}
+           "PYTHONPATH": str(_ROOT), "GOOGLE_ADS_CUSTOMER_ID": "555"}
     env.update(env_extra or {})
     return subprocess.run([sys.executable, "-m", _AUDIT_MODULE, *args],
                           cwd=str(_ROOT), capture_output=True, text=True, env=env)

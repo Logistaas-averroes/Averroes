@@ -297,7 +297,7 @@ def test_writer_on_conflict_and_two_ids_same_name_both_persist(pg, monkeypatch):
 
     # Same source_date / campaign name / ad group / keyword / term, campaign
     # IDs 10 and 20 — both are distinct facts and must both persist.
-    base = {"date": "2026-07-01", "campaign": "brand - uk",
+    base = {"date": "2026-07-01", "customer_id": "555", "campaign": "brand - uk",
             "ad_group": "Core", "keyword": "freight forwarding software",
             "match_type": "BROAD", "search_term": "freight forwarding software",
             "cost_micros": 5_000_000, "currency_code": "GBP",
@@ -329,7 +329,8 @@ def test_writer_null_id_then_id_bearing_no_double_count(pg, monkeypatch):
     _init_writer_db(pg, monkeypatch)
     from db.writers import write_search_terms
 
-    fact = {"date": "2026-07-01", "campaign": "brand - uk", "ad_group": "Core",
+    fact = {"date": "2026-07-01", "customer_id": "555",
+            "campaign": "brand - uk", "ad_group": "Core",
             "keyword": "kw", "match_type": "BROAD",
             "search_term": "freight software", "cost_micros": 5_000_000,
             "currency_code": "GBP", "source": "google_ads_api"}
@@ -373,12 +374,12 @@ def test_end_to_end_gbp_not_usd_per_date_fx(pg, monkeypatch):
     # Two Google Ads search-term rows for the SAME term/campaign on the two
     # dates: £100 on 07-01 and £100 on 07-02 (cost_micros = 100_000_000 each).
     raw_rows = [
-        {"date": "2026-07-01", "campaign_id": "10", "campaign_name": "brand - uk",
+        {"date": "2026-07-01", "customer_id": "555", "campaign_id": "10", "campaign_name": "brand - uk",
          "ad_group_id": "1", "ad_group_name": "Core",
          "search_term": "freight forwarding software", "impressions": 50,
          "clicks": 5, "cost_micros": 100_000_000, "spend": 100.0,
          "currency_code": "GBP", "conversions": 1.0},
-        {"date": "2026-07-02", "campaign_id": "10", "campaign_name": "brand - uk",
+        {"date": "2026-07-02", "customer_id": "555", "campaign_id": "10", "campaign_name": "brand - uk",
          "ad_group_id": "1", "ad_group_name": "Core",
          "search_term": "freight forwarding software", "impressions": 60,
          "clicks": 6, "cost_micros": 100_000_000, "spend": 100.0,
@@ -448,11 +449,11 @@ def test_per_date_fx_differs_from_window_average(pg, monkeypatch):
     # Day 1: £300 at 1.00 = $300.  Day 2: £100 at 2.00 = $200.  Exact = $500.
     # Window-average rate = (1.00+2.00)/2 = 1.50 → £400 × 1.50 = $600 (WRONG).
     raw = [
-        {"date": "2026-07-01", "campaign_id": "10", "campaign_name": "brand",
+        {"date": "2026-07-01", "customer_id": "555", "campaign_id": "10", "campaign_name": "brand",
          "ad_group_id": "1", "ad_group_name": "Core", "search_term": "x",
          "impressions": 1, "clicks": 1, "cost_micros": 300_000_000,
          "spend": 300.0, "currency_code": "GBP", "conversions": 0.0},
-        {"date": "2026-07-02", "campaign_id": "10", "campaign_name": "brand",
+        {"date": "2026-07-02", "customer_id": "555", "campaign_id": "10", "campaign_name": "brand",
          "ad_group_id": "1", "ad_group_name": "Core", "search_term": "x",
          "impressions": 1, "clicks": 1, "cost_micros": 100_000_000,
          "spend": 100.0, "currency_code": "GBP", "conversions": 0.0},
@@ -493,11 +494,11 @@ def test_missing_fx_date_withholds_usd(pg, monkeypatch):
                 "rate, provider) VALUES ('2026-07-01','GBP','USD',1.20,'test')")
 
     raw = [
-        {"date": "2026-07-01", "campaign_id": "10", "campaign_name": "brand",
+        {"date": "2026-07-01", "customer_id": "555", "campaign_id": "10", "campaign_name": "brand",
          "ad_group_id": "1", "ad_group_name": "Core", "search_term": "x",
          "impressions": 1, "clicks": 1, "cost_micros": 100_000_000,
          "spend": 100.0, "currency_code": "GBP", "conversions": 0.0},
-        {"date": "2026-07-02", "campaign_id": "10", "campaign_name": "brand",
+        {"date": "2026-07-02", "customer_id": "555", "campaign_id": "10", "campaign_name": "brand",
          "ad_group_id": "1", "ad_group_name": "Core", "search_term": "x",
          "impressions": 1, "clicks": 1, "cost_micros": 100_000_000,
          "spend": 100.0, "currency_code": "GBP", "conversions": 0.0},
@@ -560,26 +561,26 @@ def test_drawer_identity_safety_same_name_two_ids(pg, monkeypatch):
         with conn.cursor() as cur:
             # id 10 — flagged waste on 2026-07-01.
             cur.execute(
-                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "INSERT INTO search_terms(customer_id, source_date, campaign_name, campaign_id, "
                 "ad_group, keyword, match_type, search_term, cost_micros, "
                 "currency_code, source_system, is_flagged_waste, junk_category) "
-                "VALUES ('2026-07-01','brand - uk','10','Core','kw','BROAD',"
+                "VALUES ('555','2026-07-01','brand - uk','10','Core','kw','BROAD',"
                 "'freight software',50000000,'GBP','google_ads_api',TRUE,'competitor')")
             # id 20 — needs review (is_flagged_waste NULL) on 2026-07-01.
             cur.execute(
-                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "INSERT INTO search_terms(customer_id, source_date, campaign_name, campaign_id, "
                 "ad_group, keyword, match_type, search_term, cost_micros, "
                 "currency_code, source_system, is_flagged_waste) "
-                "VALUES ('2026-07-01','brand - uk','20','Core','kw','BROAD',"
+                "VALUES ('555','2026-07-01','brand - uk','20','Core','kw','BROAD',"
                 "'freight software',80000000,'GBP','google_ads_api',NULL)")
             # Ambiguous NULL-campaign_id historical daily row on a DIFFERENT date
             # (so the writer's null-id supersession does not remove it) — it must
             # surface in neither id-scoped drawer.
             cur.execute(
-                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "INSERT INTO search_terms(customer_id, source_date, campaign_name, campaign_id, "
                 "ad_group, keyword, match_type, search_term, cost_micros, "
                 "currency_code, source_system, is_flagged_waste) "
-                "VALUES ('2026-06-20','brand - uk',NULL,'Core','kw','BROAD',"
+                "VALUES ('555','2026-06-20','brand - uk',NULL,'Core','kw','BROAD',"
                 "'freight software',30000000,'GBP','google_ads_api',NULL)")
             # waste_terms proof keyed ONLY by the shared campaign name.
             cur.execute("INSERT INTO runs(run_type, started_at, status) "
@@ -644,10 +645,10 @@ def test_drawer_unique_name_allows_classification_proof(pg, monkeypatch):
     with connection.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
+                "INSERT INTO search_terms(customer_id, source_date, campaign_name, campaign_id, "
                 "ad_group, keyword, match_type, search_term, cost_micros, "
                 "currency_code, source_system, is_flagged_waste, junk_category) "
-                "VALUES ('2026-07-01','gulf','2','Core','kw','BROAD',"
+                "VALUES ('555','2026-07-01','gulf','2','Core','kw','BROAD',"
                 "'freight jobs',40000000,'GBP','google_ads_api',TRUE,'job_seeker')")
             cur.execute("INSERT INTO runs(run_type, started_at, status) "
                         "VALUES ('weekly', NOW(), 'success') RETURNING id")
@@ -695,10 +696,10 @@ def test_waste_bridge_and_legacy_audit_end_to_end(pg, monkeypatch):
         with conn.cursor() as cur:
             # Verified GBP term, not yet classified (is_flagged_waste NULL).
             cur.execute(
-                "INSERT INTO search_terms(source_date, campaign_name, campaign_id, "
-                "ad_group, keyword, match_type, search_term, cost_micros, "
-                "currency_code, source_system, is_flagged_waste) VALUES "
-                "('2026-07-01','gulf','2','Core','kw','BROAD','freight jobs',"
+                "INSERT INTO search_terms(customer_id, source_date, campaign_name, "
+                "campaign_id, ad_group, keyword, match_type, search_term, "
+                "cost_micros, currency_code, source_system, is_flagged_waste) VALUES "
+                "('555','2026-07-01','gulf','2','Core','kw','BROAD','freight jobs',"
                 "20000000,'GBP','google_ads_api',NULL)")
             # Legacy row: NO currency lineage.
             cur.execute(
@@ -733,16 +734,22 @@ def test_waste_bridge_and_legacy_audit_end_to_end(pg, monkeypatch):
         "all_time", now=datetime(2026, 7, 3, 9, 0, tzinfo=timezone.utc))
 
     fj = [r for r in out["rows"] if r["search_term"] == "freight jobs"][0]
-    lg = [r for r in out["rows"] if r["search_term"] == "legacy term"][0]
     # Bridge: NULL-flag term becomes Flagged waste from safe waste_terms evidence.
     assert fj["state"] == "flagged"
     assert fj["classification_source"] == "waste_terms"
     assert fj["spend_usd"] == 25.0                 # £20 × 1.25 verified
-    # Legacy row visible, unverified, never fabricated.
-    assert lg["legacy_currency_unverified"] is True
-    assert lg["spend_usd"] is None and lg["spend_native"] is None
-    # Partial monetary status; verified subtotal is the single verified row.
-    assert out["kpis"]["monetary_status"] == "partial"
+
+    # PR-ADS-156-F3 §2: the legacy row is no longer part of the canonical
+    # population at all. It has no account and no proven provenance, so it is
+    # HISTORY — disclosed by the currency audit below, and contributing nothing
+    # to the evidence rows or the KPIs.
+    #
+    # Before F3 it appeared here as a visible "unverified" row. That was the
+    # right answer while the only question was currency lineage; it stopped
+    # being the right answer once account identity became part of what makes a
+    # row canonical, because a row nobody can attribute to an account is not a
+    # quieter version of this account's evidence.
+    assert [r for r in out["rows"] if r["search_term"] == "legacy term"] == []
     assert out["kpis"]["verified_spend_usd"] == 25.0
 
     # Read-only legacy audit reports the preserved row.

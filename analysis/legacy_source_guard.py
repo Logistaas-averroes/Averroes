@@ -271,8 +271,258 @@ def scan_legacy_sources(root: Path | str | None = None,
     return sorted(findings, key=lambda f: (f["path"], f["reason"]))
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-156-F3 review §2 — unscoped `search_terms` readers
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# The F3 review found the operational scripts still reading `search_terms` by
+# date alone, months after the production readers had been scoped. That is not a
+# gap someone was careless about; it is what happens when a rule lives in the
+# reviewers' heads. The rule is now executable.
+#
+# It scans `scripts/` as well as the production directories, which the legacy
+# scan above deliberately does not: reading LEGACY ROWS from a script is the
+# whole point of a migration or a historical diagnostic, but reading the CURRENT
+# population unscoped is the same defect wherever it happens. An operator's
+# verification command and the dashboard must answer with the same rows.
+
+#: Directories scanned for unscoped reads.
+SEARCH_TERM_READER_DIRS = (*PRODUCTION_DIRS, "scripts")
+
+#: A scope FACTORY, by the shape of its name. Every helper that produces a
+#: `SearchTermScope` ends in `_scope` — `canonical_scope`, `claimed_scope`,
+#: `unscoped_history_scope`, and the endpoint-local `_canonical_search_term_scope`
+#: — so the guard recognises the pattern rather than a fixed list it would fall
+#: behind the first time someone adds a fourth.
+SCOPE_FACTORY_SUFFIX = "_scope"
+
+REASON_UNSCOPED_SEARCH_TERM_READ = "unscoped_search_term_read"
+
+#: Reads of `search_terms` that are deliberately NOT account-scoped, each with
+#: the reason it is exempt. An entry here is a claim that the code asks a
+#: question about HISTORY — what the table holds — rather than about the
+#: canonical population a person makes decisions from.
+SEARCH_TERM_SCOPE_ALLOWLIST: dict[str, str] = {
+    "db/search_term_repository.py:fetch_legacy_currency_audit":
+        "historical diagnostic — its entire purpose is to count the rows the "
+        "canonical scope excludes, so scoping it would make it report zero",
+    "analysis/legacy_source_guard.py":
+        "the guard itself — it must contain the markers it searches for",
+}
+
+
+def _innermost_statements(tree: ast.AST):
+    """Every non-compound statement, which is the granularity a single query is
+    written at. Using the enclosing function instead would let one scoped query
+    vouch for an unscoped one three lines below it."""
+    compound = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.If,
+                ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith,
+                ast.Try, ast.Module)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.stmt) and not isinstance(node, compound):
+            yield node
+
+
+def _enclosing_function(tree: ast.AST, target: ast.stmt):
+    """The innermost function containing ``target``, as (name, node)."""
+    best = (None, None)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if any(child is target for child in ast.walk(node)):
+                # Innermost wins: a nested helper is the real owner of the
+                # query, and the module-level function around it may well
+                # resolve a scope it never passes down.
+                if best[1] is None or any(
+                        child is best[1] for child in ast.walk(node)) is False:
+                    best = (node.name, node)
+    return best
+
+
+def _sql_expression(stmt: ast.stmt):
+    """The expression that builds the SQL string, if this statement builds one.
+
+    Either the first positional argument of a ``.execute(...)`` call, or the
+    right-hand side of an assignment. Returning the expression rather than the
+    statement is what makes the literal/dynamic distinction below possible.
+    """
+    for node in ast.walk(stmt):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "execute" and node.args):
+            return node.args[0]
+    if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
+        return stmt.value
+    return None
+
+
+def _assigned_names(target: ast.AST):
+    """Every plain name bound by an assignment target."""
+    for node in ast.walk(target):
+        if isinstance(node, ast.Name):
+            yield node.id
+
+
+def _mentions_a_scope_factory(value: ast.AST) -> bool:
+    for node in ast.walk(value):
+        if isinstance(node, ast.Call):
+            name = (getattr(node.func, "id", None)
+                    or getattr(node.func, "attr", None))
+            if name and name.endswith(SCOPE_FACTORY_SUFFIX):
+                return True
+    return False
+
+
+def _scope_tainted_names(func: ast.AST | None) -> set[str]:
+    """Names inside ``func`` that carry a scope, directly or through a chain.
+
+    An intra-function taint analysis, run to a fixpoint. It exists because the
+    previous check was too weak to mean anything: it asked whether the function
+    called a ``*_scope`` factory ANYWHERE, so a function could resolve a scope,
+    ignore it, and run a date-only query three lines later with the guard's
+    blessing. Calling the factory is not using the result.
+
+    A name becomes tainted when it is assigned from an expression that either
+    calls a scope factory or references an already-tainted name. That follows
+    the real chains in this codebase — ``scope = canonical_scope(...)`` into
+    ``conditions = [scope.sql, ...]`` into ``where_sql = " AND ".join(conditions)``
+    into the query string — without needing to special-case any of their names.
+
+    Deliberately not a general dataflow analysis: it does not follow a scope
+    through a helper function, an attribute of ``self``, or a container mutated
+    by a method call it was not seeded with. Those come out as findings rather
+    than silent passes, which is the correct direction for a guard to be wrong
+    in — a false finding is argued about and then allowlisted with a reason,
+    while a false pass is never noticed at all.
+    """
+    if func is None:
+        return set()
+    tainted: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(func):
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if value is None:
+                continue
+            if not (_mentions_a_scope_factory(value)
+                    or any(isinstance(n, ast.Name) and n.id in tainted
+                           for n in ast.walk(value))):
+                continue
+            for target in targets:
+                for name in _assigned_names(target):
+                    if name not in tainted:
+                        tainted.add(name)
+                        changed = True
+    return tainted
+
+
+def scan_unscoped_search_term_readers(
+        root: Path | str | None = None,
+        directories: tuple[str, ...] = SEARCH_TERM_READER_DIRS) -> list[dict]:
+    """Every statement that SELECTs from ``search_terms`` without scoping it.
+
+    Returns ``[{"path", "function", "reason", "detail"}, …]``. Writers,
+    migrations and schema operations are excluded: this is about what a consumer
+    READS, and a DELETE inside a supersession or a migration is neither a
+    consumer nor a read.
+    """
+    base = Path(root) if root else _ROOT
+    findings: list[dict] = []
+    for directory in directories:
+        target = base / directory
+        if not target.exists():
+            continue
+        for path in sorted(target.rglob("*.py")):
+            rel = str(path.relative_to(base))
+            if rel in SEARCH_TERM_SCOPE_ALLOWLIST:
+                continue
+            try:
+                tree = ast.parse(code_only(path))
+            except SyntaxError:
+                continue
+            for stmt in _innermost_statements(tree):
+                try:
+                    text = ast.unparse(stmt)
+                except Exception:  # noqa: BLE001 — unparse is best-effort
+                    continue
+                lowered = text.lower()
+                if "from search_terms" not in lowered:
+                    continue
+                # Not a consumer read. A writer's supersession DELETE and a
+                # migration's cleanup both name the table and neither answers a
+                # question anyone reads a number from.
+                if any(w in lowered for w in ("delete from search_terms",
+                                              "insert into search_terms",
+                                              "update search_terms")):
+                    continue
+
+                func_name, func_node = _enclosing_function(tree, stmt)
+                if f"{rel}:{func_name}" in SEARCH_TERM_SCOPE_ALLOWLIST:
+                    continue
+
+                sql_expr = _sql_expression(stmt)
+                dynamic = sql_expr is not None and any(
+                    isinstance(n, (ast.Name, ast.Attribute, ast.Call,
+                                   ast.FormattedValue))
+                    for n in ast.walk(sql_expr))
+
+                if dynamic:
+                    # The predicate comes from somewhere. Require THIS query's
+                    # SQL expression to reference a scope-carrying name — not
+                    # merely that the function resolved a scope somewhere, which
+                    # a function can do and then ignore.
+                    tainted = _scope_tainted_names(func_node)
+                    referenced = {n.id for n in ast.walk(sql_expr)
+                                  if isinstance(n, ast.Name)}
+                    if referenced & tainted:
+                        continue
+                    if "customer_id" in lowered:
+                        # The dynamic part is elsewhere and the visible text
+                        # binds the account itself.
+                        continue
+                    why = ("builds its predicate from "
+                           + (", ".join(f"`{n}`" for n in sorted(referenced))
+                              if referenced else "an expression")
+                           + ", none of which carries a scope from "
+                             "analysis.search_term_scope — resolving a scope "
+                             "elsewhere in the function does not scope THIS "
+                             "query")
+                else:
+                    # A fully literal query: the whole predicate is visible
+                    # right here, so it can be judged exactly. This is the shape
+                    # the F3 review found in the operational scripts — bounded
+                    # on `source_date` and nothing else.
+                    if "customer_id" in lowered or "{scope}" in lowered:
+                        continue
+                    why = ("is a fully literal query whose WHERE clause never "
+                           "mentions `customer_id`")
+
+                findings.append({
+                    "path": rel,
+                    "function": func_name,
+                    "reason": REASON_UNSCOPED_SEARCH_TERM_READ,
+                    "detail": (
+                        f"{rel}"
+                        + (f" ({func_name})" if func_name else "")
+                        + f" reads `search_terms` unscoped: it {why}. During the "
+                          "cutover a query like this counted every observation "
+                          "twice. Compose the predicate from "
+                          "analysis.search_term_scope, or allowlist it in "
+                          "SEARCH_TERM_SCOPE_ALLOWLIST with the reason it is a "
+                          "historical diagnostic."),
+                })
+    return sorted(findings, key=lambda f: (f["path"], f["function"] or ""))
+
+
 __all__ = [
     "PRODUCTION_DIRS", "LEGACY_ACCESS_ALLOWLIST",
+    "SEARCH_TERM_READER_DIRS", "SEARCH_TERM_SCOPE_ALLOWLIST", "SCOPE_FACTORY_SUFFIX",
+    "REASON_UNSCOPED_SEARCH_TERM_READ", "scan_unscoped_search_term_readers",
     "RETIRED_PROVIDER_NAMES", "LEGACY_REPOSITORY_HELPERS",
     "LEGACY_SNAPSHOT_FILES", "KEYWORD_FALLBACK_MARKERS",
     "REASON_RETIRED_PROVIDER_IMPORT", "REASON_LEGACY_SNAPSHOT_ACCESS",

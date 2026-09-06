@@ -177,11 +177,17 @@ class TestBuildSearchTermsVerdictDB:
         # Query results in order:
         # rows_7d, rows_14d, rows_30d, rows_60d, rows_requested(1d),
         # MAX(source_date), blank rows, spend rows, click rows,
+        # unscoped historical rows, null-customer rows,
         # CANONICAL sync_state, CANONICAL sync_batches, LEGACY sync_state, runs
         #
         # PR-ADS-156 §8 added the legacy row: historical Windsor state is still
         # reported, under a key that says legacy, so it can be seen without
         # deciding freshness.
+        #
+        # PR-ADS-156-F3 §2 added the two disclosure counts. Every count above
+        # them is now ACCOUNT-SCOPED, and these two report what that scope
+        # excludes — so an incomplete cutover is visible beside the healthy
+        # numbers instead of being hidden by the filter that produced them.
         query_results = [
             (150,),   # rows_7d
             (400,),   # rows_14d
@@ -192,6 +198,8 @@ class TestBuildSearchTermsVerdictDB:
             (0,),     # blank_search_term_rows
             (100,),   # spend_rows
             (80,),    # click_rows
+            (0,),     # unscoped_historical_rows_in_window
+            (0,),     # null_customer_rows_in_window
             None,     # canonical sync_state (no row)
             None,     # canonical sync_batches (no row)
             None,     # legacy sync_state (no row)
@@ -223,8 +231,8 @@ class TestBuildSearchTermsVerdictDB:
         where it cannot be mistaken for present freshness.
         """
         # Query order: rows_7d/14d/30d/60d, MAX(source_date), blank, spend,
-        # clicks, CANONICAL sync_state, CANONICAL sync_batches, LEGACY
-        # sync_state, runs.
+        # clicks, unscoped historical rows, null-customer rows, CANONICAL
+        # sync_state, CANONICAL sync_batches, LEGACY sync_state, runs.
         query_results = [
             (0,),    # rows_7d
             (0,),    # rows_14d
@@ -234,6 +242,8 @@ class TestBuildSearchTermsVerdictDB:
             (0,),                # blank_search_term_rows
             (50,),               # spend_rows
             (40,),               # click_rows
+            (0,),                # unscoped_historical_rows_in_window
+            (0,),                # null_customer_rows_in_window
             ("google_ads_api", "success", "2026-05-10 08:00:00"),      # canonical state
             ("google_ads_api", "success", 250, "2026-05-10 08:00:00"),  # canonical batch
             ("windsor_mcp", "success", "2024-01-02 08:00:00"),          # legacy state

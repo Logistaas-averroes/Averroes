@@ -103,7 +103,22 @@ def _canonical_facts(start, end) -> dict:
     everywhere else.
     """
     from analysis.search_term_identity import term_identity_key
+    from analysis.search_term_scope import canonical_scope
     from db.connection import get_conn
+
+    # PR-ADS-156-F3 review §2 — this function is named `_canonical_facts` and
+    # was bounded on the date window alone, so during the cutover it summed each
+    # observation twice and called the result canonical. An audit that reports a
+    # doubled total is worse than no audit: it is a doubled total with a verdict
+    # attached.
+    #
+    # `start` may be None (all-time). The scope takes the same bounds and treats
+    # None as "no lower bound", so the `%s::date IS NULL` guard is no longer
+    # needed — the predicate simply omits the clause.
+    scope = canonical_scope(start, end)
+    if not scope.available:
+        return {"available": False, "error": scope.reason,
+                "reason": scope.reason}
 
     try:
         with get_conn() as conn:
@@ -120,10 +135,8 @@ def _canonical_facts(start, end) -> dict:
                            MAX(source_date)                     AS latest_source_date,
                            COUNT(DISTINCT source_date)          AS distinct_source_dates
                     FROM search_terms
-                    WHERE (%s::date IS NULL OR source_date >= %s)
-                      AND source_date <= %s
-                    """,
-                    (start, start, end),
+                    WHERE """ + scope.sql,
+                    scope.params,
                 )
                 cols = [d[0] for d in cur.description]
                 row = dict(zip(cols, cur.fetchone()))
@@ -134,10 +147,8 @@ def _canonical_facts(start, end) -> dict:
                     SELECT DISTINCT COALESCE(campaign_id, campaign_name, ''),
                                     search_term
                     FROM search_terms
-                    WHERE (%s::date IS NULL OR source_date >= %s)
-                      AND source_date <= %s
-                    """,
-                    (start, start, end),
+                    WHERE """ + scope.sql,
+                    scope.params,
                 )
                 pairs = cur.fetchall()
         identities = {term_identity_key(c, t) for c, t in pairs}

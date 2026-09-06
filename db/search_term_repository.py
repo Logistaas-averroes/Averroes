@@ -6,16 +6,36 @@ Patterns evidence page. All selected-window boundaries use ``source_date`` (the
 Google Ads reporting date), NEVER ``run_date`` — scheduler timing must not move
 business totals.
 
-Natural-key / duplication contract (audited for PR-ADS-144):
+Canonical population (PR-ADS-156-F3 §1/§2):
+  Every substantive metric here reads the ACCOUNT-SCOPED canonical population
+  defined by ``analysis.search_term_scope`` — canonical Google Ads API
+  provenance, the effective configured customer, and complete campaign /
+  ad-group / term identity. Rows that predate the account column, belong to
+  another account, or carry another provenance are HISTORY: they are disclosed
+  elsewhere and never contribute spend, clicks, impressions, conversions or row
+  counts here.
+
+  Without that scope these fetchers counted the pre-cutover null-account rows
+  alongside their complete replacements. In the first production window after
+  PR-ADS-156 that was 16,100 stale twins beside 16,267 new rows — totals close
+  to doubled, from a query that looked entirely reasonable.
+
+  When the configured account cannot be resolved these fetchers report
+  ``available: False`` with a reason. They never widen to every account.
+
+Natural-key / duplication contract (audited for PR-ADS-144, extended by
+PR-ADS-156-F2/F3):
   The table enforces a UNIQUE index ``idx_search_terms_unique_fact`` on
-  (source_date, COALESCE(campaign_name,''), COALESCE(campaign_id,''),
-   COALESCE(ad_group,''), COALESCE(keyword,''), COALESCE(match_type,''),
-   search_term) and the writer (``db.writers.write_search_terms``) upserts ON
-  CONFLICT on that same key. campaign_id is included in the key so two campaign
-  IDs sharing a display name can never collide. A repeated scheduler run
-  therefore UPDATES the existing fact row in place — duplicate scheduler copies
-  / overlapping snapshots for the same term/day/campaign event CANNOT exist,
-  so summing rows inside a window never multiplies the same fact.
+  (source_date, COALESCE(customer_id,''), COALESCE(campaign_name,''),
+   COALESCE(campaign_id,''), COALESCE(ad_group,''), COALESCE(keyword,''),
+   COALESCE(match_type,''), search_term) and the writer
+  (``db.writers.write_search_terms``) upserts ON CONFLICT on that same key.
+  customer_id is in the key so two accounts can never collide; campaign_id is
+  in it so two campaign IDs sharing a display name can never collide. A
+  repeated scheduler run therefore UPDATES the existing fact row in place —
+  duplicate scheduler copies / overlapping snapshots for the same
+  account/term/day/campaign event CANNOT exist, so summing rows inside a window
+  never multiplies the same fact.
 
 Currency contract (PR-ADS-144):
   The table durably stores ``cost_micros`` (raw Google Ads micros),
@@ -36,23 +56,41 @@ from __future__ import annotations
 import logging
 from datetime import date
 
+from analysis.search_term_scope import (
+    REASON_CUSTOMER_NOT_CONFIGURED,
+    SEARCH_TERMS_NATURAL_KEY,
+    canonical_scope,
+)
 from db.connection import get_conn
 
 logger = logging.getLogger(__name__)
 
-# The documented durable natural key of the search_terms table (kept in one
-# place so the service/audit layer can disclose it verbatim).
-SEARCH_TERMS_NATURAL_KEY = (
-    "source_date + COALESCE(campaign_name,'') + COALESCE(campaign_id,'') + "
-    "COALESCE(ad_group,'') + COALESCE(keyword,'') + COALESCE(match_type,'') + "
-    "search_term "
-    "(UNIQUE index idx_search_terms_unique_fact; writer upserts ON CONFLICT)"
-)
+# Re-exported for existing importers. PR-ADS-156-F3 §4: the string now lives in
+# `analysis.search_term_scope` beside the scope it describes, so a reader can
+# never be told an account-less key is canonical while the index says otherwise.
+__all__ = [
+    "SEARCH_TERMS_NATURAL_KEY",
+    "fetch_search_term_aggregates", "fetch_search_term_daily_costs",
+    "fetch_search_term_daily_for_campaign", "fetch_search_term_daily",
+    "fetch_legacy_currency_audit",
+]
 
 
 def _rows_as_dicts(cur) -> list[dict]:
     cols = [c[0] for c in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _scope_unavailable(what: str, reason: str) -> dict:
+    """The fail-closed result. PR-ADS-156-F3 §1.
+
+    Unavailable, with a reason — never a wider query. There is one configured
+    account today, which makes "just read everything" look harmless; it is the
+    trap, because the day a second account exists every historical total
+    silently changes meaning and nothing marks when it happened.
+    """
+    logger.warning("%s unavailable: %s", what, reason)
+    return {"available": False, "rows": [], "reason": reason}
 
 
 def fetch_search_term_aggregates(start: date | None, end: date) -> dict:
@@ -80,7 +118,15 @@ def fetch_search_term_aggregates(start: date | None, end: date) -> dict:
     keywords, match_types}.
 
     Never raises — DB outage returns {"available": False, "rows": []}.
+
+    PR-ADS-156-F3 §2: bounded by the ACCOUNT-SCOPED canonical population, so the
+    pre-cutover null-account twins that coexist with their complete replacements
+    are excluded from every total here rather than summed alongside them.
     """
+    scope = canonical_scope(start, end)
+    if not scope.available:
+        return _scope_unavailable("fetch_search_term_aggregates", scope.reason
+                                  or REASON_CUSTOMER_NOT_CONFIGURED)
     try:
         with get_conn() as conn:
             if conn is None:
@@ -123,11 +169,10 @@ def fetch_search_term_aggregates(start: date | None, end: date) -> dict:
                                FILTER (WHERE match_type IS NOT NULL)
                                AS match_types
                     FROM search_terms
-                    WHERE (%s::date IS NULL OR source_date >= %s)
-                      AND source_date <= %s
+                    WHERE """ + scope.sql + """
                     GROUP BY search_term, campaign_name, campaign_id
                     """,
-                    (start, start, end),
+                    scope.params,
                 )
                 rows = _rows_as_dicts(cur)
 
@@ -151,10 +196,9 @@ def fetch_search_term_aggregates(start: date | None, end: date) -> dict:
                                FILTER (WHERE source_system IS NOT NULL)
                                AS source_systems
                     FROM search_terms
-                    WHERE (%s::date IS NULL OR source_date >= %s)
-                      AND source_date <= %s
+                    WHERE """ + scope.sql + """
                     """,
-                    (start, start, end),
+                    scope.params,
                 )
                 src = _rows_as_dicts(cur)
             source = src[0] if src else {}
@@ -220,7 +264,13 @@ def fetch_search_term_daily_costs(start: date | None, end: date) -> dict:
     cost_micros, currency_code, source_system}. currency_code / source_system
     are the DISTINCT sets within that (unit, day) so the service can withhold
     monetary metrics for mixed/unproven provenance. Never raises.
+
+    PR-ADS-156-F3 §2: account-scoped canonical population only.
     """
+    scope = canonical_scope(start, end)
+    if not scope.available:
+        return _scope_unavailable("fetch_search_term_daily_costs", scope.reason
+                                  or REASON_CUSTOMER_NOT_CONFIGURED)
     try:
         with get_conn() as conn:
             if conn is None:
@@ -237,11 +287,10 @@ def fetch_search_term_daily_costs(start: date | None, end: date) -> dict:
                                FILTER (WHERE source_system IS NOT NULL)
                                AS source_systems
                     FROM search_terms
-                    WHERE (%s::date IS NULL OR source_date >= %s)
-                      AND source_date <= %s
+                    WHERE """ + scope.sql + """
                     GROUP BY search_term, campaign_name, campaign_id, source_date
                     """,
-                    (start, start, end),
+                    scope.params,
                 )
                 rows = _rows_as_dicts(cur)
             for row in rows:
@@ -281,14 +330,20 @@ def fetch_search_term_daily_for_campaign(
 
     Returns daily-level cost_micros and currency_code alongside spend_usd so
     the service can perform per-date FX conversion.
+
+    PR-ADS-156-F3 §2: account-scoped canonical population only, so a drawer
+    series can never double a day by charting a row and its pre-cutover twin.
     """
+    scope = canonical_scope(start, end)
+    if not scope.available:
+        return _scope_unavailable("fetch_search_term_daily_for_campaign",
+                                  scope.reason or REASON_CUSTOMER_NOT_CONFIGURED)
     try:
         with get_conn() as conn:
             if conn is None:
                 return {"available": False, "rows": []}
-            conditions = ["(%s::date IS NULL OR source_date >= %s)",
-                          "source_date <= %s", "search_term = %s"]
-            params: list = [start, start, end, search_term]
+            conditions = [scope.sql, "search_term = %s"]
+            params: list = [*scope.params, search_term]
             # Campaign-scoped identity: ID-first, name fallback only for
             # null-ID rows (never OR'd together to avoid same-name merge).
             if null_id_only:

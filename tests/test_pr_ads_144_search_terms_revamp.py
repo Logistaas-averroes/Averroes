@@ -300,9 +300,28 @@ def test_endpoints_map_unknown_window_to_400():
 
 
 def test_source_date_is_the_business_boundary_never_run_date():
+    # PR-ADS-156-F3 §1: the window bound moved into the ONE canonical scope
+    # helper, so the assertion follows it there. That is stronger than it was:
+    # the boundary is now defined in a single place rather than repeated in
+    # each fetcher, so this checks the definition instead of one copy of it.
+    from pathlib import Path
+
+    from analysis.legacy_source_guard import code_only
+
+    scope_path = (Path(__file__).resolve().parents[1] / "analysis"
+                  / "search_term_scope.py")
+    scope_src = scope_path.read_text(encoding="utf-8")
+    assert "source_date')} >= %s" in scope_src
+    assert "source_date')} <= %s" in scope_src
+    # Over CODE only: the module's docstring names `run_date` precisely to say
+    # it is never the boundary, and a guard that fails on the sentence
+    # explaining the rule is a guard that rewards deleting the explanation.
+    assert "run_date" not in code_only(scope_path)
+
     fn = _region(REPO, "def fetch_search_term_aggregates",
                  "def fetch_search_term_daily_for_campaign")
-    assert "source_date >= %s" in fn and "source_date <= %s" in fn
+    # Each fetcher composes that scope; none re-derives a window of its own.
+    assert "canonical_scope(start, end)" in fn
     assert "run_date" not in fn
     # run_date may appear in the service ONLY in the doctrine note negating it
     # and when surfacing the waste_terms classification date (drawer proof) —

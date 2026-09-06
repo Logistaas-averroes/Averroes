@@ -3686,6 +3686,37 @@ def _decode_search_terms_cursor(token: str):
         raise ValueError(f"Invalid cursor: {exc}") from exc
 
 
+def _canonical_search_term_scope():
+    """The ACCOUNT-SCOPED canonical search-term predicate (PR-ADS-156-F3 §2).
+
+    Identity and provenance only — no date bound, because these endpoints
+    express their window relatively (``NOW() - INTERVAL``) and the scope
+    composes with whatever window the caller already built.
+
+    Every substantive search-term metric in this file goes through here.
+    Before it existed, each endpoint filtered on the date window alone, so once
+    PR-ADS-156 began writing account-bearing rows beside their account-less
+    predecessors every one of them counted both: raw rows, the summary totals,
+    the n-gram source population. The complete rows are not duplicates of the
+    old ones under the new key, which is exactly why nothing complained.
+    """
+    from analysis.search_term_scope import canonical_scope  # noqa: PLC0415
+
+    return canonical_scope()
+
+
+def _search_term_scope_unavailable(safe_empty: dict, scope) -> dict:
+    """Fail closed: unavailable with a reason, never a wider query."""
+    log.warning("[api/search-terms] canonical scope unavailable: %s", scope.reason)
+    payload = dict(safe_empty)
+    payload["canonical_scope_available"] = False
+    payload["unavailable_reason"] = scope.reason
+    quality = dict(payload.get("data_quality") or {})
+    quality["status"] = scope.reason
+    payload["data_quality"] = quality
+    return payload
+
+
 @app.get("/api/search-terms")
 def api_search_terms(
     user: dict = Depends(require_auth),
@@ -3763,6 +3794,10 @@ def api_search_terms(
         from db.writers import _canonicalise_campaign_name  # noqa: PLC0415
         campaign_key = _canonicalise_campaign_name(campaign.strip().lower())
 
+    scope = _canonical_search_term_scope()
+    if not scope.available:
+        return _search_term_scope_unavailable(_safe_empty, scope)
+
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
@@ -3773,8 +3808,12 @@ def api_search_terms(
                 # ── Build base WHERE clauses (window + filters; excludes cursor) ──
                 # all_time (days is None) omits the date bound entirely — no lower
                 # bound, never a fabricated empty window.
-                base_conditions: list[str] = []
-                base_params: list[Any] = []
+                #
+                # PR-ADS-156-F3 §2: the canonical account scope comes FIRST, so
+                # every count, page and aggregate below is over one account's
+                # complete rows and never over their pre-cutover twins.
+                base_conditions: list[str] = [scope.sql]
+                base_params: list[Any] = list(scope.params)
                 if days is not None:
                     base_conditions.append("source_date >= NOW() - INTERVAL '1 day' * %s")
                     base_params.append(days)
@@ -4014,6 +4053,10 @@ def api_search_terms_summary(
         from db.writers import _canonicalise_campaign_name  # noqa: PLC0415
         campaign_key = _canonicalise_campaign_name(campaign.strip().lower())
 
+    scope = _canonical_search_term_scope()
+    if not scope.available:
+        return _search_term_scope_unavailable(_safe_empty, scope)
+
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
@@ -4025,8 +4068,12 @@ def api_search_terms_summary(
                 # Used for the analysis_state breakdown so all three buckets
                 # are always visible even when the user filters by one state.
                 # all_time (days is None) omits the date bound — no lower bound.
-                base_conditions: list[str] = []
-                base_params: list[Any] = []
+                #
+                # PR-ADS-156-F3 §2: the canonical account scope comes FIRST, so
+                # the top-line totals and the analysis_state breakdown both
+                # describe one account's complete rows.
+                base_conditions: list[str] = [scope.sql]
+                base_params: list[Any] = list(scope.params)
                 if days is not None:
                     base_conditions.append("source_date >= NOW() - INTERVAL '1 day' * %s")
                     base_params.append(days)
@@ -4313,6 +4360,10 @@ def api_search_terms_ngrams(
         "db_unavailable": True,
     }
 
+    scope = _canonical_search_term_scope()
+    if not scope.available:
+        return _search_term_scope_unavailable(_safe_empty, scope)
+
     from db.connection import get_conn  # noqa: PLC0415
     try:
         with get_conn() as conn:
@@ -4322,8 +4373,13 @@ def api_search_terms_ngrams(
             with conn.cursor() as cur:
                 # ── Build WHERE clauses ───────────────────────────────────
                 # all_time (days is None) omits the date bound — no lower bound.
-                conditions: list[str] = []
-                params: list[Any] = []
+                #
+                # PR-ADS-156-F3 §2: the canonical account scope comes FIRST. An
+                # n-gram is a count of phrases across the source rows, so a
+                # duplicated population does not merely inflate a total — it
+                # changes which phrases rank as wasteful.
+                conditions: list[str] = [scope.sql]
+                params: list[Any] = list(scope.params)
                 if days is not None:
                     conditions.append("source_date >= NOW() - INTERVAL '1 day' * %s")
                     params.append(days)
@@ -6210,6 +6266,42 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
 
     generated_at = datetime.now(timezone.utc).isoformat()
 
+    # Defined here rather than beside the normal return, because the
+    # unresolved-account branch below returns before reaching that point and
+    # must hand the operator the same kind of instruction every other verdict
+    # gets. A verdict without a next action is a diagnosis with no treatment.
+    next_actions = {
+        Verdict.OK: "Search Terms pipeline is healthy. Proceed to Waste Terms/N-Grams confidence.",
+        Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT: "Run scheduler (daily or weekly) to trigger first Search Terms sync after deployment.",
+        # PR-ADS-156 §8: provider-neutral next actions. Every one of these used
+        # to send the operator to Windsor — a source production retired, whose
+        # plan, field mapping and JSON file no longer exist. An instruction
+        # nobody can carry out is worse than none: it looks like a diagnosis.
+        Verdict.SOURCE_PULL_EMPTY: "Verify Google Ads API access and the configured customer ID, then re-run the canonical search-term sync.",
+        Verdict.SOURCE_MISSING_SEARCH_TERM_FIELD: "Check the Google Ads search_term_view field mapping — search_term not present in the response.",
+        Verdict.FILE_EMPTY: "The legacy JSON snapshot is empty. It is not a production source; check the canonical google_ads_api/search_terms sync instead.",
+        Verdict.DB_WRITE_FAILED: "The pull returned rows and none were persisted. Check write_search_terms() and the search_terms table.",
+        Verdict.DB_HAS_ROWS_API_EMPTY: "Check /api/search-terms endpoint filtering — DB has rows but API returns empty.",
+        Verdict.API_HAS_ROWS_UI_LIKELY_FILTERED: "The API returns rows the page is not showing. Check the Search Terms page filters (window, campaign, match type, waste state) before suspecting the pipeline.",
+        Verdict.FRESH_BUT_EMPTY: "The canonical sync reports success but wrote no rows and did not record a verified-empty interval. Inspect the latest sync batch.",
+        Verdict.VERIFIED_EMPTY: "Healthy: the interval was queried and Google Ads reported no eligible search terms. No action unless rows were expected.",
+        Verdict.CANONICAL_SYNC_FAILED: "The canonical google_ads_api/search_terms batch failed — the interval is NOT covered. Re-run the incremental sync and read its error.",
+        Verdict.CANONICAL_SYNC_NEVER_RUN: "No canonical search-term sync state exists. Run python -m scheduler.incremental_sync.",
+        Verdict.STALE: "Rows exist but the newest source_date is older than the freshness threshold. Re-run the incremental sync.",
+        Verdict.PARTIAL_HISTORY: "Current window is healthy; all-time history is not proven complete. Disclosed, not a failure.",
+        # PR-ADS-156-F3 final review §1 — a configuration fault, not a data
+        # fault, and the only one on this list an operator fixes without
+        # touching the pipeline at all.
+        Verdict.ACCOUNT_NOT_CONFIGURED: (
+            "Set GOOGLE_ADS_CUSTOMER_ID to the Google Ads account this "
+            "deployment reports on, then re-check. No search-term totals can "
+            "be produced until it resolves, and none were guessed: the "
+            "database may hold rows for other accounts or for pre-cutover "
+            "history, and neither is this account's evidence."),
+        Verdict.DB_UNAVAILABLE: "Fix database connection before checking Search Terms pipeline.",
+        Verdict.UNKNOWN: "Unable to determine pipeline state. Run verify_search_terms_pipeline.py manually.",
+    }
+
     db_info: dict[str, Any] = {
         "available": False,
         "rows_7d": 0,
@@ -6247,12 +6339,70 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
 
             db_info["available"] = True
 
+            # PR-ADS-156-F3 §2: every COUNT below is over the ACCOUNT-SCOPED
+            # canonical population. These numbers back a VERDICT about whether
+            # the pipeline is healthy, so counting a row and its pre-cutover
+            # null-account twin would make an incomplete cutover look like a
+            # doubly-healthy one. The unscoped rows are reported separately,
+            # under a key that says what they are.
+            from analysis.search_term_scope import (  # noqa: PLC0415
+                canonical_scope, unscoped_history_scope,
+            )
+
+            st_scope = canonical_scope()
+            db_info["canonical_scope_available"] = st_scope.available
+            db_info["canonical_customer_id"] = st_scope.customer_id
+
+            # Resolved and REJECTED before any population query runs.
+            #
+            # Falling through here with an unavailable scope was a real defect:
+            # every count below would come back 0 — correctly, since the
+            # predicate is FALSE — and `compute_search_terms_verdict` would then
+            # read those zeros as evidence about the pipeline and answer
+            # FRESH_BUT_EMPTY or NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT. Both
+            # send an operator to inspect a sync that is very likely fine, over
+            # a table that may be full of rows. The cause is one unset
+            # environment variable, and the verdict has to say so.
+            #
+            # The counts are omitted rather than reported as 0. A zero here is
+            # not a measurement of this account's population; it is the absence
+            # of an account to measure, and publishing it as a number invites
+            # exactly the reading this branch exists to prevent.
+            if not st_scope.available:
+                db_info["canonical_scope_reason"] = st_scope.reason
+                db_info["canonical_counts_measured"] = False
+                for key in ("rows_7d", "rows_14d", "rows_30d", "rows_60d",
+                            "blank_search_term_rows", "spend_rows",
+                            "click_rows"):
+                    db_info[key] = None
+                db_info["note"] = (
+                    "No canonical row totals were measured: without a resolved "
+                    "Google Ads account there is no population to count. These "
+                    "are omitted rather than reported as zero.")
+                verdict_str, reason = compute_search_terms_verdict(
+                    db_available=True, scope_available=False,
+                    window_days=days)
+                return {
+                    "generated_at": generated_at,
+                    "days": days,
+                    "verdict": verdict_str,
+                    "reason": reason,
+                    "db": db_info,
+                    "sync": sync_info,
+                    "api": {"checked": False, "rows_returned": None,
+                            "total_rows_in_window": None, "is_empty": None},
+                    "next_action": next_actions[Verdict.ACCOUNT_NOT_CONFIGURED],
+                }
+
+            scope_sql = st_scope.sql
+            scope_params = tuple(st_scope.params)
+
             with conn.cursor() as cur:
                 for window, key in [(7, "rows_7d"), (14, "rows_14d"), (30, "rows_30d"), (60, "rows_60d")]:
                     cur.execute(
-                        "SELECT COUNT(*) FROM search_terms "
-                        "WHERE source_date >= NOW() - INTERVAL '1 day' * %s",
-                        (window,),
+                        "SELECT COUNT(*) FROM search_terms WHERE " + scope_sql +
+                        " AND source_date >= NOW() - INTERVAL '1 day' * %s",
+                        (*scope_params, window),
                     )
                     row = cur.fetchone()
                     db_info[key] = int(row[0]) if row else 0
@@ -6260,31 +6410,72 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
                 # For non-standard windows run an exact count
                 if days not in (7, 14, 30, 60):
                     cur.execute(
-                        "SELECT COUNT(*) FROM search_terms "
-                        "WHERE source_date >= NOW() - INTERVAL '1 day' * %s",
-                        (days,),
+                        "SELECT COUNT(*) FROM search_terms WHERE " + scope_sql +
+                        " AND source_date >= NOW() - INTERVAL '1 day' * %s",
+                        (*scope_params, days),
                     )
                     row = cur.fetchone()
                     db_info["rows_requested"] = int(row[0]) if row else 0
 
-                cur.execute("SELECT MAX(source_date) FROM search_terms")
+                cur.execute("SELECT MAX(source_date) FROM search_terms WHERE "
+                            + scope_sql, scope_params)
                 row = cur.fetchone()
                 db_info["latest_source_date"] = str(row[0]) if row and row[0] else None
 
                 cur.execute(
-                    "SELECT COUNT(*) FROM search_terms "
-                    "WHERE search_term IS NULL OR TRIM(search_term) = ''"
+                    "SELECT COUNT(*) FROM search_terms WHERE " + scope_sql +
+                    " AND (search_term IS NULL OR TRIM(search_term) = '')",
+                    scope_params,
                 )
                 row = cur.fetchone()
                 db_info["blank_search_term_rows"] = int(row[0]) if row else 0
 
-                cur.execute("SELECT COUNT(*) FROM search_terms WHERE spend_usd > 0")
+                cur.execute("SELECT COUNT(*) FROM search_terms WHERE "
+                            + scope_sql + " AND spend_usd > 0", scope_params)
                 row = cur.fetchone()
                 db_info["spend_rows"] = int(row[0]) if row else 0
 
-                cur.execute("SELECT COUNT(*) FROM search_terms WHERE clicks > 0")
+                cur.execute("SELECT COUNT(*) FROM search_terms WHERE "
+                            + scope_sql + " AND clicks > 0", scope_params)
                 row = cur.fetchone()
                 db_info["click_rows"] = int(row[0]) if row else 0
+
+                # Disclosure, never a total: rows in the same recent window
+                # that are NOT canonical for this account. Reported so an
+                # operator can see an incomplete cutover rather than infer it
+                # from a number that looks fine because the filter hid it.
+                history = unscoped_history_scope()
+                if history.available:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM search_terms WHERE "
+                        + history.sql +
+                        " AND source_date >= NOW() - INTERVAL '1 day' * %s",
+                        (*history.params, days),
+                    )
+                    row = cur.fetchone()
+                    db_info["unscoped_historical_rows_in_window"] = (
+                        int(row[0]) if row else 0)
+                    cur.execute(
+                        "SELECT COUNT(*) FROM search_terms "
+                        " WHERE customer_id IS NULL AND source_system = %s"
+                        "   AND source_date >= NOW() - INTERVAL '1 day' * %s",
+                        ("google_ads_api", days),
+                    )
+                    row = cur.fetchone()
+                    db_info["null_customer_rows_in_window"] = (
+                        int(row[0]) if row else 0)
+                    # PR-ADS-156-F3 final review §2 — say the relationship out
+                    # loud. Now that the historical complement is NULL-safe,
+                    # account-less canonical rows appear in BOTH numbers: the
+                    # second is a named subset of the first, not a population
+                    # beside it. Two adjacent counts in one payload invite
+                    # addition, and adding these double-counts every row the
+                    # cutover is actually about.
+                    db_info["null_customer_rows_note"] = (
+                        "Diagnostic subset of unscoped_historical_rows_in_window, "
+                        "not an additional population — do not add the two "
+                        "together. It isolates the canonical-provenance rows "
+                        "carrying no account, which are the pre-cutover twins.")
 
                 # PR-ADS-156 §8 — CANONICAL sync state.
                 #
@@ -6378,34 +6569,17 @@ def _build_search_terms_verdict(days: int) -> dict[str, Any]:
 
     verdict_str, reason = compute_search_terms_verdict(
         db_available=True,
+        # Reaching this line means the scope resolved — the branch above returns
+        # otherwise — but it is passed explicitly rather than left to default,
+        # so the verdict function is never asked to infer scope availability
+        # from a row count.
+        scope_available=True,
         db_rows_window=db_rows_window,
         window_days=days,
         sync_status=sync_info.get("sync_state_status"),
         latest_weekly_run=latest_weekly_run,
     )
 
-    # Determine next action
-    next_actions = {
-        Verdict.OK: "Search Terms pipeline is healthy. Proceed to Waste Terms/N-Grams confidence.",
-        Verdict.NOT_DEPLOYED_OR_NOT_RUN_AFTER_DEPLOYMENT: "Run scheduler (daily or weekly) to trigger first Search Terms sync after deployment.",
-        # PR-ADS-156 §8: provider-neutral next actions. Every one of these used
-        # to send the operator to Windsor — a source production retired, whose
-        # plan, field mapping and JSON file no longer exist. An instruction
-        # nobody can carry out is worse than none: it looks like a diagnosis.
-        Verdict.SOURCE_PULL_EMPTY: "Verify Google Ads API access and the configured customer ID, then re-run the canonical search-term sync.",
-        Verdict.SOURCE_MISSING_SEARCH_TERM_FIELD: "Check the Google Ads search_term_view field mapping — search_term not present in the response.",
-        Verdict.FILE_EMPTY: "The legacy JSON snapshot is empty. It is not a production source; check the canonical google_ads_api/search_terms sync instead.",
-        Verdict.DB_WRITE_FAILED: "The pull returned rows and none were persisted. Check write_search_terms() and the search_terms table.",
-        Verdict.DB_HAS_ROWS_API_EMPTY: "Check /api/search-terms endpoint filtering — DB has rows but API returns empty.",
-        Verdict.FRESH_BUT_EMPTY: "The canonical sync reports success but wrote no rows and did not record a verified-empty interval. Inspect the latest sync batch.",
-        Verdict.VERIFIED_EMPTY: "Healthy: the interval was queried and Google Ads reported no eligible search terms. No action unless rows were expected.",
-        Verdict.CANONICAL_SYNC_FAILED: "The canonical google_ads_api/search_terms batch failed — the interval is NOT covered. Re-run the incremental sync and read its error.",
-        Verdict.CANONICAL_SYNC_NEVER_RUN: "No canonical search-term sync state exists. Run python -m scheduler.incremental_sync.",
-        Verdict.STALE: "Rows exist but the newest source_date is older than the freshness threshold. Re-run the incremental sync.",
-        Verdict.PARTIAL_HISTORY: "Current window is healthy; all-time history is not proven complete. Disclosed, not a failure.",
-        Verdict.DB_UNAVAILABLE: "Fix database connection before checking Search Terms pipeline.",
-        Verdict.UNKNOWN: "Unable to determine pipeline state. Run verify_search_terms_pipeline.py manually.",
-    }
     next_action = next_actions.get(verdict_str, next_actions[Verdict.UNKNOWN])
 
     return {
