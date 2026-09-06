@@ -1031,3 +1031,111 @@ def unavailable_keyword_response(window: str, now: datetime | None = None) -> di
 def unavailable_keyword_drawer_response(window: str, now: datetime | None = None) -> dict:
     base = _safe_base(window, now)
     return {**base, "db_unavailable": True, "found": False, "keyword": None}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR-ADS-157 §3 — campaign-scoped keyword preview for the Campaign drawer
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The Campaign drawer used to run its own query against the legacy `keywords`
+# snapshot table, matched by `lower(btrim(campaign_name)) = ANY(label_set)`.
+# Three things were wrong with that, and only the third was disclosed:
+#
+#   * it matched on DISPLAY NAME, so two campaigns sharing a name shared rows;
+#   * it took the latest scheduler snapshot, so the number had no relationship
+#     to the Evidence Window the user had selected;
+#   * `keywords` is the retired snapshot table, not canonical evidence.
+#
+# This adapter exists so the fix is a COMPOSITION rather than a second
+# implementation. It calls the same `build_keyword_evidence` the Keyword
+# Evidence page calls, with the campaign filter the page already supports —
+# which is keyed on `campaign_key` (account + campaign_id), not on a label.
+# There is no aggregation logic here and none in `api/server.py`.
+
+#: Rows shown in the drawer preview. Matches the previous preview size, so this
+#: is a provenance change rather than a visual one.
+CAMPAIGN_PREVIEW_LIMIT = 10
+
+#: Reasons a preview can be unavailable. Returned rather than raised so the
+#: drawer renders an honest section instead of losing the whole payload.
+PREVIEW_UNAVAILABLE_SOURCE = "keyword_evidence_unavailable"
+PREVIEW_UNAVAILABLE_IDENTITY = "campaign_identity_unresolved"
+PREVIEW_UNAVAILABLE_ERROR = "keyword_preview_failed"
+
+
+def _campaign_preview_shell(window, campaign_key, *, now=None) -> dict:
+    base = _safe_base(window, now)
+    from analysis.search_term_scope import (  # noqa: PLC0415
+        configured_customer_id,
+    )
+    return {
+        "source": "google_ads_api",
+        "source_dataset": "keyword_facts",
+        "source_table": "keyword_daily_facts",
+        "scope": "account + campaign_id, selected evidence window",
+        "grain": "criterion (campaign_id + ad_group_id + criterion_id)",
+        "window": base.get("window"),
+        "window_start": base.get("window_start"),
+        "window_end": base.get("window_end"),
+        "all_time": base.get("all_time"),
+        "customer_id": configured_customer_id(),
+        "campaign_id": campaign_key,
+        "reporting_currency": "USD",
+    }
+
+
+def build_campaign_keyword_preview(window: str, campaign_key: str | None, *,
+                                   limit: int = CAMPAIGN_PREVIEW_LIMIT,
+                                   now: datetime | None = None) -> dict:
+    """Canonical keyword preview for ONE campaign over the selected window.
+
+    Returns the PR-ADS-157 §6 section contract. ``available`` is explicit:
+    an unavailable source is never returned as a successful empty list, and a
+    genuinely empty certified window is never returned as unavailable — those
+    two states lead an operator to opposite conclusions, so the payload has to
+    tell them apart.
+    """
+    shell = _campaign_preview_shell(window, campaign_key, now=now)
+
+    # No resolved campaign identity means there is nothing to scope BY. The old
+    # query fell back to display-name matching here, which is how one campaign's
+    # keywords appeared under another campaign of the same name.
+    if not campaign_key:
+        return {**shell, "available": False,
+                "reason": PREVIEW_UNAVAILABLE_IDENTITY,
+                "identity_status": "unresolved",
+                "coverage_status": "unknown", "rows": [], "total_count": None}
+
+    try:
+        payload = build_keyword_evidence(
+            window, page=1, page_size=max(1, int(limit)),
+            campaign=campaign_key, sort="spend", now=now)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("campaign keyword preview failed (%s/%s): %s",
+                    window, campaign_key, exc)
+        return {**shell, "available": False, "reason": PREVIEW_UNAVAILABLE_ERROR,
+                "identity_status": "resolved", "coverage_status": "unknown",
+                "rows": [], "total_count": None}
+
+    if payload.get("db_unavailable"):
+        return {**shell, "available": False,
+                "reason": PREVIEW_UNAVAILABLE_SOURCE,
+                "identity_status": "resolved", "coverage_status": "unavailable",
+                "rows": [], "total_count": None}
+
+    coverage = ((payload.get("kpis") or {}).get("coverage") or {})
+    pagination = payload.get("pagination") or {}
+    rows = list(payload.get("rows") or [])[:max(1, int(limit))]
+    return {
+        **shell,
+        "available": True,
+        "reason": None,
+        "identity_status": "resolved",
+        # A certified window that genuinely contained no keyword for this
+        # campaign is `available: True` with an empty list — a measurement.
+        "coverage_status": coverage.get("status") or "unknown",
+        "coverage_scope": coverage.get("scope"),
+        "rows": rows,
+        "total_count": pagination.get("total_count"),
+        "truncated": bool((pagination.get("total_count") or 0) > len(rows)),
+    }
