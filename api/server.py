@@ -1621,6 +1621,50 @@ def api_leads_country_summary(
 
 # ── Campaign detail — shared builder ───────────────────────────────────────────
 
+def _campaign_keyword_preview(window_key: str | None, campaign_key: str | None) -> dict:
+    """Canonical keyword preview, delegated whole to the keyword evidence service.
+
+    Defensive by design: the drawer's headline, lead-quality and country
+    evidence come from a different source and must survive this section being
+    unavailable. A failure here returns an explicit unavailable section, never
+    an empty successful one.
+    """
+    if not window_key:
+        return {"available": False, "reason": "window_not_resolved",
+                "identity_status": "unknown", "coverage_status": "unknown",
+                "rows": []}
+    try:
+        from services.keyword_evidence_service import (  # noqa: PLC0415
+            build_campaign_keyword_preview,
+        )
+        return build_campaign_keyword_preview(window_key, campaign_key)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[campaign-detail] keyword preview unavailable: %s", exc)
+        return {"available": False, "reason": "keyword_preview_failed",
+                "identity_status": "unknown", "coverage_status": "unknown",
+                "rows": []}
+
+
+def _campaign_flagged_preview(window_key: str | None, campaign_key: str | None) -> dict:
+    """Canonical flagged search-term preview, delegated to the search-term
+    evidence service. Metrics are `search_terms` facts; `waste_terms` supplies
+    classification only, through that service's campaign-safe annotation join."""
+    if not window_key:
+        return {"available": False, "reason": "window_not_resolved",
+                "identity_status": "unknown", "coverage_status": "unknown",
+                "rows": []}
+    try:
+        from services.search_term_evidence_service import (  # noqa: PLC0415
+            build_campaign_flagged_preview,
+        )
+        return build_campaign_flagged_preview(window_key, campaign_key)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[campaign-detail] flagged preview unavailable: %s", exc)
+        return {"available": False, "reason": "flagged_preview_failed",
+                "identity_status": "unknown", "coverage_status": "unknown",
+                "rows": []}
+
+
 def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None = None,
                            campaign_key: str | None = None) -> dict:
     """Assemble full campaign investigation payload for a given campaign.
@@ -1646,6 +1690,7 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
     drawer_countries: list = []
     drawer_recent: list = []
     drawer_label_set: list = []
+    drawer_db_unavailable = False
     if window_key:
         try:
             from services.campaign_evidence_service import (  # noqa: PLC0415
@@ -1654,6 +1699,12 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
             ev = build_campaign_drawer_evidence(window_key, campaign_name,
                                                 campaign_key=campaign_key)
             row = ev.get("campaign")
+            # A database outage is not "no evidence" — it is "we cannot tell".
+            # The old code opened its own connection here and returned an
+            # explicit db_unavailable payload; now the services own the
+            # connections, so the flag has to be carried out of the one whose
+            # absence would otherwise read as an empty campaign.
+            drawer_db_unavailable = bool((row or {}).get("db_unavailable"))
             if row and not row.get("db_unavailable"):
                 campaign_card = {
                     "campaign_name":   row.get("campaign_name"),
@@ -1687,124 +1738,63 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
         except Exception as exc:  # noqa: BLE001
             log.warning("[campaign-detail] drawer evidence build failed: %s", exc)
 
-    _empty: dict = {
+    # PR-ADS-157 §3/§4/§5 — the keyword and flagged-term previews are now
+    # COMPOSED from the canonical evidence services rather than queried here.
+    #
+    # What they replace: two direct queries against the retired `keywords` and
+    # `waste_terms` snapshot tables, both matched on
+    # `lower(btrim(campaign_name)) = ANY(label_set)` and both taking the latest
+    # scheduler snapshot. That matched on DISPLAY NAME — so two campaigns
+    # sharing a name shared each other's rows — over a period unrelated to the
+    # Evidence Window the user selected, and read `waste_terms.spend_usd` as a
+    # metric, which PR-ADS-153D established it is not.
+    #
+    # `api/server.py` now holds no keyword or search-term aggregation at all.
+    resolved_campaign_key = (campaign_card or {}).get("campaign_key") or campaign_key
+    keyword_preview = _campaign_keyword_preview(window_key, resolved_campaign_key)
+    flagged_preview = _campaign_flagged_preview(window_key, resolved_campaign_key)
+
+    # No database connection is opened here any more. Both previews are built by
+    # the canonical evidence services, which own their own connections, their own
+    # window bounds and their own availability contracts.
+    out: dict = {
         "days":          days,
         "campaign_name": campaign_name,
-        # Headline card + lead evidence are genuine selected-window evidence (durable
-        # source); they survive even when the keyword/waste connection is unavailable.
         "campaign":      campaign_card,
         "lead_quality":  drawer_lead_quality,
         "countries":     drawer_countries,
-        "keywords":      [],
-        "waste_terms":   [],
-        "recent_leads":  drawer_recent,
-    }
-    _db_empty = {**_empty, "db_unavailable": True}
-
-    from db.connection import get_conn  # noqa: PLC0415
-    try:
-        with get_conn() as conn:
-            if conn is None:
-                return _db_empty
-
-            with conn.cursor() as cur:
-                # Headline card + lead evidence come from the selected-window service
-                # (above); this connection only gathers the keyword + waste previews.
-                campaign_out = campaign_card
-
-                # Normalized label set (canonical name + approved aliases) for
-                # matching the keyword/waste tables to the SAME campaign identity.
-                label_set_lower = sorted({(lbl or "").strip().lower()
-                                          for lbl in drawer_label_set if lbl})
-
-                # ── Keywords preview — LATEST snapshot per keyword (never summed) ──
-                # The keywords table stores overlapping scheduler snapshots, so we
-                # take the latest coherent snapshot per keyword (DISTINCT ON …
-                # ORDER BY run_date DESC) — NOT a SUM across run_date snapshots — and
-                # label it as such. Matched by the campaign's approved label set.
-                keywords_out = []
-                if label_set_lower:
-                    cur.execute(
-                        """
-                        SELECT DISTINCT ON (keyword, match_type)
-                            keyword, match_type, spend_usd, clicks, impressions,
-                            conversions, quality_score, run_date,
-                            CASE WHEN clicks > 0 THEN spend_usd / clicks ELSE NULL END AS cpc_usd
-                        FROM keywords
-                        WHERE lower(btrim(campaign_name)) = ANY(%s)
-                        ORDER BY keyword, match_type, run_date DESC, id DESC
-                        """,
-                        (label_set_lower,),
-                    )
-                    kw_rows = cur.fetchall()
-                    kw_cols = [d[0] for d in cur.description]
-                    kws = [dict(zip(kw_cols, row)) for row in kw_rows]
-                    kws.sort(key=lambda r: (r["spend_usd"] is None, -(float(r["spend_usd"]) if r["spend_usd"] is not None else 0.0)))
-                    for r in kws[:10]:
-                        keywords_out.append({
-                            "keyword":       r["keyword"],
-                            "match_type":    r["match_type"],
-                            "spend_usd":     round(float(r["spend_usd"]), 2) if r["spend_usd"] is not None else None,
-                            "clicks":        int(r["clicks"]) if r["clicks"] is not None else None,
-                            "impressions":   int(r["impressions"]) if r["impressions"] is not None else None,
-                            "conversions":   round(float(r["conversions"]), 2) if r["conversions"] is not None else None,
-                            "quality_score": round(float(r["quality_score"]), 2) if r["quality_score"] is not None else None,
-                            "cpc_usd":       round(float(r["cpc_usd"]), 2) if r["cpc_usd"] is not None else None,
-                            "run_date":      str(r["run_date"]) if r["run_date"] else None,
-                        })
-
-                # ── Waste terms preview — LATEST snapshot per term (never summed) ──
-                # Same overlap-safe rule: one coherent latest snapshot per term, not
-                # a SUM across scheduler runs. Matched by the approved label set.
-                waste_out = []
-                if label_set_lower:
-                    cur.execute(
-                        """
-                        SELECT DISTINCT ON (search_term, junk_category, matched_pattern)
-                            search_term, spend_usd, junk_category, matched_pattern,
-                            crm_junk_confirmed, run_date
-                        FROM waste_terms
-                        WHERE lower(btrim(campaign_name)) = ANY(%s)
-                        ORDER BY search_term, junk_category, matched_pattern, run_date DESC, id DESC
-                        """,
-                        (label_set_lower,),
-                    )
-                    wt_rows = cur.fetchall()
-                    wt_cols = [d[0] for d in cur.description]
-                    wts = [dict(zip(wt_cols, row)) for row in wt_rows]
-                    wts.sort(key=lambda r: (r["spend_usd"] is None, -(float(r["spend_usd"]) if r["spend_usd"] is not None else 0.0)))
-                    for r in wts[:10]:
-                        waste_out.append({
-                            "search_term":        r["search_term"],
-                            "spend_usd":          round(float(r["spend_usd"]), 2) if r["spend_usd"] is not None else None,
-                            "junk_category":      r["junk_category"],
-                            "matched_pattern":    r["matched_pattern"],
-                            "crm_junk_confirmed": int(r["crm_junk_confirmed"] or 0),
-                            "run_date":           str(r["run_date"]) if r["run_date"] else None,
-                        })
-
-    except Exception as exc:  # noqa: BLE001
-        log.error("[api/campaign-detail] database error: %s", exc, exc_info=True)
-        return _db_empty
-
-    return {
-        "days":          days,
-        "campaign_name": campaign_name,
-        "campaign":      campaign_out,
-        "lead_quality":  drawer_lead_quality,
-        "countries":     drawer_countries,
-        "keywords":      keywords_out,
-        "waste_terms":   waste_out,
+        # `keywords` / `waste_terms` keep their key names so existing consumers
+        # keep working, but they are now the canonical services' rows. The
+        # section metadata beside them is what a renderer should read: it says
+        # whether the section is available, over which window, and at which
+        # grain — none of which the bare arrays could express.
+        "keywords":         keyword_preview.get("rows") or [],
+        "keyword_evidence": keyword_preview,
+        "waste_terms":      flagged_preview.get("rows") or [],
+        "flagged_evidence": flagged_preview,
         "recent_leads":  drawer_recent,
         "label_set":     drawer_label_set,
-        "keywords_note": "Latest keyword snapshot — not selected-window totals",
+        # PR-ADS-157 §3: the snapshot disclaimer is gone because the snapshot is
+        # gone. Both previews are now selected-window canonical evidence, so a
+        # note saying otherwise would be the opposite untruth.
+        "keywords_note": "Canonical keyword_daily_facts over the selected evidence window",
         "data_sources": {
             "campaign":     "Canonical daily Google Ads spend + HubSpot event-date lead evidence",
             "lead_quality": "HubSpot leads (durable, contact_created_at, deduped, paid-search)",
-            "keywords":     "Google Ads API keyword performance (latest snapshot — not window totals)",
-            "waste_terms":  "Waste detection from search terms (latest snapshot)",
+            "keywords":     "google_ads_api/keyword_facts — keyword_daily_facts, account + campaign_id, selected window",
+            "waste_terms":  "google_ads_api/search_terms — canonical search_terms facts; waste_terms supplies classification only",
         },
     }
+
+    # The whole-drawer `db_unavailable` banner is only truthful when NOTHING in
+    # the payload could be proven. If either preview section came back available
+    # the database is demonstrably up for that path, and a global "database
+    # offline" message would be a false claim that hides real evidence.
+    if (drawer_db_unavailable
+            and not keyword_preview.get("available")
+            and not flagged_preview.get("available")):
+        out["db_unavailable"] = True
+    return out
 
 
 @app.get("/api/campaign-detail")

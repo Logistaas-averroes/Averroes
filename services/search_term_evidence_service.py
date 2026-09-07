@@ -2815,3 +2815,124 @@ def build_search_pattern_drawer(window: str, pattern: str, n: int, *,
         "terms_truncated": len(members) > len(shown),
         "overlap_note": PATTERN_OVERLAP_DISCLOSURE,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR-ADS-157 §4 — campaign-scoped flagged-term preview for the Campaign drawer
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The Campaign drawer used to read `waste_terms` directly, matched by
+# `lower(btrim(campaign_name)) = ANY(label_set)`, and rendered
+# `waste_terms.spend_usd` as the term's spend. Every part of that is wrong:
+#
+#   * `waste_terms` is a scheduler SNAPSHOT — PR-ADS-153D established that its
+#     `spend_usd` is not a canonical metric and must never be summed;
+#   * matching on display name let a name-only annotation cross between two
+#     campaigns sharing a name, attributing one campaign's junk to another;
+#   * the latest snapshot has no relationship to the selected Evidence Window.
+#
+# This adapter composes `build_flagged_search_terms` instead, which already
+# holds the canonical doctrine: every metric is a `search_terms` fact, and
+# `waste_terms` is declared "classification annotation only" behind a
+# campaign-safe join. There is no second classification rule here.
+
+#: Rows shown in the drawer preview. Matches the previous preview size.
+FLAGGED_PREVIEW_LIMIT = 10
+
+FLAGGED_PREVIEW_UNAVAILABLE_SOURCE = "search_term_evidence_unavailable"
+FLAGGED_PREVIEW_UNAVAILABLE_IDENTITY = "campaign_identity_unresolved"
+FLAGGED_PREVIEW_UNAVAILABLE_ERROR = "flagged_preview_failed"
+#: The truth state quarantined the population: rows exist but are not
+#: decision-grade, so the drawer shows the state rather than the numbers.
+FLAGGED_PREVIEW_QUARANTINED = "search_term_truth_mismatch"
+
+
+def build_campaign_flagged_preview(window: str, campaign_key: str | None, *,
+                                   limit: int = FLAGGED_PREVIEW_LIMIT,
+                                   now: datetime | None = None) -> dict[str, Any]:
+    """Canonical flagged search-term preview for ONE campaign over the window.
+
+    Returns the PR-ADS-157 §6 section contract. Metrics are canonical
+    `search_terms` facts; `waste_terms` contributes classification only.
+
+    Absence from the flagged population never means "clean" — it means no
+    DURABLE evidence flagged this term in this window, which is a different
+    statement, and the empty state says so.
+    """
+    from analysis.search_term_scope import (  # noqa: PLC0415
+        configured_customer_id,
+    )
+
+    shell = {
+        "source": "google_ads_api",
+        "source_dataset": "search_terms",
+        "source_table": "search_terms",
+        "annotation_table": "waste_terms",
+        "annotation_role": ("classification annotation only — never a metric, "
+                            "never summed, never joined by display name alone"),
+        "scope": "account + campaign_id, selected evidence window",
+        "grain": "search_term × canonical campaign identity",
+        "window": window,
+        "window_start": None,
+        "window_end": None,
+        "all_time": None,
+        "customer_id": configured_customer_id(),
+        "campaign_id": campaign_key,
+        "reporting_currency": "USD",
+    }
+
+    if not campaign_key:
+        return {**shell, "available": False,
+                "reason": FLAGGED_PREVIEW_UNAVAILABLE_IDENTITY,
+                "identity_status": "unresolved", "coverage_status": "unknown",
+                "rows": [], "total_count": None}
+
+    try:
+        payload = build_flagged_search_terms(
+            window, page=1, page_size=max(1, int(limit)),
+            campaign=campaign_key, sort="spend", now=now)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("campaign flagged preview failed (%s/%s): %s",
+                    window, campaign_key, exc)
+        return {**shell, "available": False,
+                "reason": FLAGGED_PREVIEW_UNAVAILABLE_ERROR,
+                "identity_status": "resolved", "coverage_status": "unknown",
+                "rows": [], "total_count": None}
+
+    shell.update({
+        "window": payload.get("window") or window,
+        "window_start": payload.get("window_start"),
+        "window_end": payload.get("window_end"),
+        "all_time": payload.get("all_time"),
+    })
+
+    if payload.get("db_unavailable"):
+        return {**shell, "available": False,
+                "reason": FLAGGED_PREVIEW_UNAVAILABLE_SOURCE,
+                "identity_status": "resolved", "coverage_status": "unavailable",
+                "rows": [], "total_count": None}
+
+    truth = payload.get("truth_state") or {}
+    # `actionable` is False when the canonical population quarantined itself.
+    # Showing its rows would be presenting diagnosis output as evidence.
+    if payload.get("actionable") is False or truth.get("status") == TRUTH_MISMATCH:
+        return {**shell, "available": False,
+                "reason": FLAGGED_PREVIEW_QUARANTINED,
+                "identity_status": "resolved",
+                "coverage_status": truth.get("status") or TRUTH_MISMATCH,
+                "truth_state": truth, "rows": [], "total_count": None}
+
+    pagination = payload.get("pagination") or {}
+    rows = list(payload.get("rows") or [])[:max(1, int(limit))]
+    return {
+        **shell,
+        "available": True,
+        "reason": None,
+        "identity_status": "resolved",
+        "coverage_status": truth.get("status") or TRUTH_RECONCILED,
+        "truth_state": truth,
+        "annotation_join": payload.get("annotation_join") or {},
+        "rows": rows,
+        "total_count": pagination.get("total_count"),
+        "truncated": bool((pagination.get("total_count") or 0) > len(rows)),
+    }
