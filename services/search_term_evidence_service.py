@@ -2884,6 +2884,64 @@ def _flagged_identity_status(campaign_key: str | None) -> str:
     return "resolved"
 
 
+#: The §6 keys every flagged section must carry on EVERY return path.
+FLAGGED_SECTION_KEYS = (
+    "available", "reason", "source", "source_dataset", "source_table", "scope",
+    "grain", "window", "window_start", "window_end", "all_time", "customer_id",
+    "campaign_id", "identity_status", "coverage_status", "rows",
+)
+
+
+def _flagged_shell(window, campaign_key, customer_id) -> dict[str, Any]:
+    """The invariant half of the §6 flagged section — source, scope, grain and
+    the annotation declaration. One definition, so a success and a failure
+    describe the same thing."""
+    return {
+        "source": "google_ads_api",
+        "source_dataset": "search_terms",
+        "source_table": "search_terms",
+        "annotation_table": "waste_terms",
+        "annotation_role": ("classification annotation only — never a metric, "
+                            "never summed, never joined by display name alone"),
+        # True as written: `search_term_repository` applies `canonical_scope()`,
+        # an account + provenance predicate in SQL, and the campaign filter is
+        # the canonical campaign identity — not a display name.
+        "scope": "account + campaign identity, selected evidence window",
+        "account_scope": "enforced in SQL by canonical_scope()",
+        "grain": "search_term × canonical campaign identity",
+        "window": window,
+        "window_start": None,
+        "window_end": None,
+        "all_time": None,
+        "customer_id": customer_id,
+        "campaign_id": campaign_key,
+        "reporting_currency": "USD",
+    }
+
+
+def flagged_preview_unavailable(reason: str, *, window=None, campaign_key=None,
+                                customer_id=None, identity_status=None,
+                                coverage_status: str = "unknown") -> dict[str, Any]:
+    """A COMPLETE §6 flagged section describing an unavailable state.
+
+    The single builder every caller uses, including `api/server.py`. A fallback
+    that omits half the contract is not a smaller answer — it is an answer a
+    renderer cannot distinguish from a real one, which is the failure mode this
+    section metadata exists to prevent.
+    """
+    return {
+        **_flagged_shell(window, campaign_key, customer_id),
+        "available": False,
+        "reason": reason,
+        "identity_status": (identity_status if identity_status is not None
+                            else _flagged_identity_status(campaign_key)),
+        "coverage_status": coverage_status,
+        "rows": [],
+        "total_count": None,
+        "truncated": False,
+    }
+
+
 def build_campaign_flagged_preview(window: str, campaign_key: str | None, *,
                                    limit: int = FLAGGED_PREVIEW_LIMIT,
                                    now: datetime | None = None) -> dict[str, Any]:
@@ -2907,27 +2965,7 @@ def build_campaign_flagged_preview(window: str, campaign_key: str | None, *,
     customer_id, account_reason = _flagged_preview_account()
     identity_status = _flagged_identity_status(campaign_key)
 
-    shell = {
-        "source": "google_ads_api",
-        "source_dataset": "search_terms",
-        "source_table": "search_terms",
-        "annotation_table": "waste_terms",
-        "annotation_role": ("classification annotation only — never a metric, "
-                            "never summed, never joined by display name alone"),
-        # True as written: `search_term_repository` applies `canonical_scope()`,
-        # which is an account + provenance predicate in SQL, and the campaign
-        # filter is the canonical campaign identity — not a display name.
-        "scope": "account + campaign identity, selected evidence window",
-        "account_scope": "enforced in SQL by canonical_scope()",
-        "grain": "search_term × canonical campaign identity",
-        "window": window,
-        "window_start": None,
-        "window_end": None,
-        "all_time": None,
-        "customer_id": customer_id,
-        "campaign_id": campaign_key,
-        "reporting_currency": "USD",
-    }
+    shell = _flagged_shell(window, campaign_key, customer_id)
 
     if not campaign_key:
         return {**shell, "available": False,

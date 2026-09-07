@@ -1621,6 +1621,12 @@ def api_leads_country_summary(
 
 # ── Campaign detail — shared builder ───────────────────────────────────────────
 
+#: Reason code for a drawer section asked for before the evidence window could
+#: be resolved. Not a service failure — the request never got far enough to be
+#: one — so it has its own code.
+WINDOW_NOT_RESOLVED = "window_not_resolved"
+
+
 def _campaign_keyword_preview(window_key: str | None, campaign_key: str | None) -> dict:
     """Canonical keyword preview, delegated whole to the keyword evidence service.
 
@@ -1628,11 +1634,20 @@ def _campaign_keyword_preview(window_key: str | None, campaign_key: str | None) 
     evidence come from a different source and must survive this section being
     unavailable. A failure here returns an explicit unavailable section, never
     an empty successful one.
+
+    PR-ADS-157 §3 — every unavailable path is built by the SERVICE's shared
+    builder, so a fallback carries the complete §6 contract. The earlier
+    hand-written dictionaries here held four keys out of sixteen; a renderer
+    reading `window_start` to decide whether it may claim "selected-window
+    evidence" could not tell that absence from a genuinely unbounded read.
     """
+    from services.keyword_evidence_service import (  # noqa: PLC0415
+        keyword_preview_unavailable,
+    )
     if not window_key:
-        return {"available": False, "reason": "window_not_resolved",
-                "identity_status": "unknown", "coverage_status": "unknown",
-                "rows": []}
+        return keyword_preview_unavailable(
+            WINDOW_NOT_RESOLVED, campaign_key=campaign_key,
+            identity_status="unknown")
     try:
         from services.keyword_evidence_service import (  # noqa: PLC0415
             build_campaign_keyword_preview,
@@ -1640,19 +1655,26 @@ def _campaign_keyword_preview(window_key: str | None, campaign_key: str | None) 
         return build_campaign_keyword_preview(window_key, campaign_key)
     except Exception as exc:  # noqa: BLE001
         log.warning("[campaign-detail] keyword preview unavailable: %s", exc)
-        return {"available": False, "reason": "keyword_preview_failed",
-                "identity_status": "unknown", "coverage_status": "unknown",
-                "rows": []}
+        return keyword_preview_unavailable(
+            "keyword_preview_failed", window=window_key,
+            campaign_key=campaign_key, identity_status="unknown")
 
 
 def _campaign_flagged_preview(window_key: str | None, campaign_key: str | None) -> dict:
     """Canonical flagged search-term preview, delegated to the search-term
     evidence service. Metrics are `search_terms` facts; `waste_terms` supplies
-    classification only, through that service's campaign-safe annotation join."""
+    classification only, through that service's campaign-safe annotation join.
+
+    Same §3 rule as the keyword helper: unavailable states come from the
+    service's shared builder, never from a partial dictionary maintained here.
+    """
+    from services.search_term_evidence_service import (  # noqa: PLC0415
+        flagged_preview_unavailable,
+    )
     if not window_key:
-        return {"available": False, "reason": "window_not_resolved",
-                "identity_status": "unknown", "coverage_status": "unknown",
-                "rows": []}
+        return flagged_preview_unavailable(
+            WINDOW_NOT_RESOLVED, campaign_key=campaign_key,
+            identity_status="unknown")
     try:
         from services.search_term_evidence_service import (  # noqa: PLC0415
             build_campaign_flagged_preview,
@@ -1660,9 +1682,9 @@ def _campaign_flagged_preview(window_key: str | None, campaign_key: str | None) 
         return build_campaign_flagged_preview(window_key, campaign_key)
     except Exception as exc:  # noqa: BLE001
         log.warning("[campaign-detail] flagged preview unavailable: %s", exc)
-        return {"available": False, "reason": "flagged_preview_failed",
-                "identity_status": "unknown", "coverage_status": "unknown",
-                "rows": []}
+        return flagged_preview_unavailable(
+            "flagged_preview_failed", window=window_key,
+            campaign_key=campaign_key, identity_status="unknown")
 
 
 def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None = None,
@@ -1700,11 +1722,16 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
                                                 campaign_key=campaign_key)
             row = ev.get("campaign")
             # A database outage is not "no evidence" — it is "we cannot tell".
-            # The old code opened its own connection here and returned an
-            # explicit db_unavailable payload; now the services own the
-            # connections, so the flag has to be carried out of the one whose
-            # absence would otherwise read as an empty campaign.
-            drawer_db_unavailable = bool((row or {}).get("db_unavailable"))
+            #
+            # PR-ADS-157 §4 correction: the flag lives on the ENVELOPE, not on
+            # the row. `build_campaign_drawer_evidence` returns
+            # `{"campaign": None, …, "db_unavailable": True}` during an outage,
+            # so `row` is None and the previous `(row or {}).get(...)` read
+            # `False` on every outage — the one case it existed to detect. A
+            # dead database rendered as "no campaign detail available for this
+            # window", which is a factual claim about the campaign rather than
+            # an admission that nothing could be read.
+            drawer_db_unavailable = bool(ev.get("db_unavailable"))
             if row and not row.get("db_unavailable"):
                 campaign_card = {
                     "campaign_name":   row.get("campaign_name"),
@@ -1787,10 +1814,17 @@ def _build_campaign_detail(campaign_name: str, days: int, window_key: str | None
     }
 
     # The whole-drawer `db_unavailable` banner is only truthful when NOTHING in
-    # the payload could be proven. If either preview section came back available
-    # the database is demonstrably up for that path, and a global "database
-    # offline" message would be a false claim that hides real evidence.
+    # the payload could be proven — the headline AND both preview paths. If any
+    # one of the three came back available the database is demonstrably up for
+    # that path, and a global "database offline" message would be a false claim
+    # that hides real evidence the operator can act on.
+    #
+    # The three are deliberately ANDed rather than taken from the headline
+    # alone: they are separate reads through separate services, and an outage
+    # that takes down one is not evidence about the others.
+    headline_unavailable = drawer_db_unavailable or campaign_card is None
     if (drawer_db_unavailable
+            and headline_unavailable
             and not keyword_preview.get("available")
             and not flagged_preview.get("available")):
         out["db_unavailable"] = True

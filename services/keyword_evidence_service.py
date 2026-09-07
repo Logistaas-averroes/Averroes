@@ -210,15 +210,22 @@ def _conversion_evidence(unit: dict) -> tuple:
 
 
 # ── Population build ─────────────────────────────────────────────────────────
-def _build_population(start: date | None, end: date) -> dict:
+def _build_population(start: date | None, end: date, *,
+                      customer_ids: list[str] | None = None) -> dict:
     """Fetch + assemble the selected-window keyword population at the unique
     criterion grain. Returns {available, units, source, canonical,
     identity_available, currency_info}. Each unit is FX-converted independently.
+
+    ``customer_ids`` (PR-ADS-157 §1) scopes the population to ONE Google Ads
+    account in SQL. Because every downstream number — the aggregates, the
+    monetary summary, the coverage block, the sort order and `total_count` —
+    is derived from this one population, scoping it here is what makes those
+    numbers describe the same account. Default None = account-wide.
     """
     import db.keyword_repository as kw_repo  # noqa: PLC0415
     import db.revenue_repository as revenue_repo  # noqa: PLC0415
 
-    agg = kw_repo.fetch_keyword_aggregates(start, end)
+    agg = kw_repo.fetch_keyword_aggregates(start, end, customer_ids=customer_ids)
     if not agg.get("available"):
         return {"available": False, "units": [], "source": {},
                 "canonical": {"available": False}, "identity_available": False,
@@ -230,7 +237,7 @@ def _build_population(start: date | None, end: date) -> dict:
     identity_by_label, aliases_by_id = _identity_label_index(identity)
 
     # Per-(criterion, source_date) native cost for genuine per-date FX.
-    daily = kw_repo.fetch_keyword_daily_costs(start, end)
+    daily = kw_repo.fetch_keyword_daily_costs(start, end, customer_ids=customer_ids)
     daily_by_grain: dict = {}
     for d in (daily.get("rows") or []):
         grain = _criterion_grain(d)
@@ -790,15 +797,24 @@ def build_keyword_evidence(window: str, *, page: int = 1,
                            quality_band: str | None = None, signal: str | None = None,
                            min_spend: float | None = None, sort: str = "spend",
                            sql_state: str | None = None,
+                           customer_ids: list[str] | None = None,
                            now: datetime | None = None) -> dict:
     """Main Keyword Evidence builder. KPIs are computed over the COMPLETE filtered
-    population; only the page slice is serialized into ``rows``."""
+    population; only the page slice is serialized into ``rows``.
+
+    ``customer_ids`` restricts the whole population to one Google Ads account in
+    SQL (PR-ADS-157 §1). It is applied BEFORE aggregation, sorting and
+    pagination, so a caller that must not mix accounts gets `total_count`, the
+    KPIs and the coverage block computed over its account alone — not a filtered
+    page sitting on top of account-wide totals. Default None = account-wide, the
+    behaviour the Keyword Evidence page has always had.
+    """
     _validate(match_type, criterion_status, quality_band, signal, sort, sql_state)
     page = max(1, int(page or 1))
     page_size = max(1, min(int(page_size or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
 
     start, end, base = _base(window, now)
-    pop = _build_population(start, end)
+    pop = _build_population(start, end, customer_ids=customer_ids)
     if not pop.get("available"):
         return unavailable_keyword_response(window, now)
 
@@ -1123,19 +1139,25 @@ def _campaign_preview_shell(window, campaign_key, *, now=None,
                             customer_id: str | None = None) -> dict:
     """The §6 section metadata. Declares only what the read actually does.
 
-    NOTE on `scope`: `fetch_keyword_aggregates` filters on `source_date` alone —
-    it is NOT account-scoped in SQL. The account is therefore VERIFIED from the
-    returned rows rather than asserted here, and `account_scope` says which of
-    those two it was. Claiming an account filter the query does not apply is the
-    exact class of false certification this PR exists to remove.
+    NOTE on `scope`: the account predicate is applied IN SQL by
+    `fetch_keyword_aggregates(customer_ids=...)`, before grouping, summing,
+    sorting and pagination — so the aggregates, the coverage block and
+    `total_count` all describe the same account-scoped population as the rows.
+
+    An earlier revision of this adapter declared account scope while the query
+    filtered on `source_date` alone, and verified the account by inspecting the
+    returned page instead. That check could only ever see one page: a foreign
+    row beyond the preview limit passed unnoticed while still contributing to
+    every total. Filtering the page is not scoping the population.
     """
     base = _safe_base(window, now)
     return {
         "source": "google_ads_api",
         "source_dataset": "keyword_facts",
         "source_table": "keyword_daily_facts",
-        "scope": "campaign identity (campaign_key) × selected evidence window",
-        "account_scope": "verified from returned rows (read is date-scoped)",
+        "scope": "account + campaign identity (campaign_key), selected evidence window",
+        "account_scope": "enforced in SQL by customer_id = ANY(candidates), "
+                         "before aggregation, sorting and pagination",
         "grain": "criterion (campaign_id + ad_group_id + criterion_id)",
         "window": base.get("window"),
         "window_start": base.get("window_start"),
@@ -1147,9 +1169,75 @@ def _campaign_preview_shell(window, campaign_key, *, now=None,
     }
 
 
+#: The §6 keys every keyword section must carry on EVERY return path.
+KEYWORD_SECTION_KEYS = (
+    "available", "reason", "source", "source_dataset", "source_table", "scope",
+    "grain", "window", "window_start", "window_end", "all_time", "customer_id",
+    "campaign_id", "identity_status", "coverage_status", "rows",
+)
+
+
+def keyword_preview_unavailable(reason: str, *, window=None, campaign_key=None,
+                                customer_id=None, identity_status=None,
+                                coverage_status: str = "unknown",
+                                now=None) -> dict:
+    """A COMPLETE §6 keyword section describing an unavailable state.
+
+    The single builder every caller uses — this module and `api/server.py` — so
+    a fallback can never be a shorter dictionary than a success. An incomplete
+    contract is worse than an absent one: a renderer that reads `window_start`
+    to decide whether it may say "selected-window evidence" gets `None` from a
+    missing key and from a genuinely unbounded read alike, and cannot tell a
+    fallback from a fact.
+
+    Window bounds are resolved when they can be, and simply omitted-as-None when
+    they cannot — never invented.
+    """
+    base = {}
+    if window is not None:
+        try:
+            base = _safe_base(window, now) or {}
+        except Exception:  # noqa: BLE001
+            base = {}
+    return {
+        "available": False,
+        "reason": reason,
+        "source": "google_ads_api",
+        "source_dataset": "keyword_facts",
+        "source_table": "keyword_daily_facts",
+        "scope": "account + campaign identity (campaign_key), selected evidence window",
+        "account_scope": "enforced in SQL by customer_id = ANY(candidates), "
+                         "before aggregation, sorting and pagination",
+        "grain": "criterion (campaign_id + ad_group_id + criterion_id)",
+        "window": base.get("window", window),
+        "window_start": base.get("window_start"),
+        "window_end": base.get("window_end"),
+        "all_time": base.get("all_time"),
+        "customer_id": customer_id,
+        "campaign_id": campaign_key,
+        "identity_status": (identity_status if identity_status is not None
+                            else _identity_status(campaign_key)),
+        "coverage_status": coverage_status,
+        "reporting_currency": "USD",
+        "rows": [],
+        "total_count": None,
+        "truncated": False,
+    }
+
+
 def _preview_unavailable(shell: dict, reason: str, *, identity_status: str,
                          coverage_status: str = "unknown") -> dict:
-    return {**shell, "available": False, "reason": reason,
+    """Unavailable section built from an already-resolved shell.
+
+    Delegates the field set to `keyword_preview_unavailable` so the two cannot
+    diverge, then overlays the shell's resolved window/account values.
+    """
+    complete = keyword_preview_unavailable(
+        reason, window=shell.get("window"), campaign_key=shell.get("campaign_id"),
+        customer_id=shell.get("customer_id"), identity_status=identity_status,
+        coverage_status=coverage_status)
+    refinements = {k: v for k, v in (shell or {}).items() if v is not None}
+    return {**complete, **refinements, "available": False, "reason": reason,
             "identity_status": identity_status,
             "coverage_status": coverage_status,
             "rows": [], "total_count": None, "truncated": False}
@@ -1185,15 +1273,11 @@ def build_campaign_keyword_preview(window: str, campaign_key: str | None, *,
     except Exception as exc:  # noqa: BLE001
         logger.info("campaign keyword preview context failed (%s/%s): %s",
                     window, campaign_key, exc)
-        return _preview_unavailable(
-            {"source": "google_ads_api", "source_dataset": "keyword_facts",
-             "source_table": "keyword_daily_facts", "scope": None,
-             "account_scope": None, "grain": None, "window": window,
-             "window_start": None, "window_end": None, "all_time": None,
-             "customer_id": customer_id, "campaign_id": campaign_key,
-             "reporting_currency": "USD"},
-            PREVIEW_UNAVAILABLE_CONTEXT,
-            identity_status=_identity_status(campaign_key))
+        # The shell itself could not be built, so there is nothing to refine —
+        # the shared builder supplies the complete contract directly.
+        return keyword_preview_unavailable(
+            PREVIEW_UNAVAILABLE_CONTEXT, window=window,
+            campaign_key=campaign_key, customer_id=customer_id)
 
     identity_status = _identity_status(campaign_key)
 
@@ -1214,7 +1298,11 @@ def build_campaign_keyword_preview(window: str, campaign_key: str | None, *,
     try:
         payload = build_keyword_evidence(
             window, page=1, page_size=max(1, int(limit)),
-            campaign=campaign_key, sort="spend", now=now)
+            campaign=campaign_key, sort="spend",
+            # PR-ADS-157 §1 — the account predicate goes into the SQL, so the
+            # KPIs, coverage and `total_count` below are computed over this
+            # account alone rather than over every account in the table.
+            customer_ids=candidates, now=now)
     except EvidenceWindowError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -1232,11 +1320,17 @@ def build_campaign_keyword_preview(window: str, campaign_key: str | None, *,
     pagination = payload.get("pagination") or {}
     rows = list(payload.get("rows") or [])[:max(1, int(limit))]
 
-    # Prove the account rather than assert it. A row whose `customer_id` is
-    # outside the configured account's exact spellings is another account's
-    # spend appearing inside this campaign's drawer — a scope violation, so the
-    # rows are withheld entirely rather than shown with a caveat. A row with no
-    # account recorded is equally unprovable and counts as a violation.
+    # POST-CONDITION, not the certification.
+    #
+    # The account is enforced in SQL above; this only asserts the filter did
+    # what it says. It is deliberately NOT the mechanism — a page scan cannot
+    # certify a population, because it sees one page while `total_count`, the
+    # KPIs and the coverage block are computed over all of it. A foreign row
+    # beyond the preview limit would satisfy this check and still corrupt every
+    # aggregate.
+    #
+    # Kept because it costs nothing and fails loudly if the predicate is ever
+    # dropped, mis-parameterised, or bypassed by a caching layer.
     allowed = set(candidates)
     foreign = {str(r.get("customer_id") or "") for r in rows} - allowed
     if foreign:

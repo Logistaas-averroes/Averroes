@@ -518,32 +518,66 @@ def test_20_flagged_preview_declares_waste_terms_as_annotation_only():
 def test_21_declared_scope_matches_what_the_query_actually_does():
     """A scope claim must describe the predicate, not the intention.
 
-    `search_terms` reads apply `canonical_scope()`, an account + provenance
-    predicate in SQL, so the flagged section may claim account scope.
-    `keyword_daily_facts` reads do not, so the keyword section may not — it
-    claims verification from the returned rows instead, which is what test 17
-    enforces. Declaring the stronger claim on the weaker query is the exact
-    false certification this PR removes.
+    This test has always enforced the same rule; what changed is the predicate.
+    The first revision declared account scope while `fetch_keyword_aggregates`
+    filtered on `source_date` alone, so the test required the keyword section
+    NOT to claim an account filter. PR-ADS-157 §1 added the predicate, so the
+    claim is now true — and the test verifies it against the SQL rather than
+    accepting the new string on faith.
     """
     kw_section = kw_svc.build_campaign_keyword_preview("30d", None)
     st_section = st_svc.build_campaign_flagged_preview("30d", None)
 
-    assert "account" not in kw_section["scope"].lower(), (
-        "keyword reads are date-scoped in SQL; the scope string must not imply "
-        "an account predicate the query does not apply")
-    assert "date-scoped" in kw_section["account_scope"]
-
+    # Both sections claim account scope…
+    assert "account" in kw_section["scope"].lower()
     assert "account" in st_section["scope"].lower()
+
+    # …and each names the mechanism that actually enforces it.
+    assert "enforced in SQL" in kw_section["account_scope"]
+    assert "customer_id = ANY" in kw_section["account_scope"]
+    assert "before aggregation, sorting and pagination" in kw_section["account_scope"]
     assert "canonical_scope" in st_section["account_scope"]
 
-    # And the claim about the search-term SQL is itself checked against source,
-    # so it cannot drift into a comment that used to be true.
-    repo = (_ROOT / "db" / "search_term_repository.py").read_text()
-    assert "canonical_scope(start, end)" in repo
-    kw_repo = (_ROOT / "db" / "keyword_repository.py").read_text()
-    assert "customer_id" not in kw_repo.split("_WINDOW = ")[1].split("\n")[0], (
-        "if keyword reads become account-scoped in SQL, the keyword section may "
-        "and should upgrade its claim — and this test should be updated with it")
+    # The claims are checked against the source, so they cannot drift into
+    # comments that used to be true.
+    st_repo = (_ROOT / "db" / "search_term_repository.py").read_text()
+    assert "canonical_scope(start, end)" in st_repo
+
+    kw_repo_src = (_ROOT / "db" / "keyword_repository.py").read_text()
+    assert '_ACCOUNT = "customer_id = ANY(%s)"' in kw_repo_src, (
+        "the keyword section claims an account predicate; it must exist in SQL")
+    # It is applied to BOTH keyword reads — the aggregates and the per-date
+    # costs must describe the same population or the FX conversion would be
+    # computed over rows the aggregates excluded.
+    for fn in ("fetch_keyword_aggregates", "fetch_keyword_daily_costs"):
+        body = _function_code(_ROOT / "db" / "keyword_repository.py", fn)
+        assert "_scope(customer_ids)" in body, f"{fn} does not apply the scope"
+        assert "scope_params" in body, f"{fn} does not bind the scope parameters"
+
+
+def test_21b_an_empty_account_candidate_list_selects_nothing():
+    """Fail closed, in the predicate itself.
+
+    `customer_ids=None` means "account-wide", which is what the Keyword Evidence
+    page has always had. `customer_ids=[]` means "no account resolved", and must
+    NOT collapse to the same thing — a widening fallback is how an unscoped
+    total gets published under an account-scoped label.
+    """
+    import db.keyword_repository as kw_repo
+
+    wide_sql, wide_params = kw_repo._scope(None)
+    assert "customer_id" not in wide_sql
+    assert wide_params == ()
+
+    empty_sql, empty_params = kw_repo._scope([])
+    assert "customer_id = ANY" in empty_sql, (
+        "an empty candidate list must still apply the predicate, so it selects "
+        "nothing rather than silently widening to every account")
+    assert empty_params == ([],)
+
+    scoped_sql, scoped_params = kw_repo._scope(["555", "5-5-5"])
+    assert "customer_id = ANY" in scoped_sql
+    assert scoped_params == (["555", "5-5-5"],)
 
 
 def test_22_all_supported_windows_produce_a_complete_contract():
@@ -959,7 +993,8 @@ def _exec(sql, params=()):
         cur.execute(sql, params)
 
 
-def _seed_keyword_fact(cid, day, criterion, keyword, account=ACCOUNT):
+def _seed_keyword_fact(cid, day, criterion, keyword, account=ACCOUNT,
+                       cost_micros=5_000_000):
     """One canonical `keyword_daily_facts` row. Module level so a test can add
     one after the fixture has run."""
     _exec("INSERT INTO keyword_daily_facts "
@@ -968,8 +1003,8 @@ def _seed_keyword_fact(cid, day, criterion, keyword, account=ACCOUNT):
           " match_type, criterion_status, cost_micros, currency_code, "
           " source_system, impressions, clicks, conversions) "
           "VALUES (%s,%s,%s,%s,'ag1','Ad Group',%s,%s,'EXACT','ENABLED',"
-          " 5000000,'GBP','google_ads_api',100,10,1.0)",
-          (day, account, cid, SHARED_NAME, criterion, keyword))
+          " %s,'GBP','google_ads_api',100,10,1.0)",
+          (day, account, cid, SHARED_NAME, criterion, keyword, cost_micros))
 
 
 @pytest.fixture()
@@ -1042,30 +1077,100 @@ def test_45_pg_keyword_preview_respects_the_selected_window(seeded):
 
 
 @_needs_pg
-def test_46_pg_foreign_account_rows_are_withheld(seeded):
-    """A criterion belonging to another account, on the same date, under the
-    same campaign id.
+def test_46b_pg_foreign_account_row_beyond_the_preview_limit_cannot_leak(seeded):
+    """The case a page scan structurally cannot catch.
 
-    `fetch_keyword_aggregates` filters on `source_date` ALONE — there is no
-    `customer_id` predicate in that SQL — so the foreign row genuinely comes
-    back from the database. The preview must refuse the whole result rather
-    than publish another account's spend inside this campaign's drawer.
+    One allowed row sits on page 1. A foreign-account row carrying the SAME
+    `campaign_id` is given far more spend, so the account-wide ordering would put
+    it first — and enough filler rows are added that it would fall beyond the
+    preview limit either way.
 
-    Before the row is added, the same call succeeds. That contrast is the point:
-    it shows the withholding is caused by the foreign row and not by some other
-    unavailability.
+    If the account were enforced by inspecting the returned page, the foreign row
+    would be invisible to the check while still inflating `total_count`, the
+    monetary KPIs and the coverage block. Scoping the population in SQL is what
+    makes the numbers beside the rows describe the same account as the rows.
+    """
+    limit = 3
+
+    # Baseline over the account-scoped population, before the foreign rows exist.
+    before = kw_svc.build_campaign_keyword_preview("7d", CAMP_A, limit=limit)
+    assert before["available"] is True, before.get("reason")
+    base_total = before["total_count"]
+    base_spend = ((before.get("rows") or [{}])[0] or {}).get("spend_usd")
+
+    # A foreign-account row under the same campaign_id, with the largest spend in
+    # the table, plus filler so it cannot land on page 1 of the preview.
+    _seed_keyword_fact(CAMP_A, DAY, "c-foreign-big", "zzz foreign whale",
+                       account=OTHER_ACCOUNT, cost_micros=999_000_000)
+    for i in range(limit + 2):
+        _seed_keyword_fact(CAMP_A, DAY, f"c-foreign-{i}", f"foreign filler {i}",
+                           account=OTHER_ACCOUNT, cost_micros=500_000_000)
+
+    after = kw_svc.build_campaign_keyword_preview("7d", CAMP_A, limit=limit)
+    assert after["available"] is True, after.get("reason")
+
+    # No foreign row in the page…
+    accounts = {str(r.get("customer_id")) for r in after["rows"]}
+    assert OTHER_ACCOUNT not in accounts
+    assert all(a in set(kw_svc._preview_account()[1]) for a in accounts)
+
+    # …and no foreign row in the AGGREGATES either. This is the half a page scan
+    # could never defend: seven foreign rows were added and the scoped total is
+    # unchanged.
+    assert after["total_count"] == base_total, (
+        f"foreign-account rows leaked into total_count: {base_total} -> "
+        f"{after['total_count']}")
+
+    # Nor into the money.
+    top_spend = ((after.get("rows") or [{}])[0] or {}).get("spend_usd")
+    assert top_spend == base_spend, (
+        "a foreign-account row outranked this account's own spend")
+
+    # And the account-wide population really did grow — otherwise this test
+    # would pass over a fixture that never created the hazard.
+    import db.keyword_repository as kw_repo
+    from datetime import date as _date
+    wide = kw_repo.fetch_keyword_aggregates(DAY, _date.today())
+    scoped = kw_repo.fetch_keyword_aggregates(
+        DAY, _date.today(), customer_ids=kw_svc._preview_account()[1])
+    assert len(wide["rows"]) > len(scoped["rows"]), (
+        "the fixture did not actually create a cross-account population")
+    assert {str(r["customer_id"]) for r in scoped["rows"]} == {ACCOUNT}
+
+
+@_needs_pg
+def test_46_pg_foreign_account_rows_are_excluded_not_merely_withheld(seeded):
+    """A foreign-account row on the same campaign_id is EXCLUDED by the query.
+
+    This assertion was strengthened, not relaxed. The first implementation had
+    no account predicate in SQL, so it detected foreign rows by scanning the
+    returned page and withheld the WHOLE section when it saw one — the operator
+    lost their own campaign's evidence because a different account had a row.
+
+    With the predicate applied in SQL the foreign row never enters the
+    population: the section stays available, this account's rows are all
+    present, and no foreign row appears. Withholding is still the outcome if the
+    predicate is ever bypassed — `PREVIEW_UNAVAILABLE_SCOPE` remains reachable
+    as a post-condition — but exclusion is the correct primary behaviour, and it
+    preserves evidence that was never in doubt.
     """
     before = kw_svc.build_campaign_keyword_preview("7d", CAMP_A)
     assert before["available"] is True, before.get("reason")
+    before_keywords = {r["keyword"] for r in before["rows"]}
 
     _seed_keyword_fact(CAMP_A, DAY, "c-foreign", "winfleet foreign",
                        account=OTHER_ACCOUNT)
 
     after = kw_svc.build_campaign_keyword_preview("7d", CAMP_A)
-    assert after["available"] is False
-    assert after["reason"] == kw_svc.PREVIEW_UNAVAILABLE_SCOPE
-    assert after["rows"] == [], "foreign-account rows must not reach the drawer"
-    assert after["total_count"] is None
+
+    assert after["available"] is True, (
+        "this account's own evidence must survive another account having a row")
+    assert {r["keyword"] for r in after["rows"]} == before_keywords, (
+        "the account-scoped population changed when a foreign row was added")
+    assert "winfleet foreign" not in {r["keyword"] for r in after["rows"]}
+    assert OTHER_ACCOUNT not in {str(r.get("customer_id")) for r in after["rows"]}
+    assert after["total_count"] == before["total_count"]
+    assert after["account_scope"].startswith("enforced in SQL")
 
 
 @_needs_pg
@@ -1441,3 +1546,396 @@ def test_67_the_eager_import_fixture_actually_binds_the_real_get_conn():
         assert bound is conn_mod.get_conn, (
             f"{name}.get_conn is not db.connection.get_conn — a patched "
             "connection factory has been captured as its permanent binding")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §2 correction — SQL-DEPENDENT STATUS filters are gated too
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_68_sql_dependent_status_options_are_disabled_when_unproven():
+    """"SQL producer" and "Spend without SQL proof" are conclusions.
+
+    Both are read off the SQL count. Offering them as filters over an
+    unreconciled count invites the operator to slice the table by a finding the
+    evidence does not support — and "Spend without SQL proof" in particular
+    reads as an accusation.
+    """
+    region = _js_region("renderCampaignEvidenceFilters")
+    assert "CAMPAIGN_SQL_DEPENDENT_STATUSES.has(v)" in region, (
+        "the status <option> builder does not consult the SQL-dependent set")
+    assert "disabled" in region
+    # And a stale selection is neutralized, not silently left applying.
+    assert 'if (CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)) f.status = "all";' in region
+
+
+def test_69_filter_refuses_sql_dependent_statuses_internally():
+    """Defence where the classification actually happens.
+
+    A disabled `<option>` is an affordance. `filterCampaignEvidence` is where a
+    campaign is included or excluded, so stale state or a direct call must not
+    be able to classify by an unreconciled count.
+    """
+    region = _js_region("filterCampaignEvidence")
+    assert "const sqlPub = campaignSqlPublication();" in region
+    assert "CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)" in region
+    assert "!sqlPub.publish) return true;" in region
+
+    # The refusal is evaluated BEFORE the equality check that would otherwise
+    # exclude every row whose status differs.
+    gate_at = region.index("CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)")
+    equality_at = region.index('(c.outcome_status || "") !== f.status')
+    assert gate_at < equality_at, (
+        "the status equality check runs before the gate, so an unproven "
+        "SQL-dependent filter would still exclude rows")
+
+
+def test_70_sql_independent_statuses_stay_usable_in_every_state():
+    """Only the two SQL-dependent statuses are gated.
+
+    Junk-heavy, Mapping review, No outcome evidence and Data unavailable never
+    depended on the SQL count. Disabling them because SQL reconciliation failed
+    would remove evidence the operator needs precisely then.
+    """
+    js = _APP_JS.read_text()
+    block = js[js.index("const CAMPAIGN_SQL_DEPENDENT_STATUSES"):]
+    block = block[:block.index("]);") + 3]
+    for gated in ("SQL producer", "Spend without SQL proof"):
+        assert gated in block
+    for independent in ("Junk-heavy", "Mapping review", "No outcome evidence",
+                        "Data unavailable"):
+        assert independent not in block, (
+            f"{independent!r} does not depend on the SQL count and must not be gated")
+
+    # The predicate gates by membership, so an independent status falls through
+    # to the ordinary equality check in every reconciliation state.
+    region = _js_region("filterCampaignEvidence", source=js)
+    assert 'f.status !== "all" && CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)' in region
+
+
+def test_71_every_unproven_reconciliation_state_gates_the_status_filter():
+    """mismatch · partial · unavailable · missing block — all withhold.
+
+    The gate is one function with a single `publish: true` branch, so this is
+    checked at the source of truth rather than by re-listing the states in the
+    filter.
+    """
+    gate = _js_region("campaignSqlPublication")
+    assert gate.count("publish: true") == 1
+    for state in ("mismatch", "partial"):
+        assert f'status === "{state}"' in gate
+    assert "if (!r || !r.reconciliation_status)" in gate      # missing block
+    tail = gate[gate.rindex("return {"):]
+    assert "publish: false" in tail                            # anything else
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §3 correction — every fallback carries the COMPLETE section contract
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_72_shared_unavailable_builders_produce_the_complete_contract():
+    """One builder per section, used by the service AND by `api/server.py`.
+
+    A fallback that omits half the contract is not a smaller answer — it is one
+    a renderer cannot distinguish from a real one. `window_start` absent and
+    `window_start` genuinely unbounded both arrive as `None`, and the renderer
+    decides whether it may say "selected-window evidence" from exactly that.
+    """
+    kw_keys = set(kw_svc.KEYWORD_SECTION_KEYS)
+    st_keys = set(st_svc.FLAGGED_SECTION_KEYS)
+
+    cases = [
+        ("kw/no window", kw_svc.keyword_preview_unavailable("r"), kw_keys),
+        ("kw/window", kw_svc.keyword_preview_unavailable("r", window="30d",
+                                                         campaign_key="1"), kw_keys),
+        ("kw/bad window", kw_svc.keyword_preview_unavailable("r", window="nope"), kw_keys),
+        ("fl/no window", st_svc.flagged_preview_unavailable("r"), st_keys),
+        ("fl/window", st_svc.flagged_preview_unavailable("r", window="30d",
+                                                         campaign_key="1"), st_keys),
+    ]
+    for label, section, keys in cases:
+        missing = keys - set(section)
+        assert not missing, f"{label}: incomplete contract, missing {sorted(missing)}"
+        assert section["available"] is False
+        assert section["reason"] == "r"
+        assert section["rows"] == []
+        assert section["total_count"] is None
+        # The invariant descriptors are always populated — never blanked.
+        for field in ("source", "source_dataset", "source_table", "scope", "grain"):
+            assert section[field], f"{label}: {field} is empty on a fallback"
+
+
+def test_73_api_helpers_delegate_to_the_shared_builders():
+    """`api/server.py` must not maintain section dictionaries of its own."""
+    import api.server as server
+
+    for helper, keys, reason in (
+        (server._campaign_keyword_preview, kw_svc.KEYWORD_SECTION_KEYS,
+         "window_not_resolved"),
+        (server._campaign_flagged_preview, st_svc.FLAGGED_SECTION_KEYS,
+         "window_not_resolved"),
+    ):
+        section = helper(None, "23094767513")
+        assert not (set(keys) - set(section)), "incomplete unresolved-window section"
+        assert section["reason"] == reason
+
+    # Structural: the helpers call the builders and hold no literal contract.
+    for name in ("_campaign_keyword_preview", "_campaign_flagged_preview"):
+        called = _called_names(_API_SERVER, name)
+        assert ("keyword_preview_unavailable" in called
+                or "flagged_preview_unavailable" in called), (
+            f"{name} does not use a shared unavailable builder")
+        code = _function_code(_API_SERVER, name)
+        assert '"source_table"' not in code, (
+            f"{name} still hand-builds a section dictionary")
+
+
+def test_74_service_exception_path_returns_a_complete_contract():
+    """A raising evidence service still yields the full §6 shape."""
+    import api.server as server
+
+    original = kw_svc.build_campaign_keyword_preview
+    kw_svc.build_campaign_keyword_preview = lambda *a, **k: (
+        _ for _ in ()).throw(RuntimeError("boom"))
+    try:
+        section = server._campaign_keyword_preview("30d", "23094767513")
+    finally:
+        kw_svc.build_campaign_keyword_preview = original
+
+    assert not (set(kw_svc.KEYWORD_SECTION_KEYS) - set(section))
+    assert section["reason"] == "keyword_preview_failed"
+    assert section["window"] == "30d"
+    assert section["scope"] and section["grain"]
+
+
+def test_75_db_unavailable_identity_and_certified_empty_all_complete():
+    """Database down · identity unresolved · certified empty — all complete."""
+    kw_keys = set(kw_svc.KEYWORD_SECTION_KEYS)
+
+    original = kw_svc.build_keyword_evidence
+    kw_svc.build_keyword_evidence = lambda *a, **k: {"db_unavailable": True}
+    try:
+        db_down = kw_svc.build_campaign_keyword_preview("30d", "23094767513")
+    finally:
+        kw_svc.build_keyword_evidence = original
+    assert not (kw_keys - set(db_down))
+    assert db_down["reason"] == kw_svc.PREVIEW_UNAVAILABLE_SOURCE
+    assert db_down["coverage_status"] == "unavailable"
+
+    unresolved = kw_svc.build_campaign_keyword_preview("30d", None)
+    assert not (kw_keys - set(unresolved))
+    assert unresolved["identity_status"] == "unresolved"
+
+    kw_svc.build_keyword_evidence = lambda *a, **k: {
+        "rows": [], "pagination": {"total_count": 0},
+        "kpis": {"coverage": {"status": "complete"}}}
+    try:
+        empty = kw_svc.build_campaign_keyword_preview("30d", "23094767513")
+    finally:
+        kw_svc.build_keyword_evidence = original
+    assert not (kw_keys - set(empty))
+    assert empty["available"] is True and empty["reason"] is None
+    assert empty["total_count"] == 0, "a measured zero is a number, not None"
+
+
+def test_76_context_failure_path_no_longer_hand_builds_a_partial_dict():
+    """The one path that cannot use the shell must still be complete."""
+    code = _function_code(_ROOT / "services" / "keyword_evidence_service.py",
+                          "build_campaign_keyword_preview")
+    assert "keyword_preview_unavailable(" in code
+    assert '"source_dataset": \'keyword_facts\'' not in code
+    assert "'scope': None" not in code and '"scope": None' not in code
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §4 correction — database-outage propagation
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_77_outage_flag_is_read_from_the_envelope_not_the_row():
+    """The bug, as an assertion.
+
+    `build_campaign_drawer_evidence` returns
+    `{"campaign": None, …, "db_unavailable": True}` on an outage — the flag is
+    on the ENVELOPE and `row` is None. Reading `(row or {}).get("db_unavailable")`
+    therefore evaluated `False` in the exact case it existed to detect, and a
+    dead database rendered as "no campaign detail available for this window": a
+    factual claim about the campaign instead of an admission that nothing could
+    be read.
+    """
+    code = _function_code(_API_SERVER, "_build_campaign_detail")
+    assert 'drawer_db_unavailable = bool(ev.get(\'db_unavailable\'))' in code \
+        or 'bool(ev.get("db_unavailable"))' in code
+    assert '(row or {}).get(\'db_unavailable\')' not in code
+    assert '(row or {}).get("db_unavailable")' not in code
+
+    # The service really does put it on the envelope — checked, not assumed.
+    svc = (_ROOT / "services" / "campaign_evidence_service.py").read_text()
+    assert '"recent_leads": [], "label_set": [], "db_unavailable": True' in svc
+
+
+def _detail_with(monkeypatch, *, ev, keyword, flagged):
+    """Run `_build_campaign_detail` with all three sources stubbed."""
+    import api.server as server
+    import services.campaign_evidence_service as ce
+
+    monkeypatch.setattr(ce, "build_campaign_drawer_evidence",
+                        lambda *a, **k: ev)
+    monkeypatch.setattr(server, "_campaign_keyword_preview", lambda *a, **k: keyword)
+    monkeypatch.setattr(server, "_campaign_flagged_preview", lambda *a, **k: flagged)
+    return server._build_campaign_detail("Brand - UK", 30, window_key="30d",
+                                         campaign_key="111")
+
+
+_OUTAGE_EV = {"campaign": None, "lead_quality": None, "countries": [],
+              "recent_leads": [], "label_set": [], "db_unavailable": True}
+_EMPTY_EV = {"campaign": None, "lead_quality": None, "countries": [],
+             "recent_leads": [], "label_set": [], "db_unavailable": False}
+
+
+def test_78_complete_outage_sets_the_whole_drawer_flag(monkeypatch):
+    detail = _detail_with(
+        monkeypatch, ev=_OUTAGE_EV,
+        keyword=kw_svc.keyword_preview_unavailable("keyword_evidence_unavailable",
+                                                   window="30d"),
+        flagged=st_svc.flagged_preview_unavailable("search_term_evidence_unavailable",
+                                                   window="30d"))
+    assert detail.get("db_unavailable") is True, (
+        "a total outage must say so, not render as an empty campaign")
+
+
+def test_79_one_surviving_preview_suppresses_the_outage_banner(monkeypatch):
+    """A global "database offline" banner would hide evidence that loaded.
+
+    If any of the three reads came back available the database is demonstrably
+    up for that path, so the whole-drawer claim is false — and it would replace
+    a section the operator can actually use with an apology.
+    """
+    surviving = {**kw_svc.keyword_preview_unavailable("x", window="30d"),
+                 "available": True, "reason": None,
+                 "rows": [{"keyword": "winfleet"}], "total_count": 1}
+
+    detail = _detail_with(
+        monkeypatch, ev=_OUTAGE_EV, keyword=surviving,
+        flagged=st_svc.flagged_preview_unavailable("search_term_evidence_unavailable",
+                                                   window="30d"))
+    assert detail.get("db_unavailable") is not True
+    assert detail["keyword_evidence"]["available"] is True
+    assert detail["keywords"] == [{"keyword": "winfleet"}]
+
+    # Symmetric: the flagged section surviving is equally sufficient.
+    surviving_flagged = {**st_svc.flagged_preview_unavailable("x", window="30d"),
+                         "available": True, "reason": None,
+                         "rows": [{"search_term": "winfleet"}], "total_count": 1}
+    detail2 = _detail_with(
+        monkeypatch, ev=_OUTAGE_EV,
+        keyword=kw_svc.keyword_preview_unavailable("keyword_evidence_unavailable",
+                                                   window="30d"),
+        flagged=surviving_flagged)
+    assert detail2.get("db_unavailable") is not True
+
+
+def test_80_campaign_not_found_is_not_an_outage(monkeypatch):
+    """No campaign row + a healthy database is "no evidence", not "cannot tell".
+
+    Both states render the drawer without a headline, and conflating them tells
+    the operator to go and check the database when the honest answer is that
+    this campaign had nothing in this window.
+    """
+    detail = _detail_with(
+        monkeypatch, ev=_EMPTY_EV,
+        keyword=kw_svc.keyword_preview_unavailable("keyword_evidence_unavailable",
+                                                   window="30d"),
+        flagged=st_svc.flagged_preview_unavailable("search_term_evidence_unavailable",
+                                                   window="30d"))
+    assert detail.get("db_unavailable") is not True, (
+        "a campaign with no rows must not be reported as a database outage")
+    assert detail["campaign"] is None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §5 correction — the audit must FAIL on each of these regressions
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _audit_violations(**patched_sources) -> list[str]:
+    """Run the audit's static checks over a temporarily patched source tree.
+
+    Each check reads the real files, so the only honest way to prove it can fail
+    is to reintroduce the defect on disk and watch it fail. Every file is
+    restored in `finally`, including on assertion error.
+    """
+    import importlib
+    originals = {path: Path(path).read_text() for path in patched_sources}
+    try:
+        for path, replace in patched_sources.items():
+            src = originals[path]
+            for old, new in replace:
+                assert old in src, f"{path}: patch anchor not found: {old[:60]!r}"
+                src = src.replace(old, new, 1)
+            Path(path).write_text(src)
+
+        for name in list(sys.modules):
+            if name.startswith(("services.", "api.", "db.", "scripts.")):
+                del sys.modules[name]
+        audit = importlib.import_module(
+            "scripts.audit_campaign_evidence_certification")
+        f = audit.Findings()
+        audit.check_account_scope_before_aggregation(f)
+        audit.check_section_contracts_are_complete(f)
+        audit.check_outage_propagation(f)
+        audit.check_frontend_gates(f)
+        return [v.split(":")[0] for v in f.violations]
+    finally:
+        for path, text in originals.items():
+            Path(path).write_text(text)
+        for name in list(sys.modules):
+            if name.startswith(("services.", "api.", "db.", "scripts.")):
+                del sys.modules[name]
+
+
+def test_81_audit_is_clean_on_this_branch():
+    """The baseline. Without it, the four failure tests below prove nothing —
+    a check that fails on everything is not a gate either."""
+    assert _audit_violations() == []
+
+
+def test_82_audit_fails_when_account_scope_leaves_the_query():
+    """Dropping the predicate from the aggregate query must be caught.
+
+    This is the regression that a page scan could not detect, so the audit is
+    the only place it can be caught statically.
+    """
+    violations = _audit_violations(**{
+        "db/keyword_repository.py": [
+            ("    where, scope_params = _scope(customer_ids)\n    agg_sql",
+             "    where, scope_params = _WINDOW, ()\n    agg_sql"),
+        ]})
+    assert "account_scope" in violations
+
+
+def test_83_audit_fails_on_an_incomplete_section_contract():
+    violations = _audit_violations(**{
+        "api/server.py": [
+            ('''        return keyword_preview_unavailable(
+            WINDOW_NOT_RESOLVED, campaign_key=campaign_key,
+            identity_status="unknown")''',
+             '''        return {"available": False, "reason": WINDOW_NOT_RESOLVED,
+                "source_table": "keyword_daily_facts", "rows": []}'''),
+        ]})
+    assert "section_contracts" in violations
+
+
+def test_84_audit_fails_when_the_outage_flag_is_read_off_the_row():
+    violations = _audit_violations(**{
+        "api/server.py": [
+            ('drawer_db_unavailable = bool(ev.get("db_unavailable"))',
+             'drawer_db_unavailable = bool((row or {}).get("db_unavailable"))'),
+        ]})
+    assert "outage_propagation" in violations
+
+
+def test_85_audit_fails_when_the_sql_status_filter_is_ungated():
+    violations = _audit_violations(**{
+        "static/app.js": [
+            ('''    if (f.status !== "all" && CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)
+        && !sqlPub.publish) return true;
+''', ""),
+        ]})
+    assert "sql_status_filter_gate" in violations

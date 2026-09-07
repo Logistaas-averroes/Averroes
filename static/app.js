@@ -6605,8 +6605,17 @@ function renderCampaignEvidenceKPIs() {
 
 function renderCampaignEvidenceFilters() {
   const f = _campaignFilters;
-  const statusOpt = (v, label) =>
-    `<option value="${v}"${f.status === v ? " selected" : ""}>${label}</option>`;
+  const pub = campaignSqlPublication();
+  // PR-ADS-157 §2 — a status option whose MEANING depends on the SQL count is
+  // disabled when that count is not publishable. "SQL producer" and "Spend
+  // without SQL proof" are conclusions drawn from the SQL number; offering them
+  // as filters over an unreconciled count invites the operator to slice the
+  // table by a finding the evidence does not support.
+  const statusOpt = (v, label) => {
+    const gated = CAMPAIGN_SQL_DEPENDENT_STATUSES.has(v) && !pub.publish;
+    const attrs = gated ? ` disabled title="${escapeHtml(pub.reason)}"` : "";
+    return `<option value="${v}"${f.status === v ? " selected" : ""}${attrs}>${label}</option>`;
+  };
 
   // PR-ADS-157 §2 — SQL-dependent controls are DISABLED when the scope does not
   // reconcile, not silently ignored. "Has confirmed SQL" / "No confirmed SQL"
@@ -6616,10 +6625,13 @@ function renderCampaignEvidenceFilters() {
   //
   // A stale selection is coerced back to the neutral option so the table can
   // never quietly keep filtering by a control the operator can no longer see.
-  const pub = campaignSqlPublication();
   if (!pub.publish) {
     if (f.outcome === "has_sql" || f.outcome === "no_sql") f.outcome = "all";
     if (f.sort === "sqls" || f.sort === "cpql") f.sort = "spend";
+    // A stale SQL-dependent STATUS selection is neutralized for the same
+    // reason the outcome and sort selections are: the control disappears, so
+    // the filter it was applying must not silently keep applying.
+    if (CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)) f.status = "all";
   }
   const sqlDisabled = pub.publish ? "" : " disabled";
   const sqlTitle = pub.publish ? "" : ` title="${escapeHtml(pub.reason)}"`;
@@ -6655,8 +6667,17 @@ function renderCampaignEvidenceFilters() {
 
 function filterCampaignEvidence(rows) {
   const f = _campaignFilters;
+  const sqlPub = campaignSqlPublication();
   return rows.filter((c) => {
     if (f.search && !(c.campaign_name || "").toLowerCase().includes(f.search.toLowerCase())) return false;
+    // PR-ADS-157 §2 — refuse SQL-dependent STATUS filtering internally too.
+    // The disabled <option> is an affordance; this is where a campaign actually
+    // gets included or excluded, so a stale state value or a direct call to
+    // this function must not be able to classify by an unreconciled count.
+    // SQL-INDEPENDENT statuses (Junk-heavy, Mapping review, No outcome
+    // evidence, Data unavailable) keep working — they never depended on it.
+    if (f.status !== "all" && CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)
+        && !sqlPub.publish) return true;
     if (f.status !== "all" && (c.outcome_status || "") !== f.status) return false;
     // Outcome filters match genuine recorded values only — an unavailable (null)
     // metric is never classified as a zero-outcome campaign.
@@ -6666,7 +6687,6 @@ function filterCampaignEvidence(rows) {
     // A stale state value, a restored session, or a caller invoking this
     // function directly must not be able to classify an unreconciled SQL count.
     // So the refusal lives here too, where the classification actually happens.
-    const sqlPub = campaignSqlPublication();
     if ((f.outcome === "has_sql" || f.outcome === "no_sql") && !sqlPub.publish) return true;
     if (f.outcome === "has_sql"  && !(sqls != null && sqls > 0))  return false;
     if (f.outcome === "no_sql"   && !(sqls != null && sqls === 0)) return false;

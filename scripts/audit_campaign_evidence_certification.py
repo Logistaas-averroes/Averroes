@@ -42,8 +42,16 @@ What it checks
  12  campaign identity is unique — no two rows share a `campaign_key`
  13  campaigns sharing a display name keep distinct identities
  14  identity resolution never silently falls back to display name
- 15  the frontend gates every SQL-dependent surface on the reconciliation
- 16  no external write is performed by this command
+ 15  the frontend gates every SQL-dependent surface on the reconciliation,
+     INCLUDING the SQL-dependent status filters
+ 16  the keyword account predicate is applied in SQL, before aggregation,
+     sorting and pagination — not by filtering a returned page
+ 17  an empty account candidate list selects nothing rather than widening
+ 18  every unavailable section carries the complete §6 contract, and
+     `api/server.py` maintains no section dictionaries of its own
+ 19  the drawer reads `db_unavailable` from the evidence ENVELOPE, and raises the
+     whole-drawer banner only when the headline and both previews are unavailable
+ 20  no external write is performed by this command
 
 Guarantees
 ----------
@@ -194,6 +202,170 @@ def check_no_waste_terms_metric(f: Findings) -> None:
                  "no waste_terms column reaches the drawer as a metric")
 
 
+def check_account_scope_before_aggregation(f: Findings) -> None:
+    """PR-ADS-157 §1 — the account predicate must be in the QUERY.
+
+    Filtering a returned page cannot certify a population: the page is one slice
+    while `total_count`, the monetary KPIs and the coverage block are computed
+    over all of it. A foreign-account row beyond the preview limit passes a page
+    scan unnoticed and still contributes to every total.
+    """
+    repo = _ROOT / "db" / "keyword_repository.py"
+    try:
+        src = repo.read_text()
+    except Exception as exc:  # noqa: BLE001
+        f.unavailable_now("account_scope", f"{repo} unreadable: {exc}")
+        return
+
+    if '_ACCOUNT = "customer_id = ANY(%s)"' not in src:
+        f.violation("account_scope",
+                    "db/keyword_repository.py has no account predicate; the "
+                    "keyword preview cannot be account-scoped in SQL")
+        return
+
+    missing = [fn for fn in ("fetch_keyword_aggregates", "fetch_keyword_daily_costs")
+               if "_scope(customer_ids)" not in (_function_code(repo, fn) or "")]
+    if missing:
+        f.violation("account_scope",
+                    f"these keyword reads do not apply the account scope: {missing}")
+        return
+
+    # An empty candidate list must select nothing, not widen to every account.
+    try:
+        import db.keyword_repository as kw_repo
+        empty_sql, empty_params = kw_repo._scope([])
+        wide_sql, _ = kw_repo._scope(None)
+    except Exception as exc:  # noqa: BLE001
+        f.violation("account_scope", f"the scope helper could not be exercised: {exc}")
+        return
+    if "customer_id = ANY" not in empty_sql or empty_params != ([],):
+        f.violation("account_scope",
+                    "an empty account candidate list does not apply the predicate — "
+                    "an unresolved account would widen to every account")
+        return
+    if "customer_id" in wide_sql:
+        f.violation("account_scope",
+                    "the account-wide read gained an account predicate, which "
+                    "would silently change the Keyword Evidence page")
+        return
+
+    # And the preview must actually pass its candidates through.
+    svc = _ROOT / "services" / "keyword_evidence_service.py"
+    preview = _function_code(svc, "build_campaign_keyword_preview") or ""
+    if "customer_ids=candidates" not in preview:
+        f.violation("account_scope",
+                    "the campaign keyword preview does not pass its account "
+                    "candidates into the population query")
+        return
+
+    f.passed("account_scope",
+             "account predicate applied in SQL before aggregation, sorting and "
+             "pagination; empty candidate list selects nothing")
+
+
+def check_section_contracts_are_complete(f: Findings) -> None:
+    """PR-ADS-157 §3 — every fallback carries the full §6 contract.
+
+    Exercised, not inspected: the shared builders are called on the paths a
+    drawer actually hits and the returned dictionaries are checked key by key.
+    """
+    try:
+        import services.keyword_evidence_service as kw
+        import services.search_term_evidence_service as st
+        import api.server as server
+    except Exception as exc:  # noqa: BLE001
+        f.unavailable_now("section_contracts", f"services unimportable: {exc}")
+        return
+
+    cases = [
+        ("keyword/no-window", server._campaign_keyword_preview(None, "1"),
+         kw.KEYWORD_SECTION_KEYS),
+        ("flagged/no-window", server._campaign_flagged_preview(None, "1"),
+         st.FLAGGED_SECTION_KEYS),
+        ("keyword/builder", kw.keyword_preview_unavailable("probe"),
+         kw.KEYWORD_SECTION_KEYS),
+        ("flagged/builder", st.flagged_preview_unavailable("probe"),
+         st.FLAGGED_SECTION_KEYS),
+        ("keyword/identity", kw.build_campaign_keyword_preview("30d", None),
+         kw.KEYWORD_SECTION_KEYS),
+        ("flagged/identity", st.build_campaign_flagged_preview("30d", None),
+         st.FLAGGED_SECTION_KEYS),
+    ]
+    broken = []
+    for label, section, keys in cases:
+        missing = sorted(set(keys) - set(section or {}))
+        if missing:
+            broken.append(f"{label} missing {missing}")
+            continue
+        empty = [k for k in ("source", "source_dataset", "source_table", "scope",
+                             "grain") if not section.get(k)]
+        if empty:
+            broken.append(f"{label} has empty {empty}")
+    if broken:
+        f.violation("section_contracts", "; ".join(broken))
+    else:
+        f.passed("section_contracts",
+                 f"{len(cases)} fallback paths carry the complete §6 contract")
+
+    # Structural: api/server.py must not maintain its own section dictionaries.
+    for name in ("_campaign_keyword_preview", "_campaign_flagged_preview"):
+        code = _function_code(_API_SERVER, name) or ""
+        if '"source_table"' in code or "'source_table'" in code:
+            f.violation("section_contracts",
+                        f"{name} hand-builds a section dictionary instead of "
+                        "using the shared unavailable builder")
+            return
+    f.passed("section_contract_ownership",
+             "api/server.py delegates every unavailable section to the services")
+
+
+def check_outage_propagation(f: Findings) -> None:
+    """PR-ADS-157 §4 — the outage flag is read from the ENVELOPE.
+
+    `build_campaign_drawer_evidence` returns `db_unavailable` beside a `None`
+    campaign, so reading it off the row evaluated False in exactly the case it
+    existed to detect and a dead database rendered as an empty campaign.
+    """
+    code = _function_code(_API_SERVER, "_build_campaign_detail")
+    if code is None:
+        f.violation("outage_propagation", "_build_campaign_detail not found")
+        return
+
+    if "(row or {}).get('db_unavailable')" in code or '(row or {}).get("db_unavailable")' in code:
+        f.violation("outage_propagation",
+                    "the drawer reads db_unavailable off the campaign row; the "
+                    "flag is on the envelope and the row is None during an "
+                    "outage, so the outage is never detected")
+        return
+    if "ev.get('db_unavailable')" not in code and 'ev.get("db_unavailable")' not in code:
+        f.violation("outage_propagation",
+                    "the drawer does not read db_unavailable from the drawer "
+                    "evidence envelope")
+        return
+
+    # The whole-drawer banner needs all three reads to be unavailable.
+    for token in ("keyword_preview.get('available')", 'keyword_preview.get("available")'):
+        if token in code:
+            break
+    else:
+        f.violation("outage_propagation",
+                    "the whole-drawer outage flag does not consider the keyword "
+                    "preview, so it could claim a total outage while a section loaded")
+        return
+    for token in ("flagged_preview.get('available')", 'flagged_preview.get("available")'):
+        if token in code:
+            break
+    else:
+        f.violation("outage_propagation",
+                    "the whole-drawer outage flag does not consider the flagged "
+                    "preview")
+        return
+
+    f.passed("outage_propagation",
+             "outage read from the envelope; whole-drawer flag requires the "
+             "headline and both previews to be unavailable")
+
+
 def check_frontend_gates(f: Findings) -> None:
     """Every SQL-dependent surface must consult the one gate function."""
     try:
@@ -210,6 +382,31 @@ def check_frontend_gates(f: Findings) -> None:
     # The gate must be READ by each surface, not merely defined once. A gate
     # nothing calls is the exact defect this PR fixes: /api/campaigns already
     # returned sql_reconciliation and the page simply never read it.
+    # PR-ADS-157 §2 — the SQL-dependent STATUS filters are gated too.
+    filters_region = js[js.find("function renderCampaignEvidenceFilters"):]
+    filters_region = filters_region[:filters_region.find("\nfunction ", 40)]
+    predicate = js[js.find("function filterCampaignEvidence"):]
+    predicate = predicate[:predicate.find("\nfunction ", 40)]
+    status_problems = []
+    if "CAMPAIGN_SQL_DEPENDENT_STATUSES.has(v)" not in filters_region:
+        status_problems.append("the status <option> builder is not gated")
+    if 'f.status = "all"' not in filters_region:
+        status_problems.append("a stale SQL-dependent status selection is not cleared")
+    if "CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)" not in predicate:
+        status_problems.append("filterCampaignEvidence does not refuse "
+                               "SQL-dependent statuses internally")
+    else:
+        gate_at = predicate.index("CAMPAIGN_SQL_DEPENDENT_STATUSES.has(f.status)")
+        eq_at = predicate.find('(c.outcome_status || "") !== f.status')
+        if eq_at != -1 and eq_at < gate_at:
+            status_problems.append("the status equality check runs before the gate")
+    if status_problems:
+        f.violation("sql_status_filter_gate", "; ".join(status_problems))
+    else:
+        f.passed("sql_status_filter_gate",
+                 "SQL-dependent status filters are disabled, cleared when stale, "
+                 "and refused inside the predicate")
+
     required_callers = {
         "renderCampaignEvidenceKPIs": "KPI strip",
         "renderCampaignEvidenceFilters": "filter controls",
@@ -437,6 +634,9 @@ def run(windows) -> tuple[Findings, dict]:
     f = Findings()
     check_legacy_readers(f)
     check_no_waste_terms_metric(f)
+    check_account_scope_before_aggregation(f)
+    check_section_contracts_are_complete(f)
+    check_outage_propagation(f)
     check_frontend_gates(f)
     per_window = {w: _audit_window(w, f) for w in windows}
     return f, per_window

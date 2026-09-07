@@ -59,15 +59,53 @@ KEYWORD_DAILY_FACTS_NATURAL_KEY = (
 # only, never run_date.
 _WINDOW = "(%s::date IS NULL OR source_date >= %s) AND source_date <= %s"
 
+# PR-ADS-157 §1 — OPTIONAL account predicate, applied in SQL.
+#
+# `keyword_daily_facts` is keyed on (source_date, customer_id, campaign_id,
+# ad_group_id, criterion_id), so rows from two Google Ads accounts sit side by
+# side in this table. The window predicate alone does not separate them.
+#
+# A consumer that must not mix accounts — the campaign drawer preview — passes
+# its account's exact spellings here, so the filter runs BEFORE grouping,
+# summing, sorting and pagination. Filtering a returned page instead would leave
+# `total_count`, the aggregate totals and the coverage block computed over a
+# population the caller never certified: a page that looks clean sitting on top
+# of totals that are not.
+#
+# `customer_ids=None` keeps the account-wide behaviour every existing caller
+# has, so this is additive.
+_ACCOUNT = "customer_id = ANY(%s)"
+
+
+def _scope(customer_ids) -> tuple[str, tuple]:
+    """``(where_sql, params)`` for the window, optionally narrowed to an account.
+
+    The account clause is EXACT (`= ANY`) over a fixed, tiny candidate list —
+    never a pattern, never NULL-tolerant. A row with no `customer_id` cannot
+    match, which is correct: an account-less row is not provably ours.
+    """
+    if customer_ids is None:
+        return _WINDOW, ()
+    ids = [str(c) for c in customer_ids if str(c).strip()]
+    # An empty candidate list is NOT "no filter" — it is "no account", and it
+    # must select nothing rather than silently widening to every account.
+    return f"{_WINDOW} AND {_ACCOUNT}", (ids,)
+
 
 def _rows_as_dicts(cur) -> list[dict]:
     cols = [c[0] for c in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def fetch_keyword_aggregates(start: date | None, end: date) -> dict:
+def fetch_keyword_aggregates(start: date | None, end: date, *,
+                             customer_ids: list[str] | None = None) -> dict:
     """Window aggregates at the unique-criterion grain
     (customer_id, campaign_id, ad_group_id, criterion_id).
+
+    ``customer_ids`` (PR-ADS-157 §1) narrows the read to one Google Ads account
+    IN SQL, so the grouping, the totals, the ordering and everything downstream
+    describe the same account-scoped population. Default None = account-wide,
+    unchanged for every existing caller.
 
     Each row sums durable source-date facts ONCE (the natural key guarantees no
     duplicate facts), carries the currency/source provenance sets for the unit,
@@ -77,6 +115,7 @@ def fetch_keyword_aggregates(start: date | None, end: date) -> dict:
     Returns ``{available, rows, source}`` (source = window totals for
     reconciliation) or ``{available: False}`` when the DB is unavailable.
     """
+    where, scope_params = _scope(customer_ids)
     agg_sql = f"""
         SELECT
           customer_id, campaign_id, ad_group_id, criterion_id,
@@ -115,7 +154,7 @@ def fetch_keyword_aggregates(start: date | None, end: date) -> dict:
              FILTER (WHERE landing_page_experience IS NOT NULL))[1] AS landing_page_experience,
           MAX(quality_observed_at) FILTER (WHERE quality_score IS NOT NULL) AS quality_observed_at
         FROM keyword_daily_facts
-        WHERE {_WINDOW}
+        WHERE {where}
         GROUP BY customer_id, campaign_id, ad_group_id, criterion_id
         ORDER BY SUM(cost_micros) DESC NULLS LAST
     """
@@ -134,9 +173,9 @@ def fetch_keyword_aggregates(start: date | None, end: date) -> dict:
           ARRAY_AGG(DISTINCT currency_code) FILTER (WHERE currency_code IS NOT NULL) AS currency_codes,
           ARRAY_AGG(DISTINCT source_system) FILTER (WHERE source_system IS NOT NULL) AS source_systems
         FROM keyword_daily_facts
-        WHERE {_WINDOW}
+        WHERE {where}
     """
-    params = (start, start, end)
+    params = (start, start, end) + scope_params
     try:
         with get_conn() as conn:
             if conn is None:
@@ -167,10 +206,16 @@ def fetch_keyword_aggregates(start: date | None, end: date) -> dict:
     return {"available": True, "rows": rows, "source": source}
 
 
-def fetch_keyword_daily_costs(start: date | None, end: date) -> dict:
+def fetch_keyword_daily_costs(start: date | None, end: date, *,
+                              customer_ids: list[str] | None = None) -> dict:
     """Per-(criterion, source_date) native cost so the service can FX-convert at
     EACH date's own rate (never a window-average). Returns ``{available, rows}``.
+
+    ``customer_ids`` narrows to one account in SQL, matching
+    ``fetch_keyword_aggregates`` — the two must describe the SAME population or
+    the FX conversion would be computed over rows the aggregates excluded.
     """
+    where, scope_params = _scope(customer_ids)
     sql = f"""
         SELECT
           customer_id, campaign_id, ad_group_id, criterion_id, source_date,
@@ -178,7 +223,7 @@ def fetch_keyword_daily_costs(start: date | None, end: date) -> dict:
           ARRAY_AGG(DISTINCT currency_code) FILTER (WHERE currency_code IS NOT NULL) AS currency_codes,
           ARRAY_AGG(DISTINCT source_system) FILTER (WHERE source_system IS NOT NULL) AS source_systems
         FROM keyword_daily_facts
-        WHERE {_WINDOW}
+        WHERE {where}
         GROUP BY customer_id, campaign_id, ad_group_id, criterion_id, source_date
     """
     try:
@@ -186,7 +231,7 @@ def fetch_keyword_daily_costs(start: date | None, end: date) -> dict:
             if conn is None:
                 return {"available": False, "rows": []}
             with conn.cursor() as cur:
-                cur.execute(sql, (start, start, end))
+                cur.execute(sql, (start, start, end) + scope_params)
                 rows = _rows_as_dicts(cur)
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_keyword_daily_costs failed: %s", exc)
