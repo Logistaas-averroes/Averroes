@@ -1277,3 +1277,101 @@ def test_59_audit_runs_all_windows_against_a_real_database(seeded):
         assert "available" in data, f"{window} produced no verdict"
 
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# API surface — auth, window validation, and the fail-closed default
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_60_unknown_window_is_http_400_at_the_endpoint():
+    """§5: unknown windows still answer 400.
+
+    The preview adapters let `EvidenceWindowError` propagate precisely so this
+    keeps working. If they had absorbed it into `available: False`, a malformed
+    request would become a 200 with an apologetic panel and the endpoint would
+    silently stop validating its own input.
+    """
+    import api.server as server
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as excinfo:
+        server._resolve_evidence_window("not_a_window", 30)
+    assert excinfo.value.status_code == 400
+
+    # And every supported window resolves.
+    for window in ("7d", "14d", "30d", "60d", "180d", "all_time"):
+        days, key = server._resolve_evidence_window(window, 30)
+        assert key == window
+        if window == "all_time":
+            assert days is None, "all_time must carry no lower bound"
+
+
+def test_61_campaign_detail_endpoint_requires_authentication():
+    """Unchanged by this PR — asserted so it stays that way."""
+    import api.server as server
+    route = next(r for r in server.app.routes
+                 if getattr(r, "path", None) == "/api/campaign-detail")
+    deps = repr(getattr(route, "dependant", None)) + repr(route.__dict__)
+    assert "require_auth" in deps, "the drawer endpoint lost its auth dependency"
+
+
+def test_62_gate_fails_closed_on_a_status_it_has_never_seen():
+    """A future reconciliation status must withhold, not publish.
+
+    The gate's LAST return is the withholding branch, so any status that does
+    not match a known case falls through to it. A gate whose default was
+    permissive would silently publish the first time the vocabulary grew.
+    """
+    region = _js_region("campaignSqlPublication")
+    tail = region[region.rindex("return {"):]
+    assert "publish: false" in tail
+    assert 'state: "unavailable"' in tail
+    assert "Unavailable is not zero" in tail
+
+
+def test_63_withheld_states_are_announced_to_assistive_technology():
+    """A visual-only "Reconciliation required" is not a disclosure for everyone.
+
+    The unavailable section carries role="status" so a screen reader announces
+    it, and every withheld value carries the reason as a title rather than
+    relying on colour or position alone.
+    """
+    js = _APP_JS.read_text()
+    assert 'role="status"' in _js_region("drawerSectionUnavailable", source=js)
+    assert 'role="note"' in _js_region("renderCampaignSqlReconciliation", source=js)
+    withheld = _js_region("campaignSqlWithheld", source=js)
+    assert 'title="${escapeHtml(pub.reason || "")}"' in withheld
+
+
+def test_64_all_time_coverage_is_disclosed_rather_than_implied():
+    """`all_time` has no lower bound, and the section says so.
+
+    Rendering an all-time result with a blank start date would look like a
+    window whose start was merely unknown — a different and much worse claim.
+    """
+    for section in (kw_svc.build_campaign_keyword_preview("all_time", None),
+                    st_svc.build_campaign_flagged_preview("all_time", None)):
+        assert section["window"] == "all_time"
+        assert "all_time" in section
+
+    provenance = _js_region("drawerSectionProvenance")
+    assert 's.all_time ? "all time"' in provenance
+    assert "s.all_time ||" in provenance, (
+        "all_time must count as bounded, or an all-time section would be told "
+        "its window bounds are unavailable")
+
+
+def test_65_every_reason_code_is_distinct():
+    """Two states sharing a reason code cannot be told apart downstream."""
+    codes = {}
+    for module, prefix in ((kw_svc, "PREVIEW_UNAVAILABLE_"),
+                           (st_svc, "FLAGGED_PREVIEW_UNAVAILABLE_")):
+        for name in dir(module):
+            if name.startswith(prefix):
+                codes.setdefault(getattr(module, name), []).append(
+                    f"{module.__name__}.{name}")
+    # The account code is deliberately SHARED between the two services: it is
+    # the same condition with the same remedy, and giving it two spellings
+    # would make a single misconfiguration look like two unrelated faults.
+    shared = {code for code, names in codes.items() if len(names) > 1}
+    assert shared <= {"google_ads_customer_not_configured",
+                      "campaign_identity_unresolved"}, (
+        f"reason codes collide without justification: {shared}")
