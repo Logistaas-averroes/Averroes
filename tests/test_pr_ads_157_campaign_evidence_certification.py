@@ -45,6 +45,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+import tests.conftest as conftest  # noqa: E402
 import services.keyword_evidence_service as kw_svc  # noqa: E402
 import services.search_term_evidence_service as st_svc  # noqa: E402
 
@@ -1375,3 +1376,68 @@ def test_65_every_reason_code_is_distinct():
     assert shared <= {"google_ads_customer_not_configured",
                       "campaign_identity_unresolved"}, (
         f"reason codes collide without justification: {shared}")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Test isolation — the hazard this PR tripped over
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_66_every_by_value_get_conn_importer_is_eagerly_imported():
+    """`tests/conftest.py`'s eager-import list must stay EXHAUSTIVE.
+
+    The hazard, concretely: a module that does `from db.connection import
+    get_conn` at module scope binds that function BY VALUE. A test that
+    monkeypatches `db.connection.get_conn` therefore leaks its fake permanently
+    into any module whose FIRST import happens while the fake is installed —
+    monkeypatch restores the attribute, not the copy.
+
+    This PR hit it. Composing the canonical keyword evidence service in the
+    campaign drawer moved the first import of `db.writers` into a PR-ADS-141
+    test that patches `get_conn`. Every real write afterwards went through a
+    fake cursor; `db.writers` caught the AttributeError, logged it, and returned
+    normally. Nine PostgreSQL tests in suites this PR never touched failed with
+    empty tables, and nothing in their output named the cause.
+
+    The conftest fixture imports these modules before any test runs. That fixes
+    it only for as long as the list matches the code — a list nobody maintains
+    is the same class of defect as the bug it was written for, so this test
+    derives the truth from the source tree instead of trusting the list.
+    """
+    import re
+
+    listed = set(conftest._EAGER_DB_MODULES)
+    pattern = re.compile(r"^from db\.connection import .*\bget_conn\b", re.M)
+
+    actual = set()
+    for path in sorted((_ROOT / "db").glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        if pattern.search(path.read_text()):
+            actual.add(f"db.{path.stem}")
+
+    missing = actual - listed
+    assert not missing, (
+        "these modules bind get_conn by value but are not eagerly imported by "
+        f"tests/conftest.py, so a monkeypatched connection can leak into them: "
+        f"{sorted(missing)}")
+
+
+def test_67_the_eager_import_fixture_actually_binds_the_real_get_conn():
+    """The list being right is not the same as the fixture having worked.
+
+    Asserts identity, not equality: every listed module's `get_conn` must be the
+    very object `db.connection` exposes. A captured fake would compare unequal
+    here, which is precisely the state that produced silent write failures.
+    """
+    import importlib
+    import db.connection as conn_mod
+
+    for name in conftest._EAGER_DB_MODULES:
+        if name == "db.connection":
+            continue
+        module = importlib.import_module(name)
+        bound = getattr(module, "get_conn", None)
+        if bound is None:
+            continue          # resolves through the module at call time — safe
+        assert bound is conn_mod.get_conn, (
+            f"{name}.get_conn is not db.connection.get_conn — a patched "
+            "connection factory has been captured as its permanent binding")
