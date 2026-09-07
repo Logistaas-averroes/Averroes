@@ -621,3 +621,296 @@ def test_26_no_external_writes_anywhere_in_the_changed_paths():
             assert token.lower() not in low, f"external write token {token!r} present"
         for verb in ("insert into", "update ", "delete from"):
             assert verb not in low, f"write verb {verb!r} present in a read path"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §2 — SQL scope and reconciliation publication rules
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _js_region(marker: str, *, source: str | None = None) -> str:
+    """One top-level JS function body, bounded at the next `\\nfunction `."""
+    js = source if source is not None else _APP_JS.read_text()
+    i = js.find(f"function {marker}")
+    assert i != -1, f"function {marker} not found in static/app.js"
+    j = js.find("\nfunction ", i + len(marker) + 9)
+    return js[i:j if j != -1 else len(js)]
+
+
+def test_27_api_returns_the_campaign_attributable_scope_not_a_bare_sql_count():
+    """The reconciliation must NAME its population.
+
+    "SQLs" is four different numbers: all-source, Google Ads-source,
+    campaign-attributable, and keyword-attributable — plus Google Ads platform
+    conversions, which is a fifth number from a different system entirely. A
+    page that publishes one of them under a bare label is not reporting a
+    metric, it is inviting a reader to pick whichever definition makes the
+    number make sense.
+    """
+    import services.canonical_contact_outcome_service as canon
+    assert canon.SCOPE_CAMPAIGN_ATTRIBUTABLE == "campaign_attributable_sqls"
+
+    # `reconciled` is stricter than "the page agrees with itself": every
+    # Google Ads-source SQL must also be campaign-attributable, and no qualified
+    # contact may be excluded. A Google Ads-source SQL with no campaign identity
+    # is a real coverage gap and downgrades the status honestly.
+    reconciled = canon.reconciliation_metadata(
+        {"counts": {"total_all_source_sqls": 100, "google_ads_source_sqls": 40,
+                    "campaign_attributable_sqls": 40}},
+        canon.SCOPE_CAMPAIGN_ATTRIBUTABLE, available=True, consumer_count=40)
+    assert reconciled["sql_scope"] == "campaign_attributable_sqls"
+    assert reconciled["reconciliation_status"] == canon.STATUS_RECONCILED
+    assert reconciled["unmatched_sql_contacts"] == 0
+
+    # The nested scopes are all published, so "40" is checkable rather than
+    # merely asserted — and 20 unmatched Google Ads-source SQLs make this a
+    # PARTIAL scope, not a reconciled one.
+    block = canon.reconciliation_metadata(
+        {"counts": {"total_all_source_sqls": 100, "google_ads_source_sqls": 60,
+                    "campaign_attributable_sqls": 40, "excluded_sql_contacts": 5}},
+        canon.SCOPE_CAMPAIGN_ATTRIBUTABLE, available=True, consumer_count=40)
+    assert block["reconciliation_status"] == canon.STATUS_PARTIAL
+    assert block["total_all_source_sqls"] == 100
+    assert block["google_ads_source_sqls"] == 60
+    assert block["campaign_attributable_sqls"] == 40
+    assert block["unmatched_sql_contacts"] == 20
+
+
+def test_28_consumer_disagreement_is_a_mismatch_not_a_rounding_note():
+    import services.canonical_contact_outcome_service as canon
+    block = canon.reconciliation_metadata(
+        {"counts": {"total_all_source_sqls": 100, "google_ads_source_sqls": 60,
+                    "campaign_attributable_sqls": 40}},
+        canon.SCOPE_CAMPAIGN_ATTRIBUTABLE, available=True,
+        consumer_count=37)   # the page rendered a different number
+    assert block["reconciliation_status"] == canon.STATUS_MISMATCH
+
+
+def test_29_unavailable_reconciliation_publishes_no_counts_at_all():
+    """Unavailable is not zero — the counts must be None, not 0."""
+    import services.canonical_contact_outcome_service as canon
+    block = canon.reconciliation_metadata({"counts": {}},
+                                          canon.SCOPE_CAMPAIGN_ATTRIBUTABLE,
+                                          available=False)
+    assert block["reconciliation_status"] == canon.STATUS_UNAVAILABLE
+    for key in ("total_all_source_sqls", "google_ads_source_sqls",
+                "campaign_attributable_sqls", "excluded_sql_contacts",
+                "unmatched_sql_contacts"):
+        assert block[key] is None, f"{key} was published as {block[key]!r}"
+
+
+def test_30_campaigns_endpoint_still_carries_the_reconciliation_block():
+    """The contract the frontend now depends on must exist at the source."""
+    svc = (_ROOT / "services" / "campaign_evidence_service.py").read_text()
+    assert '"sql_reconciliation"' in svc
+    assert "SCOPE_CAMPAIGN_ATTRIBUTABLE" in svc
+
+
+def test_31_frontend_stores_the_reconciliation_in_campaign_state():
+    """PR #174's root cause, as an assertion.
+
+    `/api/campaigns` returned `sql_reconciliation` all along. The Campaign page
+    read `campaigns`, `summary`, `audit`, `window`, `spend_currency` and
+    `reporting_currency` — and never this. A contract nothing reads is not a
+    contract; it is a field.
+    """
+    js = _APP_JS.read_text()
+    assert "let _campaignSqlReconciliation" in js
+    assert "_campaignSqlReconciliation = data.sql_reconciliation" in js
+
+
+def test_32_there_is_exactly_one_publication_gate():
+    """One decision function, so five surfaces cannot drift into three.
+
+    A gate applied in the KPI strip but not in the sort order is not a gate; it
+    is a place where an operator can still rank campaigns by a number the page
+    just told them it could not certify.
+    """
+    js = _APP_JS.read_text()
+    assert js.count("function campaignSqlPublication()") == 1
+    for fn in ("renderCampaignEvidenceKPIs", "renderCampaignEvidenceFilters",
+               "filterCampaignEvidence", "sortCampaignEvidence",
+               "renderCampaignEvidenceRow", "renderCampaignDrawer",
+               "_appendDrawerEvidenceSections"):
+        assert "campaignSqlPublication" in _js_region(fn, source=js), (
+            f"{fn} publishes SQL-dependent output without consulting the gate")
+
+
+def test_33_gate_publishes_only_on_a_reconciled_scope():
+    """Read the gate's own branches, so the rule is checked, not assumed."""
+    region = _js_region("campaignSqlPublication")
+    # Exactly one branch may set publish: true, and it is the reconciled one.
+    assert region.count("publish: true") == 1
+    reconciled_at = region.index('status === "reconciled"')
+    publish_at = region.index("publish: true")
+    assert reconciled_at < publish_at
+    for state in ("mismatch", "partial"):
+        assert f'status === "{state}"' in region
+    # A missing block is unproven, not permission.
+    assert "if (!r || !r.reconciliation_status)" in region
+
+
+def test_34_aggregate_sql_and_cpql_are_both_withheld_together():
+    """CPQL's denominator IS the SQL count.
+
+    Withholding the SQL total but publishing the CPQL derived from it would
+    leave the number that matters most standing on the evidence just declared
+    uncertifiable.
+    """
+    region = _js_region("renderCampaignEvidenceKPIs")
+    assert "pub.publish\n    ? fmtCount(s.confirmed_sqls_total)" in region
+    assert "campaignSqlWithheld(pub)" in region
+    # The CPQL branch tests the gate BEFORE it ever reads overall_cpql_usd.
+    cpql_branch = region[region.index("const cpql ="):]
+    gate_at = cpql_branch.index("!pub.publish")
+    value_at = cpql_branch.index("s.overall_cpql_usd")
+    assert gate_at < value_at, "CPQL reads its value before checking the gate"
+
+
+def test_35_withheld_evidence_never_renders_as_zero():
+    js = _APP_JS.read_text()
+    region = _js_region("campaignSqlWithheld", source=js)
+    assert "Reconciliation required" in region
+    assert "Unreconciled" in region
+    assert ">0<" not in region and "return 0" not in region
+
+
+def test_36_sql_filters_and_sorts_cannot_classify_an_unproven_count():
+    """Both the control and the classification refuse.
+
+    A disabled <option> is an affordance. `filterCampaignEvidence` is where a
+    campaign actually gets sorted into "has SQL" or "no SQL", so the refusal has
+    to live there as well — otherwise stale state, a restored session, or a
+    direct call reintroduces the classification the UI just hid.
+    """
+    filt = _js_region("filterCampaignEvidence")
+    assert "campaignSqlPublication()" in filt
+    assert 'f.outcome === "has_sql" || f.outcome === "no_sql"' in filt
+
+    controls = _js_region("renderCampaignEvidenceFilters")
+    assert "sqlDisabled" in controls
+    assert 'f.outcome = "all"' in controls    # stale selection is cleared
+    assert 'f.sort = "spend"' in controls
+
+    sort = _js_region("sortCampaignEvidence")
+    assert 'by === "sqls" || by === "cpql"' in sort
+    assert "campaignSqlPublication().publish" in sort
+
+
+def test_37_independent_evidence_survives_a_sql_reconciliation_failure():
+    """Spend, junk, wrong-fit and lead counts never depended on the SQL scope.
+
+    Withholding them because SQL reconciliation failed would punish the operator
+    for a defect in an unrelated population — and would remove exactly the
+    evidence they need in order to investigate it.
+    """
+    kpis = _js_region("renderCampaignEvidenceKPIs")
+    # Spend and junk KPIs are rendered unconditionally.
+    assert "${spendPrimary}" in kpis
+    assert "fmtCount(s.confirmed_junk_total)" in kpis
+    assert "campaignSqlPublication" not in kpis.split("const spendPrimary")[0].split(
+        "const s = _campaignSummary")[-1], "spend is gated on the SQL scope"
+
+    row = _js_region("renderCampaignEvidenceRow")
+    assert "campaignSpendCell(c)" in row
+    assert "c.confirmed_junk" in row
+
+    sections = _js_region("_appendDrawerEvidenceSections")
+    assert "independent canonical lead evidence" in sections
+
+
+def test_38_sql_dependent_statuses_stop_concluding_when_unproven():
+    """"Spend without SQL proof" is an accusation, and an unreconciled scope is
+    not proof of absence."""
+    js = _APP_JS.read_text()
+    assert 'CAMPAIGN_SQL_DEPENDENT_STATUSES = new Set([' in js
+    assert '"SQL producer", "Spend without SQL proof",' in js
+    for fn in ("renderCampaignEvidenceRow", "renderCampaignDrawer"):
+        region = _js_region(fn, source=js)
+        assert "CAMPAIGN_SQL_DEPENDENT_STATUSES.has" in region, (
+            f"{fn} publishes an SQL-dependent conclusion ungated")
+        assert "Reconciliation required" in region
+
+
+def test_39_the_five_sql_populations_are_never_labelled_the_same():
+    """Campaign-attributable SQLs ≠ Google Ads platform conversions."""
+    js = _APP_JS.read_text()
+    assert 'CAMPAIGN_SQL_SCOPE_LABEL = "Campaign-attributable SQLs"' in js
+    assert 'CAMPAIGN_SQL_SCOPE_SHORT = "Attributed SQLs"' in js
+    assert "Google Ads platform conversions" in js
+    # And the old undefined label is gone from every rendered string.
+    rendered = "\n".join(ln for ln in js.splitlines()
+                         if not ln.strip().startswith("//"))
+    assert ">Confirmed SQLs<" not in rendered
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §7 — the drawer renders all six section states
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_40_drawer_distinguishes_all_six_section_states():
+    js = _APP_JS.read_text()
+    assert "function drawerSectionUnavailable" in js
+    assert "function drawerSectionProvenance" in js
+
+    unavailable = _js_region("drawerSectionUnavailable", source=js)
+    assert "Unavailable is not zero" in unavailable
+    assert "Reason code" in unavailable
+    assert "identity_status" in unavailable
+
+    sections = _js_region("_appendDrawerEvidenceSections", source=js)
+    # certified empty — explicitly a measurement, not an absence of data
+    assert "This is a measured result, not a missing one." in sections
+    # absence from the flagged population is never "clean"
+    assert "That is not a statement that its traffic is clean" in sections
+    # unavailable is its own branch, checked BEFORE the empty branch, so an
+    # unavailable section can never fall through to "no rows".
+    kw_branch = sections[sections.index("const kwSection"):]
+    assert kw_branch.index("available === false") < kw_branch.index("keywords.length === 0")
+
+
+def test_41_provenance_never_claims_window_evidence_for_an_unbounded_result():
+    """The phrase is DERIVED from the window bounds, never hardcoded."""
+    region = _js_region("drawerSectionProvenance")
+    assert "const bounded = !!(s.all_time || (s.window_start && s.window_end))" in region
+    assert 'bounded ? "selected-window evidence" : "window bounds unavailable"' in region
+    # And every §6 field the operator needs is rendered.
+    for field in ("source", "source_dataset", "source_table", "grain",
+                  "customer_id", "campaign_id", "coverage_status",
+                  "identity_status", "annotation_table"):
+        assert f"s.{field}" in region, f"provenance omits {field}"
+
+
+def test_42_name_derived_identity_is_disclosed_in_the_drawer():
+    """The cross-campaign hazard is stated where the rows are shown."""
+    region = _js_region("drawerSectionProvenance")
+    assert 'identity_status === "name_derived"' in region
+    assert "could be shared with another campaign of the same name" in region
+
+
+def test_43_drawer_reason_codes_are_all_explained():
+    """Every reason code an adapter can return has a sentence in the UI.
+
+    A reason code with no mapping renders as a bare identifier, which is better
+    than nothing but is not the disclosure the contract promises. This test
+    fails when a new reason code is added without one.
+    """
+    js = _APP_JS.read_text()
+    mapped = set()
+    block = js[js.index("const DRAWER_SECTION_REASONS = {"):]
+    block = block[:block.index("\n};")]
+    for line in block.splitlines():
+        line = line.strip()
+        if line and ":" in line and not line.startswith("//"):
+            mapped.add(line.split(":", 1)[0].strip())
+
+    emitted = set()
+    for module, prefix in ((kw_svc, "PREVIEW_UNAVAILABLE_"),
+                           (st_svc, "FLAGGED_PREVIEW_UNAVAILABLE_")):
+        for name in dir(module):
+            if name.startswith(prefix):
+                emitted.add(getattr(module, name))
+    emitted.add(st_svc.FLAGGED_PREVIEW_QUARANTINED)
+    emitted.add("window_not_resolved")   # emitted by the api/server.py helpers
+
+    missing = emitted - mapped
+    assert not missing, f"reason codes with no operator-facing explanation: {sorted(missing)}"

@@ -389,11 +389,25 @@ def test_no_snapshot_language_on_campaign_page():
 def test_clean_table_headers():
     region = _region(APP_JS, "function renderCampaignDecisionTable",
                      "function campaignSpendCell")
-    for h in (">Campaign<", ">Status<", ">Spend<", ">Leads<", ">SQLs<",
+    for h in (">Campaign<", ">Status<", ">Spend<", ">Leads<",
               ">Junk<", ">Junk Rate<", ">CPQL<"):
         assert h in region, f"missing clean header {h}"
+    # PR-ADS-157 §2 renamed the bare ">SQLs<" header. "SQLs" named no
+    # population: this page counts CAMPAIGN-ATTRIBUTABLE SQLs, which is a
+    # strict subset of Google Ads-source SQLs, which is itself a subset of
+    # all-source SQLs — and none of those are Google Ads platform conversions.
+    # The header is now emitted from a constant so the label cannot drift.
+    assert "CAMPAIGN_SQL_SCOPE_SHORT" in region
+    assert 'CAMPAIGN_SQL_SCOPE_SHORT = "Attributed SQLs"' in APP_JS
     assert "— Latest Snapshot" not in region
-    assert "Google Ads" not in region            # no repeated source in headers
+    # "No repeated source in headers" is about the VISIBLE header text, not
+    # about tooltips. PR-ADS-157 §2 requires the SQL header to disclose that
+    # campaign-attributable SQLs are not Google Ads platform conversions, and
+    # a title attribute is where that disclosure belongs. So check the rendered
+    # label text between the tags, not the whole tag including its attributes.
+    import re as _re
+    header_text = " ".join(_re.findall(r"<th[^>]*>(.*?)</th>", region, _re.S))
+    assert "Google Ads" not in header_text       # no repeated source in headers
     assert ">Decision<" not in region            # verdict column replaced by Status
 
 
@@ -432,9 +446,15 @@ def test_no_duplicate_source_strip_inline():
 def test_kpi_cards_are_genuine_window_kpis():
     region = _region(APP_JS, "function renderCampaignEvidenceKPIs",
                      "function renderCampaignEvidenceFilters")
-    for label in (">Campaigns<", ">Spend<", ">Confirmed SQLs<", ">Confirmed Junk<",
+    for label in (">Campaigns<", ">Spend<", ">Confirmed Junk<",
                   ">Overall CPQL<"):
         assert label in region
+    # PR-ADS-157 §2: ">Confirmed SQLs<" is now the scoped label, emitted from a
+    # constant. "Confirmed" described a HubSpot verdict; it said nothing about
+    # WHICH SQL population the number covered, which is the thing an operator
+    # comparing this page to HubSpot actually needs to know.
+    assert "CAMPAIGN_SQL_SCOPE_LABEL" in region
+    assert 'CAMPAIGN_SQL_SCOPE_LABEL = "Campaign-attributable SQLs"' in APP_JS
     assert "Latest Snapshot" not in region and "Spend Evidence" not in region
 
 
@@ -444,7 +464,13 @@ def test_kpi_cards_are_genuine_window_kpis():
 def test_drawer_uses_window_card_no_snapshot():
     dr = _region(APP_JS, "function renderCampaignDrawer",
                  "function _appendDrawerEvidenceSections")
-    assert "snapshot" not in dr.lower()
+    # The claim is that no SNAPSHOT LANGUAGE REACHES THE USER. Comments are not
+    # rendered, and PR-ADS-157 added one explaining that a snapshot may never
+    # call itself selected-window evidence — a scan of raw source would fail
+    # precisely because the rule was written down. So strip comment lines first.
+    dr_rendered = "\n".join(
+        ln for ln in dr.splitlines() if not ln.strip().startswith("//"))
+    assert "snapshot" not in dr_rendered.lower()
     # No scheduler verdict in the drawer (camp.verdicted_leads is a lead COUNT, ok).
     assert "camp.verdict_reason" not in dr and "verdictBadge(" not in dr
     assert "Google Conv" not in dr                       # no snapshot conversions
@@ -811,15 +837,28 @@ def test_backfilled_contact_excluded_from_recent_window(monkeypatch):
 
 
 def test_keyword_and_waste_snapshots_not_summed():
-    kw = _region(SERVER, "# ── Keywords preview — LATEST snapshot per keyword",
-                 "# ── Waste terms preview")
-    assert "DISTINCT ON (keyword, match_type)" in kw
-    assert "run_date DESC" in kw
-    assert "SUM(spend_usd)" not in kw and "SUM(clicks)" not in kw
-    waste = _region(SERVER, "# ── Waste terms preview — LATEST snapshot per term",
-                    "except Exception")
-    assert "DISTINCT ON (search_term, junk_category, matched_pattern)" in waste
-    assert "SUM(spend_usd)" not in waste
+    """PR-ADS-157 §3/§4 strengthened this guarantee rather than removing it.
+
+    This test used to assert that the drawer's two snapshot queries took the
+    LATEST snapshot per key (`DISTINCT ON … ORDER BY run_date DESC`) instead of
+    summing across overlapping scheduler runs. Both queries are gone: the drawer
+    no longer reads `keywords` or `waste_terms` at all, and gets canonical
+    window facts from the evidence services instead.
+
+    So the original claim now holds by construction — a snapshot that is never
+    read cannot be summed — and the assertion moves to the stronger fact.
+    """
+    from tests.test_pr_ads_157_campaign_evidence_certification import (
+        _function_code,
+    )
+    from pathlib import Path
+    builder = _function_code(Path(ROOT) / "api" / "server.py", "_build_campaign_detail")
+    assert "FROM keywords" not in builder
+    assert "FROM waste_terms" not in builder
+    assert "DISTINCT ON" not in builder
+    assert "SUM(" not in builder
+    # And nothing in the builder aggregates at all any more.
+    assert "get_conn" not in builder
 
 
 def test_stable_key_wrong_key_returns_not_found_no_name_fallback(monkeypatch):
@@ -850,9 +889,16 @@ def test_no_windsor_label_in_campaign_evidence():
     # The drawer data_sources + keyword note must not label keyword evidence "Windsor".
     ds = _region(SERVER, '"data_sources": {', "},",)
     assert "Windsor" not in ds
-    assert "latest snapshot" in ds.lower()
-    # The frontend keyword note is honest about the latest-snapshot source.
-    assert "Latest keyword snapshot" in APP_JS
+    # This used to require the string "latest snapshot", because the keyword
+    # source WAS a snapshot and the drawer had to say so. PR-ADS-157 §3 replaced
+    # it with canonical `keyword_daily_facts` over the selected window, so that
+    # disclaimer is now the opposite untruth. The claim it was protecting —
+    # "the drawer states its real source" — is asserted directly instead.
+    assert "latest snapshot" not in ds.lower()
+    assert "keyword_daily_facts" in ds
+    assert "search_terms" in ds
+    assert "waste_terms supplies classification only" in ds
+    assert "Latest keyword snapshot" not in APP_JS
 
 
 def test_drawer_data_sources_identify_canonical_headline():
