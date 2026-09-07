@@ -35,6 +35,7 @@ observing that both are spelled ``campaign_key``.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import sys
 from pathlib import Path
@@ -914,3 +915,365 @@ def test_43_drawer_reason_codes_are_all_explained():
 
     missing = emitted - mapped
     assert not missing, f"reason codes with no operator-facing explanation: {sorted(missing)}"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PostgreSQL-backed behaviour
+#
+# Everything above reasons about contracts and source. These execute the real
+# composed SQL against a real server, because a preview that returns the right
+# shape while reading the wrong rows would satisfy every test so far.
+# ═════════════════════════════════════════════════════════════════════════════
+
+from datetime import date, timedelta  # noqa: E402
+
+from tests.test_pr_ads_153e_a_pg_integration import (  # noqa: E402,F401
+    _have_postgres, pg,
+)
+
+_needs_pg = pytest.mark.skipif(
+    not _have_postgres(),
+    reason="PostgreSQL server binaries / unprivileged postgres user unavailable")
+
+#: The account every row below is stamped with — the same value tests/conftest.py
+#: configures, so a seeded row is visible to the scoped readers.
+ACCOUNT = "555"
+OTHER_ACCOUNT = "777"
+
+#: Inside the 7d window, so every window from 7d up contains it.
+DAY = date.today() - timedelta(days=2)
+#: Outside 7d but inside 30d — the row that proves the window is real.
+OLD_DAY = date.today() - timedelta(days=20)
+
+#: Two campaigns that SHARE a display name and differ only by id. The exact
+#: shape the legacy `lower(btrim(campaign_name)) = ANY(...)` query merged.
+CAMP_A = "23094767513"
+CAMP_B = "23094767514"
+SHARED_NAME = "global - competitors"
+
+
+def _exec(sql, params=()):
+    from db.connection import get_conn
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+
+
+def _seed_keyword_fact(cid, day, criterion, keyword, account=ACCOUNT):
+    """One canonical `keyword_daily_facts` row. Module level so a test can add
+    one after the fixture has run."""
+    _exec("INSERT INTO keyword_daily_facts "
+          "(source_date, customer_id, campaign_id, campaign_name, "
+          " ad_group_id, ad_group_name, criterion_id, keyword_text, "
+          " match_type, criterion_status, cost_micros, currency_code, "
+          " source_system, impressions, clicks, conversions) "
+          "VALUES (%s,%s,%s,%s,'ag1','Ad Group',%s,%s,'EXACT','ENABLED',"
+          " 5000000,'GBP','google_ads_api',100,10,1.0)",
+          (day, account, cid, SHARED_NAME, criterion, keyword))
+
+
+@pytest.fixture()
+def seeded(pg, monkeypatch):  # noqa: F811
+    """A live database with two same-named campaigns and their canonical facts."""
+    import db.connection as connection
+    monkeypatch.setenv("DATABASE_URL", pg.url)
+    monkeypatch.setenv("GOOGLE_ADS_CUSTOMER_ID", ACCOUNT)
+    connection._pool = None
+    connection.init_pool()
+    from db.schema import init_db
+    init_db()
+
+    for cid in (CAMP_A, CAMP_B):
+        for day in (DAY, OLD_DAY):
+            _exec("INSERT INTO google_ads_campaign_daily_spend "
+                  "(customer_id, currency_code, campaign_id, campaign_name, "
+                  " spend_date, cost_micros, spend_account_currency) "
+                  "VALUES (%s,'GBP',%s,%s,%s,%s,%s)",
+                  (ACCOUNT, cid, SHARED_NAME, day, 10_000_000, 10.0))
+
+    # Keyword facts: one criterion per campaign inside the 7d window, plus one
+    # for campaign A outside it.
+    #
+    # NOTE: no foreign-account row here. Test 46 seeds one itself, because the
+    # scope guard withholds the WHOLE preview when it sees one — correctly —
+    # and leaving it in the shared fixture would mean no other test could ever
+    # observe a row. Discovered by writing these tests: the guard is not
+    # decorative, and a fixture that trips it certifies nothing else.
+    _seed_keyword_fact(CAMP_A, DAY, "c-a-in", "winfleet a")
+    _seed_keyword_fact(CAMP_B, DAY, "c-b-in", "winfleet b")
+    _seed_keyword_fact(CAMP_A, OLD_DAY, "c-a-old", "winfleet old")
+
+    # Search-term facts for the same two campaigns.
+    for cid, term in ((CAMP_A, "winfleet a"), (CAMP_B, "winfleet b")):
+        _exec("INSERT INTO search_terms "
+              "(source_date, campaign_name, campaign_id, ad_group, keyword, "
+              " match_type, search_term, customer_id, spend_usd, clicks, "
+              " impressions, conversions, source_system) "
+              "VALUES (%s,%s,%s,'Ad Group','','',%s,%s,5.0,10,100,1.0,"
+              " 'google_ads_api')",
+              (DAY, SHARED_NAME, cid, term, ACCOUNT))
+    yield pg
+
+
+@_needs_pg
+def test_44_pg_keyword_preview_returns_only_this_campaigns_rows(seeded):
+    """The defect, executed. Two campaigns share a display name; the preview
+    for one must not contain the other's keyword."""
+    section = kw_svc.build_campaign_keyword_preview("7d", CAMP_A)
+    assert section["available"] is True, section.get("reason")
+    keywords = {r["keyword"] for r in section["rows"]}
+    assert "winfleet a" in keywords
+    assert "winfleet b" not in keywords, (
+        "a campaign sharing a display name leaked into this campaign's preview")
+
+
+@_needs_pg
+def test_45_pg_keyword_preview_respects_the_selected_window(seeded):
+    """The old query took the latest snapshot regardless of the window."""
+    seven = kw_svc.build_campaign_keyword_preview("7d", CAMP_A)
+    thirty = kw_svc.build_campaign_keyword_preview("30d", CAMP_A)
+    assert seven["available"] and thirty["available"]
+
+    seven_kw = {r["keyword"] for r in seven["rows"]}
+    thirty_kw = {r["keyword"] for r in thirty["rows"]}
+    assert "winfleet old" not in seven_kw, "a row outside the 7d window was returned"
+    assert "winfleet old" in thirty_kw, "a row inside the 30d window was missing"
+    assert seven["window_start"] != thirty["window_start"]
+
+
+@_needs_pg
+def test_46_pg_foreign_account_rows_are_withheld(seeded):
+    """A criterion belonging to another account, on the same date, under the
+    same campaign id.
+
+    `fetch_keyword_aggregates` filters on `source_date` ALONE — there is no
+    `customer_id` predicate in that SQL — so the foreign row genuinely comes
+    back from the database. The preview must refuse the whole result rather
+    than publish another account's spend inside this campaign's drawer.
+
+    Before the row is added, the same call succeeds. That contrast is the point:
+    it shows the withholding is caused by the foreign row and not by some other
+    unavailability.
+    """
+    before = kw_svc.build_campaign_keyword_preview("7d", CAMP_A)
+    assert before["available"] is True, before.get("reason")
+
+    _seed_keyword_fact(CAMP_A, DAY, "c-foreign", "winfleet foreign",
+                       account=OTHER_ACCOUNT)
+
+    after = kw_svc.build_campaign_keyword_preview("7d", CAMP_A)
+    assert after["available"] is False
+    assert after["reason"] == kw_svc.PREVIEW_UNAVAILABLE_SCOPE
+    assert after["rows"] == [], "foreign-account rows must not reach the drawer"
+    assert after["total_count"] is None
+
+
+@_needs_pg
+def test_47_pg_flagged_preview_is_campaign_and_window_scoped(seeded):
+    section = st_svc.build_campaign_flagged_preview("7d", CAMP_A)
+    _assert_section_contract(section, where="pg flagged preview")
+    if section["available"]:
+        terms = {r["search_term"] for r in section["rows"]}
+        assert "winfleet b" not in terms, "another campaign's term leaked in"
+        assert section["window_start"] is not None
+        assert section["window_end"] is not None
+
+
+@_needs_pg
+def test_48_pg_empty_campaign_is_available_and_empty_not_unavailable(seeded):
+    """A campaign identity with no keyword facts is a MEASUREMENT.
+
+    This is the distinction the whole section contract exists for, and it can
+    only be checked against a real database: an in-memory double would return
+    whatever the test told it to.
+    """
+    section = kw_svc.build_campaign_keyword_preview("7d", "99999999999")
+    assert section["available"] is True, section.get("reason")
+    assert section["rows"] == []
+    assert section["reason"] is None
+    assert section["total_count"] == 0
+
+
+@_needs_pg
+def test_49_pg_campaign_detail_endpoint_composes_both_previews(seeded):
+    """End to end: the real endpoint builder, against a real database."""
+    import api.server as server
+    detail = server._build_campaign_detail(SHARED_NAME, 7, window_key="7d",
+                                           campaign_key=CAMP_A)
+    assert "keyword_evidence" in detail
+    assert "flagged_evidence" in detail
+    _assert_section_contract(detail["keyword_evidence"], where="endpoint keyword")
+    _assert_section_contract(detail["flagged_evidence"], where="endpoint flagged")
+    # The legacy keys still exist and carry the canonical rows.
+    assert detail["keywords"] == (detail["keyword_evidence"].get("rows") or [])
+    assert detail["waste_terms"] == (detail["flagged_evidence"].get("rows") or [])
+    assert "Canonical keyword_daily_facts" in detail["keywords_note"]
+
+
+@_needs_pg
+def test_50_pg_one_broken_section_does_not_take_down_the_payload(seeded):
+    """A failing preview must cost the operator the preview, not the drawer."""
+    import api.server as server
+    original = st_svc.build_campaign_flagged_preview
+    st_svc.build_campaign_flagged_preview = lambda *a, **k: (
+        _ for _ in ()).throw(RuntimeError("search-term backend down"))
+    try:
+        detail = server._build_campaign_detail(SHARED_NAME, 7, window_key="7d",
+                                               campaign_key=CAMP_A)
+    finally:
+        st_svc.build_campaign_flagged_preview = original
+
+    assert detail["flagged_evidence"]["available"] is False
+    assert detail["flagged_evidence"]["reason"] == "flagged_preview_failed"
+    # …and the independent evidence is untouched.
+    assert detail["keyword_evidence"]["available"] is True
+    assert detail["campaign"] is not None
+    assert detail.get("db_unavailable") is not True
+
+
+@_needs_pg
+def test_51_pg_unconfigured_account_fails_closed_over_a_populated_table(seeded,
+                                                                       monkeypatch):
+    """Fail-closed matters ONLY over a populated table.
+
+    With no rows, every implementation returns nothing and looks correct. These
+    rows exist and would be returned by an unscoped read, so this is the case
+    that distinguishes a real gate from an absent one.
+    """
+    monkeypatch.delenv("GOOGLE_ADS_CUSTOMER_ID", raising=False)
+    for section in (kw_svc.build_campaign_keyword_preview("7d", CAMP_A),
+                    st_svc.build_campaign_flagged_preview("7d", CAMP_A)):
+        assert section["available"] is False
+        assert section["reason"] == "google_ads_customer_not_configured"
+        assert section["rows"] == []
+        assert section["customer_id"] is None
+
+
+@_needs_pg
+def test_52_pg_all_windows_execute_against_a_real_server(seeded):
+    """Every supported window runs its real composed SQL, including all_time."""
+    for window in ("7d", "14d", "30d", "60d", "180d", "all_time"):
+        kw = kw_svc.build_campaign_keyword_preview(window, CAMP_A)
+        st = st_svc.build_campaign_flagged_preview(window, CAMP_A)
+        _assert_section_contract(kw, where=f"pg keyword/{window}")
+        _assert_section_contract(st, where=f"pg flagged/{window}")
+        if window == "all_time":
+            assert kw["all_time"] is True, "all_time must disclose itself"
+        elif kw["available"]:
+            assert kw["all_time"] is not True
+            assert kw["window_start"] and kw["window_end"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §8 — the audit command's exit codes
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _run_audit(env_extra=None, args=("--window", "30d", "--json")):
+    """Run the audit as a SUBPROCESS.
+
+    In-process would let the test's own imports, pool and patched modules decide
+    the outcome. The command's contract is that it initialises its own pool and
+    exits with a code an operator or a CI job can act on, and a subprocess is
+    the only way to check that claim.
+    """
+    import os
+    import subprocess
+    env = {**os.environ, **(env_extra or {})}
+    return subprocess.run(
+        [sys.executable, "-m", "scripts.audit_campaign_evidence_certification",
+         *args],
+        capture_output=True, text=True, cwd=str(_ROOT), env=env)
+
+
+def test_53_audit_exits_2_when_the_database_is_unavailable():
+    """Unavailable is exit 2, never exit 1 and never exit 0.
+
+    "The database is down" and "the code publishes an uncertified number" lead
+    an operator to opposite actions. Collapsing them would make an outage look
+    like a defect, and — far worse — would let a real defect hide behind one.
+    """
+    result = _run_audit({"DATABASE_URL": ""})
+    assert result.returncode == 2, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["certified"] is False
+    assert payload["exit_code"] == 2
+    assert payload["violations"] == [], (
+        "a database outage must not be reported as a truth-contract violation")
+    assert payload["unavailable"], "an outage must be reported, not swallowed"
+
+
+def test_54_audit_exits_2_for_an_unknown_window():
+    result = _run_audit(args=("--window", "not_a_window", "--json"))
+    assert result.returncode == 2
+
+
+def test_55_audit_reports_no_external_writes():
+    result = _run_audit({"DATABASE_URL": ""})
+    payload = json.loads(result.stdout)
+    assert payload["external_writes_performed"] is False
+
+
+def test_56_audit_is_read_only_by_construction():
+    """No write verb and no external client anywhere in the audit source."""
+    path = _ROOT / "scripts" / "audit_campaign_evidence_certification.py"
+    src = path.read_text()
+    # Strip comments AND docstrings. The module docstring states that Google
+    # Ads, HubSpot and Mailchimp are never contacted — a raw scan would fail
+    # precisely because the guarantee was written down. `ast.unparse` drops
+    # comments; docstrings are removed explicitly.
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(body, list) and body:
+            first = body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                node.body = body[1:] or [ast.Pass()]
+    lowered = ast.unparse(tree).lower()
+    for verb in ("insert into", "update ", "delete from", "drop ", "truncate",
+                 "commit()"):
+        assert verb not in lowered, f"write verb {verb!r} in a read-only audit"
+    for client in ("googleads", "google.ads", "hubspot", "requests.post",
+                   "requests.put", "requests.patch"):
+        assert client not in lowered, f"external client {client!r} in the audit"
+
+
+def test_57_audit_reports_a_concise_default_and_full_json():
+    """Both output modes exist and agree on the verdict."""
+    human = _run_audit({"DATABASE_URL": ""}, args=("--window", "30d"))
+    assert "PR-ADS-157" in human.stdout
+    assert "External writes performed: no" in human.stdout
+    assert "VERDICT: UNAVAILABLE" in human.stdout
+    assert human.returncode == 2
+
+    machine = _run_audit({"DATABASE_URL": ""})
+    assert json.loads(machine.stdout)["exit_code"] == human.returncode
+
+
+def test_58_audit_static_checks_pass_on_this_branch():
+    """The legacy-reader, waste-metric and frontend-gate checks certify HEAD.
+
+    These run without a database, so a failure here is a genuine regression in
+    the code this PR changed rather than an environment problem.
+    """
+    from scripts import audit_campaign_evidence_certification as audit
+    findings = audit.Findings()
+    audit.check_legacy_readers(findings)
+    audit.check_no_waste_terms_metric(findings)
+    audit.check_frontend_gates(findings)
+    assert findings.violations == [], findings.violations
+    assert findings.unavailable == [], findings.unavailable
+    assert all(c["ok"] for c in findings.checks)
+
+
+@_needs_pg
+def test_59_audit_runs_all_windows_against_a_real_database(seeded):
+    """The live half of the audit, executed rather than described."""
+    from scripts import audit_campaign_evidence_certification as audit
+    findings, per_window = audit.run(audit.WINDOWS)
+    assert set(per_window) == set(audit.WINDOWS)
+    assert findings.violations == [], findings.violations
+    # Every window either reported availability or said why it could not.
+    for window, data in per_window.items():
+        assert "available" in data, f"{window} produced no verdict"
+
+
