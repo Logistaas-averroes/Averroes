@@ -1854,14 +1854,44 @@ def test_80_campaign_not_found_is_not_an_outage(monkeypatch):
 # §5 correction — the audit must FAIL on each of these regressions
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _audit_violations(**patched_sources) -> list[str]:
-    """Run the audit's static checks over a temporarily patched source tree.
+#: Run the audit's static checks and print the violation names, one per line.
+#: Executed in a SUBPROCESS — see `_audit_violations` for why that matters.
+_AUDIT_PROBE = """
+import sys
+sys.path.insert(0, %r)
+from scripts import audit_campaign_evidence_certification as audit
+f = audit.Findings()
+audit.check_account_scope_before_aggregation(f)
+audit.check_section_contracts_are_complete(f)
+audit.check_outage_propagation(f)
+audit.check_frontend_gates(f)
+for v in f.violations:
+    print(v.split(":")[0])
+"""
 
-    Each check reads the real files, so the only honest way to prove it can fail
-    is to reintroduce the defect on disk and watch it fail. Every file is
+
+def _audit_violations(**patched_sources) -> list[str]:
+    """Violation names from the audit's static checks, over a patched tree.
+
+    Each check reads the real files, so the only honest way to prove one can
+    fail is to reintroduce the defect on disk and watch it fail. Every file is
     restored in `finally`, including on assertion error.
+
+    Run in a SUBPROCESS, deliberately. The first version of this helper deleted
+    `db.*`, `services.*` and `api.*` from `sys.modules` and re-imported them so
+    the audit would see the patched source. That worked — and left every later
+    suite in the process holding references to the OLD module objects while new
+    ones existed alongside, including a second `db.connection` with its own
+    `_pool`. Fifty tests in the revenue-attribution suites failed with
+    `source_unavailable` and `NoneType is not subscriptable`, none of them near
+    the cause.
+
+    It is the same module-identity hazard `tests/conftest.py` exists to prevent,
+    reintroduced by the test written to guard against a related one. A
+    subprocess gets a genuinely fresh interpreter and cannot touch this one.
     """
-    import importlib
+    import subprocess
+
     originals = {path: Path(path).read_text() for path in patched_sources}
     try:
         for path, replace in patched_sources.items():
@@ -1871,23 +1901,15 @@ def _audit_violations(**patched_sources) -> list[str]:
                 src = src.replace(old, new, 1)
             Path(path).write_text(src)
 
-        for name in list(sys.modules):
-            if name.startswith(("services.", "api.", "db.", "scripts.")):
-                del sys.modules[name]
-        audit = importlib.import_module(
-            "scripts.audit_campaign_evidence_certification")
-        f = audit.Findings()
-        audit.check_account_scope_before_aggregation(f)
-        audit.check_section_contracts_are_complete(f)
-        audit.check_outage_propagation(f)
-        audit.check_frontend_gates(f)
-        return [v.split(":")[0] for v in f.violations]
+        result = subprocess.run(
+            [sys.executable, "-c", _AUDIT_PROBE % str(_ROOT)],
+            capture_output=True, text=True, cwd=str(_ROOT))
+        assert result.returncode == 0, (
+            f"the audit probe crashed:\n{result.stdout}\n{result.stderr}")
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
     finally:
         for path, text in originals.items():
             Path(path).write_text(text)
-        for name in list(sys.modules):
-            if name.startswith(("services.", "api.", "db.", "scripts.")):
-                del sys.modules[name]
 
 
 def test_81_audit_is_clean_on_this_branch():
