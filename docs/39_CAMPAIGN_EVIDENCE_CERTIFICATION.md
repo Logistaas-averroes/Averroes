@@ -83,40 +83,92 @@ classification doctrine and no new aggregation logic is introduced.
 |---|---|---|---|---|---|
 | headline card | canonical Google Ads daily spend + durable HubSpot event-date outcomes | campaign | `campaign_key` + approved aliases | selected | canonical spend read is customer-scoped |
 | lead quality / countries / recent leads | same service as the table | campaign | `campaign_key` + alias set | selected | — |
-| **keywords** | `keyword_daily_facts` via `keyword_evidence_service.build_campaign_keyword_preview` | criterion (`campaign_id` + `ad_group_id` + `criterion_id`) | `campaign_key` — **never a display name** | selected | **verified from returned rows** (see below) |
+| **keywords** | `keyword_daily_facts` via `keyword_evidence_service.build_campaign_keyword_preview` | criterion (`campaign_id` + `ad_group_id` + `criterion_id`) | `campaign_key` — **never a display name** | selected | **enforced in SQL**, before aggregation (see below) |
 | **flagged search terms** | `search_terms` via `search_term_evidence_service.build_campaign_flagged_preview`; `waste_terms` annotation only | `search_term` × canonical campaign identity | `campaign_key` | selected | **enforced in SQL** by `canonical_scope()` |
 
-### The account-scope asymmetry, and why it is declared rather than assumed
+### The account-scope asymmetry, and how it was actually resolved
 
 `db/search_term_repository.py` applies `canonical_scope(start, end)` — an account
-+ provenance predicate in SQL. `db/keyword_repository.py:60` does not:
++ provenance predicate in SQL. `db/keyword_repository.py` originally did not:
 
 ```
 _WINDOW = "(%s::date IS NULL OR source_date >= %s) AND source_date <= %s"
 ```
 
-That is a date filter with no `customer_id` clause. The first version of the
-keyword adapter nevertheless declared
+A date filter with no `customer_id` clause. The first version of the keyword
+adapter nevertheless declared `"scope": "account + campaign_id, …"`, which was
+false — a claim about a predicate that did not exist.
 
+The first attempt at a fix replaced the claim with a **page scan**: `_unit_row`
+emits `customer_id`, and the preview compared every returned row against the
+configured account. That was still wrong, for a reason worth recording.
+
+**Filtering a page is not scoping a population.** The preview returns ten rows
+while `total_count`, the monetary KPIs, the match-type summary and the coverage
+block are computed over the *whole* filtered population. A foreign-account row
+sorting below the preview limit is invisible to a page scan and still
+contributes to every one of those aggregates — rows that look clean sitting on
+top of totals that are not.
+
+So the predicate went into the query:
+
+```python
+_ACCOUNT = "customer_id = ANY(%s)"          # db/keyword_repository.py
+fetch_keyword_aggregates(start, end, customer_ids=[...])
+fetch_keyword_daily_costs(start, end, customer_ids=[...])
 ```
-"scope": "account + campaign_id, selected evidence window"
+
+applied in `_build_population`, therefore **before** grouping, summing, sorting
+and pagination. Both keyword reads take it, because the per-date FX costs must
+describe the same population as the aggregates or the conversion would be
+computed over rows the aggregates excluded.
+
+Three properties are load-bearing:
+
+* `customer_ids=None` means account-wide — unchanged for the Keyword Evidence
+  page and every other existing caller. This is additive.
+* `customer_ids=[]` means *no account resolved* and still applies the predicate,
+  so it selects **nothing**. Collapsing an empty candidate list to "no filter"
+  is how an unscoped total gets published under an account-scoped label.
+* The predicate is exact (`= ANY` over a fixed candidate list) and NULL-hostile.
+  A row with no `customer_id` cannot match — treating "no account recorded" as
+  "our account" is the assumption that produced 16,100 account-less twins in
+  PR-ADS-156-F3, and it is not made here.
+
+The page scan survives as a **post-condition**, not the certification: it costs
+nothing and fails loudly if the predicate is ever dropped, mis-parameterised or
+bypassed. `account_scope` now reads `"enforced in SQL by customer_id =
+ANY(candidates), before aggregation, sorting and pagination"`.
+
+### Section contracts come from one builder per section
+
+`keyword_preview_unavailable` and `flagged_preview_unavailable` are the single
+sources of an unavailable §6 section, used by the services and by
+`api/server.py`, which maintains none of its own. The dictionaries it previously
+hand-wrote held four keys out of sixteen.
+
+That matters because of how the renderer reads them: it decides whether it may
+say "selected-window evidence" from `window_start`/`window_end`, and a *missing*
+key and a genuinely unbounded read both arrive as `None`. An incomplete contract
+is not a smaller answer — it is one the renderer cannot tell from a real one.
+
+### Database outage is read from the envelope
+
+`build_campaign_drawer_evidence` returns `db_unavailable` on the **envelope**,
+beside a `None` campaign:
+
+```python
+return {"campaign": None, …, "label_set": [], "db_unavailable": True}
 ```
 
-which was false, and false in exactly the way this PR exists to remove — a claim
-about a predicate that does not exist.
+so `(row or {}).get("db_unavailable")` evaluated `False` in exactly the case it
+existed to detect, and a dead database rendered as *"No campaign detail
+available for this window"* — a factual claim about the campaign instead of an
+admission that nothing could be read. The flag is now taken from `ev`, and the
+whole-drawer banner is raised only when the headline **and both** previews are
+unavailable: three separate reads through three services, and an outage in one
+is not evidence about the others.
 
-Two honest options were available: add account scoping to the shared keyword
-query, which would change the Keyword Evidence page globally and is outside this
-PR's remit; or prove the account instead of asserting it. The second was chosen.
-`_unit_row` now emits `customer_id` (additive — existing consumers ignore it),
-and the preview compares every returned row against the configured account's
-exact spellings. A row from another account, or a row with no account recorded
-at all, is a **scope violation**: the rows are withheld entirely rather than
-shown with a caveat, and the section declares `account_scope: "verified from
-returned rows (read is date-scoped)"`.
-
-Treating "no account recorded" as "our account" is the assumption that produced
-16,100 account-less twins in PR-ADS-156-F3. It is not made here.
 
 ### SQL publication policy
 
@@ -135,6 +187,14 @@ block is unproven, not permission.
 | `mismatch` | Reconciliation required | Reconciliation required | raw, labelled unreconciled | withheld | Reconciliation required | disabled + coerced to neutral |
 | `partial` | withheld, reason stated | withheld | raw, labelled unreconciled | withheld | Reconciliation required | disabled |
 | `unavailable` | withheld, never `0` | withheld | raw, labelled unreconciled | withheld | Reconciliation required | disabled |
+
+The SQL-dependent **status** filters — "SQL producer" and "Spend without SQL
+proof" — obey the same rule. Both are conclusions read off the SQL count, so
+both `<option>`s are disabled when the scope is unproven, a stale selection is
+cleared, and `filterCampaignEvidence` refuses them internally before the
+equality check that would otherwise exclude every row. The four SQL-independent
+statuses (Junk-heavy, Mapping review, No outcome evidence, Data unavailable)
+never depended on the count and keep working in every state.
 
 Spend, leads, confirmed junk and wrong-fit are independent of the SQL scope and
 stay published in every state. Withholding them would punish the operator for a
