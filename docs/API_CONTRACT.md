@@ -4004,3 +4004,74 @@ is the safe outcome: the range stays uncovered, the gate keeps Country ROAS
 blocked, and the next run picks it up.
 
 Full doctrine: `docs/36_CANONICAL_COUNTRY_GEOGRAPHY.md`.
+
+## SQL doctrine audit CLI — `python -m scripts.audit_sql_doctrine_inventory` (PR-ADS-158)
+
+Read-only investigation command; there is no HTTP endpoint. It inventories every
+production SQL consumer, classifies every discovered code occurrence against the
+reviewed registry in `analysis/sql_doctrine_registry.py`, and compares the legacy
+SQL population (`status_category = qualified` on `contact_created_at`, built by
+`canonical_contact_outcome_service`) against the canonical lifecycle population
+(entered `salesqualifiedlead` on `date_entered_sql`, built by
+`canonical_crm_funnel_service`) on durable contact keys for every Evidence window
+(`7d`, `14d`, `30d`, `60d`, `180d`, `all_time`) and Business window
+(`current_quarter`, `last_quarter`, `last_6_months`, `ytd`, `all_time`).
+
+```
+python -m scripts.audit_sql_doctrine_inventory                  # human report
+python -m scripts.audit_sql_doctrine_inventory --json           # machine-readable
+python -m scripts.audit_sql_doctrine_inventory --static-only    # no database
+python -m scripts.audit_sql_doctrine_inventory --json --occurrences
+```
+
+| Exit | Meaning |
+|---|---|
+| `0` | audit completed and every discovered production occurrence is classified — legacy may still exist |
+| `1` | audit incomplete: an unclassified production occurrence, a registry contradiction, or a write-safety failure |
+| `2` | required database / canonical source unavailable, so the runtime comparison could not run |
+
+JSON top level (never a single ambiguous `ok`):
+
+```jsonc
+{
+  "audit_complete": true,             // every occurrence classified
+  "migration_complete": false,        // no active legacy / mixed consumer remains
+  "verdict": "READY_FOR_ROADMAP",     // | AUDIT_INCOMPLETE | SOURCE_UNAVAILABLE
+  "exit_code": 0,
+  "canonical_standard": { ... },      // the reference SQL doctrine
+  "legacy_standard": { ... },
+  "inventory": [ ... ],               // every consumer record (§4 fields)
+  "active_legacy_consumers": [ ... ],
+  "mixed_consumers": [ ... ],
+  "canonical_lifecycle_consumers": [ ... ],
+  "unclassified_occurrences": [],
+  "static_discovery": { "production_occurrences": 1117, "occurrences_by_classification": {...}, ... },
+  "window_comparisons": [             // one per window
+    { "window_type": "evidence", "window": "30d", "start_date": "...", "end_date": "...",
+      "legacy_counts": {"all_source": 6, "google_ads_source": 6, "campaign_attributable": 6, "keyword_attributable": null},
+      "lifecycle_counts": {"all_source": 33, "google_ads_source": 8, "campaign_attributable": 8, "keyword_attributable": 8},
+      "overlap_count": 4, "legacy_only_count": 2, "lifecycle_only_count": 29,
+      "date_shifted_count": 1, "missing_sql_entry_date_count": 40,
+      "totals_equal": false, "populations_equal": false, "population_difference": true,
+      "difference_reason_codes": ["event_date_moved_from_creation_to_stage_entry", "..."],
+      "classification_gaps": { "sql_contacts_stale_classification": 0, "non_sql_contacts_missing_classification": 1,
+                               "production_status": "partial", "status_if_only_sql_gaps_counted": "reconciled",
+                               "irrelevant_non_sql_gap_affects_sql_status": true },
+      "legacy_reconciliation": {"status": "partial", "reasons": ["missing_non_sql_classification"]},
+      "lifecycle_reconciliation": {"status": "partial", "reasons": ["missing_stage_entry_date"], "reasons_not_about_sql": []},
+      "legacy_complete_total_publishable": false, "lifecycle_complete_total_publishable": false,
+      "legacy_cpql_denominator_complete": false, "lifecycle_cpql_denominator_complete": false }
+  ],
+  "coverage_gaps": { ... },
+  "cpql_consumers": [ ... ],
+  "decision_surfaces": [ ... ],
+  "known_contract_conflicts": [ ... ],
+  "write_safety": { "ok": true, "problems": [], "runtime_guard": {"installed": true} },
+  "external_writes_performed": false,
+  "database_writes_performed": false,
+  "summary": { ... }                  // the human report's closing block
+}
+```
+
+An unavailable side reports `null` counts, never `0`. No email address or phone
+number appears in any output. Full findings: `docs/audits/PR_ADS_158_SQL_DOCTRINE_INVENTORY.md`.
