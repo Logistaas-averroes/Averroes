@@ -4009,7 +4009,9 @@ Full doctrine: `docs/36_CANONICAL_COUNTRY_GEOGRAPHY.md`.
 
 Read-only investigation command; there is no HTTP endpoint. It inventories every
 production SQL consumer, classifies every discovered code occurrence against the
-reviewed registry in `analysis/sql_doctrine_registry.py`, and compares the legacy
+reviewed registry in `analysis/sql_doctrine_registry.py` (explicit path + symbol or
+path + specific-pattern bindings only; an unbound occurrence is
+`unknown_requires_review` and exits 1), and compares the legacy
 SQL population (`status_category = qualified` on `contact_created_at`, built by
 `canonical_contact_outcome_service`) against the canonical lifecycle population
 (entered `salesqualifiedlead` on `date_entered_sql`, built by
@@ -4045,7 +4047,7 @@ JSON top level (never a single ambiguous `ok`):
   "mixed_consumers": [ ... ],
   "canonical_lifecycle_consumers": [ ... ],
   "unclassified_occurrences": [],
-  "static_discovery": { "production_occurrences": 1117, "occurrences_by_classification": {...}, ... },
+  "static_discovery": { "production_occurrences": 1150, "occurrences_by_classification": {...}, ... },
   "window_comparisons": [             // one per window
     { "window_type": "evidence", "window": "30d", "start_date": "...", "end_date": "...",
       "legacy_counts": {"all_source": 6, "google_ads_source": 6, "campaign_attributable": 6, "keyword_attributable": null},
@@ -4055,8 +4057,15 @@ JSON top level (never a single ambiguous `ok`):
       "totals_equal": false, "populations_equal": false, "population_difference": true,
       "difference_reason_codes": ["event_date_moved_from_creation_to_stage_entry", "..."],
       "classification_gaps": { "sql_contacts_stale_classification": 0, "non_sql_contacts_missing_classification": 1,
-                               "production_status": "partial", "status_if_only_sql_gaps_counted": "reconciled",
-                               "irrelevant_non_sql_gap_affects_sql_status": true },
+                               "production_status": "partial",
+                               "status_without": {"sql_stale": "partial", "sql_missing": "partial",
+                                                  "non_sql_stale": "partial", "non_sql_missing": "reconciled",
+                                                  "all_sql_gaps": "partial", "all_non_sql_gaps": "reconciled",
+                                                  "all_classification_gaps": "reconciled"},
+                               "category_changes_sql_status": {"sql_stale": false, "sql_missing": false,
+                                                               "non_sql_stale": false, "non_sql_missing": true},
+                               "joint_dependency": {"non_sql": false, "sql": false, "all_gaps": false},
+                               "irrelevant_non_sql_gap_affects_sql_status": true, "flags_consistent": true },
       "legacy_reconciliation": {"status": "partial", "reasons": ["missing_non_sql_classification"]},
       "lifecycle_reconciliation": {"status": "partial", "reasons": ["missing_stage_entry_date"], "reasons_not_about_sql": []},
       "legacy_complete_total_publishable": false, "lifecycle_complete_total_publishable": false,

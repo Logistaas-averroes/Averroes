@@ -75,8 +75,8 @@ the JSON report. Summary at the audited commit:
 | `inactive_legacy` | 2 | revenue attribution JSON fallback (reachable only when the database read fails); Claude advisor mode |
 
 Consumers affecting executive totals: 16. Consumers affecting operational
-decisions: 22. Production occurrences discovered and classified: 1,117 across
-16 patterns; unclassified: 0.
+decisions: 22. Production occurrences discovered and classified: 1,150 across
+19 patterns; unclassified: 0.
 
 ### Discovery method
 
@@ -92,12 +92,28 @@ line matching one of 19 regex markers (`status_category = 'qualified'`,
 `no_sql`, `canonical_crm_funnel_service` / `crm_funnel_repository`,
 `crm_funnel_reconciliation_service` / `sql_truth_audit_service`). Each
 occurrence is attributed to its enclosing Python function (via `ast`) or
-top-level JavaScript function, then matched against the reviewed rules in
-`analysis/sql_doctrine_registry.py::RULES` (most specific path + symbol +
-pattern wins). `tests/`, `docs/`, `*.md`, `*_fixtures.*` and `*.json` are
-scanned but classified by location and never counted as production. An
-occurrence with no rule is `unknown_requires_review` and makes
-`audit_complete = false` (exit 1).
+top-level JavaScript function, then matched against the reviewed bindings in
+`analysis/sql_doctrine_registry.py::RULES`.
+
+**Binding contract (audit-integrity correction, PR review).** A binding is an
+exact file path plus either the enclosing symbol(s) it covers, or a pattern
+from `SPECIFIC_PATTERNS` (the doctrine literals and service references — never
+`sqls`, `contact_created_at`, `cpql`, `confirmed_sqls` or a bare `SQLs` label).
+Module-level bindings (`<module>`) must name the patterns they cover. There are
+no folder, glob or whole-file bindings, and no exceptions: `scheduler/` has no
+SQL occurrence and no binding at all. A new function carrying an SQL marker
+inside any known file — an engine, a page service, a scheduler module,
+`static/app.js` — therefore surfaces as `unknown_requires_review` and makes
+`audit_complete = false` (exit 1) until someone reviews it and binds it. The
+regression tests in `tests/test_pr_ads_158_sql_doctrine_audit.py` inject such
+a function into `campaign_evidence_service`, `canonical_contact_outcome_service`,
+`scheduler/weekly.py` and `static/app.js` and require exactly that outcome.
+
+`tests/`, `docs/`, `*.md`, `*_fixtures.*` and `*.json` are scanned but
+classified by location and never counted as production.
+
+At the audited head: 1,150 production occurrences discovered, 0 unclassified,
+124 explicit bindings.
 
 ## 4. Date-field differences [STATIC][CONFIRMED]
 
@@ -240,14 +256,24 @@ excluded = 0, unmatched = 0 and mapping coverage is complete.
 The audit reports per window: `sql_contacts_stale_classification`,
 `sql_contacts_missing_classification`,
 `non_sql_contacts_stale_classification`,
-`non_sql_contacts_missing_classification`, whether each category currently
-changes the status, `production_status`,
-`status_if_only_sql_gaps_counted` (the same production function re-run with
-the stale / missing counts restricted to SQL contacts), and
-`irrelevant_non_sql_gap_affects_sql_status` — `true` only when removing the
-non-SQL gaps changes the production status. `tests/test_pr_ads_158_sql_doctrine_audit.py::test_15`
-and the PostgreSQL test `test_hidden_non_sql_gap_downgrades_sql_reconciliation`
-prove the mechanism.
+`non_sql_contacts_missing_classification`, `production_status`, and a
+`status_without` block holding the production status function re-evaluated
+on one **counterfactual per gap category** (that category's contacts removed),
+plus "all SQL gaps removed", "all non-SQL gaps removed" and "all gaps
+removed". `category_changes_sql_status.<category>` is `true` only when that
+category's own counterfactual yields a different status than production; a
+category that merely co-exists with `partial` is `false`. When no single
+category flips the status but a group does, `joint_dependency` reports it as
+joint rather than attributing it to a member.
+`irrelevant_non_sql_gap_affects_sql_status` equals "all non-SQL gaps removed
+changes the status", so it cannot contradict the per-category flags
+(`flags_consistent` asserts this). An independent cause — an unresolved
+campaign identity keeping `google_ads_source ≠ campaign_attributable`, an
+excluded SQL, a nesting violation — keeps every counterfactual `partial` and
+yields `false` everywhere. `tests/test_pr_ads_158_sql_doctrine_audit.py::test_15`,
+`test_15b` (independent campaign-identity cause) and `test_15c` (joint
+dependency) and the PostgreSQL test
+`test_hidden_non_sql_gap_downgrades_sql_reconciliation` prove the mechanism.
 
 A second hidden cause on the lifecycle side [STATIC][CONFIRMED]:
 `canonical_crm_funnel_service.reconciliation_status` returns `partial` when any

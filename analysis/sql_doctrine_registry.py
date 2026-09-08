@@ -619,15 +619,37 @@ CONSUMERS: list[dict] = [
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# RULES — every production occurrence must match one.
+# RULES — every production occurrence must match one EXPLICIT binding.
+#
+# Binding contract (enforced by ``analysis.sql_doctrine_audit.validate_rules``
+# and by the regression tests):
+#   * ``path`` is an exact file. No folder or glob bindings exist.
+#   * a rule names the enclosing ``symbol``(s) it covers, or a pattern from
+#     ``SPECIFIC_PATTERNS``. Broad patterns (``sqls``, ``contact_created_at``,
+#     ``cpql``, bare "SQLs" labels, ``confirmed_sqls`` …) can only be bound
+#     together with a symbol.
+#   * ``<module>`` bindings name the exact patterns they cover, so a new
+#     module-level statement of another kind stays unreviewed.
+#   * a new function inside ANY known file — engine, page service, scheduler,
+#     frontend — therefore surfaces as ``unknown_requires_review`` and fails the
+#     audit until it is reviewed and bound here.
+#
+# Whole-file exceptions: none. The only single-purpose modules (schema DDL,
+# the lifecycle taxonomy, index.html) are bound as ``<module>`` + patterns,
+# which is the same guarantee expressed explicitly.
 # ═════════════════════════════════════════════════════════════════════════════
-def _r(rid, path, classification, consumer=None, *, symbol=None, pattern=None) -> dict:
+def _r(rid, path, classification, consumer, *, symbol=None, pattern=None) -> dict:
     rule = {"id": rid, "path": path, "classification": classification, "consumer": consumer}
     if symbol is not None:
-        rule["symbol"] = symbol
+        rule["symbol"] = list(symbol) if isinstance(symbol, (list, tuple, set)) else [symbol]
     if pattern is not None:
-        rule["pattern"] = pattern
+        rule["pattern"] = list(pattern) if isinstance(pattern, (list, tuple, set)) else [pattern]
     return rule
+
+
+def _m(rid, path, classification, consumer, patterns) -> dict:
+    """A module-level binding: ``<module>`` + the exact patterns it covers."""
+    return _r(rid, path, classification, consumer, symbol="<module>", pattern=patterns)
 
 
 _CE = "Campaign Evidence table + KPI strip"
@@ -672,78 +694,218 @@ _STWASTE = "Search-term waste truth audit (CLI)"
 _GACONV = "Google Ads platform conversions (keyword / search-term / campaign snapshot / daily delta)"
 _JSONFALLBACK = "Legacy JSON revenue fallback (revenue_attribution_service._build_from_json)"
 _CLAUDE = "Claude advisor report writer (ADVISOR_MODE=claude)"
+_AUDIT = "PR-ADS-158 audit"
+
+# Pattern shorthands for <module> bindings.
+_ENGINE_REFS = ["legacy_outcome_service_ref", "lifecycle_funnel_service_ref",
+                "doctrine_comparison_service_ref", "platform_sql_attribution_ref"]
+_LIFECYCLE_MARKERS = ["lifecycle_sql_column_ref", "lifecycle_sql_property_ref",
+                      "lifecycle_sql_stage_ref"]
+_LEGACY_MARKERS = ["legacy_sql_literal", "legacy_python_comparison", "legacy_qualified_symbol",
+                   "sql_case_expression"]
 
 RULES: list[dict] = [
-    # ── the audit itself ────────────────────────────────────────────────────
-    _r("audit.core", "analysis/sql_doctrine_audit.py", CLS_DIAGNOSTIC, "PR-ADS-158 audit"),
-    _r("audit.registry", "analysis/sql_doctrine_registry.py", CLS_DIAGNOSTIC, "PR-ADS-158 audit"),
-    _r("audit.cli", "scripts/audit_sql_doctrine_inventory.py", CLS_DIAGNOSTIC, "PR-ADS-158 audit"),
+    # ── the audit itself (diagnostic; its own modules quote every marker) ───
+    _m("audit.core.module", "analysis/sql_doctrine_audit.py", CLS_DIAGNOSTIC, _AUDIT,
+       _ENGINE_REFS + _LIFECYCLE_MARKERS + _LEGACY_MARKERS
+       + ["confirmed_sqls_ref", "contact_created_at_ref", "cpql_ref", "sql_count_ref",
+          "sql_verdict_ref", "sqls_field_ref", "sql_reconciliation_ref"]),
+    _r("audit.core", "analysis/sql_doctrine_audit.py", CLS_DIAGNOSTIC, _AUDIT,
+       symbol=["_difference_reason_codes", "compare_window", "hidden_reconciliation_causes",
+               "_counterfactual_counts", "legacy_reconciliation_reasons", "legacy_scope_keys",
+               "lifecycle_scope_keys", "render_human", "classification_gap_breakdown",
+               "campaign_identity_breakdown", "lifecycle_campaign_breakdown",
+               "coverage_gaps", "assemble_report", "write_safety_proof",
+               "lifecycle_reasons_not_about_sql", "_scope_set_delta"]),
+    _m("audit.registry.module", "analysis/sql_doctrine_registry.py", CLS_DIAGNOSTIC, _AUDIT,
+       _ENGINE_REFS + _LIFECYCLE_MARKERS + _LEGACY_MARKERS
+       + ["confirmed_sqls_ref", "contact_created_at_ref", "cpql_ref", "sql_count_ref",
+          "sql_verdict_ref", "sqls_field_ref", "sql_reconciliation_ref", "frontend_sqls_label"]),
+    _r("audit.registry", "analysis/sql_doctrine_registry.py", CLS_DIAGNOSTIC, _AUDIT,
+       symbol=["_c", "_r", "_m"]),
+    _m("audit.cli.module", "scripts/audit_sql_doctrine_inventory.py", CLS_DIAGNOSTIC, _AUDIT,
+       _ENGINE_REFS + ["contact_created_at_ref", "cpql_ref", "lifecycle_sql_column_ref"]),
+    _r("audit.cli", "scripts/audit_sql_doctrine_inventory.py", CLS_DIAGNOSTIC, _AUDIT,
+       symbol=["_sources_block", "build_runtime_comparison", "fetch_runtime_sources",
+               "production_keyword_keys", "production_resolver_factory", "resolve_all_windows",
+               "build_static", "write_safety", "run_audit", "main", "install_read_only_guard",
+               "ReadOnlyPool"]),
 
     # ── doctrine engines ────────────────────────────────────────────────────
-    _r("engine.legacy", "services/canonical_contact_outcome_service.py", CLS_LEGACY, _LEGACY_ENGINE),
-    _r("engine.legacy.repo", "db/canonical_contact_outcome_repository.py", CLS_LEGACY, _LEGACY_ENGINE),
-    _r("engine.funnel", "services/canonical_crm_funnel_service.py", CLS_CANONICAL, _FUNNEL_ENGINE),
-    _r("engine.funnel.repo", "db/crm_funnel_repository.py", CLS_CANONICAL, _FUNNEL_ENGINE),
-    _r("engine.lifecycle.taxonomy", "analysis/crm_lifecycle.py", CLS_CANONICAL, _FUNNEL_ENGINE),
-    _r("engine.platform", "services/platform_sql_attribution_service.py", CLS_LEGACY, _PLATFORM),
-    _r("engine.platform.repo", "db/platform_sql_attribution_repository.py", CLS_LEGACY, _PLATFORM),
+    _m("engine.legacy.module", "services/canonical_contact_outcome_service.py", CLS_LEGACY,
+       _LEGACY_ENGINE, ["contact_created_at_ref", "legacy_outcome_service_ref",
+                        "legacy_qualified_symbol", "legacy_sql_literal", "sqls_field_ref"]),
+    _r("engine.legacy", "services/canonical_contact_outcome_service.py", CLS_LEGACY, _LEGACY_ENGINE,
+       symbol=["_canonical_contact", "_classification_state", "_excluded_contact", "build",
+               "build_populations", "page_reconciliation", "reconciliation_metadata",
+               "_reconciliation_status", "resolve_window_contract", "_window_block",
+               "_scope_counts", "scope_keys", "_scope_block_reasons", "_in_window",
+               "deduplicate_latest", "_build_identity_resolver"]),
+    _m("engine.legacy.repo.module", "db/canonical_contact_outcome_repository.py", CLS_LEGACY,
+       _LEGACY_ENGINE, ["contact_created_at_ref", "legacy_outcome_service_ref"]),
+    _r("engine.legacy.repo", "db/canonical_contact_outcome_repository.py", CLS_LEGACY, _LEGACY_ENGINE,
+       symbol=["_unavailable", "fetch_canonical_inputs"]),
+    _m("engine.funnel.module", "services/canonical_crm_funnel_service.py", CLS_CANONICAL,
+       _FUNNEL_ENGINE, ["legacy_outcome_service_ref", "legacy_sql_literal",
+                        "lifecycle_funnel_service_ref", "lifecycle_sql_property_ref",
+                        "lifecycle_sql_stage_ref"]),
+    _r("engine.funnel", "services/canonical_crm_funnel_service.py", CLS_CANONICAL, _FUNNEL_ENGINE,
+       symbol=["_build_campaign_resolver", "build", "contacts", "default_campaign_resolver",
+               "operational_status_breakdown", "build_populations", "reconciliation_status",
+               "_contact_scopes", "_event_counts", "scope_keys", "scopes_are_nested",
+               "lead_cohort_progression", "event_definition"]),
+    _m("engine.funnel.repo.module", "db/crm_funnel_repository.py", CLS_CANONICAL, _FUNNEL_ENGINE,
+       ["lifecycle_funnel_service_ref", "lifecycle_sql_column_ref"]),
+    _r("engine.funnel.repo.legacy_rows", "db/crm_funnel_repository.py", CLS_DIAGNOSTIC, _FUNNELREC,
+       symbol="fetch_legacy_outcome_rows"),
+    _r("engine.funnel.repo", "db/crm_funnel_repository.py", CLS_CANONICAL, _FUNNEL_ENGINE,
+       symbol=["fetch_funnel_contacts", "fetch_all_funnel_contacts", "fetch_funnel_contact_page",
+               "fetch_operational_status_counts", "fetch_contacts_missing_stage_dates",
+               "_funnel_select", "_effective_date_sql", "_recovery_join"]),
+    _m("engine.lifecycle.taxonomy", "analysis/crm_lifecycle.py", CLS_CANONICAL, _FUNNEL_ENGINE,
+       _LIFECYCLE_MARKERS),
+    _m("engine.platform.module", "services/platform_sql_attribution_service.py", CLS_LEGACY,
+       _PLATFORM, ["contact_created_at_ref", "platform_sql_attribution_ref"]),
+    _r("engine.platform", "services/platform_sql_attribution_service.py", CLS_LEGACY, _PLATFORM,
+       symbol=["fetch_and_resolve_contacts", "_attribute", "attribute_keywords",
+               "attribute_search_terms", "_keyword_audit", "_search_term_audit",
+               "contact_details_for_keys", "_completeness", "_row_state"]),
+    _m("engine.platform.repo.module", "db/platform_sql_attribution_repository.py", CLS_LEGACY,
+       _PLATFORM, ["contact_created_at_ref", "legacy_sql_literal", "platform_sql_attribution_ref"]),
+    _r("engine.platform.repo", "db/platform_sql_attribution_repository.py", CLS_LEGACY, _PLATFORM,
+       symbol="fetch_sql_contacts"),
 
     # ── platform evidence services ──────────────────────────────────────────
+    _m("ce.module", "services/campaign_evidence_service.py", CLS_LEGACY, _CE,
+       ["contact_created_at_ref", "legacy_qualified_symbol", "sql_verdict_ref"]),
     _r("ce.drawer", "services/campaign_evidence_service.py", CLS_LEGACY, _CD,
        symbol=["build_campaign_drawer_evidence", "_lead_split", "_country_split",
                "build_campaign_evidence_row"]),
-    _r("ce.reconciliation", "services/campaign_evidence_service.py", CLS_LEGACY, _CE,
-       symbol="_canonical_sql_reconciliation"),
-    _r("ce.service", "services/campaign_evidence_service.py", CLS_LEGACY, _CE),
-    _r("kw.service", "services/keyword_evidence_service.py", CLS_LEGACY, _KW),
-    _r("st.service", "services/search_term_evidence_service.py", CLS_LEGACY, _ST),
-    _r("workbench", "services/campaign_identity_service.py", CLS_LEGACY, _WORKBENCH),
+    _r("ce.service", "services/campaign_evidence_service.py", CLS_LEGACY, _CE,
+       symbol=["_add_lead", "_audit_block", "_build_summary", "_canonical_sql_reconciliation",
+               "_new_outcomes", "_outcome_status", "_row", "build_campaign_evidence",
+               "unavailable_response", "_junk_rate", "_empty_summary"]),
+    _m("kw.module", "services/keyword_evidence_service.py", CLS_LEGACY, _KW, ["sql_verdict_ref"]),
+    _r("kw.service", "services/keyword_evidence_service.py", CLS_LEGACY, _KW,
+       symbol=["_canonical_keyword_reconciliation", "_filter_sql_state", "_keyword_drawer_sql_block",
+               "_keyword_sql_attribution", "_sql_attribution_block", "build_keyword_evidence",
+               "_apply_keyword_sql", "build_keyword_drawer", "build_campaign_keyword_preview",
+               "_sort_rows"]),
+    _m("st.module", "services/search_term_evidence_service.py", CLS_LEGACY, _ST, ["sql_verdict_ref"]),
+    _r("st.service", "services/search_term_evidence_service.py", CLS_LEGACY, _ST,
+       symbol=["_canonical_st_reconciliation", "_filter_flagged_rows", "_filter_units_sql",
+               "_search_term_drawer_sql_block", "_search_term_sql_attribution",
+               "_search_term_sql_block", "build_flagged_search_terms", "build_search_term_evidence",
+               "_apply_search_term_sql", "_flagged_kpis", "_flagged_priority",
+               "_flagged_truth_state", "build_search_term_drawer", "build_campaign_flagged_preview",
+               "_empty_flagged_kpis"]),
+    _r("workbench", "services/campaign_identity_service.py", CLS_LEGACY, _WORKBENCH,
+       symbol="build_mapping_review"),
 
     # ── executive / revenue services ────────────────────────────────────────
+    _m("ovw.module", "services/dashboard_overview_service.py", CLS_MIXED, _OVW, ["sqls_field_ref"]),
     _r("ovw.lifecycle", "services/dashboard_overview_service.py", CLS_CANONICAL, _OVW_LC,
        symbol=["_lifecycle_funnel_block", "_lifecycle_previous_period", "_lifecycle_activity_block"]),
-    _r("ovw", "services/dashboard_overview_service.py", CLS_MIXED, _OVW),
-    _r("mart", "services/revenue_decision_mart.py", CLS_LEGACY, _MART),
+    _r("ovw", "services/dashboard_overview_service.py", CLS_MIXED, _OVW,
+       symbol=["_build_decision_cards", "_build_period_change", "_build_signals",
+               "_build_source_mix", "_build_unavailable", "build_dashboard_overview",
+               "_build_kpis"]),
+    _r("mart", "services/revenue_decision_mart.py", CLS_LEGACY, _MART,
+       symbol=["_summary_block", "build_revenue_decision_mart", "_canonical_core"]),
+    _m("ras.module", "services/revenue_attribution_service.py", CLS_MIXED, _RAS, ["sqls_field_ref"]),
     _r("ras.json", "services/revenue_attribution_service.py", CLS_INACTIVE, _JSONFALLBACK,
        symbol=["_build_from_json", "_build_campaign_rows", "_build_country_rows", "_build_summary"]),
-    _r("ras", "services/revenue_attribution_service.py", CLS_MIXED, _RAS),
-    _r("src", "services/source_attribution_service.py", CLS_MIXED, _SRC),
-    _r("chan", "services/dashboard_channels_service.py", CLS_MIXED, _CHAN),
-    _r("camp", "services/dashboard_campaigns_service.py", CLS_LEGACY, _CAMP),
-    _r("ctry", "services/dashboard_countries_service.py", CLS_LEGACY, _CTRY),
-    _r("rev", "services/dashboard_revenue_service.py", CLS_LEGACY, _REV),
-    _r("deals", "services/dashboard_deals_service.py", CLS_LEGACY, _DEALS),
-    _r("hi", "analysis/historical_intelligence.py", CLS_LEGACY, _HI),
+    _r("ras", "services/revenue_attribution_service.py", CLS_MIXED, _RAS,
+       symbol=["_build_db_rows", "_build_db_summary", "_build_from_db", "_finalize_row",
+               "_geo_spend_only_residual_row", "_new_bucket", "_row_notes",
+               "build_revenue_attribution_audit", "classify_verdict", "build_revenue_attribution"]),
+    _m("src.module", "services/source_attribution_service.py", CLS_MIXED, _SRC, ["contact_created_at_ref"]),
+    _r("src", "services/source_attribution_service.py", CLS_MIXED, _SRC,
+       symbol=["_finalize_channels", "_source_contact_row", "_unavailable_revenue_by_source",
+               "build_revenue_by_source", "build_source_platform_detail", "classify_contact_row"]),
+    _r("chan", "services/dashboard_channels_service.py", CLS_MIXED, _CHAN,
+       symbol=["_accumulate", "_build_channels_and_platforms", "_build_decision_cards",
+               "_build_kpis", "_build_period_change", "_build_quality_matrix", "_build_trend",
+               "_build_truth_status", "_new_bucket", "build_dashboard_channels"]),
+    _m("camp.module", "services/dashboard_campaigns_service.py", CLS_LEGACY, _CAMP, ["sql_verdict_ref"]),
+    _r("camp", "services/dashboard_campaigns_service.py", CLS_LEGACY, _CAMP,
+       symbol=["_build_campaign_rows", "_build_keyword_themes", "_build_kpis",
+               "_build_period_change", "_build_unavailable", "_campaign_status",
+               "build_dashboard_campaigns"]),
+    _m("ctry.module", "services/dashboard_countries_service.py", CLS_LEGACY, _CTRY, ["sql_verdict_ref"]),
+    _r("ctry", "services/dashboard_countries_service.py", CLS_LEGACY, _CTRY,
+       symbol=["_build_country_rows", "_build_kpis", "_build_period_change", "_build_regional_mix",
+               "_build_residual", "_build_unavailable", "_country_status",
+               "build_dashboard_countries", "_residual_gap"]),
+    _m("rev.module", "services/dashboard_revenue_service.py", CLS_LEGACY, _REV, ["contact_created_at_ref"]),
+    _r("rev", "services/dashboard_revenue_service.py", CLS_LEGACY, _REV,
+       symbol=["_build_customer_trend", "_build_kpis", "_build_unavailable", "build_dashboard_revenue"]),
+    _m("deals.module", "services/dashboard_deals_service.py", CLS_LEGACY, _DEALS, ["sql_verdict_ref"]),
+    _r("deals", "services/dashboard_deals_service.py", CLS_LEGACY, _DEALS,
+       symbol=["_build_campaign_breakdown", "_build_decision_cards", "_build_funnel", "_build_kpis",
+               "_build_period_change", "_build_source_breakdown", "_build_truth_status",
+               "_build_unavailable", "_source_status", "build_dashboard_deals",
+               "_build_sql_no_deal", "_sql_no_deal_status"]),
+    _m("hi.module", "analysis/historical_intelligence.py", CLS_LEGACY, _HI,
+       ["confirmed_sqls_ref", "cpql_ref"]),
+    _r("hi", "analysis/historical_intelligence.py", CLS_LEGACY, _HI,
+       symbol=["_aggregate_campaign_rows", "_aggregate_geo_rows", "_build_deteriorating_note",
+               "_build_movement", "_classify_cpql_direction", "_classify_overall_trend",
+               "_safe_cpql", "compute_campaign_trends", "compute_geo_trends",
+               "compute_quality_movement", "load_campaign_trend_rows"]),
 
     # ── scheduled outputs ───────────────────────────────────────────────────
-    _r("report.core", "analysis/core.py", CLS_LEGACY, _REPORT),
-    _r("report.rule_advisor", "analysis/rule_advisor.py", CLS_LEGACY, _REPORT),
-    _r("report.advisor", "analysis/advisor.py", CLS_INACTIVE, _CLAUDE),
-    _r("scheduler", "scheduler/", CLS_LEGACY, _REPORT),
-    _r("windsor", "connectors/windsor_pull.py", CLS_GOOGLE_ADS_CONVERSION, _GACONV),
-    _r("hubspot_pull", "connectors/hubspot_pull.py", CLS_CANONICAL, _SYNC),
-    _r("sync.funnel", "services/hubspot_contact_funnel_sync_service.py", CLS_CANONICAL, _SYNC),
-    _r("recovery", "services/lifecycle_history_recovery_service.py", CLS_CANONICAL, _RECOVERY),
-    _r("recovery.cli", "scripts/backfill_lifecycle_stage_history.py", CLS_CANONICAL, _RECOVERY),
-    _r("leadrec", "services/lead_reconciliation_service.py", CLS_MIXED, _LEADREC),
-    _r("revrecovery", "services/revenue_recovery_service.py", CLS_MIXED, _LEADREC),
-    _r("classrepair", "services/canonical_classification_repair_service.py", CLS_LEGACY, _WRITE_CLASS),
-    _r("mailchimp.svc", "services/mailchimp_audit_service.py", CLS_LEGACY, _MAILCHIMP),
-    _r("mailchimp.repo", "db/mailchimp_repository.py", CLS_LEGACY, _MAILCHIMP),
+    _m("report.core.module", "analysis/core.py", CLS_LEGACY, _REPORT, ["cpql_ref"]),
+    _r("report.core", "analysis/core.py", CLS_LEGACY, _REPORT,
+       symbol=["determine_verdict", "run_campaign_truth", "run_lead_quality"]),
+    _m("report.rule_advisor.module", "analysis/rule_advisor.py", CLS_LEGACY, _REPORT, ["cpql_ref"]),
+    _r("report.rule_advisor", "analysis/rule_advisor.py", CLS_LEGACY, _REPORT,
+       symbol=["_build_campaign_truth_table", "_build_data_gaps",
+               "_build_historical_intelligence_block"]),
+    _r("report.advisor", "analysis/advisor.py", CLS_INACTIVE, _CLAUDE,
+       symbol=["generate_weekly_report", "generate_monthly_report", "_build_prompt"]),
+    # scheduler/ has NO SQL occurrence at the audited commit and NO binding: a
+    # new one there is unknown_requires_review by construction.
+    _r("windsor", "connectors/windsor_pull.py", CLS_GOOGLE_ADS_CONVERSION, _GACONV,
+       symbol="pull_keyword_performance"),
+    _m("hubspot_pull.module", "connectors/hubspot_pull.py", CLS_CANONICAL, _SYNC,
+       ["lifecycle_sql_property_ref"]),
+    _r("hubspot_pull", "connectors/hubspot_pull.py", CLS_CANONICAL, _SYNC,
+       symbol="normalize_contact_funnel_row"),
+    _r("sync.funnel", "services/hubspot_contact_funnel_sync_service.py", CLS_CANONICAL, _SYNC,
+       symbol=["build_coverage", "run_contact_funnel_sync"]),
+    _r("recovery", "services/lifecycle_history_recovery_service.py", CLS_CANONICAL, _RECOVERY,
+       symbol=["recover", "run_recovery"]),
+    _r("recovery.cli", "scripts/backfill_lifecycle_stage_history.py", CLS_CANONICAL, _RECOVERY,
+       symbol="main"),
+    _m("leadrec.module", "services/lead_reconciliation_service.py", CLS_MIXED, _LEADREC,
+       ["contact_created_at_ref"]),
+    _m("revrecovery.module", "services/revenue_recovery_service.py", CLS_MIXED, _LEADREC,
+       ["contact_created_at_ref"]),
+    _m("classrepair.module", "services/canonical_classification_repair_service.py", CLS_LEGACY,
+       _WRITE_CLASS, ["contact_created_at_ref", "legacy_outcome_service_ref"]),
+    _r("classrepair", "services/canonical_classification_repair_service.py", CLS_LEGACY, _WRITE_CLASS,
+       symbol=["_canonical_classification_row", "run_repair"]),
+    _m("mailchimp.svc.module", "services/mailchimp_audit_service.py", CLS_LEGACY, _MAILCHIMP,
+       ["contact_created_at_ref", "legacy_sql_literal"]),
+    _r("mailchimp.svc", "services/mailchimp_audit_service.py", CLS_LEGACY, _MAILCHIMP,
+       symbol="build_attribution_audit"),
+    _r("mailchimp.repo", "db/mailchimp_repository.py", CLS_LEGACY, _MAILCHIMP,
+       symbol="fetch_durable_outcome_populations"),
 
     # ── writers / schema ────────────────────────────────────────────────────
     _r("writers.campaigns", "db/writers.py", CLS_LEGACY, _WRITE_CAMP, symbol="write_campaigns"),
     _r("writers.leads", "db/writers.py", CLS_LEGACY, _WRITE_LEADS,
        symbol=["write_leads", "_map_status_category", "backfill_event_date_for_contact"]),
     _r("writers.gclid", "db/writers.py", CLS_LEGACY, _GCLID, symbol="write_gclid_attribution"),
-    _r("writers.class", "db/writers.py", CLS_LEGACY, _WRITE_CLASS, symbol="upsert_contact_source_classification"),
+    _r("writers.class", "db/writers.py", CLS_LEGACY, _WRITE_CLASS,
+       symbol="upsert_contact_source_classification"),
     _r("writers.funnel", "db/writers.py", CLS_CANONICAL, _SYNC, symbol="upsert_hubspot_contact_funnel"),
-    _r("writers.module", "db/writers.py", CLS_LEGACY, _WRITE_LEADS, symbol="<module>",
-       pattern="legacy_qualified_symbol"),
-    _r("writers.module.funnel", "db/writers.py", CLS_CANONICAL, _SYNC, symbol="<module>",
-       pattern="lifecycle_sql_column_ref"),
-    _r("schema.funnel", "db/schema.py", CLS_CANONICAL, _SYNC, pattern="lifecycle_sql_column_ref"),
-    _r("schema.legacy", "db/schema.py", CLS_LEGACY, _WRITE_LEADS),
+    _m("writers.module.legacy", "db/writers.py", CLS_LEGACY, _WRITE_LEADS, ["legacy_qualified_symbol"]),
+    _m("writers.module.funnel", "db/writers.py", CLS_CANONICAL, _SYNC, ["lifecycle_sql_column_ref"]),
+    _m("schema.funnel", "db/schema.py", CLS_CANONICAL, _SYNC, ["lifecycle_sql_column_ref"]),
+    _m("schema.legacy", "db/schema.py", CLS_LEGACY, _WRITE_LEADS,
+       ["confirmed_sqls_ref", "contact_created_at_ref"]),
 
     # ── revenue repository (query source of the legacy pages) ───────────────
     _r("revrepo.lead_quality", "db/revenue_repository.py", CLS_LEGACY, _CE,
@@ -772,7 +934,7 @@ RULES: list[dict] = [
                "api_search_term_evidence_flagged", "api_search_term_evidence_term"]),
     _r("api.revenue", "api/server.py", CLS_MIXED, _RAS, symbol="get_revenue_attribution"),
     _r("api.source", "api/server.py", CLS_MIXED, _SRC, symbol="get_revenue_by_source"),
-    _r("api.module", "api/server.py", CLS_LEGACY, _REPORT, symbol="<module>", pattern="sqls_field_ref"),
+    _m("api.module", "api/server.py", CLS_LEGACY, _REPORT, ["sqls_field_ref"]),
     _r("api.crm_funnel", "api/server.py", CLS_CANONICAL, _FUNNEL_ENGINE,
        symbol=["api_crm_funnel", "api_crm_funnel_contacts", "api_crm_funnel_operational_status",
                "api_crm_funnel_sync", "api_crm_funnel_coverage"]),
@@ -781,15 +943,32 @@ RULES: list[dict] = [
        symbol=["api_audit_sql_truth", "api_audit_sql_truth_repair"]),
 
     # ── diagnostics ─────────────────────────────────────────────────────────
-    _r("diag.sqltruth", "services/sql_truth_audit_service.py", CLS_DIAGNOSTIC, _SQLTRUTH),
-    _r("diag.funnelrec", "services/crm_funnel_reconciliation_service.py", CLS_DIAGNOSTIC, _FUNNELREC),
-    _r("diag.parity", "services/cross_page_parity_service.py", CLS_DIAGNOSTIC, _PARITY),
-    _r("diag.parity.cli", "scripts/audit_cross_page_canonical_parity.py", CLS_DIAGNOSTIC, _PARITY),
-    _r("diag.cert", "scripts/audit_campaign_evidence_certification.py", CLS_DIAGNOSTIC, _CERT),
-    _r("diag.stwaste", "scripts/audit_search_term_waste_truth.py", CLS_MIXED, _STWASTE),
-    _r("diag.funnel_truth", "scripts/audit_crm_funnel_truth.py", CLS_DIAGNOSTIC, _FUNNELREC),
-    _r("diag.leads_truth", "scripts/audit_leads_page_truth.py", CLS_DIAGNOSTIC, _FUNNELREC),
-    _r("diag.scripts", "scripts/", CLS_DIAGNOSTIC, "operator scripts (no SQL count published)"),
+    _m("diag.sqltruth.module", "services/sql_truth_audit_service.py", CLS_DIAGNOSTIC, _SQLTRUTH,
+       ["doctrine_comparison_service_ref", "legacy_outcome_service_ref"]),
+    _r("diag.sqltruth", "services/sql_truth_audit_service.py", CLS_DIAGNOSTIC, _SQLTRUTH,
+       symbol=["_window_reconciliation", "run", "build_audit", "_keyword_attributable_keys",
+               "_differences", "_dashboard_section", "_source_section", "_keyword_section"]),
+    _m("diag.funnelrec.module", "services/crm_funnel_reconciliation_service.py", CLS_DIAGNOSTIC,
+       _FUNNELREC, ["doctrine_comparison_service_ref", "legacy_outcome_service_ref",
+                    "legacy_qualified_symbol", "legacy_sql_literal", "lifecycle_funnel_service_ref",
+                    "lifecycle_sql_property_ref", "lifecycle_sql_stage_ref"]),
+    _r("diag.funnelrec", "services/crm_funnel_reconciliation_service.py", CLS_DIAGNOSTIC, _FUNNELREC,
+       symbol=["compare_sql_counts", "reconcile_contacts", "run", "_scope_coverage"]),
+    _m("diag.parity.module", "services/cross_page_parity_service.py", CLS_DIAGNOSTIC, _PARITY,
+       ["contact_created_at_ref", "lifecycle_sql_property_ref", "sql_reconciliation_ref",
+        "sqls_field_ref"]),
+    _r("diag.parity.cli", "scripts/audit_cross_page_canonical_parity.py", CLS_DIAGNOSTIC, _PARITY,
+       symbol="main"),
+    _m("diag.cert.module", "scripts/audit_campaign_evidence_certification.py", CLS_DIAGNOSTIC, _CERT,
+       ["cpql_ref"]),
+    _r("diag.cert", "scripts/audit_campaign_evidence_certification.py", CLS_DIAGNOSTIC, _CERT,
+       symbol=["_audit_window", "check_frontend_gates", "check_summary_population_reconciliation",
+               "check_publication_rule", "check_reconciliation_scope"]),
+    _r("diag.stwaste", "scripts/audit_search_term_waste_truth.py", CLS_MIXED, _STWASTE, symbol="main"),
+    _r("diag.funnel_truth", "scripts/audit_crm_funnel_truth.py", CLS_DIAGNOSTIC, _FUNNELREC,
+       symbol=["collect", "main"]),
+    _r("diag.leads_truth", "scripts/audit_leads_page_truth.py", CLS_DIAGNOSTIC, _FUNNELREC,
+       symbol=["collect", "main"]),
 
     # ── frontend: static/app.js by top-level function ───────────────────────
     _r("ui.campaign", "static/app.js", CLS_LEGACY, _CE,
@@ -838,7 +1017,8 @@ RULES: list[dict] = [
     _r("ui.historical", "static/app.js", CLS_LEGACY, _HI, symbol="_renderHistoricalTable"),
     _r("ui.gclid", "static/app.js", CLS_LEGACY, _GCLID, symbol="renderGclidAttributionTable"),
     _r("ui.report", "static/app.js", CLS_LEGACY, _REPORT, symbol="copyLatestReport"),
-    _r("ui.index", "static/index.html", CLS_LEGACY, _GEO),
+    _m("ui.index", "static/index.html", CLS_LEGACY, _GEO,
+       ["confirmed_sqls_ref", "frontend_sqls_label", "sqls_field_ref"]),
 ]
 
 

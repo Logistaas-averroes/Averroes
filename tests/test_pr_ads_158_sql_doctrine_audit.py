@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+
+import pytest
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -324,8 +326,14 @@ def test_15_audit_detects_non_sql_gap_influencing_sql_reconciliation():
         pops["counts"], pops["contacts"], scope="campaign_attributable_sqls",
         reconcile_fn=canon.reconciliation_metadata)
     assert hidden["production_status"] == "partial"
-    assert hidden["status_if_only_sql_gaps_counted"] == "reconciled"
+    assert hidden["status_without"]["non_sql_missing"] == "reconciled"
+    assert hidden["status_without"]["all_non_sql_gaps"] == "reconciled"
+    assert hidden["category_changes_sql_status"] == {
+        "sql_stale": False, "sql_missing": False,
+        "non_sql_stale": False, "non_sql_missing": True}
     assert hidden["irrelevant_non_sql_gap_affects_sql_status"] is True
+    assert hidden["joint_dependency"] == {"non_sql": False, "sql": False, "all_gaps": False}
+    assert hidden["flags_consistent"] is True
     assert hidden["status_function"].endswith("_reconciliation_status")
     # When an SQL contact is ALSO stale the status is partial for a legitimate
     # reason, and the audit must not blame the non-SQL gap.
@@ -334,12 +342,68 @@ def test_15_audit_detects_non_sql_gap_influencing_sql_reconciliation():
         pops["counts"], pops["contacts"], scope="campaign_attributable_sqls",
         reconcile_fn=canon.reconciliation_metadata)
     assert hidden["non_sql_gap_present"] is True
+    assert hidden["category_changes_sql_status"]["non_sql_missing"] is False
+    assert hidden["category_changes_sql_status"]["sql_stale"] is False   # not alone either
     assert hidden["irrelevant_non_sql_gap_affects_sql_status"] is False
+    # Neither gap alone flips the status; both together do → a joint dependency.
+    assert hidden["status_without"]["all_classification_gaps"] == "reconciled"
+    assert hidden["joint_dependency"]["all_gaps"] is True
     # And on the production-shaped fixture the flag is set per window.
     w = _window(_runtime(), "evidence", "30d")
     assert w["classification_gaps"]["irrelevant_non_sql_gap_affects_sql_status"] is True
     assert set(w["legacy_reconciliation"]["reasons"]) == {
         "stale_non_sql_classification", "missing_non_sql_classification"}
+
+
+def test_15b_independent_cause_never_blamed_on_non_sql_gap():
+    """Campaign-identity coverage keeps the status partial on its own: removing
+    a non-SQL classification gap must not be reported as changing anything."""
+    from services import canonical_contact_outcome_service as canon
+    win = canon.resolve_window_contract(canon.WINDOW_EVIDENCE, "30d", now=NOW)
+    leads = [_lead("s1", "qualified"),
+             _lead("s2", "qualified", campaign=None),      # google-ads SQL, no campaign identity
+             _lead("n1", "unknown")]                        # non-SQL, classification missing
+    cls = [_classification("s1", "qualified"), _classification("s2", "qualified")]
+    pops = canon.build_populations(leads, set(), cls, win["start"], win["end"])
+    assert pops["counts"]["google_ads_source_sqls"] == 2
+    assert pops["counts"]["campaign_attributable_sqls"] == 1
+    hidden = audit.hidden_reconciliation_causes(
+        pops["counts"], pops["contacts"], scope="campaign_attributable_sqls",
+        reconcile_fn=canon.reconciliation_metadata)
+    assert hidden["non_sql_contacts_missing_classification"] == 1
+    assert hidden["production_status"] == "partial"
+    assert set(hidden["status_without"].values()) == {"partial"}
+    assert not any(hidden["category_changes_sql_status"].values())
+    assert hidden["irrelevant_non_sql_gap_affects_sql_status"] is False
+    assert hidden["joint_dependency"] == {"non_sql": False, "sql": False, "all_gaps": False}
+    assert hidden["flags_consistent"] is True
+    breakdown = audit.classification_gap_breakdown(pops["contacts"])
+    reasons = audit.legacy_reconciliation_reasons(pops["counts"], breakdown)
+    assert "google_ads_sqls_not_campaign_attributable" in reasons
+    assert "missing_non_sql_classification" in reasons
+
+
+def test_15c_per_category_flags_are_evaluated_independently():
+    """Each category is judged by its own counterfactual, never by co-presence."""
+    from services import canonical_contact_outcome_service as canon
+    win = canon.resolve_window_contract(canon.WINDOW_EVIDENCE, "30d", now=NOW)
+    leads = [_lead("s1", "qualified"), _lead("n1", "unknown"), _lead("n2", "in_progress")]
+    cls = [_classification("s1", "qualified"), _classification("n2", "wrong_fit")]  # n2 stale, n1 missing
+    pops = canon.build_populations(leads, set(), cls, win["start"], win["end"])
+    hidden = audit.hidden_reconciliation_causes(
+        pops["counts"], pops["contacts"], scope="campaign_attributable_sqls",
+        reconcile_fn=canon.reconciliation_metadata)
+    # Two non-SQL gaps: removing either alone leaves the other, so neither
+    # flips the status alone — but removing both does. Joint, not individual.
+    assert hidden["production_status"] == "partial"
+    assert hidden["status_without"]["non_sql_stale"] == "partial"
+    assert hidden["status_without"]["non_sql_missing"] == "partial"
+    assert hidden["status_without"]["all_non_sql_gaps"] == "reconciled"
+    assert hidden["category_changes_sql_status"]["non_sql_stale"] is False
+    assert hidden["category_changes_sql_status"]["non_sql_missing"] is False
+    assert hidden["joint_dependency"]["non_sql"] is True
+    assert hidden["irrelevant_non_sql_gap_affects_sql_status"] is True
+    assert hidden["flags_consistent"] is True
 
 
 # ── 16: CPQL consumers ───────────────────────────────────────────────────────
@@ -570,3 +634,90 @@ def test_cli_json_and_exit_code(capsys, monkeypatch):
     rc = cli.main([])
     text = capsys.readouterr().out
     assert rc == 0 and "Verdict: READY_FOR_ROADMAP" in text
+
+
+# ── registry bindings must be explicit (PR-ADS-158 review, blocker 1) ────────
+def test_every_rule_is_an_explicit_symbol_or_specific_pattern_binding():
+    for rule in registry.RULES:
+        assert audit.rule_binding_problems(rule) == [], rule["id"]
+        assert not rule["path"].endswith("/") and "*" not in rule["path"], rule["id"]
+        assert rule.get("symbol") or set(rule["pattern"]) <= audit.SPECIFIC_PATTERNS, rule["id"]
+    # No folder-wide binding survives, and scheduler/ has none at all.
+    assert not any(r["path"].startswith("scheduler") for r in registry.RULES)
+    # The validator rejects every shape the review objected to.
+    bad = {"id": "x", "path": "services/campaign_evidence_service.py", "classification": audit.CLS_LEGACY}
+    assert audit.rule_binding_problems(bad)
+    bad = {"id": "x", "path": "scheduler/", "classification": audit.CLS_LEGACY, "symbol": "run"}
+    assert audit.rule_binding_problems(bad)
+    bad = {"id": "x", "path": "services/x.py", "classification": audit.CLS_LEGACY, "pattern": "sqls_field_ref"}
+    assert audit.rule_binding_problems(bad)
+    bad = {"id": "x", "path": "services/x.py", "classification": audit.CLS_LEGACY, "symbol": "<module>"}
+    assert audit.rule_binding_problems(bad)
+    ok = {"id": "x", "path": "services/x.py", "classification": audit.CLS_LEGACY, "pattern": "legacy_sql_literal"}
+    assert audit.rule_binding_problems(ok) == []
+
+
+def _inject_and_classify(tmp_path, rel_path: str, addition: str):
+    """Copy a REAL production file into a scratch root, append a new function
+    carrying an SQL marker, and classify with the REAL registry rules."""
+    src = _ROOT / rel_path
+    dst = tmp_path / rel_path
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(src.read_text(encoding="utf-8") + addition, encoding="utf-8")
+    occ = audit.classify_occurrences(audit.discover_occurrences(tmp_path, files=[dst]),
+                                     registry.RULES)
+    return [o for o in occ if o.location_kind == "production"]
+
+
+_PY_NEW_FUNCTION = (
+    "\n\ndef _pr158_review_probe(row):\n"
+    "    return row.get('status_category') == 'qualified'\n"
+)
+_JS_NEW_FUNCTION = (
+    "\n\nfunction pr158ReviewProbe(rows) {\n"
+    "  return rows.filter(r => (r.confirmed_sqls || 0) > 0).length; // SQLs\n}\n"
+)
+
+
+@pytest.mark.parametrize("rel_path, addition, expected_symbol", [
+    ("services/campaign_evidence_service.py", _PY_NEW_FUNCTION, "_pr158_review_probe"),
+    ("services/canonical_contact_outcome_service.py", _PY_NEW_FUNCTION, "_pr158_review_probe"),
+    ("scheduler/weekly.py", _PY_NEW_FUNCTION, "_pr158_review_probe"),
+    ("static/app.js", _JS_NEW_FUNCTION, "pr158ReviewProbe"),
+])
+def test_new_function_in_known_file_is_unknown_until_bound(tmp_path, rel_path, addition,
+                                                           expected_symbol):
+    prod = _inject_and_classify(tmp_path, rel_path, addition)
+    probe = [o for o in prod if o.symbol == expected_symbol]
+    assert probe, "probe occurrence was not discovered"
+    assert all(o.classification == audit.CLS_UNKNOWN for o in probe), rel_path
+    # Every PRE-EXISTING occurrence in the same file stays classified: the
+    # narrowing did not un-classify reviewed code.
+    others = [o for o in prod if o.symbol != expected_symbol]
+    assert all(o.classification != audit.CLS_UNKNOWN for o in others), rel_path
+    # The unknown occurrence makes the whole audit incomplete: exit 1.
+    static = audit.build_static_inventory(prod, registry.CONSUMERS, [], [])
+    report = audit.assemble_report(
+        static=static, consumers=registry.CONSUMERS, cpql_consumers=[], decision_surfaces=[],
+        known_conflicts=[], window_comparisons=[], runtime_available=True, runtime_reason=None,
+        generated_at="t", audited_commit=None, write_safety={"ok": True, "problems": []})
+    assert report["audit_complete"] is False
+    assert report["verdict"] == "AUDIT_INCOMPLETE"
+    assert report["exit_code"] == 1
+    assert {o["symbol"] for o in report["unclassified_occurrences"]} == {expected_symbol}
+    # An explicit binding for that symbol — and only that — resolves it.
+    bound = registry.RULES + [{"id": "probe", "path": rel_path, "classification": audit.CLS_LEGACY,
+                               "consumer": "probe", "symbol": [expected_symbol]}]
+    reclassified = audit.classify_occurrences(prod, bound)
+    assert all(o.classification == audit.CLS_LEGACY for o in reclassified
+               if o.symbol == expected_symbol)
+
+
+def test_new_module_level_statement_of_unbound_pattern_is_unknown(tmp_path):
+    """A <module> binding covers only the patterns it names."""
+    prod = _inject_and_classify(
+        tmp_path, "services/campaign_evidence_service.py",
+        "\n\nPR158_PROBE = \"SELECT 1 WHERE status_category = 'qualified'\"\n")
+    probe = [o for o in prod if "PR158_PROBE" in o.snippet]
+    assert probe and all(o.symbol == "<module>" for o in probe)
+    assert all(o.classification == audit.CLS_UNKNOWN for o in probe)

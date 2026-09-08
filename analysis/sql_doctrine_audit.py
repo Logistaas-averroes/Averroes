@@ -315,10 +315,9 @@ def discover_occurrences(root: Path, *, files=None) -> list[Occurrence]:
 
 # ── Rule-based classification ────────────────────────────────────────────────
 def _path_matches(rule_path: str, path: str) -> bool:
-    if rule_path.endswith("/"):
-        return path.startswith(rule_path)
-    if rule_path.endswith("*"):
-        return path.startswith(rule_path[:-1])
+    """Exact file match only. Folder- and glob-wide bindings were removed in
+    PR-ADS-158 review: a new SQL consumer inside a known directory must surface
+    as ``unknown_requires_review``, never inherit a neighbour's classification."""
     return path == rule_path
 
 
@@ -378,9 +377,62 @@ def classify_occurrences(occurrences: list[Occurrence], rules: list[dict]) -> li
     return occurrences
 
 
+#: Patterns specific enough to bind an occurrence on their own (path + pattern)
+#: without naming the enclosing symbol. Everything else (``sqls``,
+#: ``contact_created_at``, ``cpql``, bare "SQLs" labels, ``confirmed_sqls`` …)
+#: is too broad to classify an unreviewed function and requires a symbol.
+SPECIFIC_PATTERNS = frozenset({
+    "legacy_sql_literal", "legacy_python_comparison", "sql_case_expression",
+    "legacy_qualified_symbol", "legacy_outcome_service_ref",
+    "platform_sql_attribution_ref", "lifecycle_sql_column_ref",
+    "lifecycle_sql_property_ref", "lifecycle_sql_stage_ref",
+    "lifecycle_funnel_service_ref", "doctrine_comparison_service_ref",
+    "sql_reconciliation_ref",
+})
+
+MODULE_SYMBOL = "<module>"
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    return list(value) if isinstance(value, (list, tuple, set)) else [value]
+
+
+def rule_binding_problems(rule: dict) -> list[str]:
+    """Why a rule is not an explicit reviewed binding (PR-ADS-158 review).
+
+    A rule binds an occurrence only through:
+      * ``path`` + ``symbol`` (an enclosing function/class; ``<module>`` must
+        additionally name the ``pattern``s it covers so a new module-level
+        statement of another kind stays unreviewed); or
+      * ``path`` + a pattern in ``SPECIFIC_PATTERNS``.
+    A folder, glob or whole-file rule is rejected: it would let a new consumer
+    inside a known file inherit its neighbour's classification unreviewed.
+    """
+    rid = rule.get("id", "?")
+    problems: list[str] = []
+    path = rule.get("path", "")
+    if not path or path.endswith("/") or "*" in path:
+        problems.append(f"{rid}: folder/glob path binding is not allowed: {path!r}")
+    symbols = _as_list(rule.get("symbol"))
+    patterns = _as_list(rule.get("pattern"))
+    if not symbols and not patterns:
+        problems.append(f"{rid}: whole-file binding is not allowed (needs symbol or specific pattern)")
+    if not symbols and patterns and not set(patterns) <= SPECIFIC_PATTERNS:
+        broad = sorted(set(patterns) - SPECIFIC_PATTERNS)
+        problems.append(f"{rid}: pattern-only binding uses broad pattern(s) {broad}")
+    if MODULE_SYMBOL in symbols and not patterns:
+        problems.append(f"{rid}: '<module>' binding must name its patterns")
+    if MODULE_SYMBOL in symbols and len(symbols) > 1:
+        problems.append(f"{rid}: '<module>' must be bound on its own, not with functions")
+    return problems
+
+
 def validate_rules(rules: list[dict], root: Path | None = None) -> list[str]:
-    """Registry self-consistency: every rule names a known classification and
-    (when a root is given) an existing path. Returns problems, never raises."""
+    """Registry self-consistency: every rule is an explicit binding, names a
+    known classification and (when a root is given) an existing path. Returns
+    problems, never raises."""
     problems: list[str] = []
     seen: set[str] = set()
     for rule in rules:
@@ -393,10 +445,13 @@ def validate_rules(rules: list[dict], root: Path | None = None) -> list[str]:
         seen.add(rid)
         if rule.get("classification") not in CLASSIFICATIONS:
             problems.append(f"{rid}: unknown classification {rule.get('classification')!r}")
+        problems.extend(rule_binding_problems(rule))
+        for pat in _as_list(rule.get("pattern")):
+            if pat not in PATTERNS:
+                problems.append(f"{rid}: unknown pattern {pat!r}")
         if root is not None:
             path = rule.get("path", "")
-            target = Path(root) / path.rstrip("*")
-            if not target.exists():
+            if not (Path(root) / path).exists():
                 problems.append(f"{rid}: path does not exist: {path}")
     return problems
 
@@ -592,49 +647,93 @@ def legacy_reconciliation_reasons(counts: dict, breakdown: dict,
     return reasons
 
 
+GAP_CATEGORIES = ("sql_stale", "sql_missing", "non_sql_stale", "non_sql_missing")
+
+
+def _counterfactual_counts(counts: dict, breakdown: dict, removed: set) -> dict:
+    """The production counts with the named gap categories removed. Production
+    accumulates ``stale_classification_contacts`` /
+    ``missing_classification_contacts`` over SQL and non-SQL contacts alike;
+    removing a category subtracts exactly its contacts from that total."""
+    out = dict(counts)
+    stale = (0 if "sql_stale" in removed else breakdown["sql_stale"]) + \
+            (0 if "non_sql_stale" in removed else breakdown["non_sql_stale"])
+    missing = (0 if "sql_missing" in removed else breakdown["sql_missing"]) + \
+              (0 if "non_sql_missing" in removed else breakdown["non_sql_missing"])
+    out["stale_classification_contacts"] = stale
+    out["missing_classification_contacts"] = missing
+    return out
+
+
 def hidden_reconciliation_causes(counts: dict, legacy_contacts: list[dict], *,
                                  scope: str, reconcile_fn,
                                  keyword_attributable=None,
                                  available: bool = True) -> dict:
-    """Prove whether a NON-SQL classification gap changes the SQL status.
+    """Prove, per gap category, whether it changes the SQL reconciliation status.
 
     ``reconcile_fn`` is the production
-    ``canonical_contact_outcome_service.reconciliation_metadata``. It is called
-    twice: once with the counts exactly as production computes them, once with
-    the stale / missing counts restricted to SQL contacts. A different status
-    proves the non-SQL gap is what moved it.
+    ``canonical_contact_outcome_service.reconciliation_metadata``. It is
+    evaluated on the production counts and on one counterfactual per category
+    (that category's contacts removed), plus "all SQL gaps removed" and "all
+    non-SQL gaps removed". A category *changes* the status only when its own
+    counterfactual yields a different status than production. When no single
+    category changes the status but removing a group does, the group is
+    reported as a JOINT dependency rather than attributed to any one member.
+    Another independent cause (an unresolved campaign identity, an excluded
+    SQL, a nesting violation) keeps every counterfactual ``partial`` and so
+    correctly yields ``False`` everywhere.
     """
     breakdown = classification_gap_breakdown(legacy_contacts)
-    production = reconcile_fn({"counts": counts}, scope, available=available,
-                              keyword_attributable=keyword_attributable)
-    sql_only_counts = dict(counts)
-    sql_only_counts["stale_classification_contacts"] = breakdown["sql_stale"]
-    sql_only_counts["missing_classification_contacts"] = breakdown["sql_missing"]
-    sql_only = reconcile_fn({"counts": sql_only_counts}, scope, available=available,
-                            keyword_attributable=keyword_attributable)
-    prod_status = production["reconciliation_status"]
-    sql_only_status = sql_only["reconciliation_status"]
+
+    def status_without(removed: set) -> str:
+        cf = _counterfactual_counts(counts, breakdown, removed)
+        return reconcile_fn({"counts": cf}, scope, available=available,
+                            keyword_attributable=keyword_attributable)["reconciliation_status"]
+
+    production = status_without(set())
+    single = {cat: status_without({cat}) for cat in GAP_CATEGORIES}
+    without_all_non_sql = status_without({"non_sql_stale", "non_sql_missing"})
+    without_all_sql = status_without({"sql_stale", "sql_missing"})
+    without_all = status_without(set(GAP_CATEGORIES))
+
+    changes = {cat: (breakdown[cat] > 0 and single[cat] != production)
+               for cat in GAP_CATEGORIES}
+    non_sql_group_changes = without_all_non_sql != production
+    sql_group_changes = without_all_sql != production
+    joint = {
+        "non_sql": non_sql_group_changes and not (changes["non_sql_stale"] or changes["non_sql_missing"]),
+        "sql": sql_group_changes and not (changes["sql_stale"] or changes["sql_missing"]),
+        "all_gaps": (without_all != production) and not non_sql_group_changes and not sql_group_changes,
+    }
     non_sql_gap_present = bool(breakdown["non_sql_stale"] or breakdown["non_sql_missing"])
+    # A single-category flip implies the group flip (removing more gaps can only
+    # move the status the same way), so the per-category flags can never
+    # contradict the group-level flag. Asserted, not assumed.
+    consistent = (not (changes["non_sql_stale"] or changes["non_sql_missing"])
+                  or non_sql_group_changes)
     return {
         "sql_contacts_stale_classification": breakdown["sql_stale"],
         "sql_contacts_missing_classification": breakdown["sql_missing"],
         "non_sql_contacts_stale_classification": breakdown["non_sql_stale"],
         "non_sql_contacts_missing_classification": breakdown["non_sql_missing"],
-        "category_changes_sql_status": {
-            "sql_stale": bool(breakdown["sql_stale"]),
-            "sql_missing": bool(breakdown["sql_missing"]),
-            # Production counts every stale/missing contact regardless of its
-            # outcome, so a non-SQL gap changes the status whenever it exists.
-            "non_sql_stale": bool(breakdown["non_sql_stale"]) and prod_status != sql_only_status
-                             or (bool(breakdown["non_sql_stale"]) and prod_status == "partial"),
-            "non_sql_missing": bool(breakdown["non_sql_missing"]) and prod_status != sql_only_status
-                               or (bool(breakdown["non_sql_missing"]) and prod_status == "partial"),
+        "production_status": production,
+        "status_without": {
+            "sql_stale": single["sql_stale"],
+            "sql_missing": single["sql_missing"],
+            "non_sql_stale": single["non_sql_stale"],
+            "non_sql_missing": single["non_sql_missing"],
+            "all_sql_gaps": without_all_sql,
+            "all_non_sql_gaps": without_all_non_sql,
+            "all_classification_gaps": without_all,
         },
-        "production_status": prod_status,
-        "status_if_only_sql_gaps_counted": sql_only_status,
+        "category_changes_sql_status": changes,
+        "joint_dependency": joint,
+        "status_if_only_sql_gaps_counted": without_all_non_sql,
         "non_sql_gap_present": non_sql_gap_present,
-        "irrelevant_non_sql_gap_affects_sql_status": prod_status != sql_only_status,
+        "irrelevant_non_sql_gap_affects_sql_status": non_sql_group_changes,
+        "flags_consistent": consistent,
         "status_function": "services.canonical_contact_outcome_service._reconciliation_status",
+        "method": "counterfactual re-evaluation of the production status function per gap category",
     }
 
 
