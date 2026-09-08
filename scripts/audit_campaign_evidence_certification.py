@@ -38,7 +38,10 @@ What it checks
      `campaign_attributable_sqls` scope
  10  the publication rule holds: a non-reconciled scope withholds the
      aggregate SQL total and the aggregate CPQL
- 11  summary totals reconcile to the sum of the table rows
+ 11  every summary field reconciles to the population that actually feeds it:
+     mapped rows → `confirmed_sqls_total` and `mapping_coverage.mapped_sqls`;
+     Mapping Review rows → `mapping_coverage.unmatched_sqls`; and
+     mapped + unmatched + excluded_not_google → `total_paid_search_sqls`
  12  campaign identity is unique — no two rows share a `campaign_key`
  13  campaigns sharing a display name keep distinct identities
  14  identity resolution never silently falls back to display name
@@ -456,6 +459,146 @@ def check_frontend_gates(f: Findings) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Population reconciliation — which rows add up to which summary field
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sum_or_unavailable(values):
+    """Sum, unless any contributor is unavailable.
+
+    A withheld count is not a zero. Summing `None` as `0` would turn missing
+    evidence into a smaller-but-confident number — the exact class of claim this
+    gate exists to catch.
+    """
+    vals = list(values)
+    if any(v is None for v in vals):
+        return None
+    return sum(vals)
+
+
+def _reconcile(f: Findings, name: str, observed, published,
+               observed_label: str, published_label: str,
+               *, empty_population: bool = False) -> None:
+    """Compare a population computed from the rows against the published field.
+
+    Either side may legitimately be unavailable — when lead evidence is missing,
+    every row withholds its SQL count and so does the summary. Unavailable on
+    BOTH sides is therefore consistent. Unavailable on exactly ONE side is a
+    violation: half the evidence is missing while the other half is published as
+    certain.
+
+    A population with no rows at all is the one case where a `0` on the row side
+    contradicts nothing: there is no evidence there to disagree with a withheld
+    field. It still has to match a field that *does* publish a number, so a
+    dropped Mapping Review row is caught rather than excused.
+    """
+    if observed is None and published is None:
+        f.passed(name, f"{published_label} is withheld, and so are the rows behind it")
+    elif empty_population and published is None:
+        f.passed(name, f"no rows in this population, and {published_label} is withheld")
+    elif observed is None or published is None:
+        f.violation(name,
+                    f"{observed_label}={observed!r} but {published_label}={published!r} "
+                    "— one side is withheld while the other publishes a number")
+    elif observed != published:
+        f.violation(name,
+                    f"{observed_label}={observed} but {published_label}={published}")
+    else:
+        f.passed(name, f"{published_label} == {observed_label} == {observed}")
+
+
+def check_summary_population_reconciliation(window, campaigns, summary,
+                                            f: Findings) -> dict:
+    """Reconcile each summary field against the rows that actually feed it.
+
+    The campaign table carries two kinds of row and the summary deliberately
+    counts only one of them:
+
+      * `mapping_status="mapped"`   — SQLs attributed to a canonical Google Ads
+        campaign identity. This population, and only this population, feeds
+        `confirmed_sqls_total` and the CPQL denominator.
+      * `mapping_status="unmatched"` — Mapping Review rows: real paid-search SQLs
+        whose campaign identity is not yet proven. They are shown, never merged.
+
+    A third population, `excluded_not_google_sqls`, has no rows at all: those
+    SQLs are proven not to be Google Ads, so no campaign row can exist for them.
+
+    Comparing `confirmed_sqls_total` against *every* row therefore compares a
+    mapped-only number with a mapped + unmatched sum, and fails on any account
+    with a single Mapping Review SQL (production: 71 mapped + 1 unmatched = 72
+    rows over 180d; 382 + 232 = 614 over all_time). The fix is to reconcile each
+    population against its own field — never to widen the published scope, which
+    would let an unattributed SQL lower canonical CPQL.
+    """
+    cov = summary.get("mapping_coverage") or {}
+    scoped = f"[{window}]"
+
+    # ── the row population must partition exactly ───────────────────────────
+    # A row whose mapping_status is neither value belongs to no population, so
+    # it reconciles against nothing and disappears from every total silently.
+    strays = sorted({(c.get("mapping_status") or "<missing>") for c in campaigns}
+                    - {"mapped", "unmatched"})
+    if strays:
+        f.violation(f"population_partition{scoped}",
+                    f"campaign rows carry unrecognised mapping_status {strays} — "
+                    "every row must belong to exactly one reconciled population")
+    else:
+        f.passed(f"population_partition{scoped}",
+                 "every campaign row is either mapped or a Mapping Review row")
+
+    mapped_rows = [c for c in campaigns if c.get("mapping_status") == "mapped"]
+    review_rows = [c for c in campaigns if c.get("mapping_status") == "unmatched"]
+    mapped_row_sqls = _sum_or_unavailable(c.get("confirmed_sqls") for c in mapped_rows)
+    review_row_sqls = _sum_or_unavailable(c.get("confirmed_sqls") for c in review_rows)
+
+    # ── each population against the field it actually feeds ─────────────────
+    _reconcile(f, f"mapped_rows_reconcile{scoped}",
+               mapped_row_sqls, summary.get("confirmed_sqls_total"),
+               "sum of confirmed_sqls over mapped rows", "summary.confirmed_sqls_total",
+               empty_population=not mapped_rows)
+    _reconcile(f, f"mapped_coverage_reconcile{scoped}",
+               mapped_row_sqls, cov.get("mapped_sqls"),
+               "sum of confirmed_sqls over mapped rows",
+               "summary.mapping_coverage.mapped_sqls",
+               empty_population=not mapped_rows)
+    _reconcile(f, f"unmatched_rows_reconcile{scoped}",
+               review_row_sqls, cov.get("unmatched_sqls"),
+               "sum of confirmed_sqls over Mapping Review rows",
+               "summary.mapping_coverage.unmatched_sqls",
+               empty_population=not review_rows)
+
+    # ── the three populations must add up to the declared total ─────────────
+    parts = (cov.get("mapped_sqls"), cov.get("unmatched_sqls"),
+             cov.get("excluded_not_google_sqls"))
+    _reconcile(f, f"paid_search_partition{scoped}",
+               _sum_or_unavailable(parts), cov.get("total_paid_search_sqls"),
+               "mapped + unmatched + excluded_not_google",
+               "summary.mapping_coverage.total_paid_search_sqls")
+
+    # ── name every population in the output, so no reader has to guess ──────
+    return {
+        "campaign_attributable_sqls": {
+            "rows": len(mapped_rows), "sqls": mapped_row_sqls,
+            "definition": "mapped canonical Google Ads campaign rows — the only "
+                          "population feeding confirmed_sqls_total and CPQL",
+        },
+        "unmatched_sqls": {
+            "rows": len(review_rows), "sqls": review_row_sqls,
+            "definition": "Mapping Review rows — paid-search SQLs with no proven "
+                          "campaign identity; shown, never merged into the total",
+        },
+        "excluded_not_google_sqls": {
+            "rows": 0, "sqls": cov.get("excluded_not_google_sqls"),
+            "definition": "paid-search SQLs proven not to be Google Ads — no "
+                          "campaign row exists for them",
+        },
+        "total_paid_search_sqls": {
+            "rows": len(campaigns), "sqls": cov.get("total_paid_search_sqls"),
+            "definition": "all three populations together",
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Live checks — per window, against the real evidence services
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -505,18 +648,9 @@ def _audit_window(window: str, f: Findings) -> dict:
             f.passed(f"unavailable_not_zero[{window}]",
                      "unavailable reconciliation publishes no counts")
 
-    # ── 11 · summary reconciles to the rows it summarises ───────────────────
-    # Only meaningful when both sides are present; a None total is a withheld
-    # total, not a disagreement.
-    row_sqls = [c.get("confirmed_sqls") for c in campaigns]
-    if summary.get("confirmed_sqls_total") is not None and all(v is not None for v in row_sqls):
-        if sum(row_sqls) != summary["confirmed_sqls_total"]:
-            f.violation(f"summary_reconciles[{window}]",
-                        f"summary confirmed_sqls_total={summary['confirmed_sqls_total']} "
-                        f"but the rows sum to {sum(row_sqls)}")
-        else:
-            f.passed(f"summary_reconciles[{window}]",
-                     f"{summary['confirmed_sqls_total']} == sum of rows")
+    # ── 11 · every summary field reconciles to the population that feeds it ─
+    out["sql_populations"] = check_summary_population_reconciliation(
+        window, campaigns, summary, f)
 
     # ── 12/13 · campaign identity is unique, and names do not merge ─────────
     keys = [c.get("campaign_key") for c in campaigns if c.get("campaign_key") is not None]
