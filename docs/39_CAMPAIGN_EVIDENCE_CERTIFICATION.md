@@ -218,6 +218,50 @@ Each is a subset of the one above it, except (5), which is not in that lattice a
 all. The UI labels are `Campaign-attributable SQLs`, `Attributed SQLs` where
 column width is tight, and `Google Ads platform conversions` for (5).
 
+### Which campaign rows reconcile to which summary field (PR-ADS-157-F1)
+
+The campaign table renders two kinds of row and the summary deliberately counts
+only one of them, so "the rows" is never a single population.
+
+| Campaign rows | Summary field(s) they reconcile to |
+| --- | --- |
+| `mapping_status = "mapped"` | `summary.confirmed_sqls_total` **and** `summary.mapping_coverage.mapped_sqls` |
+| `mapping_status = "unmatched"` (Mapping Review) | `summary.mapping_coverage.unmatched_sqls` |
+| *no rows exist* | `summary.mapping_coverage.excluded_not_google_sqls` |
+| every row, plus the excluded population | `summary.mapping_coverage.total_paid_search_sqls` |
+
+Scope definitions, as published by the audit's `sql_populations` block:
+
+* **`campaign_attributable_sqls`** — SQLs on rows mapped to a canonical Google
+  Ads campaign identity. The only population feeding the headline SQL total and
+  the CPQL denominator.
+* **`unmatched_sqls`** — Mapping Review rows: real paid-search SQLs whose
+  campaign identity is not yet proven. Rendered so they are not lost, never
+  merged into the total.
+* **`excluded_not_google_sqls`** — paid-search SQLs proven *not* to be Google
+  Ads. No campaign row exists for them, so they appear only in coverage.
+* **`total_paid_search_sqls`** — all three together.
+
+**The regression this replaced.** The first version of check 11 summed
+`confirmed_sqls` across *every* campaign row and compared the result to
+`confirmed_sqls_total`. That compares a mapped + unmatched sum against a
+mapped-only field, so it fails on any account holding a single Mapping Review
+SQL. Production validation failed exactly there: `180d` published 71 with 72
+across all rows (71 mapped + 1 unmatched), and `all_time` published 382 with 614
+(382 + 232).
+
+Both numbers were right; the comparison was not. The two "fixes" that would have
+made the audit green are both false: raising `confirmed_sqls_total` to include
+unmatched SQLs would let an unattributed lead lower canonical CPQL, and dropping
+Mapping Review rows would hide the SQLs an operator has to go and map. Neither
+was done — the gate now reconciles each population against the field it feeds,
+and `tests/test_pr_ads_157_f1_population_reconciliation.py` fails the audit if
+the populations are merged again.
+
+Unavailability is preserved throughout: a withheld count on one side and a
+number on the other is a violation, both sides withheld is consistent, and a
+population with no rows never turns into a certain `0`.
+
 ### Legacy readers removed
 
 Both direct queries in `_build_campaign_detail` are gone, along with the database

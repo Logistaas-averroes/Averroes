@@ -70,7 +70,7 @@ jobs:
           ls -d /usr/lib/postgresql/*/bin
           sudo -n -u postgres true
 
-      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157)
+      - name: PostgreSQL integration tests (153D + 153E-A + 153E-A2 + 153E-B + 153F + 154A + 154B + 154C + 155-F1 + 155-F2 + 156 + 156-F1 + 156-F2 + 156-F3 + 157 + 157-F1)
         run: |
           python -m pytest \
             tests/test_pr_ads_153d_pg_integration.py \
@@ -90,6 +90,7 @@ jobs:
             tests/test_pr_ads_156_f4_residual_twin_sweep.py \
             tests/test_pr_ads_156_f3_review_corrections.py \
             tests/test_pr_ads_157_campaign_evidence_certification.py \
+            tests/test_pr_ads_157_f1_population_reconciliation.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -136,6 +137,7 @@ jobs:
                            "tests.test_pr_ads_156_f4_residual_twin_sweep",
                            "tests.test_pr_ads_156_f3_review_corrections",
                            "tests.test_pr_ads_157_campaign_evidence_certification",
+                           "tests.test_pr_ads_157_f1_population_reconciliation",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):
