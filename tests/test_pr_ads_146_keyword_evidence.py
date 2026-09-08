@@ -66,7 +66,13 @@ def _source(rows):
 
 
 def _daily_from(rows, *, skip_fx_for=None):
-    def _fn(start, end):
+    # PR-ADS-157 §1 gave the real `fetch_keyword_daily_costs` an optional
+    # `customer_ids` (account scope applied in SQL). This double stands in for
+    # that function, so it must accept the same call. Widening a stub to match
+    # the interface it replaces is not loosening an assertion — a stub narrower
+    # than the real thing fails on the CALL rather than on the behaviour under
+    # test, which is exactly what happened here.
+    def _fn(start, end, **_kw):
         out = []
         for r in rows:
             if r["cost_micros"] is None:
@@ -104,7 +110,8 @@ def _patch(monkeypatch, rows, *, canonical=None, rate=1.25, identity=None,
     import db.keyword_repository as kr
     import db.revenue_repository as rr
     monkeypatch.setattr(kr, "fetch_keyword_aggregates",
-                        lambda s, e: {"available": True, "rows": rows, "source": _source(rows)})
+                        lambda s, e, **_kw: {"available": True, "rows": rows,
+                                             "source": _source(rows)})
     monkeypatch.setattr(kr, "fetch_keyword_daily_costs", daily or _daily_from(rows, skip_fx_for=skip_fx))
     monkeypatch.setattr(kr, "fetch_keyword_daily_for_criterion",
                         lambda s, e, **kw: {"available": True, "rows": []})
@@ -136,11 +143,12 @@ def test_all_time_has_no_lower_bound(monkeypatch):
     import db.keyword_repository as kr
     import db.revenue_repository as rr
 
-    def _agg(s, e):
+    def _agg(s, e, **_kw):
         captured["start"] = s
         return {"available": True, "rows": [_k("kw", "Brand - UK", "1", "1001", 10.0)], "source": _source([_k("kw", "Brand - UK", "1", "1001", 10.0)])}
     monkeypatch.setattr(kr, "fetch_keyword_aggregates", _agg)
-    monkeypatch.setattr(kr, "fetch_keyword_daily_costs", lambda s, e: {"available": True, "rows": []})
+    monkeypatch.setattr(kr, "fetch_keyword_daily_costs",
+                        lambda s, e, **_kw: {"available": True, "rows": []})
     monkeypatch.setattr(rr, "fetch_canonical_campaign_spend", lambda s, e, *_a, **_k: _canonical())
     monkeypatch.setattr(rr, "fetch_campaign_identity", lambda customer_id=None: {"available": True, "mappings": []})
     monkeypatch.setattr(rr, "fetch_fx_rates", _fx())

@@ -2815,3 +2815,221 @@ def build_search_pattern_drawer(window: str, pattern: str, n: int, *,
         "terms_truncated": len(members) > len(shown),
         "overlap_note": PATTERN_OVERLAP_DISCLOSURE,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR-ADS-157 §4 — campaign-scoped flagged-term preview for the Campaign drawer
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The Campaign drawer used to read `waste_terms` directly, matched by
+# `lower(btrim(campaign_name)) = ANY(label_set)`, and rendered
+# `waste_terms.spend_usd` as the term's spend. Every part of that is wrong:
+#
+#   * `waste_terms` is a scheduler SNAPSHOT — PR-ADS-153D established that its
+#     `spend_usd` is not a canonical metric and must never be summed;
+#   * matching on display name let a name-only annotation cross between two
+#     campaigns sharing a name, attributing one campaign's junk to another;
+#   * the latest snapshot has no relationship to the selected Evidence Window.
+#
+# This adapter composes `build_flagged_search_terms` instead, which already
+# holds the canonical doctrine: every metric is a `search_terms` fact, and
+# `waste_terms` is declared "classification annotation only" behind a
+# campaign-safe join. There is no second classification rule here.
+
+#: Rows shown in the drawer preview. Matches the previous preview size.
+FLAGGED_PREVIEW_LIMIT = 10
+
+FLAGGED_PREVIEW_UNAVAILABLE_SOURCE = "search_term_evidence_unavailable"
+FLAGGED_PREVIEW_UNAVAILABLE_IDENTITY = "campaign_identity_unresolved"
+FLAGGED_PREVIEW_UNAVAILABLE_ERROR = "flagged_preview_failed"
+#: The truth state quarantined the population: rows exist but are not
+#: decision-grade, so the drawer shows the state rather than the numbers.
+FLAGGED_PREVIEW_QUARANTINED = "search_term_truth_mismatch"
+#: The configured Google Ads account could not be resolved. Resolved and
+#: REJECTED before any substantive population query runs (PR-ADS-156-F3 §1
+#: doctrine) — an unresolved scope cannot certify a result, so there is no point
+#: producing one.
+FLAGGED_PREVIEW_UNAVAILABLE_ACCOUNT = "google_ads_customer_not_configured"
+#: Even assembling the section context failed. The drawer still gets a complete
+#: §6 contract rather than losing the whole Campaign detail payload.
+FLAGGED_PREVIEW_UNAVAILABLE_CONTEXT = "flagged_preview_context_failed"
+
+#: Campaign keys the shared resolver emits when it could NOT pin the campaign to
+#: a canonical Google Ads campaign id — they are derived from the normalized
+#: display name, so a preview built on one is disclosed as name-derived.
+_FLAGGED_NAME_DERIVED_PREFIXES = ("unmatched:", "not_google_ads:")
+
+
+def _flagged_preview_account() -> tuple[str | None, str | None]:
+    """``(configured_customer_id, unavailable_reason)``. Never raises, never
+    invents or defaults an account identity."""
+    try:
+        from analysis.search_term_scope import (  # noqa: PLC0415
+            configured_customer_id,
+        )
+        cid = configured_customer_id()
+        cid = str(cid).strip() if cid is not None else ""
+        return (cid, None) if cid else (None, FLAGGED_PREVIEW_UNAVAILABLE_ACCOUNT)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("campaign flagged preview: account unresolved: %s", exc)
+        return None, FLAGGED_PREVIEW_UNAVAILABLE_ACCOUNT
+
+
+def _flagged_identity_status(campaign_key: str | None) -> str:
+    if not campaign_key:
+        return "unresolved"
+    key = str(campaign_key)
+    if any(key.startswith(p) for p in _FLAGGED_NAME_DERIVED_PREFIXES):
+        return "name_derived"
+    return "resolved"
+
+
+#: The §6 keys every flagged section must carry on EVERY return path.
+FLAGGED_SECTION_KEYS = (
+    "available", "reason", "source", "source_dataset", "source_table", "scope",
+    "grain", "window", "window_start", "window_end", "all_time", "customer_id",
+    "campaign_id", "identity_status", "coverage_status", "rows",
+)
+
+
+def _flagged_shell(window, campaign_key, customer_id) -> dict[str, Any]:
+    """The invariant half of the §6 flagged section — source, scope, grain and
+    the annotation declaration. One definition, so a success and a failure
+    describe the same thing."""
+    return {
+        "source": "google_ads_api",
+        "source_dataset": "search_terms",
+        "source_table": "search_terms",
+        "annotation_table": "waste_terms",
+        "annotation_role": ("classification annotation only — never a metric, "
+                            "never summed, never joined by display name alone"),
+        # True as written: `search_term_repository` applies `canonical_scope()`,
+        # an account + provenance predicate in SQL, and the campaign filter is
+        # the canonical campaign identity — not a display name.
+        "scope": "account + campaign identity, selected evidence window",
+        "account_scope": "enforced in SQL by canonical_scope()",
+        "grain": "search_term × canonical campaign identity",
+        "window": window,
+        "window_start": None,
+        "window_end": None,
+        "all_time": None,
+        "customer_id": customer_id,
+        "campaign_id": campaign_key,
+        "reporting_currency": "USD",
+    }
+
+
+def flagged_preview_unavailable(reason: str, *, window=None, campaign_key=None,
+                                customer_id=None, identity_status=None,
+                                coverage_status: str = "unknown") -> dict[str, Any]:
+    """A COMPLETE §6 flagged section describing an unavailable state.
+
+    The single builder every caller uses, including `api/server.py`. A fallback
+    that omits half the contract is not a smaller answer — it is an answer a
+    renderer cannot distinguish from a real one, which is the failure mode this
+    section metadata exists to prevent.
+    """
+    return {
+        **_flagged_shell(window, campaign_key, customer_id),
+        "available": False,
+        "reason": reason,
+        "identity_status": (identity_status if identity_status is not None
+                            else _flagged_identity_status(campaign_key)),
+        "coverage_status": coverage_status,
+        "rows": [],
+        "total_count": None,
+        "truncated": False,
+    }
+
+
+def build_campaign_flagged_preview(window: str, campaign_key: str | None, *,
+                                   limit: int = FLAGGED_PREVIEW_LIMIT,
+                                   now: datetime | None = None) -> dict[str, Any]:
+    """Canonical flagged search-term preview for ONE campaign over the window.
+
+    Returns the PR-ADS-157 §6 section contract and FAILS CLOSED throughout:
+    every path, including account-configuration failure and failure to build the
+    section context itself, returns an explicit ``available: False`` with a
+    reason code rather than raising. The Campaign drawer's spend, lead, junk and
+    wrong-fit evidence is independent of flagged terms and must survive this
+    section being unavailable.
+
+    Metrics are canonical `search_terms` facts; `waste_terms` contributes
+    classification only. Absence from the flagged population never means
+    "clean" — it means no DURABLE evidence flagged this term in this window,
+    which is a different statement, and the empty state says so.
+
+    ``EvidenceWindowError`` propagates so an invalid window is still HTTP 400 at
+    the API boundary rather than a drawer section that absorbed a caller error.
+    """
+    customer_id, account_reason = _flagged_preview_account()
+    identity_status = _flagged_identity_status(campaign_key)
+
+    shell = _flagged_shell(window, campaign_key, customer_id)
+
+    if not campaign_key:
+        return {**shell, "available": False,
+                "reason": FLAGGED_PREVIEW_UNAVAILABLE_IDENTITY,
+                "identity_status": "unresolved", "coverage_status": "unknown",
+                "rows": [], "total_count": None, "truncated": False}
+
+    # No account, no read — rejected BEFORE the population query.
+    if account_reason is not None:
+        return {**shell, "available": False, "reason": account_reason,
+                "identity_status": identity_status,
+                "coverage_status": "unavailable",
+                "rows": [], "total_count": None, "truncated": False}
+
+    try:
+        payload = build_flagged_search_terms(
+            window, page=1, page_size=max(1, int(limit)),
+            campaign=campaign_key, sort="spend", now=now)
+    except EvidenceWindowError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.info("campaign flagged preview failed (%s/%s): %s",
+                    window, campaign_key, exc)
+        return {**shell, "available": False,
+                "reason": FLAGGED_PREVIEW_UNAVAILABLE_ERROR,
+                "identity_status": identity_status, "coverage_status": "unknown",
+                "rows": [], "total_count": None, "truncated": False}
+
+    shell.update({
+        "window": payload.get("window") or window,
+        "window_start": payload.get("window_start"),
+        "window_end": payload.get("window_end"),
+        "all_time": payload.get("all_time"),
+    })
+
+    if payload.get("db_unavailable"):
+        return {**shell, "available": False,
+                "reason": FLAGGED_PREVIEW_UNAVAILABLE_SOURCE,
+                "identity_status": identity_status,
+                "coverage_status": "unavailable",
+                "rows": [], "total_count": None, "truncated": False}
+
+    truth = payload.get("truth_state") or {}
+    # `actionable` is False when the canonical population quarantined itself.
+    # Showing its rows would be presenting diagnosis output as evidence.
+    if payload.get("actionable") is False or truth.get("status") == TRUTH_MISMATCH:
+        return {**shell, "available": False,
+                "reason": FLAGGED_PREVIEW_QUARANTINED,
+                "identity_status": identity_status,
+                "coverage_status": truth.get("status") or TRUTH_MISMATCH,
+                "truth_state": truth, "rows": [], "total_count": None,
+                "truncated": False}
+
+    pagination = payload.get("pagination") or {}
+    rows = list(payload.get("rows") or [])[:max(1, int(limit))]
+    return {
+        **shell,
+        "available": True,
+        "reason": None,
+        "identity_status": identity_status,
+        "coverage_status": truth.get("status") or TRUTH_RECONCILED,
+        "truth_state": truth,
+        "annotation_join": payload.get("annotation_join") or {},
+        "rows": rows,
+        "total_count": pagination.get("total_count"),
+        "truncated": bool((pagination.get("total_count") or 0) > len(rows)),
+    }

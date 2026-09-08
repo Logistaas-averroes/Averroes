@@ -766,14 +766,29 @@ def test_28b_the_allowlist_is_narrow_and_every_entry_is_justified():
 def test_28c_the_legacy_keyword_snapshot_keeps_its_live_consumers():
     """§5 required an inspection before stopping the scheduled legacy writes.
 
-    Four live consumers read `keywords`, and none of them is Keyword Evidence:
-    the campaign drill-down preview, the aggregated keyword endpoint, the
+    PR-ADS-156 found FOUR live consumers of `keywords`, none of them Keyword
+    Evidence: the campaign drawer preview, the aggregated keyword endpoint, the
     keyword-review action queue, and the keyword-theme snapshot behind the
-    Campaigns page. Stopping the writes would have starved all four, so the
-    writes stay — documented, non-authoritative, and out of Keyword Evidence.
+    Campaigns page. Stopping the writes would have starved all four.
+
+    PR-ADS-157 §3 MIGRATED THE FIRST of them — the campaign drawer preview now
+    composes canonical `keyword_daily_facts` over the selected window — so this
+    count is now two in `api/server.py`, not three. That is a migration, not a
+    regression, and the writes still stay for the remaining consumers.
+
+    The assertion is `>= 2` rather than `== 2` on purpose: this test exists to
+    prove the legacy writes are still NEEDED, and a hard equality would fail
+    the next time a consumer is migrated, which is the direction of travel.
+    Dropping to zero is the condition that should re-open the question, and
+    `>= 2` still catches it.
     """
     api_src = (_ROOT / "api" / "server.py").read_text(encoding="utf-8")
-    assert api_src.count("FROM keywords") >= 3
+    assert api_src.count("FROM keywords") >= 2
+
+    # And the migrated consumer is genuinely gone from the drawer builder.
+    from tests.test_pr_ads_157_campaign_evidence_certification import _function_code
+    builder = _function_code(_ROOT / "api" / "server.py", "_build_campaign_detail")
+    assert "FROM keywords" not in builder
     revenue_repo = (_ROOT / "db" / "revenue_repository.py").read_text(encoding="utf-8")
     assert "fetch_keyword_theme_snapshot" in revenue_repo
 

@@ -210,15 +210,22 @@ def _conversion_evidence(unit: dict) -> tuple:
 
 
 # ── Population build ─────────────────────────────────────────────────────────
-def _build_population(start: date | None, end: date) -> dict:
+def _build_population(start: date | None, end: date, *,
+                      customer_ids: list[str] | None = None) -> dict:
     """Fetch + assemble the selected-window keyword population at the unique
     criterion grain. Returns {available, units, source, canonical,
     identity_available, currency_info}. Each unit is FX-converted independently.
+
+    ``customer_ids`` (PR-ADS-157 §1) scopes the population to ONE Google Ads
+    account in SQL. Because every downstream number — the aggregates, the
+    monetary summary, the coverage block, the sort order and `total_count` —
+    is derived from this one population, scoping it here is what makes those
+    numbers describe the same account. Default None = account-wide.
     """
     import db.keyword_repository as kw_repo  # noqa: PLC0415
     import db.revenue_repository as revenue_repo  # noqa: PLC0415
 
-    agg = kw_repo.fetch_keyword_aggregates(start, end)
+    agg = kw_repo.fetch_keyword_aggregates(start, end, customer_ids=customer_ids)
     if not agg.get("available"):
         return {"available": False, "units": [], "source": {},
                 "canonical": {"available": False}, "identity_available": False,
@@ -230,7 +237,7 @@ def _build_population(start: date | None, end: date) -> dict:
     identity_by_label, aliases_by_id = _identity_label_index(identity)
 
     # Per-(criterion, source_date) native cost for genuine per-date FX.
-    daily = kw_repo.fetch_keyword_daily_costs(start, end)
+    daily = kw_repo.fetch_keyword_daily_costs(start, end, customer_ids=customer_ids)
     daily_by_grain: dict = {}
     for d in (daily.get("rows") or []):
         grain = _criterion_grain(d)
@@ -432,6 +439,12 @@ def _unit_row(unit: dict, th: dict, window_end: date | None) -> dict:
         "campaign": unit.get("campaign_display"),
         "campaign_key": unit.get("campaign_key"),
         "campaign_id": unit.get("campaign_id"),
+        # PR-ADS-157 §6: the account this fact actually belongs to. Additive —
+        # existing consumers ignore it. It exists so a campaign-scoped consumer
+        # can PROVE the account its rows came from instead of asserting a scope
+        # the underlying query does not apply (`fetch_keyword_aggregates` filters
+        # on source_date only).
+        "customer_id": unit.get("customer_id"),
         "ad_group": unit.get("ad_group_name"),
         "ad_group_id": unit.get("ad_group_id"),
         "mapping_status": unit.get("mapping_status"),
@@ -784,15 +797,24 @@ def build_keyword_evidence(window: str, *, page: int = 1,
                            quality_band: str | None = None, signal: str | None = None,
                            min_spend: float | None = None, sort: str = "spend",
                            sql_state: str | None = None,
+                           customer_ids: list[str] | None = None,
                            now: datetime | None = None) -> dict:
     """Main Keyword Evidence builder. KPIs are computed over the COMPLETE filtered
-    population; only the page slice is serialized into ``rows``."""
+    population; only the page slice is serialized into ``rows``.
+
+    ``customer_ids`` restricts the whole population to one Google Ads account in
+    SQL (PR-ADS-157 §1). It is applied BEFORE aggregation, sorting and
+    pagination, so a caller that must not mix accounts gets `total_count`, the
+    KPIs and the coverage block computed over its account alone — not a filtered
+    page sitting on top of account-wide totals. Default None = account-wide, the
+    behaviour the Keyword Evidence page has always had.
+    """
     _validate(match_type, criterion_status, quality_band, signal, sort, sql_state)
     page = max(1, int(page or 1))
     page_size = max(1, min(int(page_size or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
 
     start, end, base = _base(window, now)
-    pop = _build_population(start, end)
+    pop = _build_population(start, end, customer_ids=customer_ids)
     if not pop.get("available"):
         return unavailable_keyword_response(window, now)
 
@@ -1031,3 +1053,303 @@ def unavailable_keyword_response(window: str, now: datetime | None = None) -> di
 def unavailable_keyword_drawer_response(window: str, now: datetime | None = None) -> dict:
     base = _safe_base(window, now)
     return {**base, "db_unavailable": True, "found": False, "keyword": None}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR-ADS-157 §3 — campaign-scoped keyword preview for the Campaign drawer
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The Campaign drawer used to run its own query against the legacy `keywords`
+# snapshot table, matched by `lower(btrim(campaign_name)) = ANY(label_set)`.
+# Three things were wrong with that, and only the third was disclosed:
+#
+#   * it matched on DISPLAY NAME, so two campaigns sharing a name shared rows;
+#   * it took the latest scheduler snapshot, so the number had no relationship
+#     to the Evidence Window the user had selected;
+#   * `keywords` is the retired snapshot table, not canonical evidence.
+#
+# This adapter exists so the fix is a COMPOSITION rather than a second
+# implementation. It calls the same `build_keyword_evidence` the Keyword
+# Evidence page calls, with the campaign filter the page already supports —
+# which is keyed on `campaign_key` (account + campaign_id), not on a label.
+# There is no aggregation logic here and none in `api/server.py`.
+
+#: Rows shown in the drawer preview. Matches the previous preview size, so this
+#: is a provenance change rather than a visual one.
+CAMPAIGN_PREVIEW_LIMIT = 10
+
+#: Reasons a preview can be unavailable. Returned rather than raised so the
+#: drawer renders an honest section instead of losing the whole payload.
+PREVIEW_UNAVAILABLE_SOURCE = "keyword_evidence_unavailable"
+PREVIEW_UNAVAILABLE_IDENTITY = "campaign_identity_unresolved"
+PREVIEW_UNAVAILABLE_ERROR = "keyword_preview_failed"
+#: The configured Google Ads account could not be resolved. Fail closed: with no
+#: account there is no scope to read WITHIN, and `fetch_keyword_aggregates`
+#: filters on `source_date` alone — so an unresolved account would publish every
+#: account's keywords under one campaign drawer.
+PREVIEW_UNAVAILABLE_ACCOUNT = "google_ads_customer_not_configured"
+#: Rows were returned that do not belong to the configured account. This is a
+#: scope violation, not an empty result, and the rows are withheld.
+PREVIEW_UNAVAILABLE_SCOPE = "keyword_scope_account_mismatch"
+#: Even assembling the section context failed. The drawer still gets a complete
+#: §6 contract so one broken supplementary section cannot take the payload down.
+PREVIEW_UNAVAILABLE_CONTEXT = "keyword_preview_context_failed"
+
+#: Campaign keys the shared resolver emits for campaigns it could NOT pin to a
+#: canonical Google Ads campaign id. Such a key is derived from the NORMALIZED
+#: DISPLAY NAME, which is precisely the identity this PR is retiring — so a
+#: preview built on one is disclosed as name-derived, never as campaign_id
+#: evidence.
+_NAME_DERIVED_KEY_PREFIXES = ("unmatched:", "not_google_ads:")
+
+
+def _preview_account() -> tuple[str | None, list[str], str | None]:
+    """``(configured_customer_id, exact_candidate_spellings, unavailable_reason)``.
+
+    Never raises and never defaults. An account identity that cannot be resolved
+    is returned as a reason code, not invented, not blanked into a wildcard.
+    """
+    try:
+        from analysis.search_term_scope import (  # noqa: PLC0415
+            configured_customer_id, customer_id_candidates,
+        )
+        cid = configured_customer_id()
+        cid = str(cid).strip() if cid is not None else ""
+        if not cid:
+            return None, [], PREVIEW_UNAVAILABLE_ACCOUNT
+        candidates = [str(c) for c in (customer_id_candidates(cid) or []) if str(c).strip()]
+        if not candidates:
+            return None, [], PREVIEW_UNAVAILABLE_ACCOUNT
+        return cid, candidates, None
+    except Exception as exc:  # noqa: BLE001
+        logger.info("campaign keyword preview: account unresolved: %s", exc)
+        return None, [], PREVIEW_UNAVAILABLE_ACCOUNT
+
+
+def _identity_status(campaign_key: str | None) -> str:
+    if not campaign_key:
+        return "unresolved"
+    key = str(campaign_key)
+    if any(key.startswith(p) for p in _NAME_DERIVED_KEY_PREFIXES):
+        return "name_derived"
+    return "resolved"
+
+
+def _campaign_preview_shell(window, campaign_key, *, now=None,
+                            customer_id: str | None = None) -> dict:
+    """The §6 section metadata. Declares only what the read actually does.
+
+    NOTE on `scope`: the account predicate is applied IN SQL by
+    `fetch_keyword_aggregates(customer_ids=...)`, before grouping, summing,
+    sorting and pagination — so the aggregates, the coverage block and
+    `total_count` all describe the same account-scoped population as the rows.
+
+    An earlier revision of this adapter declared account scope while the query
+    filtered on `source_date` alone, and verified the account by inspecting the
+    returned page instead. That check could only ever see one page: a foreign
+    row beyond the preview limit passed unnoticed while still contributing to
+    every total. Filtering the page is not scoping the population.
+    """
+    base = _safe_base(window, now)
+    return {
+        "source": "google_ads_api",
+        "source_dataset": "keyword_facts",
+        "source_table": "keyword_daily_facts",
+        "scope": "account + campaign identity (campaign_key), selected evidence window",
+        "account_scope": "enforced in SQL by customer_id = ANY(candidates), "
+                         "before aggregation, sorting and pagination",
+        "grain": "criterion (campaign_id + ad_group_id + criterion_id)",
+        "window": base.get("window"),
+        "window_start": base.get("window_start"),
+        "window_end": base.get("window_end"),
+        "all_time": base.get("all_time"),
+        "customer_id": customer_id,
+        "campaign_id": campaign_key,
+        "reporting_currency": "USD",
+    }
+
+
+#: The §6 keys every keyword section must carry on EVERY return path.
+KEYWORD_SECTION_KEYS = (
+    "available", "reason", "source", "source_dataset", "source_table", "scope",
+    "grain", "window", "window_start", "window_end", "all_time", "customer_id",
+    "campaign_id", "identity_status", "coverage_status", "rows",
+)
+
+
+def keyword_preview_unavailable(reason: str, *, window=None, campaign_key=None,
+                                customer_id=None, identity_status=None,
+                                coverage_status: str = "unknown",
+                                now=None) -> dict:
+    """A COMPLETE §6 keyword section describing an unavailable state.
+
+    The single builder every caller uses — this module and `api/server.py` — so
+    a fallback can never be a shorter dictionary than a success. An incomplete
+    contract is worse than an absent one: a renderer that reads `window_start`
+    to decide whether it may say "selected-window evidence" gets `None` from a
+    missing key and from a genuinely unbounded read alike, and cannot tell a
+    fallback from a fact.
+
+    Window bounds are resolved when they can be, and simply omitted-as-None when
+    they cannot — never invented.
+    """
+    base = {}
+    if window is not None:
+        try:
+            base = _safe_base(window, now) or {}
+        except Exception:  # noqa: BLE001
+            base = {}
+    return {
+        "available": False,
+        "reason": reason,
+        "source": "google_ads_api",
+        "source_dataset": "keyword_facts",
+        "source_table": "keyword_daily_facts",
+        "scope": "account + campaign identity (campaign_key), selected evidence window",
+        "account_scope": "enforced in SQL by customer_id = ANY(candidates), "
+                         "before aggregation, sorting and pagination",
+        "grain": "criterion (campaign_id + ad_group_id + criterion_id)",
+        "window": base.get("window", window),
+        "window_start": base.get("window_start"),
+        "window_end": base.get("window_end"),
+        "all_time": base.get("all_time"),
+        "customer_id": customer_id,
+        "campaign_id": campaign_key,
+        "identity_status": (identity_status if identity_status is not None
+                            else _identity_status(campaign_key)),
+        "coverage_status": coverage_status,
+        "reporting_currency": "USD",
+        "rows": [],
+        "total_count": None,
+        "truncated": False,
+    }
+
+
+def _preview_unavailable(shell: dict, reason: str, *, identity_status: str,
+                         coverage_status: str = "unknown") -> dict:
+    """Unavailable section built from an already-resolved shell.
+
+    Delegates the field set to `keyword_preview_unavailable` so the two cannot
+    diverge, then overlays the shell's resolved window/account values.
+    """
+    complete = keyword_preview_unavailable(
+        reason, window=shell.get("window"), campaign_key=shell.get("campaign_id"),
+        customer_id=shell.get("customer_id"), identity_status=identity_status,
+        coverage_status=coverage_status)
+    refinements = {k: v for k, v in (shell or {}).items() if v is not None}
+    return {**complete, **refinements, "available": False, "reason": reason,
+            "identity_status": identity_status,
+            "coverage_status": coverage_status,
+            "rows": [], "total_count": None, "truncated": False}
+
+
+def build_campaign_keyword_preview(window: str, campaign_key: str | None, *,
+                                   limit: int = CAMPAIGN_PREVIEW_LIMIT,
+                                   now: datetime | None = None) -> dict:
+    """Canonical keyword preview for ONE campaign over the selected window.
+
+    Returns the PR-ADS-157 §6 section contract and FAILS CLOSED throughout:
+    every path — including account-configuration failure and failure to build
+    the section context itself — returns an explicit ``available: False`` with a
+    reason code rather than raising, because raising here would take down a
+    Campaign detail payload whose spend, lead, junk and wrong-fit evidence is
+    independent of keywords and still perfectly provable.
+
+    ``available`` is explicit in the other direction too: an unavailable source
+    is never returned as a successful empty list, and a genuinely empty
+    certified window is never returned as unavailable — those two states lead an
+    operator to opposite conclusions.
+
+    An invalid window is the one exception: ``EvidenceWindowError`` propagates so
+    the API layer can answer HTTP 400 instead of rendering a drawer section that
+    quietly absorbed a caller error.
+    """
+    customer_id, candidates, account_reason = _preview_account()
+    try:
+        shell = _campaign_preview_shell(window, campaign_key, now=now,
+                                        customer_id=customer_id)
+    except EvidenceWindowError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.info("campaign keyword preview context failed (%s/%s): %s",
+                    window, campaign_key, exc)
+        # The shell itself could not be built, so there is nothing to refine —
+        # the shared builder supplies the complete contract directly.
+        return keyword_preview_unavailable(
+            PREVIEW_UNAVAILABLE_CONTEXT, window=window,
+            campaign_key=campaign_key, customer_id=customer_id)
+
+    identity_status = _identity_status(campaign_key)
+
+    # No resolved campaign identity means there is nothing to scope BY. The old
+    # query fell back to display-name matching here, which is how one campaign's
+    # keywords appeared under another campaign of the same name.
+    if not campaign_key:
+        return _preview_unavailable(shell, PREVIEW_UNAVAILABLE_IDENTITY,
+                                    identity_status="unresolved")
+
+    # No account, no read. Resolved BEFORE any substantive query, so an
+    # unconfigured deployment never executes an unscoped population query whose
+    # result it could not have certified anyway.
+    if account_reason is not None:
+        return _preview_unavailable(shell, account_reason,
+                                    identity_status=identity_status)
+
+    try:
+        payload = build_keyword_evidence(
+            window, page=1, page_size=max(1, int(limit)),
+            campaign=campaign_key, sort="spend",
+            # PR-ADS-157 §1 — the account predicate goes into the SQL, so the
+            # KPIs, coverage and `total_count` below are computed over this
+            # account alone rather than over every account in the table.
+            customer_ids=candidates, now=now)
+    except EvidenceWindowError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.info("campaign keyword preview failed (%s/%s): %s",
+                    window, campaign_key, exc)
+        return _preview_unavailable(shell, PREVIEW_UNAVAILABLE_ERROR,
+                                    identity_status=identity_status)
+
+    if payload.get("db_unavailable"):
+        return _preview_unavailable(shell, PREVIEW_UNAVAILABLE_SOURCE,
+                                    identity_status=identity_status,
+                                    coverage_status="unavailable")
+
+    coverage = ((payload.get("kpis") or {}).get("coverage") or {})
+    pagination = payload.get("pagination") or {}
+    rows = list(payload.get("rows") or [])[:max(1, int(limit))]
+
+    # POST-CONDITION, not the certification.
+    #
+    # The account is enforced in SQL above; this only asserts the filter did
+    # what it says. It is deliberately NOT the mechanism — a page scan cannot
+    # certify a population, because it sees one page while `total_count`, the
+    # KPIs and the coverage block are computed over all of it. A foreign row
+    # beyond the preview limit would satisfy this check and still corrupt every
+    # aggregate.
+    #
+    # Kept because it costs nothing and fails loudly if the predicate is ever
+    # dropped, mis-parameterised, or bypassed by a caching layer.
+    allowed = set(candidates)
+    foreign = {str(r.get("customer_id") or "") for r in rows} - allowed
+    if foreign:
+        logger.warning("campaign keyword preview scope violation (%s/%s): %s",
+                       window, campaign_key, sorted(foreign))
+        return _preview_unavailable(shell, PREVIEW_UNAVAILABLE_SCOPE,
+                                    identity_status=identity_status,
+                                    coverage_status=coverage.get("status") or "unknown")
+
+    return {
+        **shell,
+        "available": True,
+        "reason": None,
+        "identity_status": identity_status,
+        # A certified window that genuinely contained no keyword for this
+        # campaign is `available: True` with an empty list — a measurement.
+        "coverage_status": coverage.get("status") or "unknown",
+        "coverage_scope": coverage.get("scope"),
+        "rows": rows,
+        "total_count": pagination.get("total_count"),
+        "truncated": bool((pagination.get("total_count") or 0) > len(rows)),
+    }

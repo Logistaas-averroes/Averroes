@@ -94,7 +94,7 @@ def _agg_rows():
     return rows
 
 
-def _fetch_keyword_aggregates(start, end):
+def _fetch_keyword_aggregates(start, end, **_kw):  # PR-ADS-157 §1: accepts customer_ids
     rows = _agg_rows()
     return {"available": True, "rows": rows, "source": {
         "fact_rows": sum(r["fact_rows"] for r in rows),
@@ -108,7 +108,7 @@ def _fetch_keyword_aggregates(start, end):
         "currency_codes": ["GBP"], "source_systems": ["google_ads_api"]}}
 
 
-def _fetch_keyword_daily_costs(start, end):
+def _fetch_keyword_daily_costs(start, end, **_kw):  # PR-ADS-157 §1: accepts customer_ids
     rows = []
     for (kw, camp, cid, ag, agid, crit, mt, gbp, *_r) in _KW:
         rows.append({"customer_id": CUST, "campaign_id": cid, "ad_group_id": agid,
