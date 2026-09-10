@@ -124,6 +124,25 @@ def _render(result: dict) -> None:
     if not result.get("ok"):
         print(f"\n  RUN DID NOT COMPLETE: {result.get('reason')}")
         print(f"  {result.get('detail')}")
+        # PR-ADS-159-R7: a checkpoint failure is a PARTIAL local write. Saying
+        # "nothing was written" there would be false, and would send an operator
+        # looking for rows that are already in the database.
+        if result.get("partial_local_write"):
+            print("\n  PARTIAL LOCAL WRITE — read this carefully:")
+            print(f"    recovered evidence rows PERSISTED: "
+                  f"{result.get('events_persisted')} "
+                  f"(contacts: {result.get('contacts_recovered')})")
+            print("    durable checkpoint PERSISTED:      no")
+            print(f"    cursor that was NOT saved:         "
+                  f"{result.get('unsaved_cursor')}")
+            print("    resumability proven:               no")
+            print(f"    HubSpot writes performed:          "
+                  f"{result.get('hubspot_writes_performed')}")
+            print("\n  The evidence rows are keyed on (contact_id, funnel_event),")
+            print("  so re-running is safe: a retry rewrites them rather than")
+            print("  appending. It will re-read the same contacts from the older")
+            print("  cursor, which costs HubSpot quota but duplicates nothing.")
+            return
         print("\n  Nothing was written. Recovered counts are UNKNOWN, not zero:")
         print("  an aborted pass proves nothing about how much evidence HubSpot holds.")
         return

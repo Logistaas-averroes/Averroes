@@ -1169,12 +1169,18 @@ class FakeRepo:
     what the loop DOES with the cursor, not to re-describe it.
     """
 
-    def __init__(self, candidates, *, state_available=True):
+    def __init__(self, candidates, *, state_available=True, save_ok=True,
+                 save_error=None):
         self.candidates = list(candidates)
         self.state_available = state_available
+        #: The durable checkpoint write can fail on its own, independently of
+        #: the evidence write — they are two modules with two connections.
+        self.save_ok = save_ok
+        self.save_error = save_error
         #: scope -> saved checkpoint row. Separate keys prove separation.
         self.saved: dict = {}
         self.reads: list = []
+        self.save_attempts: list = []
 
     # ── checkpoint ──────────────────────────────────────────────────────────
     def fetch_lifecycle_recovery_state(self, *, scope=None):
@@ -1184,6 +1190,11 @@ class FakeRepo:
         return {"available": True, "row": self.saved.get(scope), "scope": scope}
 
     def save_lifecycle_recovery_state(self, state, *, scope=None):
+        self.save_attempts.append(scope)
+        if not self.save_ok:
+            # Nothing is recorded: a checkpoint that was not stored must not
+            # look stored to the next run.
+            return {"ok": False, "error": self.save_error or "write not proven"}
         self.saved[scope] = dict(state)
         return {"ok": True, "error": None}
 
@@ -1208,12 +1219,18 @@ def _candidate(contact_id, stage="customer"):
             "date_entered_sql": None}
 
 
-def _run(monkeypatch, fake_repo, client, *, stub_writer=True, **kwargs):
+def _run(monkeypatch, fake_repo, client, *, stub_writer=True,
+         writer_result=None, writer_calls=None, **kwargs):
     """Run `recover()` against the fake repository.
 
     The local writer is stubbed by default: these tests are about the LOOP's
     cursor and vocabulary decisions, and a real write attempt with no database
     would fail the run before any of that could be observed.
+
+    ``writer_result`` replaces the stub's answer, so an evidence write can be
+    made to fail independently of the checkpoint write — the two are separate
+    modules with separate connections, and the difference between them is
+    exactly what the partial-write disclosure has to report.
     """
     import db.crm_funnel_repository as real_repo
 
@@ -1223,9 +1240,15 @@ def _run(monkeypatch, fake_repo, client, *, stub_writer=True, **kwargs):
         monkeypatch.setattr(real_repo, name, getattr(fake_repo, name))
     if stub_writer:
         import db.writers as real_writers
-        monkeypatch.setattr(
-            real_writers, "upsert_lifecycle_stage_history",
-            lambda rows, *, run_id: {"ok": True, "persisted": len(rows)})
+
+        def _stub(rows, *, run_id):
+            if writer_calls is not None:
+                writer_calls.append(list(rows))
+            if writer_result is not None:
+                return dict(writer_result)
+            return {"ok": True, "persisted": len(rows)}
+
+        monkeypatch.setattr(real_writers, "upsert_lifecycle_stage_history", _stub)
     kwargs.setdefault("event", lifecycle.EVENT_SQL)
     return recovery.recover(client=client, **kwargs)
 
@@ -1495,13 +1518,36 @@ def test_80_a_failed_pass_reports_remaining_work_as_unknown(monkeypatch):
 
 def test_81_each_vocabulary_is_bound_to_one_denominator():
     names = set(recovery.VOCABULARIES)
-    assert names == {"request", "per_contact_payload", "per_sql_gap",
+    assert names == {"run", "request", "per_contact_payload", "per_sql_gap",
                      "per_stage_gap"}
+    run = set(recovery.VOCABULARIES["run"])
     request = set(recovery.VOCABULARIES["request"])
     gaps = (set(recovery.VOCABULARIES["per_sql_gap"])
             | set(recovery.VOCABULARIES["per_stage_gap"]))
     assert not (request & gaps), (
         "a value in both vocabularies lets two different denominators be added")
+    assert not (run & gaps), (
+        "a run outcome is one per pass; a gap outcome is one per missing "
+        "date. Sharing a value lets the two be summed under one heading")
+    # `run` and `request` deliberately intersect, and ONLY here: a pass can be
+    # stopped BY a failed request. That is one run outcome caused by one
+    # request outcome, never two counts added — `run` is single-valued.
+    assert run & request == {recovery.HISTORY_REQUEST_FAILED,
+                             recovery.HUBSPOT_AUTHORIZATION_FAILED}
+
+
+def test_81b_the_run_outcome_is_single_valued_and_always_reported(monkeypatch):
+    """Every pass names exactly one run outcome from the run vocabulary."""
+    fake = FakeRepo([_candidate("c1")])
+    ok = _run(monkeypatch, fake, FakeClient(batch_results=[_record("c1", [])]),
+              limit=10)
+    assert ok["run_outcome"] == recovery.RUN_OK
+    assert ok["run_outcome"] in recovery.RUN_OUTCOMES
+
+    broken = FakeRepo([_candidate("c1")], state_available=False)
+    stopped = _run(monkeypatch, broken, FakeClient(), limit=10)
+    assert stopped["run_outcome"] == recovery.CHECKPOINT_UNREADABLE
+    assert stopped["run_outcome"] in recovery.RUN_OUTCOMES
 
 
 def test_82_the_parameter_dropped_verdict_lives_only_in_the_diagnosis_vocabulary():
@@ -1839,3 +1885,638 @@ def test_98_pg_an_unavailable_scoped_reader_is_unavailable_not_zero(
             "an unreadable operational count must never become 0")
     assert f.violations == [], (
         "an outage is unavailability, not a contract violation")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-159-R7 — the checkpoint write is part of the result, not a side effect
+#
+# `repo.save_lifecycle_recovery_state(...)` used to be called and its answer
+# thrown away, so a pass whose durable cursor was never stored still returned
+# `ok: True` with a `next_cursor` the next run would never see. These tests
+# execute both writes and read the report, because the only way to tell a saved
+# checkpoint from an unsaved one is to ask what the run said about it.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _recovering_client(contact_ids, ts=None):
+    """A batch read that answers every contact with a usable SQL version."""
+    ts = ts or datetime(2026, 3, 3, tzinfo=timezone.utc)
+    return FakeClient(batch_results=[
+        _record(cid, [_version("salesqualifiedlead", ts)]) for cid in contact_ids])
+
+
+def test_99_apply_persists_evidence_and_checkpoint_together(monkeypatch):
+    """Case 1. Both writes succeed → ok, both disclosed as done."""
+    fake = FakeRepo([_candidate("c1"), _candidate("c2")])
+    writes: list = []
+    result = _run(monkeypatch, fake, _recovering_client(["c1", "c2"]),
+                  apply=True, limit=10, writer_calls=writes)
+
+    scope = recovery.checkpoint_scope(lifecycle.EVENT_SQL)
+    assert result["ok"] is True
+    assert result["run_outcome"] == recovery.RUN_OK
+    assert result["events_persisted"] == 2
+    assert len(writes) == 1 and len(writes[0]) == 2
+    assert fake.saved[scope]["last_contact_id"] == "c2"
+    assert result["next_cursor"] == "c2"
+    assert result["hubspot_writes_performed"] is False
+
+
+def test_100_a_failed_checkpoint_write_fails_the_run(monkeypatch):
+    """Case 2 + Case 5. Evidence persisted, cursor not → never `ok: true`.
+
+    This is the exact hazard: the rows landed, the cursor did not, and the old
+    code returned success. The next run would then re-read the same contacts
+    from the stale cursor — quota spent on work already done — while the
+    operator had been told the pass completed and was resumable.
+    """
+    fake = FakeRepo([_candidate("c1"), _candidate("c2")],
+                    save_ok=False, save_error="connection closed mid-write")
+    result = _run(monkeypatch, fake, _recovering_client(["c1", "c2"]),
+                  apply=True, limit=10)
+
+    assert result["ok"] is False
+    assert result["reason"] == recovery.CHECKPOINT_WRITE_FAILED
+    assert result["run_outcome"] == recovery.CHECKPOINT_WRITE_FAILED
+    assert "connection closed mid-write" in result["detail"]
+
+    # What actually happened, stated rather than left to inference.
+    assert result["events_persisted"] == 2
+    assert result["contacts_recovered"] == 2
+    assert result["local_evidence_persisted"] is True
+    assert result["checkpoint_persisted"] is False
+    assert result["resumability_proven"] is False
+    assert result["partial_local_write"] is True
+    assert result["unsaved_cursor"] == "c2"
+    assert result["hubspot_writes_performed"] is False
+    assert fake.saved == {}, "a refused checkpoint write must store nothing"
+
+
+def test_101_a_checkpoint_failure_with_no_evidence_is_not_a_partial_write(
+        monkeypatch):
+    """Case 3. No rows recovered and the cursor was refused.
+
+    Still a failed run — the cursor is what makes a bounded pass resumable —
+    but NOT a partial local write, because nothing local was written. Reporting
+    it as partial would send an operator looking for rows that do not exist.
+    """
+    fake = FakeRepo([_candidate("c1")], save_ok=False)
+    empty = FakeClient(batch_results=[_record("c1", [])])
+    result = _run(monkeypatch, fake, empty, apply=True, limit=10,
+                  individual_fallback=False)
+
+    assert result["ok"] is False
+    assert result["reason"] == recovery.CHECKPOINT_WRITE_FAILED
+    assert result["events_persisted"] == 0
+    assert result["local_evidence_persisted"] is False
+    assert result["partial_local_write"] is False
+    assert result["checkpoint_persisted"] is False
+    assert result["resumability_proven"] is False
+
+
+def test_102_a_dry_run_writes_neither_evidence_nor_checkpoint(monkeypatch):
+    """Case 4. Without --apply nothing is persisted, and nothing claims to be."""
+    fake = FakeRepo([_candidate("c1")])
+    writes: list = []
+    result = _run(monkeypatch, fake, _recovering_client(["c1"]),
+                  apply=False, limit=10, writer_calls=writes)
+
+    assert result["ok"] is True
+    assert result["apply"] is False
+    assert writes == [], "a dry run must not reach the evidence writer"
+    assert fake.save_attempts == [], "a dry run must not write a checkpoint"
+    assert result["events_recovered"] == 1
+    assert result["events_persisted"] == 0
+    assert result["hubspot_writes_performed"] is False
+
+
+def test_103_a_failed_checkpoint_is_never_rendered_as_nothing_written(capsys,
+                                                                     monkeypatch):
+    """Case 6. The operator-facing text must not contradict the report.
+
+    A generic failure renderer prints "Nothing was written". After a partial
+    local write that sentence is false, so the renderer has to branch on the
+    disclosure rather than on `ok`.
+    """
+    from scripts import backfill_lifecycle_stage_history as cli
+
+    fake = FakeRepo([_candidate("c1")], save_ok=False)
+    result = _run(monkeypatch, fake, _recovering_client(["c1"]),
+                  apply=True, limit=10)
+    cli._render(result)
+    out = capsys.readouterr().out
+
+    assert "Nothing was written" not in out
+    assert "PARTIAL LOCAL WRITE" in out
+    assert "durable checkpoint PERSISTED:      no" in out
+    assert "resumability proven:               no" in out
+    assert "HubSpot writes performed:          False" in out
+    # The idempotence claim is what makes re-running the safe instruction.
+    assert "rewrites them rather than" in out
+
+    # And the negative control: a failure with nothing written still says so.
+    stopped = _run(monkeypatch, FakeRepo([_candidate("c1")],
+                                         state_available=False),
+                   FakeClient(), apply=True, limit=10)
+    cli._render(stopped)
+    assert "Nothing was written" in capsys.readouterr().out
+
+
+def test_104_re_running_after_a_checkpoint_failure_is_idempotent(monkeypatch):
+    """The retry the failure report tells the operator to run.
+
+    It re-reads the same contacts from the older cursor and rewrites the same
+    evidence rows keyed on (contact_id, funnel_event) — extra HubSpot quota,
+    zero duplicates. Asserted by running it, not by citing the upsert.
+    """
+    seen: list = []
+    fake = FakeRepo([_candidate("c1")], save_ok=False)
+    first = _run(monkeypatch, fake, _recovering_client(["c1"]),
+                 apply=True, limit=10, writer_calls=seen)
+    assert first["ok"] is False
+
+    fake.save_ok = True          # the transient failure clears
+    second = _run(monkeypatch, fake, _recovering_client(["c1"]),
+                  apply=True, limit=10, writer_calls=seen)
+
+    assert second["ok"] is True
+    assert len(seen) == 2, "the retry re-read the same contact"
+    keys = [{(r["contact_id"], r["funnel_event"]) for r in batch} for batch in seen]
+    assert keys[0] == keys[1] == {("c1", lifecycle.EVENT_SQL)}, (
+        "the same natural key is rewritten, never appended under a new one")
+
+
+def test_105_an_evidence_write_failure_is_reported_under_its_own_reason(
+        monkeypatch):
+    """The other half of the pair: the rows failed, so the checkpoint is never
+    attempted. Advancing the cursor past contacts whose evidence was not stored
+    would lose them permanently."""
+    fake = FakeRepo([_candidate("c1")])
+    result = _run(monkeypatch, fake, _recovering_client(["c1"]),
+                  apply=True, limit=10,
+                  writer_result={"ok": False, "error": "disk full"})
+
+    assert result["ok"] is False
+    assert result["reason"] == recovery.LOCAL_WRITE_FAILED
+    assert result["local_evidence_persisted"] is False
+    assert result["partial_local_write"] is False
+    # Never attempted is not the same claim as attempted and failed.
+    assert result["checkpoint_persisted"] is None
+    assert fake.save_attempts == []
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-159-R8 — "unrecoverable" must carry the evidence it claims
+#
+# `_definitively_unrecoverable` used to see only the SURVIVING state plus a
+# boolean "the fallback ran", because the individual read's answer overwrote the
+# batch one. Missing-batch + empty-individual and not-returned-batch +
+# empty-individual both reached it looking like "both paths definitively empty".
+# Neither is: a missing payload could still be our own request — that was the §1
+# defect — and a contact HubSpot did not return is an identity question.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_EMPTY = recovery.PAYLOAD_EMPTY
+_MISSING = recovery.PAYLOAD_MISSING
+_ABSENT = recovery.CONTACT_NOT_RETURNED
+
+
+@pytest.mark.parametrize("batch_state,individual_state,unrecoverable", [
+    (_EMPTY, _EMPTY, True),        # both paths completed, both affirmatively empty
+    (_MISSING, _EMPTY, False),     # the batch may simply not have been asked
+    (_ABSENT, _EMPTY, False),      # an identity question, not a retention one
+    (_EMPTY, _MISSING, False),     # the individual read returned no container
+    (_MISSING, _MISSING, False),   # neither path proved anything
+    (_ABSENT, _MISSING, False),
+    (_EMPTY, None, False),         # never attempted — a shrug, not a proof
+    (_MISSING, None, False),
+    (_ABSENT, None, False),
+])
+def test_106_unrecoverable_requires_an_affirmative_empty_from_both_paths(
+        batch_state, individual_state, unrecoverable):
+    assert recovery._definitively_unrecoverable(
+        batch_state, individual_state) is unrecoverable
+
+    reason = recovery._gap_reason(batch_state, individual_state,
+                                  individual_state or batch_state)
+    if unrecoverable:
+        assert reason == recovery.UNRECOVERABLE_NO_EVIDENCE
+    else:
+        assert reason != recovery.UNRECOVERABLE_NO_EVIDENCE, (
+            f"batch={batch_state} individual={individual_state} does not prove "
+            "HubSpot holds no transition for this contact")
+    assert reason in recovery.SQL_GAP_OUTCOMES
+
+
+def test_107_both_empty_reads_earn_the_word_end_to_end(monkeypatch):
+    """The one pair that does: an empty container from BOTH reads."""
+    fake = FakeRepo([_candidate("c1")])
+    client = FakeClient(batch_results=[_record("c1", [])],
+                        individual_results={"c1": _record("c1", [])})
+    result = _run(monkeypatch, fake, client, limit=10)
+
+    row = result["unresolved"][0]
+    assert row["batch_state"] == _EMPTY
+    assert row["individual_state"] == _EMPTY
+    assert row["both_paths_attempted"] is True
+    assert row["reason"] == recovery.UNRECOVERABLE_NO_EVIDENCE
+
+
+def test_108_a_missing_batch_payload_is_not_unrecoverable_end_to_end(monkeypatch):
+    """The production shape: batch returns no container, individual empty.
+
+    Fifty contacts landed here and the first cut would have called every one of
+    them unrecoverable — publishing "HubSpot holds no SQL transition for these
+    contacts" on the strength of a request that may not have asked.
+    """
+    fake = FakeRepo([_candidate("c1")])
+    client = FakeClient(batch_results=[_record("c1", container=False)],
+                        individual_results={"c1": _record("c1", [])})
+    result = _run(monkeypatch, fake, client, limit=10)
+
+    row = result["unresolved"][0]
+    assert row["batch_state"] == _MISSING
+    assert row["individual_state"] == _EMPTY
+    assert row["reason"] != recovery.UNRECOVERABLE_NO_EVIDENCE
+    assert row["reason"] == recovery.HISTORY_PAYLOAD_EMPTY
+
+
+def test_109_a_contact_hubspot_did_not_return_is_not_unrecoverable(monkeypatch):
+    """Batch omitted the contact entirely; the individual read came back empty."""
+    fake = FakeRepo([_candidate("c1")])
+    client = FakeClient(batch_results=[],
+                        individual_results={"c1": _record("c1", [])})
+    result = _run(monkeypatch, fake, client, limit=10)
+
+    row = result["unresolved"][0]
+    assert row["batch_state"] == _ABSENT
+    assert row["individual_state"] == _EMPTY
+    assert row["reason"] != recovery.UNRECOVERABLE_NO_EVIDENCE
+
+
+def test_110_the_batch_outcome_survives_the_individual_read(monkeypatch):
+    """The mechanism itself: `state` is overwritten, `batch_state` is not.
+
+    Losing the batch outcome is what let a missing payload be mistaken for a
+    proven absence, so the two are asserted to differ on the same row.
+    """
+    fake = FakeRepo([_candidate("c1")])
+    client = FakeClient(batch_results=[_record("c1", container=False)],
+                        individual_results={"c1": _record("c1", [])})
+    result = _run(monkeypatch, fake, client, limit=10)
+
+    row = result["unresolved"][0]
+    assert row["payload_state"] == _EMPTY, "the surviving state is the individual one"
+    assert row["batch_state"] == _MISSING, "and the batch outcome is still there"
+    assert row["batch_state"] != row["payload_state"]
+
+
+@pytest.mark.parametrize("batch_error,individual_error", [
+    (_ApiError(500), None),
+    (None, _ApiError(500)),
+])
+def test_111_a_request_failure_stops_the_run_and_proves_nothing(
+        batch_error, individual_error, monkeypatch):
+    """A failed request is not an absence of evidence.
+
+    Counting it per contact would publish "HubSpot holds no history for these"
+    when the truth is that we could not ask.
+    """
+    fake = FakeRepo([_candidate("c1")])
+    client = FakeClient(batch_results=[_record("c1", container=False)],
+                        individual_results={"c1": _record("c1", [])},
+                        batch_error=batch_error,
+                        individual_error=individual_error)
+    result = _run(monkeypatch, fake, client, limit=10)
+
+    assert result["ok"] is False
+    assert result["reason"] == recovery.HISTORY_REQUEST_FAILED
+    assert result["run_outcome"] in recovery.RUN_OUTCOMES
+    assert result["more_candidates_remain"] is None
+    assert result["events_recovered"] is None
+
+
+def test_112_a_budget_deferred_contact_is_deferred_not_unrecoverable(monkeypatch):
+    """Unattempted. The individual read it was owed was never funded."""
+    fake = FakeRepo([_candidate("c1"), _candidate("c2")])
+    client = FakeClient(batch_results=[_record("c1", []), _record("c2", [])],
+                        individual_results={"c1": _record("c1", []),
+                                            "c2": _record("c2", [])})
+    result = _run(monkeypatch, fake, client, limit=10,
+                  individual_request_budget=1)
+
+    by_contact = {r["contact_id"]: r for r in result["unresolved"]}
+    assert by_contact["c1"]["reason"] == recovery.UNRECOVERABLE_NO_EVIDENCE
+    assert by_contact["c2"]["reason"] == recovery.SQL_DEFERRED_BY_BUDGET
+    assert by_contact["c2"]["adjudicated"] is False
+    assert result["next_cursor"] == "c1", "the cursor stops at the last adjudicated"
+    assert result["more_candidates_remain"] is True
+
+
+def test_113_history_without_an_sql_version_is_its_own_state(monkeypatch):
+    """Present, readable, and it contains no SQL transition.
+
+    That is a real finding about the contact and it must not be collapsed into
+    "unrecoverable", which is a claim about HubSpot returning nothing at all.
+    """
+    ts = datetime(2026, 2, 2, tzinfo=timezone.utc)
+    fake = FakeRepo([_candidate("c1")])
+    client = FakeClient(batch_results=[_record("c1", [_version("lead", ts)])])
+    result = _run(monkeypatch, fake, client, limit=10)
+
+    row = result["unresolved"][0]
+    assert row["payload_state"] == recovery.PAYLOAD_PRESENT
+    assert row["reason"] == recovery.HISTORY_PRESENT_NO_SQL_STAGE
+    assert row["reason"] in recovery.SQL_GAP_OUTCOMES
+    assert row["reason"] != recovery.UNRECOVERABLE_NO_EVIDENCE
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-159-R9 — a partial audit outage cannot pass as a completed audit
+#
+# `audit_read_reconciliation` recorded `contact_read_unavailable` and
+# `scoped_reader_unavailable` in the result blocks only. Neither reached
+# `Findings.unavailable_now`, so as long as ONE combination compared cleanly the
+# audit called itself passed, reported `audit_complete: true` and exited 0 —
+# while required repository reads had not run at all.
+#
+# The distinction these tests hold: a DATA/CONTRACT state (the canonical service
+# was asked and fail-closed exactly as designed) is a successful check with an
+# unavailable answer. An EXECUTION failure (a read that did not run) is
+# unavailability of the audit itself, and must be reported as such even when
+# forty-three other combinations agreed.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _audit_now():
+    return datetime.now(tz=timezone.utc)
+
+
+@_needs_pg
+def test_114_pg_all_combinations_execute_and_agree(seeded159):
+    """Case 1. The healthy baseline every other case is measured against."""
+    from scripts import audit_lifecycle_sql_coverage as audit
+
+    f = audit.Findings()
+    block = audit.audit_read_reconciliation(f, _audit_now())
+
+    assert block["combinations_expected"] == 44
+    assert block["combinations_compared"] == 44
+    assert block["combinations_execution_unavailable"] == 0
+    assert block["combinations_data_unavailable"] == 0
+    assert block["all_combinations_compared"] is True
+    assert block["reconciliation_complete"] is True
+    assert f.violations == [] and f.unavailable == []
+    assert f.exit_code == audit.EXIT_OK
+
+
+@_needs_pg
+def test_115_pg_one_failed_scoped_reader_makes_the_audit_unavailable(
+        seeded159, monkeypatch):
+    """Case 2 + Case 5. 43 agree, 1 never ran → not a pass, and not exit 0.
+
+    This is the precise shape the old code let through: the failure was written
+    into one result block, nothing consulted it, and the audit reported success.
+    """
+    from scripts import audit_lifecycle_sql_coverage as audit
+
+    real_page = repo.fetch_funnel_contact_page
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 5:      # exactly one of the forty-four
+            return {"available": False, "reason": "database_unavailable",
+                    "rows": [], "total": None}
+        return real_page(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "fetch_funnel_contact_page", flaky)
+
+    f = audit.Findings()
+    block = audit.audit_read_reconciliation(f, _audit_now())
+
+    assert block["combinations_expected"] == 44
+    assert block["combinations_compared"] == 43
+    assert block["combinations_execution_unavailable"] == 1
+    assert block["all_combinations_compared"] is False
+    assert block["reconciliation_complete"] is False
+
+    assert f.unavailable, (
+        "an execution failure must reach Findings.unavailable_now even when "
+        "43 other combinations agreed")
+    assert any("read_reconciliation" in u for u in f.unavailable)
+    assert f.violations == [], "a read that did not run is not a contract breach"
+    assert f.exit_code == audit.EXIT_UNAVAILABLE
+    assert f.exit_code != audit.EXIT_OK
+
+    failed = [b for b in block["results"] if b.get("execution_failure")]
+    assert len(failed) == 1
+    assert failed[0]["reason"] == "scoped_reader_unavailable"
+    assert failed[0]["headline"] is None
+    assert failed[0]["detail_total"] is None
+    assert failed[0]["operational_total"] is None
+
+
+@_needs_pg
+def test_116_pg_one_failed_window_contact_read_makes_the_audit_unavailable(
+        seeded159, monkeypatch):
+    """Case 3. A whole window's scopes could not be reached; the rest could."""
+    from scripts import audit_lifecycle_sql_coverage as audit
+    from services import canonical_crm_funnel_service as funnel
+
+    real_contacts = repo.fetch_funnel_contacts
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:      # the second window only
+            return {"available": False, "reason": "database_unavailable",
+                    "rows": []}
+        return real_contacts(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "fetch_funnel_contacts", flaky)
+
+    f = audit.Findings()
+    block = audit.audit_read_reconciliation(f, _audit_now())
+
+    scopes = len(funnel.ORDERED_SCOPES)
+    assert block["combinations_expected"] == 44
+    assert block["combinations_compared"] == 44 - scopes
+    assert block["combinations_execution_unavailable"] == scopes
+    assert block["reconciliation_complete"] is False
+    assert f.exit_code == audit.EXIT_UNAVAILABLE
+
+    reasons = {b["reason"] for b in block["results"] if b.get("execution_failure")}
+    assert reasons == {"contact_read_unavailable"}
+
+
+@_needs_pg
+def test_117_pg_a_fail_closed_campaign_identity_is_audited_successfully(
+        seeded159, monkeypatch):
+    """Case 4. The canonical service was ASKED and answered "unknowable".
+
+    That is a data/contract state, not an execution failure: the audit proved
+    the fail-closed behaviour rather than failing to look. Treating it as an
+    outage would make the product's correct behaviour look like a broken audit.
+    """
+    from scripts import audit_lifecycle_sql_coverage as audit
+    from services import canonical_crm_funnel_service as funnel
+
+    monkeypatch.setattr(funnel, "_build_campaign_resolver",
+                        lambda start, end: (None, False))
+
+    f = audit.Findings()
+    block = audit.audit_read_reconciliation(f, _audit_now())
+
+    identity_blocked = [b for b in block["results"]
+                        if b["reason"] == audit.REASON_IDENTITY_UNAVAILABLE]
+    assert identity_blocked, "some scope must depend on campaign identity"
+    for pair in identity_blocked:
+        assert pair["execution_failure"] is False
+        assert pair["available"] is False
+        assert pair["headline"] is None
+
+    assert block["combinations_execution_unavailable"] == 0
+    assert block["combinations_data_unavailable"] == len(identity_blocked)
+    assert block["combinations_compared"] == 44 - len(identity_blocked)
+    assert block["all_combinations_compared"] is False, (
+        "twelve pairs were not comparable, and the summary must not imply "
+        "that all forty-four were")
+    assert block["reconciliation_complete"] is True, (
+        "every combination reached a proven outcome; a pair that fails closed "
+        "by contract is not comparable, and that is a finding, not an outage")
+
+    assert f.unavailable == [], (
+        "the canonical service answering 'unknowable' is a successful check")
+    assert f.violations == []
+    assert f.exit_code == audit.EXIT_OK
+
+
+@_needs_pg
+def test_118_pg_a_partial_execution_outage_cannot_exit_zero(seeded159,
+                                                            monkeypatch):
+    """Case 5, through the real CLI: `audit_complete: false` and exit 2.
+
+    Asserted end to end rather than on the helper, because `audit_complete` and
+    the process exit code are set in `main`, and that is where the old code
+    turned a partial outage back into a pass.
+    """
+    import contextlib
+    import io
+
+    from scripts import audit_lifecycle_sql_coverage as audit
+
+    real_ops = repo.fetch_operational_status_counts
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 3:      # exactly one of the forty-four
+            return {"available": False, "reason": "database_unavailable",
+                    "counts": {}}
+        return real_ops(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "fetch_operational_status_counts", flaky)
+    monkeypatch.setenv("DATABASE_URL", seeded159.url)
+    monkeypatch.setattr(sys, "argv", ["audit_lifecycle_sql_coverage", "--json"])
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = audit.main()
+    report = json.loads(buf.getvalue())
+
+    assert code == audit.EXIT_UNAVAILABLE
+    assert code != audit.EXIT_OK
+    assert report["audit_complete"] is False, (
+        "a required repository read did not run; the audit is not complete "
+        "however many other combinations agreed")
+    assert report["violations"] == [], "an outage is not a contract violation"
+    assert any("read_reconciliation" in u for u in report["unavailable"])
+
+    recon = report["read_reconciliation"]
+    assert recon["combinations_execution_unavailable"] == 1
+    assert recon["combinations_compared"] == 43
+    assert recon["reconciliation_complete"] is False
+    assert recon["all_combinations_compared"] is False
+
+
+@_needs_pg
+def test_119_pg_unavailable_counts_stay_null_and_never_become_zero(
+        seeded159, monkeypatch):
+    """Case 6. A read that did not answer must not be published as a proven 0.
+
+    Zero is a claim about the population. `None` is a claim about the audit.
+    Rendering the second as the first is how an outage becomes a headline.
+    """
+    from scripts import audit_lifecycle_sql_coverage as audit
+
+    monkeypatch.setattr(
+        repo, "fetch_funnel_contact_page",
+        lambda *a, **k: {"available": False, "reason": "database_unavailable",
+                         "rows": [], "total": None})
+
+    f = audit.Findings()
+    block = audit.audit_read_reconciliation(f, _audit_now())
+
+    assert block["combinations_compared"] == 0
+    assert block["combinations_execution_unavailable"] == 44
+    for pair in block["results"]:
+        assert pair["available"] is False
+        for field in ("headline", "detail_total", "operational_total"):
+            assert pair[field] is None, f"{field} became a number it never read"
+            assert pair[field] != 0
+    assert f.exit_code == audit.EXIT_UNAVAILABLE
+
+
+@_needs_pg
+def test_120_pg_the_summary_never_claims_more_than_it_compared(seeded159,
+                                                               monkeypatch):
+    """Case 7. Every rendered claim is arithmetic over what actually ran."""
+    from scripts import audit_lifecycle_sql_coverage as audit
+
+    real_page = repo.fetch_funnel_contact_page
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] in (2, 7):
+            return {"available": False, "reason": "database_unavailable",
+                    "rows": [], "total": None}
+        return real_page(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "fetch_funnel_contact_page", flaky)
+
+    f = audit.Findings()
+    block = audit.audit_read_reconciliation(f, _audit_now())
+
+    # The parts add up to the whole — no combination is silently dropped.
+    assert (block["combinations_compared"]
+            + block["combinations_data_unavailable"]
+            + block["combinations_execution_unavailable"]
+            == block["combinations_expected"] == 44)
+    assert block["combinations_execution_unavailable"] == 2
+    assert block["all_combinations_compared"] is False
+    assert block["reconciliation_complete"] is False
+
+    # No PASSING check may be recorded for a reconciliation that did not finish.
+    recon_checks = [c for c in f.checks if c["check"] == "read_reconciliation"]
+    assert recon_checks, "the reconciliation must record a check either way"
+    assert all(not c["ok"] for c in recon_checks), (
+        "a partial reconciliation must never be recorded as a passed check")
+    detail = recon_checks[0]["detail"]
+    assert "2 of 44" in detail, (
+        "the message must name how many combinations could not be executed")
+
+    # And the rendered text says the same thing the report does.
+    report = {"audit_complete": False, "coverage_complete": False,
+              "complete_sql_total_publishable": False, "cpql_publishable": False,
+              "external_writes_performed": False, "population": {},
+              "windows": [], "read_reconciliation": block}
+    import io
+    import contextlib
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        audit._render(report, f, audit.EXIT_UNAVAILABLE)
+    out = buf.getvalue()
+    assert "42/44 compared" in out
+    assert "2 could not execute" in out
+    assert "all combinations compared: False" in out

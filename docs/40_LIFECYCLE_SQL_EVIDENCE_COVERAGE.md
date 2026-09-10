@@ -89,10 +89,19 @@ were absent from the list. The exhaustiveness test used a subset check, so it
 passed on both counts. **A constant kept alive so a static test goes green is not
 a contract.**
 
-There are five denominators, so there are five vocabularies:
+There are six denominators, so there are six vocabularies:
 
 **A · per read attempt** — `history_request_ok`, `history_request_failed`,
 `hubspot_authorization_failed`
+
+**A2 · per run** — `run_completed`, `contact_store_unreadable`,
+`recovery_checkpoint_unreadable`, `local_write_failed`,
+`checkpoint_write_failed`, plus the two request failures that stop a pass. Every
+run reports exactly one of these as `run_outcome`, on both the success and the
+failure path; before R7 the stop reasons were bare strings belonging to no
+vocabulary at all, and a completed pass named its outcome nowhere. This is the
+one vocabulary that deliberately intersects another (A), and it can only ever be
+single-valued, so no two counts can be summed through it.
 
 **B · per contact asked** — `history_payload_present`, `history_payload_missing`,
 `history_payload_empty`, `history_contact_not_returned`,
@@ -126,10 +135,23 @@ described the same thing.
   vocabulary E, and the diagnostic emits it structurally whenever the serialized
   batch body will not carry `propertiesWithHistory`.
 * **`unrecoverable_no_hubspot_evidence`** now carries a proof. It is emitted only
-  when **both** supported paths completed and the surviving answer is an
-  affirmative absence (an EMPTY history). A *missing payload* could still be our
-  request; a *contact not returned* is an identity question. Neither proves the
+  when **both** supported paths completed and **both answers** are an affirmative
+  absence — an EMPTY history from the batch read *and* an EMPTY history from the
+  individual read. A *missing payload* could still be our own request (that was
+  the §1 defect, and the whole reason a second path exists); a *contact not
+  returned* is an identity question, not a retention one. Neither proves the
   transition was never recorded, and neither earns the word "unrecoverable".
+
+  This is stronger than the first cut, which checked only the **surviving**
+  state plus a boolean "the fallback ran" — because the individual read's answer
+  overwrote the batch one, so the batch outcome was gone by the time anything
+  asked whether both paths had been definitive. Under that check, *batch
+  missing + individual empty* and *batch contact-not-returned + individual
+  empty* both passed as "both paths definitively empty". They are not. Both
+  outcomes are now carried separately, and every unresolved row publishes
+  `batch_state`, `individual_state` and `both_paths_attempted` so a reader can
+  see why the word was or was not used. A `None` individual state — never
+  attempted, or deferred by the request budget — can never satisfy it.
 
 `matching_stage_version_recovered` was being added to the summary
 unconditionally, so an SQL run whose rows all said
@@ -226,6 +248,47 @@ general one — inheriting is the defect.
 Modes: dry run by default, `--apply`, `--sql-only`, `--limit`, `--restart`,
 `--no-individual-fallback`, `--individual-budget`, `--diagnose`, `--json`.
 
+### The checkpoint write fails closed (R7)
+
+`repo.save_lifecycle_recovery_state(...)` was called and its result discarded, so
+an `--apply` run whose durable cursor was never stored still returned `ok: true`
+with a `next_cursor` the next run would never see. The next run would then
+re-read the same contacts from the stale cursor — HubSpot quota spent on work
+already done — while the operator had been told the pass completed and was
+resumable.
+
+The result is now inspected. A refused checkpoint write returns
+`checkpoint_write_failed` and the run is **not** `ok`.
+
+Evidence rows and the checkpoint go through two different modules with two
+different connections, so they are **not one transaction**. Rather than claim
+otherwise, a checkpoint failure reports the partial state exactly:
+
+| Field | Meaning |
+| --- | --- |
+| `local_evidence_persisted` | whether recovered rows reached `hubspot_lifecycle_stage_history` |
+| `events_persisted` | how many actually landed |
+| `contacts_recovered` | over how many contacts |
+| `checkpoint_persisted` | `false` only where the write was **attempted and failed**; `null` where it was never reached — "not attempted" is not the same claim as "attempted and failed" |
+| `resumability_proven` | always `false` on a failed run |
+| `unsaved_cursor` | the cursor that was **not** stored |
+| `partial_local_write` | evidence landed, the cursor did not |
+| `hubspot_writes_performed` | always `false`, on every path |
+
+The CLI does **not** route this through the generic failure renderer. "Nothing
+was written" is false after a partial local write and would send an operator
+looking for rows that are already in the database, so the renderer branches on
+`partial_local_write` and prints what landed, what did not, and why re-running is
+safe: the evidence upsert is keyed on `(contact_id, funnel_event)`, so a retry
+**rewrites** rather than appends. It costs the re-read, and duplicates nothing.
+
+The reverse order is preserved too — if the **evidence** write fails, the
+checkpoint is never attempted at all. Advancing the cursor past contacts whose
+evidence was not stored would lose them permanently.
+
+Every run now also reports a single `run_outcome` drawn from the per-run
+vocabulary (A2), on both the success and the failure path.
+
 ---
 
 ## §5 — One effective SQL-entry expression
@@ -283,6 +346,40 @@ counts and the effective-date basis. A pair the audit cannot check is
 `contact_read_unavailable` — with all three counts `None`, never zero. A
 disagreement between available readers is exit 1; unreadable inputs are exit 2;
 `--strict` keeps its separate exit 3 for incomplete evidence coverage.
+
+#### A partial outage is not a completed audit (R9)
+
+Those unavailability reasons were recorded **in the result blocks only**. Nothing
+consulted them, so as long as one combination compared cleanly the audit called
+itself passed, reported `audit_complete: true` and exited 0 — while required
+repository reads had not run at all.
+
+Two kinds of unavailability are now separated:
+
+* **Data / contract** — `campaign_identity_unavailable`. The canonical service
+  was asked and fail-closed exactly as designed, and the audit *proved* that.
+  This is a successful check with an unavailable answer. Treating it as an outage
+  would report the product's correct behaviour as a broken audit.
+* **Execution** — `contact_read_unavailable`, `scope_membership_unavailable`,
+  `scoped_reader_unavailable`. A required repository read did not run. This is
+  unavailability of the **audit**, it reaches `Findings.unavailable_now` even when
+  the other forty-three combinations agreed, and it forces `audit_complete:
+  false` and exit 2.
+
+Aggregate fields make the arithmetic checkable, and the first three always sum to
+the whole — no combination is silently dropped:
+
+    combinations_expected              44
+    combinations_compared              actually compared
+    combinations_data_unavailable      not comparable by contract
+    combinations_execution_unavailable never executed
+    all_combinations_compared          compared == expected
+    reconciliation_complete            every combination reached a proven
+                                       outcome and every comparable one agreed
+
+`all_combinations_compared` and `reconciliation_complete` are kept apart on
+purpose. Collapsing them would let "complete" be read as "all forty-four
+reconciled" when twelve were never comparable.
 
 ---
 

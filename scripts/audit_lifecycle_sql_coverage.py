@@ -337,13 +337,17 @@ def audit_read_reconciliation(f: Findings, now: datetime) -> dict:
         f.unavailable_now("read_reconciliation",
                           "the canonical contact store could not be read, so no "
                           "window or scope could be reconciled")
-        return {"available": False, "combinations": 0, "results": []}
+        return {"available": False, "combinations": 0,
+                "combinations_expected": None, "combinations_compared": 0,
+                "combinations_data_unavailable": None,
+                "combinations_execution_unavailable": None,
+                "all_combinations_compared": False,
+                "reconciliation_complete": False, "results": []}
 
     all_rows = contacts.get("rows") or []
     col = EVENT_DATE_COLUMN[EVENT_SQL]
     results: list[dict] = []
     compared = 0
-    unavailable = 0
 
     for win in windows:
         start, end = win.get("start"), win.get("end")
@@ -354,7 +358,6 @@ def audit_read_reconciliation(f: Findings, now: datetime) -> dict:
             for scope in funnel.ORDERED_SCOPES:
                 results.append(_recon_unavailable(win, scope,
                                                   "contact_read_unavailable"))
-                unavailable += 1
             continue
 
         resolver, identity_available = funnel._build_campaign_resolver(start, end)  # noqa: SLF001
@@ -370,31 +373,88 @@ def audit_read_reconciliation(f: Findings, now: datetime) -> dict:
             results.append(block)
             if block["available"]:
                 compared += 1
-            else:
-                unavailable += 1
 
-    if compared:
+    expected = len(windows) * len(funnel.ORDERED_SCOPES)
+    execution_failures = [b for b in results if b.get("execution_failure")]
+    data_unavailable = [b for b in results
+                        if not b["available"] and not b.get("execution_failure")]
+
+    # R9: an execution failure is unavailability of the AUDIT, and it is
+    # recorded as such even when other combinations succeeded. Otherwise 43
+    # green pairs hide the one whose repository read never ran.
+    if execution_failures:
+        by_reason: dict = {}
+        for block in execution_failures:
+            by_reason[block["reason"]] = by_reason.get(block["reason"], 0) + 1
+        f.unavailable_now(
+            "read_reconciliation",
+            f"{len(execution_failures)} of {expected} window/scope "
+            f"combination(s) could not be executed: "
+            + ", ".join(f"{n}x {r}" for r, n in sorted(by_reason.items()))
+            + " — a required repository read did not run, so the "
+              "reconciliation is incomplete regardless of how many other "
+              "combinations agreed")
+    elif compared:
         f.passed("read_reconciliation",
-                 f"{compared} window/scope combination(s) reconciled across "
-                 f"headline, detail and operational reads"
-                 + (f"; {unavailable} unavailable" if unavailable else ""))
+                 f"{compared} of {expected} window/scope combination(s) "
+                 "reconciled across headline, detail and operational reads"
+                 + (f"; {len(data_unavailable)} unavailable by contract"
+                    if data_unavailable else ""))
     else:
         f.unavailable_now("read_reconciliation",
                           "no window/scope combination could be reconciled")
 
+    # Complete only when EVERY comparable combination ran and agreed. A pair
+    # that failed closed by contract (no campaign identity) is not comparable
+    # and does not block completeness; a pair that never executed does.
+    mismatches = [b for b in results if b.get("coverage_status") == "mismatch"]
+    reconciliation_complete = (not execution_failures and not mismatches
+                               and compared > 0)
+
     return {"available": bool(compared),
             "combinations": len(results),
+            "combinations_expected": expected,
+            "combinations_compared": compared,
+            "combinations_data_unavailable": len(data_unavailable),
+            "combinations_execution_unavailable": len(execution_failures),
+            # Two different claims, kept apart. `reconciliation_complete` says
+            # every combination reached a PROVEN outcome and every comparable
+            # one agreed. `all_combinations_compared` says every combination
+            # was actually compared — which a contract-unavailable pair, by
+            # definition, was not. Collapsing them would let "complete" be read
+            # as "all forty-four reconciled" when twelve were never comparable.
+            "all_combinations_compared": compared == expected,
+            "reconciliation_complete": reconciliation_complete,
             "reconciled": compared,
-            "unavailable": unavailable,
+            "unavailable": len(results) - compared,
             "scopes": list(funnel.ORDERED_SCOPES),
             "effective_date_basis": repo.EFFECTIVE_DATE_DOCTRINE,
             "results": results}
+
+
+# ── PR-ADS-159-R9 — a data state and an execution failure are not the same ───
+# `campaign_identity_unavailable` is a DATA/CONTRACT state: the canonical
+# service was asked, it failed closed exactly as designed, and the audit proved
+# it. That is a successful check with an unavailable answer.
+#
+# Every other reason here is an EXECUTION failure — a repository read that did
+# not run. Those must reach `Findings.unavailable_now`, or a partial database
+# outage produces `audit_complete: true` and exit 0 while required reads never
+# happened. The first cut recorded them in the result block only, so 43 passing
+# combinations could hide one that never executed.
+REASON_IDENTITY_UNAVAILABLE = "campaign_identity_unavailable"
+_EXECUTION_FAILURES = (
+    "contact_read_unavailable",
+    "scope_membership_unavailable",
+    "scoped_reader_unavailable",
+)
 
 
 def _recon_unavailable(win, scope, reason) -> dict:
     """One window/scope pair the audit could not check. Unavailable, not zero."""
     return {
         "available": False, "reason": reason,
+        "execution_failure": reason in _EXECUTION_FAILURES,
         "window": win.get("window_key"), "window_type": win.get("window_type"),
         "scope": scope, "headline": None, "detail_total": None,
         "operational_total": None,
@@ -412,7 +472,7 @@ def _reconcile_one(f, repo, funnel, win, scope, start, end, col,
     # canonical service returns None membership and an unavailable page for it;
     # the audit must agree rather than compare a null against a zero.
     if funnel._identity_dependent_scope_unavailable(scope, identity_available):  # noqa: SLF001
-        return _recon_unavailable(win, scope, "campaign_identity_unavailable")
+        return _recon_unavailable(win, scope, REASON_IDENTITY_UNAVAILABLE)
 
     memberships = [c["scopes"].get(scope) for c in sql_population]
     if any(m is None for m in memberships):
@@ -582,10 +642,17 @@ def _render(report: dict, findings: Findings, exit_code: int) -> None:
         print(f"      why: {win.get('explanation')}")
 
     recon = report.get("read_reconciliation") or {}
-    if recon.get("available"):
-        print(f"\n  READ RECONCILIATION [{recon.get('window')}]  headline="
-              f"{recon.get('headline')} detail={recon.get('detail_total')} "
-              f"operational={recon.get('operational_total')}")
+    if recon.get("combinations_expected"):
+        print(f"\n  READ RECONCILIATION  "
+              f"{recon.get('combinations_compared')}/"
+              f"{recon.get('combinations_expected')} compared · "
+              f"{recon.get('combinations_data_unavailable')} unavailable by "
+              f"contract · {recon.get('combinations_execution_unavailable')} "
+              f"could not execute")
+        print(f"    all combinations compared: "
+              f"{recon.get('all_combinations_compared')}")
+        print(f"    reconciliation_complete:   "
+              f"{recon.get('reconciliation_complete')}")
 
     for check in findings.checks:
         if not check["ok"]:

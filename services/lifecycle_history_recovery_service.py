@@ -138,6 +138,22 @@ HUBSPOT_AUTHORIZATION_FAILED = "hubspot_authorization_failed"
 REQUEST_OUTCOMES = (REQUEST_OK, HISTORY_REQUEST_FAILED,
                     HUBSPOT_AUTHORIZATION_FAILED)
 
+# ── A2 · per RUN ─────────────────────────────────────────────────────────────
+# Denominator: one invocation of `recover()`. Answers "did the pass complete,
+# and if not, what stopped it?" These were previously bare strings scattered
+# through the code, belonging to no vocabulary at all.
+RUN_OK = "run_completed"
+CONTACT_STORE_UNREADABLE = "contact_store_unreadable"
+CHECKPOINT_UNREADABLE = "recovery_checkpoint_unreadable"
+LOCAL_WRITE_FAILED = "local_write_failed"
+#: The durable cursor was not stored. Evidence rows may ALREADY be persisted —
+#: this is a partial local write, never "nothing was written".
+CHECKPOINT_WRITE_FAILED = "checkpoint_write_failed"
+
+RUN_OUTCOMES = (RUN_OK, CONTACT_STORE_UNREADABLE, CHECKPOINT_UNREADABLE,
+                LOCAL_WRITE_FAILED, CHECKPOINT_WRITE_FAILED,
+                HISTORY_REQUEST_FAILED, HUBSPOT_AUTHORIZATION_FAILED)
+
 # ── B · per CONTACT ASKED ────────────────────────────────────────────────────
 # Denominator: one contact in one pass. Answers "what did HubSpot's payload
 # contain for it?" These are the connector's own states, plus one this service
@@ -204,6 +220,7 @@ STAGE_GAP_OUTCOMES = (
 #: Every vocabulary, by the thing it counts. A report names which one it is
 #: using, so two numbers with different denominators can never be added.
 VOCABULARIES = {
+    "run": RUN_OUTCOMES,
     "request": REQUEST_OUTCOMES,
     "per_contact_payload": PAYLOAD_OUTCOMES,
     "per_sql_gap": SQL_GAP_OUTCOMES,
@@ -395,25 +412,37 @@ def checkpoint_scope(event: str | None) -> str:
     return f"{SCOPE}:{event}"
 
 
-def _definitively_unrecoverable(payload_state: str, fallback_attempted: bool) -> bool:
-    """Have BOTH supported paths answered, and both said "no evidence"?
+def _definitively_unrecoverable(batch_state, individual_state) -> bool:
+    """Did BOTH supported paths complete AND both return an affirmative absence?
 
-    "Unrecoverable" is a claim about HubSpot, so it needs proof from HubSpot:
-    the batch read ran, the individual read ran, and the surviving answer is an
-    affirmative absence — an EMPTY history, not a missing payload and not a
-    contact HubSpot declined to return. A missing payload could still be our
-    request; a contact not returned is an identity question. Neither proves the
-    transition was never recorded.
+    "Unrecoverable" is a claim about HubSpot, so it needs proof from HubSpot —
+    and the proof required is exactly what the doctrine says it is: an EMPTY
+    history from the batch read AND an EMPTY history from the individual read.
+
+    PR-ADS-159-R8: the first version checked only the SURVIVING state and a
+    boolean "the fallback ran". It therefore accepted *missing* batch + empty
+    individual, and *contact-not-returned* batch + empty individual, as "both
+    paths definitively empty". They are not:
+
+      * a missing payload could still be our own request — that was the §1
+        defect, and the whole reason a second path exists;
+      * a contact HubSpot did not return is an identity question, not a
+        retention one.
+
+    Neither proves the transition was never recorded, and neither earns the
+    word. Both outcomes are now carried separately so this can be asked
+    honestly, and a `None` individual state (never attempted, or deferred) can
+    never satisfy it.
     """
-    return bool(fallback_attempted) and payload_state == PAYLOAD_EMPTY
+    return batch_state == PAYLOAD_EMPTY and individual_state == PAYLOAD_EMPTY
 
 
-def _gap_reason(payload_state: str, fallback_attempted: bool) -> str:
+def _gap_reason(batch_state, individual_state, surviving_state) -> str:
     """The per-gap outcome for a contact HubSpot answered with no history."""
-    if _definitively_unrecoverable(payload_state, fallback_attempted):
+    if _definitively_unrecoverable(batch_state, individual_state):
         return UNRECOVERABLE_NO_EVIDENCE
     # Not defaulted: an unrecognised state is reported as ITSELF.
-    return _PAYLOAD_STATE_REASON.get(payload_state, payload_state)
+    return _PAYLOAD_STATE_REASON.get(surviving_state, surviving_state)
 
 
 #: PR-ADS-159 §4 — the individual-read fallback is bounded by a request budget,
@@ -489,8 +518,7 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
 
     state = repo.fetch_lifecycle_recovery_state(scope=scope)
     if not state.get("available"):
-        return _failed(run_id, mode, started,
-                       "recovery_checkpoint_unreadable",
+        return _failed(run_id, mode, started, CHECKPOINT_UNREADABLE,
                        "the durable checkpoint could not be read, so a run "
                        "could not be resumed or recorded", scope=scope)
     cursor = (state.get("row") or {}).get("last_contact_id") if resume else None
@@ -506,7 +534,7 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
         candidates = repo.fetch_contacts_missing_stage_dates(
             after_contact_id=cursor, limit=fetch_size)
     if not candidates.get("available"):
-        return _failed(run_id, mode, started, "contact_store_unreadable",
+        return _failed(run_id, mode, started, CONTACT_STORE_UNREADABLE,
                        "the canonical contact store could not be read",
                        scope=scope)
 
@@ -566,19 +594,24 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
                     break
 
                 examined += 1
-                fallback_attempted = False
+                # PR-ADS-159-R8: both path outcomes are kept. The first version
+                # overwrote `state` with the individual read's answer, so the
+                # batch outcome was gone by the time anything asked whether BOTH
+                # paths had been definitive — and "unrecoverable" was decided
+                # without the evidence it claimed.
+                batch_state = state
+                individual_state = None
                 if needs_fallback:
                     individual_requests += 1
-                    fallback_attempted = True
                     single = hubspot_pull.fetch_lifecycle_stage_history_single(
                         row["contact_id"], client=client)
-                    if single.get("state") == PAYLOAD_PRESENT:
-                        entry, state = single, single["state"]
+                    individual_state = single.get("state")
+                    if individual_state == PAYLOAD_PRESENT:
                         individual_rescued += 1
-                    else:
-                        # Both paths answered. Keep the individual read's own
-                        # verdict — it is the more authoritative of the two.
-                        entry, state = single, single.get("state") or state
+                    # The individual read is the more authoritative SURVIVING
+                    # answer; the batch outcome is kept beside it, not replaced.
+                    entry = single
+                    state = individual_state or batch_state
 
                 payload_states[state] = payload_states.get(state, 0) + 1
                 # Adjudicated: every read this contact was owed has been made.
@@ -592,12 +625,16 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
                     # recorded". Neither is a connector failure, and neither is
                     # evidence about a specific stage.
                     contacts_without_history += 1
-                    reason = _gap_reason(state, fallback_attempted)
+                    reason = _gap_reason(batch_state, individual_state, state)
                     unresolved_rows.extend(
                         {"contact_id": row["contact_id"], "funnel_event": e,
                          "reason": reason, "payload_state": state,
                          "adjudicated": True,
-                         "both_paths_attempted": fallback_attempted}
+                         # Both outcomes travel with the row, so a reader can
+                         # see WHY it is or is not called unrecoverable.
+                         "batch_state": batch_state,
+                         "individual_state": individual_state,
+                         "both_paths_attempted": individual_state is not None}
                         for e in missing_events(row, events))
                     continue
 
@@ -610,7 +647,8 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
                 recovered_rows.extend(found)
                 unresolved_rows.extend(
                     {"contact_id": row["contact_id"], "payload_state": state,
-                     "adjudicated": True, **u}
+                     "adjudicated": True, "batch_state": batch_state,
+                     "individual_state": individual_state, **u}
                     for u in unresolved)
     except Exception as exc:  # noqa: BLE001
         # A partial pass is never reported as a completed one, and the cursor is
@@ -636,16 +674,28 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
         result = writers.upsert_lifecycle_stage_history(recovered_rows,
                                                         run_id=run_id)
         if not result.get("ok"):
-            return _failed(run_id, mode, started, "local_write_failed",
+            return _failed(run_id, mode, started, LOCAL_WRITE_FAILED,
                            result.get("error") or "write not proven",
                            examined=examined, scope=scope)
         persisted = result.get("persisted") or 0
 
     contacts_recovered = len({r["contact_id"] for r in recovered_rows})
     if apply:
+        # ── PR-ADS-159-R7 — the checkpoint write is checked ──────────────────
+        # Its result used to be discarded, so a run whose durable cursor was
+        # never saved still returned ok=True. The next run would then re-read
+        # the same contacts from the old cursor — wasted HubSpot quota — while
+        # the operator had been told the pass completed and was resumable.
+        #
+        # Evidence rows and the checkpoint are written through two different
+        # modules with their own connections, so they are NOT one transaction.
+        # Rather than pretend otherwise, a failure here reports the partial
+        # state exactly: what was persisted, what was not, and what that costs.
+        # Re-running is safe — the evidence upsert is keyed on
+        # (contact_id, funnel_event), so a retry rewrites rather than appends.
         # R1/R2: this mode's OWN checkpoint, advanced only to the last contact
         # every required read was made for.
-        repo.save_lifecycle_recovery_state({
+        saved = repo.save_lifecycle_recovery_state({
             "last_contact_id": last_adjudicated_id,
             "contacts_examined": examined,
             "contacts_recovered": contacts_recovered,
@@ -655,11 +705,23 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
             "last_run_mode": mode,
             "last_error": write_error,
         }, scope=scope)
+        if not saved.get("ok"):
+            return _failed(
+                run_id, mode, started, CHECKPOINT_WRITE_FAILED,
+                saved.get("error") or "the durable checkpoint was not persisted",
+                examined=examined, scope=scope,
+                evidence_rows_persisted=persisted,
+                contacts_recovered=contacts_recovered,
+                unsaved_cursor=last_adjudicated_id)
 
     return {
         "ok": True,
         "run_id": run_id,
         "mode": mode,
+        # One value from RUN_OUTCOMES, on every path. Before R7 the stop reasons
+        # were bare strings belonging to no vocabulary, and a completed pass
+        # named its outcome nowhere at all.
+        "run_outcome": RUN_OK,
         "apply": bool(apply),
         # Always explicit, and always False. There is no HubSpot write path in
         # this module, and the report says so rather than leaving it inferred.
@@ -782,14 +844,28 @@ def _evidence_summary(payload_states: dict, unresolved_rows: list,
 
 
 def _failed(run_id, mode, started, reason, detail, *, examined=0,
-            scope=None) -> dict:
-    """A run that could not complete. Counts are NULL where nothing was proven."""
+            scope=None, evidence_rows_persisted=None, contacts_recovered=None,
+            unsaved_cursor=None) -> dict:
+    """A run that could not complete. Counts are NULL where nothing was proven.
+
+    PR-ADS-159-R7: a checkpoint failure is a PARTIAL local write, not a run that
+    did nothing. Evidence rows may already be in
+    ``hubspot_lifecycle_stage_history`` while the cursor is not — so those three
+    optional arguments carry what actually happened, and the report must not be
+    rendered as "nothing was written".
+    """
+    evidence_written = bool(evidence_rows_persisted)
     return {
         "ok": False,
         "run_id": run_id,
         "mode": mode,
         "reason": reason,
+        # The same field a completed pass carries, from the same vocabulary.
+        "run_outcome": reason,
         "detail": detail,
+        # Always explicit and always False, on every path. No HubSpot write
+        # exists in this module, and a failed run says so rather than leaving
+        # the reader to infer it from a missing field.
         "hubspot_writes_performed": False,
         "checkpoint_scope": scope,
         "started_at": started.isoformat(),
@@ -798,8 +874,22 @@ def _failed(run_id, mode, started, reason, detail, *, examined=0,
         # A pass that could not finish proves nothing about what is left.
         "more_candidates_remain": None,
         # Unknown, not zero: an aborted pass proves nothing about how much
-        # evidence HubSpot holds.
-        "contacts_recovered": None,
+        # evidence HubSpot holds — EXCEPT where the caller measured it before
+        # the failure, which is exactly the checkpoint case.
+        "contacts_recovered": contacts_recovered,
         "events_recovered": None,
-        "events_persisted": 0,
+        "events_persisted": evidence_rows_persisted or 0,
+        # ── the partial-write disclosure ────────────────────────────────────
+        # `checkpoint_persisted` is False only where the write was ATTEMPTED and
+        # failed. On every other failure it was never reached, and "not
+        # attempted" is not the same claim as "attempted and failed".
+        "local_evidence_persisted": evidence_written,
+        "checkpoint_persisted": (False if reason == CHECKPOINT_WRITE_FAILED
+                                 else None),
+        # Never true on a failed run: the cursor is the only thing that makes a
+        # bounded pass resumable, and this pass did not prove it was stored.
+        "resumability_proven": False,
+        "unsaved_cursor": unsaved_cursor,
+        "partial_local_write": (reason == CHECKPOINT_WRITE_FAILED
+                                and evidence_written),
     }
