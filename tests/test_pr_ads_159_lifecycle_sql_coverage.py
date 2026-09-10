@@ -355,19 +355,6 @@ def test_12_a_recovered_sql_timestamp_is_hubspots_own_value():
 # §2 — the evidence vocabulary
 # ═════════════════════════════════════════════════════════════════════════════
 
-def test_13_every_required_evidence_state_exists_and_is_distinct():
-    required = {
-        "history_request_failed", "history_contact_not_returned",
-        "history_parameter_dropped_or_unsupported", "history_payload_missing",
-        "history_payload_empty", "history_present_no_sql_stage",
-        "history_sql_version_missing_timestamp", "history_sql_timestamp_invalid",
-        "history_sql_timestamp_recovered", "unrecoverable_no_hubspot_evidence",
-    }
-    states = list(recovery.EVIDENCE_STATES)
-
-    assert required <= set(states), sorted(required - set(states))
-    assert len(states) == len(set(states)), "states must be mutually exclusive"
-
 
 def test_14_contact_not_returned_no_longer_collapses_into_payload_missing():
     """The two were one number. They are two different follow-ups."""
@@ -424,26 +411,6 @@ def test_18_stages_implying_sql_are_derived_from_the_rank_doctrine():
     assert "subscriber" not in stages
 
 
-def test_19_the_candidate_query_requires_no_effective_date_not_just_no_column():
-    """A contact recovered on an earlier run must not be attempted again.
-
-    The all-stage read deliberately omits the recovery join; the SQL candidate
-    read must include it, or every run re-asks HubSpot about contacts it already
-    answered.
-    """
-    src = _function_source("fetch_sql_recovery_candidates")
-
-    assert "_recovery_join()" in src
-    assert "effective_date_sql(EVENT_SQL)" in src
-    assert "IS NULL" in src
-
-
-def test_20_the_report_states_whether_more_candidates_remain():
-    """A bounded run read as the whole picture is how a coverage number lies."""
-    src = _function_source("recover", module="services")
-
-    assert '"more_candidates_remain": len(rows) >= int(limit)' in src
-    assert '"candidate_mode"' in src
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -504,13 +471,6 @@ def test_23_a_permanent_individual_failure_is_not_retried_forever(monkeypatch):
     assert len(client.individual_calls) == 1, (
         "a permission failure must not be retried — it cannot start working")
 
-
-def test_24_the_individual_read_budget_is_a_hard_ceiling():
-    src = _function_source("recover", module="services")
-
-    assert "individual_requests < individual_request_budget" in src
-    assert "budget_exhausted = True" in src
-    assert '"individual_budget_exhausted"' in src
 
 
 def test_25_the_error_message_carries_no_contact_identifier():
@@ -843,7 +803,13 @@ def test_47_the_audit_makes_no_external_api_call():
     src = (_ROOT / "scripts" / "audit_lifecycle_sql_coverage.py").read_text()
     code = ast.unparse(ast.parse(src))
 
-    for forbidden in ("hubspot_pull", "get_client", "google_ads", "mailchimp"):
+    # Narrowed by PR-ADS-159-R5: the audit now imports the canonical funnel
+    # service, whose SCOPE CONSTANTS legitimately contain "google_ads"
+    # (`SCOPE_GOOGLE_ADS_SOURCE`). A guard that fires on a constant's NAME stops
+    # being read as a guard. What must be absent are the client entry points.
+    for forbidden in ("hubspot_pull", "get_client", "google_ads_client",
+                      "googleads", "mailchimp_client", "requests.get",
+                      "requests.post", "httpx."):
         assert forbidden not in code, (
             f"{forbidden} is reachable from the audit — it must read only the "
             "local database")
@@ -1128,9 +1094,25 @@ def test_60_pg_the_audit_runs_and_reports_incomplete_coverage(seeded159):
     assert report["complete_sql_total_publishable"] is False
     assert report["cpql_publishable"] is False
     assert report["population"]["unresolved"] == 2
-    assert report["read_reconciliation"]["headline"] == \
-        report["read_reconciliation"]["detail_total"] == \
-        report["read_reconciliation"]["operational_total"]
+
+    # PR-ADS-159-R5: every window × every canonical scope, not just all_time.
+    recon = report["read_reconciliation"]
+    assert recon["combinations"] == 11 * 4, (
+        f"expected 11 windows x 4 scopes, got {recon['combinations']}")
+    assert recon["scopes"] == ["all_source", "google_ads_source",
+                              "campaign_attributable", "keyword_attributable"]
+    assert recon["reconciled"] >= 1, recon
+    # Every compared pair agrees; every other pair is UNAVAILABLE with a reason,
+    # never a silent zero.
+    for block in recon["results"]:
+        if block["available"]:
+            assert block["headline"] == block["detail_total"] \
+                == block["operational_total"], block
+        else:
+            assert block["reason"], "an unavailable pair must say why"
+            assert block["headline"] is None
+            assert block["detail_total"] is None
+            assert block["operational_total"] is None
 
 
 @_needs_pg
@@ -1168,3 +1150,692 @@ def test_62_pg_the_audit_output_carries_no_contact_identifier(seeded159):
         assert f'"{identifier}"' not in result.stdout or identifier in (
             "direct", "recovered"), f"{identifier} leaked into the audit output"
     assert "Acme" not in result.stdout
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §11 — PR-ADS-159-R1/R2/R3: checkpoints, cursor safety, exact remaining work
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# These drive `recover()` end to end against a fake repository. The previous
+# versions of three of these tests asserted SOURCE STRINGS — that the file
+# contained `len(rows) >= int(limit)`, that it mentioned a budget comparison.
+# A string assertion cannot tell whether the cursor actually stops, and the
+# cursor actually stopping is the entire guarantee.
+
+class FakeRepo:
+    """A funnel repository double: candidates in, checkpoints out.
+
+    Wide enough for `recover()` to run its real loop — the point is to observe
+    what the loop DOES with the cursor, not to re-describe it.
+    """
+
+    def __init__(self, candidates, *, state_available=True):
+        self.candidates = list(candidates)
+        self.state_available = state_available
+        #: scope -> saved checkpoint row. Separate keys prove separation.
+        self.saved: dict = {}
+        self.reads: list = []
+
+    # ── checkpoint ──────────────────────────────────────────────────────────
+    def fetch_lifecycle_recovery_state(self, *, scope=None):
+        self.reads.append(scope)
+        if not self.state_available:
+            return {"available": False, "row": None, "scope": scope}
+        return {"available": True, "row": self.saved.get(scope), "scope": scope}
+
+    def save_lifecycle_recovery_state(self, state, *, scope=None):
+        self.saved[scope] = dict(state)
+        return {"ok": True, "error": None}
+
+    # ── candidates ──────────────────────────────────────────────────────────
+    def _page(self, after_contact_id, limit):
+        rows = [r for r in self.candidates
+                if after_contact_id is None or r["contact_id"] > after_contact_id]
+        return {"available": True, "rows": rows[:limit]}
+
+    def fetch_sql_recovery_candidates(self, *, after_contact_id=None, limit=200):
+        return self._page(after_contact_id, limit)
+
+    def fetch_contacts_missing_stage_dates(self, *, after_contact_id=None,
+                                           limit=200):
+        return self._page(after_contact_id, limit)
+
+
+def _candidate(contact_id, stage="customer"):
+    """One SQL-recovery candidate row as the repository returns it."""
+    return {"contact_id": contact_id, "lifecycle_stage": stage,
+            "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+            "date_entered_sql": None}
+
+
+def _run(monkeypatch, fake_repo, client, *, stub_writer=True, **kwargs):
+    """Run `recover()` against the fake repository.
+
+    The local writer is stubbed by default: these tests are about the LOOP's
+    cursor and vocabulary decisions, and a real write attempt with no database
+    would fail the run before any of that could be observed.
+    """
+    import db.crm_funnel_repository as real_repo
+
+    for name in ("fetch_lifecycle_recovery_state", "save_lifecycle_recovery_state",
+                 "fetch_sql_recovery_candidates",
+                 "fetch_contacts_missing_stage_dates"):
+        monkeypatch.setattr(real_repo, name, getattr(fake_repo, name))
+    if stub_writer:
+        import db.writers as real_writers
+        monkeypatch.setattr(
+            real_writers, "upsert_lifecycle_stage_history",
+            lambda rows, *, run_id: {"ok": True, "persisted": len(rows)})
+    kwargs.setdefault("event", lifecycle.EVENT_SQL)
+    return recovery.recover(client=client, **kwargs)
+
+
+def _present_client(contact_ids, ts=None):
+    """A client whose BATCH read answers every contact with an SQL version."""
+    ts = ts or datetime(2026, 3, 3, tzinfo=timezone.utc)
+    return FakeClient(batch_results=[
+        _record(cid, [_version("salesqualifiedlead", ts)]) for cid in contact_ids])
+
+
+def _batch_blind_client(contact_ids, *, individual=None):
+    """A client whose batch returns no history — the production shape."""
+    return FakeClient(
+        batch_results=[_record(cid, container=False) for cid in contact_ids],
+        individual_results=dict(individual or {}))
+
+
+# ── R1 · independent checkpoints ─────────────────────────────────────────────
+
+def test_63_each_candidate_mode_has_its_own_checkpoint_scope():
+    assert recovery.checkpoint_scope(None) == "lifecycle_stage_history"
+    assert recovery.checkpoint_scope(lifecycle.EVENT_SQL) == \
+        "lifecycle_stage_history:sql"
+    assert recovery.checkpoint_scope(None) != \
+        recovery.checkpoint_scope(lifecycle.EVENT_SQL)
+
+
+def test_64_an_unknown_mode_does_not_inherit_the_general_cursor():
+    """A new population must not silently resume from another's cursor.
+
+    That is the exact defect: SQL-only inheriting the all-stage cursor and
+    skipping every candidate below it.
+    """
+    assert recovery.checkpoint_scope("opportunity") == \
+        "lifecycle_stage_history:opportunity"
+    assert recovery.checkpoint_scope("opportunity") != \
+        recovery.checkpoint_scope(None)
+
+
+def test_65_sql_recovery_reads_and_writes_only_its_own_checkpoint(monkeypatch):
+    """Behavioural: run SQL-only with a HIGH general-mode cursor in place.
+
+    Under the shared scope this run would have resumed at "c9" and found
+    nothing. It must resume from its own (absent) cursor and process c1.
+    """
+    fake = FakeRepo([_candidate("c1"), _candidate("c2")])
+    fake.saved["lifecycle_stage_history"] = {"last_contact_id": "c9"}
+
+    result = _run(monkeypatch, fake, _present_client(["c1", "c2"]),
+                  limit=10, apply=True)
+
+    assert result["ok"], result
+    assert result["checkpoint_scope"] == "lifecycle_stage_history:sql"
+    assert result["resume_from"] is None, (
+        "the SQL run must not inherit the all-stage cursor")
+    assert result["contacts_examined"] == 2
+    # The general checkpoint is untouched.
+    assert fake.saved["lifecycle_stage_history"] == {"last_contact_id": "c9"}
+    assert fake.saved["lifecycle_stage_history:sql"]["last_contact_id"] == "c2"
+
+
+def test_66_general_recovery_is_unaffected_by_a_high_sql_cursor(monkeypatch):
+    fake = FakeRepo([_candidate("c1"), _candidate("c2")])
+    fake.saved["lifecycle_stage_history:sql"] = {"last_contact_id": "c9"}
+
+    result = _run(monkeypatch, fake, _present_client(["c1", "c2"]),
+                  limit=10, apply=True, event=None)
+
+    assert result["checkpoint_scope"] == "lifecycle_stage_history"
+    assert result["resume_from"] is None
+    assert result["contacts_examined"] == 2
+    assert fake.saved["lifecycle_stage_history:sql"] == {"last_contact_id": "c9"}
+
+
+def test_67_each_mode_resumes_from_its_own_cursor(monkeypatch):
+    fake = FakeRepo([_candidate(f"c{i}") for i in range(1, 6)])
+    fake.saved["lifecycle_stage_history:sql"] = {"last_contact_id": "c3"}
+    fake.saved["lifecycle_stage_history"] = {"last_contact_id": "c1"}
+
+    sql = _run(monkeypatch, fake, _present_client(["c4", "c5"]), limit=10)
+    assert sql["resume_from"] == "c3"
+    assert sql["contacts_examined"] == 2
+
+    general = _run(monkeypatch, fake, _present_client(["c2", "c3", "c4", "c5"]),
+                   limit=10, event=None)
+    assert general["resume_from"] == "c1"
+    assert general["contacts_examined"] == 4
+
+
+def test_68_applying_one_mode_never_overwrites_the_others_checkpoint(monkeypatch):
+    fake = FakeRepo([_candidate("c1")])
+    fake.saved["lifecycle_stage_history"] = {"last_contact_id": "zzz",
+                                             "contacts_examined": 999}
+
+    _run(monkeypatch, fake, _present_client(["c1"]), limit=10, apply=True)
+
+    assert fake.saved["lifecycle_stage_history"]["last_contact_id"] == "zzz"
+    assert fake.saved["lifecycle_stage_history"]["contacts_examined"] == 999
+    assert set(fake.saved) == {"lifecycle_stage_history",
+                               "lifecycle_stage_history:sql"}
+
+
+# ── R2 · the cursor never passes an unadjudicated contact ────────────────────
+
+def test_69_the_cursor_stops_before_the_first_budget_deferred_contact(monkeypatch):
+    """limit 5, budget 2: three contacts need a fallback, only two may have one.
+
+    Previously the loop set the cursor on EVERY row it looked at, so c3, c4 and
+    c5 were passed over with no individual read and skipped for good on the
+    next resumed run.
+    """
+    ids = [f"c{i}" for i in range(1, 6)]
+    fake = FakeRepo([_candidate(c) for c in ids])
+    client = _batch_blind_client(ids)   # every contact needs the fallback
+
+    result = _run(monkeypatch, fake, client, limit=5, apply=True,
+                  individual_request_budget=2)
+
+    assert result["ok"], result
+    assert result["individual_requests"] == 2
+    assert result["deferred_at_contact"] == "c3"
+    assert result["next_cursor"] == "c2", (
+        "the cursor must stop at the last FULLY adjudicated contact")
+    assert result["contacts_examined"] == 2
+    assert result["contacts_deferred_by_budget"] == 3
+    assert fake.saved["lifecycle_stage_history:sql"]["last_contact_id"] == "c2"
+
+
+def test_70_a_resumed_run_processes_the_deferred_contact(monkeypatch):
+    """The other half of the guarantee: deferred means LATER, not lost."""
+    ids = [f"c{i}" for i in range(1, 6)]
+    fake = FakeRepo([_candidate(c) for c in ids])
+
+    first = _run(monkeypatch, fake, _batch_blind_client(ids), limit=5,
+                 apply=True, individual_request_budget=2)
+    assert first["next_cursor"] == "c2"
+
+    second = _run(monkeypatch, fake, _batch_blind_client(["c3", "c4", "c5"]),
+                  limit=5, apply=True, individual_request_budget=10)
+
+    assert second["resume_from"] == "c2"
+    assert second["contacts_examined"] == 3
+    assert second["next_cursor"] == "c5"
+
+
+def test_71_no_contact_is_skipped_or_processed_twice_across_resumes(monkeypatch):
+    """Walk the whole population two contacts at a time; account for every id."""
+    ids = [f"c{i}" for i in range(1, 8)]
+    fake = FakeRepo([_candidate(c) for c in ids])
+
+    seen: list = []
+    guard = 0
+    while guard < 20:
+        guard += 1
+        result = _run(monkeypatch, fake, _batch_blind_client(ids), limit=2,
+                      apply=True, individual_request_budget=2)
+        assert result["ok"], result
+        seen.extend(r["contact_id"] for r in result["unresolved"]
+                    if r.get("adjudicated"))
+        if not result["more_candidates_remain"]:
+            break
+
+    assert seen == ids, f"expected every contact exactly once, got {seen}"
+    assert len(seen) == len(set(seen)), "a contact was processed twice"
+
+
+def test_72_a_deferred_contact_is_not_classified_unrecoverable(monkeypatch):
+    ids = ["c1", "c2", "c3"]
+    fake = FakeRepo([_candidate(c) for c in ids])
+
+    result = _run(monkeypatch, fake, _batch_blind_client(ids), limit=3,
+                  individual_request_budget=1)
+
+    deferred = [r for r in result["unresolved"] if not r.get("adjudicated")]
+    assert deferred, "the deferred contacts must appear in the report"
+    for row in deferred:
+        assert row["reason"] == recovery.SQL_DEFERRED_BY_BUDGET
+        assert row["reason"] != recovery.UNRECOVERABLE_NO_EVIDENCE
+        assert row["payload_state"] == recovery.PAYLOAD_FALLBACK_DEFERRED
+
+
+def test_73_a_dry_run_writes_no_checkpoint(monkeypatch):
+    fake = FakeRepo([_candidate("c1"), _candidate("c2")])
+
+    result = _run(monkeypatch, fake, _present_client(["c1", "c2"]), limit=10)
+
+    assert result["mode"] == "dry_run"
+    assert result["apply"] is False
+    assert fake.saved == {}, "a dry run must persist nothing, anywhere"
+
+
+def test_74_apply_advances_only_through_fully_adjudicated_contacts(monkeypatch):
+    """Budget covers c1 only; the checkpoint must stop there, not at c3."""
+    ids = ["c1", "c2", "c3"]
+    fake = FakeRepo([_candidate(c) for c in ids])
+
+    result = _run(monkeypatch, fake, _batch_blind_client(ids), limit=3,
+                  apply=True, individual_request_budget=1)
+
+    assert result["next_cursor"] == "c1"
+    assert fake.saved["lifecycle_stage_history:sql"]["last_contact_id"] == "c1"
+
+
+# ── R3 · exact remaining work ────────────────────────────────────────────────
+
+def test_75_fewer_candidates_than_the_limit_means_no_more_remain(monkeypatch):
+    fake = FakeRepo([_candidate("c1"), _candidate("c2")])
+    result = _run(monkeypatch, fake, _present_client(["c1", "c2"]), limit=10)
+
+    assert result["contacts_examined"] == 2
+    assert result["more_candidates_remain"] is False
+
+
+def test_76_exactly_the_limit_with_nothing_behind_it_means_no_more_remain(
+        monkeypatch):
+    """The case `len(rows) >= limit` got WRONG — it reported more work forever."""
+    fake = FakeRepo([_candidate("c1"), _candidate("c2")])
+    result = _run(monkeypatch, fake, _present_client(["c1", "c2"]), limit=2)
+
+    assert result["contacts_examined"] == 2
+    assert result["more_candidates_remain"] is False, (
+        "exactly the last page is not evidence of another page")
+
+
+def test_77_exactly_the_limit_with_another_row_behind_it_means_more_remain(
+        monkeypatch):
+    fake = FakeRepo([_candidate("c1"), _candidate("c2"), _candidate("c3")])
+    result = _run(monkeypatch, fake, _present_client(["c1", "c2"]), limit=2)
+
+    assert result["contacts_examined"] == 2
+    assert result["more_candidates_remain"] is True
+
+
+def test_78_budget_exhaustion_before_the_limit_still_means_more_remain(
+        monkeypatch):
+    """Deferred candidates are remaining work even when the page was not full."""
+    ids = ["c1", "c2", "c3"]
+    fake = FakeRepo([_candidate(c) for c in ids])
+
+    result = _run(monkeypatch, fake, _batch_blind_client(ids), limit=10,
+                  individual_request_budget=1)
+
+    assert result["more_candidates_remain"] is True
+    assert result["deferred_at_contact"] == "c2"
+
+
+def test_79_an_empty_population_reports_no_remaining_work(monkeypatch):
+    fake = FakeRepo([])
+    result = _run(monkeypatch, fake, FakeClient(), limit=10)
+
+    assert result["ok"] is True
+    assert result["contacts_examined"] == 0
+    assert result["more_candidates_remain"] is False
+
+
+def test_80_a_failed_pass_reports_remaining_work_as_unknown(monkeypatch):
+    """An aborted pass proves nothing about what is left — not even "more"."""
+    fake = FakeRepo([_candidate("c1")], state_available=False)
+    result = _run(monkeypatch, fake, FakeClient(), limit=10)
+
+    assert result["ok"] is False
+    assert result["more_candidates_remain"] is None
+
+
+# ── R4 · the emitted vocabulary, executed ────────────────────────────────────
+
+def test_81_each_vocabulary_is_bound_to_one_denominator():
+    names = set(recovery.VOCABULARIES)
+    assert names == {"request", "per_contact_payload", "per_sql_gap",
+                     "per_stage_gap"}
+    request = set(recovery.VOCABULARIES["request"])
+    gaps = (set(recovery.VOCABULARIES["per_sql_gap"])
+            | set(recovery.VOCABULARIES["per_stage_gap"]))
+    assert not (request & gaps), (
+        "a value in both vocabularies lets two different denominators be added")
+
+
+def test_82_the_parameter_dropped_verdict_lives_only_in_the_diagnosis_vocabulary():
+    """It is a statement about the REQUEST; no contact's payload can make it.
+
+    Declaring it as a per-contact evidence state is exactly what made it
+    unreachable — emitted by nothing, asserted by a subset check that passed.
+    """
+    assert hubspot.HISTORY_PARAMETER_UNSUPPORTED in hubspot.DIAGNOSIS_VERDICTS
+    for name, states in recovery.VOCABULARIES.items():
+        assert hubspot.HISTORY_PARAMETER_UNSUPPORTED not in states, name
+
+
+@pytest.mark.parametrize("verdict", hubspot.DIAGNOSIS_VERDICTS)
+def test_83_every_diagnosis_verdict_is_reachable(verdict, monkeypatch):
+    """Each verdict is produced by executing the code, not asserted to exist."""
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    present = [_record("c1", [_version("salesqualifiedlead", ts)])]
+    empty = [_record("c1", [])]
+    present_single = {"c1": _record("c1", [_version("salesqualifiedlead", ts)])}
+    empty_single = {"c1": _record("c1", [])}
+
+    if verdict == hubspot.HISTORY_PARAMETER_UNSUPPORTED:
+        # Force the structural defect: a body that will not carry the key.
+        monkeypatch.setattr(hubspot, "_batch_history_body",
+                            lambda ids: {"inputs": [], "properties": [],
+                                         "properties_with_history": []})
+        client = FakeClient(batch_results=empty, individual_results=empty_single)
+    elif verdict == hubspot.VERDICT_BOTH:
+        client = FakeClient(batch_results=present, individual_results=present_single)
+    elif verdict == hubspot.VERDICT_INDIVIDUAL_ONLY:
+        client = FakeClient(batch_results=[_record("c1", container=False)],
+                            individual_results=present_single)
+    elif verdict == hubspot.VERDICT_BATCH_ONLY:
+        client = FakeClient(batch_results=present, individual_results=empty_single)
+    elif verdict == hubspot.VERDICT_NEITHER:
+        client = FakeClient(batch_results=empty, individual_results=empty_single)
+    elif verdict == hubspot.VERDICT_BATCH_FAILED:
+        client = FakeClient(batch_error=_ApiError(500),
+                            individual_results=present_single)
+    elif verdict == hubspot.VERDICT_INDIVIDUAL_FAILED:
+        client = FakeClient(batch_results=empty, individual_error=_ApiError(500))
+    else:  # VERDICT_BOTH_FAILED
+        client = FakeClient(batch_error=_ApiError(500),
+                            individual_error=_ApiError(500))
+
+    out = hubspot.diagnose_lifecycle_history_reads(["c1"], client=client)
+    assert out["verdict"] == verdict, out
+
+
+def test_84_a_failed_batch_is_never_reported_as_the_portal_holding_nothing():
+    """The strongest claim about HubSpot must not come from an unanswered call."""
+    client = FakeClient(batch_error=_ApiError(500),
+                        individual_results={"c1": _record("c1", [])})
+
+    out = hubspot.diagnose_lifecycle_history_reads(["c1"], client=client)
+
+    assert out["verdict"] == hubspot.VERDICT_BATCH_FAILED
+    assert out["verdict"] != hubspot.VERDICT_NEITHER
+    assert out["batch"]["outcome"] == "request_failed"
+    # …and the individual read's own outcome survives beside it.
+    assert out["individual"]["outcome"] == "ok"
+    assert out["individual"]["states"] == {hubspot.HISTORY_EMPTY: 1}
+
+
+def test_85_both_outcomes_survive_when_the_paths_disagree():
+    """Neither read produces history, but for DIFFERENT reasons. Keep both."""
+    client = FakeClient(batch_results=[_record("c1", container=False)],
+                        individual_results={"c1": _record("c1", [])})
+
+    out = hubspot.diagnose_lifecycle_history_reads(["c1"], client=client)
+
+    assert out["batch"]["states"] == {hubspot.HISTORY_PROPERTY_ABSENT: 1}
+    assert out["individual"]["states"] == {hubspot.HISTORY_EMPTY: 1}
+    assert out["paths_agree"] is False
+    assert out["verdict"] == hubspot.VERDICT_NEITHER
+
+
+def test_86_unrecoverable_requires_both_paths_to_answer_definitively(monkeypatch):
+    """The proof, executed. An EMPTY history from both reads — and only that."""
+    fake = FakeRepo([_candidate("c1")])
+    client = FakeClient(batch_results=[_record("c1", [])],
+                        individual_results={"c1": _record("c1", [])})
+
+    result = _run(monkeypatch, fake, client, limit=10)
+
+    reasons = {r["reason"] for r in result["unresolved"]}
+    assert reasons == {recovery.UNRECOVERABLE_NO_EVIDENCE}
+    assert all(r["both_paths_attempted"] for r in result["unresolved"])
+
+
+def test_87_a_missing_payload_is_never_called_unrecoverable(monkeypatch):
+    """A payload we may simply not have asked for correctly proves nothing."""
+    fake = FakeRepo([_candidate("c1")])
+    client = FakeClient(batch_results=[_record("c1", container=False)],
+                        individual_results={"c1": _record("c1", container=False)})
+
+    result = _run(monkeypatch, fake, client, limit=10)
+
+    reasons = {r["reason"] for r in result["unresolved"]}
+    assert reasons == {recovery.PAYLOAD_MISSING}
+    assert recovery.UNRECOVERABLE_NO_EVIDENCE not in reasons
+
+
+def test_88_without_the_fallback_nothing_is_ever_called_unrecoverable(monkeypatch):
+    """One path cannot prove absence. The budget/flag must gate the claim."""
+    fake = FakeRepo([_candidate("c1")])
+    client = FakeClient(batch_results=[_record("c1", [])])
+
+    result = _run(monkeypatch, fake, client, limit=10,
+                  individual_fallback=False)
+
+    reasons = {r["reason"] for r in result["unresolved"]}
+    assert reasons == {recovery.PAYLOAD_EMPTY}
+    assert recovery.UNRECOVERABLE_NO_EVIDENCE not in reasons
+
+
+def test_89_a_successful_sql_recovery_is_summarised_as_the_sql_state(monkeypatch):
+    """The summary must be built from the ROWS, not from a generic constant.
+
+    The first cut added `matching_stage_version_recovered` unconditionally, so
+    an SQL run whose rows all said `history_sql_timestamp_recovered` was
+    summarised under a name that appeared nowhere in its own output.
+    """
+    fake = FakeRepo([_candidate("c1")])
+    result = _run(monkeypatch, fake, _present_client(["c1"]), limit=10)
+
+    per_gap = result["evidence_states"]["per_stage_gap_reason"]
+    assert per_gap == {recovery.HISTORY_SQL_TIMESTAMP_RECOVERED: 1}
+    assert recovery.MATCHING_VERSION_RECOVERED not in per_gap
+    assert result["evidence_states"]["per_stage_gap_vocabulary"] == "per_sql_gap"
+
+
+def test_90_a_non_sql_stage_keeps_the_generic_recovered_state(monkeypatch):
+    """The SQL vocabulary is keyed on the EVENT, not on the run mode.
+
+    An all-stage run recovering a LEAD transition reports the generic state; the
+    same run recovering an SQL transition reports the SQL one. Both are correct,
+    and the report names which vocabulary its gap counts belong to.
+    """
+    ts = datetime(2026, 4, 4, tzinfo=timezone.utc)
+    fake = FakeRepo([_candidate("c1")])
+    client = FakeClient(batch_results=[_record("c1", [_version("lead", ts)])])
+
+    result = _run(monkeypatch, fake, client, limit=10, event=None)
+
+    per_gap = result["evidence_states"]["per_stage_gap_reason"]
+    assert recovery.MATCHING_VERSION_RECOVERED in per_gap, per_gap
+    assert result["evidence_states"]["per_stage_gap_vocabulary"] == "per_stage_gap"
+    for state in per_gap:
+        assert state in recovery.VOCABULARIES["per_stage_gap"], state
+
+
+def test_91_every_emitted_state_belongs_to_its_own_vocabulary(monkeypatch):
+    """Executed over four different shapes, not asserted over a constant list."""
+    ts = datetime(2026, 2, 2, tzinfo=timezone.utc)
+    shapes = {
+        "recovered": FakeClient(
+            batch_results=[_record("c1", [_version("salesqualifiedlead", ts)])]),
+        "no_sql_stage": FakeClient(
+            batch_results=[_record("c1", [_version("lead", ts)])]),
+        "empty": FakeClient(batch_results=[_record("c1", [])],
+                            individual_results={"c1": _record("c1", [])}),
+        "not_returned": FakeClient(batch_results=[]),
+    }
+    sql_vocab = set(recovery.VOCABULARIES["per_sql_gap"])
+    payload_vocab = set(recovery.VOCABULARIES["per_contact_payload"])
+
+    for name, client in shapes.items():
+        fake = FakeRepo([_candidate("c1")])
+        result = _run(monkeypatch, fake, client, limit=10)
+        states = result["evidence_states"]
+        for gap_state in states["per_stage_gap_reason"]:
+            assert gap_state in sql_vocab, f"{name}: {gap_state} is not a SQL-gap state"
+        for payload_state in states["per_contact_payload_state"]:
+            assert payload_state in payload_vocab, (
+                f"{name}: {payload_state} is not a payload state")
+
+
+def test_92_an_authorization_failure_stops_the_run_under_its_own_reason(
+        monkeypatch):
+    fake = FakeRepo([_candidate("c1")])
+    client = FakeClient(batch_error=_ApiError(403))
+
+    result = _run(monkeypatch, fake, client, limit=10, apply=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == recovery.HUBSPOT_AUTHORIZATION_FAILED
+    assert result["reason"] in recovery.VOCABULARIES["request"]
+    assert fake.saved == {}, "a stopped run must not advance any checkpoint"
+
+
+def test_93_local_apply_is_idempotent(monkeypatch):
+    """Re-running the same recovery rewrites rather than duplicates.
+
+    The write path is keyed on (contact_id, funnel_event); this proves the
+    SERVICE hands the writer the same key set on a re-run rather than growing it.
+    """
+    writes: list = []
+
+    class _Writer:
+        @staticmethod
+        def upsert_lifecycle_stage_history(rows, *, run_id):
+            writes.append([(r["contact_id"], r["funnel_event"]) for r in rows])
+            return {"ok": True, "persisted": len(rows)}
+
+    import db.writers as real_writers
+    monkeypatch.setattr(real_writers, "upsert_lifecycle_stage_history",
+                        _Writer.upsert_lifecycle_stage_history)
+
+    for _ in range(2):
+        fake = FakeRepo([_candidate("c1")])
+        _run(monkeypatch, fake, _present_client(["c1"]), limit=10, apply=True,
+             stub_writer=False)
+
+    assert writes == [[("c1", "sql")], [("c1", "sql")]], writes
+    assert len({tuple(w) for w in writes}) == 1, (
+        "the same contact/event key must be rewritten, never appended to")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §12 — PR-ADS-159-R1/R5 against a real PostgreSQL server
+# ═════════════════════════════════════════════════════════════════════════════
+
+@_needs_pg
+def test_94_pg_the_two_checkpoint_scopes_are_separate_rows(seeded159):
+    """The separation, in the durable store rather than in a fake.
+
+    A shared row is the whole defect: one scope's cursor overwriting the other's
+    is what let an SQL-only run resume from an all-stage position.
+    """
+    repo.save_lifecycle_recovery_state(
+        {"last_contact_id": "zzz-general", "contacts_examined": 1,
+         "contacts_recovered": 0, "contacts_without_history": 0,
+         "events_recovered": 0, "last_run_id": "r1", "last_run_mode": "apply",
+         "last_error": None},
+        scope="lifecycle_stage_history")
+    repo.save_lifecycle_recovery_state(
+        {"last_contact_id": "aaa-sql", "contacts_examined": 1,
+         "contacts_recovered": 0, "contacts_without_history": 0,
+         "events_recovered": 0, "last_run_id": "r2", "last_run_mode": "apply",
+         "last_error": None},
+        scope="lifecycle_stage_history:sql")
+
+    general = repo.fetch_lifecycle_recovery_state(scope="lifecycle_stage_history")
+    sql = repo.fetch_lifecycle_recovery_state(scope="lifecycle_stage_history:sql")
+
+    assert general["available"] and sql["available"]
+    assert general["row"]["last_contact_id"] == "zzz-general"
+    assert sql["row"]["last_contact_id"] == "aaa-sql", (
+        "writing the general scope must not move the SQL cursor")
+
+
+@_needs_pg
+def test_95_pg_the_default_scope_is_the_original_general_one(seeded159):
+    """Backward compatibility: the existing production checkpoint still resumes."""
+    repo.save_lifecycle_recovery_state(
+        {"last_contact_id": "legacy", "contacts_examined": 0,
+         "contacts_recovered": 0, "contacts_without_history": 0,
+         "events_recovered": 0, "last_run_id": "r", "last_run_mode": "apply",
+         "last_error": None})
+
+    unscoped = repo.fetch_lifecycle_recovery_state()
+    explicit = repo.fetch_lifecycle_recovery_state(scope="lifecycle_stage_history")
+
+    assert unscoped["scope"] == "lifecycle_stage_history"
+    assert unscoped["row"]["last_contact_id"] == "legacy"
+    assert explicit["row"]["last_contact_id"] == "legacy"
+
+
+@_needs_pg
+def test_96_pg_an_sql_run_does_not_resume_from_the_general_cursor(seeded159):
+    """End to end, on real rows: the exact skip this correction prevents.
+
+    The general cursor is set past every candidate. Under the shared scope the
+    SQL run would find nothing and report success; it must instead find both
+    undated contacts.
+    """
+    repo.save_lifecycle_recovery_state(
+        {"last_contact_id": "zzzzzz", "contacts_examined": 0,
+         "contacts_recovered": 0, "contacts_without_history": 0,
+         "events_recovered": 0, "last_run_id": "r", "last_run_mode": "apply",
+         "last_error": None},
+        scope="lifecycle_stage_history")
+
+    sql_state = repo.fetch_lifecycle_recovery_state(
+        scope=recovery.checkpoint_scope(lifecycle.EVENT_SQL))
+    assert sql_state["row"] is None, "the SQL scope has its own, empty checkpoint"
+
+    candidates = repo.fetch_sql_recovery_candidates(
+        after_contact_id=(sql_state["row"] or {}).get("last_contact_id"),
+        limit=100)
+    assert {r["contact_id"] for r in candidates["rows"]} == {"undated",
+                                                             "old_undated"}
+
+
+@_needs_pg
+def test_97_pg_the_audit_reconciles_every_window_and_scope(seeded159):
+    """44 combinations, each compared or explicitly unavailable — never zero."""
+    import os
+
+    env = {**os.environ, "DATABASE_URL": seeded159.url}
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.audit_lifecycle_sql_coverage", "--json"],
+        capture_output=True, text=True, cwd=str(_ROOT), env=env)
+    report = json.loads(result.stdout)
+    recon = report["read_reconciliation"]
+
+    assert report["violations"] == [], report["violations"]
+    assert recon["combinations"] == 44
+    seen = {(b["window_type"], b["window"], b["scope"]) for b in recon["results"]}
+    assert len(seen) == 44, "every window/scope pair must be reported separately"
+    assert recon["effective_date_basis"] == repo.EFFECTIVE_DATE_DOCTRINE
+
+
+@_needs_pg
+def test_98_pg_an_unavailable_scoped_reader_is_unavailable_not_zero(
+        seeded159, monkeypatch):
+    """Fail-closed: a reader that cannot answer must not read as a proven 0."""
+    from scripts import audit_lifecycle_sql_coverage as audit
+
+    monkeypatch.setattr(
+        repo, "fetch_operational_status_counts",
+        lambda *a, **k: {"available": False, "reason": "database_unavailable",
+                         "counts": {}})
+
+    f = audit.Findings()
+    block = audit.audit_read_reconciliation(f, datetime.now(tz=timezone.utc))
+
+    assert block["reconciled"] == 0
+    assert block["unavailable"] == 44
+    for pair in block["results"]:
+        assert pair["available"] is False
+        assert pair["operational_total"] is None, (
+            "an unreadable operational count must never become 0")
+    assert f.violations == [], (
+        "an outage is unavailability, not a contract violation")

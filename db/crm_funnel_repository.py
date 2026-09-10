@@ -481,38 +481,53 @@ def fetch_unresolved_sql_created_at_bounds() -> dict:
         return _unavailable(rows=[])
 
 
-def fetch_lifecycle_recovery_state() -> dict:
-    """The durable recovery checkpoint.
+def fetch_lifecycle_recovery_state(*, scope: str | None = None) -> dict:
+    """The durable recovery checkpoint for ONE candidate population.
 
     ``available=False`` means the checkpoint could not be READ. A run must fail
     closed on that rather than start from the beginning, which would rescan work
     already done and, worse, report a fresh run's counts as the whole picture.
 
     An available checkpoint with ``row=None`` is a different and legitimate
-    state: the command has never run.
+    state: this scope has never run.
+
+    PR-ADS-159-R1 — ``scope`` separates the populations. The general and SQL-only
+    runs shared one row, so an SQL-only run resumed from whatever cursor the last
+    all-stage run left. The all-stage population is a superset ordered by the same
+    key, so its cursor is normally far ahead: every SQL candidate below it would
+    be skipped silently while the run reported success. ``scope`` defaults to the
+    original value, so the existing production checkpoint keeps resuming exactly
+    where it is.
     """
     try:
         with get_conn() as conn:
             if conn is None:
                 return {"available": False, "reason": "database_unavailable",
-                        "row": None}
+                        "row": None, "scope": scope or RECOVERY_SCOPE}
             with conn.cursor() as cur:
                 cur.execute(
                     f"SELECT * FROM {RECOVERY_STATE_TABLE} WHERE scope = %s",
-                    (RECOVERY_SCOPE,))
+                    (scope or RECOVERY_SCOPE,))
                 rows = _rows_as_dicts(cur)
-        return {"available": True, "row": rows[0] if rows else None}
+        return {"available": True, "row": rows[0] if rows else None,
+                "scope": scope or RECOVERY_SCOPE}
     except Exception as exc:  # noqa: BLE001
         log.error("fetch_lifecycle_recovery_state failed: %s", exc)
-        return {"available": False, "reason": str(exc), "row": None}
+        return {"available": False, "reason": str(exc), "row": None,
+                "scope": scope or RECOVERY_SCOPE}
 
 
-def save_lifecycle_recovery_state(state: dict) -> dict:
+def save_lifecycle_recovery_state(state: dict, *, scope: str | None = None) -> dict:
     """Advance the durable recovery checkpoint. Counts ACCUMULATE across runs.
 
     A bounded command is meant to be run repeatedly, so each run's totals are
     added to the stored ones. Overwriting them would make the last small run
     look like the whole history of the recovery.
+
+    PR-ADS-159-R1 — ``scope`` names the candidate population whose checkpoint
+    this is. Writing one mode's cursor over another's is how an SQL-only run
+    ends up resuming from an all-stage cursor and skipping real candidates; the
+    scope is part of the row's primary key, so the two can never collide.
     """
     try:
         with get_conn() as conn:
@@ -543,7 +558,7 @@ def save_lifecycle_recovery_state(state: dict) -> dict:
                         last_error               = EXCLUDED.last_error,
                         updated_at               = NOW()
                     """,
-                    (RECOVERY_SCOPE, state.get("last_contact_id"),
+                    (scope or RECOVERY_SCOPE, state.get("last_contact_id"),
                      state.get("contacts_examined") or 0,
                      state.get("contacts_recovered") or 0,
                      state.get("contacts_without_history") or 0,

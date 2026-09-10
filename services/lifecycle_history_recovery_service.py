@@ -113,44 +113,115 @@ NO_HISTORY_VERSION = "history_present_no_matching_stage_version"
 MATCHING_VERSION_RECOVERED = "matching_stage_version_recovered"
 NO_TIMESTAMP_ON_VERSION = "history_version_without_timestamp"
 
-# ── PR-ADS-159 §2 — the full evidence vocabulary, mutually exclusive ─────────
-# Ten states, each with one follow-up. The previous six could not express three
-# facts that turned out to matter:
+# ── PR-ADS-159-R4 — THREE vocabularies, because there are three denominators ─
+# The first cut declared ten states as one flat "evidence vocabulary" and
+# claimed they were mutually exclusive. They were not one thing at all: some
+# describe a REQUEST, some describe a CONTACT's payload, some describe a
+# (contact, stage) GAP. Counting them under one heading is the same conflation
+# PR-ADS-155-F1 removed, reintroduced one level up.
 #
-#   * the request FAILED (as opposed to succeeding with nothing in it);
-#   * HubSpot did not return the contact at all, which is not the same as
-#     returning it without history;
-#   * the history parameter never reached HubSpot — the PR-ADS-159 §1 defect,
-#     which for a year looked exactly like "this portal holds no history".
+# Worse, two of the ten were unreachable — declared, exported, and emitted by
+# nothing — while two states the code DID emit were absent from the list. The
+# exhaustiveness test used a subset check, so it passed on both counts. A
+# constant kept alive so a static test goes green is not a contract.
 #
-# A timestamp that is present but unparseable is likewise its own state: a
-# malformed value is a data problem to chase, not an absent transition.
-#
-# These names are the machine-readable contract. They are never collapsed, never
-# defaulted into one another, and an unrecognised state is reported as ITSELF.
+# So: one vocabulary per denominator, every member reachable, every emitted
+# value a member of its own vocabulary, and the tests EXECUTE each state rather
+# than asserting the constant exists.
+
+# ── A · per READ ATTEMPT ─────────────────────────────────────────────────────
+# Denominator: one HubSpot request. Answers "did we get an answer at all?"
+REQUEST_OK = "history_request_ok"
 HISTORY_REQUEST_FAILED = "history_request_failed"
-HISTORY_CONTACT_NOT_RETURNED = "history_contact_not_returned"
-HISTORY_PARAMETER_UNSUPPORTED = "history_parameter_dropped_or_unsupported"
+HUBSPOT_AUTHORIZATION_FAILED = "hubspot_authorization_failed"
+
+REQUEST_OUTCOMES = (REQUEST_OK, HISTORY_REQUEST_FAILED,
+                    HUBSPOT_AUTHORIZATION_FAILED)
+
+# ── B · per CONTACT ASKED ────────────────────────────────────────────────────
+# Denominator: one contact in one pass. Answers "what did HubSpot's payload
+# contain for it?" These are the connector's own states, plus one this service
+# owns: a contact whose required individual fallback was never attempted.
+PAYLOAD_PRESENT = hubspot_states.HISTORY_PRESENT
+PAYLOAD_MISSING = hubspot_states.HISTORY_PROPERTY_ABSENT
+PAYLOAD_EMPTY = hubspot_states.HISTORY_EMPTY
+CONTACT_NOT_RETURNED = hubspot_states.HISTORY_CONTACT_ABSENT
+#: Deferred, NOT adjudicated. The pass stopped here; the contact is still owed
+#: an individual read and stays eligible for the next run.
+PAYLOAD_FALLBACK_DEFERRED = "history_individual_fallback_deferred"
+
+PAYLOAD_OUTCOMES = (PAYLOAD_PRESENT, PAYLOAD_MISSING, PAYLOAD_EMPTY,
+                    CONTACT_NOT_RETURNED, PAYLOAD_FALLBACK_DEFERRED)
+
+# ── C · per (CONTACT, SQL GAP) ───────────────────────────────────────────────
+# Denominator: one missing SQL-entry date. Answers "what did the evidence
+# resolve to?" The three payload reasons appear here too because, for a gap on
+# a contact HubSpot answered with nothing, the payload state IS the answer.
 HISTORY_PRESENT_NO_SQL_STAGE = "history_present_no_sql_stage"
 HISTORY_SQL_VERSION_NO_TIMESTAMP = "history_sql_version_missing_timestamp"
 HISTORY_SQL_TIMESTAMP_INVALID = "history_sql_timestamp_invalid"
 HISTORY_SQL_TIMESTAMP_RECOVERED = "history_sql_timestamp_recovered"
+#: Emitted ONLY when both supported read paths completed and both returned a
+#: definitive no-evidence answer. It is a proof, not a shrug — see
+#: `_definitively_unrecoverable`.
 UNRECOVERABLE_NO_EVIDENCE = "unrecoverable_no_hubspot_evidence"
+SQL_DEFERRED_BY_BUDGET = "sql_recovery_deferred_by_budget"
+HISTORY_CONTACT_NOT_RETURNED = CONTACT_NOT_RETURNED
 
-#: Every state this module may report, so a report can be checked for
-#: exhaustiveness rather than trusted to have thought of everything.
-EVIDENCE_STATES = (
-    HISTORY_REQUEST_FAILED,
-    HISTORY_CONTACT_NOT_RETURNED,
-    HISTORY_PARAMETER_UNSUPPORTED,
-    HISTORY_PAYLOAD_MISSING,
-    HISTORY_PAYLOAD_EMPTY,
+SQL_GAP_OUTCOMES = (
+    HISTORY_SQL_TIMESTAMP_RECOVERED,
     HISTORY_PRESENT_NO_SQL_STAGE,
     HISTORY_SQL_VERSION_NO_TIMESTAMP,
     HISTORY_SQL_TIMESTAMP_INVALID,
-    HISTORY_SQL_TIMESTAMP_RECOVERED,
     UNRECOVERABLE_NO_EVIDENCE,
+    SQL_DEFERRED_BY_BUDGET,
+    PAYLOAD_MISSING,
+    PAYLOAD_EMPTY,
+    CONTACT_NOT_RETURNED,
 )
+
+# ── D · per (CONTACT, STAGE GAP) in the ALL-STAGE run ────────────────────────
+# The generic per-stage names from PR-ADS-155-F1, PLUS the SQL ones — because
+# the SQL vocabulary is keyed on the EVENT, not on the run mode. An all-stage
+# pass adjudicates the SQL gap too, and when it does it reports the SQL state.
+# Omitting them here would make a legitimate emission fall outside its own
+# declared vocabulary, which is the defect this section exists to remove.
+STAGE_GAP_OUTCOMES = (
+    MATCHING_VERSION_RECOVERED,
+    NO_HISTORY_VERSION,
+    NO_TIMESTAMP_ON_VERSION,
+    HISTORY_SQL_TIMESTAMP_RECOVERED,
+    HISTORY_PRESENT_NO_SQL_STAGE,
+    HISTORY_SQL_VERSION_NO_TIMESTAMP,
+    HISTORY_SQL_TIMESTAMP_INVALID,
+    UNRECOVERABLE_NO_EVIDENCE,
+    PAYLOAD_MISSING,
+    PAYLOAD_EMPTY,
+    CONTACT_NOT_RETURNED,
+    SQL_DEFERRED_BY_BUDGET,
+)
+
+#: Every vocabulary, by the thing it counts. A report names which one it is
+#: using, so two numbers with different denominators can never be added.
+VOCABULARIES = {
+    "request": REQUEST_OUTCOMES,
+    "per_contact_payload": PAYLOAD_OUTCOMES,
+    "per_sql_gap": SQL_GAP_OUTCOMES,
+    "per_stage_gap": STAGE_GAP_OUTCOMES,
+}
+
+# ── E · per DIAGNOSIS RUN ────────────────────────────────────────────────────
+#: `history_parameter_dropped_or_unsupported` is in NONE of the four above. It is
+#: a verdict about the REQUEST — a statement one contact's payload can never
+#: make — and it belongs to the connector's diagnosis vocabulary, where it is
+#: reachable and tested. Declaring it as a per-contact state is what made it
+#: unreachable in the first place.
+#:
+#: Re-exported here so a caller can check every vocabulary in one place without
+#: importing the HubSpot connector. The lifecycle SQL coverage audit reads only
+#: the local database, and must not import a module that can reach an API.
+DIAGNOSIS_VERDICTS = tuple(hubspot_states.DIAGNOSIS_VERDICTS)
+HISTORY_PARAMETER_UNSUPPORTED = hubspot_states.HISTORY_PARAMETER_UNSUPPORTED
 
 #: Connector payload state → the reason an unrecovered stage reports.
 #: A state absent from this map is deliberately NOT defaulted: an unknown state
@@ -300,6 +371,51 @@ def _chunks(items, size):
         yield items[i:i + size]
 
 
+# ── PR-ADS-159-R1 — one durable checkpoint per candidate population ──────────
+# The general and SQL-only runs shared `lifecycle_stage_history`, so an SQL-only
+# run resumed from whatever cursor the last all-stage run happened to leave.
+# Since the all-stage population is a superset ordered by the same key, its
+# cursor is usually FAR ahead — and every SQL candidate below it would be
+# skipped silently, forever, while the report said the run completed.
+#
+# The general scope keeps its original name so the existing production
+# checkpoint continues to resume exactly where it is.
+SCOPE_BY_MODE = {None: SCOPE, EVENT_SQL: f"{SCOPE}:{EVENT_SQL}"}
+
+
+def checkpoint_scope(event: str | None) -> str:
+    """The durable checkpoint scope for one candidate mode.
+
+    An unrecognised event gets its own scope rather than falling back to the
+    general one: a new population must not inherit another's cursor, which is
+    the exact defect this function exists to prevent.
+    """
+    if event in SCOPE_BY_MODE:
+        return SCOPE_BY_MODE[event]
+    return f"{SCOPE}:{event}"
+
+
+def _definitively_unrecoverable(payload_state: str, fallback_attempted: bool) -> bool:
+    """Have BOTH supported paths answered, and both said "no evidence"?
+
+    "Unrecoverable" is a claim about HubSpot, so it needs proof from HubSpot:
+    the batch read ran, the individual read ran, and the surviving answer is an
+    affirmative absence — an EMPTY history, not a missing payload and not a
+    contact HubSpot declined to return. A missing payload could still be our
+    request; a contact not returned is an identity question. Neither proves the
+    transition was never recorded.
+    """
+    return bool(fallback_attempted) and payload_state == PAYLOAD_EMPTY
+
+
+def _gap_reason(payload_state: str, fallback_attempted: bool) -> str:
+    """The per-gap outcome for a contact HubSpot answered with no history."""
+    if _definitively_unrecoverable(payload_state, fallback_attempted):
+        return UNRECOVERABLE_NO_EVIDENCE
+    # Not defaulted: an unrecognised state is reported as ITSELF.
+    return _PAYLOAD_STATE_REASON.get(payload_state, payload_state)
+
+
 #: PR-ADS-159 §4 — the individual-read fallback is bounded by a request budget,
 #: not by the candidate count. One request per contact is affordable for a few
 #: hundred and is not affordable for a portal-wide scan, so the budget is an
@@ -345,6 +461,18 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
     ``individual_request_budget`` requests for the whole run. It is a fallback,
     never a scan: only contacts the batch failed on are retried.
 
+    PR-ADS-159-R1/R2 — two things this pass will not do:
+
+    * It will not resume from another population's cursor. Each candidate mode
+      owns an independent durable checkpoint (:func:`checkpoint_scope`), so an
+      SQL-only run cannot inherit an all-stage cursor and skip every SQL
+      candidate below it.
+    * It will not advance the cursor past a contact it did not fully
+      adjudicate. When the individual-read budget runs out, the pass STOPS at
+      the first contact that still needs one; that contact and everything after
+      it stay eligible for the next run. Advancing over a deferred contact
+      would skip it permanently, which is worse than doing less work.
+
     Fails closed: an unreadable contact store, an unreadable checkpoint, or an
     authentication/permission failure returns ``ok=False`` with a reason rather
     than a run that examined nothing and reported success.
@@ -357,26 +485,35 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
     events = (event,) if event else None
     if event and event not in FUNNEL_EVENTS:
         raise ValueError(f"Unknown funnel event '{event}'")
+    scope = checkpoint_scope(event)
 
-    state = repo.fetch_lifecycle_recovery_state()
+    state = repo.fetch_lifecycle_recovery_state(scope=scope)
     if not state.get("available"):
         return _failed(run_id, mode, started,
                        "recovery_checkpoint_unreadable",
                        "the durable checkpoint could not be read, so a run "
-                       "could not be resumed or recorded")
+                       "could not be resumed or recorded", scope=scope)
     cursor = (state.get("row") or {}).get("last_contact_id") if resume else None
 
+    # PR-ADS-159-R3 — fetch ONE more than we will process. `len(rows) >= limit`
+    # cannot tell "exactly the last page" from "another page exists", and an
+    # operator reading a false "no more work" stops early on a real gap.
+    fetch_size = int(limit) + 1
     if event == EVENT_SQL:
         candidates = repo.fetch_sql_recovery_candidates(
-            after_contact_id=cursor, limit=limit)
+            after_contact_id=cursor, limit=fetch_size)
     else:
         candidates = repo.fetch_contacts_missing_stage_dates(
-            after_contact_id=cursor, limit=limit)
+            after_contact_id=cursor, limit=fetch_size)
     if not candidates.get("available"):
         return _failed(run_id, mode, started, "contact_store_unreadable",
-                       "the canonical contact store could not be read")
+                       "the canonical contact store could not be read",
+                       scope=scope)
 
-    rows = candidates.get("rows") or []
+    fetched = candidates.get("rows") or []
+    beyond_limit = len(fetched) > int(limit)      # real evidence, not a guess
+    rows = fetched[:int(limit)]
+
     examined = 0
     recovered_rows: list = []
     unresolved_rows: list = []
@@ -386,42 +523,68 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
     payload_states: dict = {}
     contacts_with_history_and_match = 0
     contacts_with_history_no_match = 0
-    last_contact_id = cursor
+    # The cursor is the last FULLY ADJUDICATED contact — never the last one
+    # merely looked at.
+    last_adjudicated_id = cursor
     individual_requests = 0
     individual_rescued = 0
-    budget_exhausted = False
+    deferred_at_contact = None
+    deferred_count = 0
 
     try:
         from connectors import hubspot_pull  # noqa: PLC0415
 
         for batch in _chunks(rows, BATCH_SIZE):
+            if deferred_at_contact is not None:
+                break
             history = hubspot_pull.fetch_lifecycle_stage_history(
                 [r["contact_id"] for r in batch], client=client)
             for row in batch:
-                examined += 1
-                last_contact_id = row["contact_id"]
                 entry = history.get(row["contact_id"]) or {}
-                state = entry.get("state") or hubspot_states.HISTORY_CONTACT_ABSENT
+                state = entry.get("state") or CONTACT_NOT_RETURNED
+                needs_fallback = (individual_fallback
+                                  and state != PAYLOAD_PRESENT)
 
-                # PR-ADS-159 §1b — the bounded individual fallback. Tried only
-                # where the batch produced no history, and only while the budget
-                # lasts; a contact left unattempted because the budget ran out is
-                # reported as such and never as "no evidence exists".
-                if (individual_fallback
-                        and state != hubspot_states.HISTORY_PRESENT):
-                    if individual_requests < individual_request_budget:
-                        individual_requests += 1
-                        single = hubspot_pull.fetch_lifecycle_stage_history_single(
-                            row["contact_id"], client=client)
-                        if single.get("state") == hubspot_states.HISTORY_PRESENT:
-                            entry, state = single, single["state"]
-                            individual_rescued += 1
+                # ── R2: stop, do not skip ────────────────────────────────────
+                # This contact is owed an individual read and there is no budget
+                # left to give it one. Everything from here on is unexamined, so
+                # the pass ends and the cursor stays where it was.
+                if needs_fallback and individual_requests >= individual_request_budget:
+                    deferred_at_contact = row["contact_id"]
+                    remaining = rows[rows.index(row):]
+                    deferred_count = len(remaining)
+                    payload_states[PAYLOAD_FALLBACK_DEFERRED] = (
+                        payload_states.get(PAYLOAD_FALLBACK_DEFERRED, 0)
+                        + deferred_count)
+                    unresolved_rows.extend(
+                        {"contact_id": pending["contact_id"], "funnel_event": e,
+                         "reason": SQL_DEFERRED_BY_BUDGET,
+                         "payload_state": PAYLOAD_FALLBACK_DEFERRED,
+                         "adjudicated": False}
+                        for pending in remaining
+                        for e in missing_events(pending, events))
+                    break
+
+                examined += 1
+                fallback_attempted = False
+                if needs_fallback:
+                    individual_requests += 1
+                    fallback_attempted = True
+                    single = hubspot_pull.fetch_lifecycle_stage_history_single(
+                        row["contact_id"], client=client)
+                    if single.get("state") == PAYLOAD_PRESENT:
+                        entry, state = single, single["state"]
+                        individual_rescued += 1
                     else:
-                        budget_exhausted = True
+                        # Both paths answered. Keep the individual read's own
+                        # verdict — it is the more authoritative of the two.
+                        entry, state = single, single.get("state") or state
 
                 payload_states[state] = payload_states.get(state, 0) + 1
+                # Adjudicated: every read this contact was owed has been made.
+                last_adjudicated_id = row["contact_id"]
 
-                if state != hubspot_states.HISTORY_PRESENT:
+                if state != PAYLOAD_PRESENT:
                     # HubSpot returned no usable history payload for this contact.
                     # WHICH kind of nothing it returned is preserved: an absent
                     # record and an affirmatively empty history are different
@@ -429,10 +592,12 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
                     # recorded". Neither is a connector failure, and neither is
                     # evidence about a specific stage.
                     contacts_without_history += 1
-                    reason = _PAYLOAD_STATE_REASON.get(state, state)
+                    reason = _gap_reason(state, fallback_attempted)
                     unresolved_rows.extend(
                         {"contact_id": row["contact_id"], "funnel_event": e,
-                         "reason": reason, "payload_state": state}
+                         "reason": reason, "payload_state": state,
+                         "adjudicated": True,
+                         "both_paths_attempted": fallback_attempted}
                         for e in missing_events(row, events))
                     continue
 
@@ -444,7 +609,8 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
                     contacts_with_history_no_match += 1
                 recovered_rows.extend(found)
                 unresolved_rows.extend(
-                    {"contact_id": row["contact_id"], "payload_state": state, **u}
+                    {"contact_id": row["contact_id"], "payload_state": state,
+                     "adjudicated": True, **u}
                     for u in unresolved)
     except Exception as exc:  # noqa: BLE001
         # A partial pass is never reported as a completed one, and the cursor is
@@ -456,11 +622,11 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
         # holds no history for these contacts" when the truth is that this token
         # may not read them.
         log.error("[lifecycle_history_recovery] HubSpot read failed: %s", exc)
-        reason = ("hubspot_authorization_failed"
+        reason = (HUBSPOT_AUTHORIZATION_FAILED
                   if _is_permanent_auth_failure(exc)
                   else HISTORY_REQUEST_FAILED)
         return _failed(run_id, mode, started, reason, str(exc),
-                       examined=examined)
+                       examined=examined, scope=scope)
 
     persisted = 0
     write_error = None
@@ -472,13 +638,15 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
         if not result.get("ok"):
             return _failed(run_id, mode, started, "local_write_failed",
                            result.get("error") or "write not proven",
-                           examined=examined)
+                           examined=examined, scope=scope)
         persisted = result.get("persisted") or 0
 
     contacts_recovered = len({r["contact_id"] for r in recovered_rows})
     if apply:
+        # R1/R2: this mode's OWN checkpoint, advanced only to the last contact
+        # every required read was made for.
         repo.save_lifecycle_recovery_state({
-            "last_contact_id": last_contact_id,
+            "last_contact_id": last_adjudicated_id,
             "contacts_examined": examined,
             "contacts_recovered": contacts_recovered,
             "contacts_without_history": contacts_without_history,
@@ -486,7 +654,7 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
             "last_run_id": run_id,
             "last_run_mode": mode,
             "last_error": write_error,
-        })
+        }, scope=scope)
 
     return {
         "ok": True,
@@ -499,23 +667,27 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
         "started_at": started.isoformat(),
         "finished_at": datetime.now(tz=timezone.utc).isoformat(),
         "resume_from": cursor,
-        "next_cursor": last_contact_id,
-        # PR-ADS-159 §3: a bounded run must say whether it finished the
-        # population. `limit` rows returned means there is very likely more, and
-        # an operator reading a partial run as the whole picture is exactly how
-        # a coverage number becomes wrong.
-        "more_candidates_remain": len(rows) >= int(limit),
+        # R2: the last FULLY ADJUDICATED contact. Never a contact whose required
+        # individual read was not made — resuming past one would skip it for good.
+        "next_cursor": last_adjudicated_id,
+        # R3: from evidence, not from `len(rows) >= limit`. A page that is
+        # exactly the last page and a page with another row behind it are
+        # different facts, and the old comparison could not tell them apart.
+        # Budget-deferred candidates are remaining work too.
+        "more_candidates_remain": bool(beyond_limit or deferred_at_contact),
         "candidate_mode": event or "all_stages",
+        "checkpoint_scope": scope,
         "contacts_examined": examined,
         "contacts_with_gaps": len(rows),
         "contacts_without_history": contacts_without_history,
-        # PR-ADS-159 §1b/§4: the fallback's own accounting. `budget_exhausted`
-        # says some contacts were never attempted individually — they are
-        # unattempted, not proven unrecoverable.
+        # R2: the fallback's own accounting. A deferred contact is UNATTEMPTED —
+        # it is not proven unrecoverable, and it stays eligible next run.
         "individual_requests": individual_requests,
         "individual_rescued": individual_rescued,
         "individual_request_budget": int(individual_request_budget),
-        "individual_budget_exhausted": budget_exhausted,
+        "individual_budget_exhausted": deferred_at_contact is not None,
+        "deferred_at_contact": deferred_at_contact,
+        "contacts_deferred_by_budget": deferred_count,
         # PR-ADS-155-F1: the evidence breakdown. Production's first dry run
         # recovered 0 of 50 and could not say whether HubSpot had answered at
         # all. These counts make a zero readable, and they are the ONLY basis on
@@ -524,7 +696,7 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
         "contacts_with_history_and_match": contacts_with_history_and_match,
         "contacts_with_history_no_match": contacts_with_history_no_match,
         "evidence_states": _evidence_summary(payload_states, unresolved_rows,
-                                             recovered_rows),
+                                             recovered_rows, event=event),
         "contacts_recovered": contacts_recovered,
         "events_recovered": len(recovered_rows),
         "events_persisted": persisted,
@@ -574,27 +746,43 @@ def diagnose(*, limit: int = 25, client=None) -> dict:
 
 
 def _evidence_summary(payload_states: dict, unresolved_rows: list,
-                      recovered_rows: list) -> dict:
+                      recovered_rows: list, *, event=None) -> dict:
     """Every evidence state this run observed, counted over what it counts.
 
-    Deliberately two different denominators, each labelled: the payload states
-    are per CONTACT (HubSpot answers once per contact), the stage reasons are per
-    (contact, stage) gap. Reporting both under one heading would be the same
-    conflation this section exists to remove.
+    Two labelled denominators: payload states are per CONTACT (HubSpot answers
+    once per contact); gap reasons are per (contact, stage). Reporting both under
+    one heading would be the conflation this section exists to remove.
+
+    PR-ADS-159-R4: the recovered count is built from each row's OWN
+    ``evidence_state``. The first cut added the generic
+    ``matching_stage_version_recovered`` constant unconditionally, so an SQL run
+    whose rows all carried ``history_sql_timestamp_recovered`` was summarised
+    under a name that appeared nowhere in its own output — a summary that
+    disagreed with the rows it summarised.
     """
-    per_stage: dict = {}
+    per_gap: dict = {}
     for row in unresolved_rows:
         reason = row.get("reason")
-        per_stage[reason] = per_stage.get(reason, 0) + 1
-    if recovered_rows:
-        per_stage[MATCHING_VERSION_RECOVERED] = len(recovered_rows)
+        per_gap[reason] = per_gap.get(reason, 0) + 1
+    for row in recovered_rows:
+        state = row.get("evidence_state") or MATCHING_VERSION_RECOVERED
+        per_gap[state] = per_gap.get(state, 0) + 1
+
+    vocabulary = ("per_sql_gap" if event == EVENT_SQL else "per_stage_gap")
     return {
         "per_contact_payload_state": dict(sorted(payload_states.items())),
-        "per_stage_gap_reason": dict(sorted(per_stage.items())),
+        "per_contact_vocabulary": "per_contact_payload",
+        "per_stage_gap_reason": dict(sorted(per_gap.items())),
+        # Named, so two counts with different denominators can never be summed
+        # by a reader who assumed they described the same thing.
+        "per_stage_gap_vocabulary": vocabulary,
+        "vocabularies": {name: list(states)
+                         for name, states in VOCABULARIES.items()},
     }
 
 
-def _failed(run_id, mode, started, reason, detail, *, examined=0) -> dict:
+def _failed(run_id, mode, started, reason, detail, *, examined=0,
+            scope=None) -> dict:
     """A run that could not complete. Counts are NULL where nothing was proven."""
     return {
         "ok": False,
@@ -603,9 +791,12 @@ def _failed(run_id, mode, started, reason, detail, *, examined=0) -> dict:
         "reason": reason,
         "detail": detail,
         "hubspot_writes_performed": False,
+        "checkpoint_scope": scope,
         "started_at": started.isoformat(),
         "finished_at": datetime.now(tz=timezone.utc).isoformat(),
         "contacts_examined": examined,
+        # A pass that could not finish proves nothing about what is left.
+        "more_candidates_remain": None,
         # Unknown, not zero: an aborted pass proves nothing about how much
         # evidence HubSpot holds.
         "contacts_recovered": None,

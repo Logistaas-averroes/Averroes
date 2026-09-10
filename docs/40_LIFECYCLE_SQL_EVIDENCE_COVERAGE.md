@@ -80,37 +80,75 @@ token, email, name, company, full payload, or unrelated property value.
 
 ---
 
-## §2 — Evidence-state vocabulary
+## §2 — Evidence vocabularies (corrected by R4)
 
-Ten mutually exclusive machine-readable states, never collapsed and never
-defaulted into one another:
+The first cut declared ten states as one flat "evidence vocabulary" and claimed
+they were mutually exclusive. They were not one thing at all — and two of the ten
+were **unreachable**, emitted by nothing, while two states the code *did* emit
+were absent from the list. The exhaustiveness test used a subset check, so it
+passed on both counts. **A constant kept alive so a static test goes green is not
+a contract.**
 
-| State | What it means | Follow-up |
-| --- | --- | --- |
-| `history_request_failed` | the call itself failed | retry / investigate the API |
-| `history_contact_not_returned` | HubSpot returned no record for this id | identity: deleted, merged, invisible to this token |
-| `history_parameter_dropped_or_unsupported` | the history parameter never reached HubSpot | fix the request — the §1 defect |
-| `history_payload_missing` | contact returned, no history container | retention, or ask via the individual read |
-| `history_payload_empty` | container present, zero versions | HubSpot affirmatively holds none |
-| `history_present_no_sql_stage` | history exists, no version setting SQL | the transition was never recorded |
-| `history_sql_version_missing_timestamp` | SQL version carries no timestamp | HubSpot recorded a change without a time |
-| `history_sql_timestamp_invalid` | SQL version's timestamp will not parse | **our** parsing problem, not an absent transition |
-| `history_sql_timestamp_recovered` | HubSpot's own timestamp ingested | done |
-| `unrecoverable_no_hubspot_evidence` | no evidence anywhere | leave NULL, keep reporting the gap |
+There are five denominators, so there are five vocabularies:
 
-Two corrections to the previous six:
+**A · per read attempt** — `history_request_ok`, `history_request_failed`,
+`hubspot_authorization_failed`
 
-* `history_contact_not_returned` **no longer folds into**
-  `history_payload_missing`. They were one number and they are two different
-  problems.
-* `history_sql_timestamp_invalid` is separated from
-  `history_sql_version_missing_timestamp`. Both arrive as `timestamp: None`;
-  only the raw field distinguishes them, so the connector now carries
-  `timestamp_raw` through.
+**B · per contact asked** — `history_payload_present`, `history_payload_missing`,
+`history_payload_empty`, `history_contact_not_returned`,
+`history_individual_fallback_deferred`
 
-An unrecognised state is reported **as itself**.
+**C · per (contact, SQL gap)** — `history_sql_timestamp_recovered`,
+`history_present_no_sql_stage`, `history_sql_version_missing_timestamp`,
+`history_sql_timestamp_invalid`, `unrecoverable_no_hubspot_evidence`,
+`sql_recovery_deferred_by_budget`, plus the three payload reasons (for a gap on a
+contact HubSpot answered with nothing, the payload state *is* the answer)
 
----
+**D · per (contact, stage gap)** in the all-stage run — the generic
+PR-ADS-155-F1 names plus the SQL ones, because the SQL vocabulary is keyed on the
+**event**, not on the run mode
+
+**E · per diagnosis run** — `both_paths_return_history`,
+`individual_only_batch_returns_no_history`,
+`batch_only_individual_returns_no_history`, `neither_path_returns_history`,
+`batch_request_failed`, `individual_request_failed`, `both_requests_failed`,
+`history_parameter_dropped_or_unsupported`
+
+Every report names the vocabulary each count block belongs to, so two numbers
+with different denominators can never be added by a reader who assumed they
+described the same thing.
+
+### The two states that were unreachable
+
+* **`history_parameter_dropped_or_unsupported`** is a statement about the
+  **request** — something one contact's payload can never make. Declaring it a
+  per-contact state is precisely what made it unreachable. It now lives only in
+  vocabulary E, and the diagnostic emits it structurally whenever the serialized
+  batch body will not carry `propertiesWithHistory`.
+* **`unrecoverable_no_hubspot_evidence`** now carries a proof. It is emitted only
+  when **both** supported paths completed and the surviving answer is an
+  affirmative absence (an EMPTY history). A *missing payload* could still be our
+  request; a *contact not returned* is an identity question. Neither proves the
+  transition was never recorded, and neither earns the word "unrecoverable".
+
+`matching_stage_version_recovered` was being added to the summary
+unconditionally, so an SQL run whose rows all said
+`history_sql_timestamp_recovered` was summarised under a name that appeared
+nowhere in its own output. The summary is now built from each row's own
+`evidence_state`.
+
+Retained from the first cut: `history_contact_not_returned` no longer folds into
+`history_payload_missing`; `history_sql_timestamp_invalid` is separate from
+`history_sql_version_missing_timestamp` (both arrive as `timestamp: None`, so the
+connector carries `timestamp_raw`). An unrecognised state is reported **as
+itself**.
+
+### Diagnosis must not overclaim
+
+A failed batch request is no longer reported as `neither_path_returns_history` —
+the strongest possible claim about the portal, drawn from a request that never
+got an answer. Request failure has its own verdicts, both paths' outcomes are
+preserved even when they disagree, and `paths_agree` records whether they did.
 
 ## §3 — SQL-specific candidates
 
@@ -124,6 +162,16 @@ A candidate is exactly:
 
 The second half needs the recovery join, unlike the all-stage read. Without it
 every run re-asks HubSpot about contacts it already answered.
+### Remaining work is exact (R3)
+
+`more_candidates_remain` was `len(rows) >= limit`, which cannot tell "exactly the
+last page" from "another page exists" — so it reported more work forever, and an
+operator reading a false "no more work" would stop early on a real gap. The
+command now fetches `limit + 1`, processes at most `limit`, and sets the flag
+from what it actually saw. Budget-deferred candidates count as remaining work. A
+pass that could not finish reports `None` — an aborted run proves nothing about
+what is left, not even that there is more.
+
 `--sql-only` selects this population; the report carries `candidate_mode`,
 `more_candidates_remain`, the per-state outcome counts, the next cursor, and the
 individual-read accounting. No PII.
@@ -140,6 +188,40 @@ individual-read accounting. No PII.
 | 404 | `history_contact_not_returned` — HubSpot answered |
 | resumability | durable cursor, advanced only on completed `--apply` runs |
 | writes | `--apply` writes only `hubspot_lifecycle_stage_history`; **never** HubSpot |
+
+### The cursor never passes an unadjudicated contact (R2)
+
+The first cut set `last_contact_id` on **every row it looked at**, including
+rows whose required individual read the budget could not fund. It then reported
+those contacts as "not attempted" — and persisted a cursor past them. On the
+next resumed run they were below the cursor and **skipped permanently**. A
+bounded command that loses candidates is worse than one that does less work.
+
+The pass now **stops** at the first contact that needs an individual read it
+cannot fund. That contact and everything after it stay eligible; the checkpoint
+advances only to the last **fully adjudicated** contact. Four states are kept
+apart in the report: batch attempted, individual fallback attempted, fallback
+deferred by budget, and fully adjudicated. A deferred contact is reported as
+`sql_recovery_deferred_by_budget` — never as `unrecoverable_no_hubspot_evidence`.
+
+### Independent checkpoints per candidate mode (R1)
+
+The general and SQL-only runs shared the scope `lifecycle_stage_history`, so an
+SQL-only run resumed from whatever cursor the last all-stage run left behind.
+The all-stage population is a **superset ordered by the same key**, so its
+cursor is normally far ahead — and every SQL candidate below it was skipped
+silently while the report said the run completed.
+
+| Mode | Checkpoint scope |
+| --- | --- |
+| all-stage (default) | `lifecycle_stage_history` |
+| `--sql-only` | `lifecycle_stage_history:sql` |
+| any other event | `lifecycle_stage_history:<event>` |
+
+The general scope keeps its original name, so the existing production checkpoint
+resumes exactly where it is. `--restart` ignores the cursor of the **current**
+mode only. An unrecognised mode gets its own scope rather than inheriting the
+general one — inheriting is the defect.
 
 Modes: dry run by default, `--apply`, `--sql-only`, `--limit`, `--restart`,
 `--no-individual-fallback`, `--individual-budget`, `--diagnose`, `--json`.
@@ -180,6 +262,27 @@ inferred stage ordering, campaign observation date, application run date.
 
 A drift-prevention test parametrises every canonical read; the audit repeats the
 check statically and names each certified reader.
+
+### Reconciled across every window and scope (R5)
+
+The first cut compared the three reads for `all_time` with **no attribution
+scope** — one of forty-four combinations — and the PR then claimed they
+reconcile everywhere. All 44 now run: 11 resolved lifecycle windows × 4 canonical
+scopes (`all_source`, `google_ads_source`, `campaign_attributable`,
+`keyword_attributable`).
+
+The allow-lists come from the canonical service's own
+`resolve_population_filters` and `_build_campaign_resolver`. The audit does not
+re-implement attribution classification: a second copy that agreed would prove
+nothing, and one that disagreed would report the audit's bug as the product's.
+
+Each pair is reported separately with its window, window type, scope, the three
+counts and the effective-date basis. A pair the audit cannot check is
+**unavailable with a reason** — `campaign_identity_unavailable`,
+`scope_membership_unavailable`, `scoped_reader_unavailable`,
+`contact_read_unavailable` — with all three counts `None`, never zero. A
+disagreement between available readers is exit 1; unreadable inputs are exit 2;
+`--strict` keeps its separate exit 3 for incomplete evidence coverage.
 
 ---
 

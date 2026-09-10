@@ -969,6 +969,7 @@ def diagnose_lifecycle_history_reads(contact_ids, *, client=None) -> dict:
 
     client = client or get_client()
 
+    batch_failed = individual_failed = False
     try:
         batch = fetch_lifecycle_stage_history(sample, client=client)
         out["batch"].update(outcome="ok", returned_contacts=len(batch),
@@ -976,7 +977,7 @@ def diagnose_lifecycle_history_reads(contact_ids, *, client=None) -> dict:
                             versions_seen=sum(len(v.get("versions") or [])
                                               for v in batch.values()))
     except Exception as exc:  # noqa: BLE001
-        batch = {}
+        batch, batch_failed = {}, True
         out["batch"].update(outcome="request_failed",
                             error_type=type(exc).__name__)
 
@@ -986,6 +987,7 @@ def diagnose_lifecycle_history_reads(contact_ids, *, client=None) -> dict:
             individual[cid] = fetch_lifecycle_stage_history_single(
                 cid, client=client)
         except Exception as exc:  # noqa: BLE001
+            individual_failed = True
             out["individual"].update(outcome="request_failed",
                                      error_type=type(exc).__name__)
             break
@@ -997,7 +999,23 @@ def diagnose_lifecycle_history_reads(contact_ids, *, client=None) -> dict:
                                      len(v.get("versions") or [])
                                      for v in individual.values()))
 
-    out["verdict"] = _history_read_verdict(batch, individual)
+    # PR-ADS-159-R4: BOTH outcomes are preserved even when they disagree and
+    # even when neither produced usable history. Collapsing them was how a
+    # failed request came to read as "the portal holds nothing".
+    out["verdict"] = _history_read_verdict(
+        batch, individual, batch_failed=batch_failed,
+        individual_failed=individual_failed)
+    out["paths_agree"] = (out["batch"].get("states")
+                          == out["individual"].get("states"))
+
+    # The structural finding, independent of what the portal answered: if the
+    # body will not carry `propertiesWithHistory`, history is never requested
+    # and no empirical verdict about the portal is admissible.
+    if out["batch"]["request_body_key"] != "propertiesWithHistory":
+        out["request_defect"] = HISTORY_PARAMETER_UNSUPPORTED
+        out["verdict"] = HISTORY_PARAMETER_UNSUPPORTED
+    else:
+        out["request_defect"] = None
     return out
 
 
@@ -1022,20 +1040,61 @@ def _state_counts(by_contact: dict) -> dict:
     return dict(sorted(counts.items()))
 
 
-def _history_read_verdict(batch: dict, individual: dict) -> str:
-    """Which read, if either, produced usable history over the sample."""
+#: PR-ADS-159-R4 — the DIAGNOSIS vocabulary. Denominator: one diagnosis run.
+#: These are statements about the READS, which no single contact's payload can
+#: make. `history_parameter_dropped_or_unsupported` lives here and only here:
+#: declaring it as a per-contact evidence state is what made it unreachable.
+VERDICT_BOTH = "both_paths_return_history"
+VERDICT_INDIVIDUAL_ONLY = "individual_only_batch_returns_no_history"
+VERDICT_BATCH_ONLY = "batch_only_individual_returns_no_history"
+VERDICT_NEITHER = "neither_path_returns_history"
+VERDICT_BATCH_FAILED = "batch_request_failed"
+VERDICT_INDIVIDUAL_FAILED = "individual_request_failed"
+VERDICT_BOTH_FAILED = "both_requests_failed"
+
+DIAGNOSIS_VERDICTS = (
+    VERDICT_BOTH,
+    VERDICT_INDIVIDUAL_ONLY,
+    VERDICT_BATCH_ONLY,
+    VERDICT_NEITHER,
+    VERDICT_BATCH_FAILED,
+    VERDICT_INDIVIDUAL_FAILED,
+    VERDICT_BOTH_FAILED,
+    HISTORY_PARAMETER_UNSUPPORTED,
+)
+
+
+def _history_read_verdict(batch: dict, individual: dict, *,
+                          batch_failed: bool = False,
+                          individual_failed: bool = False) -> str:
+    """Which read, if either, produced usable history over the sample.
+
+    PR-ADS-159-R4: a FAILED request is not "this read returns no history". The
+    first cut passed an empty dict for a failed batch, which fell through to
+    `neither_path_returns_history` — the strongest possible claim about the
+    portal, drawn from a request that never got an answer. That is the same
+    class of error as the defect being diagnosed.
+    """
     def _any_present(d):
         return any((e or {}).get("state") == HISTORY_PRESENT for e in d.values())
 
+    if batch_failed and individual_failed:
+        return VERDICT_BOTH_FAILED
+    if batch_failed:
+        return VERDICT_BATCH_FAILED
+    if individual_failed:
+        return VERDICT_INDIVIDUAL_FAILED
+
     batch_ok, single_ok = _any_present(batch), _any_present(individual)
     if batch_ok and single_ok:
-        return "both_paths_return_history"
+        return VERDICT_BOTH
     if single_ok:
-        # The portal HAS the history; the batch request is not getting it.
-        return "individual_only_batch_returns_no_history"
+        # The portal HAS the history and the batch is not getting it. That is
+        # not a retention finding — it is a statement about our request.
+        return VERDICT_INDIVIDUAL_ONLY
     if batch_ok:
-        return "batch_only_individual_returns_no_history"
-    return "neither_path_returns_history"
+        return VERDICT_BATCH_ONLY
+    return VERDICT_NEITHER
 
 
 def _normalise_history_version(version) -> dict:

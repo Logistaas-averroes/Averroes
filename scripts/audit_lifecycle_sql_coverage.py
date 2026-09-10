@@ -308,76 +308,208 @@ def audit_windows(f: Findings, population: dict, now: datetime) -> list[dict]:
 
 
 def audit_read_reconciliation(f: Findings, now: datetime) -> dict:
-    """Headline, detail page and operational counts must agree on one window.
+    """Headline, detail page and operational counts, for EVERY window and scope.
 
     They are three reads of the same population. Before PR-ADS-159 §5 they used
     two different date expressions, so a recovered contact appeared in one and
     not the others — a disagreement no single number could reveal.
+
+    PR-ADS-159-R5: the first cut checked ``all_time`` with no attribution scope,
+    which is one of forty-four combinations, and then the PR claimed the three
+    reads reconcile everywhere. They now all run: every resolved lifecycle window
+    against every canonical scope.
+
+    The scope allow-lists come from the canonical service's OWN
+    ``resolve_population_filters`` and its own ``_build_campaign_resolver``. The
+    audit must not re-implement attribution classification: a second copy that
+    agreed with the first would prove nothing, and one that disagreed would
+    report the audit's bug as the product's.
     """
     from analysis.crm_lifecycle import EVENT_DATE_COLUMN, EVENT_SQL
     from db import crm_funnel_repository as repo
     from scripts.audit_sql_doctrine_inventory import resolve_all_windows
     from services import canonical_contact_outcome_service as canon
+    from services import canonical_crm_funnel_service as funnel
 
-    windows = [w for w in resolve_all_windows(canon, now)
-               if w.get("window_key") == "all_time"] or resolve_all_windows(canon, now)[:1]
-    win = windows[0]
-    start, end = win.get("start"), win.get("end")
-
+    windows = resolve_all_windows(canon, now)
     contacts = repo.fetch_all_funnel_contacts()
-    page = repo.fetch_funnel_contact_page(EVENT_SQL, start, end, page_size=1)
-    ops = repo.fetch_operational_status_counts(EVENT_SQL, start, end)
-
-    if not (contacts.get("available") and page.get("available")
-            and ops.get("available")):
+    if not contacts.get("available"):
         f.unavailable_now("read_reconciliation",
-                          "one of the three canonical reads was unavailable")
-        return {"available": False, "window": win.get("window_key")}
+                          "the canonical contact store could not be read, so no "
+                          "window or scope could be reconciled")
+        return {"available": False, "combinations": 0, "results": []}
 
+    all_rows = contacts.get("rows") or []
     col = EVENT_DATE_COLUMN[EVENT_SQL]
-    headline = sum(1 for r in (contacts.get("rows") or [])
-                   if _in_window(r.get(col), start, end))
+    results: list[dict] = []
+    compared = 0
+    unavailable = 0
+
+    for win in windows:
+        start, end = win.get("start"), win.get("end")
+        # The window's own rows, through the canonical read (which applies the
+        # shared effective-date expression).
+        windowed = repo.fetch_funnel_contacts(start, end)
+        if not windowed.get("available"):
+            for scope in funnel.ORDERED_SCOPES:
+                results.append(_recon_unavailable(win, scope,
+                                                  "contact_read_unavailable"))
+                unavailable += 1
+            continue
+
+        resolver, identity_available = funnel._build_campaign_resolver(start, end)  # noqa: SLF001
+        populations = funnel.build_populations(
+            windowed.get("rows") or [], start, end,
+            campaign_resolver=resolver, identity_available=identity_available)
+        sql_population = (populations.get("events") or {}).get(EVENT_SQL) or []
+
+        for scope in funnel.ORDERED_SCOPES:
+            block = _reconcile_one(
+                f, repo, funnel, win, scope, start, end, col,
+                sql_population, resolver, identity_available, all_rows)
+            results.append(block)
+            if block["available"]:
+                compared += 1
+            else:
+                unavailable += 1
+
+    if compared:
+        f.passed("read_reconciliation",
+                 f"{compared} window/scope combination(s) reconciled across "
+                 f"headline, detail and operational reads"
+                 + (f"; {unavailable} unavailable" if unavailable else ""))
+    else:
+        f.unavailable_now("read_reconciliation",
+                          "no window/scope combination could be reconciled")
+
+    return {"available": bool(compared),
+            "combinations": len(results),
+            "reconciled": compared,
+            "unavailable": unavailable,
+            "scopes": list(funnel.ORDERED_SCOPES),
+            "effective_date_basis": repo.EFFECTIVE_DATE_DOCTRINE,
+            "results": results}
+
+
+def _recon_unavailable(win, scope, reason) -> dict:
+    """One window/scope pair the audit could not check. Unavailable, not zero."""
+    return {
+        "available": False, "reason": reason,
+        "window": win.get("window_key"), "window_type": win.get("window_type"),
+        "scope": scope, "headline": None, "detail_total": None,
+        "operational_total": None,
+    }
+
+
+def _reconcile_one(f, repo, funnel, win, scope, start, end, col,
+                   sql_population, resolver, identity_available,
+                   all_rows) -> dict:
+    """Compare the three canonical reads for ONE window and ONE scope."""
+    window_key, window_type = win.get("window_key"), win.get("window_type")
+    label = f"read_reconciliation[{window_type}/{window_key}/{scope}]"
+
+    # An identity-dependent scope with no identity contract is UNKNOWABLE. The
+    # canonical service returns None membership and an unavailable page for it;
+    # the audit must agree rather than compare a null against a zero.
+    if funnel._identity_dependent_scope_unavailable(scope, identity_available):  # noqa: SLF001
+        return _recon_unavailable(win, scope, "campaign_identity_unavailable")
+
+    memberships = [c["scopes"].get(scope) for c in sql_population]
+    if any(m is None for m in memberships):
+        return _recon_unavailable(win, scope, "scope_membership_unavailable")
+    headline = sum(1 for m in memberships if m)
+
+    from analysis.crm_lifecycle import EVENT_SQL
+
+    # The canonical service's OWN allow-list resolver — never a second copy of
+    # the attribution rules living in the audit.
+    filters = funnel.resolve_population_filters(scope, None, resolver, repo)
+    scoped = {"source_pairs_in": filters["source_pairs_in"],
+              "campaigns_in": filters["campaigns_in"],
+              "require_keyword": filters["require_keyword"]}
+    page = repo.fetch_funnel_contact_page(EVENT_SQL, start, end, page_size=1,
+                                          **scoped)
+    ops = repo.fetch_operational_status_counts(EVENT_SQL, start, end, **scoped)
+
+    if not page.get("available") or not ops.get("available"):
+        return _recon_unavailable(win, scope, "scoped_reader_unavailable")
+
     detail = int(page.get("total") or 0)
     operational = sum(int(v) for v in (ops.get("counts") or {}).values())
 
-    block = {"available": True, "window": win.get("window_key"), "headline": headline,
-             "detail_total": detail, "operational_total": operational}
-    if headline == detail == operational:
-        f.passed("read_reconciliation",
-                 f"{win.get('window_key')}: headline == detail == operational == "
-                 f"{headline}")
-    else:
-        f.violation("read_reconciliation",
-                    f"{win.get('window_key')}: headline={headline}, detail={detail}, "
+    block = {
+        "available": True, "reason": None,
+        "window": window_key, "window_type": window_type, "scope": scope,
+        "headline": headline, "detail_total": detail,
+        "operational_total": operational,
+        "effective_date_basis": repo.EFFECTIVE_DATE_DOCTRINE,
+        "coverage_status": "compared",
+    }
+    if not (headline == detail == operational):
+        f.violation(label,
+                    f"headline={headline}, detail={detail}, "
                     f"operational={operational} — three reads of one population "
-                    "disagree")
+                    "disagree for this window and scope")
+        block["coverage_status"] = "mismatch"
     return block
 
 
 def audit_evidence_states(f: Findings) -> dict:
-    """The recovery vocabulary must be exhaustive and mutually exclusive."""
+    """Each vocabulary must be internally exclusive, and belong to ONE denominator.
+
+    PR-ADS-159-R4: the previous check took one flat list and asserted a subset,
+    which passed while two of its members were unreachable and two states the
+    code actually emitted were missing from it. This checks the property that
+    matters instead: no value may appear in two vocabularies that count
+    different things, because that is the only way a reader can add two numbers
+    with different denominators without noticing.
+    """
     from services import lifecycle_history_recovery_service as recovery
 
-    states = list(recovery.EVIDENCE_STATES)
-    required = {
-        "history_request_failed", "history_contact_not_returned",
-        "history_parameter_dropped_or_unsupported", "history_payload_missing",
-        "history_payload_empty", "history_present_no_sql_stage",
-        "history_sql_version_missing_timestamp", "history_sql_timestamp_invalid",
-        "history_sql_timestamp_recovered", "unrecoverable_no_hubspot_evidence",
-    }
-    missing = sorted(required - set(states))
-    duplicated = sorted({s for s in states if states.count(s) > 1})
-    if missing:
+    vocabularies = {name: list(states)
+                    for name, states in recovery.VOCABULARIES.items()}
+    out = {"vocabularies": vocabularies,
+           "diagnosis_verdicts": None}
+
+    for name, states in vocabularies.items():
+        duplicated = sorted({s for s in states if states.count(s) > 1})
+        if duplicated:
+            f.violation("evidence_states",
+                        f"the {name} vocabulary repeats {duplicated} — a "
+                        "vocabulary that counts one thing twice is not exclusive")
+
+    # The request vocabulary describes reads; the gap vocabularies describe
+    # evidence. A value in both would make "3 failures" and "3 gaps" addable.
+    request = set(vocabularies["request"])
+    gaps = set(vocabularies["per_sql_gap"]) | set(vocabularies["per_stage_gap"])
+    overlap = sorted(request & gaps)
+    if overlap:
         f.violation("evidence_states",
-                    f"the recovery vocabulary cannot express {missing}")
-    elif duplicated:
+                    f"{overlap} appears in both the request and the gap "
+                    "vocabularies, which count different things")
+
+    # Read through the recovery service, which re-exports it. This audit must
+    # not import the HubSpot connector: it reads only the local database, and a
+    # module that can reach an API has no business on its import path.
+    out["diagnosis_verdicts"] = list(recovery.DIAGNOSIS_VERDICTS)
+    dropped = recovery.HISTORY_PARAMETER_UNSUPPORTED
+    # A statement about the REQUEST. It cannot be a per-contact state, and
+    # declaring it as one is what made it unreachable.
+    if dropped not in recovery.DIAGNOSIS_VERDICTS:
         f.violation("evidence_states",
-                    f"states are not mutually exclusive: {duplicated}")
-    else:
+                    "the parameter-dropped verdict is not in the diagnosis "
+                    "vocabulary, so nothing can ever report it")
+    if dropped in gaps:
+        f.violation("evidence_states",
+                    "the parameter-dropped verdict is declared as a per-gap "
+                    "state; one contact's payload cannot diagnose a request")
+
+    if not any(c["check"] == "evidence_states" and not c["ok"] for c in f.checks):
         f.passed("evidence_states",
-                 f"{len(states)} mutually exclusive evidence states")
-    return {"states": states}
+                 f"{len(vocabularies)} vocabularies, "
+                 f"{sum(len(v) for v in vocabularies.values())} states, each "
+                 "bound to one denominator")
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────

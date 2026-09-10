@@ -571,7 +571,18 @@ def test_19_the_recovery_report_separates_the_four_states_with_counts():
     assert per_stage[recovery.NO_HISTORY_VERSION] == 1
     assert per_stage[recovery.MATCHING_VERSION_RECOVERED] == 1
     # Two denominators, each named — never merged into one misleading total.
-    assert set(summary) == {"per_contact_payload_state", "per_stage_gap_reason"}
+    #
+    # PR-ADS-159-R4 added the vocabulary LABELS beside the two count blocks, so
+    # a reader can see which denominator each belongs to rather than inferring
+    # it from the key name. The guarantee is unchanged and now explicit: the
+    # counts themselves still live in exactly these two blocks.
+    assert {"per_contact_payload_state", "per_stage_gap_reason"} <= set(summary)
+    assert summary["per_contact_vocabulary"] == "per_contact_payload"
+    assert summary["per_stage_gap_vocabulary"] in summary["vocabularies"]
+    counts = {k for k, v in summary.items() if isinstance(v, dict)
+              and k != "vocabularies"}
+    assert counts == {"per_contact_payload_state", "per_stage_gap_reason"}, (
+        "no third count block may appear without its own declared denominator")
 
     # An empty history is NOT reported as a connector failure, and a request
     # failure is NOT reported as absent history.

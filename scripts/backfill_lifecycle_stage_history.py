@@ -38,7 +38,15 @@ Bounded, idempotent, resumable
 Every run takes an explicit ``--limit``. Rows are keyed on
 ``(contact_id, funnel_event)``, so a re-run rewrites rather than duplicates. A
 durable cursor advances only on ``--apply`` runs that completed, so a stopped
-run resumes exactly where it left off. ``--restart`` ignores the cursor.
+run resumes exactly where it left off.
+
+PR-ADS-159-R1: each candidate mode owns an INDEPENDENT checkpoint —
+``lifecycle_stage_history`` for the all-stage run, ``lifecycle_stage_history:sql``
+for ``--sql-only``. They previously shared one row, so an SQL-only run resumed
+from whatever cursor the last all-stage run left; since the all-stage population
+is a superset ordered by the same key, its cursor is normally far ahead and every
+SQL candidate below it was skipped silently. ``--restart`` ignores the cursor of
+the CURRENT mode only, and never touches the other's.
 """
 
 from __future__ import annotations
@@ -126,14 +134,18 @@ def _render(result: dict) -> None:
     print(f"  contacts examined:         {result.get('contacts_examined')}")
     print(f"  contacts with NO history:  {result.get('contacts_without_history')}")
     print(f"  candidate mode:            {result.get('candidate_mode')}")
+    print(f"  checkpoint scope:          {result.get('checkpoint_scope')}")
     print(f"  more candidates remain:    {result.get('more_candidates_remain')}")
     print(f"  individual reads used:     {result.get('individual_requests')}"
           f" / {result.get('individual_request_budget')}"
           f"  (rescued {result.get('individual_rescued')})")
     if result.get("individual_budget_exhausted"):
-        print("  NOTE: the individual-read budget ran out. Some contacts were")
-        print("        never attempted individually — they are UNATTEMPTED,")
-        print("        not proven unrecoverable.")
+        print(f"  NOTE: the individual-read budget ran out at contact "
+              f"{result.get('deferred_at_contact')}.")
+        print(f"        {result.get('contacts_deferred_by_budget')} candidate(s) "
+              "were DEFERRED, not adjudicated. The pass stopped there and the")
+        print("        cursor did NOT advance past them, so the next run picks")
+        print("        them up. They are UNATTEMPTED, not unrecoverable.")
     print(f"  contacts with recovery:    {result.get('contacts_recovered')}")
     print(f"  stage events recovered:    {result.get('events_recovered')}")
     print(f"  stage events persisted:    {result.get('events_persisted')}")
@@ -227,8 +239,9 @@ def main() -> int:
                         help="persist recovered timestamps to the LOCAL database "
                              "(never to HubSpot). Default is a dry run.")
     parser.add_argument("--restart", action="store_true",
-                        help="ignore the durable cursor and start from the first "
-                             "contact id")
+                        help="ignore the durable cursor OF THIS MODE and start "
+                             "from the first contact id. The other mode's "
+                             "checkpoint is untouched.")
     parser.add_argument("--sql-only", action="store_true",
                         help="PR-ADS-159 §3: examine ONLY contacts that reached "
                              "SQL and have no effective SQL-entry timestamp")
