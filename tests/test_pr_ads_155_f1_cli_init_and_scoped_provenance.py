@@ -483,13 +483,34 @@ def test_16_the_connector_distinguishes_every_payload_state():
     # Four distinct states — the production run collapsed all of them into one.
     assert len({out[k]["state"] for k in out}) == 4
 
-    # The request genuinely asks for history, under the field the SDK serializes
-    # to `propertiesWithHistory`.
-    sent = _client_returning.last_kwargs["batch_read_input_simple_public_object_id"]
-    assert sent["properties_with_history"] == ["lifecyclestage"]
-    from hubspot.crm.contacts.models import BatchReadInputSimplePublicObjectId as _B
-    assert _B.attribute_map["properties_with_history"] == "propertiesWithHistory"
+    # ── CORRECTED BY PR-ADS-159 §1 ──────────────────────────────────────────
+    # This assertion used to read:
+    #
+    #     sent = ...["batch_read_input_simple_public_object_id"]
+    #     assert sent["properties_with_history"] == ["lifecyclestage"]
+    #     assert _B.attribute_map["properties_with_history"] == "propertiesWithHistory"
+    #
+    # …which subscripted a plain DICT body and then reassured the reader that
+    # the model's attribute_map would rename the field. Both halves were true
+    # and together they proved nothing: the code never built that model. The
+    # SDK's `sanitize_for_serialization` applies attribute_map ONLY to model
+    # instances — "If obj is dict, return the dict" — so the wire body carried
+    # the snake_case key, HubSpot ignored it, and 50 production contacts came
+    # back with no history at all.
+    #
+    # The test passed throughout. It asserted the shape of the bug and cited a
+    # mapping that was never applied to it.
+    #
+    # What it asserts now is what leaves the process: the serialized body.
+    from hubspot.crm.contacts.api_client import ApiClient
     from hubspot.crm.contacts.models import SimplePublicObject as _S
+
+    sent = _client_returning.last_kwargs["batch_read_input_simple_public_object_id"]
+    wire = ApiClient().sanitize_for_serialization(sent)
+    assert wire["propertiesWithHistory"] == ["lifecyclestage"], (
+        "the request must ask for propertiesWithHistory on the wire; a "
+        "snake_case key is silently ignored and history never comes back")
+    assert "properties_with_history" not in wire
     assert "properties_with_history" in _S.openapi_types, (
         "the batch response model must carry history, or the SDK drops it")
 
