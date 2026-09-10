@@ -189,6 +189,26 @@ def stage_rank(stage) -> int | None:
     return STAGE_RANK.get(normalize_lifecycle_stage(stage))
 
 
+def stages_implying_event(event: str) -> tuple[str, ...]:
+    """Lifecycle stages whose presence proves the contact entered ``event``.
+
+    A contact currently sitting at ``customer`` must have passed through SQL, so
+    a missing SQL-entry timestamp on that contact is a coverage GAP rather than
+    an ordinary non-conversion. This returns the stage VALUES that imply the
+    event, so the same doctrine can be applied in SQL (as an array parameter)
+    without a second, drifting copy of the rank comparison living in a query.
+
+    PR-ADS-159 §3: this decides membership of the recovery candidate population
+    and nothing else. It says a transition happened; it says nothing whatsoever
+    about WHEN, and it is never used to supply a date.
+    """
+    target = STAGE_RANK.get(EVENT_STAGE[event])
+    if target is None:  # pragma: no cover — every funnel event has a rank
+        raise ValueError(f"Unknown funnel event '{event}'")
+    return tuple(sorted(stage for stage, rank in STAGE_RANK.items()
+                        if rank >= target))
+
+
 def event_date_column(event: str) -> str:
     """Durable column that stores the canonical event date for a funnel event."""
     try:
