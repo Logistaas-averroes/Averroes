@@ -548,13 +548,21 @@ def test_page_size_is_capped_at_the_api_boundary():
 def test_default_ordering_is_newest_event_first_and_deterministic():
     source = (_ROOT / "db" / "crm_funnel_repository.py").read_text()
     page_fn = source.split("def fetch_funnel_contact_page(")[1].split("\ndef ")[0]
-    assert "ORDER BY {date_column} DESC, contact_id ASC" in page_fn
+    # PR-ADS-159 §5 qualified the tiebreak with the funnel alias, because the
+    # query now joins the recovery pivot and a bare `contact_id` is ambiguous.
+    # The guarantee is unchanged: newest event first, deterministic tiebreak.
+    assert "ORDER BY {date_column} DESC, {FUNNEL_ALIAS}.contact_id ASC" in page_fn
 
 
 def test_ordering_uses_the_selected_event_date_not_createdate():
     source = (_ROOT / "db" / "crm_funnel_repository.py").read_text()
     page_fn = source.split("def fetch_funnel_contact_page(")[1].split("\ndef ")[0]
-    assert "date_column = EVENT_DATE_COLUMN[event]" in page_fn
+    # PR-ADS-159 §5: the page orders and filters on the EFFECTIVE stage-entry
+    # date — the direct HubSpot property, else a recovered history timestamp —
+    # so it selects the same population the headline counted. Ordering on the
+    # bare column would drop every recovered contact to the bottom with a NULL.
+    assert "date_column = effective_date_sql(event)" in page_fn
+    assert "date_column = EVENT_DATE_COLUMN[event]" not in page_fn
     assert "created_at DESC" not in page_fn
 
 

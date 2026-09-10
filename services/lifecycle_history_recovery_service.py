@@ -38,10 +38,29 @@ the timestamp stays NULL, and the cohort keeps reporting the gap. The recovery
 is therefore best-effort by construction: it can shrink the gap, and it can
 never close it by pretending.
 
+PR-ADS-159 — why the first production run recovered nothing
+-----------------------------------------------------------
+The first dry run examined 50 contacts and reported ``history_payload_missing``
+50 times, which reads as "this portal holds no lifecycle history". It was not.
+The batch request was handed a plain dict, the SDK serializes a dict verbatim,
+and the body therefore went out asking for ``properties_with_history`` — a field
+HubSpot's batch endpoint does not know. History was never requested. The request
+now goes out as the SDK model, which maps the field to ``propertiesWithHistory``.
+
+Three things follow from that mistake and are built in here:
+
+* a bounded **individual-read fallback**, so a batch that answers nothing can be
+  distinguished from a portal that holds nothing;
+* an evidence vocabulary that can SAY "the parameter never reached HubSpot",
+  which the previous six states could not;
+* an **SQL-specific candidate mode**, so a run aimed at the SQL coverage gap
+  does not spend its request budget on stages that cannot resolve it.
+
 Guarantees
 ----------
-* **No HubSpot write, ever.** The only HubSpot call is a batch READ with
-  ``propertiesWithHistory``.
+* **No HubSpot write, ever.** The only HubSpot calls are the batch READ with
+  ``propertiesWithHistory`` and, as a bounded fallback, the single-contact READ
+  with the same property. Both are GET/POST reads on the CRM read API.
 * **Local-database writes only**, into ``hubspot_lifecycle_stage_history``, a
   table the contact sync does not own. (Writing into
   ``hubspot_contact_funnel.date_entered_*`` would be erased by the next
@@ -62,6 +81,7 @@ from datetime import datetime, timezone
 
 from analysis.crm_lifecycle import (
     EVENT_DATE_COLUMN,
+    EVENT_SQL,
     EVENT_STAGE,
     FUNNEL_EVENTS,
     LIFECYCLE_RULE_VERSION,
@@ -93,11 +113,56 @@ NO_HISTORY_VERSION = "history_present_no_matching_stage_version"
 MATCHING_VERSION_RECOVERED = "matching_stage_version_recovered"
 NO_TIMESTAMP_ON_VERSION = "history_version_without_timestamp"
 
+# ── PR-ADS-159 §2 — the full evidence vocabulary, mutually exclusive ─────────
+# Ten states, each with one follow-up. The previous six could not express three
+# facts that turned out to matter:
+#
+#   * the request FAILED (as opposed to succeeding with nothing in it);
+#   * HubSpot did not return the contact at all, which is not the same as
+#     returning it without history;
+#   * the history parameter never reached HubSpot — the PR-ADS-159 §1 defect,
+#     which for a year looked exactly like "this portal holds no history".
+#
+# A timestamp that is present but unparseable is likewise its own state: a
+# malformed value is a data problem to chase, not an absent transition.
+#
+# These names are the machine-readable contract. They are never collapsed, never
+# defaulted into one another, and an unrecognised state is reported as ITSELF.
+HISTORY_REQUEST_FAILED = "history_request_failed"
+HISTORY_CONTACT_NOT_RETURNED = "history_contact_not_returned"
+HISTORY_PARAMETER_UNSUPPORTED = "history_parameter_dropped_or_unsupported"
+HISTORY_PRESENT_NO_SQL_STAGE = "history_present_no_sql_stage"
+HISTORY_SQL_VERSION_NO_TIMESTAMP = "history_sql_version_missing_timestamp"
+HISTORY_SQL_TIMESTAMP_INVALID = "history_sql_timestamp_invalid"
+HISTORY_SQL_TIMESTAMP_RECOVERED = "history_sql_timestamp_recovered"
+UNRECOVERABLE_NO_EVIDENCE = "unrecoverable_no_hubspot_evidence"
+
+#: Every state this module may report, so a report can be checked for
+#: exhaustiveness rather than trusted to have thought of everything.
+EVIDENCE_STATES = (
+    HISTORY_REQUEST_FAILED,
+    HISTORY_CONTACT_NOT_RETURNED,
+    HISTORY_PARAMETER_UNSUPPORTED,
+    HISTORY_PAYLOAD_MISSING,
+    HISTORY_PAYLOAD_EMPTY,
+    HISTORY_PRESENT_NO_SQL_STAGE,
+    HISTORY_SQL_VERSION_NO_TIMESTAMP,
+    HISTORY_SQL_TIMESTAMP_INVALID,
+    HISTORY_SQL_TIMESTAMP_RECOVERED,
+    UNRECOVERABLE_NO_EVIDENCE,
+)
+
 #: Connector payload state → the reason an unrecovered stage reports.
 #: A state absent from this map is deliberately NOT defaulted: an unknown state
 #: is reported as itself rather than folded into the nearest familiar reason.
+#:
+#: `HISTORY_CONTACT_ABSENT` no longer folds into `history_payload_missing`.
+#: "HubSpot did not return this contact" and "HubSpot returned it with no
+#: history" were being counted as one number, and they are different problems:
+#: the first is an identity question (deleted, merged, invisible to this token),
+#: the second is a retention question.
 _PAYLOAD_STATE_REASON = {
-    hubspot_states.HISTORY_CONTACT_ABSENT: HISTORY_PAYLOAD_MISSING,
+    hubspot_states.HISTORY_CONTACT_ABSENT: HISTORY_CONTACT_NOT_RETURNED,
     hubspot_states.HISTORY_PROPERTY_ABSENT: HISTORY_PAYLOAD_MISSING,
     hubspot_states.HISTORY_EMPTY: HISTORY_PAYLOAD_EMPTY,
 }
@@ -123,15 +188,45 @@ def _stage_reached(current_stage, event: str) -> bool:
     return current_rank >= event_rank
 
 
-def missing_events(row: dict) -> list[str]:
-    """Funnel events this contact demonstrably reached with no entry timestamp."""
+def missing_events(row: dict, events=None) -> list[str]:
+    """Funnel events this contact demonstrably reached with no entry timestamp.
+
+    ``events`` restricts the search — PR-ADS-159 §3's SQL mode passes
+    ``(EVENT_SQL,)`` so a contact missing only its ``date_entered_lead`` is
+    never fetched from HubSpot on an SQL run. It would cost a request and could
+    not resolve an SQL gap.
+    """
     stage = row.get("lifecycle_stage")
+    wanted = tuple(events) if events else FUNNEL_EVENTS
     return [event for event in FUNNEL_EVENTS
-            if row.get(EVENT_DATE_COLUMN[event]) is None
+            if event in wanted
+            and row.get(EVENT_DATE_COLUMN[event]) is None
             and _stage_reached(stage, event)]
 
 
-def select_recovered_events(row: dict, versions: list) -> tuple[list, list]:
+#: PR-ADS-159 §2 — the SQL run reports SQL-specific state names. The generic
+#: per-stage reasons stay for the all-stage mode; SQL gets the vocabulary the
+#: coverage contract is written in, so a report never has to be translated.
+_SQL_STATE = {
+    NO_HISTORY_VERSION: HISTORY_PRESENT_NO_SQL_STAGE,
+    NO_TIMESTAMP_ON_VERSION: HISTORY_SQL_VERSION_NO_TIMESTAMP,
+    MATCHING_VERSION_RECOVERED: HISTORY_SQL_TIMESTAMP_RECOVERED,
+}
+
+
+def evidence_state(event: str, generic_reason: str) -> str:
+    """The published state for one (event, generic reason) pair.
+
+    Only the SQL event is remapped. An unrecognised reason is returned as
+    itself — never defaulted into a neighbouring state, which is how the first
+    version of this vocabulary lost three distinct findings.
+    """
+    if event != EVENT_SQL:
+        return generic_reason
+    return _SQL_STATE.get(generic_reason, generic_reason)
+
+
+def select_recovered_events(row: dict, versions: list, events=None) -> tuple[list, list]:
     """Match a contact's history versions to its missing stage-entry dates. Pure.
 
     Returns ``(recovered, unresolved)``.
@@ -155,7 +250,7 @@ def select_recovered_events(row: dict, versions: list) -> tuple[list, list]:
             by_stage.setdefault(stage, []).append(version)
 
     recovered, unresolved = [], []
-    for event in missing_events(row):
+    for event in missing_events(row, events):
         candidates = by_stage.get(EVENT_STAGE[event]) or []
         dated = [v for v in candidates if v.get("timestamp") is not None]
         if not candidates:
@@ -163,12 +258,22 @@ def select_recovered_events(row: dict, versions: list) -> tuple[list, list]:
             # is the only one of the five states that is real evidence the
             # transition was never recorded — the payload-level states are
             # decided by the caller from the connector's own report.
-            unresolved.append({"funnel_event": event, "reason": NO_HISTORY_VERSION,
-                               "history_versions_seen": len(versions or [])})
+            unresolved.append({
+                "funnel_event": event,
+                "reason": evidence_state(event, NO_HISTORY_VERSION),
+                "history_versions_seen": len(versions or [])})
             continue
         if not dated:
-            unresolved.append({"funnel_event": event,
-                               "reason": NO_TIMESTAMP_ON_VERSION})
+            # PR-ADS-159 §2: a version that CARRIED a timestamp we could not
+            # parse is a different finding from one that carried none. Both
+            # arrive as `timestamp: None`; only the raw field tells them apart,
+            # and only one of them is a bug on our side.
+            malformed = any(v.get("timestamp_raw") not in (None, "")
+                            for v in candidates)
+            reason = (HISTORY_SQL_TIMESTAMP_INVALID
+                      if (malformed and event == EVENT_SQL)
+                      else evidence_state(event, NO_TIMESTAMP_ON_VERSION))
+            unresolved.append({"funnel_event": event, "reason": reason})
             continue
         best = max(dated, key=lambda v: v["timestamp"])
         recovered.append({
@@ -185,7 +290,7 @@ def select_recovered_events(row: dict, versions: list) -> tuple[list, list]:
             "hubspot_source_label": best.get("source_label"),
             "hubspot_updated_by_user_id": best.get("updated_by_user_id"),
             "lifecycle_rule_version": LIFECYCLE_RULE_VERSION,
-            "evidence_state": MATCHING_VERSION_RECOVERED,
+            "evidence_state": evidence_state(event, MATCHING_VERSION_RECOVERED),
         })
     return recovered, unresolved
 
@@ -195,8 +300,33 @@ def _chunks(items, size):
         yield items[i:i + size]
 
 
+#: PR-ADS-159 §4 — the individual-read fallback is bounded by a request budget,
+#: not by the candidate count. One request per contact is affordable for a few
+#: hundred and is not affordable for a portal-wide scan, so the budget is an
+#: explicit ceiling the caller raises deliberately.
+DEFAULT_INDIVIDUAL_REQUEST_BUDGET = 200
+
+#: Failures that must STOP a run rather than be counted per contact. A token
+#: that cannot read contacts would otherwise be reported as "HubSpot holds no
+#: history for any of these 200 contacts", which is the same false conclusion
+#: PR-ADS-159 §1 was built on.
+_STOP_STATUSES = (401, 403)
+
+
+def _is_permanent_auth_failure(exc) -> bool:
+    status = getattr(exc, "status", None)
+    if status in _STOP_STATUSES:
+        return True
+    # HubSpotRetryableError wraps the original; its message carries the status.
+    text = str(exc)
+    return any(f"status={code}" in text for code in _STOP_STATUSES)
+
+
 def recover(*, limit: int, apply: bool = False, resume: bool = True,
-            client=None, run_id: str | None = None) -> dict:
+            client=None, run_id: str | None = None, event: str | None = None,
+            individual_fallback: bool = True,
+            individual_request_budget: int = DEFAULT_INDIVIDUAL_REQUEST_BUDGET,
+            ) -> dict:
     """Run one bounded recovery pass.
 
     ``apply=False`` (the default) is a DRY RUN: HubSpot is read, every candidate
@@ -204,15 +334,29 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
     that answers "how many of these gaps does HubSpot actually hold evidence
     for?", which is a question that can only be answered against the real portal.
 
-    Fails closed: an unreadable contact store, or an unreadable checkpoint,
-    returns ``ok=False`` with a reason rather than a run that examined nothing
-    and reported success.
+    ``event="sql"`` (PR-ADS-159 §3) selects the SQL-SPECIFIC candidate
+    population: contacts whose lifecycle stage proves they reached SQL and which
+    have no EFFECTIVE SQL-entry timestamp — no direct property and no previously
+    recovered one. Without it the scan spends HubSpot requests on contacts whose
+    only gap is a stage that cannot resolve an SQL question.
+
+    ``individual_fallback`` retries a contact the batch read could not answer
+    through the supported single-contact read, within
+    ``individual_request_budget`` requests for the whole run. It is a fallback,
+    never a scan: only contacts the batch failed on are retried.
+
+    Fails closed: an unreadable contact store, an unreadable checkpoint, or an
+    authentication/permission failure returns ``ok=False`` with a reason rather
+    than a run that examined nothing and reported success.
     """
     from db import crm_funnel_repository as repo  # noqa: PLC0415
 
     run_id = run_id or uuid.uuid4().hex
     mode = MODE_APPLY if apply else MODE_DRY_RUN
     started = datetime.now(tz=timezone.utc)
+    events = (event,) if event else None
+    if event and event not in FUNNEL_EVENTS:
+        raise ValueError(f"Unknown funnel event '{event}'")
 
     state = repo.fetch_lifecycle_recovery_state()
     if not state.get("available"):
@@ -222,8 +366,12 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
                        "could not be resumed or recorded")
     cursor = (state.get("row") or {}).get("last_contact_id") if resume else None
 
-    candidates = repo.fetch_contacts_missing_stage_dates(after_contact_id=cursor,
-                                                         limit=limit)
+    if event == EVENT_SQL:
+        candidates = repo.fetch_sql_recovery_candidates(
+            after_contact_id=cursor, limit=limit)
+    else:
+        candidates = repo.fetch_contacts_missing_stage_dates(
+            after_contact_id=cursor, limit=limit)
     if not candidates.get("available"):
         return _failed(run_id, mode, started, "contact_store_unreadable",
                        "the canonical contact store could not be read")
@@ -239,6 +387,9 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
     contacts_with_history_and_match = 0
     contacts_with_history_no_match = 0
     last_contact_id = cursor
+    individual_requests = 0
+    individual_rescued = 0
+    budget_exhausted = False
 
     try:
         from connectors import hubspot_pull  # noqa: PLC0415
@@ -251,6 +402,23 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
                 last_contact_id = row["contact_id"]
                 entry = history.get(row["contact_id"]) or {}
                 state = entry.get("state") or hubspot_states.HISTORY_CONTACT_ABSENT
+
+                # PR-ADS-159 §1b — the bounded individual fallback. Tried only
+                # where the batch produced no history, and only while the budget
+                # lasts; a contact left unattempted because the budget ran out is
+                # reported as such and never as "no evidence exists".
+                if (individual_fallback
+                        and state != hubspot_states.HISTORY_PRESENT):
+                    if individual_requests < individual_request_budget:
+                        individual_requests += 1
+                        single = hubspot_pull.fetch_lifecycle_stage_history_single(
+                            row["contact_id"], client=client)
+                        if single.get("state") == hubspot_states.HISTORY_PRESENT:
+                            entry, state = single, single["state"]
+                            individual_rescued += 1
+                    else:
+                        budget_exhausted = True
+
                 payload_states[state] = payload_states.get(state, 0) + 1
 
                 if state != hubspot_states.HISTORY_PRESENT:
@@ -265,11 +433,11 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
                     unresolved_rows.extend(
                         {"contact_id": row["contact_id"], "funnel_event": e,
                          "reason": reason, "payload_state": state}
-                        for e in missing_events(row))
+                        for e in missing_events(row, events))
                     continue
 
                 found, unresolved = select_recovered_events(
-                    row, entry.get("versions") or [])
+                    row, entry.get("versions") or [], events)
                 if found:
                     contacts_with_history_and_match += 1
                 else:
@@ -281,9 +449,18 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
     except Exception as exc:  # noqa: BLE001
         # A partial pass is never reported as a completed one, and the cursor is
         # not advanced past work that was not finished.
+        #
+        # PR-ADS-159 §4: an authentication or permission failure STOPS the run
+        # under its own reason. Retrying it would burn the budget on a call that
+        # cannot succeed, and counting it per contact would publish "HubSpot
+        # holds no history for these contacts" when the truth is that this token
+        # may not read them.
         log.error("[lifecycle_history_recovery] HubSpot read failed: %s", exc)
-        return _failed(run_id, mode, started, HISTORY_REQUEST_UNAVAILABLE,
-                       str(exc), examined=examined)
+        reason = ("hubspot_authorization_failed"
+                  if _is_permanent_auth_failure(exc)
+                  else HISTORY_REQUEST_FAILED)
+        return _failed(run_id, mode, started, reason, str(exc),
+                       examined=examined)
 
     persisted = 0
     write_error = None
@@ -323,9 +500,22 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
         "finished_at": datetime.now(tz=timezone.utc).isoformat(),
         "resume_from": cursor,
         "next_cursor": last_contact_id,
+        # PR-ADS-159 §3: a bounded run must say whether it finished the
+        # population. `limit` rows returned means there is very likely more, and
+        # an operator reading a partial run as the whole picture is exactly how
+        # a coverage number becomes wrong.
+        "more_candidates_remain": len(rows) >= int(limit),
+        "candidate_mode": event or "all_stages",
         "contacts_examined": examined,
         "contacts_with_gaps": len(rows),
         "contacts_without_history": contacts_without_history,
+        # PR-ADS-159 §1b/§4: the fallback's own accounting. `budget_exhausted`
+        # says some contacts were never attempted individually — they are
+        # unattempted, not proven unrecoverable.
+        "individual_requests": individual_requests,
+        "individual_rescued": individual_rescued,
+        "individual_request_budget": int(individual_request_budget),
+        "individual_budget_exhausted": budget_exhausted,
         # PR-ADS-155-F1: the evidence breakdown. Production's first dry run
         # recovered 0 of 50 and could not say whether HubSpot had answered at
         # all. These counts make a zero readable, and they are the ONLY basis on
@@ -343,6 +533,43 @@ def recover(*, limit: int, apply: bool = False, resume: bool = True,
         "recovered": recovered_rows,
         "source_system": "hubspot_property_history",
         "lifecycle_rule_version": LIFECYCLE_RULE_VERSION,
+    }
+
+
+def diagnose(*, limit: int = 25, client=None) -> dict:
+    """Read-only: which HubSpot read actually returns lifecycle history?
+
+    Takes a bounded sample of real SQL-recovery candidates and runs both reads
+    over it. Recovers nothing, writes nothing, and reports only structural
+    facts — never a contact's property values.
+
+    This is the check that was missing when the batch parameter was being
+    dropped: a payload-state count over one read can only ever say "we got
+    nothing", and cannot distinguish a portal without history from a request
+    that never asked for any.
+    """
+    from db import crm_funnel_repository as repo  # noqa: PLC0415
+    from connectors import hubspot_pull  # noqa: PLC0415
+
+    started = datetime.now(tz=timezone.utc)
+    sample_size = max(1, min(int(limit or 25), BATCH_SIZE))
+    candidates = repo.fetch_sql_recovery_candidates(limit=sample_size)
+    if not candidates.get("available"):
+        return {"ok": False, "reason": "contact_store_unreadable",
+                "detail": "the canonical contact store could not be read",
+                "hubspot_writes_performed": False,
+                "started_at": started.isoformat()}
+
+    ids = [r["contact_id"] for r in (candidates.get("rows") or [])]
+    diagnosis = hubspot_pull.diagnose_lifecycle_history_reads(ids, client=client)
+    return {
+        "ok": True,
+        "mode": "diagnose",
+        "hubspot_writes_performed": False,
+        "started_at": started.isoformat(),
+        "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+        "candidate_mode": EVENT_SQL,
+        "diagnosis": diagnosis,
     }
 
 

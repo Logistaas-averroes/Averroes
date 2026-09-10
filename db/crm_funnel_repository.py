@@ -20,7 +20,12 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 
-from analysis.crm_lifecycle import EVENT_DATE_COLUMN, FUNNEL_EVENTS
+from analysis.crm_lifecycle import (
+    EVENT_DATE_COLUMN,
+    EVENT_SQL,
+    FUNNEL_EVENTS,
+    stages_implying_event,
+)
 from db.connection import get_conn
 
 log = logging.getLogger(__name__)
@@ -99,15 +104,69 @@ def _funnel_select() -> str:
     return ", ".join(parts)
 
 
-def _effective_date_sql(event) -> str:
-    """The stage-entry expression a window predicate must filter on.
+# ── PR-ADS-159 §5 — ONE effective stage-entry expression, for every read ─────
+# Before this, `fetch_funnel_contacts` / `fetch_all_funnel_contacts` filtered on
+# the coalesced expression while `fetch_funnel_contact_page` and
+# `fetch_operational_status_counts` filtered on the BARE column. A contact whose
+# SQL date came from recovered history was therefore counted in the headline and
+# absent from the detail page and the operational counts that are supposed to
+# explain it — two numbers that disagree by construction, on the same window,
+# for the same scope.
+#
+# Every canonical read now goes through `effective_date_sql`. The precedence is
+# fixed and is the whole doctrine:
+#
+#   1. the direct HubSpot property (`hubspot_contact_funnel.date_entered_*`)
+#   2. an explicitly recovered lifecycle-history timestamp
+#   3. NULL — no date is invented, ever
+#
+# The direct column always wins; recovery can only fill a hole. Nothing else may
+# stand in for a stage-entry date: not contact creation, not the last status
+# update, not a deal date, not the current stage, not an inferred ordering.
+EFFECTIVE_DATE_DOCTRINE = (
+    "COALESCE(direct hubspot_contact_funnel.date_entered_<event>, "
+    "recovered lifecycle-history timestamp) — NULL when neither exists"
+)
 
-    The predicate and the projection must use the SAME expression. Filtering on
-    the base column while selecting the coalesced one would return a contact's
-    recovered date but decide its window membership without it.
+#: Aliases every canonical query must use for the funnel table and the recovery
+#: pivot, so one expression is valid in all of them.
+FUNNEL_ALIAS = "f"
+RECOVERY_ALIAS = "h"
+
+
+def direct_date_sql(event, *, funnel_alias: str = FUNNEL_ALIAS) -> str:
+    """The DIRECT HubSpot stage-entry property. Precedence 1."""
+    if event not in EVENT_DATE_COLUMN:
+        raise ValueError(f"Unknown funnel event '{event}'")
+    return f"{funnel_alias}.{EVENT_DATE_COLUMN[event]}"
+
+
+def recovered_date_sql(event, *, recovery_alias: str = RECOVERY_ALIAS) -> str:
+    """The RECOVERED lifecycle-history timestamp. Precedence 2."""
+    if event not in EVENT_DATE_COLUMN:
+        raise ValueError(f"Unknown funnel event '{event}'")
+    return f"{recovery_alias}.recovered_{EVENT_DATE_COLUMN[event]}"
+
+
+def effective_date_sql(event, *, funnel_alias: str = FUNNEL_ALIAS,
+                       recovery_alias: str = RECOVERY_ALIAS) -> str:
+    """The one stage-entry expression every canonical read must use.
+
+    The predicate, the projection, the ordering and the count must all use THIS
+    expression. Filtering on the base column while selecting the coalesced one
+    returns a contact's recovered date but decides its window membership without
+    it — which is exactly how the headline and the detail page came apart.
+
+    Composed from the two precedence levels above, so a read that needs to
+    distinguish them (the coverage split does) draws on the same definitions
+    rather than spelling the columns out again.
     """
-    col = EVENT_DATE_COLUMN[event]
-    return f"COALESCE(f.{col}, h.recovered_{col})"
+    return (f"COALESCE({direct_date_sql(event, funnel_alias=funnel_alias)}, "
+            f"{recovered_date_sql(event, recovery_alias=recovery_alias)})")
+
+
+#: Retained as the module-private spelling used by the older readers.
+_effective_date_sql = effective_date_sql
 
 
 def _rows_as_dicts(cur) -> list[dict]:
@@ -261,6 +320,164 @@ def fetch_contacts_missing_stage_dates(*, after_contact_id=None,
         return {"available": True, "rows": rows, "table": FUNNEL_TABLE}
     except Exception as exc:  # noqa: BLE001
         log.error("fetch_contacts_missing_stage_dates failed: %s", exc)
+        return _unavailable(rows=[])
+
+
+# ── PR-ADS-159 §3 — the SQL-specific recovery candidate population ───────────
+# `fetch_contacts_missing_stage_dates` returns a contact with ANY missing stage
+# date. In SQL mode that is the wrong population: a contact missing only its
+# `date_entered_lead` costs a HubSpot request and can never resolve an SQL gap.
+#
+# A candidate here is exactly the definition the mission gives:
+#   * the contact is treated as having reached SQL under the lifecycle doctrine
+#     (its current stage implies the transition), AND
+#   * it has no EFFECTIVE SQL-entry timestamp — no direct property and no
+#     previously recovered history date.
+#
+# The second half needs the recovery join, unlike the all-stage read: a contact
+# recovered on a previous run is resolved and must not be attempted again.
+
+def fetch_sql_recovery_candidates(*, after_contact_id=None,
+                                  limit: int = 200) -> dict:
+    """Contacts that reached SQL with no effective SQL-entry date, by contact id.
+
+    Ascending order over the durable HubSpot identity is what makes the command
+    resumable: the cursor is the last contact id processed.
+    """
+    stages = list(stages_implying_event(EVENT_SQL))
+    effective = effective_date_sql(EVENT_SQL)
+    params: list = [stages]
+    cursor_clause = ""
+    if after_contact_id:
+        cursor_clause = f"AND {FUNNEL_ALIAS}.contact_id > %s"
+        params.append(str(after_contact_id))
+    params.append(int(limit))
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows=[])
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {FUNNEL_ALIAS}.contact_id,
+                           {FUNNEL_ALIAS}.lifecycle_stage,
+                           {FUNNEL_ALIAS}.created_at,
+                           {FUNNEL_ALIAS}.{EVENT_DATE_COLUMN[EVENT_SQL]}
+                    FROM {FUNNEL_TABLE} {FUNNEL_ALIAS}
+                    {_recovery_join()}
+                    WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s)
+                      AND {effective} IS NULL
+                      {cursor_clause}
+                    ORDER BY {FUNNEL_ALIAS}.contact_id ASC
+                    LIMIT %s
+                    """,
+                    params,
+                )
+                rows = _rows_as_dicts(cur)
+        return {"available": True, "rows": rows, "table": FUNNEL_TABLE,
+                "event": EVENT_SQL, "stages_implying_sql": stages}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_sql_recovery_candidates failed: %s", exc)
+        return _unavailable(rows=[])
+
+
+def fetch_sql_coverage_population() -> dict:
+    """The GLOBAL lifecycle-SQL population, split by where its date came from.
+
+    One scan, four disjoint counts over contacts whose current stage implies
+    they reached SQL:
+
+      ``direct``      the HubSpot property is present
+      ``recovered``   the property is NULL and lifecycle history supplied a date
+      ``unresolved``  neither — the transition is real and its date is unknown
+      ``candidates``  the whole population (the three above)
+
+    ``earliest_unresolved_created_at`` / ``latest_unresolved_created_at`` bound
+    the unresolved contacts' CREATION times. Creation is used downstream only to
+    DISPROVE membership of a window (a contact created after a window ended
+    cannot have entered SQL inside it) — it is never a stage-entry date.
+    """
+    stages = list(stages_implying_event(EVENT_SQL))
+    # The same two precedence levels the shared expression is built from, so
+    # this split can never disagree with the effective date every other read
+    # filters on.
+    direct = direct_date_sql(EVENT_SQL)
+    recovered = recovered_date_sql(EVENT_SQL)
+    effective = effective_date_sql(EVENT_SQL)
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(candidates=None, direct=None,
+                                    recovered=None, unresolved=None)
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*) AS candidates,
+                           COUNT(*) FILTER (WHERE {direct} IS NOT NULL)
+                               AS direct,
+                           COUNT(*) FILTER (WHERE {direct} IS NULL
+                                              AND {recovered} IS NOT NULL)
+                               AS recovered,
+                           COUNT(*) FILTER (WHERE {effective} IS NULL)
+                               AS unresolved,
+                           MIN({FUNNEL_ALIAS}.created_at) FILTER (
+                               WHERE {effective} IS NULL)
+                               AS earliest_unresolved_created_at,
+                           MAX({FUNNEL_ALIAS}.created_at) FILTER (
+                               WHERE {effective} IS NULL)
+                               AS latest_unresolved_created_at,
+                           COUNT(*) FILTER (
+                               WHERE {effective} IS NULL
+                                 AND {FUNNEL_ALIAS}.created_at IS NULL)
+                               AS unresolved_without_created_at
+                    FROM {FUNNEL_TABLE} {FUNNEL_ALIAS}
+                    {_recovery_join()}
+                    WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s)
+                    """,
+                    (stages,),
+                )
+                row = _rows_as_dicts(cur)[0]
+        return {"available": True, "stages_implying_sql": stages,
+                "table": FUNNEL_TABLE, "recovery_table": RECOVERY_TABLE, **row}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_sql_coverage_population failed: %s", exc)
+        return _unavailable(candidates=None, direct=None, recovered=None,
+                            unresolved=None)
+
+
+def fetch_unresolved_sql_created_at_bounds() -> dict:
+    """Creation timestamps of every unresolved lifecycle-SQL contact.
+
+    The ONLY temporal fact known about a contact whose SQL-entry date is
+    missing. Used to prove a contact CANNOT belong to a window (it was created
+    after the window closed, so it cannot have entered SQL inside it) and for
+    nothing else. A contact whose creation time is itself unknown can never be
+    ruled out of any window, and is reported as such rather than assumed absent.
+    """
+    stages = list(stages_implying_event(EVENT_SQL))
+    col = EVENT_DATE_COLUMN[EVENT_SQL]
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows=[])
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {FUNNEL_ALIAS}.contact_id,
+                           {FUNNEL_ALIAS}.created_at
+                    FROM {FUNNEL_TABLE} {FUNNEL_ALIAS}
+                    {_recovery_join()}
+                    WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s)
+                      AND {effective_date_sql(EVENT_SQL)} IS NULL
+                    """,
+                    (stages,),
+                )
+                rows = _rows_as_dicts(cur)
+        return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_unresolved_sql_created_at_bounds failed: %s", exc)
         return _unavailable(rows=[])
 
 
@@ -532,6 +749,30 @@ _CONTACT_PAGE_COLUMNS = (
 )
 
 
+def _contact_page_select() -> str:
+    """The contact-page projection, with stage dates coalesced like the headline.
+
+    A page that filtered on the effective date but displayed the bare column
+    would show an empty date beside a row it had just proved was in window.
+    Each recovered date is flagged (``date_entered_*_from_history``) so the two
+    provenances stay distinguishable in the payload.
+    """
+    date_cols = {EVENT_DATE_COLUMN[e] for e in FUNNEL_EVENTS}
+    parts = []
+    for col in _CONTACT_PAGE_COLUMNS:
+        if col in date_cols:
+            parts.append(
+                f"COALESCE({FUNNEL_ALIAS}.{col}, {RECOVERY_ALIAS}.recovered_{col}) "
+                f"AS {col}")
+            parts.append(
+                f"({FUNNEL_ALIAS}.{col} IS NULL "
+                f"AND {RECOVERY_ALIAS}.recovered_{col} IS NOT NULL) "
+                f"AS {col}_from_history")
+        else:
+            parts.append(f"{FUNNEL_ALIAS}.{col}")
+    return ", ".join(parts)
+
+
 def fetch_distinct_facets() -> dict:
     """Distinct source-evidence PAIRS and campaign labels in the canonical store.
 
@@ -586,16 +827,17 @@ def _append_source_pair_filter(where: list, params: list, source_pairs_in) -> No
         f"""EXISTS (
             SELECT 1
             FROM unnest(%s::text[], %s::text[]) AS allowed(src, detail)
-            WHERE allowed.src IS NOT DISTINCT FROM {FUNNEL_TABLE}.hs_analytics_source
-              AND allowed.detail IS NOT DISTINCT FROM {FUNNEL_TABLE}.hs_analytics_source_data_1
+            WHERE allowed.src IS NOT DISTINCT FROM {FUNNEL_ALIAS}.hs_analytics_source
+              AND allowed.detail IS NOT DISTINCT FROM {FUNNEL_ALIAS}.hs_analytics_source_data_1
         )""")
     params.append([pair[0] for pair in source_pairs_in])
     params.append([pair[1] for pair in source_pairs_in])
 
 
 # A HubSpot keyword label must be a real value, not an empty string.
-_KEYWORD_PRESENT_SQL = ("(hs_analytics_source_data_2 IS NOT NULL "
-                        "AND btrim(hs_analytics_source_data_2) <> '')")
+_KEYWORD_PRESENT_SQL = (
+    f"({FUNNEL_ALIAS}.hs_analytics_source_data_2 IS NOT NULL "
+    f"AND btrim({FUNNEL_ALIAS}.hs_analytics_source_data_2) <> '')")
 
 
 def _append_campaign_filter(where: list, params: list, campaigns_in) -> None:
@@ -607,7 +849,7 @@ def _append_campaign_filter(where: list, params: list, campaigns_in) -> None:
     if not campaigns_in:
         where.append("FALSE")
         return
-    where.append("(hs_analytics_source_data_1 = ANY(%s))")
+    where.append(f"({FUNNEL_ALIAS}.hs_analytics_source_data_1 = ANY(%s))")
     params.append([c for c in campaigns_in if c is not None])
 
 
@@ -639,7 +881,9 @@ def fetch_funnel_contact_page(
     if event not in FUNNEL_EVENTS:
         raise ValueError(f"Unknown funnel event '{event}'")
 
-    date_column = EVENT_DATE_COLUMN[event]
+    # PR-ADS-159 §5: the SHARED effective expression, not the bare column. This
+    # page must select the same population the headline counted.
+    date_column = effective_date_sql(event)
     size = max(1, min(int(page_size or DEFAULT_CONTACT_PAGE_SIZE),
                       MAX_CONTACT_PAGE_SIZE))
     page_number = max(1, int(page or 1))
@@ -659,11 +903,11 @@ def fetch_funnel_contact_page(
         where.append(_KEYWORD_PRESENT_SQL)
 
     if operational_status:
-        where.append("(mql_status_category = %s)")
+        where.append(f"({FUNNEL_ALIAS}.mql_status_category = %s)")
         params.append(operational_status)
 
     if company_query:
-        where.append("(company ILIKE %s)")
+        where.append(f"({FUNNEL_ALIAS}.company ILIKE %s)")
         params.append(f"%{company_query.strip()}%")
 
     where_sql = " AND ".join(where)
@@ -675,16 +919,20 @@ def fetch_funnel_contact_page(
                                     page_size=size)
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT COUNT(*) FROM {FUNNEL_TABLE} WHERE {where_sql}",
+                    f"""SELECT COUNT(*)
+                        FROM {FUNNEL_TABLE} {FUNNEL_ALIAS}
+                        {_recovery_join()}
+                        WHERE {where_sql}""",
                     params)
                 total = int(cur.fetchone()[0] or 0)
 
                 cur.execute(
                     f"""
-                    SELECT {", ".join(_CONTACT_PAGE_COLUMNS)}
-                    FROM {FUNNEL_TABLE}
+                    SELECT {_contact_page_select()}
+                    FROM {FUNNEL_TABLE} {FUNNEL_ALIAS}
+                    {_recovery_join()}
                     WHERE {where_sql}
-                    ORDER BY {date_column} DESC, contact_id ASC
+                    ORDER BY {date_column} DESC, {FUNNEL_ALIAS}.contact_id ASC
                     LIMIT %s OFFSET %s
                     """,
                     params + [size, offset])
@@ -721,7 +969,9 @@ def fetch_operational_status_counts(
     """
     if event not in FUNNEL_EVENTS:
         raise ValueError(f"Unknown funnel event '{event}'")
-    date_column = EVENT_DATE_COLUMN[event]
+    # PR-ADS-159 §5: the SHARED effective expression. These counts explain the
+    # page beside them, so they must select the same population it does.
+    date_column = effective_date_sql(event)
 
     where = [
         f"{date_column} IS NOT NULL",
@@ -741,9 +991,11 @@ def fetch_operational_status_counts(
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT COALESCE(mql_status_category, 'no_verdict') AS category,
+                    SELECT COALESCE({FUNNEL_ALIAS}.mql_status_category,
+                                    'no_verdict') AS category,
                            COUNT(*) AS contacts
-                    FROM {FUNNEL_TABLE}
+                    FROM {FUNNEL_TABLE} {FUNNEL_ALIAS}
+                    {_recovery_join()}
                     WHERE {" AND ".join(where)}
                     GROUP BY 1
                     """,
