@@ -38,7 +38,15 @@ Bounded, idempotent, resumable
 Every run takes an explicit ``--limit``. Rows are keyed on
 ``(contact_id, funnel_event)``, so a re-run rewrites rather than duplicates. A
 durable cursor advances only on ``--apply`` runs that completed, so a stopped
-run resumes exactly where it left off. ``--restart`` ignores the cursor.
+run resumes exactly where it left off.
+
+PR-ADS-159-R1: each candidate mode owns an INDEPENDENT checkpoint —
+``lifecycle_stage_history`` for the all-stage run, ``lifecycle_stage_history:sql``
+for ``--sql-only``. They previously shared one row, so an SQL-only run resumed
+from whatever cursor the last all-stage run left; since the all-stage population
+is a superset ordered by the same key, its cursor is normally far ahead and every
+SQL candidate below it was skipped silently. ``--restart`` ignores the cursor of
+the CURRENT mode only, and never touches the other's.
 """
 
 from __future__ import annotations
@@ -88,6 +96,21 @@ _STATE_MEANING = {
         "HubSpot's own recorded transition timestamp was ingested",
     "history_request_unavailable":
         "the HubSpot request itself failed — nothing was proven",
+    # PR-ADS-159 §2 — the states the previous vocabulary could not express.
+    "history_request_failed":
+        "the HubSpot request itself failed — nothing was proven",
+    "history_parameter_dropped_or_unsupported":
+        "the history parameter never reached HubSpot, so nothing was asked for",
+    "history_present_no_sql_stage":
+        "history exists and holds no version setting the SQL stage",
+    "history_sql_version_missing_timestamp":
+        "an SQL version exists but carries no timestamp at all",
+    "history_sql_timestamp_invalid":
+        "an SQL version carries a timestamp that could not be parsed",
+    "history_sql_timestamp_recovered":
+        "HubSpot's own recorded SQL transition timestamp was ingested",
+    "unrecoverable_no_hubspot_evidence":
+        "HubSpot holds no evidence for this transition",
 }
 
 
@@ -101,6 +124,25 @@ def _render(result: dict) -> None:
     if not result.get("ok"):
         print(f"\n  RUN DID NOT COMPLETE: {result.get('reason')}")
         print(f"  {result.get('detail')}")
+        # PR-ADS-159-R7: a checkpoint failure is a PARTIAL local write. Saying
+        # "nothing was written" there would be false, and would send an operator
+        # looking for rows that are already in the database.
+        if result.get("partial_local_write"):
+            print("\n  PARTIAL LOCAL WRITE — read this carefully:")
+            print(f"    recovered evidence rows PERSISTED: "
+                  f"{result.get('events_persisted')} "
+                  f"(contacts: {result.get('contacts_recovered')})")
+            print("    durable checkpoint PERSISTED:      no")
+            print(f"    cursor that was NOT saved:         "
+                  f"{result.get('unsaved_cursor')}")
+            print("    resumability proven:               no")
+            print(f"    HubSpot writes performed:          "
+                  f"{result.get('hubspot_writes_performed')}")
+            print("\n  The evidence rows are keyed on (contact_id, funnel_event),")
+            print("  so re-running is safe: a retry rewrites them rather than")
+            print("  appending. It will re-read the same contacts from the older")
+            print("  cursor, which costs HubSpot quota but duplicates nothing.")
+            return
         print("\n  Nothing was written. Recovered counts are UNKNOWN, not zero:")
         print("  an aborted pass proves nothing about how much evidence HubSpot holds.")
         return
@@ -110,6 +152,19 @@ def _render(result: dict) -> None:
     print(f"  contacts with gaps read:   {result.get('contacts_with_gaps')}")
     print(f"  contacts examined:         {result.get('contacts_examined')}")
     print(f"  contacts with NO history:  {result.get('contacts_without_history')}")
+    print(f"  candidate mode:            {result.get('candidate_mode')}")
+    print(f"  checkpoint scope:          {result.get('checkpoint_scope')}")
+    print(f"  more candidates remain:    {result.get('more_candidates_remain')}")
+    print(f"  individual reads used:     {result.get('individual_requests')}"
+          f" / {result.get('individual_request_budget')}"
+          f"  (rescued {result.get('individual_rescued')})")
+    if result.get("individual_budget_exhausted"):
+        print(f"  NOTE: the individual-read budget ran out at contact "
+              f"{result.get('deferred_at_contact')}.")
+        print(f"        {result.get('contacts_deferred_by_budget')} candidate(s) "
+              "were DEFERRED, not adjudicated. The pass stopped there and the")
+        print("        cursor did NOT advance past them, so the next run picks")
+        print("        them up. They are UNATTEMPTED, not unrecoverable.")
     print(f"  contacts with recovery:    {result.get('contacts_recovered')}")
     print(f"  stage events recovered:    {result.get('events_recovered')}")
     print(f"  stage events persisted:    {result.get('events_persisted')}")
@@ -152,6 +207,46 @@ def _render(result: dict) -> None:
         print("  was ever written to HubSpot. Re-run with --apply to persist.")
 
 
+def _render_diagnosis(result: dict) -> str:
+    """The read-only batch-vs-individual comparison, as text.
+
+    Structural facts only — no contact identifiers, no property values, no
+    payloads. The question it answers is which READ produces history, not what
+    any particular contact contains.
+    """
+    lines = ["=" * 78,
+             "  HUBSPOT LIFECYCLE-HISTORY READ DIAGNOSIS (READ-ONLY)",
+             "=" * 78]
+    if not result.get("ok"):
+        lines.append(f"\n  DIAGNOSIS DID NOT RUN: {result.get('reason')}")
+        lines.append(f"  {result.get('detail')}")
+        return "\n".join(lines)
+    diag = result.get("diagnosis") or {}
+    lines.append(f"\n  contacts sampled:   {diag.get('requested_contacts')}")
+    lines.append(f"  history property:   {diag.get('history_property')}")
+    lines.append(f"  HubSpot writes:     {diag.get('hubspot_writes_performed')}")
+    for path in ("batch", "individual"):
+        block = diag.get(path) or {}
+        lines.append(f"\n  {path.upper()}")
+        lines.append(f"    endpoint:  {block.get('endpoint')}")
+        key = block.get("request_body_key") or block.get("request_parameter")
+        lines.append(f"    asks for:  {key}")
+        lines.append(f"    outcome:   {block.get('outcome')}")
+        if block.get("error_type"):
+            lines.append(f"    error:     {block['error_type']}")
+        if block.get("returned_contacts") is not None:
+            lines.append(f"    returned:  {block['returned_contacts']} contact(s), "
+                         f"{block.get('versions_seen')} version(s)")
+        for state, count in (block.get("states") or {}).items():
+            lines.append(f"      {count:>4}  {state}")
+    lines.append(f"\n  VERDICT: {diag.get('verdict')}")
+    lines.append("\n  A batch that returns no history while the individual read")
+    lines.append("  does is OUR request, not HubSpot's retention. That was the")
+    lines.append("  PR-ADS-159 §1 defect and it is what this comparison exists")
+    lines.append("  to tell apart.")
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Recover lifecycle stage-entry dates from HubSpot property "
@@ -163,8 +258,24 @@ def main() -> int:
                         help="persist recovered timestamps to the LOCAL database "
                              "(never to HubSpot). Default is a dry run.")
     parser.add_argument("--restart", action="store_true",
-                        help="ignore the durable cursor and start from the first "
-                             "contact id")
+                        help="ignore the durable cursor OF THIS MODE and start "
+                             "from the first contact id. The other mode's "
+                             "checkpoint is untouched.")
+    parser.add_argument("--sql-only", action="store_true",
+                        help="PR-ADS-159 §3: examine ONLY contacts that reached "
+                             "SQL and have no effective SQL-entry timestamp")
+    parser.add_argument("--no-individual-fallback", action="store_true",
+                        help="do not retry a batch miss through the "
+                             "single-contact read")
+    parser.add_argument("--individual-budget", type=int, default=None,
+                        help="max single-contact reads for the WHOLE run. One "
+                             "request per contact is affordable for hundreds "
+                             "and not for a portal-wide scan, so this is a "
+                             "hard ceiling, not a pacing hint. Default 200.")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="read-only: compare the batch and individual "
+                             "history reads over a bounded sample and report "
+                             "the structural difference. Recovers nothing.")
     parser.add_argument("--json", action="store_true", help="emit raw JSON")
     args = parser.parse_args()
 
@@ -182,8 +293,24 @@ def main() -> int:
 
     from services import lifecycle_history_recovery_service as recovery
 
-    result = recovery.recover(limit=args.limit, apply=args.apply,
-                              resume=not args.restart)
+    if args.diagnose:
+        result = recovery.diagnose(limit=min(args.limit, 50))
+        print(json.dumps(result, indent=2, default=str) if args.json
+              else _render_diagnosis(result))
+        return EXIT_OK if result.get("ok") else EXIT_FAILED
+
+    budget = (args.individual_budget
+              if args.individual_budget is not None
+              else recovery.DEFAULT_INDIVIDUAL_REQUEST_BUDGET)
+    if budget < 0:
+        print("--individual-budget must not be negative", file=sys.stderr)
+        return EXIT_USAGE
+
+    result = recovery.recover(
+        limit=args.limit, apply=args.apply, resume=not args.restart,
+        event=("sql" if args.sql_only else None),
+        individual_fallback=not args.no_individual_fallback,
+        individual_request_budget=budget)
 
     if args.json:
         print(json.dumps(result, indent=2, default=str))

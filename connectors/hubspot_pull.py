@@ -751,6 +751,79 @@ HISTORY_PROPERTY_ABSENT = "history_payload_missing"
 HISTORY_EMPTY = "history_payload_empty"
 HISTORY_PRESENT = "history_payload_present"
 
+# ── PR-ADS-159 §1 — why the first production dry run recovered nothing ───────
+# 50 contacts examined, 50 `history_payload_missing`, 0 usable histories. The
+# request never asked for history.
+#
+# `client.crm.contacts.batch_api.read(...)` was handed a plain dict as its body.
+# The SDK's `ApiClient.sanitize_for_serialization` documents its own behaviour:
+# "If obj is dict, return the dict" — `attribute_map` is applied ONLY to model
+# instances. So the body went out carrying the snake_case key
+# `properties_with_history`, HubSpot's batch-read endpoint does not know that
+# field, ignored it, and answered with contacts that carry no history container
+# at all. Every contact then parsed as HISTORY_PROPERTY_ABSENT, which reads as
+# "HubSpot holds no history" when the truth is "we never asked for any".
+#
+#     dict body  -> {'inputs', 'properties', 'properties_with_history'}
+#     model body -> {'inputs', 'properties', 'propertiesWithHistory'}   ← correct
+#
+# The previous docstring's claim that "the request model serializes
+# properties_with_history to propertiesWithHistory" was true OF THE MODEL and
+# irrelevant to the code, which never built one. A parameter that exists on a
+# model the call does not use is not a parameter that was sent.
+#
+# The fix is to construct the real model. `test_pr_ads_159_*` asserts the
+# serialized body key so the dict form cannot come back unnoticed.
+HISTORY_PARAMETER_UNSUPPORTED = "history_parameter_dropped_or_unsupported"
+
+#: How the history for a contact was obtained, so a report can say which read
+#: produced its evidence rather than leaving the reader to assume the batch.
+HISTORY_VIA_BATCH = "batch_read"
+HISTORY_VIA_INDIVIDUAL = "individual_read"
+
+
+def _batch_history_body(ids):
+    """The batch-read body as an SDK MODEL, so history is actually requested.
+
+    Falls back to a hand-built camelCase dict if the model cannot be imported,
+    because the wire contract — ``propertiesWithHistory`` — is what matters, not
+    which object produced it. A snake_case dict is never sent either way.
+    """
+    payload_inputs = [{"id": cid} for cid in ids]
+    prop = [HUBSPOT_LIFECYCLE_HISTORY_PROPERTY]
+    try:
+        from hubspot.crm.contacts import (  # noqa: PLC0415
+            BatchReadInputSimplePublicObjectId,
+        )
+    except Exception:  # noqa: BLE001 — pragma: no cover
+        return {"inputs": payload_inputs, "properties": prop,
+                "propertiesWithHistory": prop}
+    return BatchReadInputSimplePublicObjectId(
+        inputs=payload_inputs, properties=prop, properties_with_history=prop)
+
+
+def _history_from_record(record: dict) -> dict:
+    """One contact's history payload → its evidence state and versions. Pure.
+
+    ``to_dict()`` emits snake_case; a raw JSON dict emits camelCase. Both are
+    accepted so parsing never depends on which form the caller passed.
+    """
+    history = record.get("properties_with_history")
+    if history is None:
+        history = record.get("propertiesWithHistory")
+    if not isinstance(history, dict) \
+            or HUBSPOT_LIFECYCLE_HISTORY_PROPERTY not in history:
+        return {"state": HISTORY_PROPERTY_ABSENT, "versions": []}
+    versions = history.get(HUBSPOT_LIFECYCLE_HISTORY_PROPERTY) or []
+    if not versions:
+        return {"state": HISTORY_EMPTY, "versions": []}
+    return {"state": HISTORY_PRESENT,
+            "versions": [_normalise_history_version(v) for v in versions]}
+
+
+def _as_record(result) -> dict:
+    return result.to_dict() if hasattr(result, "to_dict") else dict(result)
+
 
 def fetch_lifecycle_stage_history(contact_ids, *, client=None) -> dict:
     """Read `lifecyclestage` version history for up to 50 contacts. READ-ONLY.
@@ -765,11 +838,11 @@ def fetch_lifecycle_stage_history(contact_ids, *, client=None) -> dict:
     payload" and "it returned an empty history" are three different facts, and
     only the third is evidence that no transition was ever recorded.
 
-    Request/response shape verified against the installed SDK: the request model
-    serializes ``properties_with_history`` to ``propertiesWithHistory``, and the
-    batch response's ``SimplePublicObject`` carries ``properties_with_history``
-    as ``dict[str, list[ValueWithTimestamp]]`` — so history is genuinely
-    requested and genuinely deserialized, not dropped in transit.
+    The body is built as ``BatchReadInputSimplePublicObjectId``, NOT as a plain
+    dict. The SDK applies ``attribute_map`` only to model instances, so a dict
+    body would send ``properties_with_history`` — a field HubSpot's batch-read
+    endpoint does not know — and history would never be requested. See the
+    PR-ADS-159 §1 note above; that was the live defect.
 
     Raises ``HubSpotRetryableError`` on a non-rate-limit API failure. A partial
     read is never returned as a complete one.
@@ -786,12 +859,7 @@ def fetch_lifecycle_stage_history(contact_ids, *, client=None) -> dict:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.crm.contacts.batch_api.read(
-                batch_read_input_simple_public_object_id={
-                    "inputs": [{"id": cid} for cid in ids],
-                    "properties": [HUBSPOT_LIFECYCLE_HISTORY_PROPERTY],
-                    "properties_with_history": [HUBSPOT_LIFECYCLE_HISTORY_PROPERTY],
-                }
-            )
+                batch_read_input_simple_public_object_id=_batch_history_body(ids))
             break
         except ApiException as exc:
             if exc.status == 429 and attempt < MAX_RETRIES:
@@ -805,30 +873,228 @@ def fetch_lifecycle_stage_history(contact_ids, *, client=None) -> dict:
 
     # Default: HubSpot did not return this contact. Overwritten below for every
     # contact it did return, so the default can never be mistaken for evidence.
-    out = {cid: {"state": HISTORY_CONTACT_ABSENT, "versions": []} for cid in ids}
+    out = {cid: {"state": HISTORY_CONTACT_ABSENT, "versions": [],
+                 "via": HISTORY_VIA_BATCH} for cid in ids}
     for result in (getattr(response, "results", None) or []):
-        record = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+        record = _as_record(result)
         contact_id = str(record.get("id") or "").strip()
         if not contact_id:
             continue
-        # `to_dict()` emits snake_case; a raw JSON dict emits camelCase. Both are
-        # accepted so the parsing does not depend on which one the caller passed.
-        history = record.get("properties_with_history")
-        if history is None:
-            history = record.get("propertiesWithHistory")
-        if not isinstance(history, dict) \
-                or HUBSPOT_LIFECYCLE_HISTORY_PROPERTY not in history:
-            out[contact_id] = {"state": HISTORY_PROPERTY_ABSENT, "versions": []}
-            continue
-        versions = history.get(HUBSPOT_LIFECYCLE_HISTORY_PROPERTY) or []
-        if not versions:
-            out[contact_id] = {"state": HISTORY_EMPTY, "versions": []}
-            continue
-        out[contact_id] = {
-            "state": HISTORY_PRESENT,
-            "versions": [_normalise_history_version(v) for v in versions],
-        }
+        out[contact_id] = {**_history_from_record(record),
+                           "via": HISTORY_VIA_BATCH}
     return out
+
+
+def fetch_lifecycle_stage_history_single(contact_id, *, client=None) -> dict:
+    """One contact's ``lifecyclestage`` history, via the individual read.
+
+    READ-ONLY. ``GET /crm/v3/objects/contacts/{id}`` with
+    ``propertiesWithHistory`` as a QUERY parameter — a path the SDK maps
+    correctly on its own (``basic_api.get_by_id`` appends
+    ``("propertiesWithHistory", ...)`` explicitly), unlike the batch body.
+
+    This exists as a bounded fallback for the case where the batch endpoint
+    returns no history container even when asked properly. It costs one request
+    per contact, so it is never used for an unbounded scan: the recovery service
+    applies it only to contacts a batch read has already failed to answer, and
+    only within an explicit request budget.
+
+    Returns the same ``{"state", "versions", "via"}`` shape as the batch read.
+    A 404 is ``HISTORY_CONTACT_ABSENT`` — HubSpot answered, and its answer is
+    that the contact is not there. Authentication and permission failures raise,
+    because a token that cannot read contacts must stop the run, not be counted
+    as fifty contacts without history.
+    """
+    cid = str(contact_id or "").strip()
+    if not cid:
+        return {"state": HISTORY_CONTACT_ABSENT, "versions": [],
+                "via": HISTORY_VIA_INDIVIDUAL}
+
+    client = client or get_client()
+    prop = [HUBSPOT_LIFECYCLE_HISTORY_PROPERTY]
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            record = client.crm.contacts.basic_api.get_by_id(
+                cid, properties=prop, properties_with_history=prop)
+            break
+        except ApiException as exc:
+            if exc.status == 404:
+                return {"state": HISTORY_CONTACT_ABSENT, "versions": [],
+                        "via": HISTORY_VIA_INDIVIDUAL}
+            if exc.status == 429 and attempt < MAX_RETRIES:
+                time.sleep(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+            raise HubSpotRetryableError(
+                f"HubSpot individual history read failed for contact "
+                f"(status={exc.status})") from exc
+    else:  # pragma: no cover — the loop always breaks, returns or raises
+        raise HubSpotRetryableError(
+            "HubSpot individual history read exhausted retries")
+
+    return {**_history_from_record(_as_record(record)),
+            "via": HISTORY_VIA_INDIVIDUAL}
+
+
+def diagnose_lifecycle_history_reads(contact_ids, *, client=None) -> dict:
+    """Compare the batch read against the individual read. READ-ONLY, no PII.
+
+    Answers the one question a payload-state count cannot: when the batch says
+    "no history", is that HubSpot's answer or ours? Running both reads over the
+    same bounded sample separates "this portal does not expose lifecyclestage
+    history" from "our batch request is malformed", and those have opposite
+    follow-ups.
+
+    Records only structural facts — endpoint category, HTTP outcome, requested
+    and returned counts, whether the history container exists, whether a
+    ``lifecyclestage`` key exists, how many versions came back, and the parser's
+    verdict. Never a token, an email, a name, a company, a full contact payload,
+    or any unrelated property value. Contact ids are HubSpot's own opaque
+    identifiers and are reported only as counts here.
+    """
+    ids = [str(c).strip() for c in (contact_ids or []) if str(c or "").strip()]
+    sample = ids[:HUBSPOT_HISTORY_BATCH_LIMIT]
+    out: dict = {
+        "requested_contacts": len(sample),
+        "history_property": HUBSPOT_LIFECYCLE_HISTORY_PROPERTY,
+        "hubspot_writes_performed": False,
+        "batch": {"endpoint": "POST /crm/v3/objects/contacts/batch/read",
+                  "request_body_key": _batch_history_request_key()},
+        "individual": {"endpoint": "GET /crm/v3/objects/contacts/{id}",
+                       "request_parameter": "propertiesWithHistory (query)"},
+    }
+    if not sample:
+        out["batch"]["outcome"] = "not_attempted"
+        out["individual"]["outcome"] = "not_attempted"
+        return out
+
+    client = client or get_client()
+
+    batch_failed = individual_failed = False
+    try:
+        batch = fetch_lifecycle_stage_history(sample, client=client)
+        out["batch"].update(outcome="ok", returned_contacts=len(batch),
+                            states=_state_counts(batch),
+                            versions_seen=sum(len(v.get("versions") or [])
+                                              for v in batch.values()))
+    except Exception as exc:  # noqa: BLE001
+        batch, batch_failed = {}, True
+        out["batch"].update(outcome="request_failed",
+                            error_type=type(exc).__name__)
+
+    individual: dict = {}
+    for cid in sample:
+        try:
+            individual[cid] = fetch_lifecycle_stage_history_single(
+                cid, client=client)
+        except Exception as exc:  # noqa: BLE001
+            individual_failed = True
+            out["individual"].update(outcome="request_failed",
+                                     error_type=type(exc).__name__)
+            break
+    else:
+        out["individual"].update(outcome="ok",
+                                 returned_contacts=len(individual),
+                                 states=_state_counts(individual),
+                                 versions_seen=sum(
+                                     len(v.get("versions") or [])
+                                     for v in individual.values()))
+
+    # PR-ADS-159-R4: BOTH outcomes are preserved even when they disagree and
+    # even when neither produced usable history. Collapsing them was how a
+    # failed request came to read as "the portal holds nothing".
+    out["verdict"] = _history_read_verdict(
+        batch, individual, batch_failed=batch_failed,
+        individual_failed=individual_failed)
+    out["paths_agree"] = (out["batch"].get("states")
+                          == out["individual"].get("states"))
+
+    # The structural finding, independent of what the portal answered: if the
+    # body will not carry `propertiesWithHistory`, history is never requested
+    # and no empirical verdict about the portal is admissible.
+    if out["batch"]["request_body_key"] != "propertiesWithHistory":
+        out["request_defect"] = HISTORY_PARAMETER_UNSUPPORTED
+        out["verdict"] = HISTORY_PARAMETER_UNSUPPORTED
+    else:
+        out["request_defect"] = None
+    return out
+
+
+def _batch_history_request_key() -> str:
+    """The JSON key the batch body will actually carry. Structural, not a guess.
+
+    A body that serializes to ``properties_with_history`` is the PR-ADS-159 §1
+    defect, and the diagnostic reports the real key rather than the intent.
+    """
+    body = _batch_history_body(["0"])
+    if isinstance(body, dict):
+        return next((k for k in body if "istory" in k), "absent")
+    return next((json_key for attr, json_key in body.attribute_map.items()
+                 if attr == "properties_with_history"), "absent")
+
+
+def _state_counts(by_contact: dict) -> dict:
+    counts: dict = {}
+    for entry in by_contact.values():
+        state = (entry or {}).get("state") or HISTORY_CONTACT_ABSENT
+        counts[state] = counts.get(state, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+#: PR-ADS-159-R4 — the DIAGNOSIS vocabulary. Denominator: one diagnosis run.
+#: These are statements about the READS, which no single contact's payload can
+#: make. `history_parameter_dropped_or_unsupported` lives here and only here:
+#: declaring it as a per-contact evidence state is what made it unreachable.
+VERDICT_BOTH = "both_paths_return_history"
+VERDICT_INDIVIDUAL_ONLY = "individual_only_batch_returns_no_history"
+VERDICT_BATCH_ONLY = "batch_only_individual_returns_no_history"
+VERDICT_NEITHER = "neither_path_returns_history"
+VERDICT_BATCH_FAILED = "batch_request_failed"
+VERDICT_INDIVIDUAL_FAILED = "individual_request_failed"
+VERDICT_BOTH_FAILED = "both_requests_failed"
+
+DIAGNOSIS_VERDICTS = (
+    VERDICT_BOTH,
+    VERDICT_INDIVIDUAL_ONLY,
+    VERDICT_BATCH_ONLY,
+    VERDICT_NEITHER,
+    VERDICT_BATCH_FAILED,
+    VERDICT_INDIVIDUAL_FAILED,
+    VERDICT_BOTH_FAILED,
+    HISTORY_PARAMETER_UNSUPPORTED,
+)
+
+
+def _history_read_verdict(batch: dict, individual: dict, *,
+                          batch_failed: bool = False,
+                          individual_failed: bool = False) -> str:
+    """Which read, if either, produced usable history over the sample.
+
+    PR-ADS-159-R4: a FAILED request is not "this read returns no history". The
+    first cut passed an empty dict for a failed batch, which fell through to
+    `neither_path_returns_history` — the strongest possible claim about the
+    portal, drawn from a request that never got an answer. That is the same
+    class of error as the defect being diagnosed.
+    """
+    def _any_present(d):
+        return any((e or {}).get("state") == HISTORY_PRESENT for e in d.values())
+
+    if batch_failed and individual_failed:
+        return VERDICT_BOTH_FAILED
+    if batch_failed:
+        return VERDICT_BATCH_FAILED
+    if individual_failed:
+        return VERDICT_INDIVIDUAL_FAILED
+
+    batch_ok, single_ok = _any_present(batch), _any_present(individual)
+    if batch_ok and single_ok:
+        return VERDICT_BOTH
+    if single_ok:
+        # The portal HAS the history and the batch is not getting it. That is
+        # not a retention finding — it is a statement about our request.
+        return VERDICT_INDIVIDUAL_ONLY
+    if batch_ok:
+        return VERDICT_BATCH_ONLY
+    return VERDICT_NEITHER
 
 
 def _normalise_history_version(version) -> dict:
@@ -843,6 +1109,12 @@ def _normalise_history_version(version) -> dict:
     return {
         "value": raw.get("value"),
         "timestamp": parse_hubspot_timestamp(raw.get("timestamp")),
+        # PR-ADS-159 §2: the raw field, kept so the caller can tell a version
+        # that carried NO timestamp from one whose timestamp would not parse.
+        # Both arrive as `timestamp: None`, and they are different defects: the
+        # first is HubSpot recording a change without a time, the second is a
+        # value we are failing to read.
+        "timestamp_raw": raw.get("timestamp"),
         "source_type": raw.get("source_type") or raw.get("sourceType"),
         "source_id": raw.get("source_id") or raw.get("sourceId"),
         # HubSpot's human-readable account of the change (e.g. a workflow name).

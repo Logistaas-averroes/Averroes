@@ -131,11 +131,16 @@ CONSUMERS: list[dict] = [
        scope="all_source|google_ads_source|campaign_attributable|keyword_attributable",
        classification=CLS_CANONICAL,
        code_location="services/canonical_crm_funnel_service.py:build_populations",
-       migration_notes="Reference standard. Known gap: fetch_funnel_contact_page and "
-                       "fetch_operational_status_counts filter the bare column without "
-                       "the history-recovery COALESCE the headline read applies "
-                       "(db/crm_funnel_repository.py). Funnel status turns partial on "
-                       "ANY event's missing stage date, not only SQL.",
+       migration_notes="Reference standard. The PR-ADS-158 gap is CLOSED by "
+                       "PR-ADS-159 §5: fetch_funnel_contact_page and "
+                       "fetch_operational_status_counts filtered the bare column "
+                       "while the headline applied the history-recovery COALESCE, "
+                       "so a recovered contact was counted in the headline and "
+                       "absent from the two reads that explain it. All canonical "
+                       "reads now share effective_date_sql (direct property, else "
+                       "recovered history, else NULL) and a drift test plus the "
+                       "coverage audit hold them there. Funnel status still turns "
+                       "partial on ANY event's missing stage date, not only SQL.",
        truth_status="reconciled|partial|mismatch|unavailable; mismatch/unavailable → count None",
        headline=True, row=True, filters=True, sorting=True, drawer=True,
        executive=True),
@@ -682,6 +687,7 @@ _WRITE_LEADS = "leads snapshot writer (db.writers.write_leads / _map_status_cate
 _WRITE_CLASS = "Source classification cache writer"
 _SYNC = "HubSpot contact funnel sync (canonical ingestion)"
 _RECOVERY = "Lifecycle stage-history recovery (CLI)"
+_SQL_COVERAGE = "PR-ADS-159 lifecycle SQL coverage audit"
 _LEADREC = "Lead reconciliation (legacy business-date backfill)"
 _LEGACY_ENGINE = "Legacy contact-outcome contract (canonical_contact_outcome_service)"
 _FUNNEL_ENGINE = "Canonical CRM funnel contract (canonical_crm_funnel_service)"
@@ -875,9 +881,34 @@ RULES: list[dict] = [
     _r("sync.funnel", "services/hubspot_contact_funnel_sync_service.py", CLS_CANONICAL, _SYNC,
        symbol=["build_coverage", "run_contact_funnel_sync"]),
     _r("recovery", "services/lifecycle_history_recovery_service.py", CLS_CANONICAL, _RECOVERY,
-       symbol=["recover", "run_recovery"]),
+       # PR-ADS-159 §1b adds `diagnose`: the read-only comparison of the batch
+       # and individual HubSpot history reads. It recovers nothing and writes
+       # nothing; it exists to tell "HubSpot returned no history" apart from
+       # "HubSpot holds no history", which one read alone cannot do.
+       symbol=["recover", "run_recovery", "diagnose"]),
     _r("recovery.cli", "scripts/backfill_lifecycle_stage_history.py", CLS_CANONICAL, _RECOVERY,
        symbol="main"),
+
+    # ── PR-ADS-159 §6/§8 — lifecycle SQL coverage ───────────────────────────
+    # Diagnostic, not a consumer: neither module publishes an SQL number to any
+    # surface. The coverage module DECIDES whether a window's complete total may
+    # be published at all, and the audit reports that decision. They quote the
+    # SQL markers because the thing they reason about is the SQL population.
+    _m("sqlcoverage.module", "analysis/lifecycle_sql_coverage.py", CLS_DIAGNOSTIC,
+       _SQL_COVERAGE, ["confirmed_sqls_ref", "cpql_ref"]),
+    _r("sqlcoverage", "analysis/lifecycle_sql_coverage.py", CLS_DIAGNOSTIC, _SQL_COVERAGE,
+       symbol=["window_coverage", "window_membership", "membership_verdict",
+               "_explain", "_window_end_exclusive", "_as_datetime"]),
+    _m("sqlcoverage.cli.module", "scripts/audit_lifecycle_sql_coverage.py",
+       CLS_DIAGNOSTIC, _SQL_COVERAGE,
+       ["confirmed_sqls_ref", "cpql_ref", "lifecycle_sql_column_ref",
+        "lifecycle_funnel_service_ref", "legacy_outcome_service_ref"]),
+    _r("sqlcoverage.cli", "scripts/audit_lifecycle_sql_coverage.py", CLS_DIAGNOSTIC,
+       _SQL_COVERAGE,
+       symbol=["run", "main", "_render", "audit_windows", "audit_population",
+               "audit_read_reconciliation", "audit_evidence_states",
+               "check_effective_date_consistency", "_function_source",
+               "_in_window", "Findings"]),
     _m("leadrec.module", "services/lead_reconciliation_service.py", CLS_MIXED, _LEADREC,
        ["contact_created_at_ref"]),
     _m("revrecovery.module", "services/revenue_recovery_service.py", CLS_MIXED, _LEADREC,
