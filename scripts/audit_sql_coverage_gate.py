@@ -31,7 +31,9 @@ The six conditions, each a real failure mode rather than a category
 3. a boundary observation appears in an event-date field;
 4. a consumer reads ``known_reached_sql_by`` as if it were ``date_entered_sql``;
 5. a window reported as certified carries unresolved membership;
-6. the canonical readers disagree.
+6. the canonical readers disagree;
+7. the canonical contact-funnel source is not fresh, so any certification
+   describes data that may have stopped arriving.
 
 Nothing here writes. Not to HubSpot, not to the local database.
 """
@@ -407,6 +409,30 @@ def check_certified_windows_are_resolved(g: Gate, now: datetime) -> dict:
             "unresolved_certified": bad}
 
 
+def check_source_freshness(g: Gate) -> dict:
+    """§7.7 — the same freshness contract the coverage audit applies.
+
+    Imported from ``analysis.sql_coverage_freshness`` rather than restated: a
+    second copy that agreed would prove nothing, and one that disagreed would
+    report this gate's bug as the pipeline's.
+    """
+    from analysis import sql_coverage_freshness as freshness  # noqa: PLC0415
+    from db import crm_funnel_repository as repo  # noqa: PLC0415
+
+    verdict = freshness.assess(repo.fetch_contact_funnel_sync_state())
+    if verdict["fresh"] is True:
+        g.holds("source_freshness", verdict["detail"])
+    elif verdict["fresh"] is None:
+        g.cannot_check("source_freshness", verdict["detail"])
+    else:
+        # A stale pipeline is a BROKEN guarantee here, not a data finding: this
+        # gate exists to go red when the system stops being able to keep its
+        # prospective promise, and a source that stopped updating has.
+        g.broken("source_freshness",
+                 f"{verdict['reason']}: {verdict['detail']}")
+    return verdict
+
+
 def run(now: datetime | None = None) -> tuple[Gate, dict]:
     now = now or datetime.now(tz=timezone.utc)
     g = Gate()
@@ -422,6 +448,7 @@ def run(now: datetime | None = None) -> tuple[Gate, dict]:
     report["boundary_in_event_dates"] = \
         check_no_boundary_timestamp_in_event_dates(g)
     report["post_boundary_gaps"] = check_no_open_post_boundary_gaps(g)
+    report["source_freshness"] = check_source_freshness(g)
     report["certified_windows"] = check_certified_windows_are_resolved(g, now)
     return g, report
 

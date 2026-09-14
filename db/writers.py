@@ -3720,63 +3720,101 @@ def upsert_lifecycle_stage_history(rows: list, *, run_id: str) -> dict:
 #
 # Nothing here writes to HubSpot. Nothing here writes a stage-entry date.
 
-def apply_sql_coverage_boundary(boundary: dict, contacts: list) -> dict:
-    """Write a boundary and its bounded contacts in ONE transaction.
+#: The observation instant is taken from ``clock_timestamp()``, NOT ``now()``.
+#: ``now()`` returns TRANSACTION START time, which in this transaction precedes
+#: the population read — so the boundary would claim to have observed the
+#: population at an instant before it actually did. ``clock_timestamp()`` reads
+#: the wall clock at the moment it is called, after the snapshot.
+_BOUNDARY_CLOCK_SQL = "clock_timestamp()"
 
-    Returns the structured result the rest of the repository uses::
 
-        {"ok": bool, "boundary_id": str, "contacts_written": int,
-         "already_applied": bool, "error": str | None}
+def establish_sql_coverage_boundary(boundary: dict, *,
+                                    clock_sql: str = _BOUNDARY_CLOCK_SQL
+                                    ) -> dict:
+    """Snapshot the population, stamp the instant, and write the boundary. Atomic.
 
-    Idempotent on ``boundary_id``. Re-applying the same boundary rewrites the
-    same rows rather than appending, and reports ``already_applied`` so a repeat
-    run is visibly a no-op instead of looking like fresh work.
+    PR-ADS-160 §2/§3. One transaction does all three, in this order:
 
-    The boundary row is written with its FINAL status inside the transaction —
-    there is no window in which a complete-looking boundary exists without the
-    contacts it bounds.
+      1. read the candidate population (the same query the dry run shows);
+      2. stamp the observation instant, DATABASE-SIDE, after that read;
+      3. insert the boundary and its bounded contacts.
+
+    Order 1-then-2 is the point. Stamping first — or letting a caller supply the
+    instant — allows a boundary whose ``observed_at`` precedes the observation it
+    claims to describe, which would then rule contacts out of windows on the
+    strength of a bound that was never observed. A contact in the snapshot can
+    never receive a ``known_reached_sql_by`` earlier than the read that found it.
+
+    Reading and writing in ONE transaction closes the other gap: a contact
+    promoted to SQL between a separate read and write would be absent from the
+    snapshot while the boundary claimed to have observed the whole population.
+
+    Returns::
+
+        {"ok": bool, "boundary_id": str, "observed_at": datetime | None,
+         "contacts_written": int, "already_applied": bool,
+         "population": [...], "error": str | None}
+
+    ``clock_sql`` exists only so tests can inject a deterministic instant; it is
+    a SQL expression evaluated inside the transaction, never a caller-supplied
+    timestamp value, and production never passes it.
     """
+    from db import crm_funnel_repository as repo  # noqa: PLC0415
+
     boundary_id = str((boundary or {}).get("boundary_id") or "").strip()
     if not boundary_id:
-        return {"ok": False, "boundary_id": None, "contacts_written": 0,
-                "already_applied": False,
-                "error": "boundary_id is required"}
+        return _boundary_failure(None, "boundary_id is required")
 
-    observed_at = _parse_ts_or_none((boundary or {}).get("observed_at"))
-    if observed_at is None:
-        # A boundary with no observation instant bounds nothing. Refusing here
-        # is the difference between "no boundary" and "a boundary that silently
-        # excludes nobody while appearing established".
-        return {"ok": False, "boundary_id": boundary_id, "contacts_written": 0,
-                "already_applied": False,
-                "error": "observed_at is required and must be a timestamp"}
-
-    rows = []
-    for c in (contacts or []):
-        cid = str((c or {}).get("contact_id") or "").strip()
-        if not cid:
-            continue
-        rows.append((
-            boundary_id, cid, observed_at,
-            (c or {}).get("lifecycle_stage"),
-            _parse_ts_or_none((c or {}).get("created_at")),
-        ))
+    population_sql, population_params = repo.boundary_candidate_population_sql()
 
     try:
         with get_conn() as conn:
             if conn is None:
-                return {"ok": False, "boundary_id": boundary_id,
-                        "contacts_written": 0, "already_applied": False,
-                        "error": "database_unavailable"}
+                return _boundary_failure(boundary_id, "database_unavailable")
             with conn.cursor() as cur:
+                # ── the singleton, checked here AND enforced by the index ────
+                # This check gives a readable error; the partial unique index is
+                # what actually makes two concurrent establishers impossible.
                 cur.execute(
-                    "SELECT status FROM sql_coverage_boundary "
-                    "WHERE boundary_id = %s",
-                    (boundary_id,),
-                )
+                    "SELECT boundary_id, observed_at FROM sql_coverage_boundary "
+                    "WHERE status = 'complete'")
                 existing = cur.fetchone()
-                already = bool(existing) and existing[0] == "complete"
+                if existing and existing[0] != boundary_id:
+                    conn.rollback()
+                    return _boundary_failure(
+                        boundary_id,
+                        f"a different completed boundary already exists "
+                        f"({existing[0]}, observed at {existing[1]}). Exactly "
+                        f"one completed boundary may exist: two would be two "
+                        f"answers to when the guaranteed period began")
 
+                # ── 1. the population, read inside this transaction ──────────
+                cur.execute(population_sql, population_params)
+                cols = [d[0] for d in cur.description]
+                population = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+                # ── 2. the instant, stamped AFTER that read, database-side ───
+                cur.execute(f"SELECT {clock_sql}")
+                observed_at = cur.fetchone()[0]
+
+                if existing:
+                    # Same id, already complete. This is a REPLAY: verify it is
+                    # identical rather than updating anything. An update would
+                    # rewrite evidence of a past observation.
+                    verdict = _verify_boundary_replay(
+                        cur, boundary_id, boundary, population)
+                    conn.rollback()   # a replay writes NOTHING, either way
+                    return verdict
+
+                rows = [
+                    (boundary_id, str(c.get("contact_id")), observed_at,
+                     c.get("lifecycle_stage"), c.get("created_at"))
+                    for c in population if c.get("contact_id")
+                ]
+
+                # ── 3. insert. Never ON CONFLICT DO UPDATE: the contact rows
+                # carry an immutability trigger, and a completed boundary row
+                # must never be rewritten.
                 cur.execute(
                     """
                     INSERT INTO sql_coverage_boundary (
@@ -3785,23 +3823,7 @@ def apply_sql_coverage_boundary(boundary: dict, contacts: list) -> dict:
                         run_id, legacy_undated_sql_contacts, contacts_examined,
                         contacts_bounded, status, completed_at, updated_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            'complete', NOW(), NOW())
-                    ON CONFLICT (boundary_id) DO UPDATE SET
-                        observed_at               = EXCLUDED.observed_at,
-                        lifecycle_rule_version    = EXCLUDED.lifecycle_rule_version,
-                        source_dataset            = EXCLUDED.source_dataset,
-                        source_run_id             = EXCLUDED.source_run_id,
-                        population_definition     = EXCLUDED.population_definition,
-                        run_id                    = EXCLUDED.run_id,
-                        legacy_undated_sql_contacts =
-                            EXCLUDED.legacy_undated_sql_contacts,
-                        contacts_examined         = EXCLUDED.contacts_examined,
-                        contacts_bounded          = EXCLUDED.contacts_bounded,
-                        status                    = 'complete',
-                        failure_reason            = NULL,
-                        failure_detail            = NULL,
-                        completed_at              = NOW(),
-                        updated_at                = NOW()
+                            'complete', %s, %s)
                     """,
                     (boundary_id, observed_at,
                      (boundary or {}).get("lifecycle_rule_version"),
@@ -3809,38 +3831,85 @@ def apply_sql_coverage_boundary(boundary: dict, contacts: list) -> dict:
                      (boundary or {}).get("source_run_id"),
                      (boundary or {}).get("population_definition"),
                      (boundary or {}).get("run_id"),
-                     (boundary or {}).get("legacy_undated_sql_contacts"),
-                     (boundary or {}).get("contacts_examined"),
-                     len(rows)),
+                     len(rows), len(population), len(rows),
+                     observed_at, observed_at),
                 )
-
-                written = 0
                 if rows:
                     cur.executemany(
                         """
                         INSERT INTO sql_coverage_boundary_contact (
                             boundary_id, contact_id, known_reached_sql_by,
-                            lifecycle_stage_at_boundary, created_at_lower_bound)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (boundary_id, contact_id) DO UPDATE SET
-                            known_reached_sql_by =
-                                EXCLUDED.known_reached_sql_by,
-                            lifecycle_stage_at_boundary =
-                                EXCLUDED.lifecycle_stage_at_boundary,
-                            created_at_lower_bound =
-                                EXCLUDED.created_at_lower_bound
+                            lifecycle_stage_at_boundary, created_at_lower_bound,
+                            recorded_at)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                         """,
-                        rows,
+                        [(*r, observed_at) for r in rows],
                     )
-                    written = cur.rowcount if cur.rowcount is not None else len(rows)
             conn.commit()
         return {"ok": True, "boundary_id": boundary_id,
-                "contacts_written": max(0, int(written)),
-                "already_applied": already, "error": None}
+                "observed_at": observed_at, "contacts_written": len(rows),
+                "already_applied": False, "population": population,
+                "error": None}
     except Exception as exc:  # noqa: BLE001
-        log.error("apply_sql_coverage_boundary failed: %s", exc)
-        return {"ok": False, "boundary_id": boundary_id, "contacts_written": 0,
-                "already_applied": False, "error": str(exc)[:300]}
+        log.error("establish_sql_coverage_boundary failed: %s", exc)
+        return _boundary_failure(boundary_id, str(exc)[:300])
+
+
+def _boundary_failure(boundary_id, error: str) -> dict:
+    return {"ok": False, "boundary_id": boundary_id, "observed_at": None,
+            "contacts_written": 0, "already_applied": False,
+            "population": [], "error": error}
+
+
+def _verify_boundary_replay(cur, boundary_id: str, boundary: dict,
+                            population: list) -> dict:
+    """Is this replay IDENTICAL to what is stored? Verified no-op, or refusal.
+
+    A replay that matches changes nothing and says so. A replay that differs in
+    metadata, counts or population is refused: the stored boundary describes an
+    observation that has passed, and a changed replay is a request to rewrite
+    what was observed. Either way this function writes nothing — the caller
+    rolls back.
+    """
+    cur.execute(
+        "SELECT lifecycle_rule_version, source_dataset, population_definition, "
+        "       contacts_bounded, observed_at "
+        "  FROM sql_coverage_boundary WHERE boundary_id = %s",
+        (boundary_id,))
+    stored = cur.fetchone()
+    cur.execute(
+        "SELECT contact_id FROM sql_coverage_boundary_contact "
+        " WHERE boundary_id = %s ORDER BY contact_id", (boundary_id,))
+    stored_contacts = [r[0] for r in cur.fetchall()]
+
+    incoming_contacts = sorted(
+        str(c.get("contact_id")) for c in population if c.get("contact_id"))
+    differences = []
+    if stored_contacts != incoming_contacts:
+        differences.append(
+            f"population differs (stored {len(stored_contacts)} contact(s), "
+            f"replay has {len(incoming_contacts)})")
+    for index, field in enumerate(("lifecycle_rule_version", "source_dataset",
+                                   "population_definition")):
+        incoming = (boundary or {}).get(field)
+        if incoming is not None and stored[index] != incoming:
+            differences.append(f"{field} differs")
+    if stored[3] != len(incoming_contacts):
+        differences.append(
+            f"contacts_bounded differs (stored {stored[3]}, "
+            f"replay has {len(incoming_contacts)})")
+
+    if differences:
+        return _boundary_failure(
+            boundary_id,
+            "a completed boundary with this id already exists and this replay "
+            "is not identical to it: " + "; ".join(differences) +
+            ". A completed boundary records a past observation and is never "
+            "rewritten; nothing was changed")
+
+    return {"ok": True, "boundary_id": boundary_id,
+            "observed_at": stored[4], "contacts_written": len(stored_contacts),
+            "already_applied": True, "population": population, "error": None}
 
 
 def record_post_boundary_incidents(incidents: list, *, run_id: str) -> dict:

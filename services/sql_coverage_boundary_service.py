@@ -58,8 +58,15 @@ Guarantees
 * **Local writes only**, into ``sql_coverage_boundary``,
   ``sql_coverage_boundary_contact`` and ``sql_post_boundary_incident``.
 * **Dry run by default.** Nothing is written without an explicit ``apply``.
-* **Idempotent.** Re-applying the same boundary rewrites the same rows.
-* **Atomic.** The boundary and its bounded contacts commit together.
+* **Exactly one completed boundary, ever.** Enforced by a partial unique index,
+  not only by a service check — two concurrent establishers would both read "no
+  boundary exists" and both insert.
+* **Immutable.** Completed boundary rows and bounded-contact rows are never
+  updated; database triggers make that a property of the tables. An identical
+  replay is a verified no-op; a replay that differs is refused and changes
+  nothing.
+* **Atomic.** The population snapshot, the observation instant and the rows all
+  happen in ONE transaction, with the instant stamped AFTER the snapshot.
 * **Fail-closed.** An unreadable input is reported as unavailable, never as an
   empty population — which would establish a boundary that bounds nobody.
 """
@@ -100,8 +107,14 @@ BOUNDARY_STORE_UNREADABLE = "boundary_store_unreadable"
 BOUNDARY_WRITE_FAILED = "boundary_write_failed"
 BOUNDARY_ALREADY_ESTABLISHED = "boundary_already_established"
 
+#: The final verification read failed. Writes may already have landed, so this
+#: is reported with truthful partial-write accounting rather than as "nothing
+#: happened".
+INCIDENT_STORE_UNREADABLE = "incident_store_unreadable"
+
 RUN_OUTCOMES = (RUN_OK, POPULATION_UNREADABLE, BOUNDARY_STORE_UNREADABLE,
-                BOUNDARY_WRITE_FAILED, BOUNDARY_ALREADY_ESTABLISHED)
+                BOUNDARY_WRITE_FAILED, BOUNDARY_ALREADY_ESTABLISHED,
+                INCIDENT_STORE_UNREADABLE)
 
 # ── Incident reasons · denominator: one post-boundary contact ───────────────
 # Why a contact that reached SQL after the boundary has no exact date. Never a
@@ -129,27 +142,55 @@ def _utcnow() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
+def _contact_sync_provenance(repo) -> str | None:
+    """Which contact-funnel sync state the population was read against.
+
+    Recorded in ``source_run_id`` so a boundary can always be traced to the
+    ingestion run whose output it snapshotted. Best-effort: an unreadable sync
+    state yields ``None`` rather than a fabricated identifier.
+    """
+    try:
+        state = repo.fetch_contact_funnel_sync_state()
+    except Exception:  # noqa: BLE001
+        return None
+    if not (state or {}).get("available"):
+        return None
+    row = (state or {}).get("row") or {}
+    run = row.get("last_batch_id")
+    watermark = row.get("last_modified_watermark")
+    if run is None and watermark is None:
+        return None
+    return f"contact_funnel_sync batch={run} watermark={watermark}"
+
+
 def _run_id() -> str:
     return f"sqlbound_{uuid.uuid4().hex[:12]}"
 
 
-def establish_boundary(*, apply: bool = False, observed_at=None,
-                       boundary_id: str | None = None,
-                       source_run_id: str | None = None) -> dict:
+def establish_boundary(*, apply: bool = False,
+                       source_run_id: str | None = None,
+                       _clock_sql: str | None = None) -> dict:
     """Propose — and with ``apply``, record — a prospective coverage boundary.
 
     Read-only unless ``apply`` is True. The dry run returns exactly what an
     ``--apply`` would write, so approval is given against the real population
     rather than against a promise.
 
-    ``observed_at`` defaults to now. It is the instant the population was read,
-    and it becomes every bounded contact's ``known_reached_sql_by``.
+    PR-ADS-160 §2 — **there is no caller-supplied observation instant.** The
+    boundary time is stamped DATABASE-SIDE, inside the same transaction that
+    reads the population and writes the rows, and strictly after that read. An
+    operator-controlled timestamp would allow a boundary whose ``observed_at``
+    precedes the observation it claims to describe — and every window would then
+    rule contacts out on the strength of a bound that was never observed.
+
+    ``_clock_sql`` is private and exists only so tests can inject a
+    deterministic SQL clock expression. It is never a timestamp value, and no
+    CLI surface exposes it.
     """
     from db import crm_funnel_repository as repo  # noqa: PLC0415
 
     started = _utcnow()
     run_id = _run_id()
-    observed = _coerce_utc(observed_at) or started
 
     # 1. Is there already a boundary? Establishing a second one silently would
     #    leave two answers to "when did the guaranteed period begin".
@@ -179,13 +220,21 @@ def establish_boundary(*, apply: bool = False, observed_at=None,
     } for r in rows if r.get("contact_id")]
     missing_creation = sum(1 for c in contacts if c.get("created_at") is None)
 
-    bid = boundary_id or f"boundary_{observed.strftime('%Y%m%dT%H%M%SZ')}"
+    # The identifier is derived from the RUN, not from a timestamp a caller
+    # chose — an id encoding an operator-supplied instant would reintroduce the
+    # backdating this section removes, one field over.
+    bid = f"boundary_{run_id}"
     proposed = {
         "boundary_id": bid,
-        "observed_at": observed.isoformat(),
+        # Stamped database-side at apply time. A dry run has not observed
+        # anything durably, so it states that rather than inventing an instant.
+        "observed_at": None,
+        "observed_at_source": "database clock_timestamp(), stamped after the "
+                              "population snapshot, inside the write transaction",
         "lifecycle_rule_version": LIFECYCLE_RULE_VERSION,
         "source_dataset": SOURCE_DATASET,
-        "source_run_id": source_run_id,
+        # Provenance: which sync run's state the population was read against.
+        "source_run_id": source_run_id or _contact_sync_provenance(repo),
         "population_definition": POPULATION_DEFINITION,
         "run_id": run_id,
         "legacy_undated_sql_contacts": len(contacts),
@@ -213,17 +262,18 @@ def establish_boundary(*, apply: bool = False, observed_at=None,
         "vocabularies": {k: list(v) for k, v in VOCABULARIES.items()},
     }
 
-    if current and not boundary_id:
-        # A boundary already exists and the caller did not ask for a specific
-        # one. Report it rather than quietly replacing it.
+    if current:
+        # A completed boundary already exists. There is no replacement path:
+        # exactly one may exist, and it is immutable.
         return {**base, "ok": False, "run_outcome": BOUNDARY_ALREADY_ESTABLISHED,
                 "reason": BOUNDARY_ALREADY_ESTABLISHED,
                 "detail": (
                     f"a completed boundary already exists "
                     f"({current.get('boundary_id')} observed at "
-                    f"{current.get('observed_at')}). Establishing a second "
-                    f"would leave two answers to when the guaranteed period "
-                    f"began; pass an explicit boundary id to replace it"),
+                    f"{current.get('observed_at')}). Exactly one completed "
+                    f"boundary may exist and it is immutable — two would be "
+                    f"two answers to when the guaranteed period began. There "
+                    f"is no replacement path"),
                 "boundary_written": False,
                 "contacts_written": 0,
                 "certification_can_begin": False,
@@ -241,12 +291,19 @@ def establish_boundary(*, apply: bool = False, observed_at=None,
 
     from db import writers  # noqa: PLC0415
 
-    result = writers.apply_sql_coverage_boundary(
-        {**proposed, "observed_at": observed}, contacts)
+    kwargs = {"clock_sql": _clock_sql} if _clock_sql else {}
+    result = writers.establish_sql_coverage_boundary(proposed, **kwargs)
     if not result.get("ok"):
         return _failed(run_id, started, BOUNDARY_WRITE_FAILED,
                        result.get("error") or "the boundary write was not proven",
                        apply=apply, extra=base)
+
+    # The instant the DATABASE stamped, echoed back so the report states what
+    # was actually recorded rather than what was proposed.
+    written = dict(proposed)
+    written["observed_at"] = result.get("observed_at")
+    base = {**base, "boundary": written,
+            "legacy_undated_bounded": result.get("contacts_written") or 0}
 
     return {**base, "ok": True, "run_outcome": RUN_OK,
             "boundary_written": True,
@@ -353,7 +410,8 @@ def detect_post_boundary_gaps(*, apply: bool = False, run_id: str | None = None,
                            "prospective period to check yet")}
 
     since = _coerce_utc(boundary.get("observed_at"))
-    population = repo.fetch_post_boundary_sql_contacts(since=since)
+    population = repo.fetch_post_boundary_sql_contacts(
+        boundary_id=boundary.get("boundary_id"), since=since)
     if not population.get("available"):
         return _gap_failed(rid, started, POPULATION_UNREADABLE,
                            "the post-boundary population could not be read",
@@ -404,20 +462,54 @@ def detect_post_boundary_gaps(*, apply: bool = False, run_id: str | None = None,
 
         # A contact that now HAS an exact date closes its incident. Resolution
         # is always attributable to which permitted source supplied the date.
+        #
+        # PR-ADS-160 §4: every one of these writes is CHECKED, and the count
+        # reported is what the database persisted — not how many ids we asked
+        # about. `len(requested)` would report a clean run while the resolution
+        # silently failed, leaving incidents open that the report calls closed.
         closeable = [r["contact_id"] for r in with_exact if r.get("contact_id")]
         recovered_ids = [r["contact_id"] for r in recovered_rows]
         if closeable:
-            writers.resolve_post_boundary_incidents(
+            res = writers.resolve_post_boundary_incidents(
                 closeable, resolved_by="direct_property")
-            resolved += len(closeable)
+            if not res.get("ok"):
+                return _gap_failed(rid, started, BOUNDARY_WRITE_FAILED,
+                                   res.get("error")
+                                   or "direct-property incident resolution "
+                                      "was not proven",
+                                   apply=apply,
+                                   evidence_persisted=persisted_events,
+                                   incidents_written=incidents_written,
+                                   incidents_resolved=resolved)
+            resolved += int(res.get("persisted") or 0)
         if recovered_ids:
-            writers.resolve_post_boundary_incidents(
+            res = writers.resolve_post_boundary_incidents(
                 recovered_ids, resolved_by="history")
-            resolved += len(recovered_ids)
+            if not res.get("ok"):
+                return _gap_failed(rid, started, BOUNDARY_WRITE_FAILED,
+                                   res.get("error")
+                                   or "history incident resolution was not "
+                                      "proven",
+                                   apply=apply,
+                                   evidence_persisted=persisted_events,
+                                   incidents_written=incidents_written,
+                                   incidents_resolved=resolved)
+            resolved += int(res.get("persisted") or 0)
 
+    # The FINAL verification read. If this cannot be made, the run proves
+    # nothing about the prospective guarantee and must not report ok — a null
+    # open-incident count beside ok:true reads as "checked, all clear" to every
+    # consumer that only looks at `ok`.
     open_state = repo.fetch_post_boundary_incidents(status="open")
-    open_count = (open_state.get("open_count")
-                  if open_state.get("available") else None)
+    if not open_state.get("available"):
+        return _gap_failed(rid, started, INCIDENT_STORE_UNREADABLE,
+                           "the post-boundary incident store could not be read, "
+                           "so the prospective SQL guarantee is unverified for "
+                           "this run",
+                           apply=apply, evidence_persisted=persisted_events,
+                           incidents_written=incidents_written,
+                           incidents_resolved=resolved)
+    open_count = open_state.get("open_count")
 
     return {
         "ok": True,
@@ -441,7 +533,10 @@ def detect_post_boundary_gaps(*, apply: bool = False, run_id: str | None = None,
         # NULL, never 0, when the incident store could not be read: a window
         # must not certify because an outage made its blockers invisible.
         "unresolved_post_boundary_incidents": open_count,
-        "incident_store_available": bool(open_state.get("available")),
+        "incident_store_available": True,
+        # The open incidents themselves, so each WINDOW can resolve membership
+        # against its own bounds rather than being handed one global count.
+        "open_incidents": open_state.get("rows") or [],
         "history_requests": history_requests,
         "history_budget": int(history_budget),
         "incident_reasons": _count_reasons(incidents),
@@ -549,7 +644,14 @@ def _count_reasons(incidents) -> dict:
 
 
 def _gap_failed(run_id, started, reason, detail, *, apply=False,
-                evidence_persisted=0) -> dict:
+                evidence_persisted=0, incidents_written=0,
+                incidents_resolved=0) -> dict:
+    """A pass that could not complete, with TRUTHFUL partial-write accounting.
+
+    Some of these failures happen after writes have already landed. Reporting
+    them as "nothing happened" would send an operator looking for rows that
+    exist, so what was persisted is stated and what was never proven is null.
+    """
     return {
         "ok": False,
         "run_id": run_id,
@@ -560,7 +662,12 @@ def _gap_failed(run_id, started, reason, detail, *, apply=False,
         "hubspot_writes_performed": False,
         "started_at": started.isoformat(),
         "finished_at": _utcnow().isoformat(),
+        # What DID land, stated rather than assumed to be nothing.
         "history_events_persisted": evidence_persisted,
+        "incidents_written": incidents_written,
+        "incidents_resolved": incidents_resolved,
+        "partial_local_write": bool(evidence_persisted or incidents_written
+                                    or incidents_resolved),
         # A pass that could not complete proves nothing about the prospective
         # population. Unknown, never zero.
         "new_sql_transitions_observed": None,

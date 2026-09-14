@@ -251,6 +251,7 @@ def audit_boundary(f: Findings) -> dict:
         return {"available": False, "boundary": None,
                 "boundary_established": None,
                 "open_post_boundary_incidents": None,
+                "open_incidents": None,
                 "post_boundary_incidents_available": False}
 
     boundary = state.get("boundary")
@@ -284,6 +285,9 @@ def audit_boundary(f: Findings) -> dict:
 
     return {
         "available": True,
+        # PR-ADS-160 §6: the incidents themselves, so each window resolves
+        # membership against its own bounds instead of one global count.
+        "open_incidents": rows if incidents.get("available") else None,
         "boundary": boundary,
         "boundary_established": boundary is not None,
         "boundary_id": (boundary or {}).get("boundary_id"),
@@ -296,8 +300,35 @@ def audit_boundary(f: Findings) -> dict:
     }
 
 
+def audit_source_freshness(f: Findings) -> dict:
+    """PR-ADS-160 §5 — is the canonical contact-funnel source still updating?
+
+    A certification prerequisite, not a footnote. A window can be complete and
+    still worthless if its source stopped being fed: it would be complete with
+    respect to data that has stopped arriving.
+    """
+    from analysis import sql_coverage_freshness as freshness
+    from db import crm_funnel_repository as repo
+
+    state = repo.fetch_contact_funnel_sync_state()
+    verdict = freshness.assess(state)
+
+    if verdict["fresh"] is True:
+        f.passed("source_freshness", verdict["detail"])
+    elif verdict["fresh"] is None:
+        f.unavailable_now("source_freshness", verdict["detail"])
+    else:
+        # A stale or failed pipeline is a real finding about the DATA, like an
+        # incomplete window — not a contract violation and not an audit outage.
+        f.passed("source_freshness",
+                 f"NOT FRESH ({verdict['reason']}): {verdict['detail']} — no "
+                 f"window may certify")
+    return verdict
+
+
 def audit_certification(f: Findings, windows: list, boundary: dict,
-                        reconciliation: dict) -> dict:
+                        reconciliation: dict,
+                        freshness: dict | None = None) -> dict:
     """Which windows may be certified — the whole gate, not the window-local half.
 
     ``analysis.lifecycle_sql_coverage`` judges the window against the boundary
@@ -305,6 +336,7 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
     applied here:
 
       * every canonical reader must reconcile (all 44 combinations);
+      * the canonical contact-funnel source must be proven FRESH;
       * the audit itself must have been able to look.
 
     A window that is locally eligible is NOT certified while either fails.
@@ -314,6 +346,7 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
     reconciled = bool(reconciliation.get("reconciliation_complete"))
     boundary_readable = bool(boundary.get("available"))
     incidents_readable = bool(boundary.get("post_boundary_incidents_available"))
+    source_fresh = (freshness or {}).get("fresh") is True
 
     certified, blocked = [], []
     for win in windows or []:
@@ -324,9 +357,14 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
                             "reason": win.get("certification_status")})
             win["certified"] = False
             continue
-        if not (reconciled and boundary_readable and incidents_readable):
-            reason = ("canonical_readers_did_not_reconcile" if not reconciled
-                      else "certification_inputs_unreadable")
+        if not (reconciled and boundary_readable and incidents_readable
+                and source_fresh):
+            if not source_fresh:
+                reason = (freshness or {}).get("reason") or "source_not_fresh"
+            elif not reconciled:
+                reason = "canonical_readers_did_not_reconcile"
+            else:
+                reason = "certification_inputs_unreadable"
             blocked.append({"window": label, "reason": reason})
             win["certified"] = False
             win["certification_status"] = reason
@@ -351,12 +389,15 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
         "readers_reconciled": reconciled,
         "boundary_readable": boundary_readable,
         "incidents_readable": incidents_readable,
+        "source_fresh": source_fresh,
+        "source_freshness_reason": (freshness or {}).get("reason"),
     }
 
 
 def audit_windows(f: Findings, population: dict, now: datetime,
                   boundary: dict | None = None,
-                  open_incidents=None) -> list[dict]:
+                  open_incidents=None, freshness: dict | None = None
+                  ) -> list[dict]:
     """Per-window coverage — the global gap resolved against each window ONCE."""
     from analysis import lifecycle_sql_coverage as coverage
     from analysis.crm_lifecycle import EVENT_DATE_COLUMN, EVENT_SQL
@@ -402,7 +443,8 @@ def audit_windows(f: Findings, population: dict, now: datetime,
             confirmed_sqls=confirmed, recovered_sqls=recovered,
             unresolved_rows=rows, population_available=rows_available,
             window_start=start, boundary_observed_at=boundary_observed,
-            open_post_boundary_incidents=open_incidents)
+            open_post_boundary_incidents=open_incidents,
+            freshness=freshness)
         block["window_start"] = str(start) if start else None
         block["window_end"] = str(end) if end else None
         block["window_type"] = win.get("window_type")
@@ -721,13 +763,17 @@ def run(now: datetime | None = None) -> tuple[Findings, dict]:
     report["evidence_states"] = audit_evidence_states(f)
     report["population"] = audit_population(f)
     report["boundary"] = audit_boundary(f)
+    report["source_freshness"] = audit_source_freshness(f)
     report["windows"] = audit_windows(
         f, report["population"], now,
         boundary=report["boundary"].get("boundary"),
-        open_incidents=report["boundary"].get("open_post_boundary_incidents"))
+        # The incident ROWS, so each window resolves membership itself.
+        open_incidents=report["boundary"].get("open_incidents"),
+        freshness=report["source_freshness"])
     report["read_reconciliation"] = audit_read_reconciliation(f, now)
     report["certification"] = audit_certification(
-        f, report["windows"], report["boundary"], report["read_reconciliation"])
+        f, report["windows"], report["boundary"], report["read_reconciliation"],
+        report["source_freshness"])
 
     windows = [w for w in report["windows"] if w.get("window_total_complete")
                is not None]
@@ -800,9 +846,14 @@ def _render(report: dict, findings: Findings, exit_code: int) -> None:
             print(f"      certification: {win.get('certification_status')}")
 
     cert = report.get("certification") or {}
+    fresh = report.get("source_freshness") or {}
     print(f"\n  CERTIFICATION  {cert.get('windows_certified')}/"
           f"{cert.get('windows_assessed')} window(s) certified")
     print(f"    canonical readers reconciled: {cert.get('readers_reconciled')}")
+    print(f"    contact-funnel source fresh:  {fresh.get('fresh')} "
+          f"({fresh.get('reason')})")
+    if fresh.get("detail"):
+        print(f"      {fresh.get('detail')}")
 
     recon = report.get("read_reconciliation") or {}
     if recon.get("combinations_expected"):

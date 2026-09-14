@@ -1339,6 +1339,49 @@ CREATE TABLE IF NOT EXISTS sql_coverage_boundary (
 CREATE INDEX IF NOT EXISTS idx_sqlcb_status ON sql_coverage_boundary(status);
 CREATE INDEX IF NOT EXISTS idx_sqlcb_observed ON sql_coverage_boundary(observed_at);
 
+-- ── The singleton, enforced by the DATABASE ────────────────────────────────
+-- At most ONE completed boundary may ever exist. Two would be two answers to
+-- "when did the guaranteed period begin", and every window's certification
+-- verdict would depend on which one a reader happened to pick up.
+--
+-- A service-level check cannot provide this: two concurrent establish attempts
+-- can both read "no boundary exists" and both insert. Only a database
+-- constraint makes the second one fail. The index is partial on a constant, so
+-- it constrains the COUNT of completed rows rather than any column's value.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_sql_coverage_boundary_completed
+  ON sql_coverage_boundary ((TRUE)) WHERE status = 'complete';
+
+-- ── Immutability, enforced by the DATABASE ─────────────────────────────────
+-- A completed boundary and its bounded contacts are evidence of what was
+-- observed at a moment that has passed. Editing either would rewrite history:
+-- every window verdict already derived from them would silently change meaning,
+-- and nothing would record that it had.
+--
+-- Replaying the identical boundary must therefore be a verified no-op rather
+-- than an update, and any replay that differs must fail. The triggers below
+-- make "never updated" a property of the table rather than a discipline every
+-- future writer has to remember.
+CREATE OR REPLACE FUNCTION sql_coverage_boundary_is_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD.status = 'complete' THEN
+    RAISE EXCEPTION
+      'sql_coverage_boundary % is complete and immutable; a completed '
+      'boundary is evidence of a past observation and is never rewritten',
+      OLD.boundary_id
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_sql_coverage_boundary_immutable
+  ON sql_coverage_boundary;
+CREATE TRIGGER trg_sql_coverage_boundary_immutable
+  BEFORE UPDATE OR DELETE ON sql_coverage_boundary
+  FOR EACH ROW EXECUTE FUNCTION sql_coverage_boundary_is_immutable();
+
+
 -- One row per legacy undated SQL contact that was PRESENT in the population at
 -- boundary observation time.
 --
@@ -1367,6 +1410,23 @@ CREATE INDEX IF NOT EXISTS idx_sqlcbc_contact
   ON sql_coverage_boundary_contact(contact_id);
 CREATE INDEX IF NOT EXISTS idx_sqlcbc_boundary
   ON sql_coverage_boundary_contact(boundary_id);
+CREATE OR REPLACE FUNCTION sql_coverage_boundary_contact_is_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION
+    'sql_coverage_boundary_contact rows are immutable (boundary %, contact %); '
+    'a recorded bound is evidence of a past observation',
+    OLD.boundary_id, OLD.contact_id
+    USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_sql_coverage_boundary_contact_immutable
+  ON sql_coverage_boundary_contact;
+CREATE TRIGGER trg_sql_coverage_boundary_contact_immutable
+  BEFORE UPDATE OR DELETE ON sql_coverage_boundary_contact
+  FOR EACH ROW EXECUTE FUNCTION sql_coverage_boundary_contact_is_immutable();
+
 
 -- PR-ADS-160 §5 — a post-boundary contact that reached SQL with NO exact
 -- timestamp from either permitted source.

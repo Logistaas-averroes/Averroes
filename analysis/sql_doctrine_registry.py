@@ -778,6 +778,8 @@ RULES: list[dict] = [
                "fetch_unresolved_sql_boundary_bounds",
                "fetch_post_boundary_incidents",
                "fetch_boundary_candidate_population",
+               "boundary_candidate_population_sql",
+               "fetch_contact_funnel_sync_state",
                "fetch_post_boundary_sql_contacts"]),
     _m("engine.lifecycle.taxonomy", "analysis/crm_lifecycle.py", CLS_CANONICAL, _FUNNEL_ENGINE,
        _LIFECYCLE_MARKERS),
@@ -906,10 +908,15 @@ RULES: list[dict] = [
     # be published at all, and the audit reports that decision. They quote the
     # SQL markers because the thing they reason about is the SQL population.
     _m("sqlcoverage.module", "analysis/lifecycle_sql_coverage.py", CLS_DIAGNOSTIC,
-       _SQL_COVERAGE, ["confirmed_sqls_ref", "cpql_ref"]),
+       _SQL_COVERAGE,
+       # PR-ADS-160 §6: incident membership reads contact creation as a LOWER
+       # bound, the same one-directional use PR-ADS-159 made of it. Never a date.
+       ["confirmed_sqls_ref", "cpql_ref", "contact_created_at_ref"]),
     _r("sqlcoverage", "analysis/lifecycle_sql_coverage.py", CLS_DIAGNOSTIC, _SQL_COVERAGE,
        symbol=["window_coverage", "window_membership", "membership_verdict",
-               "_explain", "_window_end_exclusive", "_as_datetime"]),
+               "_explain", "_window_end_exclusive", "_as_datetime",
+               # PR-ADS-160
+               "incident_membership", "_certification"]),
     _m("sqlcoverage.cli.module", "scripts/audit_lifecycle_sql_coverage.py",
        CLS_DIAGNOSTIC, _SQL_COVERAGE,
        ["confirmed_sqls_ref", "cpql_ref", "lifecycle_sql_column_ref",
@@ -917,6 +924,7 @@ RULES: list[dict] = [
     _r("sqlcoverage.cli", "scripts/audit_lifecycle_sql_coverage.py", CLS_DIAGNOSTIC,
        _SQL_COVERAGE,
        symbol=["run", "main", "_render", "audit_windows", "audit_population",
+               "audit_source_freshness",
                "audit_read_reconciliation", "audit_evidence_states",
                "check_effective_date_consistency", "_function_source",
                "_in_window", "Findings",
@@ -929,6 +937,12 @@ RULES: list[dict] = [
     # proposes and applies it locally; the gate reads both and fails when a
     # bound has been mistaken for a date. They quote the SQL markers because the
     # population they reason about is the SQL population.
+    # PR-ADS-160 §5 — the shared freshness contract. Diagnostic: it publishes
+    # no SQL number and reads only the ingestion state, never a stage date.
+    _m("sqlfresh.module", "analysis/sql_coverage_freshness.py", CLS_DIAGNOSTIC,
+       _SQL_BOUNDARY, ["lifecycle_funnel_service_ref"]),
+    _r("sqlfresh", "analysis/sql_coverage_freshness.py", CLS_DIAGNOSTIC,
+       _SQL_BOUNDARY, symbol=["assess", "blocks_certification", "_as_datetime"]),
     _m("sqlboundary.svc.module", "services/sql_coverage_boundary_service.py",
        CLS_DIAGNOSTIC, _SQL_BOUNDARY,
        ["lifecycle_sql_column_ref", "lifecycle_sql_property_ref",
@@ -954,6 +968,7 @@ RULES: list[dict] = [
     _r("sqlgate", "scripts/audit_sql_coverage_gate.py", CLS_DIAGNOSTIC,
        _SQL_BOUNDARY,
        symbol=["run", "main", "_render", "_code_lines", "Gate",
+               "check_source_freshness",
                "check_timestamps_cannot_be_erased", "check_bound_is_not_a_date",
                "check_no_boundary_timestamp_in_event_dates",
                "check_no_open_post_boundary_gaps",
@@ -987,7 +1002,8 @@ RULES: list[dict] = [
     # PR-ADS-160 — boundary and incident writers. They write bounds and
     # incidents into their OWN tables; neither writes a stage-entry date.
     _r("sqlboundary.writers", "db/writers.py", CLS_DIAGNOSTIC, _SQL_BOUNDARY,
-       symbol=["apply_sql_coverage_boundary", "record_post_boundary_incidents",
+       symbol=["establish_sql_coverage_boundary", "_verify_boundary_replay",
+               "_boundary_failure", "record_post_boundary_incidents",
                "resolve_post_boundary_incidents", "_contact_funnel_set"]),
     _m("writers.module.boundary", "db/writers.py", CLS_DIAGNOSTIC, _SQL_BOUNDARY,
        ["contact_created_at_ref"]),

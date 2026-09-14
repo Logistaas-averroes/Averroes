@@ -66,9 +66,27 @@ _needs_pg = pytest.mark.skipif(
     reason="PostgreSQL server binaries / unprivileged postgres user unavailable")
 
 #: A boundary instant, and windows placed either side of it.
+#:
+#: PR-ADS-160 §2 removed every operator-facing way to choose this. The boundary
+#: time is stamped DATABASE-SIDE inside the write transaction, so tests inject a
+#: deterministic SQL clock EXPRESSION through the private `_clock_sql` seam —
+#: never a timestamp value, and never through any CLI surface.
 BOUNDARY = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+_FIXED_CLOCK = "TIMESTAMPTZ '2026-09-14 12:00:00+00'"
+
+
+def _establish(apply=True):
+    """Establish the boundary with a deterministic, database-side instant."""
+    return boundary_svc.establish_boundary(
+        apply=apply, _clock_sql=_FIXED_CLOCK if apply else None)
+
+
 #: A contact created long before the boundary — the shape of all 533.
 LEGACY_CREATED = datetime(2020, 3, 1, tzinfo=timezone.utc)
+
+#: A freshness verdict good enough to certify against, for the pure-analysis
+#: tests. The real contract is exercised against a real sync state in §5.
+FRESH = {"fresh": True, "reason": "source_fresh"}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -122,8 +140,13 @@ def test_02_the_same_contact_stays_unresolved_for_an_overlapping_window():
 
 
 @pytest.mark.parametrize("window_start,window_end,expected", [
-    # Opens exactly AT the boundary instant: the transition was already over.
-    (BOUNDARY, date(2026, 10, 31), "proven_outside"),
+    # Opens exactly AT the boundary instant. PR-ADS-160 §7: the comparison is
+    # STRICT, so this stays UNRESOLVED. A window start is inclusive, so the
+    # transition could have occurred at that very instant; ruling the contact
+    # out would need interval semantics this system has not proven.
+    (BOUNDARY, date(2026, 10, 31), "unresolved"),
+    # One second AFTER the boundary: now strictly later, so it is ruled out.
+    (BOUNDARY + timedelta(seconds=1), date(2026, 10, 31), "proven_outside"),
     # Opens one second before it: it could have happened inside.
     (BOUNDARY - timedelta(seconds=1), date(2026, 10, 31), "unresolved"),
     # Entirely before the boundary.
@@ -190,6 +213,14 @@ def seeded160(pg, monkeypatch):  # noqa: F811
     init_db()
     from db import writers
 
+    # PR-ADS-160 §5: certification now REQUIRES a fresh contact-funnel source.
+    # A fixture that omitted this would silently exercise the stale path.
+    writers.update_contact_funnel_sync_state(
+        "contacts", bootstrap_status="complete",
+        last_incremental_at=datetime.now(tz=timezone.utc),
+        last_modified_watermark=datetime.now(tz=timezone.utc),
+        last_error=None)
+
     writers.upsert_hubspot_contact_funnel([
         # Reached SQL, no date anywhere — the shape of the 533.
         {"contact_id": "undated_a", "lifecycle_stage": "salesqualifiedlead",
@@ -240,7 +271,7 @@ def test_07_pg_boundary_evidence_never_becomes_an_sql_event_date(seeded160):
     name, and touches neither of the two places an exact timestamp may live.
     """
     before = _sql_dates(seeded160.connection, ["undated_a", "undated_b", "dated"])
-    result = boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+    result = _establish()
     assert result["ok"] and result["boundary_written"]
     after = _sql_dates(seeded160.connection, ["undated_a", "undated_b", "dated"])
 
@@ -270,7 +301,7 @@ def test_08_pg_current_lifecycle_status_alone_never_becomes_an_event_date(
     A stage proves a transition HAPPENED. It says nothing about WHEN, and this
     is the substitution that would be easiest to rationalise and most wrong.
     """
-    boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+    _establish()
 
     with seeded160.connection.get_conn() as c, c.cursor() as cur:
         cur.execute("SELECT lifecycle_stage, date_entered_sql, "
@@ -287,13 +318,27 @@ def test_08_pg_current_lifecycle_status_alone_never_becomes_an_event_date(
 
 
 @_needs_pg
-def test_09_pg_applying_the_boundary_twice_is_idempotent(seeded160):
-    """Requirement 10. Re-running rewrites; it never appends or double-counts."""
-    first = boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
-    bid = first["boundary"]["boundary_id"]
+def test_09_pg_an_exact_replay_is_a_verified_no_op(seeded160):
+    """Requirement 10, under §3's immutability: VERIFIED, never rewritten.
 
-    second = boundary_svc.establish_boundary(
-        apply=True, observed_at=BOUNDARY, boundary_id=bid)
+    The first cut used ``ON CONFLICT DO UPDATE``, so a replay silently rewrote
+    the stored rows. A completed boundary records an observation that has
+    passed; rewriting it would change the meaning of every window verdict
+    already derived from it, and nothing would record that it had.
+
+    An identical replay therefore verifies and writes nothing.
+    """
+    from db import writers
+
+    first = _establish()
+    bid = first["boundary"]["boundary_id"]
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT boundary_id, observed_at, contacts_bounded, "
+                    "completed_at FROM sql_coverage_boundary")
+        before = cur.fetchall()
+
+    second = writers.establish_sql_coverage_boundary(
+        {**first["boundary"], "boundary_id": bid}, clock_sql=_FIXED_CLOCK)
 
     assert second["ok"] is True
     assert second["already_applied"] is True
@@ -303,19 +348,34 @@ def test_09_pg_applying_the_boundary_twice_is_idempotent(seeded160):
         cur.execute("SELECT COUNT(*) FROM sql_coverage_boundary")
         assert cur.fetchone()[0] == 1, "a second boundary row would be a second truth"
         cur.execute("SELECT COUNT(*) FROM sql_coverage_boundary_contact")
-        assert cur.fetchone()[0] == 2, "bounds were rewritten, not appended"
+        assert cur.fetchone()[0] == 2, "bounds are never appended"
+        cur.execute("SELECT boundary_id, observed_at, contacts_bounded, "
+                    "completed_at FROM sql_coverage_boundary")
+        assert cur.fetchall() == before, (
+            "an exact replay must leave the stored boundary byte-identical")
 
 
 @_needs_pg
-def test_10_pg_a_second_boundary_is_refused_without_an_explicit_id(seeded160):
-    """Two boundaries would be two answers to "when did the guarantee begin"."""
-    boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+def test_10_pg_a_second_boundary_is_refused_and_there_is_no_override(seeded160):
+    """Two boundaries would be two answers to "when did the guarantee begin".
+
+    PR-ADS-160 §3 removed the replacement path entirely: there is no flag, no
+    parameter, and no service argument that establishes a second one.
+    """
+    _establish()
     again = boundary_svc.establish_boundary(apply=True)
 
     assert again["ok"] is False
     assert again["run_outcome"] == boundary_svc.BOUNDARY_ALREADY_ESTABLISHED
     assert again["boundary_written"] is False
-    assert "two answers" in again["detail"]
+    assert "no replacement path" in again["detail"]
+
+    # The service exposes no way to ask for a different boundary id.
+    import inspect
+
+    params = set(inspect.signature(boundary_svc.establish_boundary).parameters)
+    assert "boundary_id" not in params
+    assert "observed_at" not in params
 
 
 def test_11_a_failed_population_read_cannot_establish_a_boundary(monkeypatch):
@@ -352,9 +412,10 @@ def test_12_a_failed_local_write_cannot_report_success(monkeypatch):
                         lambda: {"available": True, "rows": [
                             {"contact_id": "c1", "created_at": LEGACY_CREATED,
                              "lifecycle_stage": "salesqualifiedlead"}]})
-    monkeypatch.setattr(writers, "apply_sql_coverage_boundary",
-                        lambda b, c: {"ok": False, "error": "disk full",
-                                      "contacts_written": 0})
+    monkeypatch.setattr(writers, "establish_sql_coverage_boundary",
+                        lambda b, **k: {"ok": False, "error": "disk full",
+                                        "contacts_written": 0,
+                                        "observed_at": None})
 
     result = boundary_svc.establish_boundary(apply=True)
 
@@ -474,7 +535,7 @@ def test_16_pg_a_post_boundary_contact_with_the_direct_property_is_counted_once(
     """Requirement 6. The happy path creates no incident and no duplicate."""
     from db import writers
 
-    boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+    _establish()
     calls = _stub_history(monkeypatch, {})
 
     writers.upsert_hubspot_contact_funnel([{
@@ -505,7 +566,7 @@ def test_17_pg_a_post_boundary_contact_is_recovered_from_history_exactly_once(
     """Requirement 7. No direct property, but HubSpot holds a real transition."""
     from db import writers
 
-    boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+    _establish()
     transition = BOUNDARY + timedelta(days=2)
     _stub_history(monkeypatch, {"new_hist": {
         "state": hubspot.HISTORY_PRESENT,
@@ -543,7 +604,7 @@ def test_18_pg_a_post_boundary_contact_with_neither_source_raises_an_incident(
     """Requirement 8. The gap becomes visible instead of joining the 533."""
     from db import writers
 
-    boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+    _establish()
     _stub_history(monkeypatch, {"new_gap": {
         "state": hubspot.HISTORY_PRESENT,
         # Real history, but no SQL transition in it.
@@ -585,7 +646,7 @@ def test_19_pg_an_incident_resolves_only_when_a_real_timestamp_arrives(
     """Resolution is attributable to evidence, never to the passage of time."""
     from db import writers
 
-    boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+    _establish()
     _stub_history(monkeypatch, {"late": {"state": hubspot.HISTORY_PRESENT,
                                          "versions": []}})
     writers.upsert_hubspot_contact_funnel([{
@@ -614,22 +675,30 @@ def test_19_pg_an_incident_resolves_only_when_a_real_timestamp_arrives(
     assert resolved_by == "direct_property"
 
 
-def test_20_an_unreadable_incident_store_reports_null_not_zero(monkeypatch):
-    """A window must not certify because an outage made its blockers invisible."""
+def test_20_an_unreadable_incident_store_fails_the_run_closed(monkeypatch):
+    """Requirement §4. An UNVERIFIED guarantee is not a healthy one.
+
+    The first cut returned ``ok: True`` with a null open-incident count. Every
+    consumer that checks only ``ok`` — the scheduler among them — would read
+    that as "checked, all clear", when in fact nothing was verified. The run now
+    fails, and says what it could not confirm.
+    """
     monkeypatch.setattr(repo, "fetch_active_sql_coverage_boundary",
                         lambda: {"available": True, "boundary": {
                             "boundary_id": "b1", "observed_at": BOUNDARY}})
     monkeypatch.setattr(repo, "fetch_post_boundary_sql_contacts",
-                        lambda *, since: {"available": True, "rows": []})
+                        lambda *, boundary_id=None, since=None: {
+                            "available": True, "rows": []})
     monkeypatch.setattr(repo, "fetch_post_boundary_incidents",
                         lambda *, status=None: {"available": False, "rows": [],
                                                 "open_count": None})
 
     result = boundary_svc.detect_post_boundary_gaps(apply=False)
 
-    assert result["ok"] is True
+    assert result["ok"] is False
+    assert result["run_outcome"] == boundary_svc.INCIDENT_STORE_UNREADABLE
     assert result["unresolved_post_boundary_incidents"] is None
-    assert result["incident_store_available"] is False
+    assert "unverified" in result["detail"]
 
 
 def test_21_a_failed_gap_pass_reports_unknown_counts_not_zero(monkeypatch):
@@ -638,7 +707,7 @@ def test_21_a_failed_gap_pass_reports_unknown_counts_not_zero(monkeypatch):
                         lambda: {"available": True, "boundary": {
                             "boundary_id": "b1", "observed_at": BOUNDARY}})
     monkeypatch.setattr(repo, "fetch_post_boundary_sql_contacts",
-                        lambda *, since: {"available": False, "rows": []})
+                        lambda *, boundary_id=None, since=None: {"available": False, "rows": []})
 
     result = boundary_svc.detect_post_boundary_gaps(apply=True)
 
@@ -660,7 +729,8 @@ def test_22_an_open_incident_blocks_certification_of_affected_windows():
         confirmed_sqls=5, recovered_sqls=0,
         unresolved_rows=[{"contact_id": "c1", "created_at": LEGACY_CREATED,
                           "known_reached_sql_by": BOUNDARY}],
-        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=0)
+        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=0,
+        freshness=FRESH)
     assert clean["certification_status"] == coverage.CERT_ELIGIBLE
     assert clean["certification_eligible"] is True
 
@@ -669,7 +739,8 @@ def test_22_an_open_incident_blocks_certification_of_affected_windows():
         confirmed_sqls=5, recovered_sqls=0,
         unresolved_rows=[{"contact_id": "c1", "created_at": LEGACY_CREATED,
                           "known_reached_sql_by": BOUNDARY}],
-        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=1)
+        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=1,
+        freshness=FRESH)
     assert blocked["certification_status"] == coverage.CERT_POST_BOUNDARY_GAPS
     assert blocked["certification_eligible"] is False
     # The window is still COMPLETE for the historical population — completeness
@@ -689,7 +760,8 @@ def test_23_certification_depends_on_where_the_window_sits(start, end, expected)
         confirmed_sqls=1, recovered_sqls=0,
         unresolved_rows=[{"contact_id": "c1", "created_at": LEGACY_CREATED,
                           "known_reached_sql_by": BOUNDARY}],
-        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=0)
+        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=0,
+        freshness=FRESH)
     assert block["certification_status"] == expected
 
 
@@ -697,7 +769,8 @@ def test_24_no_boundary_means_no_window_is_certifiable():
     block = coverage.window_coverage(
         window="oct", window_end=date(2026, 10, 31), window_start=date(2026, 10, 1),
         confirmed_sqls=1, recovered_sqls=0, unresolved_rows=[],
-        boundary_observed_at=None, open_post_boundary_incidents=0)
+        boundary_observed_at=None, open_post_boundary_incidents=0,
+        freshness=FRESH)
     assert block["certification_status"] == coverage.CERT_NO_BOUNDARY
     assert block["certification_eligible"] is False
 
@@ -723,7 +796,8 @@ def test_26_all_time_coverage_stays_incomplete_forever():
         confirmed_sqls=728, recovered_sqls=0,
         unresolved_rows=[{"contact_id": f"c{i}", "created_at": LEGACY_CREATED,
                           "known_reached_sql_by": BOUNDARY} for i in range(533)],
-        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=0)
+        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=0,
+        freshness=FRESH)
 
     assert block["window_total_complete"] is False
     assert block["window_membership_unresolved"] == 533
@@ -741,7 +815,7 @@ def test_27_pg_all_44_combinations_still_reconcile_with_a_boundary(seeded160):
     """Requirement 12. The boundary changes membership, never the read paths."""
     from scripts import audit_lifecycle_sql_coverage as audit
 
-    boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+    _establish()
 
     f = audit.Findings()
     block = audit.audit_read_reconciliation(f, datetime.now(tz=timezone.utc))
@@ -766,7 +840,7 @@ def test_28_pg_the_audit_reports_historical_and_prospective_gaps_separately(
 
     from scripts import audit_lifecycle_sql_coverage as audit
 
-    boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+    _establish()
     _stub_history(monkeypatch, {"gap": {"state": hubspot.HISTORY_PRESENT,
                                         "versions": []}})
     from db import writers
@@ -802,7 +876,7 @@ def test_29_pg_the_gate_holds_on_a_clean_system(seeded160):
     """Every guarantee is checked by execution, over a real schema."""
     from scripts import audit_sql_coverage_gate as gate_mod
 
-    boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+    _establish()
 
     g, report = gate_mod.run()
 
@@ -821,7 +895,7 @@ def test_30_pg_the_gate_fails_when_a_post_boundary_gap_is_open(
     from db import writers
     from scripts import audit_sql_coverage_gate as gate_mod
 
-    boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+    _establish()
     _stub_history(monkeypatch, {"gap": {"state": hubspot.HISTORY_PRESENT,
                                         "versions": []}})
     writers.upsert_hubspot_contact_funnel([{
@@ -848,7 +922,7 @@ def test_31_pg_the_gate_detects_a_boundary_instant_used_as_an_event_date(
     """
     from scripts import audit_sql_coverage_gate as gate_mod
 
-    boundary_svc.establish_boundary(apply=True, observed_at=BOUNDARY)
+    _establish()
     with seeded160.connection.get_conn() as c, c.cursor() as cur:
         cur.execute("UPDATE hubspot_contact_funnel SET date_entered_sql = %s "
                     "WHERE contact_id = 'undated_a'", (BOUNDARY,))
@@ -1125,3 +1199,761 @@ def test_40_a_contact_beyond_the_request_budget_is_unattempted_not_absent(
                 if i["reason"] == boundary_svc.INCIDENT_NO_DIRECT_DATE]
     assert all(i["history_checked"] is False for i in unfunded), (
         "an unfunded contact must never look like one we checked")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §1 — the OLD contact promoted AFTER the boundary
+#
+# The central failure mode, and the one the first cut could not see. Both of its
+# predicates — `created_at >= boundary` and `effective_date >= boundary` — are
+# FALSE for this contact, so it was invisible:
+#
+#     created long before the boundary;
+#     BELOW SQL when the snapshot was taken, so absent from it;
+#     promoted to SQL afterwards;
+#     no exact SQL timestamp captured.
+#
+# Creation date cannot classify it. The immutable snapshot can, and is the only
+# thing that can: it is the record of who was already historical.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _no_history(monkeypatch):
+    """HubSpot answers with real, EMPTY history — so an incident is genuine."""
+    monkeypatch.setattr(
+        hubspot, "fetch_lifecycle_stage_history",
+        lambda ids, client=None: {cid: {"state": hubspot.HISTORY_PRESENT,
+                                        "versions": []} for cid in ids})
+
+
+@_needs_pg
+def test_41_pg_an_old_contact_promoted_after_the_boundary_is_a_prospective_gap(
+        seeded160, monkeypatch):
+    """Created long before B, below SQL at B, promoted after, no timestamp."""
+    from db import writers
+
+    # Below SQL when the snapshot is taken — so NOT in it.
+    writers.upsert_hubspot_contact_funnel([{
+        "contact_id": "promoted_later", "lifecycle_stage": "lead",
+        "created_at": LEGACY_CREATED, "last_modified_at": LEGACY_CREATED}])
+
+    established = _establish()
+    assert established["ok"]
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT contact_id FROM sql_coverage_boundary_contact "
+                    "ORDER BY contact_id")
+        snapshot = [r[0] for r in cur.fetchall()]
+    assert "promoted_later" not in snapshot, (
+        "a contact below SQL at boundary time must not be in the snapshot")
+
+    # Now promoted to SQL, with NO exact timestamp. Its creation date is old,
+    # and it has no effective date at all — both old predicates are false.
+    _no_history(monkeypatch)
+    writers.upsert_hubspot_contact_funnel([{
+        "contact_id": "promoted_later", "lifecycle_stage": "salesqualifiedlead",
+        "created_at": LEGACY_CREATED,
+        "last_modified_at": BOUNDARY + timedelta(days=3)}])
+
+    result = boundary_svc.detect_post_boundary_gaps(apply=True)
+
+    assert result["ok"] is True
+    assert result["new_undated_sql_gaps"] == 1, (
+        "an old contact promoted after the boundary with no SQL timestamp is a "
+        "PROSPECTIVE gap, however old its creation date")
+    assert result["unresolved_post_boundary_incidents"] == 1
+
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT contact_id FROM sql_post_boundary_incident")
+        assert [r[0] for r in cur.fetchall()] == ["promoted_later"]
+        # And no date was invented for it.
+        cur.execute("SELECT date_entered_sql FROM hubspot_contact_funnel "
+                    "WHERE contact_id = 'promoted_later'")
+        assert cur.fetchone()[0] is None
+
+
+@_needs_pg
+def test_42_pg_a_snapshot_contact_stays_historical_and_raises_no_incident(
+        seeded160, monkeypatch):
+    """The other side of the anti-join: the snapshot IS the classifier.
+
+    ``undated_a`` and ``undated_b`` were undated at SQL when the boundary was
+    taken, so they are in the snapshot and are historical forever. They must
+    never become prospective incidents, however many times detection runs.
+    """
+    _establish()
+    _no_history(monkeypatch)
+
+    result = boundary_svc.detect_post_boundary_gaps(apply=True)
+
+    assert result["new_undated_sql_gaps"] == 0
+    assert result["unresolved_post_boundary_incidents"] == 0
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM sql_post_boundary_incident")
+        assert cur.fetchone()[0] == 0, (
+            "a contact recorded in the boundary snapshot is historical, and "
+            "must never be reported as a prospective gap")
+
+
+@_needs_pg
+def test_43_pg_a_promoted_contacts_incident_blocks_only_relevant_windows(
+        seeded160, monkeypatch):
+    """§1 + §6 together: the gap blocks certification where it could belong."""
+    from db import writers
+
+    writers.upsert_hubspot_contact_funnel([{
+        "contact_id": "promoted_later", "lifecycle_stage": "lead",
+        "created_at": LEGACY_CREATED, "last_modified_at": LEGACY_CREATED}])
+    _establish()
+    _no_history(monkeypatch)
+    writers.upsert_hubspot_contact_funnel([{
+        "contact_id": "promoted_later", "lifecycle_stage": "salesqualifiedlead",
+        "created_at": LEGACY_CREATED,
+        "last_modified_at": BOUNDARY + timedelta(days=3)}])
+    boundary_svc.detect_post_boundary_gaps(apply=True)
+
+    incidents = repo.fetch_post_boundary_incidents(status="open")
+    assert incidents["available"] and incidents["open_count"] == 1
+    rows = incidents["rows"]
+
+    # A window opening AFTER the incident was detected: it could belong.
+    detected = rows[0]["detected_at"]
+    after = coverage.window_coverage(
+        window="after", window_start=detected, window_end=None,
+        confirmed_sqls=0, recovered_sqls=0, unresolved_rows=[],
+        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=rows,
+        freshness=FRESH)
+    assert after["open_post_boundary_gaps"] == 1
+
+    # A window that CLOSED before the contact was created: it cannot.
+    before = coverage.window_coverage(
+        window="ancient", window_start=date(2019, 1, 1),
+        window_end=date(2019, 12, 31), confirmed_sqls=0, recovered_sqls=0,
+        unresolved_rows=[], boundary_observed_at=BOUNDARY,
+        open_post_boundary_incidents=rows, freshness=FRESH)
+    assert before["open_post_boundary_gaps"] == 0
+    assert before["post_boundary_gaps_ruled_out"] == 1
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §2 — the boundary timestamp is not the operator's to choose
+# ═════════════════════════════════════════════════════════════════════════════
+
+@_needs_pg
+def test_44_pg_an_operator_cannot_backdate_the_boundary(seeded160):
+    """Requirement §2. There is no surface that accepts a historical instant.
+
+    A backdated boundary would rule contacts out of windows on the strength of
+    an observation that never happened at that time — the bound would be a
+    fiction, and every window after it would inherit it.
+    """
+    import inspect
+    import os
+
+    # 1. No service parameter accepts one.
+    params = inspect.signature(boundary_svc.establish_boundary).parameters
+    assert "observed_at" not in params
+    assert not any("timestamp" in p or "instant" in p for p in params)
+
+    # 2. No CLI flag exposes one.
+    env = {**os.environ, "DATABASE_URL": seeded160.url}
+    helped = subprocess.run(
+        [sys.executable, "-m", "scripts.establish_sql_coverage_boundary",
+         "--help"], capture_output=True, text=True, cwd=str(_ROOT), env=env)
+    assert "--observed-at" not in helped.stdout
+    assert "--boundary-id" not in helped.stdout
+
+    # 3. The CLI REJECTS one if a user tries anyway.
+    tried = subprocess.run(
+        [sys.executable, "-m", "scripts.establish_sql_coverage_boundary",
+         "--apply", "--observed-at", "2020-01-01T00:00:00Z"],
+        capture_output=True, text=True, cwd=str(_ROOT), env=env)
+    assert tried.returncode != 0
+    assert repo.fetch_active_sql_coverage_boundary()["boundary"] is None
+
+
+@_needs_pg
+def test_45_pg_the_boundary_instant_is_stamped_after_the_population_read(
+        seeded160):
+    """The instant comes from the database, and never precedes the snapshot.
+
+    Stamped with ``clock_timestamp()`` rather than ``now()``: ``now()`` returns
+    TRANSACTION START time, which in this transaction precedes the population
+    read — so the boundary would claim to have observed the population at an
+    instant before it actually did.
+    """
+    before = datetime.now(tz=timezone.utc)
+    result = boundary_svc.establish_boundary(apply=True)
+    after = datetime.now(tz=timezone.utc)
+
+    assert result["ok"] is True
+    observed = result["boundary"]["observed_at"]
+    assert observed is not None, "an applied boundary must record its instant"
+    assert before <= observed <= after, (
+        "the instant must fall inside this call, not be chosen by a caller")
+
+    # Every bounded contact carries exactly that instant — never earlier.
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT DISTINCT known_reached_sql_by FROM "
+                    "sql_coverage_boundary_contact")
+        bounds = [r[0] for r in cur.fetchall()]
+    assert bounds == [observed]
+    assert all(b >= before for b in bounds), (
+        "a contact observed in the snapshot must never receive a bound earlier "
+        "than the observation that found it")
+
+
+@_needs_pg
+def test_46_pg_the_boundary_records_its_snapshot_provenance(seeded160):
+    """§2 — the run the population was read against is recorded, not implied."""
+    result = _establish()
+    assert result["ok"]
+
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT source_dataset, source_run_id, run_id, "
+                    "population_definition, lifecycle_rule_version "
+                    "FROM sql_coverage_boundary")
+        dataset, source_run, run_id, definition, rule = cur.fetchone()
+
+    assert dataset == boundary_svc.SOURCE_DATASET
+    assert run_id and run_id.startswith("sqlbound_")
+    assert definition == boundary_svc.POPULATION_DEFINITION
+    assert rule == lifecycle.LIFECYCLE_RULE_VERSION
+    # The sync state the population was read against, carried verbatim.
+    assert source_run and "contact_funnel_sync" in source_run
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §3 — exactly one completed boundary, and it is immutable
+# ═════════════════════════════════════════════════════════════════════════════
+
+@_needs_pg
+def test_47_pg_a_second_completed_boundary_is_refused_by_the_database(seeded160):
+    """A service check cannot provide this. Two concurrent establishers would
+    both read "no boundary exists" and both insert; only a constraint stops the
+    second. Proven by attempting the insert directly, bypassing the service."""
+    import psycopg2
+
+    _establish()
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        with pytest.raises(psycopg2.errors.UniqueViolation):
+            cur.execute(
+                "INSERT INTO sql_coverage_boundary (boundary_id, observed_at, "
+                " lifecycle_rule_version, source_dataset, population_definition,"
+                " run_id, status) "
+                "VALUES ('rival', now(), 'v', 'd', 'p', 'r', 'complete')")
+        c.rollback()
+
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM sql_coverage_boundary "
+                    "WHERE status = 'complete'")
+        assert cur.fetchone()[0] == 1
+
+
+@_needs_pg
+def test_48_pg_a_completed_boundary_can_never_be_updated_or_deleted(seeded160):
+    """Immutability is a property of the TABLES, not a discipline writers keep."""
+    import psycopg2
+
+    _establish()
+    for statement in (
+        "UPDATE sql_coverage_boundary SET observed_at = now()",
+        "UPDATE sql_coverage_boundary SET contacts_bounded = 99",
+        "DELETE FROM sql_coverage_boundary",
+        "UPDATE sql_coverage_boundary_contact SET known_reached_sql_by = now()",
+        "DELETE FROM sql_coverage_boundary_contact",
+    ):
+        with seeded160.connection.get_conn() as c, c.cursor() as cur:
+            with pytest.raises(psycopg2.Error):
+                cur.execute(statement)
+            c.rollback()
+
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT contacts_bounded FROM sql_coverage_boundary")
+        assert cur.fetchone()[0] == 2
+        cur.execute("SELECT COUNT(*) FROM sql_coverage_boundary_contact")
+        assert cur.fetchone()[0] == 2
+
+
+@_needs_pg
+def test_49_pg_a_mutated_replay_is_refused_and_changes_nothing(seeded160):
+    """Requirement §3. Same id, different content → fail, database untouched."""
+    from db import writers
+
+    first = _establish()
+    bid = first["boundary"]["boundary_id"]
+
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT boundary_id, observed_at, contacts_bounded, "
+                    "population_definition FROM sql_coverage_boundary")
+        before = cur.fetchall()
+
+    mutated = writers.establish_sql_coverage_boundary(
+        {**first["boundary"], "boundary_id": bid,
+         "population_definition": "something else entirely"},
+        clock_sql=_FIXED_CLOCK)
+
+    assert mutated["ok"] is False
+    assert "not identical" in mutated["error"]
+    assert "population_definition differs" in mutated["error"]
+
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT boundary_id, observed_at, contacts_bounded, "
+                    "population_definition FROM sql_coverage_boundary")
+        assert cur.fetchall() == before, (
+            "a refused replay must leave the stored boundary untouched")
+
+
+@_needs_pg
+def test_50_pg_a_replay_with_a_changed_population_is_refused(seeded160):
+    """The population is part of what a boundary asserts, so it is verified too."""
+    from db import writers
+
+    first = _establish()
+    bid = first["boundary"]["boundary_id"]
+
+    # A new undated SQL contact appears, so a replay would bound 3, not 2.
+    writers.upsert_hubspot_contact_funnel([{
+        "contact_id": "undated_c", "lifecycle_stage": "salesqualifiedlead",
+        "created_at": LEGACY_CREATED, "last_modified_at": LEGACY_CREATED}])
+
+    replay = writers.establish_sql_coverage_boundary(
+        {**first["boundary"], "boundary_id": bid}, clock_sql=_FIXED_CLOCK)
+
+    assert replay["ok"] is False
+    assert "population differs" in replay["error"]
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM sql_coverage_boundary_contact")
+        assert cur.fetchone()[0] == 2, "the stored snapshot is unchanged"
+
+
+@_needs_pg
+def test_51_pg_a_different_boundary_id_is_refused_by_the_service_and_writer(
+        seeded160):
+    """§3 — the singleton is enforced at both layers, with a readable reason."""
+    from db import writers
+
+    _establish()
+    rival = writers.establish_sql_coverage_boundary(
+        {"boundary_id": "rival_boundary",
+         "lifecycle_rule_version": lifecycle.LIFECYCLE_RULE_VERSION,
+         "source_dataset": boundary_svc.SOURCE_DATASET,
+         "population_definition": boundary_svc.POPULATION_DEFINITION,
+         "run_id": "r2"}, clock_sql=_FIXED_CLOCK)
+
+    assert rival["ok"] is False
+    assert "a different completed boundary already exists" in rival["error"]
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM sql_coverage_boundary")
+        assert cur.fetchone()[0] == 1
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §4 — fail closed on every required write and verification read
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _boundary_stubs(monkeypatch, *, rows):
+    monkeypatch.setattr(repo, "fetch_active_sql_coverage_boundary",
+                        lambda: {"available": True, "boundary": {
+                            "boundary_id": "b1", "observed_at": BOUNDARY}})
+    monkeypatch.setattr(repo, "fetch_post_boundary_sql_contacts",
+                        lambda *, boundary_id=None, since=None: {
+                            "available": True, "rows": rows})
+    monkeypatch.setattr(repo, "fetch_post_boundary_incidents",
+                        lambda *, status=None: {"available": True, "rows": [],
+                                                "open_count": 0})
+
+
+def test_52_a_failed_direct_property_resolution_fails_the_run(monkeypatch):
+    """§4. An unchecked resolution would report a clean run that never happened."""
+    from db import writers
+
+    _boundary_stubs(monkeypatch, rows=[{
+        "contact_id": "has_date", "created_at": BOUNDARY,
+        "lifecycle_stage": "salesqualifiedlead",
+        "direct_date_entered_sql": BOUNDARY,
+        "effective_date_entered_sql": BOUNDARY}])
+    monkeypatch.setattr(writers, "resolve_post_boundary_incidents",
+                        lambda ids, *, resolved_by: {
+                            "ok": False, "error": "deadlock detected",
+                            "persisted": 0})
+
+    result = boundary_svc.detect_post_boundary_gaps(apply=True)
+
+    assert result["ok"] is False
+    assert result["run_outcome"] == boundary_svc.BOUNDARY_WRITE_FAILED
+    assert "deadlock detected" in result["detail"]
+
+
+def test_53_a_failed_history_resolution_fails_the_run(monkeypatch):
+    """The same, on the other permitted source."""
+    from db import writers
+
+    transition = BOUNDARY + timedelta(hours=2)
+    _boundary_stubs(monkeypatch, rows=[{
+        "contact_id": "needs_history", "created_at": BOUNDARY,
+        "lifecycle_stage": "salesqualifiedlead",
+        "direct_date_entered_sql": None,
+        "effective_date_entered_sql": None}])
+    monkeypatch.setattr(
+        hubspot, "fetch_lifecycle_stage_history",
+        lambda ids, client=None: {cid: {
+            "state": hubspot.HISTORY_PRESENT,
+            "versions": [{"value": "salesqualifiedlead", "timestamp": transition,
+                          "source_type": "CRM_UI", "source_id": "u1",
+                          "source_label": None, "updated_by_user_id": None}]}
+            for cid in ids})
+    monkeypatch.setattr(writers, "upsert_lifecycle_stage_history",
+                        lambda rows, *, run_id: {"ok": True,
+                                                 "persisted": len(rows)})
+    monkeypatch.setattr(writers, "resolve_post_boundary_incidents",
+                        lambda ids, *, resolved_by: {
+                            "ok": False, "error": "connection lost",
+                            "persisted": 0})
+
+    result = boundary_svc.detect_post_boundary_gaps(apply=True)
+
+    assert result["ok"] is False
+    assert result["run_outcome"] == boundary_svc.BOUNDARY_WRITE_FAILED
+    assert "connection lost" in result["detail"]
+    # Truthful partial-write accounting: the evidence DID land.
+    assert result["history_events_persisted"] == 1
+    assert result["partial_local_write"] is True
+
+
+def test_54_resolution_counts_come_from_the_database_not_the_request(monkeypatch):
+    """§4. Report what was PERSISTED, never how many ids we asked about.
+
+    ``len(requested)`` would report two resolutions where the database made one
+    — and an incident the report calls closed would still be open.
+    """
+    from db import writers
+
+    _boundary_stubs(monkeypatch, rows=[
+        {"contact_id": f"c{i}", "created_at": BOUNDARY,
+         "lifecycle_stage": "salesqualifiedlead",
+         "direct_date_entered_sql": BOUNDARY,
+         "effective_date_entered_sql": BOUNDARY} for i in range(3)])
+    # Three ids asked about; the database resolved ONE (the others were already
+    # resolved, so the UPDATE's WHERE clause skipped them).
+    monkeypatch.setattr(writers, "resolve_post_boundary_incidents",
+                        lambda ids, *, resolved_by: {"ok": True, "persisted": 1,
+                                                     "error": None})
+
+    result = boundary_svc.detect_post_boundary_gaps(apply=True)
+
+    assert result["ok"] is True
+    assert result["incidents_resolved"] == 1, (
+        "the count must be what the database persisted, not len(requested)")
+
+
+def test_55_the_scheduler_records_an_error_when_the_guarantee_is_unverified(
+        monkeypatch):
+    """§4. A scheduler run must never look healthy on an unverified guarantee."""
+    import scheduler.incremental_sync as sync
+
+    monkeypatch.setattr(
+        "services.sql_coverage_boundary_service.detect_post_boundary_gaps",
+        lambda **k: {"ok": False, "run_outcome": "incident_store_unreadable",
+                     "detail": "the post-boundary incident store could not be read",
+                     "new_undated_sql_gaps": None,
+                     "unresolved_post_boundary_incidents": None})
+
+    errors: list = []
+    result = sync._detect_sql_coverage_gaps(run_id="r1", errors=errors)
+
+    assert result["ok"] is False
+    assert errors, "an unverified prospective guarantee must be a run error"
+    assert "sql_coverage_gaps" in errors[0]
+
+
+def test_56_the_scheduler_errors_when_open_incidents_cannot_be_counted(
+        monkeypatch):
+    """The other direction: a completed run that could not count its blockers."""
+    import scheduler.incremental_sync as sync
+
+    monkeypatch.setattr(
+        "services.sql_coverage_boundary_service.detect_post_boundary_gaps",
+        lambda **k: {"ok": True, "new_undated_sql_gaps": 0,
+                     "unresolved_post_boundary_incidents": None})
+
+    errors: list = []
+    sync._detect_sql_coverage_gaps(run_id="r1", errors=errors)
+
+    assert errors and "UNVERIFIED" in errors[0]
+
+
+def test_57_the_scheduler_errors_on_remaining_open_incidents(monkeypatch):
+    """An open prospective gap is the condition this PR exists to surface."""
+    import scheduler.incremental_sync as sync
+
+    monkeypatch.setattr(
+        "services.sql_coverage_boundary_service.detect_post_boundary_gaps",
+        lambda **k: {"ok": True, "new_undated_sql_gaps": 0,
+                     "unresolved_post_boundary_incidents": 3})
+
+    errors: list = []
+    sync._detect_sql_coverage_gaps(run_id="r1", errors=errors)
+
+    assert errors and "3 unresolved" in errors[0]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §5 — freshness is a certification PREREQUISITE
+#
+# A window can be complete — every undated contact ruled out, no prospective gap
+# able to belong to it — and still be worthless if its source stopped updating.
+# It would be complete with respect to data that has stopped arriving. "Nothing
+# is missing from what we have" is not "nothing is missing".
+# ═════════════════════════════════════════════════════════════════════════════
+
+import analysis.sql_coverage_freshness as freshness_mod  # noqa: E402
+
+NOW = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+
+
+def _sync(**over):
+    row = {"bootstrap_status": "complete",
+           "last_incremental_at": NOW - timedelta(hours=2),
+           "last_error": None}
+    row.update(over)
+    return {"available": True, "row": row}
+
+
+@pytest.mark.parametrize("state,expected_reason,expected_fresh", [
+    (_sync(), freshness_mod.FRESH, True),
+    (_sync(last_incremental_at=NOW - timedelta(hours=200)),
+     freshness_mod.STALE, False),
+    (_sync(last_error="HubSpot 500"), freshness_mod.SYNC_FAILED, False),
+    (_sync(bootstrap_status="partial"),
+     freshness_mod.BOOTSTRAP_INCOMPLETE, False),
+    (_sync(last_incremental_at=None), freshness_mod.NEVER_RUN, False),
+    ({"available": True, "row": None}, freshness_mod.STATE_MISSING, False),
+    # Unreadable is None, NOT False: False is a claim about the pipeline,
+    # None is a statement about us. Both block; only one is the pipeline's fault.
+    ({"available": False, "row": None}, freshness_mod.STATE_UNAVAILABLE, None),
+])
+def test_58_the_freshness_contract_distinguishes_every_state(
+        state, expected_reason, expected_fresh):
+    verdict = freshness_mod.assess(state, now=NOW)
+
+    assert verdict["reason"] == expected_reason
+    assert verdict["fresh"] is expected_fresh
+    assert verdict["reason"] in freshness_mod.FRESHNESS_REASONS
+    assert verdict["detail"], "every verdict must say WHY"
+    # Everything that is not proven fresh blocks certification.
+    assert freshness_mod.blocks_certification(verdict) is (expected_fresh is not True)
+
+
+@pytest.mark.parametrize("state", [
+    _sync(last_incremental_at=NOW - timedelta(hours=200)),
+    _sync(last_error="HubSpot 500"),
+    _sync(bootstrap_status="partial"),
+    {"available": False, "row": None},
+])
+def test_59_no_window_certifies_on_a_source_that_is_not_fresh(state):
+    """Requirement §5. The four blocking states, each proven to block.
+
+    The window below is otherwise perfect: it opens after the boundary, every
+    historical contact is ruled out, and no prospective gap can belong to it.
+    Only freshness stops it — which is the whole point.
+    """
+    verdict = freshness_mod.assess(state, now=NOW)
+    block = coverage.window_coverage(
+        window="oct", window_end=date(2026, 10, 31), window_start=date(2026, 10, 1),
+        confirmed_sqls=5, recovered_sqls=0,
+        unresolved_rows=[{"contact_id": "c1", "created_at": LEGACY_CREATED,
+                          "known_reached_sql_by": BOUNDARY}],
+        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=0,
+        freshness=verdict)
+
+    # Complete, and still not certifiable.
+    assert block["window_total_complete"] is True
+    assert block["certification_eligible"] is False
+    assert block["certification_status"] == coverage.CERT_STALE_SOURCE
+    assert verdict["reason"] in block["certification_explanation"]
+
+
+def test_60_a_fresh_source_lets_an_otherwise_clean_window_certify():
+    """The positive control: freshness is the ONLY thing that was blocking."""
+    block = coverage.window_coverage(
+        window="oct", window_end=date(2026, 10, 31), window_start=date(2026, 10, 1),
+        confirmed_sqls=5, recovered_sqls=0,
+        unresolved_rows=[{"contact_id": "c1", "created_at": LEGACY_CREATED,
+                          "known_reached_sql_by": BOUNDARY}],
+        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=0,
+        freshness=freshness_mod.assess(_sync(), now=NOW))
+
+    assert block["certification_status"] == coverage.CERT_ELIGIBLE
+    assert block["source_fresh"] is True
+
+
+def test_61_freshness_uses_the_sync_run_time_not_the_newest_contact():
+    """Which timestamp, and why it matters.
+
+    ``last_incremental_at`` is when the sync RAN. ``latest_modified_at`` is the
+    newest contact modification it happened to see, and that goes stale on its
+    own whenever HubSpot is quiet. Confusing them would make a working system
+    look broken every weekend, and a broken one look fine for as long as its
+    last read stayed recent.
+    """
+    quiet_crm = _sync(last_incremental_at=NOW - timedelta(hours=1))
+    quiet_crm["row"]["latest_modified_at"] = NOW - timedelta(days=30)
+    assert freshness_mod.assess(quiet_crm, now=NOW)["fresh"] is True
+
+    dead_pipeline = _sync(last_incremental_at=NOW - timedelta(days=30))
+    dead_pipeline["row"]["latest_modified_at"] = NOW - timedelta(minutes=1)
+    assert freshness_mod.assess(dead_pipeline, now=NOW)["fresh"] is False
+
+
+@_needs_pg
+def test_62_pg_the_audit_and_the_gate_share_one_freshness_contract(
+        seeded160, monkeypatch):
+    """Both surfaces expose it, and neither restates the rule.
+
+    A second copy that agreed would prove nothing, and one that disagreed would
+    report the gate's bug as the pipeline's.
+    """
+    from scripts import audit_lifecycle_sql_coverage as audit
+    from scripts import audit_sql_coverage_gate as gate_mod
+
+    _establish()
+
+    f = audit.Findings()
+    audit_verdict = audit.audit_source_freshness(f)
+    g = gate_mod.Gate()
+    gate_verdict = gate_mod.check_source_freshness(g)
+
+    assert audit_verdict["reason"] == gate_verdict["reason"]
+    assert audit_verdict["fresh"] is gate_verdict["fresh"] is True
+    assert audit_verdict["reason"] in freshness_mod.FRESHNESS_REASONS
+
+
+@_needs_pg
+def test_63_pg_a_stale_source_breaks_the_gate_and_blocks_every_window(
+        seeded160, monkeypatch):
+    """End to end: stale ingestion, red gate, zero certified windows."""
+    from db import writers
+    from scripts import audit_lifecycle_sql_coverage as audit
+    from scripts import audit_sql_coverage_gate as gate_mod
+
+    _establish()
+    writers.update_contact_funnel_sync_state(
+        "contacts", bootstrap_status="complete",
+        last_incremental_at=datetime.now(tz=timezone.utc) - timedelta(days=14),
+        last_error=None)
+
+    g, gate_report = gate_mod.run()
+    assert any("source_freshness" in v for v in g.violations)
+    assert g.exit_code == gate_mod.EXIT_VIOLATION
+    assert gate_report["source_freshness"]["reason"] == freshness_mod.STALE
+
+    findings, report = audit.run()
+    assert report["source_freshness"]["fresh"] is False
+    assert report["certification"]["windows_certified"] == 0
+    assert report["certification"]["source_fresh"] is False
+    # A stale pipeline is a DATA finding for the coverage audit, not a contract
+    # violation and not an audit outage — the audit still ran perfectly.
+    assert findings.violations == []
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §6 — incidents are resolved PER WINDOW, not applied globally
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _incident(created, detected):
+    return {"contact_id": "g1", "contact_created_at": created,
+            "detected_at": detected}
+
+
+def test_64_an_incident_blocks_only_the_windows_it_could_belong_to():
+    """Requirement §6. One global count blocking everything is the defect.
+
+    The incident's contact was created in December. A window that CLOSED in
+    October cannot contain a transition by a contact that did not exist — and
+    must certify normally.
+    """
+    december = _incident(datetime(2026, 12, 1, tzinfo=timezone.utc),
+                         datetime(2026, 12, 5, tzinfo=timezone.utc))
+
+    october = coverage.incident_membership(
+        [december], date(2026, 10, 1), date(2026, 10, 31))
+    assert october["open_post_boundary_gaps"] == 0
+    assert october["post_boundary_gaps_ruled_out"] == 1
+
+    late_december = coverage.incident_membership(
+        [december], date(2026, 12, 1), date(2026, 12, 31))
+    assert late_december["open_post_boundary_gaps"] == 1
+    assert late_december["post_boundary_gaps_ruled_out"] == 0
+
+
+@pytest.mark.parametrize("start,end,blocks", [
+    # Window entirely BEFORE the contact existed → ruled out by the creation
+    # lower bound.
+    (date(2026, 1, 1), date(2026, 1, 31), 0),
+    # Window OVERLAPPING the detection → could belong. The transition happened
+    # somewhere at or before 15 September and after 1 August; part of that
+    # interval lies inside this window.
+    (date(2026, 9, 1), date(2026, 9, 30), 1),
+    # Window opening AFTER detection → ruled out by the detection UPPER bound.
+    # "Already at SQL by 15 September" means the transition was over before
+    # October opened. This is the same one-directional rule §7 applies to the
+    # boundary bound, and it is why detection is worth recording at all.
+    (date(2026, 10, 1), date(2026, 10, 31), 0),
+])
+def test_65_incident_membership_before_overlapping_and_after(start, end, blocks):
+    incident = _incident(datetime(2026, 8, 1, tzinfo=timezone.utc),
+                         datetime(2026, 9, 15, tzinfo=timezone.utc))
+    split = coverage.incident_membership([incident], start, end)
+    assert split["open_post_boundary_gaps"] == blocks
+
+
+def test_66_an_incident_detected_before_a_window_opened_is_ruled_out():
+    """The detection UPPER bound, used the only sound way it can be.
+
+    Detection means "we first saw it already at SQL, with no date". If that was
+    strictly before a window opened, the transition was over before the window
+    began — the same strict comparison §7 applies to the boundary bound.
+    """
+    early = _incident(datetime(2026, 1, 1, tzinfo=timezone.utc),
+                      datetime(2026, 2, 1, tzinfo=timezone.utc))
+    split = coverage.incident_membership(
+        [early], date(2026, 6, 1), date(2026, 6, 30))
+    assert split["open_post_boundary_gaps"] == 0
+    assert split["post_boundary_gaps_ruled_out"] == 1
+
+
+def test_67_an_incident_with_no_usable_bounds_blocks_every_window():
+    """Nothing rules it out, so it rules nothing out. Unknown blocks."""
+    blind = {"contact_id": "g1", "contact_created_at": None,
+             "detected_at": None}
+    for start, end in [(date(2026, 1, 1), date(2026, 1, 31)),
+                       (date(2026, 10, 1), date(2026, 10, 31)),
+                       (None, None)]:
+        split = coverage.incident_membership([blind], start, end)
+        assert split["open_post_boundary_gaps"] == 1
+
+
+def test_68_an_unreadable_incident_store_blocks_certification(monkeypatch):
+    """§4 + §6. A null count is not zero gaps — unknown blockers must block."""
+    block = coverage.window_coverage(
+        window="oct", window_end=date(2026, 10, 31), window_start=date(2026, 10, 1),
+        confirmed_sqls=5, recovered_sqls=0, unresolved_rows=[],
+        boundary_observed_at=BOUNDARY, open_post_boundary_incidents=None,
+        freshness=FRESH)
+
+    assert block["certification_eligible"] is False
+    assert block["certification_status"] == coverage.CERT_UNAVAILABLE
+    assert block["open_post_boundary_gaps"] is None
+    assert "unknown blockers must block" in block["certification_explanation"]
+
+
+def test_69_incident_membership_never_produces_a_date():
+    """It returns counts. It has no way to return a timestamp, and never does."""
+    incident = _incident(datetime(2026, 8, 1, tzinfo=timezone.utc),
+                         datetime(2026, 9, 15, tzinfo=timezone.utc))
+    split = coverage.incident_membership(
+        [incident], date(2026, 9, 1), date(2026, 9, 30))
+
+    assert set(split) == {"open_post_boundary_gaps",
+                          "post_boundary_gaps_ruled_out",
+                          "post_boundary_gaps_global"}
+    assert all(isinstance(v, int) for v in split.values())

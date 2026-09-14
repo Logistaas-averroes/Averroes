@@ -1083,6 +1083,24 @@ def _detect_sql_coverage_gaps(*, run_id, errors: list) -> dict:
             log.warning("[incremental_sync] %s", err)
             return result
 
+        # PR-ADS-160 §4: an unverified guarantee is not a healthy one. If the
+        # final incident read could not be made, `ok` is already False above —
+        # this guards the other direction: a run that completed but could not
+        # count open incidents must never look clean.
+        open_incidents = result.get("unresolved_post_boundary_incidents")
+        if open_incidents is None:
+            err = ("hubspot/sql_coverage_gaps: the post-boundary incident store "
+                   "could not be read, so the prospective SQL guarantee is "
+                   "UNVERIFIED for this run")
+            errors.append(err)
+            log.warning("[incremental_sync] %s", err)
+            return result
+        if open_incidents:
+            err = (f"hubspot/sql_coverage_gaps: {open_incidents} unresolved "
+                   f"post-boundary SQL coverage incident(s) remain open")
+            errors.append(err)
+            log.warning("[incremental_sync] %s", err)
+
         gaps = result.get("new_undated_sql_gaps") or 0
         if gaps:
             # A new post-boundary gap is exactly the condition this PR exists

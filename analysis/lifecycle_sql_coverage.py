@@ -107,10 +107,18 @@ def membership_verdict(created_at, window_end, known_reached_sql_by=None,
 
     **The boundary UPPER bound** (PR-ADS-160). ``known_reached_sql_by`` is an
     observation instant at which the contact had ALREADY reached SQL. If that
-    instant is at or before the window's start, the SQL transition happened
-    strictly before the window opened, so it cannot belong to this window
-    either. This is the rule that lets windows opening after the boundary stop
-    carrying the 533 historical unknowns.
+    instant is STRICTLY before the window's start, the SQL transition happened
+    before the window opened, so it cannot belong to this window either. This is
+    the rule that lets windows opening after the boundary stop carrying the 533
+    historical unknowns.
+
+    The comparison is strict on purpose. At exact equality — a bound landing on
+    the window's first instant — the transition could have occurred AT that
+    instant, and a window start is inclusive. Ruling the contact out there would
+    require interval semantics finer than this system has proven, so equality
+    stays unresolved. Erring the other way would silently drop a contact from a
+    window it might genuinely belong to, which is the one direction this module
+    must never err in.
 
     Everything else is ``"unresolved"``, including:
 
@@ -136,7 +144,7 @@ def membership_verdict(created_at, window_end, known_reached_sql_by=None,
     # can be ruled out of it.
     start = _as_datetime(window_start)
     bound = _as_datetime(known_reached_sql_by)
-    if start is not None and bound is not None and bound <= start:
+    if start is not None and bound is not None and bound < start:
         return "proven_outside"
     return "unresolved"
 
@@ -191,7 +199,7 @@ def window_membership(unresolved_rows, window_end, window_start=None) -> dict:
 def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
                     unresolved_rows, population_available: bool = True,
                     window_start=None, boundary_observed_at=None,
-                    open_post_boundary_incidents=None) -> dict:
+                    open_post_boundary_incidents=None, freshness=None) -> dict:
     """One window's SQL coverage verdict, and whether it may publish a total.
 
     ``confirmed_sqls`` is the count of contacts with a PROVEN effective
@@ -204,7 +212,8 @@ def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
     from it are unavailable — not zero, not the confirmed subset relabelled.
 
     PR-ADS-160 adds ``window_start`` (needed for the boundary's upper-bound
-    exclusion), ``boundary_observed_at`` and ``open_post_boundary_incidents``,
+    exclusion), ``boundary_observed_at``, ``open_post_boundary_incidents`` and
+    ``freshness``,
     and reports a per-window certification verdict alongside the existing
     completeness verdict. The two are different questions: completeness asks
     whether the HISTORICAL population can be ruled out, certification asks
@@ -228,12 +237,30 @@ def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
             "explanation": (
                 "the lifecycle-SQL population could not be read, so this "
                 "window's completeness is unknown — not complete, and not zero"),
+            "post_boundary_gaps_ruled_out": None,
+            "post_boundary_gaps_global": None,
             **_certification(None, None, None, None, available=False),
         }
 
     split = window_membership(unresolved_rows, window_end, window_start)
     unresolved = split["window_membership_unresolved"]
     complete = unresolved == 0
+
+    # PR-ADS-160 §6 — resolve prospective gaps against THIS window, not one
+    # global count applied everywhere. A list is resolved per window; a bare
+    # int is a pre-resolved count; None means the store could not be read.
+    if isinstance(open_post_boundary_incidents, (list, tuple)):
+        incident_split = incident_membership(
+            open_post_boundary_incidents, window_start, window_end)
+    elif open_post_boundary_incidents is None:
+        incident_split = {"open_post_boundary_gaps": None,
+                          "post_boundary_gaps_ruled_out": None,
+                          "post_boundary_gaps_global": None}
+    else:
+        incident_split = {
+            "open_post_boundary_gaps": int(open_post_boundary_incidents),
+            "post_boundary_gaps_ruled_out": 0,
+            "post_boundary_gaps_global": int(open_post_boundary_incidents)}
     return {
         "window": window,
         "confirmed_sqls": confirmed_sqls,
@@ -246,8 +273,12 @@ def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
         "cpql_publishable": complete,
         "reason": COVERAGE_COMPLETE if complete else COVERAGE_UNRESOLVED_MEMBERSHIP,
         "explanation": _explain(complete, unresolved, split, window_end),
+        "post_boundary_gaps_ruled_out":
+            incident_split["post_boundary_gaps_ruled_out"],
+        "post_boundary_gaps_global": incident_split["post_boundary_gaps_global"],
         **_certification(window_start, window_end, boundary_observed_at,
-                         open_post_boundary_incidents, complete=complete),
+                         incident_split["open_post_boundary_gaps"],
+                         complete=complete, freshness=freshness),
     }
 
 
@@ -270,11 +301,66 @@ CERT_INCOMPLETE = "not_certifiable_unresolved_membership"
 CERT_NO_BOUNDARY = "not_certifiable_no_boundary_established"
 #: The inputs could not be read. Never rendered as "not certified" — unknown.
 CERT_UNAVAILABLE = "certification_unavailable"
+#: PR-ADS-160 §5 — the contact-funnel data behind this window is not fresh.
+#: Certifying a window whose source stopped updating would publish a number that
+#: is complete only with respect to data that has stopped arriving.
+CERT_STALE_SOURCE = "not_certifiable_source_not_fresh"
+
+
+def incident_membership(incidents, window_start, window_end) -> dict:
+    """Which open post-boundary incidents could belong to THIS window.
+
+    PR-ADS-160 first passed one GLOBAL open-incident count to every window, so a
+    single gap blocked certification everywhere — including windows that closed
+    before the contact existed. That is the same conflation this module removes
+    for historical gaps, reintroduced for prospective ones.
+
+    An incident carries no SQL entry date; if it did, it would not be an
+    incident. So the same two sound bounds apply, and only those:
+
+    * ``contact_created_at`` is a LOWER bound. A contact created at or after a
+      window's end cannot have entered SQL inside it.
+    * ``detected_at`` is an observation UPPER bound — the instant we first saw
+      the contact already at SQL with no date. If that is strictly before the
+      window opened, the transition was over before the window began.
+
+    Neither is the event. Nothing here ever returns a date, and an incident with
+    neither bound readable blocks every window, because nothing rules it out.
+    """
+    rows = list(incidents or [])
+    end = _window_end_exclusive(window_end)
+    start = _as_datetime(window_start)
+
+    could_belong = 0
+    ruled_out = 0
+    for row in rows:
+        row = row or {}
+        created = _as_datetime(row.get("contact_created_at"))
+        detected = _as_datetime(row.get("detected_at"))
+
+        # Created after this window closed: it did not exist while the window
+        # was open, so it cannot have entered SQL inside it.
+        if end is not None and created is not None and created >= end:
+            ruled_out += 1
+            continue
+        # Already at SQL before this window opened. Strict, for the same reason
+        # the historical rule is strict: at equality the transition could have
+        # happened at the window's inclusive first instant.
+        if start is not None and detected is not None and detected < start:
+            ruled_out += 1
+            continue
+        could_belong += 1
+
+    return {
+        "open_post_boundary_gaps": could_belong,
+        "post_boundary_gaps_ruled_out": ruled_out,
+        "post_boundary_gaps_global": len(rows),
+    }
 
 
 def _certification(window_start, window_end, boundary_observed_at,
                    open_incidents, *, complete: bool = False,
-                   available: bool = True) -> dict:
+                   available: bool = True, freshness: dict | None = None) -> dict:
     """Can THIS window become certified? The window-local half of the answer.
 
     Certification is deliberately split in two. This function judges what can be
@@ -285,12 +371,19 @@ def _certification(window_start, window_end, boundary_observed_at,
     An open-ended window is never certifiable: "All Time" necessarily includes
     the historical period whose dates are unknowable, and no boundary changes
     that.
+
+    ``open_incidents`` is this window's OWN count from ``incident_membership``,
+    never a global one. ``freshness`` is the contact-funnel freshness verdict:
+    a window whose source has stopped updating cannot certify, because its
+    completeness would be complete only with respect to data that stopped
+    arriving.
     """
     if not available:
         return {"certification_status": CERT_UNAVAILABLE,
                 "certification_eligible": False,
                 "window_after_boundary": None,
                 "open_post_boundary_gaps": None,
+                "source_fresh": None,
                 "certification_explanation": (
                     "the inputs could not be read, so certification is unknown "
                     "— not granted, and not refused")}
@@ -298,13 +391,19 @@ def _certification(window_start, window_end, boundary_observed_at,
     start = _as_datetime(window_start)
     boundary = _as_datetime(boundary_observed_at)
     end = _window_end_exclusive(window_end)
-    gaps = 0 if open_incidents is None else int(open_incidents)
+    # None means the incident store could not be read. That is NOT zero gaps:
+    # an unknown number of blockers must block, or an outage certifies windows.
+    gaps_unknown = open_incidents is None
+    gaps = 0 if gaps_unknown else int(open_incidents)
+    fresh_state = (freshness or {}).get("fresh")
+    fresh_reason = (freshness or {}).get("reason")
 
     if boundary is None:
         return {"certification_status": CERT_NO_BOUNDARY,
                 "certification_eligible": False,
                 "window_after_boundary": None,
                 "open_post_boundary_gaps": open_incidents,
+                "source_fresh": fresh_state,
                 "certification_explanation": (
                     "no completed coverage boundary exists, so no window can "
                     "yet be certified")}
@@ -315,6 +414,7 @@ def _certification(window_start, window_end, boundary_observed_at,
                 "certification_eligible": False,
                 "window_after_boundary": False,
                 "open_post_boundary_gaps": open_incidents,
+                "source_fresh": fresh_state,
                 "certification_explanation": (
                     "this window has no start bound, so it includes the "
                     "historical period whose SQL dates are unknowable")}
@@ -333,13 +433,26 @@ def _certification(window_start, window_end, boundary_observed_at,
                 "certification_eligible": False,
                 "window_after_boundary": False,
                 "open_post_boundary_gaps": open_incidents,
+                "source_fresh": fresh_state,
                 "certification_explanation": f"this window {detail}"}
+
+    if gaps_unknown:
+        return {"certification_status": CERT_UNAVAILABLE,
+                "certification_eligible": False,
+                "window_after_boundary": True,
+                "open_post_boundary_gaps": None,
+                "source_fresh": fresh_state,
+                "certification_explanation": (
+                    "the post-boundary incident store could not be read, so it "
+                    "is unknown whether any prospective gap belongs to this "
+                    "window — unknown blockers must block")}
 
     if gaps:
         return {"certification_status": CERT_POST_BOUNDARY_GAPS,
                 "certification_eligible": False,
                 "window_after_boundary": True,
                 "open_post_boundary_gaps": open_incidents,
+                "source_fresh": fresh_state,
                 "certification_explanation": (
                     f"{gaps} post-boundary contact(s) reached SQL with no exact "
                     f"entry date and cannot be ruled out of this window")}
@@ -349,19 +462,37 @@ def _certification(window_start, window_end, boundary_observed_at,
                 "certification_eligible": False,
                 "window_after_boundary": True,
                 "open_post_boundary_gaps": open_incidents,
+                "source_fresh": fresh_state,
                 "certification_explanation": (
                     "membership of the undated population is not fully "
                     "resolved for this window")}
+
+    # PR-ADS-160 §5 — freshness is a PREREQUISITE, not a footnote. A window
+    # whose source stopped updating is complete only with respect to data that
+    # stopped arriving, and `fresh is not True` covers stale, failed, missing
+    # and unreadable alike: only a proven-fresh source certifies.
+    if fresh_state is not True:
+        return {"certification_status": CERT_STALE_SOURCE,
+                "certification_eligible": False,
+                "window_after_boundary": True,
+                "open_post_boundary_gaps": open_incidents,
+                "source_fresh": fresh_state,
+                "certification_explanation": (
+                    f"the canonical contact-funnel source is not proven fresh "
+                    f"({fresh_reason or 'freshness unknown'}), so this window's "
+                    f"completeness describes data that may have stopped "
+                    f"arriving")}
 
     return {"certification_status": CERT_ELIGIBLE,
             "certification_eligible": True,
             "window_after_boundary": True,
             "open_post_boundary_gaps": open_incidents,
+            "source_fresh": True,
             "certification_explanation": (
                 "this window opens at or after the proven boundary, no open "
-                "post-boundary gap can belong to it, and every historical "
-                "undated contact is ruled out — freshness and reader "
-                "reconciliation are still checked by the audit")}
+                "post-boundary gap can belong to it, every historical undated "
+                "contact is ruled out, and the contact-funnel source is fresh "
+                "— reader reconciliation is still checked by the audit")}
 
 
 def _explain(complete: bool, unresolved: int, split: dict, window_end) -> str:

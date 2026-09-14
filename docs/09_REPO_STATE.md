@@ -418,4 +418,30 @@ for **PR-ADS-161**. No production apply run. No HubSpot write. No complete
 historical SQL total, and no CPQL where coverage is incomplete. All Time stays
 incomplete permanently.
 
+**Review corrections (§1–§7).** Seven truth-contract blockers were found and
+fixed before merge:
+
+* **the classifier was wrong.** Selecting prospective contacts on
+  `created_at >= boundary OR effective_date >= boundary` missed the central
+  failure mode — an old contact, below SQL when the snapshot was taken, promoted
+  afterwards with no timestamp. Both predicates are false for it. The immutable
+  snapshot is now the classifier, by anti-join; creation date classifies nothing.
+* **the boundary instant was the operator's to choose.** `--observed-at` is gone.
+  The instant is stamped database-side with `clock_timestamp()` inside the same
+  transaction that reads the population, and strictly after that read.
+* **the boundary was replaceable.** A partial unique index enforces exactly one
+  completed boundary, and triggers make it and its bounded contacts immutable.
+  An identical replay verifies; any other replay is refused unchanged.
+* **writes went unchecked.** Every resolution result is inspected, counts come
+  from the database rather than `len(requested)`, and an unreadable final
+  verification read fails the run instead of returning `ok: true` with a null.
+* **freshness was promised but not implemented.** One contract
+  (`analysis/sql_coverage_freshness.py`) shared by the audit and the gate;
+  stale, failed, incomplete-bootstrap and unavailable all block certification.
+* **incidents blocked globally.** They are now resolved per window against the
+  same two sound bounds — creation as a lower bound, detection as an upper one.
+* **boundary exclusion was inclusive.** `known_reached_sql_by < window_start`,
+  strictly: at equality the transition could have occurred at the window's
+  inclusive first instant.
+
 Full doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`.

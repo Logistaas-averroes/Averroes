@@ -52,9 +52,21 @@ are unknowable, and stays honestly incomplete forever.
 Safety
 ------
 Dry run by default · local writes only under ``--apply`` · no HubSpot write path
-exists in this module · the boundary and its bounded contacts commit in ONE
-transaction, so a half-established boundary is not a state that can occur ·
-re-applying the same boundary rewrites the same rows and says so.
+exists in this module.
+
+**The observation instant is not yours to choose.** There is no flag for it. The
+boundary time is stamped by the DATABASE, inside the same transaction that reads
+the population and writes the rows, and strictly after that read. An
+operator-supplied timestamp would allow a boundary whose ``observed_at``
+precedes the observation it claims to describe — and every window would then
+rule contacts out on the strength of a bound that was never observed.
+
+**Exactly one completed boundary may ever exist, and it is immutable.** There is
+no replacement flag and no replacement path. A partial unique index enforces the
+singleton (a service check cannot: two concurrent establishers would both read
+"no boundary exists" and both insert), and triggers make the boundary row and
+its bounded contacts un-updatable. Re-running after a boundary exists is refused
+and changes nothing.
 """
 
 from __future__ import annotations
@@ -111,7 +123,11 @@ def _render(result: dict, *, show_population: bool = False) -> None:
 
     print(f"\n  PROPOSED BOUNDARY")
     print(f"    boundary id:            {boundary.get('boundary_id')}")
-    print(f"    observed at (UTC):      {boundary.get('observed_at')}")
+    observed = boundary.get("observed_at")
+    print(f"    observed at (UTC):      "
+          f"{observed or 'stamped by the database at --apply time'}")
+    print(f"    instant source:         {boundary.get('observed_at_source')}")
+    print(f"    source run provenance:  {boundary.get('source_run_id')}")
     print(f"    lifecycle rule version: {boundary.get('lifecycle_rule_version')}")
     print(f"    source dataset:         {boundary.get('source_dataset')}")
     print(f"    population definition:  {boundary.get('population_definition')}")
@@ -139,8 +155,8 @@ def _render(result: dict, *, show_population: bool = False) -> None:
     print(f"    boundary recorded:  {result.get('boundary_written')}")
     print(f"    contacts bounded:   {result.get('contacts_written')}")
     if result.get("already_applied"):
-        print("    (this boundary already existed — the rows were rewritten,")
-        print("     not appended; the run is an idempotent no-op)")
+        print("    (an identical boundary already existed — this run VERIFIED")
+        print("     it and wrote nothing; a completed boundary is immutable)")
 
     print(f"\n  CERTIFICATION")
     print(f"    can begin: {result.get('certification_can_begin')}")
@@ -162,11 +178,6 @@ def main() -> int:
         description="Establish the prospective SQL coverage boundary (local only)")
     parser.add_argument("--apply", action="store_true",
                         help="record the boundary LOCALLY (default: dry run)")
-    parser.add_argument("--boundary-id", default=None,
-                        help="explicit boundary identifier; required to replace "
-                             "an existing boundary")
-    parser.add_argument("--observed-at", default=None,
-                        help="ISO-8601 UTC observation instant (default: now)")
     parser.add_argument("--show-population", action="store_true",
                         help="list the contacts that would be bounded")
     parser.add_argument("--json", action="store_true",
@@ -185,11 +196,7 @@ def main() -> int:
     from services import sql_coverage_boundary_service as service
 
     try:
-        result = service.establish_boundary(
-            apply=bool(args.apply),
-            observed_at=args.observed_at,
-            boundary_id=args.boundary_id,
-        )
+        result = service.establish_boundary(apply=bool(args.apply))
     except Exception as exc:  # noqa: BLE001
         payload = {"ok": False, "reason": "unexpected_error",
                    "detail": str(exc)[:500],
