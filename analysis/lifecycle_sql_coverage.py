@@ -93,43 +93,83 @@ def _window_end_exclusive(end):
     return None if ended is None else ended + _ONE_DAY
 
 
-def membership_verdict(created_at, window_end) -> str:
-    """Can this undated contact be ruled OUT of the window? One implication only.
+def membership_verdict(created_at, window_end, known_reached_sql_by=None,
+                       window_start=None) -> str:
+    """Can this undated contact be ruled OUT of the window? Two implications.
 
-    ``"proven_outside"`` when the contact was created at or after the first
-    instant past the window: it did not exist while the window was open, so it
-    cannot have entered SQL inside it.
+    Both are one-directional. Each can only ever DISPROVE membership, and
+    neither can ever confirm it or supply a date.
 
-    ``"unresolved"`` otherwise — including when creation is unknown. An unknown
-    creation time rules the contact out of nothing, and an open-ended window
-    (All Time) can never rule anything out.
+    **The creation LOWER bound** (PR-ADS-159). ``"proven_outside"`` when the
+    contact was created at or after the first instant past the window: it did
+    not exist while the window was open, so it cannot have entered SQL inside
+    it.
+
+    **The boundary UPPER bound** (PR-ADS-160). ``known_reached_sql_by`` is an
+    observation instant at which the contact had ALREADY reached SQL. If that
+    instant is at or before the window's start, the SQL transition happened
+    strictly before the window opened, so it cannot belong to this window
+    either. This is the rule that lets windows opening after the boundary stop
+    carrying the 533 historical unknowns.
+
+    Everything else is ``"unresolved"``, including:
+
+    * unknown creation time — rules the contact out of nothing;
+    * no boundary evidence — the same;
+    * a window that OVERLAPS the boundary, where the unknown event could fall on
+      either side of it;
+    * an open-ended window (All Time), which can never rule anything out.
+
+    Note what this function still refuses to do. It never returns a date, and
+    ``known_reached_sql_by`` is never compared against the window END to place
+    the contact INSIDE a window. "It had reached SQL by B, and B is inside this
+    window" says nothing about whether the transition happened in this window or
+    any earlier one.
     """
     end = _window_end_exclusive(window_end)
-    if end is None:
-        return "unresolved"
     created = _as_datetime(created_at)
-    if created is None:
-        return "unresolved"
-    return "proven_outside" if created >= end else "unresolved"
+    if end is not None and created is not None and created >= end:
+        return "proven_outside"
+
+    # The boundary bound needs a window START to compare against. An open-ended
+    # window (All Time, or any window with no lower bound) has none, and nothing
+    # can be ruled out of it.
+    start = _as_datetime(window_start)
+    bound = _as_datetime(known_reached_sql_by)
+    if start is not None and bound is not None and bound <= start:
+        return "proven_outside"
+    return "unresolved"
 
 
-def window_membership(unresolved_rows, window_end) -> dict:
+def window_membership(unresolved_rows, window_end, window_start=None) -> dict:
     """Split the global undated population against ONE window.
 
-    ``unresolved_rows`` is ``[{"contact_id", "created_at"}, …]`` — every contact
-    that reached SQL with no effective entry date. The same list is used for
-    every window; what changes is how much of it can be ruled out.
+    ``unresolved_rows`` is ``[{"contact_id", "created_at",
+    "known_reached_sql_by"}, …]`` — every contact that reached SQL with no
+    effective entry date. The same list is used for every window; what changes
+    is how much of it can be ruled out.
     """
     rows = list(unresolved_rows or [])
     proven_outside = 0
     unresolved = 0
     unknown_creation = 0
+    bounded = 0
+    excluded_by_boundary = 0
     for row in rows:
-        created = (row or {}).get("created_at")
+        row = row or {}
+        created = row.get("created_at")
+        bound = row.get("known_reached_sql_by")
         if created is None:
             unknown_creation += 1
-        if membership_verdict(created, window_end) == "proven_outside":
+        if bound is not None:
+            bounded += 1
+        verdict = membership_verdict(created, window_end, bound, window_start)
+        if verdict == "proven_outside":
             proven_outside += 1
+            # Attributed to the boundary only when creation alone could NOT
+            # have ruled it out — so the two rules are never double-counted.
+            if membership_verdict(created, window_end) != "proven_outside":
+                excluded_by_boundary += 1
         else:
             unresolved += 1
     return {
@@ -139,12 +179,19 @@ def window_membership(unresolved_rows, window_end) -> dict:
         # contacts can never be ruled out of any window by any amount of
         # window arithmetic, so they bound what this method can ever achieve.
         "unresolved_without_created_at": unknown_creation,
+        # PR-ADS-160: how much of the exclusion the BOUNDARY is responsible for,
+        # kept apart from the creation rule so neither can silently absorb the
+        # other's work — or its absence.
+        "window_membership_bounded": bounded,
+        "window_membership_excluded_by_boundary": excluded_by_boundary,
         "global_missing_sql_entry_date": len(rows),
     }
 
 
 def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
-                    unresolved_rows, population_available: bool = True) -> dict:
+                    unresolved_rows, population_available: bool = True,
+                    window_start=None, boundary_observed_at=None,
+                    open_post_boundary_incidents=None) -> dict:
     """One window's SQL coverage verdict, and whether it may publish a total.
 
     ``confirmed_sqls`` is the count of contacts with a PROVEN effective
@@ -155,6 +202,14 @@ def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
     The complete total is publishable only when no undated contact could belong
     to this window. While any could, the complete total and the CPQL derived
     from it are unavailable — not zero, not the confirmed subset relabelled.
+
+    PR-ADS-160 adds ``window_start`` (needed for the boundary's upper-bound
+    exclusion), ``boundary_observed_at`` and ``open_post_boundary_incidents``,
+    and reports a per-window certification verdict alongside the existing
+    completeness verdict. The two are different questions: completeness asks
+    whether the HISTORICAL population can be ruled out, certification asks
+    whether the window lies wholly in the period for which evidence is
+    guaranteed going forward.
     """
     if not population_available:
         return {
@@ -164,6 +219,8 @@ def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
             "global_missing_sql_entry_date": None,
             "window_membership_unresolved": None,
             "window_membership_proven_outside": None,
+            "window_membership_bounded": None,
+            "window_membership_excluded_by_boundary": None,
             "window_total_complete": False,
             "complete_sql_total": None,
             "cpql_publishable": False,
@@ -171,9 +228,10 @@ def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
             "explanation": (
                 "the lifecycle-SQL population could not be read, so this "
                 "window's completeness is unknown — not complete, and not zero"),
+            **_certification(None, None, None, None, available=False),
         }
 
-    split = window_membership(unresolved_rows, window_end)
+    split = window_membership(unresolved_rows, window_end, window_start)
     unresolved = split["window_membership_unresolved"]
     complete = unresolved == 0
     return {
@@ -188,7 +246,122 @@ def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
         "cpql_publishable": complete,
         "reason": COVERAGE_COMPLETE if complete else COVERAGE_UNRESOLVED_MEMBERSHIP,
         "explanation": _explain(complete, unresolved, split, window_end),
+        **_certification(window_start, window_end, boundary_observed_at,
+                         open_post_boundary_incidents, complete=complete),
     }
+
+
+# ── PR-ADS-160 §6 — per-window certification, stated in stable codes ─────────
+#: Every prerequisite this module can judge is met. NOT a claim that the window
+#: IS certified: freshness and reader reconciliation are checked by the audit,
+#: which may still withhold certification. This says "nothing here blocks it".
+CERT_ELIGIBLE = "eligible"
+#: The window opens before the boundary, so it contains historical SQL events
+#: whose dates are unknowable. It can never be certified.
+CERT_PRE_BOUNDARY = "not_certifiable_window_precedes_boundary"
+#: The window straddles the boundary instant. An undated historical event could
+#: fall on either side of it, so membership stays genuinely open.
+CERT_OVERLAPS_BOUNDARY = "not_certifiable_window_overlaps_boundary"
+#: Open post-boundary incidents exist that this window cannot rule out.
+CERT_POST_BOUNDARY_GAPS = "not_certifiable_open_post_boundary_gaps"
+#: Membership of the historical undated population is not fully resolved here.
+CERT_INCOMPLETE = "not_certifiable_unresolved_membership"
+#: No completed boundary exists yet, so "after the boundary" has no meaning.
+CERT_NO_BOUNDARY = "not_certifiable_no_boundary_established"
+#: The inputs could not be read. Never rendered as "not certified" — unknown.
+CERT_UNAVAILABLE = "certification_unavailable"
+
+
+def _certification(window_start, window_end, boundary_observed_at,
+                   open_incidents, *, complete: bool = False,
+                   available: bool = True) -> dict:
+    """Can THIS window become certified? The window-local half of the answer.
+
+    Certification is deliberately split in two. This function judges what can be
+    judged from the window and the evidence population alone; the audit adds
+    dataset freshness and the 44-way reader reconciliation on top and may still
+    refuse. Neither half can grant certification by itself.
+
+    An open-ended window is never certifiable: "All Time" necessarily includes
+    the historical period whose dates are unknowable, and no boundary changes
+    that.
+    """
+    if not available:
+        return {"certification_status": CERT_UNAVAILABLE,
+                "certification_eligible": False,
+                "window_after_boundary": None,
+                "open_post_boundary_gaps": None,
+                "certification_explanation": (
+                    "the inputs could not be read, so certification is unknown "
+                    "— not granted, and not refused")}
+
+    start = _as_datetime(window_start)
+    boundary = _as_datetime(boundary_observed_at)
+    end = _window_end_exclusive(window_end)
+    gaps = 0 if open_incidents is None else int(open_incidents)
+
+    if boundary is None:
+        return {"certification_status": CERT_NO_BOUNDARY,
+                "certification_eligible": False,
+                "window_after_boundary": None,
+                "open_post_boundary_gaps": open_incidents,
+                "certification_explanation": (
+                    "no completed coverage boundary exists, so no window can "
+                    "yet be certified")}
+
+    # An open-ended or unbounded-start window spans the historical period.
+    if start is None:
+        return {"certification_status": CERT_PRE_BOUNDARY,
+                "certification_eligible": False,
+                "window_after_boundary": False,
+                "open_post_boundary_gaps": open_incidents,
+                "certification_explanation": (
+                    "this window has no start bound, so it includes the "
+                    "historical period whose SQL dates are unknowable")}
+
+    after_boundary = start >= boundary
+    if not after_boundary:
+        # Does it merely precede the boundary, or straddle it?
+        straddles = end is None or end > boundary
+        status = CERT_OVERLAPS_BOUNDARY if straddles else CERT_PRE_BOUNDARY
+        detail = ("straddles the boundary instant, so an undated historical "
+                  "event could fall on either side of it"
+                  if straddles else
+                  "closes before the boundary, so it lies entirely inside the "
+                  "historical period whose SQL dates are unknowable")
+        return {"certification_status": status,
+                "certification_eligible": False,
+                "window_after_boundary": False,
+                "open_post_boundary_gaps": open_incidents,
+                "certification_explanation": f"this window {detail}"}
+
+    if gaps:
+        return {"certification_status": CERT_POST_BOUNDARY_GAPS,
+                "certification_eligible": False,
+                "window_after_boundary": True,
+                "open_post_boundary_gaps": open_incidents,
+                "certification_explanation": (
+                    f"{gaps} post-boundary contact(s) reached SQL with no exact "
+                    f"entry date and cannot be ruled out of this window")}
+
+    if not complete:
+        return {"certification_status": CERT_INCOMPLETE,
+                "certification_eligible": False,
+                "window_after_boundary": True,
+                "open_post_boundary_gaps": open_incidents,
+                "certification_explanation": (
+                    "membership of the undated population is not fully "
+                    "resolved for this window")}
+
+    return {"certification_status": CERT_ELIGIBLE,
+            "certification_eligible": True,
+            "window_after_boundary": True,
+            "open_post_boundary_gaps": open_incidents,
+            "certification_explanation": (
+                "this window opens at or after the proven boundary, no open "
+                "post-boundary gap can belong to it, and every historical "
+                "undated contact is ruled out — freshness and reader "
+                "reconciliation are still checked by the audit")}
 
 
 def _explain(complete: bool, unresolved: int, split: dict, window_end) -> str:
@@ -198,6 +371,13 @@ def _explain(complete: bool, unresolved: int, split: dict, window_end) -> str:
         if not split["global_missing_sql_entry_date"]:
             return ("every lifecycle-SQL contact has a proven entry date, so "
                     "this window's population is complete")
+        bounded = split.get("window_membership_excluded_by_boundary") or 0
+        if bounded:
+            by_creation = proven - bounded
+            return (f"all {proven} undated lifecycle-SQL contact(s) are ruled "
+                    f"out of this window: {by_creation} created after it ended, "
+                    f"and {bounded} already at SQL before it began. Neither "
+                    f"gives any of them a date")
         return (f"all {proven} undated lifecycle-SQL contact(s) were created "
                 f"after this window ended, so none of them can have entered "
                 f"SQL inside it")

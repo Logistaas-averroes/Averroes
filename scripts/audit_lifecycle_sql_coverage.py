@@ -233,7 +233,130 @@ def audit_population(f: Findings) -> dict:
     return {"available": True, **population}
 
 
-def audit_windows(f: Findings, population: dict, now: datetime) -> list[dict]:
+def audit_boundary(f: Findings) -> dict:
+    """PR-ADS-160 — the boundary, the bounded population, and the open gaps.
+
+    Reports the historical and prospective sides SEPARATELY. Before this PR
+    there was one undated population and one number; after it, "a date HubSpot
+    does not hold" and "a date we failed to capture" are different findings with
+    different remedies, and adding them would hide the second inside the first.
+    """
+    from db import crm_funnel_repository as repo
+
+    state = repo.fetch_active_sql_coverage_boundary()
+    if not state.get("available"):
+        f.unavailable_now("sql_coverage_boundary",
+                          "the coverage-boundary store could not be read, so "
+                          "no window's certification can be assessed")
+        return {"available": False, "boundary": None,
+                "boundary_established": None,
+                "open_post_boundary_incidents": None,
+                "post_boundary_incidents_available": False}
+
+    boundary = state.get("boundary")
+    incidents = repo.fetch_post_boundary_incidents(status="open")
+    if not incidents.get("available"):
+        f.unavailable_now("post_boundary_incidents",
+                          "the post-boundary incident store could not be read; "
+                          "a window must not certify while its blockers are "
+                          "invisible")
+        open_count = None
+    else:
+        open_count = incidents.get("open_count")
+
+    if boundary is None:
+        # Not a violation and not an outage: the boundary simply has not been
+        # established yet. Certification is unavailable, and says so.
+        f.passed("sql_coverage_boundary",
+                 "no coverage boundary is established yet, so no window is "
+                 "certifiable — this is a state, not a failure")
+    else:
+        f.passed("sql_coverage_boundary",
+                 f"boundary {boundary.get('boundary_id')} observed at "
+                 f"{boundary.get('observed_at')}, bounding "
+                 f"{boundary.get('contacts_bounded')} legacy undated contact(s)")
+
+    rows = incidents.get("rows") or []
+    by_reason: dict = {}
+    for row in rows:
+        key = row.get("reason")
+        by_reason[key] = by_reason.get(key, 0) + 1
+
+    return {
+        "available": True,
+        "boundary": boundary,
+        "boundary_established": boundary is not None,
+        "boundary_id": (boundary or {}).get("boundary_id"),
+        "boundary_observed_at": (boundary or {}).get("observed_at"),
+        "legacy_undated_bounded": (boundary or {}).get("contacts_bounded"),
+        # NULL, never 0, when the store could not be read.
+        "open_post_boundary_incidents": open_count,
+        "post_boundary_incidents_available": bool(incidents.get("available")),
+        "post_boundary_incident_reasons": dict(sorted(by_reason.items())),
+    }
+
+
+def audit_certification(f: Findings, windows: list, boundary: dict,
+                        reconciliation: dict) -> dict:
+    """Which windows may be certified — the whole gate, not the window-local half.
+
+    ``analysis.lifecycle_sql_coverage`` judges the window against the boundary
+    and the evidence population. Two further conditions are global and are
+    applied here:
+
+      * every canonical reader must reconcile (all 44 combinations);
+      * the audit itself must have been able to look.
+
+    A window that is locally eligible is NOT certified while either fails.
+    Certification is a claim that a published number is trustworthy, so every
+    input to it must be proven, not merely un-contradicted.
+    """
+    reconciled = bool(reconciliation.get("reconciliation_complete"))
+    boundary_readable = bool(boundary.get("available"))
+    incidents_readable = bool(boundary.get("post_boundary_incidents_available"))
+
+    certified, blocked = [], []
+    for win in windows or []:
+        label = f"{win.get('window_type')}/{win.get('window')}"
+        locally_eligible = bool(win.get("certification_eligible"))
+        if not locally_eligible:
+            blocked.append({"window": label,
+                            "reason": win.get("certification_status")})
+            win["certified"] = False
+            continue
+        if not (reconciled and boundary_readable and incidents_readable):
+            reason = ("canonical_readers_did_not_reconcile" if not reconciled
+                      else "certification_inputs_unreadable")
+            blocked.append({"window": label, "reason": reason})
+            win["certified"] = False
+            win["certification_status"] = reason
+            continue
+        certified.append(label)
+        win["certified"] = True
+
+    if certified:
+        f.passed("window_certification",
+                 f"{len(certified)} window(s) certified: {', '.join(certified)}")
+    else:
+        f.passed("window_certification",
+                 "no window is certified — every window either opens before the "
+                 "boundary, carries unresolved membership, or has an unmet "
+                 "global prerequisite")
+
+    return {
+        "certified_windows": certified,
+        "blocked_windows": blocked,
+        "windows_certified": len(certified),
+        "windows_assessed": len(windows or []),
+        "readers_reconciled": reconciled,
+        "boundary_readable": boundary_readable,
+        "incidents_readable": incidents_readable,
+    }
+
+
+def audit_windows(f: Findings, population: dict, now: datetime,
+                  boundary: dict | None = None,
+                  open_incidents=None) -> list[dict]:
     """Per-window coverage — the global gap resolved against each window ONCE."""
     from analysis import lifecycle_sql_coverage as coverage
     from analysis.crm_lifecycle import EVENT_DATE_COLUMN, EVENT_SQL
@@ -242,13 +365,19 @@ def audit_windows(f: Findings, population: dict, now: datetime) -> list[dict]:
     from services import canonical_contact_outcome_service as canon
 
     windows = resolve_all_windows(canon, now)
-    unresolved_rows = repo.fetch_unresolved_sql_created_at_bounds()
+    # PR-ADS-160: both temporal bounds, not just creation. The boundary's upper
+    # bound is what lets a window opening after it stop carrying the historical
+    # undated population. It is read here as a BOUND and never as a date.
+    unresolved_rows = repo.fetch_unresolved_sql_boundary_bounds(
+        boundary_id=(boundary or {}).get("boundary_id"))
     if not unresolved_rows.get("available"):
         f.unavailable_now("window_membership",
                           "the undated lifecycle-SQL contacts could not be read")
         rows, rows_available = [], False
     else:
         rows, rows_available = unresolved_rows.get("rows") or [], True
+
+    boundary_observed = (boundary or {}).get("observed_at")
 
     contacts = repo.fetch_all_funnel_contacts()
     if not contacts.get("available"):
@@ -271,7 +400,9 @@ def audit_windows(f: Findings, population: dict, now: datetime) -> list[dict]:
         block = coverage.window_coverage(
             window=win.get("window_key"), window_end=end,
             confirmed_sqls=confirmed, recovered_sqls=recovered,
-            unresolved_rows=rows, population_available=rows_available)
+            unresolved_rows=rows, population_available=rows_available,
+            window_start=start, boundary_observed_at=boundary_observed,
+            open_post_boundary_incidents=open_incidents)
         block["window_start"] = str(start) if start else None
         block["window_end"] = str(end) if end else None
         block["window_type"] = win.get("window_type")
@@ -589,8 +720,14 @@ def run(now: datetime | None = None) -> tuple[Findings, dict]:
     report["effective_date"] = check_effective_date_consistency(f)
     report["evidence_states"] = audit_evidence_states(f)
     report["population"] = audit_population(f)
-    report["windows"] = audit_windows(f, report["population"], now)
+    report["boundary"] = audit_boundary(f)
+    report["windows"] = audit_windows(
+        f, report["population"], now,
+        boundary=report["boundary"].get("boundary"),
+        open_incidents=report["boundary"].get("open_post_boundary_incidents"))
     report["read_reconciliation"] = audit_read_reconciliation(f, now)
+    report["certification"] = audit_certification(
+        f, report["windows"], report["boundary"], report["read_reconciliation"])
 
     windows = [w for w in report["windows"] if w.get("window_total_complete")
                is not None]
@@ -624,6 +761,23 @@ def _render(report: dict, findings: Findings, exit_code: int) -> None:
         print(f"    {pop.get('unresolved')}  global_missing_sql_entry_date")
         print(f"    {pop.get('unresolved_without_created_at')}  of those with no creation time either")
 
+    bound = report.get("boundary") or {}
+    print("\n  COVERAGE BOUNDARY  (historical vs prospective)")
+    if not bound.get("available"):
+        print("    unavailable — the boundary store could not be read")
+    elif not bound.get("boundary_established"):
+        print("    none established yet — no window is certifiable")
+    else:
+        print(f"    boundary id:            {bound.get('boundary_id')}")
+        print(f"    observed at (UTC):      {bound.get('boundary_observed_at')}")
+        print(f"    legacy undated bounded: {bound.get('legacy_undated_bounded')}"
+              "   ← an UPPER BOUND, never a date")
+    incidents = bound.get("open_post_boundary_incidents")
+    print(f"    open post-boundary gaps: "
+          f"{'unavailable' if incidents is None else incidents}")
+    for reason, count in (bound.get("post_boundary_incident_reasons") or {}).items():
+        print(f"      {count}x {reason}")
+
     print("\n  PER-WINDOW MEMBERSHIP  (the global gap, resolved against each window)")
     for win in report.get("windows") or []:
         # `all_time` exists in BOTH the evidence and business window families,
@@ -634,12 +788,21 @@ def _render(report: dict, findings: Findings, exit_code: int) -> None:
             print(f"    {label:<28} unavailable")
             continue
         mark = "complete" if win["window_total_complete"] else "INCOMPLETE"
-        print(f"    {label:<28} {mark:<11} "
+        cert = "CERTIFIED" if win.get("certified") else "not certified"
+        print(f"    {label:<28} {mark:<11} {cert:<14} "
               f"confirmed={win.get('confirmed_sqls')} "
               f"(recovered={win.get('window_membership_recovered')}) "
               f"unresolved={win.get('window_membership_unresolved')} "
-              f"ruled_out={win.get('window_membership_proven_outside')}")
+              f"ruled_out={win.get('window_membership_proven_outside')} "
+              f"(by_boundary={win.get('window_membership_excluded_by_boundary')})")
         print(f"      why: {win.get('explanation')}")
+        if not win.get("certified"):
+            print(f"      certification: {win.get('certification_status')}")
+
+    cert = report.get("certification") or {}
+    print(f"\n  CERTIFICATION  {cert.get('windows_certified')}/"
+          f"{cert.get('windows_assessed')} window(s) certified")
+    print(f"    canonical readers reconciled: {cert.get('readers_reconciled')}")
 
     recon = report.get("read_reconciliation") or {}
     if recon.get("combinations_expected"):

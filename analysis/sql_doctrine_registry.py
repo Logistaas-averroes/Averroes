@@ -688,6 +688,7 @@ _WRITE_CLASS = "Source classification cache writer"
 _SYNC = "HubSpot contact funnel sync (canonical ingestion)"
 _RECOVERY = "Lifecycle stage-history recovery (CLI)"
 _SQL_COVERAGE = "PR-ADS-159 lifecycle SQL coverage audit"
+_SQL_BOUNDARY = "PR-ADS-160 prospective SQL coverage boundary"
 _LEADREC = "Lead reconciliation (legacy business-date backfill)"
 _LEGACY_ENGINE = "Legacy contact-outcome contract (canonical_contact_outcome_service)"
 _FUNNEL_ENGINE = "Canonical CRM funnel contract (canonical_crm_funnel_service)"
@@ -768,6 +769,16 @@ RULES: list[dict] = [
        symbol=["fetch_funnel_contacts", "fetch_all_funnel_contacts", "fetch_funnel_contact_page",
                "fetch_operational_status_counts", "fetch_contacts_missing_stage_dates",
                "_funnel_select", "_effective_date_sql", "_recovery_join"]),
+    # PR-ADS-160 — the boundary read side. Diagnostic: these return an UPPER
+    # BOUND on an unknown event and an incident list. None of them returns a
+    # stage-entry date, and `contact_created_at` appears only as the LOWER
+    # bound carried for triage.
+    _r("sqlboundary.repo", "db/crm_funnel_repository.py", CLS_DIAGNOSTIC, _SQL_BOUNDARY,
+       symbol=["fetch_active_sql_coverage_boundary",
+               "fetch_unresolved_sql_boundary_bounds",
+               "fetch_post_boundary_incidents",
+               "fetch_boundary_candidate_population",
+               "fetch_post_boundary_sql_contacts"]),
     _m("engine.lifecycle.taxonomy", "analysis/crm_lifecycle.py", CLS_CANONICAL, _FUNNEL_ENGINE,
        _LIFECYCLE_MARKERS),
     _m("engine.platform.module", "services/platform_sql_attribution_service.py", CLS_LEGACY,
@@ -908,7 +919,46 @@ RULES: list[dict] = [
        symbol=["run", "main", "_render", "audit_windows", "audit_population",
                "audit_read_reconciliation", "audit_evidence_states",
                "check_effective_date_consistency", "_function_source",
-               "_in_window", "Findings"]),
+               "_in_window", "Findings",
+               # PR-ADS-160 §6
+               "audit_boundary", "audit_certification"]),
+    # ── PR-ADS-160 — the prospective SQL coverage boundary ──────────────────
+    # Diagnostic, all three. None of them publishes an SQL number to any
+    # surface, and none of them writes a stage-entry date. The boundary service
+    # records an UPPER BOUND on an unknown event in its own tables; the CLI
+    # proposes and applies it locally; the gate reads both and fails when a
+    # bound has been mistaken for a date. They quote the SQL markers because the
+    # population they reason about is the SQL population.
+    _m("sqlboundary.svc.module", "services/sql_coverage_boundary_service.py",
+       CLS_DIAGNOSTIC, _SQL_BOUNDARY,
+       ["lifecycle_sql_column_ref", "lifecycle_sql_property_ref",
+        "lifecycle_sql_stage_ref"]),
+    _r("sqlboundary.svc", "services/sql_coverage_boundary_service.py",
+       CLS_DIAGNOSTIC, _SQL_BOUNDARY,
+       symbol=["establish_boundary", "detect_post_boundary_gaps",
+               "_consult_history", "_failed", "_gap_failed", "_coerce_utc",
+               "_count_reasons"]),
+    _m("sqlboundary.cli.module", "scripts/establish_sql_coverage_boundary.py",
+       CLS_DIAGNOSTIC, _SQL_BOUNDARY,
+       ["lifecycle_sql_column_ref", "lifecycle_sql_property_ref",
+        "lifecycle_sql_stage_ref"]),
+    _r("sqlboundary.cli", "scripts/establish_sql_coverage_boundary.py",
+       CLS_DIAGNOSTIC, _SQL_BOUNDARY,
+       symbol=["main", "_render", "_database_ready"]),
+    _m("sqlgate.module", "scripts/audit_sql_coverage_gate.py",
+       CLS_DIAGNOSTIC, _SQL_BOUNDARY,
+       ["lifecycle_sql_column_ref", "confirmed_sqls_ref", "cpql_ref",
+        # The allow-list of modules permitted to read the bound NAMES the
+        # repository module, as a string.
+        "lifecycle_funnel_service_ref"]),
+    _r("sqlgate", "scripts/audit_sql_coverage_gate.py", CLS_DIAGNOSTIC,
+       _SQL_BOUNDARY,
+       symbol=["run", "main", "_render", "_code_lines", "Gate",
+               "check_timestamps_cannot_be_erased", "check_bound_is_not_a_date",
+               "check_no_boundary_timestamp_in_event_dates",
+               "check_no_open_post_boundary_gaps",
+               "check_certified_windows_are_resolved"]),
+
     _m("leadrec.module", "services/lead_reconciliation_service.py", CLS_MIXED, _LEADREC,
        ["contact_created_at_ref"]),
     _m("revrecovery.module", "services/revenue_recovery_service.py", CLS_MIXED, _LEADREC,
@@ -934,7 +984,19 @@ RULES: list[dict] = [
     _r("writers.funnel", "db/writers.py", CLS_CANONICAL, _SYNC, symbol="upsert_hubspot_contact_funnel"),
     _m("writers.module.legacy", "db/writers.py", CLS_LEGACY, _WRITE_LEADS, ["legacy_qualified_symbol"]),
     _m("writers.module.funnel", "db/writers.py", CLS_CANONICAL, _SYNC, ["lifecycle_sql_column_ref"]),
+    # PR-ADS-160 — boundary and incident writers. They write bounds and
+    # incidents into their OWN tables; neither writes a stage-entry date.
+    _r("sqlboundary.writers", "db/writers.py", CLS_DIAGNOSTIC, _SQL_BOUNDARY,
+       symbol=["apply_sql_coverage_boundary", "record_post_boundary_incidents",
+               "resolve_post_boundary_incidents", "_contact_funnel_set"]),
+    _m("writers.module.boundary", "db/writers.py", CLS_DIAGNOSTIC, _SQL_BOUNDARY,
+       ["contact_created_at_ref"]),
     _m("schema.funnel", "db/schema.py", CLS_CANONICAL, _SYNC, ["lifecycle_sql_column_ref"]),
+    # PR-ADS-160 — the boundary tables. The DDL comment states the exhausted
+    # production population verbatim, so it necessarily names the SQL property
+    # and stage it is about.
+    _m("schema.boundary", "db/schema.py", CLS_DIAGNOSTIC, _SQL_BOUNDARY,
+       ["lifecycle_sql_property_ref", "lifecycle_sql_stage_ref"]),
     _m("schema.legacy", "db/schema.py", CLS_LEGACY, _WRITE_LEADS,
        ["confirmed_sqls_ref", "contact_created_at_ref"]),
 

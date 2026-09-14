@@ -370,3 +370,52 @@ geo rows, coverage state, failure history, checkpoints and reconciliation
 evidence are all retained.
 
 Full doctrine: `docs/36_CANONICAL_COUNTRY_GEOGRAPHY.md`.
+
+
+## PR-ADS-160 — Prospective SQL coverage boundary (September 2026)
+
+**The historical question is closed by exhaustion.** PR-ADS-159's production
+validation read every candidate: 1,261 contacts whose lifecycle stage proves
+they reached SQL, 728 with HubSpot's direct property, **0** recoverable from
+lifecycle history, **533** with no provable timestamp. All 533 returned valid
+HubSpot history and none of it held a transition into `salesqualifiedlead`.
+Those dates are absent from HubSpot, not missing from us. **They are never
+invented, here or anywhere.**
+
+**What this PR adds instead.** An immutable, local, provenance-carrying
+*boundary*: an upper bound recording that a contact had **already** reached SQL
+by an observed instant. It can only disprove membership — an event known to be
+over before a window opened cannot have happened inside it — and it is never a
+date. It lives in its own tables under `known_reached_sql_by`, and a monitoring
+gate fails if it is ever read as an event date or appears in a stage-entry
+column.
+
+**The defect it also fixes, proven against real PostgreSQL.** The contact-funnel
+upsert refreshed every column from the incoming payload under a *staleness*
+guard only. A later payload that omitted `hs_v2_date_entered_salesqualifiedlead`
+therefore blanked a stored date and reported `{'ok': True, 'persisted': 1}` —
+destroying the only evidence a contact entered SQL, and the evidence that
+anything had been lost. Stage-entry columns are now refreshed only from a
+present value; lifecycle stage and status deliberately keep latest-state
+semantics, because for those a cleared value is a real fact.
+
+**New in this PR.**
+
+| Path | Purpose |
+| --- | --- |
+| `services/sql_coverage_boundary_service.py` | boundary creation and post-boundary gap detection; no HubSpot write path |
+| `scripts/establish_sql_coverage_boundary.py` | dry-run-by-default CLI; local `--apply`; atomic; idempotent |
+| `scripts/audit_sql_coverage_gate.py` | read-only gate on the six guarantees; 0 holds / 1 broken / 2 blind |
+| `sql_coverage_boundary`, `sql_coverage_boundary_contact`, `sql_post_boundary_incident` | the boundary, its bounds, and prospective gaps |
+| `hubspot/sql_coverage_gaps` | scheduler dataset; a new gap is an **error** on the run, not a log line |
+
+**Unchanged, deliberately.** The SQL definition, the two permitted evidence
+sources, the creation-time lower-bound rule, and every canonical read path. All
+44 window/scope combinations still reconcile.
+
+**Not in this PR.** No consumer migration — the 25 legacy SQL consumers remain
+for **PR-ADS-161**. No production apply run. No HubSpot write. No complete
+historical SQL total, and no CPQL where coverage is incomplete. All Time stays
+incomplete permanently.
+
+Full doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`.

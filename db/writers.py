@@ -3487,8 +3487,48 @@ _CONTACT_FUNNEL_COLUMNS = (
 # through would blank out known-newer state. The guard only admits a write when
 # the STORED timestamp is absent (nothing to protect) or the incoming timestamp is
 # present and at least as new.
+#
+# ── PR-ADS-160 §5 — stage-entry evidence is NEVER erased by absence ──────────
+# The `last_modified_at` guard defends against a STALE write. It does nothing
+# about a SPARSE one, and the two are different hazards. Proven against a real
+# PostgreSQL instance before this fix existed:
+#
+#     first payload   date_entered_sql = 2026-09-02   -> stored
+#     later payload   property absent (NULL)          -> {'ok': True,
+#                                                         'persisted': 1}
+#     stored value    date_entered_sql = None         ← silently erased
+#
+# The write REPORTED SUCCESS while destroying the only proof that a contact
+# entered SQL, and nothing downstream could tell the difference between "this
+# contact never had a date" and "we had one and overwrote it with nothing".
+#
+# These columns are therefore refreshed only from a PRESENT incoming value.
+# `COALESCE(EXCLUDED.col, table.col)` keeps a stored timestamp when the new
+# payload omits the property, and still lets a real correction through: HubSpot
+# sending a DIFFERENT non-null date overwrites as before.
+#
+# This is deliberately narrow. It applies ONLY to stage-entry evidence, which
+# HubSpot only ever adds to. Lifecycle stage, status and the source fields keep
+# plain latest-state semantics, because for those a cleared value is itself a
+# real fact that must propagate.
+_CONTACT_FUNNEL_EVIDENCE_COLUMNS = (
+    "date_entered_lead", "date_entered_mql", "date_entered_sql",
+    "date_entered_opportunity", "date_entered_customer",
+    "latest_stage_entry_at",
+)
+
+
+def _contact_funnel_set(col: str) -> str:
+    if col in _CONTACT_FUNNEL_EVIDENCE_COLUMNS:
+        # Absence is not a correction. Only a present value may replace one.
+        return (f"{col} = COALESCE(EXCLUDED.{col}, "
+                f"hubspot_contact_funnel.{col})")
+    return f"{col} = EXCLUDED.{col}"
+
+
 _CONTACT_FUNNEL_UPDATE_SET = ",\n                        ".join(
-    f"{col} = EXCLUDED.{col}" for col in _CONTACT_FUNNEL_COLUMNS if col != "contact_id"
+    _contact_funnel_set(col)
+    for col in _CONTACT_FUNNEL_COLUMNS if col != "contact_id"
 )
 
 
@@ -3665,6 +3705,239 @@ def upsert_lifecycle_stage_history(rows: list, *, run_id: str) -> dict:
     except Exception as exc:  # noqa: BLE001
         log.error("upsert_lifecycle_stage_history failed: %s", exc)
         return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                "error": str(exc)[:300]}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PR-ADS-160 — the prospective SQL coverage boundary, write side
+# ══════════════════════════════════════════════════════════════════════════
+#
+# One local transaction, always. A boundary that exists without its bounded
+# contacts would silently rule NOTHING out while looking established, and a set
+# of bounded contacts without their boundary would be bounds nobody can trace.
+# Both halves commit together or neither does, so "partial boundary" is not a
+# state the rest of the system ever has to reason about.
+#
+# Nothing here writes to HubSpot. Nothing here writes a stage-entry date.
+
+def apply_sql_coverage_boundary(boundary: dict, contacts: list) -> dict:
+    """Write a boundary and its bounded contacts in ONE transaction.
+
+    Returns the structured result the rest of the repository uses::
+
+        {"ok": bool, "boundary_id": str, "contacts_written": int,
+         "already_applied": bool, "error": str | None}
+
+    Idempotent on ``boundary_id``. Re-applying the same boundary rewrites the
+    same rows rather than appending, and reports ``already_applied`` so a repeat
+    run is visibly a no-op instead of looking like fresh work.
+
+    The boundary row is written with its FINAL status inside the transaction —
+    there is no window in which a complete-looking boundary exists without the
+    contacts it bounds.
+    """
+    boundary_id = str((boundary or {}).get("boundary_id") or "").strip()
+    if not boundary_id:
+        return {"ok": False, "boundary_id": None, "contacts_written": 0,
+                "already_applied": False,
+                "error": "boundary_id is required"}
+
+    observed_at = _parse_ts_or_none((boundary or {}).get("observed_at"))
+    if observed_at is None:
+        # A boundary with no observation instant bounds nothing. Refusing here
+        # is the difference between "no boundary" and "a boundary that silently
+        # excludes nobody while appearing established".
+        return {"ok": False, "boundary_id": boundary_id, "contacts_written": 0,
+                "already_applied": False,
+                "error": "observed_at is required and must be a timestamp"}
+
+    rows = []
+    for c in (contacts or []):
+        cid = str((c or {}).get("contact_id") or "").strip()
+        if not cid:
+            continue
+        rows.append((
+            boundary_id, cid, observed_at,
+            (c or {}).get("lifecycle_stage"),
+            _parse_ts_or_none((c or {}).get("created_at")),
+        ))
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "boundary_id": boundary_id,
+                        "contacts_written": 0, "already_applied": False,
+                        "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM sql_coverage_boundary "
+                    "WHERE boundary_id = %s",
+                    (boundary_id,),
+                )
+                existing = cur.fetchone()
+                already = bool(existing) and existing[0] == "complete"
+
+                cur.execute(
+                    """
+                    INSERT INTO sql_coverage_boundary (
+                        boundary_id, observed_at, lifecycle_rule_version,
+                        source_dataset, source_run_id, population_definition,
+                        run_id, legacy_undated_sql_contacts, contacts_examined,
+                        contacts_bounded, status, completed_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            'complete', NOW(), NOW())
+                    ON CONFLICT (boundary_id) DO UPDATE SET
+                        observed_at               = EXCLUDED.observed_at,
+                        lifecycle_rule_version    = EXCLUDED.lifecycle_rule_version,
+                        source_dataset            = EXCLUDED.source_dataset,
+                        source_run_id             = EXCLUDED.source_run_id,
+                        population_definition     = EXCLUDED.population_definition,
+                        run_id                    = EXCLUDED.run_id,
+                        legacy_undated_sql_contacts =
+                            EXCLUDED.legacy_undated_sql_contacts,
+                        contacts_examined         = EXCLUDED.contacts_examined,
+                        contacts_bounded          = EXCLUDED.contacts_bounded,
+                        status                    = 'complete',
+                        failure_reason            = NULL,
+                        failure_detail            = NULL,
+                        completed_at              = NOW(),
+                        updated_at                = NOW()
+                    """,
+                    (boundary_id, observed_at,
+                     (boundary or {}).get("lifecycle_rule_version"),
+                     (boundary or {}).get("source_dataset"),
+                     (boundary or {}).get("source_run_id"),
+                     (boundary or {}).get("population_definition"),
+                     (boundary or {}).get("run_id"),
+                     (boundary or {}).get("legacy_undated_sql_contacts"),
+                     (boundary or {}).get("contacts_examined"),
+                     len(rows)),
+                )
+
+                written = 0
+                if rows:
+                    cur.executemany(
+                        """
+                        INSERT INTO sql_coverage_boundary_contact (
+                            boundary_id, contact_id, known_reached_sql_by,
+                            lifecycle_stage_at_boundary, created_at_lower_bound)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (boundary_id, contact_id) DO UPDATE SET
+                            known_reached_sql_by =
+                                EXCLUDED.known_reached_sql_by,
+                            lifecycle_stage_at_boundary =
+                                EXCLUDED.lifecycle_stage_at_boundary,
+                            created_at_lower_bound =
+                                EXCLUDED.created_at_lower_bound
+                        """,
+                        rows,
+                    )
+                    written = cur.rowcount if cur.rowcount is not None else len(rows)
+            conn.commit()
+        return {"ok": True, "boundary_id": boundary_id,
+                "contacts_written": max(0, int(written)),
+                "already_applied": already, "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("apply_sql_coverage_boundary failed: %s", exc)
+        return {"ok": False, "boundary_id": boundary_id, "contacts_written": 0,
+                "already_applied": False, "error": str(exc)[:300]}
+
+
+def record_post_boundary_incidents(incidents: list, *, run_id: str) -> dict:
+    """Record post-boundary SQL contacts that have no exact entry date.
+
+    Keyed on ``contact_id``: one open incident per contact, rewritten rather
+    than appended, so a recurring detection does not inflate the count. A
+    contact whose incident is already RESOLVED is not reopened by a later
+    observation that still lacks a date — resolution means an exact timestamp
+    arrived, and that fact does not expire.
+    """
+    prepared = []
+    for i in (incidents or []):
+        cid = str((i or {}).get("contact_id") or "").strip()
+        if not cid:
+            continue
+        prepared.append((
+            cid, (i or {}).get("boundary_id"), (i or {}).get("reason"),
+            (i or {}).get("lifecycle_stage"),
+            _parse_ts_or_none((i or {}).get("contact_created_at")),
+            bool((i or {}).get("history_checked")),
+            (i or {}).get("history_state"), run_id,
+        ))
+
+    if not prepared:
+        return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                        "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO sql_post_boundary_incident (
+                        contact_id, boundary_id, reason, lifecycle_stage,
+                        contact_created_at, history_checked, history_state,
+                        detected_by_run_id, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'open')
+                    ON CONFLICT (contact_id) DO UPDATE SET
+                        reason             = EXCLUDED.reason,
+                        lifecycle_stage    = EXCLUDED.lifecycle_stage,
+                        contact_created_at = EXCLUDED.contact_created_at,
+                        history_checked    = EXCLUDED.history_checked,
+                        history_state      = EXCLUDED.history_state,
+                        detected_by_run_id = EXCLUDED.detected_by_run_id,
+                        updated_at         = NOW()
+                    WHERE sql_post_boundary_incident.status <> 'resolved'
+                    """,
+                    prepared,
+                )
+                persisted = cur.rowcount if cur.rowcount is not None else len(prepared)
+            conn.commit()
+        return {"ok": True, "attempted": len(prepared),
+                "persisted": max(0, int(persisted)), "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("record_post_boundary_incidents failed: %s", exc)
+        return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                "error": str(exc)[:300]}
+
+
+def resolve_post_boundary_incidents(contact_ids: list, *, resolved_by: str) -> dict:
+    """Close incidents for contacts that now carry an exact SQL entry date.
+
+    ``resolved_by`` records WHICH permitted source supplied it —
+    ``direct_property`` or ``history`` — so a resolution is always traceable to
+    real evidence rather than to the passage of time.
+    """
+    ids = [str(c).strip() for c in (contact_ids or []) if str(c or "").strip()]
+    if not ids:
+        return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "attempted": len(ids), "persisted": 0,
+                        "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE sql_post_boundary_incident
+                       SET status      = 'resolved',
+                           resolved_at = NOW(),
+                           resolved_by = %s,
+                           updated_at  = NOW()
+                     WHERE contact_id = ANY(%s)
+                       AND status <> 'resolved'
+                    """,
+                    (resolved_by, ids),
+                )
+                persisted = cur.rowcount if cur.rowcount is not None else 0
+            conn.commit()
+        return {"ok": True, "attempted": len(ids),
+                "persisted": max(0, int(persisted)), "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("resolve_post_boundary_incidents failed: %s", exc)
+        return {"ok": False, "attempted": len(ids), "persisted": 0,
                 "error": str(exc)[:300]}
 
 

@@ -138,6 +138,11 @@ class TestSummaryShape:
             "google_ads_api/keyword_facts",
             "google_ads_api/search_terms",
             "mailchimp/refresh",
+            # PR-ADS-160: post-boundary SQL gap detection. It runs immediately
+            # after the contact funnel sync, over the contacts that sync just
+            # wrote, so a newly qualified contact with no exact SQL timestamp
+            # becomes a visible incident instead of joining the historical gap.
+            "hubspot/sql_coverage_gaps",
         }
         assert set(result["datasets"].keys()) == expected
 
@@ -791,6 +796,25 @@ def _patch_all_datasets_success(
     monkeypatch.setattr(
         "services.hubspot_contact_funnel_sync_service.get_bootstrap_mode",
         lambda: "incremental")
+
+    # PR-ADS-160: post-boundary SQL gap detection. Patched at the service seam
+    # like every other step, and mirroring the source_pull failure mode so the
+    # all-fail scenario still drives it to failure. A healthy fixture describes
+    # a run with NO boundary established yet — which is the true state until an
+    # operator applies one, and is a success rather than a gap.
+    def _sql_gaps_stub(*a, **kw):
+        if source_pull:
+            source_pull()  # raises in the all-fail scenario
+        return {"ok": True, "status": "success", "boundary_established": False,
+                "hubspot_writes_performed": False,
+                "new_sql_transitions_observed": 0,
+                "direct_sql_timestamps_present": 0,
+                "history_timestamps_recovered": 0,
+                "new_undated_sql_gaps": 0,
+                "unresolved_post_boundary_incidents": 0}
+    monkeypatch.setattr(
+        "services.sql_coverage_boundary_service.detect_post_boundary_gaps",
+        _sql_gaps_stub)
 
     def _fx_stub(*a, **kw):
         if source_pull:

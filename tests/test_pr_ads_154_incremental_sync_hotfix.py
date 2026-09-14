@@ -722,7 +722,9 @@ def test_10b_the_report_keys_are_the_labels(monkeypatch):
                  "_publish_geo_reconciliation", "_sync_mailchimp",
                  # PR-ADS-156: the two Platform Evidence datasets now run here
                  # too, so a healthy-path fixture has to describe them.
-                 "_sync_keyword_facts", "_sync_search_terms"):
+                 "_sync_keyword_facts", "_sync_search_terms",
+                 # PR-ADS-160: post-boundary SQL gap detection runs here too.
+                 "_detect_sql_coverage_gaps"):
         monkeypatch.setattr(sync, name, lambda **k: {"status": "success"})
 
     keys = set(sync.run_daily_incremental_sync(run_reason="test")["datasets"])
@@ -850,7 +852,9 @@ def test_a4_a_successful_run_record_proceeds_and_emits_the_canonical_type(monkey
                  "_publish_geo_reconciliation", "_sync_mailchimp",
                  # PR-ADS-156: the two Platform Evidence datasets now run here
                  # too, so a healthy-path fixture has to describe them.
-                 "_sync_keyword_facts", "_sync_search_terms"):
+                 "_sync_keyword_facts", "_sync_search_terms",
+                 # PR-ADS-160: post-boundary SQL gap detection runs here too.
+                 "_detect_sql_coverage_gaps"):
         monkeypatch.setattr(sync, name, lambda **k: {"status": "success"})
 
     out = sync.run_daily_incremental_sync(run_reason="test")

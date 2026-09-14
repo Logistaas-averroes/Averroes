@@ -499,6 +499,18 @@ def run_daily_incremental_sync(
         run_id=run_id, errors=errors,
     )
 
+    # ── PR-ADS-160 §5 — post-boundary SQL gap detection ─────────────────────
+    # Runs immediately AFTER the contact sync, over the contacts it just wrote.
+    # Before this, a newly qualified contact with no SQL-entry timestamp joined
+    # the undated population silently and became indistinguishable from the 533
+    # historical ones whose dates HubSpot genuinely does not hold.
+    #
+    # Now it is an explicit incident that blocks certification of every window
+    # it could belong to. Read-only against HubSpot; local writes only.
+    datasets["hubspot/sql_coverage_gaps"] = _detect_sql_coverage_gaps(
+        run_id=run_id, errors=errors,
+    )
+
     # ── hubspot/deals (via GCLID contacts in the deal window) ────────────────
     datasets["hubspot/deals"] = _sync_hubspot_deals(
         run_id=run_id, date_from=date_from_deals, date_to=today, errors=errors,
@@ -1045,6 +1057,63 @@ def _sync_contact_funnel(*, run_id, errors: list) -> dict:
         errors.append(err)
         log.warning("[incremental_sync] %s", err)
         return {"status": "failed", "error": str(exc)[:500]}
+
+
+def _detect_sql_coverage_gaps(*, run_id, errors: list) -> dict:
+    """PR-ADS-160 §5 — hold post-boundary SQL transitions to an exact timestamp.
+
+    Every contact that reaches SQL after the boundary must carry a date from one
+    of the two permitted sources. Where the direct property is absent, HubSpot
+    property history is READ (never written) and a genuine transition is
+    persisted. Where neither exists, an explicit incident is recorded.
+
+    A failure here is an ERROR on the run, not a silent zero. "We could not
+    check" and "we checked and everything is fine" produce the same-looking
+    dataset block otherwise, and only one of them means a window may certify.
+    """
+    from services.sql_coverage_boundary_service import (  # noqa: PLC0415
+        detect_post_boundary_gaps,
+    )
+
+    try:
+        result = detect_post_boundary_gaps(apply=True, run_id=run_id)
+        if not result.get("ok"):
+            err = f"hubspot/sql_coverage_gaps: {result.get('detail')}"
+            errors.append(err)
+            log.warning("[incremental_sync] %s", err)
+            return result
+
+        gaps = result.get("new_undated_sql_gaps") or 0
+        if gaps:
+            # A new post-boundary gap is exactly the condition this PR exists
+            # to surface, so it is an error on the run — visible in the summary
+            # and in whatever watches it — not a line in a log nobody reads.
+            err = (f"hubspot/sql_coverage_gaps: {gaps} post-boundary contact(s) "
+                   f"reached SQL with no exact entry timestamp "
+                   f"({result.get('incident_reasons')})")
+            errors.append(err)
+            log.warning("[incremental_sync] %s", err)
+        else:
+            log.info(
+                "[incremental_sync] hubspot/sql_coverage_gaps: observed=%s "
+                "direct=%s recovered=%s gaps=%s open_incidents=%s",
+                result.get("new_sql_transitions_observed"),
+                result.get("direct_sql_timestamps_present"),
+                result.get("history_timestamps_recovered"),
+                gaps, result.get("unresolved_post_boundary_incidents"),
+            )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        err = f"hubspot/sql_coverage_gaps: {exc}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+        return {"ok": False, "status": "failed", "error": str(exc)[:500],
+                "hubspot_writes_performed": False,
+                # Unknown, never zero: a pass that did not run proves nothing
+                # about how many prospective gaps exist.
+                "new_sql_transitions_observed": None,
+                "new_undated_sql_gaps": None,
+                "unresolved_post_boundary_incidents": None}
 
 
 def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:
