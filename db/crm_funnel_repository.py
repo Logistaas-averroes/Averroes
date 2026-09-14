@@ -481,6 +481,289 @@ def fetch_unresolved_sql_created_at_bounds() -> dict:
         return _unavailable(rows=[])
 
 
+# ── PR-ADS-160 — the prospective coverage boundary, read side ───────────────
+#
+# Every read here returns the boundary as what it is: an UPPER BOUND on an
+# unknown event. `known_reached_sql_by` is never selected into a date column,
+# never coalesced into `effective_date_sql`, and never joined into the canonical
+# funnel reads. The only consumer is the coverage analysis, which uses it solely
+# to rule a contact OUT of a window.
+
+BOUNDARY_TABLE = "sql_coverage_boundary"
+BOUNDARY_CONTACT_TABLE = "sql_coverage_boundary_contact"
+INCIDENT_TABLE = "sql_post_boundary_incident"
+
+#: A boundary is usable only when its application COMPLETED. A pending or
+#: failed row proves nothing and must never bound anything.
+BOUNDARY_STATUS_PENDING = "pending"
+BOUNDARY_STATUS_COMPLETE = "complete"
+BOUNDARY_STATUS_FAILED = "failed"
+
+
+def fetch_contact_funnel_sync_state(*, scope: str = "contacts") -> dict:
+    """The canonical contact-funnel ingestion state, for freshness and provenance.
+
+    ``available=False`` means the state could not be READ — never "the sync has
+    not run". A window must not certify while it is unknown whether its source
+    is still updating.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(row=None)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT scope, bootstrap_status, bootstrap_completed_at,
+                           last_modified_watermark, last_incremental_at,
+                           latest_modified_at, contacts_seen, pages_fetched,
+                           last_batch_id, last_error, updated_at,
+                           -- PR-ADS-160 §3: the evidence that distinguishes a
+                           -- successful INCREMENTAL from a successful bootstrap.
+                           -- Without these the freshness contract cannot tell
+                           -- a live feed from a backfill.
+                           last_status, last_sync_mode,
+                           last_successful_incremental_at,
+                           last_incremental_status
+                      FROM hubspot_contact_funnel_sync_state
+                     WHERE scope = %s
+                    """,
+                    (scope,),
+                )
+                rows = _rows_as_dicts(cur)
+        return {"available": True, "row": rows[0] if rows else None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_contact_funnel_sync_state failed: %s", exc)
+        return _unavailable(row=None)
+
+
+def fetch_active_sql_coverage_boundary() -> dict:
+    """The most recent COMPLETED boundary, or an explicit absence.
+
+    ``available=False`` means the boundary store could not be read — never
+    "there is no boundary". The two lead to opposite behaviour: no boundary
+    means nothing can be certified yet, while an unreadable store means the
+    audit cannot say whether anything can be certified, and must fail closed.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(boundary=None)
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT boundary_id, observed_at, lifecycle_rule_version,
+                           source_dataset, source_run_id, population_definition,
+                           run_id, legacy_undated_sql_contacts,
+                           contacts_examined, contacts_bounded, status,
+                           created_at, completed_at
+                    FROM {BOUNDARY_TABLE}
+                    WHERE status = %s
+                    ORDER BY observed_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (BOUNDARY_STATUS_COMPLETE,),
+                )
+                rows = _rows_as_dicts(cur)
+        return {"available": True, "boundary": rows[0] if rows else None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_active_sql_coverage_boundary failed: %s", exc)
+        return _unavailable(boundary=None)
+
+
+def fetch_unresolved_sql_boundary_bounds(*, boundary_id: str | None = None) -> dict:
+    """Every unresolved lifecycle-SQL contact, with BOTH of its temporal bounds.
+
+    Extends ``fetch_unresolved_sql_created_at_bounds`` with the boundary's upper
+    bound. The row shape is deliberately explicit about which is which::
+
+        {"contact_id", "created_at", "known_reached_sql_by"}
+
+    ``created_at`` is a LOWER bound (it existed from here on) and
+    ``known_reached_sql_by`` an UPPER one (it had already qualified by here).
+    Neither is the event. A contact with no boundary row gets ``None``, which
+    rules it out of nothing — absence of a bound is never treated as a bound.
+    """
+    stages = list(stages_implying_event(EVENT_SQL))
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows=[])
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {FUNNEL_ALIAS}.contact_id,
+                           {FUNNEL_ALIAS}.created_at,
+                           b.known_reached_sql_by
+                    FROM {FUNNEL_TABLE} {FUNNEL_ALIAS}
+                    {_recovery_join()}
+                    LEFT JOIN {BOUNDARY_CONTACT_TABLE} b
+                           ON b.contact_id = {FUNNEL_ALIAS}.contact_id
+                          AND (%s IS NULL OR b.boundary_id = %s)
+                    WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s)
+                      AND {effective_date_sql(EVENT_SQL)} IS NULL
+                    """,
+                    (boundary_id, boundary_id, stages),
+                )
+                rows = _rows_as_dicts(cur)
+        return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_unresolved_sql_boundary_bounds failed: %s", exc)
+        return _unavailable(rows=[])
+
+
+def fetch_post_boundary_incidents(*, status: str | None = "open") -> dict:
+    """Post-boundary contacts that reached SQL with no exact entry date.
+
+    These are the gaps this PR exists to make impossible to ignore. An
+    unreadable store returns ``available=False`` with ``rows=[]`` and a NULL
+    count — never zero, which would read as "there are no incidents" and let a
+    window certify during an outage.
+    """
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows=[], open_count=None)
+            with conn.cursor() as cur:
+                if status:
+                    cur.execute(
+                        f"""SELECT contact_id, boundary_id, detected_at,
+                                   detected_by_run_id, reason, lifecycle_stage,
+                                   contact_created_at, history_checked,
+                                   history_state, status, resolved_at
+                            FROM {INCIDENT_TABLE}
+                            WHERE status = %s
+                            ORDER BY detected_at""",
+                        (status,),
+                    )
+                else:
+                    cur.execute(
+                        f"""SELECT contact_id, boundary_id, detected_at,
+                                   detected_by_run_id, reason, lifecycle_stage,
+                                   contact_created_at, history_checked,
+                                   history_state, status, resolved_at
+                            FROM {INCIDENT_TABLE}
+                            ORDER BY detected_at""",
+                    )
+                rows = _rows_as_dicts(cur)
+        open_count = sum(1 for r in rows if (r.get("status") or "") == "open")
+        return {"available": True, "rows": rows, "open_count": open_count}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_post_boundary_incidents failed: %s", exc)
+        return _unavailable(rows=[], open_count=None)
+
+
+def boundary_candidate_population_sql() -> tuple[str, tuple]:
+    """The candidate-population query and its parameters, as data.
+
+    Exported so the BOUNDARY WRITER can run this exact query inside the same
+    transaction that stamps the observation instant and inserts the rows
+    (PR-ADS-160 §2). Reading the population in one connection and writing the
+    boundary in another would leave a window in which a contact is promoted to
+    SQL between the two — it would be absent from the snapshot (so treated as
+    prospective) while the boundary claims to have observed the whole
+    population. One query, one transaction, one instant.
+    """
+    stages = list(stages_implying_event(EVENT_SQL))
+    sql = f"""
+        SELECT {FUNNEL_ALIAS}.contact_id,
+               {FUNNEL_ALIAS}.created_at,
+               {FUNNEL_ALIAS}.lifecycle_stage
+        FROM {FUNNEL_TABLE} {FUNNEL_ALIAS}
+        {_recovery_join()}
+        WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s)
+          AND {effective_date_sql(EVENT_SQL)} IS NULL
+        ORDER BY {FUNNEL_ALIAS}.contact_id
+    """
+    return sql, (stages,)
+
+
+def fetch_boundary_candidate_population() -> dict:
+    """The undated lifecycle-SQL contacts a boundary would bound, with evidence.
+
+    Read-only. This is what the boundary command's dry run shows before anything
+    is written, so an operator approves an explicit population rather than a
+    count. The APPLY path does not use this — it re-runs the same query inside
+    its own transaction so the snapshot and the observation instant agree.
+    """
+    sql, params = boundary_candidate_population_sql()
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows=[])
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = _rows_as_dicts(cur)
+        return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_boundary_candidate_population failed: %s", exc)
+        return _unavailable(rows=[])
+
+
+def fetch_post_boundary_sql_contacts(*, boundary_id: str, since) -> dict:
+    """Contacts whose SQL evidence is PROSPECTIVE, defined by the snapshot.
+
+    PR-ADS-160 §1. The first version selected on ``created_at >= boundary OR
+    effective_date >= boundary``, and both predicates are false for the central
+    failure mode:
+
+        a contact existed long before the boundary;
+        it was BELOW SQL when the snapshot was taken, so it is not in it;
+        it is promoted to SQL afterwards;
+        no exact SQL timestamp is captured.
+
+    That contact is a prospective gap — it is exactly what this PR exists to
+    catch — and it was invisible. Its creation date is old, and it has no
+    effective date to compare at all.
+
+    The immutable snapshot is the correct classifier, and creation date is not a
+    classifier at all. A stage-implying-SQL contact with no exact date is
+    HISTORICAL if and only if it is present in ``sql_coverage_boundary_contact``
+    for the active boundary — that is precisely what the snapshot recorded.
+    Anything else with no exact date is prospective, however old it is. Contacts
+    WITH an exact effective date at or after the boundary are prospective
+    observations too, so the healthy path is still counted.
+    """
+    stages = list(stages_implying_event(EVENT_SQL))
+    direct = direct_date_sql(EVENT_SQL)
+    effective = effective_date_sql(EVENT_SQL)
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _unavailable(rows=[])
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {FUNNEL_ALIAS}.contact_id,
+                           {FUNNEL_ALIAS}.created_at,
+                           {FUNNEL_ALIAS}.lifecycle_stage,
+                           {direct}    AS direct_date_entered_sql,
+                           {effective} AS effective_date_entered_sql
+                    FROM {FUNNEL_TABLE} {FUNNEL_ALIAS}
+                    {_recovery_join()}
+                    LEFT JOIN {BOUNDARY_CONTACT_TABLE} snap
+                           ON snap.contact_id = {FUNNEL_ALIAS}.contact_id
+                          AND snap.boundary_id = %s
+                    WHERE lower(btrim({FUNNEL_ALIAS}.lifecycle_stage)) = ANY(%s)
+                      AND (
+                            -- undated AND absent from the snapshot: prospective,
+                            -- whatever its creation date says
+                            ({effective} IS NULL AND snap.contact_id IS NULL)
+                            -- or dated at/after the boundary: a prospective
+                            -- observation, counted so the healthy path is seen
+                         OR {effective} >= %s
+                          )
+                    ORDER BY {FUNNEL_ALIAS}.contact_id
+                    """,
+                    (boundary_id, stages, since),
+                )
+                rows = _rows_as_dicts(cur)
+        return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_post_boundary_sql_contacts failed: %s", exc)
+        return _unavailable(rows=[])
+
+
 def fetch_lifecycle_recovery_state(*, scope: str | None = None) -> dict:
     """The durable recovery checkpoint for ONE candidate population.
 

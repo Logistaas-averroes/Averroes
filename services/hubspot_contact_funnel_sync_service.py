@@ -284,16 +284,23 @@ def run_contact_funnel_sync(
         _fail_batches(batch_id, events_batch_id, str(exc)[:1000])
         # Completion is NEVER advanced on a failure. A partial bootstrap stays
         # partial so the next run resumes it.
-        db_writers.update_contact_funnel_sync_state(
-            SCOPE,
-            bootstrap_status=(
+        # PR-ADS-160 §3: a FAILED run records the failure under its own mode.
+        # It must never look like a successful incremental, and it must never
+        # advance the proven-successful-incremental timestamp.
+        failure_state = {
+            "bootstrap_status": (
                 BOOTSTRAP_PARTIAL if mode == MODE_BOOTSTRAP else
                 (state.get("bootstrap_status") or BOOTSTRAP_NOT_STARTED)
             ),
-            last_error=error,
-            contacts_seen=contacts_seen,
-            pages_fetched=pages,
-        )
+            "last_error": error,
+            "contacts_seen": contacts_seen,
+            "pages_fetched": pages,
+            "last_status": "failed",
+            "last_sync_mode": mode,
+        }
+        if mode != MODE_BOOTSTRAP:
+            failure_state["last_incremental_status"] = "failed"
+        db_writers.update_contact_funnel_sync_state(SCOPE, **failure_state)
         return _failed_result(mode, error, since, watermark,
                               contacts_seen=contacts_seen,
                               contacts_written=contacts_written, pages=pages)
@@ -308,6 +315,12 @@ def run_contact_funnel_sync(
     else:
         bootstrap_status = state.get("bootstrap_status") or BOOTSTRAP_NOT_STARTED
 
+    # PR-ADS-160 §3 — record WHICH mode ran and how it ended.
+    # `last_incremental_at` is stamped by both modes and therefore proves
+    # nothing about the incremental pipeline: a successful bootstrap would
+    # otherwise present as a fresh incremental sync, and a window could certify
+    # against a source whose incremental feed had died.
+    run_status = "partial" if truncated else "success"
     state_update = {
         "bootstrap_status": bootstrap_status,
         "last_modified_watermark": watermark,
@@ -317,9 +330,19 @@ def run_contact_funnel_sync(
         "pages_fetched": pages,
         "last_batch_id": batch_id or None,
         "last_error": None,
+        "last_status": run_status,
+        "last_sync_mode": mode,
     }
     if mode == MODE_BOOTSTRAP and bootstrap_status == BOOTSTRAP_COMPLETE:
         state_update["bootstrap_completed_at"] = now
+    if mode != MODE_BOOTSTRAP:
+        # The incremental's OWN outcome, in its own columns. A later bootstrap
+        # never touches these, so evidence that the last required incremental
+        # failed survives a bootstrap rerun — the gap PR-ADS-153E-A2 documented
+        # on the deal ledger and could not close with two columns.
+        state_update["last_incremental_status"] = run_status
+        if run_status == "success":
+            state_update["last_successful_incremental_at"] = now
 
     # §2: the FINAL durable state write must also be proven before this run may
     # claim success — otherwise a "successful" bootstrap could leave no record

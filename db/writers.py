@@ -3487,8 +3487,48 @@ _CONTACT_FUNNEL_COLUMNS = (
 # through would blank out known-newer state. The guard only admits a write when
 # the STORED timestamp is absent (nothing to protect) or the incoming timestamp is
 # present and at least as new.
+#
+# ── PR-ADS-160 §5 — stage-entry evidence is NEVER erased by absence ──────────
+# The `last_modified_at` guard defends against a STALE write. It does nothing
+# about a SPARSE one, and the two are different hazards. Proven against a real
+# PostgreSQL instance before this fix existed:
+#
+#     first payload   date_entered_sql = 2026-09-02   -> stored
+#     later payload   property absent (NULL)          -> {'ok': True,
+#                                                         'persisted': 1}
+#     stored value    date_entered_sql = None         ← silently erased
+#
+# The write REPORTED SUCCESS while destroying the only proof that a contact
+# entered SQL, and nothing downstream could tell the difference between "this
+# contact never had a date" and "we had one and overwrote it with nothing".
+#
+# These columns are therefore refreshed only from a PRESENT incoming value.
+# `COALESCE(EXCLUDED.col, table.col)` keeps a stored timestamp when the new
+# payload omits the property, and still lets a real correction through: HubSpot
+# sending a DIFFERENT non-null date overwrites as before.
+#
+# This is deliberately narrow. It applies ONLY to stage-entry evidence, which
+# HubSpot only ever adds to. Lifecycle stage, status and the source fields keep
+# plain latest-state semantics, because for those a cleared value is itself a
+# real fact that must propagate.
+_CONTACT_FUNNEL_EVIDENCE_COLUMNS = (
+    "date_entered_lead", "date_entered_mql", "date_entered_sql",
+    "date_entered_opportunity", "date_entered_customer",
+    "latest_stage_entry_at",
+)
+
+
+def _contact_funnel_set(col: str) -> str:
+    if col in _CONTACT_FUNNEL_EVIDENCE_COLUMNS:
+        # Absence is not a correction. Only a present value may replace one.
+        return (f"{col} = COALESCE(EXCLUDED.{col}, "
+                f"hubspot_contact_funnel.{col})")
+    return f"{col} = EXCLUDED.{col}"
+
+
 _CONTACT_FUNNEL_UPDATE_SET = ",\n                        ".join(
-    f"{col} = EXCLUDED.{col}" for col in _CONTACT_FUNNEL_COLUMNS if col != "contact_id"
+    _contact_funnel_set(col)
+    for col in _CONTACT_FUNNEL_COLUMNS if col != "contact_id"
 )
 
 
@@ -3668,11 +3708,352 @@ def upsert_lifecycle_stage_history(rows: list, *, run_id: str) -> dict:
                 "error": str(exc)[:300]}
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# PR-ADS-160 — the prospective SQL coverage boundary, write side
+# ══════════════════════════════════════════════════════════════════════════
+#
+# One local transaction, always. A boundary that exists without its bounded
+# contacts would silently rule NOTHING out while looking established, and a set
+# of bounded contacts without their boundary would be bounds nobody can trace.
+# Both halves commit together or neither does, so "partial boundary" is not a
+# state the rest of the system ever has to reason about.
+#
+# Nothing here writes to HubSpot. Nothing here writes a stage-entry date.
+
+#: The observation instant is taken from ``clock_timestamp()``, NOT ``now()``.
+#: ``now()`` returns TRANSACTION START time, which in this transaction precedes
+#: the population read — so the boundary would claim to have observed the
+#: population at an instant before it actually did. ``clock_timestamp()`` reads
+#: the wall clock at the moment it is called, after the snapshot.
+_BOUNDARY_CLOCK_SQL = "clock_timestamp()"
+
+
+def establish_sql_coverage_boundary(boundary: dict, *,
+                                    clock_sql: str = _BOUNDARY_CLOCK_SQL
+                                    ) -> dict:
+    """Snapshot the population, stamp the instant, and write the boundary. Atomic.
+
+    PR-ADS-160 §2/§3. One transaction does all three, in this order:
+
+      1. read the candidate population (the same query the dry run shows);
+      2. stamp the observation instant, DATABASE-SIDE, after that read;
+      3. insert the boundary and its bounded contacts.
+
+    Order 1-then-2 is the point. Stamping first — or letting a caller supply the
+    instant — allows a boundary whose ``observed_at`` precedes the observation it
+    claims to describe, which would then rule contacts out of windows on the
+    strength of a bound that was never observed. A contact in the snapshot can
+    never receive a ``known_reached_sql_by`` earlier than the read that found it.
+
+    Reading and writing in ONE transaction closes the other gap: a contact
+    promoted to SQL between a separate read and write would be absent from the
+    snapshot while the boundary claimed to have observed the whole population.
+
+    Returns::
+
+        {"ok": bool, "boundary_id": str, "observed_at": datetime | None,
+         "contacts_written": int, "already_applied": bool,
+         "population": [...], "error": str | None}
+
+    ``clock_sql`` exists only so tests can inject a deterministic instant; it is
+    a SQL expression evaluated inside the transaction, never a caller-supplied
+    timestamp value, and production never passes it.
+    """
+    from db import crm_funnel_repository as repo  # noqa: PLC0415
+
+    boundary_id = str((boundary or {}).get("boundary_id") or "").strip()
+    if not boundary_id:
+        return _boundary_failure(None, "boundary_id is required")
+
+    population_sql, population_params = repo.boundary_candidate_population_sql()
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return _boundary_failure(boundary_id, "database_unavailable")
+            with conn.cursor() as cur:
+                # ── the singleton, checked here AND enforced by the index ────
+                # This check gives a readable error; the partial unique index is
+                # what actually makes two concurrent establishers impossible.
+                cur.execute(
+                    "SELECT boundary_id, observed_at FROM sql_coverage_boundary "
+                    "WHERE status = 'complete'")
+                existing = cur.fetchone()
+                if existing and existing[0] != boundary_id:
+                    conn.rollback()
+                    return _boundary_failure(
+                        boundary_id,
+                        f"a different completed boundary already exists "
+                        f"({existing[0]}, observed at {existing[1]}). Exactly "
+                        f"one completed boundary may exist: two would be two "
+                        f"answers to when the guaranteed period began")
+
+                # ── 1. the population, read inside this transaction ──────────
+                cur.execute(population_sql, population_params)
+                cols = [d[0] for d in cur.description]
+                population = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+                # ── 1b. the ingestion provenance for THAT EXACT snapshot ─────
+                # PR-ADS-160 §5 (second review): the service used to read this
+                # before calling the writer, so a sync landing between the two
+                # made `source_run_id` describe an older state than the
+                # population actually snapshotted — a boundary documented as
+                # traceable to a run it does not correspond to.
+                #
+                # Read here, in the same transaction and immediately after the
+                # population, so the two describe the same instant of the
+                # database. No provenance means no boundary: a best-effort NULL
+                # beside documentation promising traceability is worse than a
+                # refusal, because nothing downstream can tell them apart.
+                cur.execute(
+                    """
+                    SELECT last_batch_id, last_modified_watermark,
+                           last_sync_mode, last_incremental_status,
+                           last_successful_incremental_at
+                      FROM hubspot_contact_funnel_sync_state
+                     WHERE scope = 'contacts'
+                    """)
+                sync_row = cur.fetchone()
+                if not sync_row:
+                    conn.rollback()
+                    return _boundary_failure(
+                        boundary_id,
+                        "no contact-funnel sync state exists, so this boundary "
+                        "could not be traced to the ingestion run that produced "
+                        "its population. A boundary with unprovable provenance "
+                        "is refused rather than recorded as best-effort")
+                source_run_id = (
+                    f"contact_funnel_sync batch={sync_row[0]} "
+                    f"watermark={sync_row[1]} mode={sync_row[2]} "
+                    f"incremental_status={sync_row[3]} "
+                    f"last_successful_incremental_at={sync_row[4]}")
+
+                # ── 2. the instant, stamped AFTER that read, database-side ───
+                cur.execute(f"SELECT {clock_sql}")
+                observed_at = cur.fetchone()[0]
+
+                if existing:
+                    # Same id, already complete. This is a REPLAY: verify it is
+                    # identical rather than updating anything. An update would
+                    # rewrite evidence of a past observation.
+                    verdict = _verify_boundary_replay(
+                        cur, boundary_id, boundary, population)
+                    conn.rollback()   # a replay writes NOTHING, either way
+                    return verdict
+
+                rows = [
+                    (boundary_id, str(c.get("contact_id")), observed_at,
+                     c.get("lifecycle_stage"), c.get("created_at"))
+                    for c in population if c.get("contact_id")
+                ]
+
+                # ── 3. insert. Never ON CONFLICT DO UPDATE: the contact rows
+                # carry an immutability trigger, and a completed boundary row
+                # must never be rewritten.
+                cur.execute(
+                    """
+                    INSERT INTO sql_coverage_boundary (
+                        boundary_id, observed_at, lifecycle_rule_version,
+                        source_dataset, source_run_id, population_definition,
+                        run_id, legacy_undated_sql_contacts, contacts_examined,
+                        contacts_bounded, status, completed_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            'complete', %s, %s)
+                    """,
+                    (boundary_id, observed_at,
+                     (boundary or {}).get("lifecycle_rule_version"),
+                     (boundary or {}).get("source_dataset"),
+                     source_run_id,
+                     (boundary or {}).get("population_definition"),
+                     (boundary or {}).get("run_id"),
+                     len(rows), len(population), len(rows),
+                     observed_at, observed_at),
+                )
+                if rows:
+                    cur.executemany(
+                        """
+                        INSERT INTO sql_coverage_boundary_contact (
+                            boundary_id, contact_id, known_reached_sql_by,
+                            lifecycle_stage_at_boundary, created_at_lower_bound,
+                            recorded_at)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        [(*r, observed_at) for r in rows],
+                    )
+            conn.commit()
+        return {"ok": True, "boundary_id": boundary_id,
+                "observed_at": observed_at, "contacts_written": len(rows),
+                "already_applied": False, "population": population,
+                "source_run_id": source_run_id, "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("establish_sql_coverage_boundary failed: %s", exc)
+        return _boundary_failure(boundary_id, str(exc)[:300])
+
+
+def _boundary_failure(boundary_id, error: str) -> dict:
+    return {"ok": False, "boundary_id": boundary_id, "observed_at": None,
+            "contacts_written": 0, "already_applied": False,
+            "population": [], "source_run_id": None, "error": error}
+
+
+def _verify_boundary_replay(cur, boundary_id: str, boundary: dict,
+                            population: list) -> dict:
+    """Is this replay IDENTICAL to what is stored? Verified no-op, or refusal.
+
+    A replay that matches changes nothing and says so. A replay that differs in
+    metadata, counts or population is refused: the stored boundary describes an
+    observation that has passed, and a changed replay is a request to rewrite
+    what was observed. Either way this function writes nothing — the caller
+    rolls back.
+    """
+    cur.execute(
+        "SELECT lifecycle_rule_version, source_dataset, population_definition, "
+        "       contacts_bounded, observed_at "
+        "  FROM sql_coverage_boundary WHERE boundary_id = %s",
+        (boundary_id,))
+    stored = cur.fetchone()
+    cur.execute(
+        "SELECT contact_id FROM sql_coverage_boundary_contact "
+        " WHERE boundary_id = %s ORDER BY contact_id", (boundary_id,))
+    stored_contacts = [r[0] for r in cur.fetchall()]
+
+    incoming_contacts = sorted(
+        str(c.get("contact_id")) for c in population if c.get("contact_id"))
+    differences = []
+    if stored_contacts != incoming_contacts:
+        differences.append(
+            f"population differs (stored {len(stored_contacts)} contact(s), "
+            f"replay has {len(incoming_contacts)})")
+    for index, field in enumerate(("lifecycle_rule_version", "source_dataset",
+                                   "population_definition")):
+        incoming = (boundary or {}).get(field)
+        if incoming is not None and stored[index] != incoming:
+            differences.append(f"{field} differs")
+    if stored[3] != len(incoming_contacts):
+        differences.append(
+            f"contacts_bounded differs (stored {stored[3]}, "
+            f"replay has {len(incoming_contacts)})")
+
+    if differences:
+        return _boundary_failure(
+            boundary_id,
+            "a completed boundary with this id already exists and this replay "
+            "is not identical to it: " + "; ".join(differences) +
+            ". A completed boundary records a past observation and is never "
+            "rewritten; nothing was changed")
+
+    return {"ok": True, "boundary_id": boundary_id,
+            "observed_at": stored[4], "contacts_written": len(stored_contacts),
+            "already_applied": True, "population": population, "error": None}
+
+
+def record_post_boundary_incidents(incidents: list, *, run_id: str) -> dict:
+    """Record post-boundary SQL contacts that have no exact entry date.
+
+    Keyed on ``contact_id``: one open incident per contact, rewritten rather
+    than appended, so a recurring detection does not inflate the count. A
+    contact whose incident is already RESOLVED is not reopened by a later
+    observation that still lacks a date — resolution means an exact timestamp
+    arrived, and that fact does not expire.
+    """
+    prepared = []
+    for i in (incidents or []):
+        cid = str((i or {}).get("contact_id") or "").strip()
+        if not cid:
+            continue
+        prepared.append((
+            cid, (i or {}).get("boundary_id"), (i or {}).get("reason"),
+            (i or {}).get("lifecycle_stage"),
+            _parse_ts_or_none((i or {}).get("contact_created_at")),
+            bool((i or {}).get("history_checked")),
+            (i or {}).get("history_state"), run_id,
+        ))
+
+    if not prepared:
+        return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
+
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                        "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO sql_post_boundary_incident (
+                        contact_id, boundary_id, reason, lifecycle_stage,
+                        contact_created_at, history_checked, history_state,
+                        detected_by_run_id, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'open')
+                    ON CONFLICT (contact_id) DO UPDATE SET
+                        reason             = EXCLUDED.reason,
+                        lifecycle_stage    = EXCLUDED.lifecycle_stage,
+                        contact_created_at = EXCLUDED.contact_created_at,
+                        history_checked    = EXCLUDED.history_checked,
+                        history_state      = EXCLUDED.history_state,
+                        detected_by_run_id = EXCLUDED.detected_by_run_id,
+                        updated_at         = NOW()
+                    WHERE sql_post_boundary_incident.status <> 'resolved'
+                    """,
+                    prepared,
+                )
+                persisted = cur.rowcount if cur.rowcount is not None else len(prepared)
+            conn.commit()
+        return {"ok": True, "attempted": len(prepared),
+                "persisted": max(0, int(persisted)), "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("record_post_boundary_incidents failed: %s", exc)
+        return {"ok": False, "attempted": len(prepared), "persisted": 0,
+                "error": str(exc)[:300]}
+
+
+def resolve_post_boundary_incidents(contact_ids: list, *, resolved_by: str) -> dict:
+    """Close incidents for contacts that now carry an exact SQL entry date.
+
+    ``resolved_by`` records WHICH permitted source supplied it —
+    ``direct_property`` or ``history`` — so a resolution is always traceable to
+    real evidence rather than to the passage of time.
+    """
+    ids = [str(c).strip() for c in (contact_ids or []) if str(c or "").strip()]
+    if not ids:
+        return {"ok": True, "attempted": 0, "persisted": 0, "error": None}
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"ok": False, "attempted": len(ids), "persisted": 0,
+                        "error": "database_unavailable"}
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE sql_post_boundary_incident
+                       SET status      = 'resolved',
+                           resolved_at = NOW(),
+                           resolved_by = %s,
+                           updated_at  = NOW()
+                     WHERE contact_id = ANY(%s)
+                       AND status <> 'resolved'
+                    """,
+                    (resolved_by, ids),
+                )
+                persisted = cur.rowcount if cur.rowcount is not None else 0
+            conn.commit()
+        return {"ok": True, "attempted": len(ids),
+                "persisted": max(0, int(persisted)), "error": None}
+    except Exception as exc:  # noqa: BLE001
+        log.error("resolve_post_boundary_incidents failed: %s", exc)
+        return {"ok": False, "attempted": len(ids), "persisted": 0,
+                "error": str(exc)[:300]}
+
+
 _FUNNEL_SYNC_STATE_FIELDS = {
     "bootstrap_status", "bootstrap_started_at", "bootstrap_completed_at",
     "last_modified_watermark", "last_incremental_at", "earliest_created_at",
     "latest_modified_at", "contacts_seen", "pages_fetched", "last_batch_id",
     "last_error",
+    # PR-ADS-160 §3 — provenance that can PROVE a successful incremental run.
+    # `last_incremental_at` is stamped by both modes, so it cannot.
+    "last_status", "last_sync_mode",
+    "last_successful_incremental_at", "last_incremental_status",
 }
 
 
@@ -3722,6 +4103,7 @@ def update_contact_funnel_sync_state(scope: str = "contacts", **fields) -> bool:
     for ts_field in (
         "bootstrap_started_at", "bootstrap_completed_at", "last_modified_watermark",
         "last_incremental_at", "earliest_created_at", "latest_modified_at",
+        "last_successful_incremental_at",
     ):
         if ts_field in updates:
             updates[ts_field] = _parse_ts_or_none(updates[ts_field])

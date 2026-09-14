@@ -370,3 +370,111 @@ geo rows, coverage state, failure history, checkpoints and reconciliation
 evidence are all retained.
 
 Full doctrine: `docs/36_CANONICAL_COUNTRY_GEOGRAPHY.md`.
+
+
+## PR-ADS-160 — Prospective SQL coverage boundary (September 2026)
+
+**The historical question is closed by exhaustion.** PR-ADS-159's production
+validation read every candidate: 1,261 contacts whose lifecycle stage proves
+they reached SQL, 728 with HubSpot's direct property, **0** recoverable from
+lifecycle history, **533** with no provable timestamp. All 533 returned valid
+HubSpot history and none of it held a transition into `salesqualifiedlead`.
+Those dates are absent from HubSpot, not missing from us. **They are never
+invented, here or anywhere.**
+
+**What this PR adds instead.** An immutable, local, provenance-carrying
+*boundary*: an upper bound recording that a contact had **already** reached SQL
+by an observed instant. It can only disprove membership — an event known to be
+over before a window opened cannot have happened inside it — and it is never a
+date. It lives in its own tables under `known_reached_sql_by`, and a monitoring
+gate fails if it is ever read as an event date or appears in a stage-entry
+column.
+
+**The defect it also fixes, proven against real PostgreSQL.** The contact-funnel
+upsert refreshed every column from the incoming payload under a *staleness*
+guard only. A later payload that omitted `hs_v2_date_entered_salesqualifiedlead`
+therefore blanked a stored date and reported `{'ok': True, 'persisted': 1}` —
+destroying the only evidence a contact entered SQL, and the evidence that
+anything had been lost. Stage-entry columns are now refreshed only from a
+present value; lifecycle stage and status deliberately keep latest-state
+semantics, because for those a cleared value is a real fact.
+
+**New in this PR.**
+
+| Path | Purpose |
+| --- | --- |
+| `services/sql_coverage_boundary_service.py` | boundary creation and post-boundary gap detection; no HubSpot write path |
+| `scripts/establish_sql_coverage_boundary.py` | dry-run-by-default CLI; local `--apply`; atomic; idempotent |
+| `scripts/audit_sql_coverage_gate.py` | read-only gate on the six guarantees; 0 holds / 1 broken / 2 blind |
+| `sql_coverage_boundary`, `sql_coverage_boundary_contact`, `sql_post_boundary_incident` | the boundary, its bounds, and prospective gaps |
+| `hubspot/sql_coverage_gaps` | scheduler dataset; a new gap is an **error** on the run, not a log line |
+
+**Unchanged, deliberately.** The SQL definition, the two permitted evidence
+sources, the creation-time lower-bound rule, and every canonical read path. All
+44 window/scope combinations still reconcile.
+
+**Not in this PR.** No consumer migration — the 25 legacy SQL consumers remain
+for **PR-ADS-161**. No production apply run. No HubSpot write. No complete
+historical SQL total, and no CPQL where coverage is incomplete. All Time stays
+incomplete permanently.
+
+**Review corrections (§1–§7).** Seven truth-contract blockers were found and
+fixed before merge:
+
+* **the classifier was wrong.** Selecting prospective contacts on
+  `created_at >= boundary OR effective_date >= boundary` missed the central
+  failure mode — an old contact, below SQL when the snapshot was taken, promoted
+  afterwards with no timestamp. Both predicates are false for it. The immutable
+  snapshot is now the classifier, by anti-join; creation date classifies nothing.
+* **the boundary instant was the operator's to choose.** `--observed-at` is gone.
+  The instant is stamped database-side with `clock_timestamp()` inside the same
+  transaction that reads the population, and strictly after that read.
+* **the boundary was replaceable.** A partial unique index enforces exactly one
+  completed boundary, and triggers make it and its bounded contacts immutable.
+  An identical replay verifies; any other replay is refused unchanged.
+* **writes went unchecked.** Every resolution result is inspected, counts come
+  from the database rather than `len(requested)`, and an unreadable final
+  verification read fails the run instead of returning `ok: true` with a null.
+* **freshness was promised but not implemented.** One contract
+  (`analysis/sql_coverage_freshness.py`) shared by the audit and the gate;
+  stale, failed, incomplete-bootstrap and unavailable all block certification.
+* **incidents blocked globally.** They are now resolved per window against the
+  same two sound bounds — creation as a lower bound, detection as an upper one.
+* **boundary exclusion was inclusive.** `known_reached_sql_by < window_start`,
+  strictly: at equality the transition could have occurred at the window's
+  inclusive first instant.
+
+**Second review (§1–§5).** Five further blockers were found and fixed:
+
+* **the scheduler dataset had no status.** `_overall_status()` treats an absent
+  status as a failure — correctly — so every real sync reported `partial`,
+  including a flawless prospective check. The wrapper now maps the service's
+  outcome onto the scheduler's vocabulary: `skipped` (no boundary yet, with an
+  explicit reason, non-voting), `success` (verified clean), `failed`
+  (unverifiable, or gaps/incidents open). No path returns `success` beside a
+  populated `errors` list.
+* **an incomplete total could still publish.** Completeness was only the
+  *historical* half, so a window with an open prospective gap published a total
+  provably missing rows, and a CPQL from it. The halves are now separate
+  (`historical_membership_complete`, `prospective_membership_complete`),
+  `complete_sql_total` is null unless both hold, and `cpql_publishable`
+  additionally requires certification — which, when it blocks, takes the total
+  back rather than annotating it. The confirmed dated subset stays visible under
+  `confirmed_sql_subset`, never as "the total".
+* **a bootstrap could masquerade as a fresh feed.** The contact-funnel sync
+  stamps `last_incremental_at` on bootstrap runs too, so a completed backfill
+  read as a live incremental pipeline. Freshness now reads
+  `last_successful_incremental_at` and `last_incremental_status` — which no
+  bootstrap overwrites, so a later bootstrap cannot erase evidence that the
+  required incremental failed. The migration is additive and legacy rows fail
+  closed until one real incremental sync records the evidence.
+* **six repository functions were defined twice**, the second silently
+  overriding the first. Removed, with an AST guard (and its own negative
+  control) over every module this PR touches.
+* **boundary provenance was not bound to the snapshot.** It was read before the
+  writer's transaction, so a sync landing in between made `source_run_id`
+  describe an older state than the population snapshotted. It is now read inside
+  that transaction, immediately after the population, and its absence **refuses**
+  establishment rather than recording a best-effort NULL.
+
+Full doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`.
