@@ -137,8 +137,23 @@ Three separate hazards, all closed by that one ordering:
   snapshot, while the boundary claims to have observed the whole population.
 
 A contact in the snapshot can therefore never carry a `known_reached_sql_by`
-earlier than the read that found it. Provenance — which contact-funnel sync run
-the population was read against — is recorded in `source_run_id`.
+earlier than the read that found it.
+
+### Provenance is bound to *that* snapshot, or there is no boundary
+
+`source_run_id` records which contact-funnel ingestion state the population was
+read against. It is read **inside the same transaction, immediately after the
+population read**, so the two describe the same instant of the database.
+
+Reading it before calling the writer — as the first cut did — left a window in
+which a sync could land between the two, making `source_run_id` describe a state
+older than the population actually snapshotted: a boundary documented as
+traceable to a run it does not correspond to.
+
+If no contact-funnel sync state exists, establishment is **refused** and nothing
+is written — not the boundary row, not one contact row. A best-effort NULL
+beside documentation promising traceability is worse than a refusal, because
+nothing downstream can tell the two apart.
 
 ### Exactly one, and immutable
 
@@ -316,9 +331,77 @@ gaps, unresolved incidents, and execution errors. **A new gap is an error on the
 run**, and so is an *unverified* guarantee — a run that could not count its own
 blockers must never look healthy.
 
+### The dataset's status, and why it needed one
+
+The service speaks in `ok` plus detailed counts. The scheduler speaks in status
+strings, and `_overall_status()` treats an **absent** status as a failure on
+purpose — an unrecognised outcome is not evidence of success. Returning the
+service payload unchanged therefore marked *every* real sync `partial`,
+including a perfectly clean prospective check.
+
+The wrapper now maps the service's outcome onto the scheduler's vocabulary:
+
+| Status | When | Votes? |
+| --- | --- | --- |
+| `skipped` | no boundary is established — there is no prospective period to police yet, and an explicit `skip_reason` says so | **no** |
+| `success` | a boundary exists, verification completed, and no open incident could belong anywhere | yes |
+| `failed` | detection, a write or the final verification could not be completed — **or** new/unresolved incidents exist | yes |
+
+Every `failed` path also appends to the run's `errors`, and no path returns
+`success` beside a populated `errors` list: a dataset that contributes an error
+while reporting success is a contradiction the run summary cannot resolve.
+
+The pre-boundary state is `skipped` rather than `success` because a dataset that
+cannot yet do its job has not failed, and calling it green would claim a
+guarantee that does not exist.
+
 ---
 
 ## 8. Certification (§6)
+
+### Completeness has two halves, and they fail for different reasons
+
+A window's SQL total is complete only when **both** are true:
+
+| Half | Question | Field |
+| --- | --- | --- |
+| historical | is every undated legacy contact ruled out of this window? | `historical_membership_complete` |
+| prospective | can no open post-boundary gap belong to this window? | `prospective_membership_complete` |
+
+The first cut computed only the historical half and called its verdict
+`complete`. A window with an open prospective gap therefore published a total
+that was provably missing rows, and a CPQL derived from it.
+
+The two are now reported apart, and the published fields follow from both:
+
+* `window_total_complete` — the conjunction, never either half alone;
+* `complete_sql_total` — **null** unless `window_total_complete` is true. Not
+  zero, and never the confirmed subset relabelled;
+* `confirmed_sql_subset` — the contacts with a proven SQL-entry date inside the
+  window. Always visible, under a name that says exactly what it is;
+* `cpql_publishable` — true only when the window is complete **and** finally
+  certified.
+
+An **unreadable** incident store is not prospective completeness — unknown
+blockers must block, or an outage publishes a total. The one exception is where
+no boundary is established at all: a post-boundary gap is defined *relative* to
+a boundary, so before one exists the prospective question is vacuous rather than
+unknown, and the historical half is the whole of completeness — PR-ADS-159's
+contract, which this PR extends and never revokes.
+
+Certification is the **last** gate, so it can take both back: when
+`audit_certification()` blocks a window or cannot certify it, that window comes
+back with `certified: false`, `cpql_publishable: false` and
+`complete_sql_total: null`. A report that says `certified: false` beside
+`complete_sql_total: 42` is read as a total by anyone who reads the number
+rather than the flag.
+
+Completeness and certification stay separate questions: a window can be
+genuinely complete — every row accounted for — and still uncertifiable because
+its source stopped updating, or because the canonical readers did not reconcile.
+Collapsing them would make "complete" mean "trustworthy".
+
+### The gate itself
 
 Certification is split in two, and neither half can grant it alone.
 
@@ -365,28 +448,57 @@ missing from what we have" is not "nothing is missing".
 One contract, in `analysis/sql_coverage_freshness.py`, used by **both** the
 coverage audit and the gate — a second copy that agreed would prove nothing, and
 one that disagreed would report the gate's bug as the pipeline's. It requires:
-the bootstrap is complete, the last incremental sync recorded no error, and that
-sync ran within `DEFAULT_MAX_AGE_HOURS` (36).
+the bootstrap is complete, the most recent **incremental** run **succeeded**,
+and that successful incremental ran within `DEFAULT_MAX_AGE_HOURS` (36).
 
 | Reason | Meaning | Certifies? |
 | --- | --- | --- |
-| `source_fresh` | bootstrap complete, no error, within threshold | **yes** |
-| `source_stale` | the sync is behind schedule | no |
-| `source_last_sync_failed` | the most recent run errored | no |
+| `source_fresh` | bootstrap complete, last incremental succeeded, within threshold | **yes** |
+| `source_stale` | the last successful incremental is behind schedule | no |
+| `source_last_incremental_failed` | the most recent incremental run errored | no |
 | `source_bootstrap_incomplete` | the backfill never finished | no |
-| `source_never_synced` | no incremental run has completed | no |
+| `source_no_successful_incremental` | no incremental run has ever succeeded | no |
+| `source_incremental_provenance_missing` | the row predates the provenance columns | no |
 | `source_sync_state_missing` | no sync state exists | no |
 | `source_sync_state_unavailable` | we could not look (`fresh: null`) | no |
 
 `fresh` is `null` — never `false` — when the state could not be read. `false` is
 a claim about the pipeline; `null` is a statement about us. Both block, and the
-explanation has to be able to tell them apart.
+explanation has to be able to tell them apart. The same distinction separates
+`source_no_successful_incremental` (a fact about the pipeline) from
+`source_incremental_provenance_missing` (a fact about the record).
 
-The timestamp is `last_incremental_at` — when the sync **ran** — not
-`latest_modified_at`, the newest contact modification it happened to see. The
-second goes stale on its own whenever HubSpot is quiet, and a quiet CRM is not a
-broken pipeline. Confusing them would make a working system look broken every
-weekend, and a broken one look fine for as long as its last read stayed recent.
+#### Which timestamp — the obvious one is wrong twice
+
+**Not `latest_modified_at`**, the newest contact modification the sync happened
+to see. That goes stale on its own whenever HubSpot is quiet, and a quiet CRM is
+not a broken pipeline. It would make a working system look broken every weekend
+and a broken one look fine for as long as its last read stayed recent.
+
+**Not `last_incremental_at` either**, despite the name. The contact-funnel sync
+stamps it on **bootstrap and incremental runs alike**, so a successful bootstrap
+is indistinguishable from a fresh incremental feed — and a window could certify
+against a source whose incremental pipeline had died, on the strength of a
+backfill. A bootstrap is a backfill, not a feed.
+
+The contract therefore reads `last_successful_incremental_at`, which only an
+incremental run that **succeeded** ever advances, together with
+`last_incremental_status`, which records that incremental's own outcome and
+which no bootstrap ever overwrites. Two columns are not enough:
+
+```
+bootstrap completes T0 → incremental FAILS T1 → bootstrap succeeds T2
+```
+
+With only `last_status` and `last_sync_mode`, T2 overwrites both and the
+evidence that the required incremental failed is gone. `last_incremental_status`
+survives it, so the failure keeps blocking until an incremental actually
+succeeds.
+
+The migration is **additive** (`ADD COLUMN IF NOT EXISTS` ×4, no backfill) and
+legacy rows carry NULL in all of them, so they **fail closed** with
+`source_incremental_provenance_missing` until one real incremental sync records
+the evidence. A row that predates the contract cannot prove anything about it.
 
 `scripts/audit_lifecycle_sql_coverage.py` adds the global half: all 44
 window/scope reader combinations must reconcile, and the audit must have been
@@ -422,6 +534,21 @@ Read-only. Writes nothing, to HubSpot or locally. It fails when:
 
 Check 2 is the one worth dwelling on: it is the only check that can fire
 **before** the damage rather than after it.
+
+### No shadowed definitions
+
+`db/crm_funnel_repository.py` had defined six functions **twice** — byte
+identical, the second silently overriding the first. That is benign exactly as
+long as the copies agree: the moment one is edited, every caller gets whichever
+Python bound last and the edit appears to have no effect for reasons nothing
+explains. It bit once inside this PR, where an updated
+`fetch_post_boundary_sql_contacts` was shadowed by its stale twin and raised
+`unexpected keyword argument`.
+
+The duplicates are removed, and an AST guard over every module this PR touches
+fails the suite if a top-level function is ever defined twice again. The guard
+carries its own negative control, because a check that cannot fail is not a
+check.
 
 ---
 

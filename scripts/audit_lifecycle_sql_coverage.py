@@ -348,14 +348,30 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
     incidents_readable = bool(boundary.get("post_boundary_incidents_available"))
     source_fresh = (freshness or {}).get("fresh") is True
 
+    def _withhold(win, label, reason):
+        """A blocked window publishes NO complete total and NO CPQL.
+
+        PR-ADS-160 §2 — the defect this closes: a window could report
+        `certified: False` and, in the same response, `complete_sql_total: 42`
+        and `cpql_publishable: true`. Whoever read the number rather than the
+        flag got an incomplete total presented as a complete one. Certification
+        is the LAST gate, so it must be able to take both back.
+
+        The confirmed dated subset stays visible under `confirmed_sql_subset` —
+        a name that says what it is.
+        """
+        blocked.append({"window": label, "reason": reason})
+        win["certified"] = False
+        win["certification_status"] = reason
+        win["cpql_publishable"] = False
+        win["complete_sql_total"] = None
+
     certified, blocked = [], []
     for win in windows or []:
         label = f"{win.get('window_type')}/{win.get('window')}"
         locally_eligible = bool(win.get("certification_eligible"))
         if not locally_eligible:
-            blocked.append({"window": label,
-                            "reason": win.get("certification_status")})
-            win["certified"] = False
+            _withhold(win, label, win.get("certification_status"))
             continue
         if not (reconciled and boundary_readable and incidents_readable
                 and source_fresh):
@@ -365,9 +381,7 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
                 reason = "canonical_readers_did_not_reconcile"
             else:
                 reason = "certification_inputs_unreadable"
-            blocked.append({"window": label, "reason": reason})
-            win["certified"] = False
-            win["certification_status"] = reason
+            _withhold(win, label, reason)
             continue
         certified.append(label)
         win["certified"] = True
@@ -458,6 +472,14 @@ def audit_windows(f: Findings, population: dict, now: datetime,
         if block["cpql_publishable"] and not block["window_total_complete"]:
             f.violation(f"cpql_fail_closed[{win.get('window_key')}]",
                         "CPQL was declared publishable without a complete total")
+        # PR-ADS-160 §2 — the same guard on the prospective half. A window whose
+        # incident store is unreadable, or which an open incident could belong
+        # to, has NOT got a complete total however resolved its history is.
+        if block["complete_sql_total"] is not None \
+                and not block["prospective_membership_complete"]:
+            f.violation(f"prospective_fail_closed[{win.get('window_key')}]",
+                        "a complete SQL total was published for a window whose "
+                        "post-boundary gap membership is unresolved or unknown")
         out.append(block)
 
     if not any(k.startswith("fail_closed") or k.startswith("cpql_fail_closed")

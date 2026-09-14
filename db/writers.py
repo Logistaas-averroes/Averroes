@@ -3793,6 +3793,41 @@ def establish_sql_coverage_boundary(boundary: dict, *,
                 cols = [d[0] for d in cur.description]
                 population = [dict(zip(cols, row)) for row in cur.fetchall()]
 
+                # ── 1b. the ingestion provenance for THAT EXACT snapshot ─────
+                # PR-ADS-160 §5 (second review): the service used to read this
+                # before calling the writer, so a sync landing between the two
+                # made `source_run_id` describe an older state than the
+                # population actually snapshotted — a boundary documented as
+                # traceable to a run it does not correspond to.
+                #
+                # Read here, in the same transaction and immediately after the
+                # population, so the two describe the same instant of the
+                # database. No provenance means no boundary: a best-effort NULL
+                # beside documentation promising traceability is worse than a
+                # refusal, because nothing downstream can tell them apart.
+                cur.execute(
+                    """
+                    SELECT last_batch_id, last_modified_watermark,
+                           last_sync_mode, last_incremental_status,
+                           last_successful_incremental_at
+                      FROM hubspot_contact_funnel_sync_state
+                     WHERE scope = 'contacts'
+                    """)
+                sync_row = cur.fetchone()
+                if not sync_row:
+                    conn.rollback()
+                    return _boundary_failure(
+                        boundary_id,
+                        "no contact-funnel sync state exists, so this boundary "
+                        "could not be traced to the ingestion run that produced "
+                        "its population. A boundary with unprovable provenance "
+                        "is refused rather than recorded as best-effort")
+                source_run_id = (
+                    f"contact_funnel_sync batch={sync_row[0]} "
+                    f"watermark={sync_row[1]} mode={sync_row[2]} "
+                    f"incremental_status={sync_row[3]} "
+                    f"last_successful_incremental_at={sync_row[4]}")
+
                 # ── 2. the instant, stamped AFTER that read, database-side ───
                 cur.execute(f"SELECT {clock_sql}")
                 observed_at = cur.fetchone()[0]
@@ -3828,7 +3863,7 @@ def establish_sql_coverage_boundary(boundary: dict, *,
                     (boundary_id, observed_at,
                      (boundary or {}).get("lifecycle_rule_version"),
                      (boundary or {}).get("source_dataset"),
-                     (boundary or {}).get("source_run_id"),
+                     source_run_id,
                      (boundary or {}).get("population_definition"),
                      (boundary or {}).get("run_id"),
                      len(rows), len(population), len(rows),
@@ -3849,7 +3884,7 @@ def establish_sql_coverage_boundary(boundary: dict, *,
         return {"ok": True, "boundary_id": boundary_id,
                 "observed_at": observed_at, "contacts_written": len(rows),
                 "already_applied": False, "population": population,
-                "error": None}
+                "source_run_id": source_run_id, "error": None}
     except Exception as exc:  # noqa: BLE001
         log.error("establish_sql_coverage_boundary failed: %s", exc)
         return _boundary_failure(boundary_id, str(exc)[:300])
@@ -3858,7 +3893,7 @@ def establish_sql_coverage_boundary(boundary: dict, *,
 def _boundary_failure(boundary_id, error: str) -> dict:
     return {"ok": False, "boundary_id": boundary_id, "observed_at": None,
             "contacts_written": 0, "already_applied": False,
-            "population": [], "error": error}
+            "population": [], "source_run_id": None, "error": error}
 
 
 def _verify_boundary_replay(cur, boundary_id: str, boundary: dict,
@@ -4015,6 +4050,10 @@ _FUNNEL_SYNC_STATE_FIELDS = {
     "last_modified_watermark", "last_incremental_at", "earliest_created_at",
     "latest_modified_at", "contacts_seen", "pages_fetched", "last_batch_id",
     "last_error",
+    # PR-ADS-160 §3 — provenance that can PROVE a successful incremental run.
+    # `last_incremental_at` is stamped by both modes, so it cannot.
+    "last_status", "last_sync_mode",
+    "last_successful_incremental_at", "last_incremental_status",
 }
 
 
@@ -4064,6 +4103,7 @@ def update_contact_funnel_sync_state(scope: str = "contacts", **fields) -> bool:
     for ts_field in (
         "bootstrap_started_at", "bootstrap_completed_at", "last_modified_watermark",
         "last_incremental_at", "earliest_created_at", "latest_modified_at",
+        "last_successful_incremental_at",
     ):
         if ts_field in updates:
             updates[ts_field] = _parse_ts_or_none(updates[ts_field])

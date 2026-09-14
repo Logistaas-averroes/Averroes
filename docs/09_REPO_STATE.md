@@ -444,4 +444,37 @@ fixed before merge:
   strictly: at equality the transition could have occurred at the window's
   inclusive first instant.
 
+**Second review (§1–§5).** Five further blockers were found and fixed:
+
+* **the scheduler dataset had no status.** `_overall_status()` treats an absent
+  status as a failure — correctly — so every real sync reported `partial`,
+  including a flawless prospective check. The wrapper now maps the service's
+  outcome onto the scheduler's vocabulary: `skipped` (no boundary yet, with an
+  explicit reason, non-voting), `success` (verified clean), `failed`
+  (unverifiable, or gaps/incidents open). No path returns `success` beside a
+  populated `errors` list.
+* **an incomplete total could still publish.** Completeness was only the
+  *historical* half, so a window with an open prospective gap published a total
+  provably missing rows, and a CPQL from it. The halves are now separate
+  (`historical_membership_complete`, `prospective_membership_complete`),
+  `complete_sql_total` is null unless both hold, and `cpql_publishable`
+  additionally requires certification — which, when it blocks, takes the total
+  back rather than annotating it. The confirmed dated subset stays visible under
+  `confirmed_sql_subset`, never as "the total".
+* **a bootstrap could masquerade as a fresh feed.** The contact-funnel sync
+  stamps `last_incremental_at` on bootstrap runs too, so a completed backfill
+  read as a live incremental pipeline. Freshness now reads
+  `last_successful_incremental_at` and `last_incremental_status` — which no
+  bootstrap overwrites, so a later bootstrap cannot erase evidence that the
+  required incremental failed. The migration is additive and legacy rows fail
+  closed until one real incremental sync records the evidence.
+* **six repository functions were defined twice**, the second silently
+  overriding the first. Removed, with an AST guard (and its own negative
+  control) over every module this PR touches.
+* **boundary provenance was not bound to the snapshot.** It was read before the
+  writer's transaction, so a sync landing in between made `source_run_id`
+  describe an older state than the population snapshotted. It is now read inside
+  that transaction, immediately after the population, and its absence **refuses**
+  establishment rather than recording a best-effort NULL.
+
 Full doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`.

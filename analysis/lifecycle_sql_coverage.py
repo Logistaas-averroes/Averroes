@@ -60,6 +60,13 @@ _ONE_DAY = timedelta(days=1)
 COVERAGE_COMPLETE = "coverage_complete"
 COVERAGE_UNRESOLVED_MEMBERSHIP = "unresolved_sql_entry_dates_may_belong"
 COVERAGE_POPULATION_UNAVAILABLE = "sql_population_unavailable"
+#: PR-ADS-160 §2 — the historical population is resolved, but a PROSPECTIVE gap
+#: could belong here. A different finding with a different remedy: this one is
+#: our own missing capture, not HubSpot's missing history.
+COVERAGE_POST_BOUNDARY_GAPS = "open_post_boundary_gaps_may_belong"
+#: The incident store could not be read, so prospective membership is unknown.
+#: Never treated as zero gaps.
+COVERAGE_INCIDENTS_UNREADABLE = "post_boundary_incidents_unreadable"
 
 
 def _as_datetime(value):
@@ -230,8 +237,11 @@ def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
             "window_membership_proven_outside": None,
             "window_membership_bounded": None,
             "window_membership_excluded_by_boundary": None,
+            "historical_membership_complete": False,
+            "prospective_membership_complete": False,
             "window_total_complete": False,
             "complete_sql_total": None,
+            "confirmed_sql_subset": confirmed_sqls,
             "cpql_publishable": False,
             "reason": COVERAGE_POPULATION_UNAVAILABLE,
             "explanation": (
@@ -244,7 +254,7 @@ def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
 
     split = window_membership(unresolved_rows, window_end, window_start)
     unresolved = split["window_membership_unresolved"]
-    complete = unresolved == 0
+    historical_complete = unresolved == 0
 
     # PR-ADS-160 §6 — resolve prospective gaps against THIS window, not one
     # global count applied everywhere. A list is resolved per window; a bare
@@ -261,24 +271,86 @@ def window_coverage(*, window, window_end, confirmed_sqls, recovered_sqls,
             "open_post_boundary_gaps": int(open_post_boundary_incidents),
             "post_boundary_gaps_ruled_out": 0,
             "post_boundary_gaps_global": int(open_post_boundary_incidents)}
+    # ── PR-ADS-160 §2 — three different questions, never collapsed ──────────
+    # The first cut computed completeness from the HISTORICAL population alone,
+    # then published `complete_sql_total` and `cpql_publishable` from it —
+    # before looking at prospective incidents, freshness or reader agreement. A
+    # window could therefore report `certified: False` and, in the same
+    # response, a complete total and a publishable CPQL. Whoever read the
+    # number rather than the flag got an incomplete total presented as a
+    # complete one.
+    #
+    #   historical_membership_complete   the 533 are resolved for this window
+    #   prospective_membership_complete  the incident store is READABLE and no
+    #                                    open incident could belong here
+    #   window_total_complete            both of the above
+    #
+    # An unreadable incident store is NOT prospective completeness. Unknown
+    # blockers must block, or an outage publishes a total.
+    #
+    # One exception, and only one: a post-boundary gap is defined RELATIVE to a
+    # boundary, so where no boundary is established there is no prospective
+    # period and nothing can belong to it. The question is vacuous rather than
+    # unknown, and `historical_complete` is the whole of completeness — exactly
+    # PR-ADS-159's contract, which this PR extends and does not revoke. Once a
+    # boundary exists, an unread incident store is a real unknown and blocks.
+    gaps_for_window = incident_split["open_post_boundary_gaps"]
+    no_prospective_period = boundary_observed_at is None
+    prospective_complete = no_prospective_period or gaps_for_window == 0
+    complete = historical_complete and prospective_complete
+
+    if not historical_complete:
+        reason = COVERAGE_UNRESOLVED_MEMBERSHIP
+    elif prospective_complete:
+        reason = COVERAGE_COMPLETE
+    elif gaps_for_window is None:
+        reason = COVERAGE_INCIDENTS_UNREADABLE
+    elif gaps_for_window:
+        reason = COVERAGE_POST_BOUNDARY_GAPS
+    else:
+        reason = COVERAGE_COMPLETE
+
+    certification = _certification(
+        window_start, window_end, boundary_observed_at, gaps_for_window,
+        complete=complete, freshness=freshness)
+
     return {
         "window": window,
         "confirmed_sqls": confirmed_sqls,
         "window_membership_recovered": recovered_sqls,
         **split,
+        "historical_membership_complete": historical_complete,
+        "prospective_membership_complete": prospective_complete,
         "window_total_complete": complete,
         # The ONLY circumstance in which a complete total exists: nothing
-        # undated could belong here, so the confirmed subset IS the population.
+        # undated, historical OR prospective, could belong here — so the
+        # confirmed subset IS the population.
         "complete_sql_total": confirmed_sqls if complete else None,
+        # ALWAYS available, and always explicitly a subset. This is the number a
+        # surface may show while the complete total is withheld, and its name
+        # says what it is.
+        "confirmed_sql_subset": confirmed_sqls,
+        # PR-ADS-160 §2: membership permits it — which is a NECESSARY condition,
+        # never a sufficient one. This layer answers only "could a complete
+        # total exist for this window", and it now answers it over BOTH halves,
+        # so it is strictly harder to satisfy than PR-ADS-159's version.
+        #
+        # The final word belongs to `audit_certification`, which alone can see
+        # reader reconciliation and source freshness, and which sets this back
+        # to False — and `complete_sql_total` back to None — for any window it
+        # cannot certify. Deciding certification here instead would silently
+        # un-publish every window that is pre-boundary or awaiting a boundary:
+        # a complete historical window is not certified, and was never claimed
+        # to be, but it is still complete. Collapsing the two would make this
+        # foundational PR a consumer change, which it is explicitly not.
         "cpql_publishable": complete,
-        "reason": COVERAGE_COMPLETE if complete else COVERAGE_UNRESOLVED_MEMBERSHIP,
-        "explanation": _explain(complete, unresolved, split, window_end),
+        "reason": reason,
+        "explanation": _explain(complete, unresolved, split, window_end,
+                                gaps_for_window, prospective_complete),
         "post_boundary_gaps_ruled_out":
             incident_split["post_boundary_gaps_ruled_out"],
         "post_boundary_gaps_global": incident_split["post_boundary_gaps_global"],
-        **_certification(window_start, window_end, boundary_observed_at,
-                         incident_split["open_post_boundary_gaps"],
-                         complete=complete, freshness=freshness),
+        **certification,
     }
 
 
@@ -495,8 +567,23 @@ def _certification(window_start, window_end, boundary_observed_at,
                 "— reader reconciliation is still checked by the audit")}
 
 
-def _explain(complete: bool, unresolved: int, split: dict, window_end) -> str:
-    """Why completeness is or is not proven, for THIS window. Always stated."""
+def _explain(complete: bool, unresolved: int, split: dict, window_end,
+             gaps_for_window=None, prospective_complete: bool = True) -> str:
+    """Why completeness is or is not proven, for THIS window. Always stated.
+
+    ``prospective_complete`` is passed in rather than re-derived from
+    ``gaps_for_window``: an unknown gap count means nothing where no boundary is
+    established, and re-deriving it here would explain a window as blocked by a
+    prospective period that does not exist.
+    """
+    if unresolved == 0 and not prospective_complete and gaps_for_window is None:
+        return ("the historical population is resolved for this window, but the "
+                "post-boundary incident store could not be read — so it is "
+                "unknown whether a prospective gap belongs here")
+    if unresolved == 0 and gaps_for_window:
+        return (f"the historical population is resolved for this window, but "
+                f"{gaps_for_window} post-boundary contact(s) reached SQL with "
+                f"no exact entry date and cannot be ruled out of it")
     if complete:
         proven = split["window_membership_proven_outside"]
         if not split["global_missing_sql_entry_date"]:

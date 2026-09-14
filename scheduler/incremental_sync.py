@@ -1067,9 +1067,25 @@ def _detect_sql_coverage_gaps(*, run_id, errors: list) -> dict:
     property history is READ (never written) and a genuine transition is
     persisted. Where neither exists, an explicit incident is recorded.
 
-    A failure here is an ERROR on the run, not a silent zero. "We could not
-    check" and "we checked and everything is fine" produce the same-looking
-    dataset block otherwise, and only one of them means a window may certify.
+    PR-ADS-160 §1 (second review) — this returns a dataset block carrying an
+    explicit ``status``. The service speaks in ``ok`` plus detailed counts; the
+    scheduler's contract is a status string, and ``_overall_status`` treats an
+    ABSENT status as a failure on purpose (an unrecognised outcome is not
+    evidence of success). Returning the service payload unchanged therefore made
+    every real sync ``partial`` — including a perfectly clean check, and
+    including the pre-boundary "nothing to police yet" state.
+
+    The mapping, and why each is what it is:
+
+    ``skipped``  no boundary is established. There is no prospective period to
+                 police, so this dataset has nothing to say about the run and
+                 must not vote on it. Non-voting, with an explicit reason.
+    ``success``  a boundary exists, verification completed, and no open incident
+                 could belong anywhere. The only green case.
+    ``failed``   detection, a write, or the final verification could not be
+                 completed — OR new/unresolved incidents exist. Both already
+                 append to ``errors``, and a dataset that contributes an error
+                 while reporting ``success`` would be self-contradicting.
     """
     from services.sql_coverage_boundary_service import (  # noqa: PLC0415
         detect_post_boundary_gaps,
@@ -1077,50 +1093,6 @@ def _detect_sql_coverage_gaps(*, run_id, errors: list) -> dict:
 
     try:
         result = detect_post_boundary_gaps(apply=True, run_id=run_id)
-        if not result.get("ok"):
-            err = f"hubspot/sql_coverage_gaps: {result.get('detail')}"
-            errors.append(err)
-            log.warning("[incremental_sync] %s", err)
-            return result
-
-        # PR-ADS-160 §4: an unverified guarantee is not a healthy one. If the
-        # final incident read could not be made, `ok` is already False above —
-        # this guards the other direction: a run that completed but could not
-        # count open incidents must never look clean.
-        open_incidents = result.get("unresolved_post_boundary_incidents")
-        if open_incidents is None:
-            err = ("hubspot/sql_coverage_gaps: the post-boundary incident store "
-                   "could not be read, so the prospective SQL guarantee is "
-                   "UNVERIFIED for this run")
-            errors.append(err)
-            log.warning("[incremental_sync] %s", err)
-            return result
-        if open_incidents:
-            err = (f"hubspot/sql_coverage_gaps: {open_incidents} unresolved "
-                   f"post-boundary SQL coverage incident(s) remain open")
-            errors.append(err)
-            log.warning("[incremental_sync] %s", err)
-
-        gaps = result.get("new_undated_sql_gaps") or 0
-        if gaps:
-            # A new post-boundary gap is exactly the condition this PR exists
-            # to surface, so it is an error on the run — visible in the summary
-            # and in whatever watches it — not a line in a log nobody reads.
-            err = (f"hubspot/sql_coverage_gaps: {gaps} post-boundary contact(s) "
-                   f"reached SQL with no exact entry timestamp "
-                   f"({result.get('incident_reasons')})")
-            errors.append(err)
-            log.warning("[incremental_sync] %s", err)
-        else:
-            log.info(
-                "[incremental_sync] hubspot/sql_coverage_gaps: observed=%s "
-                "direct=%s recovered=%s gaps=%s open_incidents=%s",
-                result.get("new_sql_transitions_observed"),
-                result.get("direct_sql_timestamps_present"),
-                result.get("history_timestamps_recovered"),
-                gaps, result.get("unresolved_post_boundary_incidents"),
-            )
-        return result
     except Exception as exc:  # noqa: BLE001
         err = f"hubspot/sql_coverage_gaps: {exc}"
         errors.append(err)
@@ -1132,6 +1104,64 @@ def _detect_sql_coverage_gaps(*, run_id, errors: list) -> dict:
                 "new_sql_transitions_observed": None,
                 "new_undated_sql_gaps": None,
                 "unresolved_post_boundary_incidents": None}
+
+    if not result.get("ok"):
+        err = f"hubspot/sql_coverage_gaps: {result.get('detail')}"
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+        return {**result, "status": "failed"}
+
+    # No boundary yet is a STATE, not an outcome. It must not vote: a dataset
+    # that cannot yet do its job has not failed, and calling it a success would
+    # claim a guarantee that does not exist.
+    if not result.get("boundary_established"):
+        log.info("[incremental_sync] hubspot/sql_coverage_gaps: skipped — "
+                 "no coverage boundary is established")
+        return {**result, "status": "skipped",
+                "skip_reason": "no_sql_coverage_boundary_established",
+                "detail": result.get("detail")
+                or ("no coverage boundary is established, so there is no "
+                    "prospective period to check yet")}
+
+    # An unverified guarantee is not a healthy one. `ok` is already False above
+    # when the final read failed; this guards the other direction — a run that
+    # completed but could not count its own blockers.
+    open_incidents = result.get("unresolved_post_boundary_incidents")
+    if open_incidents is None:
+        err = ("hubspot/sql_coverage_gaps: the post-boundary incident store "
+               "could not be read, so the prospective SQL guarantee is "
+               "UNVERIFIED for this run")
+        errors.append(err)
+        log.warning("[incremental_sync] %s", err)
+        return {**result, "status": "failed"}
+
+    gaps = result.get("new_undated_sql_gaps") or 0
+    if open_incidents or gaps:
+        # A prospective gap is the condition this PR exists to surface, so it
+        # is an error on the run AND a failed dataset. Reporting `success`
+        # beside a populated `errors` list would be a contradiction the run
+        # summary cannot resolve.
+        if gaps:
+            errors.append(
+                f"hubspot/sql_coverage_gaps: {gaps} post-boundary contact(s) "
+                f"reached SQL with no exact entry timestamp "
+                f"({result.get('incident_reasons')})")
+        if open_incidents:
+            errors.append(
+                f"hubspot/sql_coverage_gaps: {open_incidents} unresolved "
+                f"post-boundary SQL coverage incident(s) remain open")
+        for message in errors[-2:]:
+            log.warning("[incremental_sync] %s", message)
+        return {**result, "status": "failed"}
+
+    log.info(
+        "[incremental_sync] hubspot/sql_coverage_gaps: observed=%s direct=%s "
+        "recovered=%s gaps=0 open_incidents=0",
+        result.get("new_sql_transitions_observed"),
+        result.get("direct_sql_timestamps_present"),
+        result.get("history_timestamps_recovered"),
+    )
+    return {**result, "status": "success"}
 
 
 def _sync_canonical_spend(*, run_id, date_to, errors: list) -> dict:

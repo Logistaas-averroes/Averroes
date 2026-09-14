@@ -1193,6 +1193,38 @@ CREATE TABLE IF NOT EXISTS hubspot_contact_funnel_sync_state (
   updated_at                TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ── PR-ADS-160 §3 — proving a successful INCREMENTAL, not just a run ────────
+-- `last_incremental_at` is stamped by BOTH modes, so a successful bootstrap
+-- was indistinguishable from a fresh incremental sync. PR-ADS-160's
+-- certification gate asks "is the source still being fed?", and a bootstrap
+-- answering that question yes is a false negative waiting to certify a window
+-- whose incremental pipeline died.
+--
+-- The same hazard is already documented on `hubspot_deal_sync_state`
+-- (PR-ADS-153E-A2). This carries it further, because two columns are not
+-- enough:
+--
+--   bootstrap completes T0 → incremental FAILS T1 → bootstrap succeeds T2
+--
+-- With only `last_status` + `last_sync_mode`, T2 overwrites both, and the
+-- evidence that the required incremental failed is gone. So the INCREMENTAL's
+-- own outcome gets its own column, which no bootstrap ever touches.
+--
+-- All four are additive and NULL on legacy rows, which FAILS CLOSED in
+-- `analysis/sql_coverage_freshness.py` until one real incremental sync records
+-- the new evidence.
+ALTER TABLE hubspot_contact_funnel_sync_state
+  ADD COLUMN IF NOT EXISTS last_status TEXT;               -- success|partial|failed
+ALTER TABLE hubspot_contact_funnel_sync_state
+  ADD COLUMN IF NOT EXISTS last_sync_mode TEXT;            -- bootstrap|incremental
+-- Advanced ONLY by an incremental run that succeeded. A bootstrap, however
+-- successful, never moves it.
+ALTER TABLE hubspot_contact_funnel_sync_state
+  ADD COLUMN IF NOT EXISTS last_successful_incremental_at TIMESTAMPTZ;
+-- The outcome of the most recent INCREMENTAL run, whatever ran after it.
+ALTER TABLE hubspot_contact_funnel_sync_state
+  ADD COLUMN IF NOT EXISTS last_incremental_status TEXT;   -- success|partial|failed
+
 -- PR-ADS-155 §4: stage-entry timestamps RECOVERED from HubSpot property history.
 --
 -- Why a separate table

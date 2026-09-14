@@ -215,10 +215,18 @@ def seeded160(pg, monkeypatch):  # noqa: F811
 
     # PR-ADS-160 §5: certification now REQUIRES a fresh contact-funnel source.
     # A fixture that omitted this would silently exercise the stale path.
+    #
+    # §3: freshness reads the PROVEN successful incremental, not
+    # `last_incremental_at` — which a bootstrap stamps too. A fixture that set
+    # only the old column would be indistinguishable from a backfill and would
+    # fail closed, so it writes the provenance the contract actually reads.
     writers.update_contact_funnel_sync_state(
         "contacts", bootstrap_status="complete",
         last_incremental_at=datetime.now(tz=timezone.utc),
         last_modified_watermark=datetime.now(tz=timezone.utc),
+        last_status="success", last_sync_mode="incremental",
+        last_incremental_status="success",
+        last_successful_incremental_at=datetime.now(tz=timezone.utc),
         last_error=None)
 
     writers.upsert_hubspot_contact_funnel([
@@ -743,9 +751,18 @@ def test_22_an_open_incident_blocks_certification_of_affected_windows():
         freshness=FRESH)
     assert blocked["certification_status"] == coverage.CERT_POST_BOUNDARY_GAPS
     assert blocked["certification_eligible"] is False
-    # The window is still COMPLETE for the historical population — completeness
-    # and certification are different questions and must not collapse.
-    assert blocked["window_total_complete"] is True
+    # §2 (second review). The HISTORICAL half is still complete — every undated
+    # legacy contact was ruled out of this window — but an open prospective gap
+    # could belong to it, so the WINDOW TOTAL is not complete and no total is
+    # publishable. The two halves are reported apart precisely so that a
+    # complete historical population can never be read as a complete window.
+    assert blocked["historical_membership_complete"] is True
+    assert blocked["prospective_membership_complete"] is False
+    assert blocked["window_total_complete"] is False
+    assert blocked["complete_sql_total"] is None
+    assert blocked["cpql_publishable"] is False
+    # The confirmed dated subset stays visible under its own qualified name.
+    assert blocked["confirmed_sql_subset"] == 5
 
 
 @pytest.mark.parametrize("start,end,expected", [
@@ -1672,13 +1689,15 @@ def test_56_the_scheduler_errors_when_open_incidents_cannot_be_counted(
 
     monkeypatch.setattr(
         "services.sql_coverage_boundary_service.detect_post_boundary_gaps",
-        lambda **k: {"ok": True, "new_undated_sql_gaps": 0,
+        lambda **k: {"ok": True, "boundary_established": True,
+                     "new_undated_sql_gaps": 0,
                      "unresolved_post_boundary_incidents": None})
 
     errors: list = []
-    sync._detect_sql_coverage_gaps(run_id="r1", errors=errors)
+    result = sync._detect_sql_coverage_gaps(run_id="r1", errors=errors)
 
     assert errors and "UNVERIFIED" in errors[0]
+    assert result["status"] == "failed", "an error beside `success` is a lie"
 
 
 def test_57_the_scheduler_errors_on_remaining_open_incidents(monkeypatch):
@@ -1687,13 +1706,15 @@ def test_57_the_scheduler_errors_on_remaining_open_incidents(monkeypatch):
 
     monkeypatch.setattr(
         "services.sql_coverage_boundary_service.detect_post_boundary_gaps",
-        lambda **k: {"ok": True, "new_undated_sql_gaps": 0,
+        lambda **k: {"ok": True, "boundary_established": True,
+                     "new_undated_sql_gaps": 0,
                      "unresolved_post_boundary_incidents": 3})
 
     errors: list = []
-    sync._detect_sql_coverage_gaps(run_id="r1", errors=errors)
+    result = sync._detect_sql_coverage_gaps(run_id="r1", errors=errors)
 
     assert errors and "3 unresolved" in errors[0]
+    assert result["status"] == "failed"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1711,8 +1732,22 @@ NOW = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
 
 
 def _sync(**over):
+    """A sync state proving a recent, SUCCESSFUL INCREMENTAL run.
+
+    PR-ADS-160 §3: `last_incremental_at` alone proves nothing — the
+    contact-funnel sync stamps it on bootstrap runs too. The freshness contract
+    reads `last_successful_incremental_at` (advanced only by an incremental that
+    succeeded) and `last_incremental_status` (that incremental's own outcome,
+    which no later bootstrap overwrites).
+    """
     row = {"bootstrap_status": "complete",
+           # Stamped by BOTH modes. Present here only to prove the contract does
+           # not use it.
            "last_incremental_at": NOW - timedelta(hours=2),
+           "last_sync_mode": "incremental",
+           "last_status": "success",
+           "last_incremental_status": "success",
+           "last_successful_incremental_at": NOW - timedelta(hours=2),
            "last_error": None}
     row.update(over)
     return {"available": True, "row": row}
@@ -1720,12 +1755,26 @@ def _sync(**over):
 
 @pytest.mark.parametrize("state,expected_reason,expected_fresh", [
     (_sync(), freshness_mod.FRESH, True),
-    (_sync(last_incremental_at=NOW - timedelta(hours=200)),
+    (_sync(last_successful_incremental_at=NOW - timedelta(hours=200)),
      freshness_mod.STALE, False),
-    (_sync(last_error="HubSpot 500"), freshness_mod.SYNC_FAILED, False),
+    (_sync(last_incremental_status="failed",
+           last_successful_incremental_at=None),
+     freshness_mod.SYNC_FAILED, False),
     (_sync(bootstrap_status="partial"),
      freshness_mod.BOOTSTRAP_INCOMPLETE, False),
-    (_sync(last_incremental_at=None), freshness_mod.NEVER_RUN, False),
+    # A completed BOOTSTRAP and nothing else. The row is post-migration (it
+    # carries a mode), so the absence of an incremental is a fact about the
+    # PIPELINE, not about the record.
+    (_sync(last_sync_mode="bootstrap", last_incremental_status=None,
+           last_successful_incremental_at=None),
+     freshness_mod.NEVER_RUN, False),
+    # A LEGACY row, written before the provenance columns existed. It cannot
+    # prove a successful incremental either way, so it fails closed — reported
+    # apart from NEVER_RUN because the remedy differs: one needs a sync to run,
+    # the other needs a sync to record.
+    (_sync(last_sync_mode=None, last_incremental_status=None,
+           last_successful_incremental_at=None),
+     freshness_mod.PROVENANCE_MISSING, False),
     ({"available": True, "row": None}, freshness_mod.STATE_MISSING, False),
     # Unreadable is None, NOT False: False is a claim about the pipeline,
     # None is a statement about us. Both block; only one is the pipeline's fault.
@@ -1744,9 +1793,11 @@ def test_58_the_freshness_contract_distinguishes_every_state(
 
 
 @pytest.mark.parametrize("state", [
-    _sync(last_incremental_at=NOW - timedelta(hours=200)),
-    _sync(last_error="HubSpot 500"),
+    _sync(last_successful_incremental_at=NOW - timedelta(hours=200)),
+    _sync(last_incremental_status="failed"),
     _sync(bootstrap_status="partial"),
+    _sync(last_sync_mode=None, last_incremental_status=None,
+          last_successful_incremental_at=None),
     {"available": False, "row": None},
 ])
 def test_59_no_window_certifies_on_a_source_that_is_not_fresh(state):
@@ -1786,22 +1837,40 @@ def test_60_a_fresh_source_lets_an_otherwise_clean_window_certify():
     assert block["source_fresh"] is True
 
 
-def test_61_freshness_uses_the_sync_run_time_not_the_newest_contact():
-    """Which timestamp, and why it matters.
+def test_61_freshness_uses_the_proven_successful_incremental_not_a_proxy():
+    """Which timestamp, and why the two obvious ones are both wrong.
 
-    ``last_incremental_at`` is when the sync RAN. ``latest_modified_at`` is the
-    newest contact modification it happened to see, and that goes stale on its
-    own whenever HubSpot is quiet. Confusing them would make a working system
-    look broken every weekend, and a broken one look fine for as long as its
-    last read stayed recent.
+    ``latest_modified_at`` is the newest contact modification the sync happened
+    to see; it goes stale on its own whenever HubSpot is quiet, and a quiet CRM
+    is not a broken pipeline.
+
+    ``last_incremental_at`` is stamped by BOTH modes, so a successful bootstrap
+    is indistinguishable from a live incremental feed — a window could certify
+    against a source whose incremental pipeline had died.
     """
-    quiet_crm = _sync(last_incremental_at=NOW - timedelta(hours=1))
+    quiet_crm = _sync(last_successful_incremental_at=NOW - timedelta(hours=1))
     quiet_crm["row"]["latest_modified_at"] = NOW - timedelta(days=30)
     assert freshness_mod.assess(quiet_crm, now=NOW)["fresh"] is True
 
-    dead_pipeline = _sync(last_incremental_at=NOW - timedelta(days=30))
+    dead_pipeline = _sync(
+        last_successful_incremental_at=NOW - timedelta(days=30))
     dead_pipeline["row"]["latest_modified_at"] = NOW - timedelta(minutes=1)
     assert freshness_mod.assess(dead_pipeline, now=NOW)["fresh"] is False
+
+    # A BOOTSTRAP that ran a minute ago does not make the source fresh.
+    bootstrap_only = _sync(
+        last_sync_mode="bootstrap", last_incremental_status=None,
+        last_successful_incremental_at=None,
+        last_incremental_at=NOW - timedelta(minutes=1))
+    verdict = freshness_mod.assess(bootstrap_only, now=NOW)
+    assert verdict["fresh"] is False
+    assert verdict["reason"] == freshness_mod.NEVER_RUN
+
+    # And a bootstrap AFTER a failed incremental does not clear the failure.
+    masked = _sync(last_sync_mode="bootstrap", last_status="success",
+                   last_incremental_status="failed")
+    assert freshness_mod.assess(masked, now=NOW)["reason"] == \
+        freshness_mod.SYNC_FAILED
 
 
 @_needs_pg
@@ -1836,10 +1905,15 @@ def test_63_pg_a_stale_source_breaks_the_gate_and_blocks_every_window(
     from scripts import audit_sql_coverage_gate as gate_mod
 
     _establish()
+    # Genuinely stale, not merely unprovable: the last incremental SUCCEEDED,
+    # it simply succeeded two weeks ago. That distinction is the point — an
+    # unreadable provenance and a dead scheduler have different remedies.
+    stale_at = datetime.now(tz=timezone.utc) - timedelta(days=14)
     writers.update_contact_funnel_sync_state(
         "contacts", bootstrap_status="complete",
-        last_incremental_at=datetime.now(tz=timezone.utc) - timedelta(days=14),
-        last_error=None)
+        last_incremental_at=stale_at, last_status="success",
+        last_sync_mode="incremental", last_incremental_status="success",
+        last_successful_incremental_at=stale_at, last_error=None)
 
     g, gate_report = gate_mod.run()
     assert any("source_freshness" in v for v in g.violations)
@@ -1957,3 +2031,441 @@ def test_69_incident_membership_never_produces_a_date():
                           "post_boundary_gaps_ruled_out",
                           "post_boundary_gaps_global"}
     assert all(isinstance(v, int) for v in split.values())
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §4 — no shadowed definitions
+#
+# Six functions existed TWICE in the funnel repository, byte-identical, the
+# second silently overriding the first. That is benign only while the copies
+# agree: the moment one is edited, every caller gets whichever Python bound
+# last, and the edit appears to have no effect for reasons nothing explains.
+# This already bit once in this PR — an updated `fetch_post_boundary_sql_contacts`
+# was shadowed by its stale twin and raised `unexpected keyword argument`.
+# ═════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("module_path", [
+    "db/crm_funnel_repository.py",
+    "db/writers.py",
+    "services/sql_coverage_boundary_service.py",
+    "analysis/lifecycle_sql_coverage.py",
+    "analysis/sql_coverage_freshness.py",
+    "scripts/audit_lifecycle_sql_coverage.py",
+    "scripts/audit_sql_coverage_gate.py",
+    "scripts/establish_sql_coverage_boundary.py",
+])
+def test_70_no_module_defines_the_same_top_level_function_twice(module_path):
+    """A later definition silently replaces an earlier one. Never acceptable."""
+    import ast as _ast
+    import collections
+
+    source = (_ROOT / module_path).read_text(encoding="utf-8")
+    tree = _ast.parse(source)
+    counts = collections.Counter(
+        node.name for node in tree.body
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)))
+    duplicates = {name: n for name, n in counts.items() if n > 1}
+
+    assert not duplicates, (
+        f"{module_path} defines {sorted(duplicates)} more than once; the later "
+        f"definition silently overrides the earlier, so an edit to the wrong "
+        f"copy has no effect and nothing explains why")
+
+
+def test_71_the_duplicate_guard_actually_fires():
+    """The guard's own negative control.
+
+    A check that cannot fail is not a check. This proves the AST walk detects a
+    shadowed definition rather than merely finding none in files that have none.
+    """
+    import ast as _ast
+    import collections
+
+    shadowed = "def f():\n    return 1\n\n\ndef f():\n    return 2\n"
+    tree = _ast.parse(shadowed)
+    counts = collections.Counter(
+        node.name for node in tree.body
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)))
+    assert {n: c for n, c in counts.items() if c > 1} == {"f": 2}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §1 (second review) — the scheduler dataset must carry a TRUTHFUL status
+#
+# `detect_post_boundary_gaps()` speaks in `ok` plus counts. `_overall_status()`
+# speaks in status strings, and deliberately treats an ABSENT status as a
+# failure — an unrecognised outcome is not evidence of success. Returning the
+# service payload unchanged therefore marked EVERY real sync `partial`,
+# including a perfectly clean check, and including the pre-boundary state where
+# this dataset has nothing to say at all.
+#
+# These tests run the REAL wrapper — `_detect_sql_coverage_gaps` calling the
+# real service against a real database — and feed its real return value into
+# the real `_overall_status`. Mocking the wrapper to return an invented status
+# would test the invention, not the mapping.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _sched_run(seeded, monkeypatch):
+    """Run the real scheduler wrapper and score it with the real `_overall_status`."""
+    import scheduler.incremental_sync as sync
+
+    errors: list = []
+    block = sync._detect_sql_coverage_gaps(run_id="sched_test", errors=errors)
+    overall = sync._overall_status({"hubspot/sql_coverage_gaps": block})
+    return block, errors, overall
+
+
+@_needs_pg
+def test_72_pg_no_boundary_makes_the_dataset_skipped_and_non_voting(
+        seeded160, monkeypatch):
+    """Case 1. Nothing to police yet is a STATE, not a success and not a failure.
+
+    Before the boundary exists there is no prospective period, so this dataset
+    cannot vote: calling it `success` would claim a guarantee that does not
+    exist, and calling it `failed` would make every pre-boundary run red for
+    doing exactly the right thing.
+    """
+    import scheduler.incremental_sync as sync
+
+    # Deliberately NOT establishing a boundary.
+    block, errors, overall = _sched_run(seeded160, monkeypatch)
+
+    assert block["status"] == "skipped"
+    assert block["skip_reason"] == "no_sql_coverage_boundary_established"
+    assert block["detail"], "a skip must say why, or it is indistinguishable from a bug"
+    assert block["status"] in sync.NON_VOTING_STATUSES
+    assert errors == [], "having nothing to police is not a run error"
+    # Non-voting: it neither greens nor reds the run.
+    assert overall == "success"
+
+
+@_needs_pg
+def test_73_pg_a_clean_established_boundary_reports_success(
+        seeded160, monkeypatch):
+    """Case 2. The one green case — and the regression this blocker was about.
+
+    Before the fix this returned no status at all, so a flawless prospective
+    check made the whole sync `partial` forever.
+    """
+    _establish()
+
+    block, errors, overall = _sched_run(seeded160, monkeypatch)
+
+    assert block["ok"] is True
+    assert block["status"] == "success"
+    assert errors == [], "a `success` beside a populated errors list is a lie"
+    assert overall == "success"
+
+
+@_needs_pg
+def test_74_pg_an_open_incident_makes_the_dataset_failed(
+        seeded160, monkeypatch):
+    """Case 3. A post-boundary contact with no exact timestamp is the condition
+    this PR exists to surface, so it reds the dataset AND the run."""
+    from db import writers
+
+    _establish()
+    # HubSpot history holds no SQL transition either: neither permitted source
+    # can supply a date, so this is a genuine prospective gap.
+    _stub_history(monkeypatch, {"late_gap": {"state": hubspot.HISTORY_PRESENT,
+                                             "versions": []}})
+    writers.upsert_hubspot_contact_funnel([{
+        "contact_id": "late_gap", "lifecycle_stage": "salesqualifiedlead",
+        "created_at": BOUNDARY + timedelta(days=2),
+        "last_modified_at": BOUNDARY + timedelta(days=2)}])
+
+    block, errors, overall = _sched_run(seeded160, monkeypatch)
+
+    assert block["status"] == "failed"
+    assert errors, "an open prospective gap must be a run error"
+    assert any("sql_coverage_gaps" in e for e in errors)
+    assert overall != "success"
+    assert overall == "failed"
+
+
+@_needs_pg
+def test_75_pg_an_unreadable_incident_store_makes_the_dataset_failed(
+        seeded160, monkeypatch):
+    """Case 4. A run that completed but could not count its own blockers has
+    not verified anything. Unverified is not healthy."""
+    _establish()
+    monkeypatch.setattr(repo, "fetch_post_boundary_incidents",
+                        lambda **k: {"available": False, "rows": []})
+
+    block, errors, overall = _sched_run(seeded160, monkeypatch)
+
+    assert block["status"] == "failed"
+    assert errors and any("UNVERIFIED" in e or "could not" in e for e in errors)
+    assert overall != "success"
+    # And the count is unknown, never zero — a pass that could not read the
+    # store proves nothing about how many blockers remain.
+    assert block["unresolved_post_boundary_incidents"] is None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §2 (second review) — an incomplete SQL total and its CPQL must never publish
+#
+# Completeness has TWO halves and they fail for different reasons:
+#
+#   historical   every undated legacy contact ruled out of this window
+#   prospective  no open post-boundary gap could belong to this window
+#
+# The first cut computed only the historical half and called the result
+# `complete`, so a window with an open prospective gap published a total that
+# was provably missing rows, and a CPQL computed from it. The halves are now
+# reported apart, `complete_sql_total` is null unless BOTH hold, and
+# `cpql_publishable` additionally requires certification.
+#
+# The confirmed dated subset stays visible throughout — under its own
+# explicitly qualified name, never as "the total".
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _window(**over):
+    """A window whose HISTORICAL half is complete, varied one factor at a time."""
+    kwargs = {
+        "window": "oct", "window_end": date(2026, 10, 31),
+        "window_start": date(2026, 10, 1),
+        "confirmed_sqls": 42, "recovered_sqls": 0,
+        # Bounded below the window start: ruled out, so the historical half is
+        # complete in every case here. Only the PROSPECTIVE half varies.
+        "unresolved_rows": [{"contact_id": "c1", "created_at": LEGACY_CREATED,
+                             "known_reached_sql_by": BOUNDARY}],
+        "boundary_observed_at": BOUNDARY,
+        "open_post_boundary_incidents": 0,
+        "freshness": FRESH,
+    }
+    kwargs.update(over)
+    return coverage.window_coverage(**kwargs)
+
+
+def _certify(*windows):
+    """Run the same windows through the LAST gate, with every global input good.
+
+    Only the per-window verdict varies, so whatever the gate withholds, it
+    withholds for a window-local reason and nothing else.
+    """
+    from scripts import audit_lifecycle_sql_coverage as audit
+
+    blocks = [{**w, "window_type": "monthly"} for w in windows]
+    report = audit.audit_certification(
+        audit.Findings(), blocks,
+        {"available": True, "post_boundary_incidents_available": True,
+         "boundary": {"boundary_id": "b1", "observed_at": BOUNDARY}},
+        {"reconciliation_complete": True},
+        freshness=FRESH)
+    return blocks, report
+
+
+def test_76_a_window_publishes_a_complete_total_only_when_both_halves_hold():
+    """The five cases, each failing for a different reason, on the same window.
+
+    1. historical resolved, one open prospective gap that could belong
+    2. historical resolved, the incident store unreadable
+    3. both halves complete, but the source is stale
+    4. both halves complete and fresh, but the window straddles the boundary
+    5. everything clean — the only case that may publish
+    """
+    # ── 1. an open prospective gap that could belong to this window ──────────
+    case1 = _window(open_post_boundary_incidents=1)
+    # ── 2. the incident store could not be read: unknown, not zero ───────────
+    case2 = _window(open_post_boundary_incidents=None)
+    # ── 3. complete, but certifying against a source that stopped updating ───
+    case3 = _window(freshness={"fresh": False,
+                               "reason": freshness_mod.STALE})
+    # ── 4. complete and fresh, but the window straddles the boundary, so the
+    #      guaranteed period does not cover all of it ─────────────────────────
+    case4 = _window(window_start=date(2026, 9, 1), window_end=date(2026, 9, 30))
+    # ── 5. nothing wrong anywhere ───────────────────────────────────────────
+    case5 = _window()
+
+    # ── the membership layer: the two halves are computed and reported APART ─
+    #
+    # Cases 1 and 2 fail the PROSPECTIVE half while the historical half holds.
+    # Before this fix only the historical half was computed and its verdict was
+    # called `complete`, so both published a total provably missing rows.
+    for block in (case1, case2):
+        assert block["historical_membership_complete"] is True
+        assert block["prospective_membership_complete"] is False
+        assert block["window_total_complete"] is False
+        assert block["complete_sql_total"] is None
+    assert case1["reason"] == coverage.COVERAGE_POST_BOUNDARY_GAPS
+    assert case2["reason"] == coverage.COVERAGE_INCIDENTS_UNREADABLE
+
+    # Case 3 is genuinely COMPLETE — every row IS accounted for — and still may
+    # not publish. Completeness and certification are different questions: a
+    # complete window over a source that stopped updating describes data that
+    # stopped arriving. Collapsing the two would make "complete" mean
+    # "trustworthy", which is the substitution this whole PR exists to refuse.
+    assert case3["window_total_complete"] is True
+    assert case3["certification_eligible"] is False
+    assert case3["certification_status"] == coverage.CERT_STALE_SOURCE
+
+    # Case 4 straddles the boundary, and so fails BOTH questions at once: an
+    # upper bound of 14 Sep cannot rule a contact out of a window that opens on
+    # 1 Sep, so the historical half is unresolved, and only part of the window
+    # lies in the guaranteed period.
+    assert case4["historical_membership_complete"] is False
+    assert case4["window_total_complete"] is False
+    assert case4["certification_status"] == coverage.CERT_OVERLAPS_BOUNDARY
+
+    # ── the certification layer: the LAST gate, which takes the total back ───
+    blocks, report = _certify(case1, case2, case3, case4, case5)
+    failing, publishable = blocks[:4], blocks[4]
+
+    for i, block in enumerate(failing, start=1):
+        assert block["certified"] is False, f"case {i} certified"
+        assert block["cpql_publishable"] is False, f"case {i} published CPQL"
+        assert block["complete_sql_total"] is None, (
+            f"case {i} left a complete total on the report; whoever reads the "
+            f"number rather than the flag gets an incomplete total")
+        # The confirmed dated subset stays visible — under a name that says
+        # what it is, and never AS the total.
+        assert block["confirmed_sql_subset"] == 42
+        assert block["complete_sql_total"] != block["confirmed_sql_subset"]
+
+    # ── the only publishable case ───────────────────────────────────────────
+    assert publishable["historical_membership_complete"] is True
+    assert publishable["prospective_membership_complete"] is True
+    assert publishable["window_total_complete"] is True
+    assert publishable["certified"] is True
+    assert publishable["cpql_publishable"] is True
+    assert publishable["complete_sql_total"] == 42
+    assert report["windows_certified"] == 1
+    assert len(report["blocked_windows"]) == 4
+
+
+def test_77_a_global_prerequisite_takes_back_a_locally_publishable_total():
+    """The gate must WITHHOLD, not merely annotate.
+
+    A window can be locally flawless and still uncertifiable for a reason that
+    lives outside it. A report that says `certified: false` beside
+    `complete_sql_total: 42` is read as a total by anyone who reads the number
+    rather than the flag, so certification takes both back.
+    """
+    from scripts import audit_lifecycle_sql_coverage as audit
+
+    clean = _window()
+    assert clean["cpql_publishable"] is True, "control: it starts publishable"
+
+    blocks = [{**clean, "window_type": "monthly"}]
+    report = audit.audit_certification(
+        audit.Findings(), blocks,
+        {"available": True, "post_boundary_incidents_available": True,
+         "boundary": {"boundary_id": "b1", "observed_at": BOUNDARY}},
+        # The 44 canonical reader combinations did NOT reconcile — nothing to
+        # do with this window, and fatal to any claim made about it.
+        {"reconciliation_complete": False}, freshness=FRESH)
+
+    assert report["windows_certified"] == 0
+    assert report["blocked_windows"][0]["reason"] == \
+        "canonical_readers_did_not_reconcile"
+    assert blocks[0]["certified"] is False
+    assert blocks[0]["cpql_publishable"] is False
+    assert blocks[0]["complete_sql_total"] is None
+    assert blocks[0]["confirmed_sql_subset"] == 42
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §5 (second review) — provenance is bound to THE snapshot, or there is none
+#
+# The service used to read the ingestion provenance before calling the writer,
+# so a sync landing between the two made `source_run_id` describe a state older
+# than the population actually snapshotted — a boundary documented as traceable
+# to a run it does not correspond to. It is now read inside the SAME
+# transaction, immediately after the population, and its absence REFUSES
+# establishment rather than recording a best-effort NULL.
+# ═════════════════════════════════════════════════════════════════════════════
+
+@_needs_pg
+def test_78_pg_a_boundary_without_snapshot_provenance_is_refused(
+        seeded160, monkeypatch):
+    """No provable provenance, no boundary. Not a NULL, not best-effort."""
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("DELETE FROM hubspot_contact_funnel_sync_state")
+        c.commit()
+
+    result = _establish()
+
+    assert result["ok"] is False
+    assert "provenance" in result["detail"] or "traced" in result["detail"]
+    # And nothing was recorded: a refusal that left a row behind would be the
+    # best-effort boundary this blocker forbids.
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT count(*) FROM sql_coverage_boundary")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM sql_coverage_boundary_contact")
+        assert cur.fetchone()[0] == 0
+
+
+@_needs_pg
+def test_79_pg_the_provenance_describes_the_state_the_snapshot_was_read_from(
+        seeded160):
+    """The recorded provenance must match the sync state AT snapshot time.
+
+    Read outside the transaction, a sync landing in between would make this
+    describe a different run than the one that produced the population.
+    """
+    from db import writers
+
+    batch_id = writers.start_sync_batch(
+        "hubspot", "hubspot/contact_funnel", "incremental")
+    assert batch_id, "the fixture needs a real batch to trace back to"
+    writers.update_contact_funnel_sync_state(
+        "contacts", bootstrap_status="complete", last_batch_id=batch_id,
+        last_status="success", last_sync_mode="incremental",
+        last_incremental_status="success",
+        last_successful_incremental_at=datetime.now(tz=timezone.utc),
+        last_error=None)
+
+    result = _establish()
+    assert result["ok"] is True
+
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT source_run_id FROM sql_coverage_boundary")
+        source_run_id = cur.fetchone()[0]
+
+    assert f"batch={batch_id}" in source_run_id
+    assert "mode=incremental" in source_run_id
+    # The service's own report agrees with what the database recorded, so a
+    # reader of either surface reaches the same run.
+    assert result["boundary"]["source_run_id"] == source_run_id
+
+
+def test_80_the_prospective_question_is_vacuous_before_a_boundary_exists():
+    """The one place an unknown gap count does NOT block, and why.
+
+    A post-boundary gap is defined relative to a boundary. Where none is
+    established there is no prospective period and nothing can belong to it —
+    the question is vacuous, not unknown. Treating it as unknown would make
+    every window incomplete the moment PR-ADS-160 shipped, including windows
+    PR-ADS-159 correctly published, which is a consumer change this
+    foundational PR must not make.
+
+    The moment a boundary exists the same missing count IS a real unknown, and
+    blocks. That is the whole difference between "not asked" and "asked, and we
+    could not look".
+    """
+    common = {"window": "2024", "window_end": date(2024, 12, 31),
+              "window_start": date(2024, 1, 1), "confirmed_sqls": 11,
+              "recovered_sqls": 0, "unresolved_rows": [],
+              "open_post_boundary_incidents": None}
+
+    # No boundary: vacuous. PR-ADS-159's contract, unchanged.
+    before = coverage.window_coverage(**common, boundary_observed_at=None)
+    assert before["prospective_membership_complete"] is True
+    assert before["window_total_complete"] is True
+    assert before["complete_sql_total"] == 11
+    assert before["reason"] == coverage.COVERAGE_COMPLETE
+    # Complete is still not CERTIFIED — the stronger claim needs a boundary.
+    assert before["certification_status"] == coverage.CERT_NO_BOUNDARY
+    assert before["certification_eligible"] is False
+
+    # A boundary exists and the store could not be read: a real unknown.
+    after = coverage.window_coverage(**common, boundary_observed_at=BOUNDARY,
+                                     freshness=FRESH)
+    assert after["prospective_membership_complete"] is False
+    assert after["window_total_complete"] is False
+    assert after["complete_sql_total"] is None
+    assert after["cpql_publishable"] is False
+    assert after["reason"] == coverage.COVERAGE_INCIDENTS_UNREADABLE
+    assert "could not be read" in after["explanation"]

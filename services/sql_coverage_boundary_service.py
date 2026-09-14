@@ -142,27 +142,6 @@ def _utcnow() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
-def _contact_sync_provenance(repo) -> str | None:
-    """Which contact-funnel sync state the population was read against.
-
-    Recorded in ``source_run_id`` so a boundary can always be traced to the
-    ingestion run whose output it snapshotted. Best-effort: an unreadable sync
-    state yields ``None`` rather than a fabricated identifier.
-    """
-    try:
-        state = repo.fetch_contact_funnel_sync_state()
-    except Exception:  # noqa: BLE001
-        return None
-    if not (state or {}).get("available"):
-        return None
-    row = (state or {}).get("row") or {}
-    run = row.get("last_batch_id")
-    watermark = row.get("last_modified_watermark")
-    if run is None and watermark is None:
-        return None
-    return f"contact_funnel_sync batch={run} watermark={watermark}"
-
-
 def _run_id() -> str:
     return f"sqlbound_{uuid.uuid4().hex[:12]}"
 
@@ -233,8 +212,11 @@ def establish_boundary(*, apply: bool = False,
                               "population snapshot, inside the write transaction",
         "lifecycle_rule_version": LIFECYCLE_RULE_VERSION,
         "source_dataset": SOURCE_DATASET,
-        # Provenance: which sync run's state the population was read against.
-        "source_run_id": source_run_id or _contact_sync_provenance(repo),
+        # Provenance is read by the WRITER, inside the same transaction that
+        # snapshots the population — see PR-ADS-160 §5. Reading it here would
+        # describe whatever the sync state said before that transaction opened,
+        # which is not necessarily the state the snapshot corresponds to.
+        "source_run_id": source_run_id,
         "population_definition": POPULATION_DEFINITION,
         "run_id": run_id,
         "legacy_undated_sql_contacts": len(contacts),
@@ -302,6 +284,8 @@ def establish_boundary(*, apply: bool = False,
     # was actually recorded rather than what was proposed.
     written = dict(proposed)
     written["observed_at"] = result.get("observed_at")
+    # The provenance the transaction actually proved, echoed back.
+    written["source_run_id"] = result.get("source_run_id")
     base = {**base, "boundary": written,
             "legacy_undated_bounded": result.get("contacts_written") or 0}
 

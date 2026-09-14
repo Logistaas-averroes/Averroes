@@ -21,21 +21,44 @@ Certification requires ALL of:
 
 1. the bootstrap is **complete** — a partial backfill means the historical
    population itself is still arriving;
-2. the most recent incremental sync **succeeded** — ``last_error`` is clear;
-3. the sync has run **within the freshness threshold**.
+2. the most recent **incremental** run succeeded — proven by
+   ``last_incremental_status``, not inferred;
+3. that successful incremental ran **within the freshness threshold**, measured
+   on ``last_successful_incremental_at``.
 
-Anything else blocks. The four blocking states are kept apart because they have
+Anything else blocks. The blocking states are kept apart because they have
 different remedies: stale means the scheduler is behind, failed means a run
 errored, incomplete means the backfill never finished, and unavailable means we
 could not look — and only the last one is not a statement about the pipeline.
 
-Which timestamp
----------------
-``last_incremental_at`` — when the sync last RAN — not ``latest_modified_at``,
-which is the newest contact modification the sync happened to see. The second
-one goes stale on its own whenever HubSpot is quiet, and a quiet CRM is not a
-broken pipeline. Confusing the two would make a working system look broken every
-weekend, and a broken one look fine for as long as its last read stayed recent.
+Which timestamp, and why the obvious one is wrong twice
+-------------------------------------------------------
+**Not ``latest_modified_at``** — the newest contact modification the sync
+happened to see. That goes stale on its own whenever HubSpot is quiet, and a
+quiet CRM is not a broken pipeline. Using it would make a working system look
+broken every weekend, and a broken one look fine for as long as its last read
+stayed recent.
+
+**Not ``last_incremental_at`` either**, despite the name. The contact-funnel
+sync stamps it on BOTH bootstrap and incremental runs, so a successful bootstrap
+is indistinguishable from a fresh incremental feed. A window could then certify
+against a source whose incremental pipeline had died, on the strength of a
+backfill.
+
+So the contract reads ``last_successful_incremental_at``, which only an
+incremental run that SUCCEEDED ever advances, together with
+``last_incremental_status``, which records that incremental's own outcome and
+which no bootstrap ever overwrites. That second column exists because two are
+not enough:
+
+    bootstrap completes T0 → incremental FAILS T1 → bootstrap succeeds T2
+
+With only ``last_status`` and ``last_sync_mode``, T2 overwrites both and the
+evidence that the required incremental failed is gone.
+
+Legacy rows carry NULL in all of these and therefore **fail closed** until one
+real incremental sync records the new evidence. That is deliberate: a row that
+predates the contract cannot prove anything about it.
 """
 
 from __future__ import annotations
@@ -50,19 +73,24 @@ DEFAULT_MAX_AGE_HOURS = 36
 # ── Stable reason codes · denominator: one freshness assessment ─────────────
 FRESH = "source_fresh"
 STALE = "source_stale"
-SYNC_FAILED = "source_last_sync_failed"
+SYNC_FAILED = "source_last_incremental_failed"
 BOOTSTRAP_INCOMPLETE = "source_bootstrap_incomplete"
-NEVER_RUN = "source_never_synced"
+NEVER_RUN = "source_no_successful_incremental"
 STATE_MISSING = "source_sync_state_missing"
 STATE_UNAVAILABLE = "source_sync_state_unavailable"
+#: The row predates the PR-ADS-160 §3 provenance columns, so it cannot prove a
+#: successful incremental either way. Distinct from NEVER_RUN, which is a
+#: statement about the pipeline; this is a statement about the record.
+PROVENANCE_MISSING = "source_incremental_provenance_missing"
 
 FRESHNESS_REASONS = (FRESH, STALE, SYNC_FAILED, BOOTSTRAP_INCOMPLETE,
-                     NEVER_RUN, STATE_MISSING, STATE_UNAVAILABLE)
+                     NEVER_RUN, STATE_MISSING, STATE_UNAVAILABLE,
+                     PROVENANCE_MISSING)
 
 #: Every reason except FRESH blocks certification. Listed explicitly rather than
 #: derived, so adding a reason without deciding whether it blocks is impossible.
 BLOCKING_REASONS = (STALE, SYNC_FAILED, BOOTSTRAP_INCOMPLETE, NEVER_RUN,
-                    STATE_MISSING, STATE_UNAVAILABLE)
+                    STATE_MISSING, STATE_UNAVAILABLE, PROVENANCE_MISSING)
 
 
 def _as_datetime(value):
@@ -114,40 +142,72 @@ def assess(sync_state: dict, *, now: datetime | None = None,
                            "ingestion has never recorded a run")}
 
     bootstrap = row.get("bootstrap_status")
+    mode = row.get("last_sync_mode")
+    incremental_status = row.get("last_incremental_status")
+    proven_at = _as_datetime(row.get("last_successful_incremental_at"))
+    # Kept for the report only. It is NOT the freshness clock — both modes
+    # stamp it, so it cannot prove an incremental ran at all.
     last_run = _as_datetime(row.get("last_incremental_at"))
-    last_error = (row.get("last_error") or "").strip()
-    age_hours = (None if last_run is None
-                 else round((now - last_run).total_seconds() / 3600.0, 2))
+
+    age_hours = (None if proven_at is None
+                 else round((now - proven_at).total_seconds() / 3600.0, 2))
     base = {**base, "bootstrap_status": bootstrap, "age_hours": age_hours,
+            "last_sync_mode": mode,
+            "last_incremental_status": incremental_status,
+            "last_successful_incremental_at": (proven_at.isoformat()
+                                               if proven_at else None),
             "last_incremental_at": (last_run.isoformat() if last_run else None)}
 
     # Order matters: the most fundamental failure is reported, not the first
-    # symptom. A partial bootstrap whose last run also errored is a bootstrap
-    # problem — fixing the error alone would still leave the backfill unfinished.
+    # symptom. A partial bootstrap whose last incremental also failed is a
+    # bootstrap problem — fixing the incremental alone would still leave the
+    # backfill unfinished.
     if bootstrap != "complete":
         return {**base, "reason": BOOTSTRAP_INCOMPLETE,
                 "detail": (f"the contact-funnel bootstrap is '{bootstrap}', not "
                            f"complete, so the historical population is still "
                            f"arriving")}
-    if last_error:
+
+    # A row written before the PR-ADS-160 §3 columns existed can say nothing
+    # about incremental success either way. It fails closed rather than being
+    # read optimistically — which is what made a bootstrap look fresh.
+    #
+    # `last_sync_mode` is the migration marker: a row that carries it was
+    # written by the current service, so an absent incremental is a fact about
+    # the PIPELINE (nothing incremental has run) rather than about the RECORD.
+    # The two have different remedies and are reported apart.
+    if mode is None and incremental_status is None and proven_at is None:
+        return {**base, "reason": PROVENANCE_MISSING,
+                "detail": ("this sync state predates the incremental-provenance "
+                           "columns, so a successful incremental run cannot be "
+                           "proven; it will clear once one real incremental "
+                           "sync records the evidence")}
+
+    if incremental_status and incremental_status != "success":
         return {**base, "reason": SYNC_FAILED,
-                "detail": (f"the most recent contact-funnel sync recorded an "
-                           f"error: {last_error[:200]}")}
-    if last_run is None:
+                "detail": (f"the most recent contact-funnel INCREMENTAL run "
+                           f"ended '{incremental_status}'. A later bootstrap "
+                           f"does not clear this: the incremental feed is what "
+                           f"keeps the source current")}
+
+    if proven_at is None:
         return {**base, "reason": NEVER_RUN,
-                "detail": ("the contact-funnel sync has never completed an "
-                           "incremental run")}
+                "detail": ("no incremental contact-funnel sync has ever "
+                           "succeeded, so the source has never been proven to "
+                           "be updating. A completed bootstrap is a backfill, "
+                           "not a feed")}
+
     if age_hours is not None and age_hours > max_age_hours:
         return {**base, "reason": STALE,
-                "detail": (f"the contact-funnel sync last ran {age_hours}h ago, "
-                           f"beyond the {max_age_hours}h threshold; a window "
-                           f"certified now would describe data that stopped "
-                           f"arriving")}
+                "detail": (f"the last SUCCESSFUL incremental sync was "
+                           f"{age_hours}h ago, beyond the {max_age_hours}h "
+                           f"threshold; a window certified now would describe "
+                           f"data that stopped arriving")}
 
     return {**base, "fresh": True, "reason": FRESH,
-            "detail": (f"the contact-funnel sync completed its bootstrap and "
-                       f"last ran {age_hours}h ago, within the "
-                       f"{max_age_hours}h threshold")}
+            "detail": (f"the contact-funnel bootstrap is complete and an "
+                       f"incremental sync succeeded {age_hours}h ago, within "
+                       f"the {max_age_hours}h threshold")}
 
 
 def blocks_certification(verdict: dict) -> bool:
