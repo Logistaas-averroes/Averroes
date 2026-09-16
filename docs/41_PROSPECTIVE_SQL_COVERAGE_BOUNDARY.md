@@ -562,6 +562,52 @@ proven-coverage watermark does not move, because a truncated pull did not cover
 its interval — while keeping the work that genuinely landed visible. It can
 never be marked `verified_empty`: that already requires a *successful* pull.
 
+##### …including the durable run record, and every surface that reads it
+
+The run summary and the CLI exit code told the truth from the start. One line
+did not:
+
+```python
+"status": "success" if overall_status in ("success", "partial") else "failed"
+```
+
+That is the write to the `runs` table — and the `runs` table is what production
+reads. `/api/runs`, the "Latest recorded run" banner, per-page run metadata and
+Data Runs all consume it, so a truncated contact-funnel sync left every one of
+those surfaces reporting a clean run over a contact population that was never
+finished. The lie was invisible precisely where the truth was already present.
+
+The exact status is now persisted — `success` → `success`, `partial` →
+`partial`, `failed` → `failed` — mapped explicitly, so an unrecognised status
+fails closed rather than passing through.
+
+**Three outcomes, kept distinct all the way to the screen:**
+
+| Layer | `success` | `partial` | `failed` |
+| --- | --- | --- | --- |
+| `runs.status` | success | **partial** | failed |
+| `/api/runs` | success | **partial** | failed |
+| monitoring severity | green | **yellow** | yellow → red on repeat |
+| monitoring `last_success_at` | advanced | **not advanced** | not advanced |
+| monitoring `consecutive_failures` | reset | **reset** (not a failure) | incremented |
+| freshness banner | OK | **warning** | error |
+| per-page run metadata | Fresh | **"Latest run partial"** | "Last run failed" |
+
+In `api/monitoring.py` the distinction lives in two places, answering two
+different questions. `consecutive_failures` does **not** count a partial — real
+work landed, the pipeline is not down, and letting it accumulate toward the red
+threshold would report an outage where there is none. `last_success_at` is
+**not** advanced by one — it is the proven-complete coverage claim that
+staleness is measured against, and a run that stopped short has proven nothing
+about coverage. Folding partial into success for both, as the first cut did,
+made a pipeline producing nothing but partial runs look perfectly healthy.
+`last_completed_at` is reported alongside, so excluding partial from
+`last_success_at` hides nothing — it just stops that information being called
+success.
+
+Partial is deliberately **not red** either. Yellow is the only honest answer:
+something needs looking at, nothing is on fire.
+
 `scripts/audit_lifecycle_sql_coverage.py` adds the global half: all 44
 window/scope reader combinations must reconcile, and the audit must have been
 able to look. A locally eligible window is **not** certified while either fails.

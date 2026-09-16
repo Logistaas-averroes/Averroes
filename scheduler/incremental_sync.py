@@ -617,9 +617,24 @@ def run_daily_incremental_sync(
     evidence = build_evidence_block(datasets)
 
     # Reflect the true final state on the local run record.
+    #
+    # PR-ADS-160 (fourth review) — the EXACT status, not a collapsed one. This
+    # previously wrote `"success" if overall_status in ("success", "partial")`,
+    # which turned every partial run into a successful one the moment it became
+    # durable. The returned summary and the CLI exit code were already truthful,
+    # so the lie lived in exactly one place — and it was the place production
+    # reads: `/api/runs`, the "Latest recorded run" banner, per-page run
+    # metadata and Data Runs all consume this table. A truncated contact-funnel
+    # sync could therefore leave the dashboard reporting a clean run over an
+    # incomplete contact population.
+    #
+    # Mapped explicitly rather than passed through: an unrecognised status is
+    # not evidence of success, so anything outside the vocabulary fails closed.
     db_writers.update_run(run_id, {
         "finished_at": finished_at,
-        "status": "success" if overall_status in ("success", "partial") else "failed",
+        "status": (overall_status
+                   if overall_status in ("success", "partial", "failed")
+                   else "failed"),
         "error_message": "; ".join(errors)[:1000] if errors else None,
     })
 

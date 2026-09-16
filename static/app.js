@@ -1647,6 +1647,14 @@ async function loadDataFreshness() {
   } else if (status === "running") {
     statusEl.textContent = `Latest run in progress · ${runType} · ${dateStr}`;
     statusEl.className   = "freshness-status freshness-warning";
+  } else if (status === "partial") {
+    // PR-ADS-160 (fourth review). A partial run used to fall through to the
+    // green branch and read "Latest recorded run · <date> · partial" in the OK
+    // style — fresh-looking, beside the word that says it is not. Real work
+    // landed, so it is not an error; not everything landed, so it is not fresh.
+    statusEl.textContent =
+      `Latest run partial — some datasets were incomplete · ${dateStr} · ${runType} · check Scheduler`;
+    statusEl.className   = "freshness-status freshness-warning";
   } else if (ageDays > _staleAfterDays) {
     statusEl.textContent = `Latest recorded run is stale · ${dateStr} · ${runType} · ${status}`;
     statusEl.className   = "freshness-status freshness-warning";
@@ -1739,6 +1747,11 @@ function renderRunMeta(sectionKey) {
   } else if (status === "running") {
     el.textContent = `Data source: latest ${runType} analysis · Run in progress · ${dateStr}`;
     el.className   = "run-meta";
+  } else if (status === "partial") {
+    // Never "Fresh": the run that produced this page's data did not finish
+    // what it set out to do, so the page is showing an incomplete population.
+    el.textContent = `Data source: latest ${runType} analysis · Finished: ${dateStr} · Latest run partial — some datasets were incomplete`;
+    el.className   = "run-meta is-stale";
   } else if (isStale) {
     el.textContent = `Data source: latest ${runType} analysis · Finished: ${dateStr} · Stale`;
     el.className   = "run-meta is-stale";

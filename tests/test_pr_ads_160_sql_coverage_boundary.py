@@ -3113,3 +3113,342 @@ def test_90_pg_the_summary_can_never_publish_with_zero_certified_windows(
     assert findings.violations == [], (
         "withholding correctly is not a violation — the violation fires only "
         "if the summary PUBLISHES with nothing certified")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §1 (fourth review) — the DURABLE run record must carry the true final status
+#
+# `_overall_status` was already correct, the returned summary was already
+# correct, and the CLI exit code was already correct. The lie lived in exactly
+# one line — and it was the line production reads:
+#
+#     "status": "success" if overall_status in ("success", "partial") else "failed"
+#
+# `/api/runs`, the "Latest recorded run" banner, per-page run metadata and Data
+# Runs all consume the `runs` table. A truncated contact-funnel sync could
+# therefore leave every one of those surfaces reporting a clean run over a
+# contact population that was never finished.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _all_other_datasets_succeed(monkeypatch, sync):
+    """Let every voting dataset EXCEPT the contact funnel report success.
+
+    Discovered by introspection rather than listed by hand: a dataset added
+    later would otherwise fail this test for a reason that has nothing to do
+    with what it is testing, and the fix would be to edit a list nobody reads.
+    """
+    for name in dir(sync):
+        if name == "_sync_contact_funnel":
+            continue                      # the one under test — runs for real
+        if name.startswith(("_sync_", "_publish_", "_detect_")):
+            if callable(getattr(sync, name)):
+                monkeypatch.setattr(sync, name,
+                                    lambda **kw: {"status": "success"})
+
+
+def _runs_row(connection, run_id):
+    with connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT status, error_message, finished_at FROM runs "
+                    " WHERE id = %s", (run_id,))
+        row = cur.fetchone()
+    return dict(zip(("status", "error_message", "finished_at"), row)) if row else None
+
+
+@pytest.fixture()
+def truncated_funnel(seeded160, monkeypatch):
+    """A real, genuinely truncated contact-funnel run inside a real scheduler run."""
+    import scheduler.incremental_sync as sync
+    from services import hubspot_contact_funnel_sync_service as svc
+
+    real_sync = svc.run_contact_funnel_sync
+    monkeypatch.setattr(svc, "get_bootstrap_mode", lambda: svc.MODE_INCREMENTAL)
+    monkeypatch.setattr(
+        svc, "run_contact_funnel_sync",
+        lambda **kw: real_sync(**kw, page_iterator=_pages(2, complete=False)))
+    _all_other_datasets_succeed(monkeypatch, sync)
+    return seeded160
+
+
+@_needs_pg
+def test_91_pg_a_partial_run_is_recorded_as_partial_not_success(truncated_funnel):
+    """End to end: real service, real scheduler, real `runs` row.
+
+    Nothing here is mocked to return an invented status. The contact-funnel
+    dataset runs the real service over a scan that does not reach the end of its
+    result set; every other dataset succeeds; and the durable record is read
+    back out of PostgreSQL.
+    """
+    import scheduler.incremental_sync as sync
+
+    result = sync.run_daily_incremental_sync(run_reason="test_fourth_review")
+
+    # The dataset itself, unchanged from the third review.
+    funnel = result["datasets"]["hubspot/contact_funnel"]
+    assert funnel["status"] == "partial"
+    assert funnel["truncated"] is True
+
+    # The summary — both names for the same verdict.
+    assert result["status"] == "partial"
+    assert result["execution_status"] == "partial"
+
+    # The DURABLE record. This is the assertion the blocker is about.
+    row = _runs_row(truncated_funnel.connection, result["run_id"])
+    assert row is not None, "the run was never recorded"
+    assert row["status"] == "partial", (
+        "a partial run was persisted as success; every monitoring surface reads "
+        "this column, so production would show a clean run over an incomplete "
+        "contact population")
+    assert row["finished_at"] is not None
+
+    # And it says WHY, durably — a bare `partial` in a table is a verdict
+    # nobody can act on.
+    assert row["error_message"], "a partial run recorded no explanation"
+    assert "contact_funnel" in row["error_message"]
+    assert "did not reach the end of the result set" in row["error_message"]
+
+
+@_needs_pg
+def test_92_pg_the_cli_exit_code_stays_non_zero_for_a_partial_run(
+        truncated_funnel, capsys):
+    """`echo $?` must not say everything worked.
+
+    Already true before this fix, and asserted here so the durable-status change
+    cannot be "fixed" later by relaxing the exit code to match it.
+    """
+    import scheduler.incremental_sync as sync
+
+    exit_code = sync.main()
+    capsys.readouterr()                    # the JSON summary, not under test
+
+    assert exit_code != 0
+    assert exit_code == 1
+
+
+@_needs_pg
+def test_93_pg_a_clean_run_is_still_recorded_as_success(seeded160, monkeypatch):
+    """The positive control.
+
+    Same scheduler, same datasets, the ONLY difference being the completion
+    sentinel that proves the contact scan reached the end. Without this, the
+    test above is satisfied by a scheduler that records every run as partial.
+    """
+    import scheduler.incremental_sync as sync
+    from services import hubspot_contact_funnel_sync_service as svc
+
+    real_sync = svc.run_contact_funnel_sync
+    monkeypatch.setattr(svc, "get_bootstrap_mode", lambda: svc.MODE_INCREMENTAL)
+    monkeypatch.setattr(
+        svc, "run_contact_funnel_sync",
+        lambda **kw: real_sync(**kw, page_iterator=_pages(2, complete=True)))
+    _all_other_datasets_succeed(monkeypatch, sync)
+
+    result = sync.run_daily_incremental_sync(run_reason="test_fourth_review_ok")
+
+    assert result["datasets"]["hubspot/contact_funnel"]["status"] == "success"
+    assert result["status"] == "success"
+    assert result["execution_status"] == "success"
+
+    row = _runs_row(seeded160.connection, result["run_id"])
+    assert row["status"] == "success"
+    assert row["error_message"] is None
+    assert sync.main() == 0
+
+
+@_needs_pg
+def test_94_pg_a_failed_run_is_still_recorded_as_failed(seeded160, monkeypatch):
+    """The other control. Three outcomes must stay three."""
+    import scheduler.incremental_sync as sync
+
+    _all_other_datasets_succeed(monkeypatch, sync)
+    monkeypatch.setattr(sync, "_sync_contact_funnel",
+                        lambda **kw: {"status": "failed", "error": "boom"})
+
+    result = sync.run_daily_incremental_sync(run_reason="test_fourth_review_fail")
+
+    assert result["status"] in ("partial", "failed")
+    row = _runs_row(seeded160.connection, result["run_id"])
+    # Every other dataset succeeded, so the run is `partial` overall — and the
+    # durable record must say exactly that rather than rounding it to either end.
+    assert row["status"] == result["status"]
+
+
+@_needs_pg
+def test_95_pg_the_durable_status_never_disagrees_with_the_summary(
+        seeded160, monkeypatch):
+    """The invariant, over all three outcomes, through the real scheduler.
+
+    Persisting a status that contradicts the returned one is the whole defect,
+    so it is checked as a property rather than only in the truncated case.
+    """
+    import scheduler.incremental_sync as sync
+
+    def every_dataset(block):
+        """Every voting dataset reports the SAME outcome, so the RUN does too."""
+        for name in dir(sync):
+            if name.startswith(("_sync_", "_publish_", "_detect_")) \
+                    and callable(getattr(sync, name)):
+                monkeypatch.setattr(sync, name, (lambda b: lambda **kw: b)(block))
+
+    seen = {}
+    # `_overall_status` is a vote: one failing dataset among successes is a
+    # PARTIAL run, not a failed one. So a run-level `failed` needs every voting
+    # dataset to fail — which is what makes these three run outcomes, rather
+    # than three dataset outcomes wearing the run's name.
+    for label, setup in (
+            ("success", lambda: every_dataset({"status": "success"})),
+            ("partial", lambda: (_all_other_datasets_succeed(monkeypatch, sync),
+                                 monkeypatch.setattr(
+                                     sync, "_sync_contact_funnel",
+                                     lambda **kw: {"status": "partial",
+                                                   "pages": 2,
+                                                   "scan_complete": False}))),
+            ("failed", lambda: every_dataset({"status": "failed",
+                                              "error": "boom"}))):
+        setup()
+        result = sync.run_daily_incremental_sync(run_reason=f"prop_{label}")
+        row = _runs_row(seeded160.connection, result["run_id"])
+
+        assert row["status"] == result["status"], (
+            f"{label}: durable {row['status']!r} != returned {result['status']!r}")
+        assert row["status"] in ("success", "partial", "failed")
+        seen[label] = row["status"]
+
+    assert seen == {"success": "success", "partial": "partial",
+                    "failed": "failed"}, seen
+    assert len(set(seen.values())) == 3, (
+        "two of the three outcomes are indistinguishable in the runs table")
+
+
+def _viewer_client():
+    """A TestClient plus a viewer cookie — `/api/runs` requires auth."""
+    import os
+
+    try:
+        from fastapi.testclient import TestClient
+    except ImportError:                              # pragma: no cover
+        pytest.skip("fastapi[testclient] not available")
+    from starlette.responses import Response as StarletteResponse
+
+    os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-for-unit-tests-only")
+    try:
+        from api.auth import set_session
+        from api.server import app
+    except Exception as exc:                         # noqa: BLE001
+        pytest.skip(f"api.server import failed: {exc}")
+
+    r = StarletteResponse()
+    set_session(r, "testviewer", "viewer")
+    cookies = {}
+    for part in r.headers.get("set-cookie", "").split(";"):
+        part = part.strip()
+        if part.startswith("ads_session="):
+            cookies["ads_session"] = part.split("=", 1)[1]
+    return TestClient(app, raise_server_exceptions=False), cookies
+
+
+@_needs_pg
+def test_96_pg_the_api_serves_partial_rather_than_a_rounded_status(
+        truncated_funnel):
+    """`/api/runs` is what the dashboard reads. It must see `partial` too.
+
+    A durable `partial` that the API rounds on the way out would move the defect
+    one layer rather than fix it, so the endpoint is exercised rather than
+    inspected.
+    """
+    import scheduler.incremental_sync as sync
+
+    result = sync.run_daily_incremental_sync(run_reason="test_api_partial")
+    assert result["status"] == "partial"
+
+    client, cookies = _viewer_client()
+    response = client.get("/api/runs?days=30", cookies=cookies)
+    assert response.status_code == 200, response.text
+
+    runs = response.json()["runs"]
+    assert runs, "the API returned no runs at all"
+    latest = runs[0]
+
+    assert latest["status"] == "partial", (
+        f"the API rounded the durable status to {latest['status']!r}; the "
+        f"dashboard reads this field")
+    assert latest["status"] not in ("success", "failed")
+    assert latest["finished_at"] is not None
+
+
+@_needs_pg
+def test_97_pg_a_partial_run_does_not_make_monitoring_green(truncated_funnel):
+    """The monitoring severity over a REAL partial run, end to end.
+
+    `api/monitoring.py` used to count partial as a successful run for both of
+    its measurements, so a pipeline producing nothing but partial runs reported
+    itself perfectly healthy.
+    """
+    import scheduler.incremental_sync as sync
+    from api.monitoring import compute_monitoring_status
+
+    result = sync.run_daily_incremental_sync(run_reason="test_monitoring_partial")
+    assert result["status"] == "partial"
+
+    with truncated_funnel.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT run_type, status, started_at, finished_at FROM runs "
+                    " ORDER BY started_at DESC")
+        rows = [{"run_type": "daily", "status": r[1],
+                 "started_at": r[2].isoformat(), "finished_at": r[3].isoformat()}
+                for r in cur.fetchall() if r[3] is not None]
+
+    assert rows and rows[0]["status"] == "partial"
+
+    verdict = compute_monitoring_status(
+        rows, {"daily": 2, "weekly": 8, "monthly": 35}, 2)
+    daily = verdict["latest_runs"]["daily"]
+
+    assert daily["last_status"] == "partial"
+    assert daily["latest_partial"] is True
+    assert verdict["severity"] != "green", (
+        "a partial run reset the system to healthy")
+    assert verdict["severity"] == "yellow", "and it is not an outage either"
+    assert any("partially" in w for w in verdict["warnings"]), verdict["warnings"]
+    # The proven-complete coverage claim was NOT advanced by this run.
+    assert daily["last_success_at"] is None
+    assert daily["last_completed_at"] is not None
+
+
+def test_98_the_presentation_layer_never_calls_a_partial_run_fresh():
+    """The banner and the per-page strip, checked against the shipped JS.
+
+    These are the two surfaces the blocker names, and neither is reachable from
+    Python. Asserting on the source is weaker than driving a browser and far
+    stronger than asserting nothing: the defect was a MISSING branch, and a
+    missing branch is exactly what a structural check can see.
+    """
+    source = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    # `normalizeRunStatus` must pass `partial` through rather than fold it into
+    # success — everything below depends on that.
+    assert 'if (raw === "success") return "success";' in source
+    assert "return raw || \"unknown\";" in source
+
+    # Both surfaces branch on it explicitly.
+    assert source.count('status === "partial"') >= 2, (
+        "a partial run still falls through to a generic branch on at least one "
+        "of the two run-status surfaces")
+
+    banner = source[source.index("Latest recorded run failed"):]
+    banner = banner[:banner.index("// ── Monitoring status banner")]
+    assert "Latest run partial" in banner
+    assert "some datasets were incomplete" in banner
+    # Warning, not OK and not error: work landed, but not all of it.
+    partial_branch = banner[banner.index('status === "partial"'):]
+    partial_branch = partial_branch[:partial_branch.index("} else if")]
+    assert "freshness-warning" in partial_branch
+    assert "freshness-ok" not in partial_branch
+    assert "freshness-error" not in partial_branch
+
+    meta = source[source.index("function renderRunMeta"):]
+    meta = meta[:meta.index("// ── Per-page dataset-level freshness strip")]
+    meta_partial = meta[meta.index('status === "partial"'):]
+    meta_partial = meta_partial[:meta_partial.index("} else if")]
+    assert "Latest run partial" in meta_partial
+    assert "is-fresh" not in meta_partial, (
+        "per-page run metadata still describes a partial run as Fresh")
+    assert "· Fresh`" not in meta_partial

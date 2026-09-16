@@ -502,4 +502,18 @@ fixed before merge:
   the separate membership-only question, and the audit raises its own violation
   if a summary ever publishes with nothing certified.
 
+**Fourth review.** One blocker: **a partial run was still persisted as a
+success.** The scheduler's summary and CLI exit code were already truthful, but
+the write to the `runs` table read `"success" if overall_status in ("success",
+"partial")` — and the `runs` table is what production reads. `/api/runs`, the
+"Latest recorded run" banner, per-page run metadata and Data Runs all consume
+it, so a truncated contact-funnel sync left every one of those surfaces showing
+a clean run over an unfinished contact population. The exact status is now
+persisted, and the three outcomes stay distinct all the way to the screen:
+`api/monitoring.py` no longer lets a partial advance `last_success_at` (the
+proven-complete coverage claim staleness is measured against) and no longer
+reports green while the latest run is partial, while still not counting it as a
+failure; the banner and the per-page strip render it as a warning reading
+"Latest run partial — some datasets were incomplete" rather than as Fresh.
+
 Full doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`.
