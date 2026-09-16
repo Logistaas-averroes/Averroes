@@ -785,8 +785,12 @@ function buildEmptyState({ pageKey, canonicalStatus, rowsInWindow, filtersActive
     stateType = "fresh_but_empty";
   } else if (canonicalStatus === "failed" || canonicalStatus === "failed_no_data" || canonicalStatus === "stale_and_empty") {
     stateType = "stale_or_failed";
+  } else if (canonicalStatus === "partial_no_data") {
+    stateType = "partial_no_data";
   } else if (canonicalStatus === "data_available_latest_sync_failed") {
     stateType = "degraded_sync_failed";
+  } else if (canonicalStatus === "data_available_latest_sync_partial") {
+    stateType = "degraded_sync_partial";
   } else if (canonicalStatus === "stale_with_data") {
     stateType = "stale_with_data";
   } else if (canonicalStatus === "db_unavailable") {
@@ -812,6 +816,8 @@ function buildEmptyState({ pageKey, canonicalStatus, rowsInWindow, filtersActive
     db_unavailable: "empty-state--error",
     fresh_but_empty: "empty-state--warning",
     degraded_sync_failed: "empty-state--warning",
+    degraded_sync_partial: "empty-state--warning",
+    partial_no_data: "empty-state--error",
     stale_with_data: "empty-state--warning",
     filtered_out: "empty-state--info",
     not_run: "empty-state--info",
@@ -848,6 +854,14 @@ function buildEmptyState({ pageKey, canonicalStatus, rowsInWindow, filtersActive
     case "degraded_sync_failed":
       body = `${title} latest sync failed, but usable rows still exist. The page is degraded, not blocked.`;
       actionText = "Review latest sync error in System Status.";
+      break;
+    case "degraded_sync_partial":
+      body = `${title} latest sync completed partially — it did not reach the end of its result set — so these rows may be an incomplete population.`;
+      actionText = "Re-run the sync to completion before relying on counts here.";
+      break;
+    case "partial_no_data":
+      body = `${title} latest sync completed partially and returned nothing for this window. This window is not proven empty — it was never fully read.`;
+      actionText = "Re-run the sync to completion, then re-check.";
       break;
     case "stale_with_data":
       body = `${title} has data, but the latest sync is older than the freshness threshold.`;
@@ -906,6 +920,9 @@ function getPageCanonicalStatus(pageKey) {
     "db_unavailable",
     "failed_no_data",
     "failed",
+    // A truncated sync that left nothing is as blocking as a failed one: the
+    // window is not proven empty, it was never fully read.
+    "partial_no_data",
     "stale_and_empty",
     "not_run_no_upstream_data",
     "blocked_by_dependency",
@@ -913,6 +930,7 @@ function getPageCanonicalStatus(pageKey) {
     "fresh_but_empty",
     "empty_success",
     "data_available_latest_sync_failed",
+    "data_available_latest_sync_partial",
     "stale_with_data",
     "not_run_but_derivable",
     "running",
@@ -1857,6 +1875,9 @@ function renderPageDatasetFreshness(sectionKey) {
       // PR-ADS-095 refined states
       data_available_latest_sync_failed: "Data available, latest sync failed",
       failed_no_data:                    "Failed, no data",
+      // PR-ADS-160: a sync that did real work and stopped short.
+      data_available_latest_sync_partial: "Data available, latest sync partial",
+      partial_no_data:                   "Partial sync, no data",
       not_run_but_derivable:             "Not run, but derivable",
       not_run_no_upstream_data:          "Not run, no upstream data",
       unknown_row_count:                 "Row count unavailable",
@@ -1877,6 +1898,9 @@ function renderPageDatasetFreshness(sectionKey) {
       // PR-ADS-095 refined states
       data_available_latest_sync_failed: "run-meta is-canonical-warning",
       failed_no_data:                    "run-meta is-stale",
+      // Never `is-fresh`: the rows shown come from an incomplete population.
+      data_available_latest_sync_partial: "run-meta is-canonical-warning",
+      partial_no_data:                   "run-meta is-stale",
       not_run_but_derivable:             "run-meta is-canonical-warning",
       not_run_no_upstream_data:          "run-meta is-stale",
       unknown_row_count:                 "run-meta",
@@ -1903,11 +1927,12 @@ function renderPageDatasetFreshness(sectionKey) {
   const warningCount = statuses.filter((s) =>
     s === "fresh_but_empty" || s === "stale_with_data" || s === "dependency_blocked"
     || s === "data_available_latest_sync_failed" || s === "not_run_but_derivable"
-    || s === "empty_success"
+    || s === "empty_success" || s === "data_available_latest_sync_partial"
   ).length;
   const errorCount   = statuses.filter((s) =>
     s === "failed" || s === "stale_and_empty" || s === "db_unavailable"
     || s === "failed_no_data" || s === "not_run_no_upstream_data" || s === "blocked_by_dependency"
+    || s === "partial_no_data"
   ).length;
   const runningCount = statuses.filter((s) => s === "running").length;
   const unknownCount = statuses.filter((s) =>

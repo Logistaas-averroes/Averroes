@@ -3452,3 +3452,222 @@ def test_98_the_presentation_layer_never_calls_a_partial_run_fresh():
     assert "is-fresh" not in meta_partial, (
         "per-page run metadata still describes a partial run as Fresh")
     assert "· Fresh`" not in meta_partial
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §1 (fifth review) — canonical dataset freshness must not paint `partial` green
+#
+# The durable run status, the global banner, the per-page run strip and
+# monitoring severity were all corrected in the fourth review. Canonical dataset
+# freshness was the surface left behind: `compute_canonical_freshness` branched
+# on `running` and on `failed`, and had no branch for `partial` — so a truncated
+# sync fell straight through to the staleness test and, being recent and having
+# rows, came out FRESH_WITH_DATA at `ok` severity.
+#
+# It is deliberately NOT folded into `failed`. A failed sync may have written
+# nothing; a partial one wrote everything it read. The two have different
+# remedies, and different meanings for the rows already on screen.
+# ═════════════════════════════════════════════════════════════════════════════
+
+import services.freshness_service as freshness_svc  # noqa: E402
+
+_FRESHNESS_BASE = {
+    "dataset": "contact_funnel",
+    "rows_in_window": 10,
+    "latest_source_date": None,          # filled per call — "today"
+    "sync_status": "success",
+    "latest_batch_status": "success",
+    "latest_batch_row_count": 10,
+    "last_successful_sync_at": None,     # filled per call — "now"
+    "stale_threshold_days": 2,
+    "row_count_supported": True,
+}
+
+
+def _freshness(**over):
+    """The canonical verdict for a recent, populated dataset, varied one factor."""
+    kwargs = {**_FRESHNESS_BASE, **over}
+    kwargs.setdefault("latest_source_date", date.today())
+    if kwargs.get("last_successful_sync_at") is None \
+            and "last_successful_sync_at" not in over:
+        kwargs["last_successful_sync_at"] = datetime.now(tz=timezone.utc)
+    return freshness_svc.compute_canonical_freshness(**kwargs)
+
+
+def test_99_a_partial_sync_is_never_canonically_fresh():
+    """The exact reproduction from the review, and its controls.
+
+    A recent, populated dataset whose latest sync ended `partial` must not
+    report `fresh_with_data` at `ok` severity — the rows are real, but the
+    population behind them is incomplete.
+    """
+    status = freshness_svc.CanonicalFreshnessStatus
+
+    partial = _freshness(sync_status="partial", latest_batch_status="partial",
+                         latest_batch_row_count=10)
+
+    assert partial["canonical_status"] != status.FRESH_WITH_DATA
+    assert partial["severity"] != "ok", "a truncated sync was painted green"
+    assert partial["canonical_status"] == status.DATA_AVAILABLE_LATEST_SYNC_PARTIAL
+    assert partial["severity"] == "warning", (
+        "and it is not an error either — real work landed")
+    assert "PARTIAL" in partial["reason"] or "partial" in partial["reason"]
+    assert partial["next_action"].strip(), "a warning must say what to do"
+
+    # The control that makes the assertion mean something: the SAME dataset,
+    # the same recency, the same rows — only the sync outcome differs.
+    clean = _freshness()
+    assert clean["canonical_status"] == status.FRESH_WITH_DATA
+    assert clean["severity"] == "ok"
+
+
+def test_100_partial_is_distinguished_from_failed_and_from_success():
+    """Three outcomes, three verdicts, at this layer too.
+
+    Folding `partial` into `failed` would be the easy fix and the wrong one: a
+    failed sync may have written nothing, a partial one wrote everything it
+    read, and the remedies differ.
+    """
+    status = freshness_svc.CanonicalFreshnessStatus
+
+    seen = {
+        name: _freshness(sync_status=name, latest_batch_status=name)
+        for name in ("success", "partial", "failed")
+    }
+
+    assert seen["success"]["canonical_status"] == status.FRESH_WITH_DATA
+    assert seen["partial"]["canonical_status"] == \
+        status.DATA_AVAILABLE_LATEST_SYNC_PARTIAL
+    assert seen["failed"]["canonical_status"] == \
+        status.DATA_AVAILABLE_LATEST_SYNC_FAILED
+
+    assert len({v["canonical_status"] for v in seen.values()}) == 3
+    assert [seen[k]["severity"] for k in ("success", "partial", "failed")] == \
+        ["ok", "warning", "warning"]
+
+
+@pytest.mark.parametrize("field", ["sync_status", "latest_batch_status"])
+def test_101_partial_from_either_source_is_enough(field):
+    """`sync_state` and the latest batch can disagree; either one blocks green.
+
+    The `failed` branch already reads both with `or`. Reading only one would
+    leave a hole exactly where the two records disagree — which is precisely
+    when something has gone wrong.
+    """
+    status = freshness_svc.CanonicalFreshnessStatus
+
+    verdict = _freshness(**{field: "partial"})
+    assert verdict["canonical_status"] == status.DATA_AVAILABLE_LATEST_SYNC_PARTIAL
+    assert verdict["severity"] == "warning"
+
+
+def test_102_a_partial_sync_with_no_rows_does_not_claim_an_empty_window():
+    """"Nothing arrived" and "nothing exists" are different facts.
+
+    A truncated sync that produced no rows leaves a window that was never fully
+    read. Reporting it as a clean empty would turn an unfinished scan into a
+    measured zero.
+    """
+    status = freshness_svc.CanonicalFreshnessStatus
+
+    verdict = _freshness(sync_status="partial", latest_batch_status="partial",
+                         rows_in_window=0, latest_batch_row_count=0)
+
+    assert verdict["canonical_status"] == status.PARTIAL_NO_DATA
+    assert verdict["severity"] == "error"
+    assert verdict["canonical_status"] not in (
+        status.FRESH_BUT_EMPTY, status.EMPTY_SUCCESS), (
+        "a truncated scan was reported as a proven-empty window")
+    assert "NOT proven empty" in verdict["reason"]
+
+    # Control: the same zero rows after a SUCCESSFUL sync IS a clean empty.
+    clean_empty = _freshness(rows_in_window=0, latest_batch_row_count=0)
+    assert clean_empty["canonical_status"] == status.EMPTY_SUCCESS
+
+
+def test_103_a_partial_sync_never_claims_a_row_count_it_did_not_measure():
+    """An unmeasured row count stays unmeasured — but still says `partial`.
+
+    Returning PARTIAL_NO_DATA here would assert an emptiness nobody looked for.
+    Returning a bare neutral "row count unavailable" would read as a tooling
+    gap rather than an incomplete population, so the partial fact is carried
+    into the reason.
+    """
+    status = freshness_svc.CanonicalFreshnessStatus
+
+    unknown = _freshness(sync_status="partial", latest_batch_status="partial",
+                         rows_in_window=None)
+    assert unknown["canonical_status"] == status.UNKNOWN_ROW_COUNT
+    assert unknown["canonical_status"] != status.PARTIAL_NO_DATA
+    assert "partial" in unknown["reason"].lower()
+
+    not_enabled = _freshness(sync_status="partial", latest_batch_status="partial",
+                             rows_in_window=None, row_count_supported=False)
+    assert not_enabled["canonical_status"] == status.ROW_COUNT_NOT_ENABLED
+    assert "partial" in not_enabled["reason"].lower()
+
+
+def test_104_the_new_states_are_wired_into_every_registry():
+    """A status the rest of the system does not know about is worse than none.
+
+    `ALL` drives the display-label test; `SEVERITY_MAP` drives every badge;
+    `HAS_DATA_STATES` decides whether a derived dataset can be built; and
+    `BLOCKING_STATES` decides whether it is blocked. Missing from any of them,
+    a new status silently degrades to a neutral "unknown" somewhere.
+    """
+    status = freshness_svc.CanonicalFreshnessStatus
+    partial_with_data = status.DATA_AVAILABLE_LATEST_SYNC_PARTIAL
+    partial_no_data = status.PARTIAL_NO_DATA
+
+    for s in (partial_with_data, partial_no_data):
+        assert s in status.ALL
+        assert s in freshness_svc.SEVERITY_MAP
+        assert freshness_svc.canonical_status_display_label(s) != "Unknown"
+
+    # Rows exist → a dependant can still be derived, and is NOT blocked.
+    assert partial_with_data in freshness_svc.HAS_DATA_STATES
+    assert partial_with_data not in freshness_svc.BLOCKING_STATES
+    # Nothing usable arrived → nothing downstream can be derived.
+    assert partial_no_data not in freshness_svc.HAS_DATA_STATES
+    assert partial_no_data in freshness_svc.BLOCKING_STATES
+
+    # The same wiring, on the two mirrored `failed` states — so this test is
+    # asserting a shape the module already holds, not one invented for it.
+    assert status.DATA_AVAILABLE_LATEST_SYNC_FAILED in freshness_svc.HAS_DATA_STATES
+    assert status.FAILED_NO_DATA in freshness_svc.BLOCKING_STATES
+
+
+def test_105_the_dataset_freshness_ui_never_labels_a_partial_sync_fresh():
+    """The shipped JS, checked structurally.
+
+    A canonical status absent from the label and class maps falls back to
+    `run-meta` with the raw key as its text — no badge, no styling, no signal.
+    That is exactly how a new state goes unnoticed.
+    """
+    source = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    for key in ("data_available_latest_sync_partial", "partial_no_data"):
+        assert f"{key}:" in source, f"{key} is missing from the JS status maps"
+        assert source.count(f'"{key}"') + source.count(f"{key}:") >= 2, (
+            f"{key} is not wired into both the label/class maps and the "
+            f"severity ordering")
+
+    labels = source[source.index("const _csLabels"):]
+    labels = labels[:labels.index("};")]
+    assert "Data available, latest sync partial" in labels
+
+    classes = source[source.index("const _csClasses"):]
+    classes = classes[:classes.index("};")]
+    partial_line = [ln for ln in classes.splitlines()
+                    if "data_available_latest_sync_partial" in ln][0]
+    assert "is-canonical-warning" in partial_line
+    assert "is-fresh" not in partial_line, (
+        "canonical freshness still styles a partial sync as fresh")
+
+    # And it is counted as a warning, not folded into the fresh tally.
+    tally = source[source.index("const freshCount"):]
+    tally = tally[:tally.index("const runningCount")]
+    fresh_line = tally[:tally.index("const warningCount")]
+    assert "data_available_latest_sync_partial" not in fresh_line
+    assert "data_available_latest_sync_partial" in tally
+    assert "partial_no_data" in tally

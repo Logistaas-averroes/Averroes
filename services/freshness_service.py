@@ -52,6 +52,11 @@ class CanonicalFreshnessStatus:
     # PR-ADS-095 refined states
     DATA_AVAILABLE_LATEST_SYNC_FAILED = "data_available_latest_sync_failed"
     FAILED_NO_DATA = "failed_no_data"
+    # PR-ADS-160 (fifth review): a sync that did real work and did NOT reach the
+    # end of its result set. Neither of the two states above fits — `failed`
+    # discards work that landed, and every remaining state calls it fresh.
+    DATA_AVAILABLE_LATEST_SYNC_PARTIAL = "data_available_latest_sync_partial"
+    PARTIAL_NO_DATA = "partial_no_data"
     NOT_RUN_BUT_DERIVABLE = "not_run_but_derivable"
     NOT_RUN_NO_UPSTREAM_DATA = "not_run_no_upstream_data"
     UNKNOWN_ROW_COUNT = "unknown_row_count"
@@ -72,6 +77,8 @@ class CanonicalFreshnessStatus:
         UNKNOWN,
         DATA_AVAILABLE_LATEST_SYNC_FAILED,
         FAILED_NO_DATA,
+        DATA_AVAILABLE_LATEST_SYNC_PARTIAL,
+        PARTIAL_NO_DATA,
         NOT_RUN_BUT_DERIVABLE,
         NOT_RUN_NO_UPSTREAM_DATA,
         UNKNOWN_ROW_COUNT,
@@ -97,6 +104,13 @@ SEVERITY_MAP: dict[str, str] = {
     # PR-ADS-095 refined states
     CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED: "warning",
     CanonicalFreshnessStatus.FAILED_NO_DATA: "error",
+    # Warning, not ok: usable rows exist but the population behind them is
+    # incomplete. Not error either — the pipeline is not down.
+    CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_PARTIAL: "warning",
+    # Error: a truncated sync left nothing here, so the window is not proven
+    # empty — the pages that would have carried rows may simply never have been
+    # read. "Nothing arrived" and "nothing exists" are different facts.
+    CanonicalFreshnessStatus.PARTIAL_NO_DATA: "error",
     CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE: "warning",
     CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA: "error",
     CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT: "neutral",
@@ -113,6 +127,9 @@ HAS_DATA_STATES = frozenset([
     CanonicalFreshnessStatus.FRESH_WITH_DATA,
     CanonicalFreshnessStatus.STALE_WITH_DATA,
     CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
+    # Rows ARE present, so a derived dataset can still be built from them —
+    # exactly as with a failed sync that left usable rows behind.
+    CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_PARTIAL,
 ])
 
 
@@ -336,6 +353,10 @@ BLOCKING_STATES = frozenset([
     CanonicalFreshnessStatus.FRESH_BUT_EMPTY,
     CanonicalFreshnessStatus.FAILED,
     CanonicalFreshnessStatus.FAILED_NO_DATA,
+    # Mirrors FAILED_NO_DATA: nothing usable arrived, so nothing downstream can
+    # be derived. (DATA_AVAILABLE_LATEST_SYNC_PARTIAL is deliberately absent —
+    # rows exist, so it degrades a dependant rather than blocking it.)
+    CanonicalFreshnessStatus.PARTIAL_NO_DATA,
     CanonicalFreshnessStatus.DB_UNAVAILABLE,
     CanonicalFreshnessStatus.STALE_AND_EMPTY,
     CanonicalFreshnessStatus.NOT_RUN,
@@ -441,6 +462,66 @@ def compute_canonical_freshness(
             CanonicalFreshnessStatus.FAILED_NO_DATA,
             reason="Latest sync failed and no usable rows are available.",
             next_action="Check sync logs and retry source sync.",
+        )
+
+    # 5b. Partial — PR-ADS-160 (fifth review).
+    #
+    # `partial` means the sync did real work and did NOT reach the end of its
+    # result set. This branch did not exist, so a partial run fell straight
+    # through to the staleness test below and — being recent, with rows —
+    # came out FRESH_WITH_DATA at `ok` severity. Canonical dataset freshness was
+    # therefore the last surface still painting a truncated sync green, after
+    # the durable run status, the banner, the per-page run strip and monitoring
+    # severity had all been corrected.
+    #
+    # It is deliberately NOT folded into `failed`: a failed sync may have
+    # written nothing, while a partial one wrote everything it read. The two
+    # have different remedies and different meanings for the rows on screen.
+    if latest_batch_status == "partial" or sync_status == "partial":
+        batch_hint = ""
+        if latest_batch_row_count is not None:
+            batch_hint = f" Latest batch row count: {latest_batch_row_count}."
+        if rows_in_window is None:
+            # Never claim emptiness that was never measured. An unmeasured row
+            # count is answered by the row-count states below, which say so
+            # plainly — but they must still carry the partial fact, because a
+            # neutral "row count unavailable" beside a truncated sync reads as
+            # a tooling gap rather than an incomplete population.
+            partial_note = (
+                " The latest sync was partial, so the population behind this "
+                "dataset is incomplete."
+            )
+            if row_count_supported is False:
+                return _result(
+                    CanonicalFreshnessStatus.ROW_COUNT_NOT_ENABLED,
+                    reason=(f"Row-count query is not enabled for this dataset."
+                            f"{batch_hint}{partial_note}"),
+                    next_action=("Re-run the sync to completion; implement the "
+                                 "row-count diagnostic if this page depends on "
+                                 "freshness."),
+                )
+            return _result(
+                CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT,
+                reason=(f"Row count query unavailable for this dataset."
+                        f"{batch_hint}{partial_note}"),
+                next_action="Re-run the sync to completion and re-check.",
+            )
+        if rows_in_window > 0:
+            return _result(
+                CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_PARTIAL,
+                reason=(f"Latest sync completed PARTIALLY — it did not reach "
+                        f"the end of its result set — so rows exist but the "
+                        f"population may be incomplete.{batch_hint}"),
+                next_action=("Re-run the sync to completion before relying on "
+                             "counts from this dataset."),
+            )
+        return _result(
+            CanonicalFreshnessStatus.PARTIAL_NO_DATA,
+            reason=(f"Latest sync completed PARTIALLY and no rows are "
+                    f"available in this window. The window is NOT proven "
+                    f"empty: the pages that would have carried rows may never "
+                    f"have been read.{batch_hint}"),
+            next_action="Re-run the sync to completion, then re-check.",
         )
 
     # 6. Row count unavailable (cannot safely classify empty vs with_data).
@@ -568,6 +649,9 @@ def canonical_status_display_label(status: str) -> str:
         # PR-ADS-095 refined states
         CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED: "Data Available, Latest Sync Failed",
         CanonicalFreshnessStatus.FAILED_NO_DATA: "Failed, No Data",
+        # PR-ADS-160 (fifth review)
+        CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_PARTIAL: "Data Available, Latest Sync Partial",
+        CanonicalFreshnessStatus.PARTIAL_NO_DATA: "Partial Sync, No Data",
         CanonicalFreshnessStatus.NOT_RUN_BUT_DERIVABLE: "Not Run, But Derivable",
         CanonicalFreshnessStatus.NOT_RUN_NO_UPSTREAM_DATA: "Not Run, No Upstream Data",
         CanonicalFreshnessStatus.UNKNOWN_ROW_COUNT: "Row Count Unavailable",

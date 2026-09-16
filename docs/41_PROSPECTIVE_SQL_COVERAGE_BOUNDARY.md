@@ -592,6 +592,28 @@ fails closed rather than passing through.
 | monitoring `consecutive_failures` | reset | **reset** (not a failure) | incremented |
 | freshness banner | OK | **warning** | error |
 | per-page run metadata | Fresh | **"Latest run partial"** | "Last run failed" |
+| canonical dataset freshness | `fresh_with_data` (ok) | **`data_available_latest_sync_partial`** (warning) | `data_available_latest_sync_failed` (warning) |
+
+Canonical dataset freshness was the last surface still painting a truncated
+sync green. `compute_canonical_freshness` branched on `running` and on
+`failed` and had no branch for `partial`, so a recent, populated dataset whose
+sync stopped short fell through to the staleness test and came out
+`fresh_with_data` at **ok** severity — after the durable run status, the banner,
+the per-page strip and monitoring severity had all been corrected.
+
+Two states close it, mirroring the two `failed` states exactly:
+
+| Rows in window | Status | Severity | Meaning |
+| --- | --- | --- | --- |
+| > 0 | `data_available_latest_sync_partial` | warning | the rows are real; the population behind them is incomplete |
+| 0 | `partial_no_data` | error | the window is **not proven empty** — it was never fully read |
+| unknown | `unknown_row_count` / `row_count_not_enabled`, with the partial fact in the reason | neutral | never claim an emptiness nobody measured |
+
+`partial` is deliberately **not** folded into `failed`: a failed sync may have
+written nothing, a partial one wrote everything it read, and the two have
+different remedies. `data_available_latest_sync_partial` is in `HAS_DATA_STATES`
+and not in `BLOCKING_STATES` — rows exist, so a dependant is degraded rather
+than blocked — while `partial_no_data` blocks, exactly as `failed_no_data` does.
 
 In `api/monitoring.py` the distinction lives in two places, answering two
 different questions. `consecutive_failures` does **not** count a partial — real

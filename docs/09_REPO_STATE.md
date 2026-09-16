@@ -516,4 +516,16 @@ reports green while the latest run is partial, while still not counting it as a
 failure; the banner and the per-page strip render it as a warning reading
 "Latest run partial — some datasets were incomplete" rather than as Fresh.
 
+**Fifth review.** One blocker: **canonical dataset freshness still turned
+`partial` green.** `compute_canonical_freshness` branched on `running` and on
+`failed` but had no branch for `partial`, so a recent, populated dataset whose
+sync stopped short fell through to the staleness test and reported
+`fresh_with_data` at ok severity — the last surface left after the fourth
+review. Two states close it, mirroring the two `failed` states:
+`data_available_latest_sync_partial` (rows exist, population incomplete —
+warning, in `HAS_DATA_STATES`, non-blocking) and `partial_no_data` (nothing
+arrived and the window is **not proven empty** — error, blocking). An unmeasured
+row count stays unmeasured, with the partial fact carried into the reason rather
+than an emptiness nobody looked for.
+
 Full doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`.
