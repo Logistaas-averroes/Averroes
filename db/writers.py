@@ -1569,9 +1569,18 @@ def finish_sync_batch(
 ) -> bool:
     """Mark a sync_batches row as finished and update sync_state.
 
-    status must be 'success' or 'failed'.
+    status must be 'success', 'partial' or 'failed'.
     Returns True on success, False on DB unavailable or invalid batch_id.
     Never raises.
+
+    PR-ADS-160 (third review) §2 — ``partial`` exists because a run that did
+    real work but did NOT reach the end of its result set is neither. Recording
+    it as ``success`` claims coverage the run never proved; recording it as
+    ``failed`` discards work that genuinely landed. It behaves like ``failed``
+    in the one respect that matters for truth: the proven-coverage watermark
+    (``last_source_date``) does NOT advance, because a truncated pull did not
+    cover its interval. ``verified_empty`` is likewise unreachable for it —
+    :func:`_honour_verified_empty` already requires a SUCCESSFUL pull.
 
     PR-ADS-156-F1 §2 — the four keyword-only arguments are OPTIONAL and default
     to the pre-existing behaviour, so every caller written before them keeps
@@ -1587,7 +1596,7 @@ def finish_sync_batch(
         return False
 
     status = (status or "").strip().lower()
-    if status not in ("success", "failed"):
+    if status not in ("success", "failed", "partial"):
         log.warning("finish_sync_batch: invalid status %r for batch_id=%s", status, batch_id)
         return False
 
@@ -1658,19 +1667,23 @@ def finish_sync_batch(
                         (source, dataset, resolved_source_date, batch_id),
                     )
                 else:
-                    # failed — update status/error but preserve successful watermark
+                    # failed OR partial — record the outcome under its own name
+                    # and PRESERVE the proven-coverage watermark. A truncated
+                    # run advancing `last_source_date` would claim coverage of
+                    # an interval it never finished reading, which is the same
+                    # lie as a failed run advancing it.
                     cur.execute(
                         """
                         INSERT INTO sync_state (
                             source, dataset,
                             status, error_message, updated_at
-                        ) VALUES (%s, %s, 'failed', %s, NOW())
+                        ) VALUES (%s, %s, %s, %s, NOW())
                         ON CONFLICT (source, dataset) DO UPDATE SET
-                            status        = 'failed',
+                            status        = EXCLUDED.status,
                             error_message = EXCLUDED.error_message,
                             updated_at    = NOW()
                         """,
-                        (source, dataset, error_message),
+                        (source, dataset, status, error_message),
                     )
 
         log.info(
@@ -3727,17 +3740,57 @@ def upsert_lifecycle_stage_history(rows: list, *, run_id: str) -> dict:
 #: the wall clock at the moment it is called, after the snapshot.
 _BOUNDARY_CLOCK_SQL = "clock_timestamp()"
 
+#: PR-ADS-160 (third review) §1 — ONE database snapshot for every read in this
+#: transaction.
+#:
+#: Wrapping the reads in a single transaction is NOT sufficient under the
+#: connection's default READ COMMITTED isolation: PostgreSQL takes a FRESH
+#: snapshot at the start of every statement there, so the population SELECT and
+#: the ingestion-provenance SELECT can observe different committed states even
+#: though no COMMIT happened between them. A contact-funnel sync committing in
+#: that gap produces exactly the defect §5 of the second review set out to
+#: close, one layer down: a population describing one instant, recorded beside a
+#: ``source_run_id`` describing a later one.
+#:
+#: REPEATABLE READ takes the snapshot once, at this transaction's first read,
+#: and every later statement in it sees that same snapshot. The population, the
+#: provenance and the replay verification therefore describe one instant of the
+#: database by construction rather than by luck of timing.
+#:
+#: SERIALIZABLE would add write-skew protection this transaction does not need:
+#: the only skew available here is two establishers both reading "no boundary
+#: exists" and both inserting, and that is already impossible — the partial
+#: unique index rejects the second, which is a constraint, not a race. Paying
+#: for predicate locking and avoidable serialization aborts would buy nothing.
+#:
+#: ``clock_timestamp()`` is deliberately unaffected: it is volatile and reads the
+#: wall clock when called, so ``observed_at`` still lands after the snapshot. An
+#: upper bound stamped later than the observation it describes stays sound — it
+#: is simply more conservative.
+_BOUNDARY_ISOLATION = "REPEATABLE READ"
+
+#: Only these may reach ``SET TRANSACTION ISOLATION LEVEL``. The value is a
+#: module constant rather than caller input, but it is interpolated into SQL, so
+#: it is checked rather than trusted.
+_BOUNDARY_ISOLATION_LEVELS = frozenset({
+    "REPEATABLE READ", "SERIALIZABLE", "READ COMMITTED",
+})
+
 
 def establish_sql_coverage_boundary(boundary: dict, *,
                                     clock_sql: str = _BOUNDARY_CLOCK_SQL
                                     ) -> dict:
     """Snapshot the population, stamp the instant, and write the boundary. Atomic.
 
-    PR-ADS-160 §2/§3. One transaction does all three, in this order:
+    PR-ADS-160 §2/§3. One transaction, at REPEATABLE READ, does all of it in
+    this order:
 
+      0. fix the transaction's isolation level BEFORE its first query, so every
+         read below observes ONE snapshot (see ``_BOUNDARY_ISOLATION``);
       1. read the candidate population (the same query the dry run shows);
-      2. stamp the observation instant, DATABASE-SIDE, after that read;
-      3. insert the boundary and its bounded contacts.
+      2. read the ingestion provenance for that exact snapshot;
+      3. stamp the observation instant, DATABASE-SIDE, after those reads;
+      4. insert the boundary and its bounded contacts.
 
     Order 1-then-2 is the point. Stamping first — or letting a caller supply the
     instant — allows a boundary whose ``observed_at`` precedes the observation it
@@ -3748,6 +3801,12 @@ def establish_sql_coverage_boundary(boundary: dict, *,
     Reading and writing in ONE transaction closes the other gap: a contact
     promoted to SQL between a separate read and write would be absent from the
     snapshot while the boundary claimed to have observed the whole population.
+
+    One transaction alone was still not enough. Under READ COMMITTED each
+    statement takes its own snapshot, so the population read and the provenance
+    read could describe different committed states — a mixed boundary. The
+    isolation level in step 0 is what makes "the same snapshot" a property of
+    the transaction rather than a hope about timing.
 
     Returns::
 
@@ -3771,7 +3830,24 @@ def establish_sql_coverage_boundary(boundary: dict, *,
         with get_conn() as conn:
             if conn is None:
                 return _boundary_failure(boundary_id, "database_unavailable")
+
+            # ── 0. one snapshot, fixed BEFORE the first query ────────────────
+            # Read at call time, not bound at import, so a test can prove what
+            # the default prevents by lowering it. `SET TRANSACTION` is only
+            # legal as the first statement of a transaction, so the rollback
+            # guarantees a pooled connection is not mid-transaction: psycopg2
+            # opens the new transaction implicitly on this very execute, and
+            # the SET is then the first statement inside it.
+            isolation = _BOUNDARY_ISOLATION
+            if isolation not in _BOUNDARY_ISOLATION_LEVELS:
+                return _boundary_failure(
+                    boundary_id,
+                    f"refusing to establish a boundary at unrecognised "
+                    f"isolation level {isolation!r}")
+            conn.rollback()
             with conn.cursor() as cur:
+                cur.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation}")
+
                 # ── the singleton, checked here AND enforced by the index ────
                 # This check gives a readable error; the partial unique index is
                 # what actually makes two concurrent establishers impossible.

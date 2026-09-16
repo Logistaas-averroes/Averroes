@@ -477,4 +477,29 @@ fixed before merge:
   that transaction, immediately after the population, and its absence **refuses**
   establishment rather than recording a best-effort NULL.
 
+**Third review (§1–§3).** Three further blockers were found and fixed:
+
+* **one transaction was not one snapshot.** Under the connection's default READ
+  COMMITTED isolation PostgreSQL takes a fresh snapshot at the start of *every*
+  statement, so a contact-funnel sync committing between the population SELECT
+  and the provenance SELECT was invisible to the first and visible to the
+  second — the mixed boundary the previous fix aimed at, one layer further down.
+  The transaction now sets `REPEATABLE READ` before its first query. Proven with
+  two concurrent connections, the establishing transaction paused at an exact
+  statement boundary, and a READ COMMITTED negative control in which the mix
+  duly appears.
+* **a truncated contact-funnel run reported success.** `run_status` was computed
+  correctly as `partial` and then discarded: both sync batches were finished as
+  `success`, the returned dict hardcoded `"status": "success"`, and
+  `last_source_date` advanced past data the scan never read. The run's own
+  verdict is now what is written down and returned, the coverage watermark stays
+  put, and the scheduler run goes non-green with an error that says why.
+* **the audit summary ignored its own final gate.** `complete_sql_total_publishable`
+  and `cpql_publishable` were `coverage_complete` — a membership verdict —
+  published under two more names, so the summary could announce a publishable
+  CPQL while `certification` beneath it reported zero certified windows. Both are
+  now derived from what survived certification, `coverage_complete` remains as
+  the separate membership-only question, and the audit raises its own violation
+  if a summary ever publishes with nothing certified.
+
 Full doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`.

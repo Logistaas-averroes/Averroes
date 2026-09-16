@@ -525,7 +525,13 @@ def test_capped_bootstrap_persists_its_watermark_and_stays_partial(pg):
                              complete=False),
         max_pages=1, now=datetime(2026, 7, 5, tzinfo=timezone.utc))
 
-    assert result["status"] == "success"
+    # PR-ADS-160 (third review) §2 — a capped run did NOT reach the end of the
+    # result set, so it reports `partial`. This line previously asserted
+    # `success`, which is the contract that let a truncated run present as a
+    # clean daily sync: the bootstrap_status below already said partial, and the
+    # run-level status disagreed with it in the same response.
+    assert result["status"] == "partial"
+    assert result["truncated"] is True
     assert result["bootstrap_status"] == sync.BOOTSTRAP_PARTIAL
     state = sync.db_writers.get_contact_funnel_sync_state("contacts")
     assert state["last_modified_watermark"] == datetime(

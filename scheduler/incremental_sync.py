@@ -1042,8 +1042,22 @@ def _sync_contact_funnel(*, run_id, errors: list) -> dict:
     try:
         mode = get_bootstrap_mode()
         result = run_contact_funnel_sync(mode=mode, run_id=run_id)
-        if result.get("status") == "failed":
+        status = result.get("status")
+        if status == "failed":
             err = f"hubspot/contact_funnel: {result.get('error')}"
+            errors.append(err)
+            log.warning("[incremental_sync] %s", err)
+        elif status != "success":
+            # PR-ADS-160 (third review) §2. A truncated run now reports
+            # `partial`, which `_overall_status` already counts as a non-green
+            # vote. It is recorded as a run error too, so the summary SAYS why
+            # the run is not clean — a dataset that quietly votes the run down
+            # while contributing no error is a verdict nobody can explain.
+            err = (f"hubspot/contact_funnel: run ended '{status}' — the scan "
+                   f"did not reach the end of the result set "
+                   f"(pages={result.get('pages')}, "
+                   f"scan_complete={result.get('scan_complete')}), so the "
+                   f"canonical contact population is incomplete for this run")
             errors.append(err)
             log.warning("[incremental_sync] %s", err)
         else:

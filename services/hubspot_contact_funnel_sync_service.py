@@ -355,19 +355,34 @@ def run_contact_funnel_sync(
                               contacts_seen=contacts_seen,
                               contacts_written=contacts_written, pages=pages)
 
+    # PR-ADS-160 (third review) §2 — the durable batch outcome must agree with
+    # `run_status`. Finishing a TRUNCATED run's batches as `success` recorded
+    # the opposite of what the run proved, and it advanced `last_source_date`,
+    # so the batch history said the interval was covered when the scan had
+    # stopped short. `run_status` is already computed correctly above; it is now
+    # what is written down, and the watermark advances only on a real success.
+    batch_source_date = now.date() if run_status == "success" else None
+    truncation_note = None if run_status == "success" else (
+        f"contact-funnel {mode} run did not reach the end of the result set "
+        f"(pages={pages}, scan_complete={scan_complete}); recorded partial so "
+        f"no coverage watermark advances")
     if batch_id:
         db_writers.finish_sync_batch(
-            batch_id=batch_id, status="success", row_count=contacts_written,
-            last_source_date=now.date(),
+            batch_id=batch_id, status=run_status, row_count=contacts_written,
+            last_source_date=batch_source_date, error_message=truncation_note,
         )
     if events_batch_id:
         db_writers.finish_sync_batch(
-            batch_id=events_batch_id, status="success",
-            row_count=stage_events_written, last_source_date=now.date(),
+            batch_id=events_batch_id, status=run_status,
+            row_count=stage_events_written, last_source_date=batch_source_date,
+            error_message=truncation_note,
         )
 
     return {
-        "status": "success",
+        # NOT a hardcoded "success". A truncated run reports `partial`, which
+        # the scheduler's `_overall_status` treats as a non-green vote — so a
+        # run that stopped short can no longer present a clean daily sync.
+        "status": run_status,
         "mode": mode,
         "since": since.isoformat(),
         "contacts_seen": contacts_seen,

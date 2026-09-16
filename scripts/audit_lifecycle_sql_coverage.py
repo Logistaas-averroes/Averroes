@@ -797,13 +797,64 @@ def run(now: datetime | None = None) -> tuple[Findings, dict]:
         f, report["windows"], report["boundary"], report["read_reconciliation"],
         report["source_freshness"])
 
-    windows = [w for w in report["windows"] if w.get("window_total_complete")
-               is not None]
-    coverage_complete = bool(windows) and all(
-        w.get("window_total_complete") for w in report["windows"])
+    # ── membership, and then publication — two questions, answered apart ─────
+    #
+    # PR-ADS-160 (third review) §3. These two flags used to be `coverage_complete`
+    # itself, which is a MEMBERSHIP verdict: every window's undated population
+    # is ruled out. That says nothing about whether the source is still being
+    # fed, whether the boundary and its incidents could be read, or whether the
+    # 44 canonical reads agree — so the summary could announce a publishable
+    # CPQL over a dead pipeline while `certification` reported zero certified
+    # windows directly beneath it. Whoever read the summary rather than the
+    # per-window detail got the wrong answer.
+    #
+    # `audit_certification` is the LAST gate and already withholds the total and
+    # the CPQL from every window it blocks. The summary is now DERIVED from what
+    # survived that gate, so it cannot contradict it.
+    windows = report["windows"]
+    assessable = [w for w in windows if w.get("window_total_complete") is not None]
+    coverage_complete = bool(assessable) and all(
+        w.get("window_total_complete") for w in windows)
+    # Preserved unchanged, and now explicitly the membership-only question.
     report["coverage_complete"] = coverage_complete
-    report["complete_sql_total_publishable"] = coverage_complete
-    report["cpql_publishable"] = coverage_complete
+
+    certification = report["certification"]
+    assessed = certification.get("windows_assessed") or 0
+    certified = certification.get("windows_certified") or 0
+    # Every window this audit assessed must have survived certification. The
+    # window set is the same one `coverage_complete` spans, so the two answer
+    # the same question about the same windows and can be read side by side.
+    every_window_certified = bool(windows) and assessed > 0 and certified == assessed
+
+    report["cpql_publishable"] = bool(
+        coverage_complete and every_window_certified
+        and all(w.get("cpql_publishable") is True for w in windows))
+    report["complete_sql_total_publishable"] = bool(
+        coverage_complete and every_window_certified
+        and all(w.get("complete_sql_total") is not None for w in windows))
+
+    # Stated rather than left to be inferred from two booleans: a reader can see
+    # WHICH question failed without diffing the per-window blocks.
+    report["publication_withheld_by_certification"] = bool(
+        coverage_complete
+        and not (report["cpql_publishable"]
+                 and report["complete_sql_total_publishable"]))
+
+    # The contract, checked rather than trusted. A summary claiming publishable
+    # while nothing is certified is the exact defect this section closes, so it
+    # is a violation of this audit and not merely an odd-looking report.
+    if certified == 0 and (report["cpql_publishable"]
+                           or report["complete_sql_total_publishable"]):
+        f.violation("publication_gate",
+                    "the summary reports a publishable total or CPQL while no "
+                    "window is certified")
+    else:
+        f.passed("publication_gate",
+                 f"publication follows certification: {certified}/{assessed} "
+                 f"window(s) certified, cpql_publishable="
+                 f"{report['cpql_publishable']}, complete_sql_total_publishable="
+                 f"{report['complete_sql_total_publishable']}")
+
     report["incomplete_windows"] = [
         w.get("window") for w in report["windows"]
         if not w.get("window_total_complete")]
@@ -815,9 +866,16 @@ def _render(report: dict, findings: Findings, exit_code: int) -> None:
     print("  PR-ADS-159 — LIFECYCLE SQL COVERAGE AUDIT (READ-ONLY)")
     print("=" * 78)
     print(f"  audit complete:            {report['audit_complete']}")
-    print(f"  coverage complete:         {report['coverage_complete']}")
+    print(f"  coverage complete:         {report['coverage_complete']}"
+          "   (membership only)")
+    cert = report.get("certification") or {}
+    print(f"  windows certified:         {cert.get('windows_certified')}"
+          f"/{cert.get('windows_assessed')}")
     print(f"  complete SQL publishable:  {report['complete_sql_total_publishable']}")
     print(f"  CPQL publishable:          {report['cpql_publishable']}")
+    if report.get("publication_withheld_by_certification"):
+        print("    ↳ membership is complete; publication is withheld by "
+              "certification (freshness, readability or reader reconciliation)")
     print(f"  external writes performed: {report['external_writes_performed']}")
 
     pop = report.get("population") or {}

@@ -2469,3 +2469,647 @@ def test_80_the_prospective_question_is_vacuous_before_a_boundary_exists():
     assert after["cpql_publishable"] is False
     assert after["reason"] == coverage.COVERAGE_INCIDENTS_UNREADABLE
     assert "could not be read" in after["explanation"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §1 (third review) — ONE PostgreSQL snapshot for the population AND the
+# provenance, proven with two concurrent connections
+#
+# Putting both reads in one transaction was necessary and not sufficient. Under
+# the connection's default READ COMMITTED isolation, PostgreSQL takes a FRESH
+# snapshot at the start of EVERY statement, so a contact-funnel sync committing
+# between the population SELECT and the provenance SELECT is invisible to the
+# first and visible to the second. The boundary then records a population
+# describing one instant beside a `source_run_id` describing a later one — the
+# mixed snapshot §5 of the second review set out to make impossible, one layer
+# further down than that fix reached.
+#
+# test_79 cannot see this: with nothing committing concurrently, both isolation
+# levels agree. Only a second connection committing INSIDE the transaction's
+# read window can tell them apart.
+# ═════════════════════════════════════════════════════════════════════════════
+
+class _GatedCursor:
+    """A real cursor that fires a callback after each ``execute``.
+
+    The callback is what lets the test stop the establishing transaction at an
+    exact statement boundary — mid-transaction, with its snapshot already taken
+    — rather than racing it with a sleep.
+    """
+
+    def __init__(self, cur, after_execute):
+        self._cur = cur
+        self._after = after_execute
+        self._n = 0
+
+    def execute(self, sql, params=None):
+        result = (self._cur.execute(sql) if params is None
+                  else self._cur.execute(sql, params))
+        self._n += 1
+        self._after(self._n, sql)
+        return result
+
+    def __getattr__(self, name):        # executemany, fetchone, description…
+        return getattr(self._cur, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return self._cur.__exit__(*exc)
+
+
+class _GatedConn:
+    def __init__(self, conn, after_execute):
+        self._conn = conn
+        self._after = after_execute
+
+    def cursor(self, *a, **k):
+        return _GatedCursor(self._conn.cursor(*a, **k), self._after)
+
+    def __getattr__(self, name):        # commit, rollback, closed…
+        return getattr(self._conn, name)
+
+
+def _batch(label_date):
+    """A real sync_batches row, so `last_batch_id`'s foreign key is satisfied."""
+    from db import writers
+
+    return writers.start_sync_batch("hubspot", "contact_funnel", "daily",
+                                    date_to=label_date)
+
+
+def _run_establish_gated(pg_cluster, monkeypatch, *, gate_after, on_pause):
+    """Establish a boundary on a dedicated connection, paused at one statement.
+
+    ``gate_after`` is the 1-based index of the ``execute`` to pause AFTER, and
+    ``on_pause`` runs on the MAIN thread while the establishing transaction sits
+    open with its snapshot already taken.
+
+    Returns ``(result, gated_sql)`` — the statement that was gated, so the test
+    fails loudly if a refactor moves it rather than silently gating the wrong
+    read.
+    """
+    import contextlib
+    import threading
+
+    import psycopg2
+    from db import writers
+
+    paused, resume = threading.Event(), threading.Event()
+    gated_sql: list = []
+
+    def after_execute(n, sql):
+        if n == gate_after:
+            gated_sql.append(sql)
+            paused.set()
+            assert resume.wait(timeout=30), "the concurrent writer never released the gate"
+
+    establishing = psycopg2.connect(pg_cluster.url)
+
+    @contextlib.contextmanager
+    def fake_get_conn():
+        yield _GatedConn(establishing, after_execute)
+
+    monkeypatch.setattr(writers, "get_conn", fake_get_conn)
+
+    box: dict = {}
+
+    def establish():
+        try:
+            box["result"] = _establish()
+        except BaseException as exc:            # noqa: BLE001
+            box["error"] = exc
+            paused.set()
+
+    worker = threading.Thread(target=establish, daemon=True)
+    worker.start()
+    try:
+        assert paused.wait(timeout=30), "establishment never reached the gate"
+        if "error" in box:
+            raise box["error"]
+        on_pause()
+    finally:
+        resume.set()
+        worker.join(timeout=60)
+        establishing.close()
+
+    if "error" in box:
+        raise box["error"]
+    return box["result"], (gated_sql[0] if gated_sql else "")
+
+
+def _recorded(connection):
+    """What the committed boundary actually says: its population and provenance."""
+    with connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT source_run_id FROM sql_coverage_boundary")
+        row = cur.fetchone()
+        cur.execute("SELECT contact_id FROM sql_coverage_boundary_contact "
+                    "ORDER BY contact_id")
+        contacts = [r[0] for r in cur.fetchall()]
+    return (row[0] if row else None), contacts
+
+
+@_needs_pg
+@pytest.mark.parametrize("isolation,mixes", [
+    ("REPEATABLE READ", False),   # the shipped default
+    ("READ COMMITTED", True),     # the negative control — proves what it buys
+])
+def test_81_pg_population_and_provenance_come_from_one_snapshot(
+        seeded160, monkeypatch, isolation, mixes):
+    """Two connections. A sync commits between the two reads. Do they agree?
+
+    The gate fires AFTER the population read and BEFORE the provenance read, so
+    the concurrent commit lands exactly in the window that isolation closes:
+
+      REPEATABLE READ  population OLD + provenance OLD  → one snapshot
+      READ COMMITTED   population OLD + provenance NEW  → MIXED
+
+    The second parametrisation is a negative control. A guard whose absence
+    changes nothing is not a guard, and without it this test would pass on the
+    unfixed code.
+    """
+    import psycopg2
+    from db import writers
+
+    monkeypatch.setattr(writers, "_BOUNDARY_ISOLATION", isolation)
+
+    before_batch = _batch(date(2026, 9, 1))
+    after_batch = _batch(date(2026, 9, 13))
+    assert before_batch and after_batch and before_batch != after_batch
+    writers.update_contact_funnel_sync_state(
+        "contacts", bootstrap_status="complete", last_batch_id=before_batch,
+        last_status="success", last_sync_mode="incremental",
+        last_incremental_status="success",
+        last_successful_incremental_at=datetime.now(tz=timezone.utc),
+        last_error=None)
+
+    other = psycopg2.connect(seeded160.url)
+
+    def concurrent_sync():
+        """A contact-funnel sync landing mid-transaction, on its OWN connection."""
+        with other, other.cursor() as cur:
+            cur.execute(
+                "INSERT INTO hubspot_contact_funnel "
+                "(contact_id, lifecycle_stage, created_at, last_modified_at) "
+                "VALUES ('promoted_mid_transaction', 'salesqualifiedlead', %s, %s)",
+                (LEGACY_CREATED, LEGACY_CREATED))
+            cur.execute(
+                "UPDATE hubspot_contact_funnel_sync_state SET last_batch_id = %s "
+                " WHERE scope = 'contacts'", (after_batch,))
+        # `with other` commits; the establishing transaction is still open.
+
+    try:
+        # 1 = SET TRANSACTION, 2 = the singleton check, 3 = the population.
+        result, gated = _run_establish_gated(
+            seeded160, monkeypatch, gate_after=3, on_pause=concurrent_sync)
+    finally:
+        other.close()
+
+    assert "hubspot_contact_funnel" in gated and "lifecycle_stage" in gated, (
+        "the gate no longer lands on the population read — the statement order "
+        f"changed, so this test is no longer proving anything. Gated: {gated!r}")
+    assert result["ok"] is True, result.get("detail")
+
+    source_run_id, contacts = _recorded(seeded160.connection)
+
+    # The population half is OLD under both isolation levels: that statement ran
+    # before the concurrent commit. It is the PROVENANCE half that moves.
+    assert "promoted_mid_transaction" not in contacts, (
+        "the population must describe the snapshot, not a later commit")
+
+    if mixes:
+        # Without the isolation guard the two halves describe different
+        # instants, and nothing in the recorded boundary says so.
+        assert f"batch={after_batch}" in source_run_id, (
+            "control failed: READ COMMITTED should have seen the newer sync "
+            "state, which is the whole defect being guarded against")
+        assert f"batch={before_batch}" not in source_run_id
+    else:
+        assert f"batch={before_batch}" in source_run_id, (
+            f"provenance describes a different snapshot than the population: "
+            f"{source_run_id!r}")
+        assert f"batch={after_batch}" not in source_run_id
+
+
+@_needs_pg
+def test_82_pg_the_snapshot_is_pinned_before_the_first_read(
+        seeded160, monkeypatch):
+    """The other side of the same guarantee.
+
+    Gating BEFORE the population read — a commit landing while only the
+    singleton check has run — proves the snapshot is fixed at the transaction's
+    first read rather than at whichever statement happens to be last. Under
+    REPEATABLE READ both later reads still describe the pre-commit state; a
+    per-statement snapshot would have let BOTH move.
+    """
+    import psycopg2
+    from db import writers
+
+    before_batch = _batch(date(2026, 9, 1))
+    after_batch = _batch(date(2026, 9, 13))
+    writers.update_contact_funnel_sync_state(
+        "contacts", bootstrap_status="complete", last_batch_id=before_batch,
+        last_status="success", last_sync_mode="incremental",
+        last_incremental_status="success",
+        last_successful_incremental_at=datetime.now(tz=timezone.utc),
+        last_error=None)
+
+    other = psycopg2.connect(seeded160.url)
+
+    def concurrent_sync():
+        with other, other.cursor() as cur:
+            cur.execute(
+                "INSERT INTO hubspot_contact_funnel "
+                "(contact_id, lifecycle_stage, created_at, last_modified_at) "
+                "VALUES ('arrived_after_snapshot', 'salesqualifiedlead', %s, %s)",
+                (LEGACY_CREATED, LEGACY_CREATED))
+            cur.execute(
+                "UPDATE hubspot_contact_funnel_sync_state SET last_batch_id = %s "
+                " WHERE scope = 'contacts'", (after_batch,))
+
+    try:
+        # Gate after statement 2 — the singleton check, which is what takes the
+        # transaction's snapshot. The population has not been read yet.
+        result, gated = _run_establish_gated(
+            seeded160, monkeypatch, gate_after=2, on_pause=concurrent_sync)
+    finally:
+        other.close()
+
+    assert "sql_coverage_boundary" in gated, gated
+    assert result["ok"] is True, result.get("detail")
+
+    source_run_id, contacts = _recorded(seeded160.connection)
+
+    assert "arrived_after_snapshot" not in contacts, (
+        "a contact committed after the transaction's snapshot was bounded by "
+        "it — the boundary would claim to have observed a population it never "
+        "saw, and that contact would be wrongly ruled out of every later window")
+    assert f"batch={before_batch}" in source_run_id
+    assert f"batch={after_batch}" not in source_run_id
+    # Both halves moved together — or rather, neither moved. That is the claim.
+    assert sorted(contacts) == ["undated_a", "undated_b"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §2 (third review) — a truncated contact-funnel run is never a success
+#
+# `run_status` was computed correctly — "partial" whenever the scan did not
+# reach the end of the result set — and then thrown away. Both sync batches were
+# finished with status="success" and the returned dict carried a hardcoded
+# "status": "success", so:
+#
+#   * the batch history said the interval was covered when the scan stopped short;
+#   * `last_source_date` advanced, moving a proven-coverage watermark past data
+#     that was never read;
+#   * the scheduler saw a green dataset and the daily run reported clean.
+#
+# The run's own verdict is now what gets written down and returned.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _pages(n, *, complete):
+    """A page iterator. Omitting the sentinel is what `truncated` means.
+
+    The service proves completion from an explicit empty `{"complete": True}`
+    page, never from running out of pages — a capped run stops iterating too.
+    """
+    def iterator(since, max_pages=None):
+        for i in range(n):
+            yield ([{"id": f"trunc_{i}",
+                     "properties": {"hs_object_id": f"trunc_{i}",
+                                    "email": f"t{i}@example.com",
+                                    "lifecyclestage": "lead",
+                                    "createdate": "2026-09-01T00:00:00Z",
+                                    "lastmodifieddate": "2026-09-02T00:00:00Z"}}],
+                   {"complete": False})
+        if complete:
+            yield ([], {"complete": True})
+    return iterator
+
+
+def _sync_state(connection):
+    with connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT last_status, last_sync_mode, last_incremental_status, "
+                    "       last_successful_incremental_at "
+                    "  FROM hubspot_contact_funnel_sync_state WHERE scope = 'contacts'")
+        row = cur.fetchone()
+    return dict(zip(("last_status", "last_sync_mode", "last_incremental_status",
+                     "last_successful_incremental_at"), row))
+
+
+def _batch_rows(connection):
+    with connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT dataset, status FROM sync_batches "
+                    " WHERE finished_at IS NOT NULL ORDER BY id")
+        return cur.fetchall()
+
+
+@_needs_pg
+def test_83_pg_a_truncated_incremental_reports_partial_everywhere(seeded160):
+    """The real service, a real database, and every durable surface checked.
+
+    A truncated run must not look successful in ANY of the four places it is
+    recorded: the returned status, the sync batches, the incremental provenance,
+    or the proven-successful-incremental timestamp.
+    """
+    from services import hubspot_contact_funnel_sync_service as svc
+
+    # The fixture records an earlier PROVEN incremental. The question is whether
+    # a truncated run moves it — an absent timestamp would prove nothing, since
+    # it would be absent either way.
+    proven_before = _sync_state(seeded160.connection)["last_successful_incremental_at"]
+    assert proven_before is not None, "control: something to advance must exist"
+
+    result = svc.run_contact_funnel_sync(
+        mode=svc.MODE_INCREMENTAL, page_iterator=_pages(2, complete=False))
+
+    assert result["truncated"] is True
+    assert result["scan_complete"] is False
+    assert result["status"] == "partial", "a truncated run reported success"
+
+    # Both durable batches agree with the run's own verdict.
+    finished = _batch_rows(seeded160.connection)
+    assert finished, "the run recorded no finished batch at all"
+    assert {status for _, status in finished} == {"partial"}, finished
+
+    state = _sync_state(seeded160.connection)
+    assert state["last_status"] == "partial"
+    assert state["last_sync_mode"] == svc.MODE_INCREMENTAL
+    assert state["last_incremental_status"] == "partial"
+    assert state["last_successful_incremental_at"] == proven_before, (
+        "a truncated run advanced the proven-successful-incremental timestamp; "
+        "certification would then treat a short scan as a healthy feed")
+
+    # And the coverage watermark did NOT advance: a partial pull did not cover
+    # its interval, so claiming it did is the same lie as a failed run claiming it.
+    with seeded160.connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT status, last_source_date FROM sync_state "
+                    " WHERE dataset = %s", (svc.DATASET_CONTACT_FUNNEL,))
+        row = cur.fetchone()
+    assert row and row[0] == "partial"
+    assert row[1] is None, "a truncated run advanced the coverage watermark"
+
+
+@_needs_pg
+def test_84_pg_a_truncated_run_makes_the_scheduler_run_non_green(
+        seeded160, monkeypatch):
+    """End to end through the REAL scheduler wrapper and REAL `_overall_status`.
+
+    Nothing is mocked to return an invented status: the service runs for real
+    against a real database, the scheduler's own wrapper classifies it, and the
+    scheduler's own aggregator scores it.
+    """
+    import scheduler.incremental_sync as sync
+    from services import hubspot_contact_funnel_sync_service as svc
+
+    # The ONLY substitution is HubSpot's pages — the seam the service exposes
+    # for exactly this. Everything downstream of it is the real orchestration:
+    # real batches, real checkpoints, real status derivation.
+    real_sync = svc.run_contact_funnel_sync
+    monkeypatch.setattr(svc, "get_bootstrap_mode", lambda: svc.MODE_INCREMENTAL)
+    monkeypatch.setattr(
+        svc, "run_contact_funnel_sync",
+        lambda **kw: real_sync(**kw, page_iterator=_pages(2, complete=False)))
+
+    errors: list = []
+    block = sync._sync_contact_funnel(run_id=None, errors=errors)
+    overall = sync._overall_status({"hubspot/contact_funnel": block})
+
+    assert block["status"] == "partial"
+    assert block["status"] not in sync.NON_VOTING_STATUSES, (
+        "a truncated run must VOTE — a non-voting status would let it pass")
+    assert overall != "success"
+    assert errors and "contact_funnel" in errors[0], (
+        "a dataset that votes the run down must say why")
+
+
+@_needs_pg
+def test_85_pg_a_complete_incremental_still_reports_success(seeded160):
+    """The control. The fix must not turn healthy runs partial.
+
+    Same service, same database, same page count — the ONLY difference is the
+    completion sentinel that proves the scan reached the end.
+    """
+    from services import hubspot_contact_funnel_sync_service as svc
+
+    result = svc.run_contact_funnel_sync(
+        mode=svc.MODE_INCREMENTAL, page_iterator=_pages(2, complete=True))
+
+    assert result["truncated"] is False
+    assert result["status"] == "success"
+    assert {status for _, status in _batch_rows(seeded160.connection)} == {"success"}
+
+    state = _sync_state(seeded160.connection)
+    assert state["last_status"] == "success"
+    assert state["last_incremental_status"] == "success"
+    assert state["last_successful_incremental_at"] is not None
+
+    import scheduler.incremental_sync as sync
+    assert sync._overall_status({"hubspot/contact_funnel": result}) == "success"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §3 (third review) — the SUMMARY must follow certification, not membership
+#
+# `run()` computed `coverage_complete` — a pure MEMBERSHIP verdict — and then
+# published it twice more, as `complete_sql_total_publishable` and
+# `cpql_publishable`. Membership knows nothing about whether the source is still
+# being fed, whether the boundary and its incidents could be read, or whether
+# the 44 canonical reads agree. So the summary could announce a publishable CPQL
+# while the `certification` block directly beneath it reported zero certified
+# windows and had already stripped the total from every one of them.
+#
+# Whoever read the summary rather than the per-window detail got the opposite of
+# the truth. The flags are now DERIVED from what survived the final gate.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _one_certifiable_window(monkeypatch, start, end):
+    """Restrict the audit's window inventory to ONE window after the boundary.
+
+    The production inventory contains `all_time`, which is permanently
+    incomplete and permanently uncertifiable — correctly, since it contains the
+    unknowable historical period. With it present no report can ever publish
+    anything, so a positive control would be indistinguishable from a flag that
+    is simply hard-wired false. Narrowing the inventory is what makes the clean
+    case genuinely reachable, and therefore what makes the blocked cases mean
+    something.
+    """
+    import scripts.audit_sql_doctrine_inventory as inventory
+
+    monkeypatch.setattr(inventory, "resolve_all_windows", lambda canon, now: [
+        {"window_key": "post_boundary", "window_type": "business",
+         "start": start, "end": end},
+    ])
+
+
+@pytest.fixture()
+def certifiable(seeded160, monkeypatch):
+    """A database whose one window is complete, fresh, reconciled and certified.
+
+    Every undated legacy contact is bounded BELOW the window start, so the
+    historical half is resolved; no incident exists, so the prospective half is
+    too; and the sync state proves a recent successful incremental.
+    """
+    _establish()
+    _one_certifiable_window(monkeypatch, date(2026, 9, 20), date(2026, 9, 30))
+    return seeded160
+
+
+def _report(monkeypatch=None):
+    from scripts import audit_lifecycle_sql_coverage as audit
+
+    return audit.run(now=datetime(2026, 10, 1, tzinfo=timezone.utc))
+
+
+def _assert_withheld(findings, report, *, why):
+    """Every surface a consumer might read must agree that nothing publishes."""
+    cert = report["certification"]
+    assert cert["windows_certified"] == 0, why
+    assert report["cpql_publishable"] is False, f"{why}: CPQL published anyway"
+    assert report["complete_sql_total_publishable"] is False, (
+        f"{why}: a complete total was presented as publishable")
+
+    for block in report["windows"]:
+        assert block["cpql_publishable"] is False, (
+            f"{why}: window {block['window']} still publishes CPQL")
+        assert block["complete_sql_total"] is None, (
+            f"{why}: window {block['window']} kept a complete total")
+        # The confirmed dated subset is never taken away — it is a true number
+        # about contacts that carry a proven date, and withholding it would
+        # replace an overstatement with a different kind of lie.
+        assert block["confirmed_sql_subset"] is not None
+        assert block["confirmed_sqls"] == block["confirmed_sql_subset"]
+
+    # The summary never contradicts the gate directly beneath it.
+    assert "publication_gate" in [c["check"] for c in findings.checks]
+    assert not [v for v in findings.violations if "publication_gate" in v]
+
+
+@_needs_pg
+def test_86_pg_a_stale_source_withholds_publication_from_a_complete_report(
+        certifiable, monkeypatch):
+    """Case 1. Membership complete, pipeline dead.
+
+    "Nothing is missing from what we have" is not "nothing is missing". A
+    complete window over a source that stopped updating describes data that
+    stopped arriving.
+    """
+    from db import writers
+
+    stale = datetime.now(tz=timezone.utc) - timedelta(days=14)
+    writers.update_contact_funnel_sync_state(
+        "contacts", bootstrap_status="complete", last_incremental_at=stale,
+        last_status="success", last_sync_mode="incremental",
+        last_incremental_status="success",
+        last_successful_incremental_at=stale, last_error=None)
+
+    findings, report = _report()
+
+    assert report["source_freshness"]["fresh"] is False
+    assert report["coverage_complete"] is True, (
+        "control: MEMBERSHIP is complete — that is exactly why the old code "
+        "published, and why this case is the one that mattered")
+    assert report["publication_withheld_by_certification"] is True
+    _assert_withheld(findings, report, why="stale source")
+
+
+@_needs_pg
+def test_87_pg_a_reader_disagreement_withholds_publication(
+        certifiable, monkeypatch):
+    """Case 2. Membership complete, the canonical reads do not agree.
+
+    Three reads of the same population that disagree mean at least one published
+    number is wrong, and nothing in a per-window membership verdict can see it.
+    """
+    from scripts import audit_lifecycle_sql_coverage as audit
+
+    real = audit.audit_read_reconciliation
+    monkeypatch.setattr(audit, "audit_read_reconciliation",
+                        lambda f, now: {**real(f, now),
+                                        "reconciliation_complete": False})
+
+    findings, report = _report()
+
+    assert report["coverage_complete"] is True, "control: membership is complete"
+    assert report["read_reconciliation"]["reconciliation_complete"] is False
+    assert [b["reason"] for b in report["certification"]["blocked_windows"]] == \
+        ["canonical_readers_did_not_reconcile"]
+    _assert_withheld(findings, report, why="readers did not reconcile")
+
+
+@_needs_pg
+def test_88_pg_an_unreadable_certification_input_withholds_publication(
+        certifiable, monkeypatch):
+    """Case 3. Membership complete, and we could not check the blockers.
+
+    Unknown is not clear. An incident store that cannot be read is not evidence
+    of zero incidents, and publishing on it would turn an outage into a number.
+    """
+    monkeypatch.setattr(repo, "fetch_post_boundary_incidents",
+                        lambda **k: {"available": False, "rows": [],
+                                     "open_count": None})
+
+    findings, report = _report()
+
+    assert report["boundary"]["post_boundary_incidents_available"] is False
+    _assert_withheld(findings, report, why="incident store unreadable")
+    # An outage is an audit UNAVAILABILITY, not a contract violation: the audit
+    # could not look, which is a different finding from the audit finding a lie.
+    assert any("post_boundary_incidents" in u for u in findings.unavailable)
+    assert findings.violations == []
+
+
+@_needs_pg
+def test_89_pg_a_fully_clean_report_does_publish(certifiable):
+    """Case 4, the positive control.
+
+    Without this, every assertion above is satisfied by a flag hard-wired false.
+    Same code path, same window, nothing blocking — and the summary publishes.
+    """
+    findings, report = _report()
+
+    assert report["source_freshness"]["fresh"] is True
+    assert report["read_reconciliation"]["reconciliation_complete"] is True
+    assert report["coverage_complete"] is True
+    assert report["certification"]["windows_certified"] == \
+        report["certification"]["windows_assessed"] > 0
+    assert report["cpql_publishable"] is True
+    assert report["complete_sql_total_publishable"] is True
+    assert report["publication_withheld_by_certification"] is False
+
+    for block in report["windows"]:
+        assert block["cpql_publishable"] is True
+        assert block["complete_sql_total"] is not None
+    assert findings.violations == []
+
+
+@_needs_pg
+def test_90_pg_the_summary_can_never_publish_with_zero_certified_windows(
+        certifiable, monkeypatch):
+    """The invariant itself, checked by the audit rather than only by this test.
+
+    A guard that lives only in a test protects only the cases the test thought
+    of. `run()` raises a `publication_gate` violation if the summary ever claims
+    publishable while nothing is certified, so a future edit that reintroduces
+    the defect fails the audit's own contract.
+    """
+    from scripts import audit_lifecycle_sql_coverage as audit
+
+    # Force the exact contradiction: certification blocks everything, while the
+    # membership-only flags would have said publish.
+    monkeypatch.setattr(audit, "audit_certification",
+                        lambda f, w, b, r, fr=None: {
+                            "certified_windows": [], "blocked_windows": [],
+                            "windows_certified": 0, "windows_assessed": 0,
+                            "readers_reconciled": True, "boundary_readable": True,
+                            "incidents_readable": True, "source_fresh": True,
+                            "source_freshness_reason": "source_fresh"})
+
+    findings, report = _report()
+
+    assert report["coverage_complete"] is True
+    assert report["cpql_publishable"] is False
+    assert report["complete_sql_total_publishable"] is False
+    assert findings.violations == [], (
+        "withholding correctly is not a violation — the violation fires only "
+        "if the summary PUBLISHES with nothing certified")

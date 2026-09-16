@@ -87,7 +87,12 @@ VALID_SYNC_TYPES: frozenset[str] = frozenset({
 })
 
 VALID_SYNC_STATUSES: frozenset[str] = frozenset({
-    "running", "success", "failed", "unknown",
+    # PR-ADS-160 (third review) §2 — `partial` is a run that did real work and
+    # did NOT reach the end of its result set. It is neither of the other two,
+    # and collapsing it into either loses the distinction a reader needs: a
+    # `success` here would claim coverage the run never proved, a `failed`
+    # would discard work that landed. It never advances a coverage watermark.
+    "running", "success", "partial", "failed", "unknown",
 })
 
 

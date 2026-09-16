@@ -145,6 +145,43 @@ earlier than the read that found it.
 read against. It is read **inside the same transaction, immediately after the
 population read**, so the two describe the same instant of the database.
 
+#### One transaction was not enough — the isolation level is
+
+Putting both reads in one transaction closed the *connection* gap and left the
+*snapshot* gap open. Under the connection's default **READ COMMITTED**
+isolation, PostgreSQL takes a **fresh snapshot at the start of every
+statement** — so a contact-funnel sync committing between the population SELECT
+and the provenance SELECT is invisible to the first and visible to the second.
+The boundary then records a population describing one instant beside a
+`source_run_id` describing a later one, with nothing in the row saying so.
+
+The transaction therefore sets its isolation level **before its first query**:
+
+```sql
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ
+```
+
+REPEATABLE READ takes the snapshot once, at the transaction's first read, and
+every later statement sees that same snapshot. The population, the provenance
+and the replay verification describe one instant of the database *by
+construction* rather than by luck of timing.
+
+**Not SERIALIZABLE.** The only write skew available here is two establishers
+both reading "no boundary exists" and both inserting — and the partial unique
+index already rejects the second. That is a constraint, not a race. Predicate
+locking and avoidable serialization aborts would buy nothing.
+
+`clock_timestamp()` is deliberately unaffected: it is volatile and reads the
+wall clock when called, so `observed_at` still lands *after* the snapshot. An
+upper bound stamped later than the observation it describes stays sound — it is
+simply more conservative.
+
+This is proven with two concurrent connections, not asserted: the establishing
+transaction is paused at an exact statement boundary, a second connection
+commits a population and sync-state change into that window, and the recorded
+boundary is checked for a mixed snapshot. The same test runs at READ COMMITTED
+as a negative control, where the mix duly appears.
+
 Reading it before calling the writer — as the first cut did — left a window in
 which a sync could land between the two, making `source_run_id` describe a state
 older than the population actually snapshotted: a boundary documented as
@@ -500,9 +537,59 @@ legacy rows carry NULL in all of them, so they **fail closed** with
 `source_incremental_provenance_missing` until one real incremental sync records
 the evidence. A row that predates the contract cannot prove anything about it.
 
+#### A truncated run is `partial`, everywhere
+
+The run status was computed correctly — `partial` whenever the scan did not
+reach the end of the result set — and then thrown away: both sync batches were
+finished as `success` and the returned dict carried a hardcoded
+`"status": "success"`. So a run that stopped short recorded the opposite of what
+it proved, advanced `last_source_date` past data it never read, and presented
+the scheduler with a green dataset.
+
+The run's own verdict is now what gets written down and returned:
+
+| Surface | Truncated incremental |
+| --- | --- |
+| returned `status` | `partial` |
+| both `sync_batches` rows | `partial` |
+| `sync_state.last_source_date` | **not advanced** |
+| `last_incremental_status` | `partial` |
+| `last_successful_incremental_at` | **not advanced** |
+| scheduler `_overall_status` | non-`success`, with a run error saying why |
+
+`partial` behaves like `failed` in the one respect that matters for truth — the
+proven-coverage watermark does not move, because a truncated pull did not cover
+its interval — while keeping the work that genuinely landed visible. It can
+never be marked `verified_empty`: that already requires a *successful* pull.
+
 `scripts/audit_lifecycle_sql_coverage.py` adds the global half: all 44
 window/scope reader combinations must reconcile, and the audit must have been
 able to look. A locally eligible window is **not** certified while either fails.
+
+### The summary follows certification, not membership
+
+The report's two top-level flags were `coverage_complete` published twice more,
+under the names `complete_sql_total_publishable` and `cpql_publishable`. But
+`coverage_complete` is a **membership** verdict — every window's undated
+population is ruled out — and membership knows nothing about freshness,
+readability or reader agreement. So the summary could announce a publishable
+CPQL while the `certification` block directly beneath it reported **zero**
+certified windows and had already stripped the total from every one of them.
+Whoever read the summary rather than the per-window detail got the opposite of
+the truth.
+
+The flags are now derived from what survived the final gate:
+
+| Field | Question it answers |
+| --- | --- |
+| `coverage_complete` | membership only — preserved, unchanged, and now explicitly labelled |
+| `cpql_publishable` | membership complete **and** every assessed window certified **and** every window's own `cpql_publishable` |
+| `complete_sql_total_publishable` | the same, with every window retaining a non-null `complete_sql_total` |
+| `publication_withheld_by_certification` | membership is complete but the gate took publication back — says *which* question failed |
+
+`run()` also raises a `publication_gate` violation if the summary ever claims
+publishable while nothing is certified, so a future edit that reintroduces the
+defect fails the audit's own contract rather than only a test.
 
 The audit reports the historical and prospective sides **separately** —
 `legacy_undated_bounded` and `open_post_boundary_incidents`. "A date HubSpot does
