@@ -3664,10 +3664,115 @@ def test_105_the_dataset_freshness_ui_never_labels_a_partial_sync_fresh():
     assert "is-fresh" not in partial_line, (
         "canonical freshness still styles a partial sync as fresh")
 
-    # And it is counted as a warning, not folded into the fresh tally.
+    # ── the single-dataset strip counts it as a warning, not as fresh ───────
     tally = source[source.index("const freshCount"):]
     tally = tally[:tally.index("const runningCount")]
     fresh_line = tally[:tally.index("const warningCount")]
+    warning_line = tally[tally.index("const warningCount"):tally.index("const errorCount")]
+    error_line = tally[tally.index("const errorCount"):]
+
     assert "data_available_latest_sync_partial" not in fresh_line
-    assert "data_available_latest_sync_partial" in tally
-    assert "partial_no_data" in tally
+    assert "partial_no_data" not in fresh_line, (
+        "a partial sync is being counted toward the fresh tally")
+    assert "data_available_latest_sync_partial" in warning_line
+    assert "partial_no_data" in error_line
+
+    # ── the MULTI-dataset strip's per-dataset detail ────────────────────────
+    #
+    # `_shortLabels[status] || "Unknown"` is the fallback, so a status missing
+    # here renders "Contact funnel: Unknown" — beside a summary that correctly
+    # says "1 warning". The tally and the label then disagree in one line, and
+    # the label is both the more specific and the more wrong of the two. The
+    # Leads page, which draws several datasets at once, is where this shows.
+    short = source[source.index("const _shortLabels"):]
+    short = short[:short.index("};")]
+
+    expected_short = {
+        "data_available_latest_sync_partial": "Partial",
+        "partial_no_data": "Partial, no data",
+    }
+    for key, label in expected_short.items():
+        matching = [ln for ln in short.splitlines() if f"{key}:" in ln]
+        assert matching, (
+            f"{key} is missing from _shortLabels, so the multi-dataset strip "
+            f"renders it as 'Unknown' beside a correct warning summary")
+        assert f'"{label}"' in matching[0], (
+            f"{key} should read {label!r} in the multi-dataset strip, got: "
+            f"{matching[0].strip()}")
+        assert '"Unknown"' not in matching[0]
+        assert '"Fresh"' not in matching[0], (
+            f"{key} is labelled Fresh in the multi-dataset strip")
+
+    # The two labels are distinct, so a reader can tell which case they have.
+    assert expected_short["data_available_latest_sync_partial"] != \
+        expected_short["partial_no_data"]
+
+    # And the fallback is still the only thing that produces "Unknown" — if it
+    # were removed, the assertions above would pass over a different mechanism.
+    assert '_shortLabels[statuses[i]] || "Unknown"' in source
+
+
+def test_106_the_multi_dataset_label_lookup_is_evaluated_not_just_matched():
+    """The real lookup expression, run in `node`, over the real map.
+
+    This repository has no JS test harness — no `package.json`, no
+    `node_modules`, no jsdom — and two labels do not justify introducing a
+    frontend testing framework. But the `node` binary is already a CI
+    dependency (`node --check static/app.js`), so the `_shortLabels` literal can
+    be extracted and the ACTUAL expression evaluated against it:
+
+        _shortLabels[statuses[i]] || "Unknown"
+
+    That is a behavioural check of the lookup rather than a search for a
+    substring, and it is what catches the real failure mode: a key that is
+    present in the file but spelled differently from the status the backend
+    emits still renders "Unknown".
+    """
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:                                     # pragma: no cover
+        pytest.skip("node is unavailable; the structural checks still apply")
+
+    source = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    start = source.index("const _shortLabels")
+    literal = source[source.index("{", start):source.index("};", start) + 1]
+
+    # Exactly the statuses the BACKEND emits, taken from the service itself —
+    # not retyped here, so a rename on either side fails this test rather than
+    # silently agreeing with a stale copy.
+    status = freshness_svc.CanonicalFreshnessStatus
+    probes = {
+        "partial_with_data": status.DATA_AVAILABLE_LATEST_SYNC_PARTIAL,
+        "partial_no_data": status.PARTIAL_NO_DATA,
+        "fresh": status.FRESH_WITH_DATA,
+        "failed_with_data": status.DATA_AVAILABLE_LATEST_SYNC_FAILED,
+    }
+
+    script = (
+        f"const _shortLabels = {literal};\n"
+        f"const probes = {json.dumps(probes)};\n"
+        "const out = {};\n"
+        "for (const [name, st] of Object.entries(probes)) {\n"
+        "  out[name] = _shortLabels[st] || 'Unknown';\n"   # the real expression
+        "}\n"
+        "console.log(JSON.stringify(out));\n"
+    )
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    rendered = json.loads(result.stdout)
+
+    assert rendered["partial_with_data"] == "Partial", rendered
+    assert rendered["partial_no_data"] == "Partial, no data", rendered
+    assert rendered["partial_with_data"] != "Unknown"
+    assert rendered["partial_no_data"] != "Unknown"
+    assert rendered["partial_with_data"] != rendered["partial_no_data"]
+    # Never the word the whole review series is about.
+    assert "Fresh" not in (rendered["partial_with_data"], rendered["partial_no_data"])
+
+    # Controls: the states either side of the two new ones still render as
+    # before, so this proves a gap was filled rather than the map rewritten.
+    assert rendered["fresh"] == "Fresh"
+    assert rendered["failed_with_data"] == "Degraded"

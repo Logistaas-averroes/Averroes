@@ -1949,6 +1949,12 @@ function renderPageDatasetFreshness(sectionKey) {
       // PR-ADS-095 refined states
       data_available_latest_sync_failed: "Degraded",
       failed_no_data:                    "Failed",
+      // PR-ADS-160: without these two, a multi-dataset strip renders a correct
+      // warning/error SUMMARY beside a detail reading "Contact funnel: Unknown"
+      // — the tally and the per-dataset label disagreeing in the same line,
+      // with the label the more specific and more wrong of the two.
+      data_available_latest_sync_partial: "Partial",
+      partial_no_data:                   "Partial, no data",
       not_run_but_derivable:             "Derivable",
       not_run_no_upstream_data:          "No upstream",
       unknown_row_count:                 "Row count?",
