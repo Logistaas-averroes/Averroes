@@ -259,9 +259,19 @@ class TestReadOnlyContract:
 
 
 class TestPartialStatus:
-    """'partial' runs are treated as successful for monitoring purposes."""
+    """'partial' is a THIRD outcome — neither a failure nor a success.
 
-    def test_partial_resets_consecutive_failures(self):
+    PR-ADS-160 (fourth review). This class previously asserted that partial was
+    "treated as successful for monitoring purposes", which made a pipeline
+    producing nothing but partial runs look perfectly healthy: green severity,
+    no warning, and a freshness clock ticking over on runs that never finished
+    what they set out to do.
+
+    The distinction now lives in two places, answering two different questions.
+    """
+
+    def test_partial_is_not_a_failure_and_breaks_a_failure_streak(self):
+        """Something ran and something landed, so it does not count toward red."""
         runs = [
             _run("daily", "failed",  0.3),
             _run("daily", "partial", 1.0),
@@ -271,10 +281,106 @@ class TestPartialStatus:
         # Only 1 consecutive failure at the top (newest).
         assert result["latest_runs"]["daily"]["consecutive_failures"] == 1
 
-    def test_partial_counts_as_last_success(self):
+    def test_partial_does_not_advance_the_proven_complete_claim(self):
+        """`last_success_at` is the coverage claim staleness is measured against.
+
+        A run that stopped short has proven nothing about coverage, so it must
+        not reset that clock — otherwise an endlessly-partial pipeline reports
+        itself fresh forever.
+        """
         runs = [
             _run("daily", "failed",  0.3),
             _run("daily", "partial", 1.0),
         ]
         result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
+        daily = result["latest_runs"]["daily"]
+
+        assert daily["last_success_at"] is None, (
+            "a partial run advanced the proven-complete coverage claim")
+        # Nothing is hidden: "when did this pipeline last do anything" is still
+        # answerable, under a name that does not say success.
+        assert daily["last_completed_at"] is not None
+
+    def test_a_partial_latest_run_is_never_green(self):
+        """The whole point. Recent, no failures, nothing stale — still not green.
+
+        Without this, the one outcome an operator can miss entirely is the one
+        that leaves fresh-looking data behind.
+        """
+        runs = [
+            _run("daily",   "partial", 0.1),
+            _run("daily",   "success", 1.0),
+            _run("weekly",  "success", 0.5),
+            _run("monthly", "success", 0.5),
+        ]
+        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
+
+        assert result["latest_runs"]["daily"]["latest_partial"] is True
+        assert result["latest_runs"]["daily"]["last_status"] == "partial"
+        assert result["latest_runs"]["daily"]["stale"] is False, (
+            "control: a recent success means staleness is NOT what fires here")
+        assert result["severity"] == "yellow"
+        assert result["severity"] != "green"
+        assert any("partially" in w for w in result["warnings"]), result["warnings"]
+
+    def test_partial_is_not_red_either(self):
+        """Real work landed and the pipeline is not down. Yellow, not red."""
+        runs = [
+            _run("daily",   "partial", 0.1),
+            _run("daily",   "partial", 1.0),
+            _run("weekly",  "success", 0.5),
+            _run("monthly", "success", 0.5),
+        ]
+        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
+
+        assert result["latest_runs"]["daily"]["consecutive_failures"] == 0
+        assert result["severity"] == "yellow"
+
+    def test_success_is_still_green(self):
+        """The positive control. A guard that reddens everything is not a guard."""
+        runs = [
+            _run("daily",   "success", 0.1),
+            _run("weekly",  "success", 0.5),
+            _run("monthly", "success", 0.5),
+        ]
+        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
+
+        assert result["severity"] == "green"
+        assert result["warnings"] == []
+        assert result["latest_runs"]["daily"]["latest_partial"] is False
         assert result["latest_runs"]["daily"]["last_success_at"] is not None
+
+    def test_failed_is_still_red_at_the_threshold(self):
+        """And failure keeps its own, more severe answer."""
+        runs = [
+            _run("daily",   "failed",  0.1),
+            _run("daily",   "failed",  1.0),
+            _run("weekly",  "success", 0.5),
+            _run("monthly", "success", 0.5),
+        ]
+        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
+
+        assert result["latest_runs"]["daily"]["consecutive_failures"] == 2
+        assert result["severity"] == "red"
+        assert result["latest_runs"]["daily"]["latest_partial"] is False
+
+    def test_the_three_outcomes_stay_distinguishable(self):
+        """success ≠ partial ≠ failed, on every field a reader consumes."""
+        seen = {}
+        for status in ("success", "partial", "failed"):
+            runs = [_run("daily", status, 0.1),
+                    _run("weekly", "success", 0.5),
+                    _run("monthly", "success", 0.5)]
+            r = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
+            seen[status] = (r["severity"],
+                            r["latest_runs"]["daily"]["last_status"],
+                            r["latest_runs"]["daily"]["latest_partial"],
+                            r["latest_runs"]["daily"]["last_success_at"] is not None)
+
+        assert seen["success"] == ("green", "success", False, True)
+        assert seen["partial"][0] == "yellow"
+        assert seen["partial"][1:] == ("partial", True, False)
+        assert seen["failed"][0] in ("yellow", "red")
+        assert seen["failed"][1:] == ("failed", False, False)
+        assert len({v[:2] for v in seen.values()}) == 3, (
+            "two of the three outcomes are indistinguishable to a reader")

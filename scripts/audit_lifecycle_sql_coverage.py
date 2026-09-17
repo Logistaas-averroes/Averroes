@@ -233,7 +233,185 @@ def audit_population(f: Findings) -> dict:
     return {"available": True, **population}
 
 
-def audit_windows(f: Findings, population: dict, now: datetime) -> list[dict]:
+def audit_boundary(f: Findings) -> dict:
+    """PR-ADS-160 — the boundary, the bounded population, and the open gaps.
+
+    Reports the historical and prospective sides SEPARATELY. Before this PR
+    there was one undated population and one number; after it, "a date HubSpot
+    does not hold" and "a date we failed to capture" are different findings with
+    different remedies, and adding them would hide the second inside the first.
+    """
+    from db import crm_funnel_repository as repo
+
+    state = repo.fetch_active_sql_coverage_boundary()
+    if not state.get("available"):
+        f.unavailable_now("sql_coverage_boundary",
+                          "the coverage-boundary store could not be read, so "
+                          "no window's certification can be assessed")
+        return {"available": False, "boundary": None,
+                "boundary_established": None,
+                "open_post_boundary_incidents": None,
+                "open_incidents": None,
+                "post_boundary_incidents_available": False}
+
+    boundary = state.get("boundary")
+    incidents = repo.fetch_post_boundary_incidents(status="open")
+    if not incidents.get("available"):
+        f.unavailable_now("post_boundary_incidents",
+                          "the post-boundary incident store could not be read; "
+                          "a window must not certify while its blockers are "
+                          "invisible")
+        open_count = None
+    else:
+        open_count = incidents.get("open_count")
+
+    if boundary is None:
+        # Not a violation and not an outage: the boundary simply has not been
+        # established yet. Certification is unavailable, and says so.
+        f.passed("sql_coverage_boundary",
+                 "no coverage boundary is established yet, so no window is "
+                 "certifiable — this is a state, not a failure")
+    else:
+        f.passed("sql_coverage_boundary",
+                 f"boundary {boundary.get('boundary_id')} observed at "
+                 f"{boundary.get('observed_at')}, bounding "
+                 f"{boundary.get('contacts_bounded')} legacy undated contact(s)")
+
+    rows = incidents.get("rows") or []
+    by_reason: dict = {}
+    for row in rows:
+        key = row.get("reason")
+        by_reason[key] = by_reason.get(key, 0) + 1
+
+    return {
+        "available": True,
+        # PR-ADS-160 §6: the incidents themselves, so each window resolves
+        # membership against its own bounds instead of one global count.
+        "open_incidents": rows if incidents.get("available") else None,
+        "boundary": boundary,
+        "boundary_established": boundary is not None,
+        "boundary_id": (boundary or {}).get("boundary_id"),
+        "boundary_observed_at": (boundary or {}).get("observed_at"),
+        "legacy_undated_bounded": (boundary or {}).get("contacts_bounded"),
+        # NULL, never 0, when the store could not be read.
+        "open_post_boundary_incidents": open_count,
+        "post_boundary_incidents_available": bool(incidents.get("available")),
+        "post_boundary_incident_reasons": dict(sorted(by_reason.items())),
+    }
+
+
+def audit_source_freshness(f: Findings) -> dict:
+    """PR-ADS-160 §5 — is the canonical contact-funnel source still updating?
+
+    A certification prerequisite, not a footnote. A window can be complete and
+    still worthless if its source stopped being fed: it would be complete with
+    respect to data that has stopped arriving.
+    """
+    from analysis import sql_coverage_freshness as freshness
+    from db import crm_funnel_repository as repo
+
+    state = repo.fetch_contact_funnel_sync_state()
+    verdict = freshness.assess(state)
+
+    if verdict["fresh"] is True:
+        f.passed("source_freshness", verdict["detail"])
+    elif verdict["fresh"] is None:
+        f.unavailable_now("source_freshness", verdict["detail"])
+    else:
+        # A stale or failed pipeline is a real finding about the DATA, like an
+        # incomplete window — not a contract violation and not an audit outage.
+        f.passed("source_freshness",
+                 f"NOT FRESH ({verdict['reason']}): {verdict['detail']} — no "
+                 f"window may certify")
+    return verdict
+
+
+def audit_certification(f: Findings, windows: list, boundary: dict,
+                        reconciliation: dict,
+                        freshness: dict | None = None) -> dict:
+    """Which windows may be certified — the whole gate, not the window-local half.
+
+    ``analysis.lifecycle_sql_coverage`` judges the window against the boundary
+    and the evidence population. Two further conditions are global and are
+    applied here:
+
+      * every canonical reader must reconcile (all 44 combinations);
+      * the canonical contact-funnel source must be proven FRESH;
+      * the audit itself must have been able to look.
+
+    A window that is locally eligible is NOT certified while either fails.
+    Certification is a claim that a published number is trustworthy, so every
+    input to it must be proven, not merely un-contradicted.
+    """
+    reconciled = bool(reconciliation.get("reconciliation_complete"))
+    boundary_readable = bool(boundary.get("available"))
+    incidents_readable = bool(boundary.get("post_boundary_incidents_available"))
+    source_fresh = (freshness or {}).get("fresh") is True
+
+    def _withhold(win, label, reason):
+        """A blocked window publishes NO complete total and NO CPQL.
+
+        PR-ADS-160 §2 — the defect this closes: a window could report
+        `certified: False` and, in the same response, `complete_sql_total: 42`
+        and `cpql_publishable: true`. Whoever read the number rather than the
+        flag got an incomplete total presented as a complete one. Certification
+        is the LAST gate, so it must be able to take both back.
+
+        The confirmed dated subset stays visible under `confirmed_sql_subset` —
+        a name that says what it is.
+        """
+        blocked.append({"window": label, "reason": reason})
+        win["certified"] = False
+        win["certification_status"] = reason
+        win["cpql_publishable"] = False
+        win["complete_sql_total"] = None
+
+    certified, blocked = [], []
+    for win in windows or []:
+        label = f"{win.get('window_type')}/{win.get('window')}"
+        locally_eligible = bool(win.get("certification_eligible"))
+        if not locally_eligible:
+            _withhold(win, label, win.get("certification_status"))
+            continue
+        if not (reconciled and boundary_readable and incidents_readable
+                and source_fresh):
+            if not source_fresh:
+                reason = (freshness or {}).get("reason") or "source_not_fresh"
+            elif not reconciled:
+                reason = "canonical_readers_did_not_reconcile"
+            else:
+                reason = "certification_inputs_unreadable"
+            _withhold(win, label, reason)
+            continue
+        certified.append(label)
+        win["certified"] = True
+
+    if certified:
+        f.passed("window_certification",
+                 f"{len(certified)} window(s) certified: {', '.join(certified)}")
+    else:
+        f.passed("window_certification",
+                 "no window is certified — every window either opens before the "
+                 "boundary, carries unresolved membership, or has an unmet "
+                 "global prerequisite")
+
+    return {
+        "certified_windows": certified,
+        "blocked_windows": blocked,
+        "windows_certified": len(certified),
+        "windows_assessed": len(windows or []),
+        "readers_reconciled": reconciled,
+        "boundary_readable": boundary_readable,
+        "incidents_readable": incidents_readable,
+        "source_fresh": source_fresh,
+        "source_freshness_reason": (freshness or {}).get("reason"),
+    }
+
+
+def audit_windows(f: Findings, population: dict, now: datetime,
+                  boundary: dict | None = None,
+                  open_incidents=None, freshness: dict | None = None
+                  ) -> list[dict]:
     """Per-window coverage — the global gap resolved against each window ONCE."""
     from analysis import lifecycle_sql_coverage as coverage
     from analysis.crm_lifecycle import EVENT_DATE_COLUMN, EVENT_SQL
@@ -242,13 +420,19 @@ def audit_windows(f: Findings, population: dict, now: datetime) -> list[dict]:
     from services import canonical_contact_outcome_service as canon
 
     windows = resolve_all_windows(canon, now)
-    unresolved_rows = repo.fetch_unresolved_sql_created_at_bounds()
+    # PR-ADS-160: both temporal bounds, not just creation. The boundary's upper
+    # bound is what lets a window opening after it stop carrying the historical
+    # undated population. It is read here as a BOUND and never as a date.
+    unresolved_rows = repo.fetch_unresolved_sql_boundary_bounds(
+        boundary_id=(boundary or {}).get("boundary_id"))
     if not unresolved_rows.get("available"):
         f.unavailable_now("window_membership",
                           "the undated lifecycle-SQL contacts could not be read")
         rows, rows_available = [], False
     else:
         rows, rows_available = unresolved_rows.get("rows") or [], True
+
+    boundary_observed = (boundary or {}).get("observed_at")
 
     contacts = repo.fetch_all_funnel_contacts()
     if not contacts.get("available"):
@@ -271,7 +455,10 @@ def audit_windows(f: Findings, population: dict, now: datetime) -> list[dict]:
         block = coverage.window_coverage(
             window=win.get("window_key"), window_end=end,
             confirmed_sqls=confirmed, recovered_sqls=recovered,
-            unresolved_rows=rows, population_available=rows_available)
+            unresolved_rows=rows, population_available=rows_available,
+            window_start=start, boundary_observed_at=boundary_observed,
+            open_post_boundary_incidents=open_incidents,
+            freshness=freshness)
         block["window_start"] = str(start) if start else None
         block["window_end"] = str(end) if end else None
         block["window_type"] = win.get("window_type")
@@ -285,6 +472,14 @@ def audit_windows(f: Findings, population: dict, now: datetime) -> list[dict]:
         if block["cpql_publishable"] and not block["window_total_complete"]:
             f.violation(f"cpql_fail_closed[{win.get('window_key')}]",
                         "CPQL was declared publishable without a complete total")
+        # PR-ADS-160 §2 — the same guard on the prospective half. A window whose
+        # incident store is unreadable, or which an open incident could belong
+        # to, has NOT got a complete total however resolved its history is.
+        if block["complete_sql_total"] is not None \
+                and not block["prospective_membership_complete"]:
+            f.violation(f"prospective_fail_closed[{win.get('window_key')}]",
+                        "a complete SQL total was published for a window whose "
+                        "post-boundary gap membership is unresolved or unknown")
         out.append(block)
 
     if not any(k.startswith("fail_closed") or k.startswith("cpql_fail_closed")
@@ -589,16 +784,77 @@ def run(now: datetime | None = None) -> tuple[Findings, dict]:
     report["effective_date"] = check_effective_date_consistency(f)
     report["evidence_states"] = audit_evidence_states(f)
     report["population"] = audit_population(f)
-    report["windows"] = audit_windows(f, report["population"], now)
+    report["boundary"] = audit_boundary(f)
+    report["source_freshness"] = audit_source_freshness(f)
+    report["windows"] = audit_windows(
+        f, report["population"], now,
+        boundary=report["boundary"].get("boundary"),
+        # The incident ROWS, so each window resolves membership itself.
+        open_incidents=report["boundary"].get("open_incidents"),
+        freshness=report["source_freshness"])
     report["read_reconciliation"] = audit_read_reconciliation(f, now)
+    report["certification"] = audit_certification(
+        f, report["windows"], report["boundary"], report["read_reconciliation"],
+        report["source_freshness"])
 
-    windows = [w for w in report["windows"] if w.get("window_total_complete")
-               is not None]
-    coverage_complete = bool(windows) and all(
-        w.get("window_total_complete") for w in report["windows"])
+    # ── membership, and then publication — two questions, answered apart ─────
+    #
+    # PR-ADS-160 (third review) §3. These two flags used to be `coverage_complete`
+    # itself, which is a MEMBERSHIP verdict: every window's undated population
+    # is ruled out. That says nothing about whether the source is still being
+    # fed, whether the boundary and its incidents could be read, or whether the
+    # 44 canonical reads agree — so the summary could announce a publishable
+    # CPQL over a dead pipeline while `certification` reported zero certified
+    # windows directly beneath it. Whoever read the summary rather than the
+    # per-window detail got the wrong answer.
+    #
+    # `audit_certification` is the LAST gate and already withholds the total and
+    # the CPQL from every window it blocks. The summary is now DERIVED from what
+    # survived that gate, so it cannot contradict it.
+    windows = report["windows"]
+    assessable = [w for w in windows if w.get("window_total_complete") is not None]
+    coverage_complete = bool(assessable) and all(
+        w.get("window_total_complete") for w in windows)
+    # Preserved unchanged, and now explicitly the membership-only question.
     report["coverage_complete"] = coverage_complete
-    report["complete_sql_total_publishable"] = coverage_complete
-    report["cpql_publishable"] = coverage_complete
+
+    certification = report["certification"]
+    assessed = certification.get("windows_assessed") or 0
+    certified = certification.get("windows_certified") or 0
+    # Every window this audit assessed must have survived certification. The
+    # window set is the same one `coverage_complete` spans, so the two answer
+    # the same question about the same windows and can be read side by side.
+    every_window_certified = bool(windows) and assessed > 0 and certified == assessed
+
+    report["cpql_publishable"] = bool(
+        coverage_complete and every_window_certified
+        and all(w.get("cpql_publishable") is True for w in windows))
+    report["complete_sql_total_publishable"] = bool(
+        coverage_complete and every_window_certified
+        and all(w.get("complete_sql_total") is not None for w in windows))
+
+    # Stated rather than left to be inferred from two booleans: a reader can see
+    # WHICH question failed without diffing the per-window blocks.
+    report["publication_withheld_by_certification"] = bool(
+        coverage_complete
+        and not (report["cpql_publishable"]
+                 and report["complete_sql_total_publishable"]))
+
+    # The contract, checked rather than trusted. A summary claiming publishable
+    # while nothing is certified is the exact defect this section closes, so it
+    # is a violation of this audit and not merely an odd-looking report.
+    if certified == 0 and (report["cpql_publishable"]
+                           or report["complete_sql_total_publishable"]):
+        f.violation("publication_gate",
+                    "the summary reports a publishable total or CPQL while no "
+                    "window is certified")
+    else:
+        f.passed("publication_gate",
+                 f"publication follows certification: {certified}/{assessed} "
+                 f"window(s) certified, cpql_publishable="
+                 f"{report['cpql_publishable']}, complete_sql_total_publishable="
+                 f"{report['complete_sql_total_publishable']}")
+
     report["incomplete_windows"] = [
         w.get("window") for w in report["windows"]
         if not w.get("window_total_complete")]
@@ -610,9 +866,16 @@ def _render(report: dict, findings: Findings, exit_code: int) -> None:
     print("  PR-ADS-159 — LIFECYCLE SQL COVERAGE AUDIT (READ-ONLY)")
     print("=" * 78)
     print(f"  audit complete:            {report['audit_complete']}")
-    print(f"  coverage complete:         {report['coverage_complete']}")
+    print(f"  coverage complete:         {report['coverage_complete']}"
+          "   (membership only)")
+    cert = report.get("certification") or {}
+    print(f"  windows certified:         {cert.get('windows_certified')}"
+          f"/{cert.get('windows_assessed')}")
     print(f"  complete SQL publishable:  {report['complete_sql_total_publishable']}")
     print(f"  CPQL publishable:          {report['cpql_publishable']}")
+    if report.get("publication_withheld_by_certification"):
+        print("    ↳ membership is complete; publication is withheld by "
+              "certification (freshness, readability or reader reconciliation)")
     print(f"  external writes performed: {report['external_writes_performed']}")
 
     pop = report.get("population") or {}
@@ -624,6 +887,23 @@ def _render(report: dict, findings: Findings, exit_code: int) -> None:
         print(f"    {pop.get('unresolved')}  global_missing_sql_entry_date")
         print(f"    {pop.get('unresolved_without_created_at')}  of those with no creation time either")
 
+    bound = report.get("boundary") or {}
+    print("\n  COVERAGE BOUNDARY  (historical vs prospective)")
+    if not bound.get("available"):
+        print("    unavailable — the boundary store could not be read")
+    elif not bound.get("boundary_established"):
+        print("    none established yet — no window is certifiable")
+    else:
+        print(f"    boundary id:            {bound.get('boundary_id')}")
+        print(f"    observed at (UTC):      {bound.get('boundary_observed_at')}")
+        print(f"    legacy undated bounded: {bound.get('legacy_undated_bounded')}"
+              "   ← an UPPER BOUND, never a date")
+    incidents = bound.get("open_post_boundary_incidents")
+    print(f"    open post-boundary gaps: "
+          f"{'unavailable' if incidents is None else incidents}")
+    for reason, count in (bound.get("post_boundary_incident_reasons") or {}).items():
+        print(f"      {count}x {reason}")
+
     print("\n  PER-WINDOW MEMBERSHIP  (the global gap, resolved against each window)")
     for win in report.get("windows") or []:
         # `all_time` exists in BOTH the evidence and business window families,
@@ -634,12 +914,26 @@ def _render(report: dict, findings: Findings, exit_code: int) -> None:
             print(f"    {label:<28} unavailable")
             continue
         mark = "complete" if win["window_total_complete"] else "INCOMPLETE"
-        print(f"    {label:<28} {mark:<11} "
+        cert = "CERTIFIED" if win.get("certified") else "not certified"
+        print(f"    {label:<28} {mark:<11} {cert:<14} "
               f"confirmed={win.get('confirmed_sqls')} "
               f"(recovered={win.get('window_membership_recovered')}) "
               f"unresolved={win.get('window_membership_unresolved')} "
-              f"ruled_out={win.get('window_membership_proven_outside')}")
+              f"ruled_out={win.get('window_membership_proven_outside')} "
+              f"(by_boundary={win.get('window_membership_excluded_by_boundary')})")
         print(f"      why: {win.get('explanation')}")
+        if not win.get("certified"):
+            print(f"      certification: {win.get('certification_status')}")
+
+    cert = report.get("certification") or {}
+    fresh = report.get("source_freshness") or {}
+    print(f"\n  CERTIFICATION  {cert.get('windows_certified')}/"
+          f"{cert.get('windows_assessed')} window(s) certified")
+    print(f"    canonical readers reconciled: {cert.get('readers_reconciled')}")
+    print(f"    contact-funnel source fresh:  {fresh.get('fresh')} "
+          f"({fresh.get('reason')})")
+    if fresh.get("detail"):
+        print(f"      {fresh.get('detail')}")
 
     recon = report.get("read_reconciliation") or {}
     if recon.get("combinations_expected"):

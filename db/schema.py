@@ -1193,6 +1193,38 @@ CREATE TABLE IF NOT EXISTS hubspot_contact_funnel_sync_state (
   updated_at                TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ── PR-ADS-160 §3 — proving a successful INCREMENTAL, not just a run ────────
+-- `last_incremental_at` is stamped by BOTH modes, so a successful bootstrap
+-- was indistinguishable from a fresh incremental sync. PR-ADS-160's
+-- certification gate asks "is the source still being fed?", and a bootstrap
+-- answering that question yes is a false negative waiting to certify a window
+-- whose incremental pipeline died.
+--
+-- The same hazard is already documented on `hubspot_deal_sync_state`
+-- (PR-ADS-153E-A2). This carries it further, because two columns are not
+-- enough:
+--
+--   bootstrap completes T0 → incremental FAILS T1 → bootstrap succeeds T2
+--
+-- With only `last_status` + `last_sync_mode`, T2 overwrites both, and the
+-- evidence that the required incremental failed is gone. So the INCREMENTAL's
+-- own outcome gets its own column, which no bootstrap ever touches.
+--
+-- All four are additive and NULL on legacy rows, which FAILS CLOSED in
+-- `analysis/sql_coverage_freshness.py` until one real incremental sync records
+-- the new evidence.
+ALTER TABLE hubspot_contact_funnel_sync_state
+  ADD COLUMN IF NOT EXISTS last_status TEXT;               -- success|partial|failed
+ALTER TABLE hubspot_contact_funnel_sync_state
+  ADD COLUMN IF NOT EXISTS last_sync_mode TEXT;            -- bootstrap|incremental
+-- Advanced ONLY by an incremental run that succeeded. A bootstrap, however
+-- successful, never moves it.
+ALTER TABLE hubspot_contact_funnel_sync_state
+  ADD COLUMN IF NOT EXISTS last_successful_incremental_at TIMESTAMPTZ;
+-- The outcome of the most recent INCREMENTAL run, whatever ran after it.
+ALTER TABLE hubspot_contact_funnel_sync_state
+  ADD COLUMN IF NOT EXISTS last_incremental_status TEXT;   -- success|partial|failed
+
 -- PR-ADS-155 §4: stage-entry timestamps RECOVERED from HubSpot property history.
 --
 -- Why a separate table
@@ -1277,6 +1309,198 @@ CREATE TABLE IF NOT EXISTS hubspot_lifecycle_history_recovery_state (
   last_error                TEXT,
   updated_at                TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- PR-ADS-160 — the prospective SQL coverage boundary
+-- ══════════════════════════════════════════════════════════════════════════
+--
+-- PR-ADS-159's production validation exhausted historical recovery: of 1,261
+-- contacts whose lifecycle stage proves they reached SQL, 728 carry HubSpot's
+-- direct `hs_v2_date_entered_salesqualifiedlead` and 533 do not. All 533
+-- returned VALID lifecycle history, and NONE of those histories contained a
+-- transition into `salesqualifiedlead`. There is no further evidence to find.
+--
+-- Those 533 dates are unknowable. This table does NOT make them knowable. It
+-- draws a line in time and says one much weaker — but true — thing:
+--
+--     "by this observed instant, these contacts had ALREADY reached SQL."
+--
+-- That is an UPPER BOUND on an unknown event, not the event. Its only sound
+-- use is to DISPROVE membership: an event known to have happened before
+-- instant B cannot have happened inside a window that starts after B. It can
+-- never confirm membership, never become `date_entered_sql`, and never turn an
+-- unknown historical event into a dated one.
+--
+-- It is deliberately stored in its own tables, NOT in
+-- `hubspot_contact_funnel.date_entered_*` and NOT in
+-- `hubspot_lifecycle_stage_history`. Both of those hold EXACT stage-entry
+-- evidence, and a bound is not evidence of that kind. Keeping them apart is
+-- what makes "a boundary observation was mistaken for an event date" a
+-- structurally impossible bug rather than a discipline every future reader has
+-- to remember.
+CREATE TABLE IF NOT EXISTS sql_coverage_boundary (
+  id                        SERIAL PRIMARY KEY,
+  boundary_id               TEXT NOT NULL UNIQUE,   -- stable identifier
+  -- The instant the population was OBSERVED. Everything at or after this is
+  -- "prospective"; everything before is historical and stays incomplete.
+  observed_at               TIMESTAMPTZ NOT NULL,
+
+  -- Provenance, so a boundary can always be traced to the rules and the run
+  -- that produced it.
+  lifecycle_rule_version    TEXT NOT NULL,
+  source_dataset            TEXT NOT NULL,          -- e.g. hubspot/contact_funnel
+  source_run_id             TEXT,                   -- the sync run observed
+  population_definition     TEXT NOT NULL,          -- the exact rule, in words
+  run_id                    TEXT NOT NULL,          -- the boundary command's run
+
+  -- What was seen at observation time.
+  legacy_undated_sql_contacts INTEGER,              -- NULL = not proven
+  contacts_examined         INTEGER,
+  contacts_bounded          INTEGER,
+
+  -- pending | complete | failed  — a boundary is usable ONLY when complete.
+  status                    TEXT NOT NULL DEFAULT 'pending',
+  failure_reason            TEXT,
+  failure_detail            TEXT,
+
+  created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at              TIMESTAMPTZ,
+  updated_at                TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sqlcb_status ON sql_coverage_boundary(status);
+CREATE INDEX IF NOT EXISTS idx_sqlcb_observed ON sql_coverage_boundary(observed_at);
+
+-- ── The singleton, enforced by the DATABASE ────────────────────────────────
+-- At most ONE completed boundary may ever exist. Two would be two answers to
+-- "when did the guaranteed period begin", and every window's certification
+-- verdict would depend on which one a reader happened to pick up.
+--
+-- A service-level check cannot provide this: two concurrent establish attempts
+-- can both read "no boundary exists" and both insert. Only a database
+-- constraint makes the second one fail. The index is partial on a constant, so
+-- it constrains the COUNT of completed rows rather than any column's value.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_sql_coverage_boundary_completed
+  ON sql_coverage_boundary ((TRUE)) WHERE status = 'complete';
+
+-- ── Immutability, enforced by the DATABASE ─────────────────────────────────
+-- A completed boundary and its bounded contacts are evidence of what was
+-- observed at a moment that has passed. Editing either would rewrite history:
+-- every window verdict already derived from them would silently change meaning,
+-- and nothing would record that it had.
+--
+-- Replaying the identical boundary must therefore be a verified no-op rather
+-- than an update, and any replay that differs must fail. The triggers below
+-- make "never updated" a property of the table rather than a discipline every
+-- future writer has to remember.
+CREATE OR REPLACE FUNCTION sql_coverage_boundary_is_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD.status = 'complete' THEN
+    RAISE EXCEPTION
+      'sql_coverage_boundary % is complete and immutable; a completed '
+      'boundary is evidence of a past observation and is never rewritten',
+      OLD.boundary_id
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_sql_coverage_boundary_immutable
+  ON sql_coverage_boundary;
+CREATE TRIGGER trg_sql_coverage_boundary_immutable
+  BEFORE UPDATE OR DELETE ON sql_coverage_boundary
+  FOR EACH ROW EXECUTE FUNCTION sql_coverage_boundary_is_immutable();
+
+
+-- One row per legacy undated SQL contact that was PRESENT in the population at
+-- boundary observation time.
+--
+-- `known_reached_sql_by` is the boundary's `observed_at`, copied here so the
+-- bound travels with the contact. It is NOT a stage-entry timestamp and the
+-- column is named so that a reader who confuses it with one is contradicting
+-- the column's own name. Nothing in the canonical read path may COALESCE it
+-- into an event date; `analysis/lifecycle_sql_coverage.py` consumes it only to
+-- rule a contact OUT of a window.
+CREATE TABLE IF NOT EXISTS sql_coverage_boundary_contact (
+  id                        SERIAL PRIMARY KEY,
+  boundary_id               TEXT NOT NULL,
+  contact_id                TEXT NOT NULL,
+  -- The UPPER BOUND. "Had already reached SQL by this instant." Never an event.
+  known_reached_sql_by      TIMESTAMPTZ NOT NULL,
+  -- The stage that PROVED the contact reached SQL, carried for auditability.
+  lifecycle_stage_at_boundary TEXT,
+  -- The creation-time LOWER bound, where known (PR-ADS-159's sound rule).
+  created_at_lower_bound    TIMESTAMPTZ,
+  recorded_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  UNIQUE (boundary_id, contact_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sqlcbc_contact
+  ON sql_coverage_boundary_contact(contact_id);
+CREATE INDEX IF NOT EXISTS idx_sqlcbc_boundary
+  ON sql_coverage_boundary_contact(boundary_id);
+CREATE OR REPLACE FUNCTION sql_coverage_boundary_contact_is_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION
+    'sql_coverage_boundary_contact rows are immutable (boundary %, contact %); '
+    'a recorded bound is evidence of a past observation',
+    OLD.boundary_id, OLD.contact_id
+    USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_sql_coverage_boundary_contact_immutable
+  ON sql_coverage_boundary_contact;
+CREATE TRIGGER trg_sql_coverage_boundary_contact_immutable
+  BEFORE UPDATE OR DELETE ON sql_coverage_boundary_contact
+  FOR EACH ROW EXECUTE FUNCTION sql_coverage_boundary_contact_is_immutable();
+
+
+-- PR-ADS-160 §5 — a post-boundary contact that reached SQL with NO exact
+-- timestamp from either permitted source.
+--
+-- Before this table, such a contact simply joined the undated population and
+-- was indistinguishable from the 533 historical ones. That is precisely the
+-- failure this PR exists to end: after the boundary, a missing SQL timestamp is
+-- an INCIDENT — visible, attributable to a run, and blocking certification of
+-- every window it could belong to — not a silent addition to a known gap.
+--
+-- It is never counted as zero and never folded into a complete population.
+CREATE TABLE IF NOT EXISTS sql_post_boundary_incident (
+  id                        SERIAL PRIMARY KEY,
+  contact_id                TEXT NOT NULL UNIQUE,
+  boundary_id               TEXT NOT NULL,
+
+  -- When the system first SAW this contact at SQL with no exact date. This is
+  -- an observation time for the incident, NOT the SQL event date.
+  detected_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  detected_by_run_id        TEXT,
+
+  -- Why no exact timestamp exists. One of the explicit reasons in
+  -- services/sql_coverage_boundary_service.py — never a bare "missing".
+  reason                    TEXT NOT NULL,
+  lifecycle_stage           TEXT,
+  -- The contact's creation time: a LOWER bound only, for triage. Never an event.
+  contact_created_at        TIMESTAMPTZ,
+  -- Whether HubSpot property history was actually consulted for this contact,
+  -- so "we did not look" can never be reported as "there is nothing".
+  history_checked           BOOLEAN NOT NULL DEFAULT FALSE,
+  history_state             TEXT,
+
+  -- open | resolved  — resolved ONLY when an exact timestamp later arrives.
+  status                    TEXT NOT NULL DEFAULT 'open',
+  resolved_at               TIMESTAMPTZ,
+  resolved_by               TEXT,                   -- direct_property|history
+  updated_at                TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sqlpbi_status ON sql_post_boundary_incident(status);
+CREATE INDEX IF NOT EXISTS idx_sqlpbi_detected
+  ON sql_post_boundary_incident(detected_at);
 
 -- PR-ADS-153D: durable LOCAL review decisions for canonical search terms.
 --
