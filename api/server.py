@@ -5906,9 +5906,32 @@ def _read_jsonl_runs() -> list[dict]:
 def api_monitoring_status(user: dict = Depends(require_auth)) -> dict[str, Any]:
     """Return read-only monitoring summary for scheduled run health.
 
-    Computes per-run-type state (daily/weekly/monthly):
-      - last_success_at, last_status, consecutive_failures, stale.
+    Computes state per monitoring CADENCE (daily/weekly/monthly). A cadence is
+    not the same thing as a run type: concrete run types are mapped onto it by
+    ``api.monitoring.monitoring_cadence`` — the incremental sync persists
+    ``daily_incremental_sync`` and reports into the daily cadence. A run type
+    the mapping does not recognise is not monitored, never silently daily.
+
+    Each cadence returns (PR-ADS-160 / PR-ADS-160-F1):
+
+      - ``last_success_at``     — newest run with status ``success``. A
+                                  ``partial`` run does NOT advance it; this is
+                                  the proven-complete claim staleness is
+                                  measured against.
+      - ``last_completed_at``   — newest run that did work (``success`` OR
+                                  ``partial``), so excluding partial above
+                                  hides nothing.
+      - ``last_status``         — the newest run's status verbatim
+                                  (``success`` / ``partial`` / ``failed``).
+      - ``latest_partial``      — whether that newest run ended partial.
+      - ``consecutive_failures``— failures from the newest backwards. A
+                                  ``partial`` is not a failure and breaks the
+                                  streak.
+      - ``stale``               — no ``last_success_at`` inside the threshold.
+
     Derives severity (green/yellow/red) and a human-readable warnings list.
+    Partial is yellow: deliberately not green, and not red either — real work
+    landed and the pipeline is not down.
 
     Auth required. Read-only. No external calls. No mutations.
     Phase 1 read-only — no writes to any external system.

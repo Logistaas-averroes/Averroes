@@ -23,7 +23,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import pytest
+
 from api.monitoring import compute_monitoring_status as _compute_monitoring_status
+from api.monitoring import monitoring_cadence as _monitoring_cadence
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -384,3 +387,129 @@ class TestPartialStatus:
         assert seen["failed"][1:] == ("failed", False, False)
         assert len({v[:2] for v in seen.values()}) == 3, (
             "two of the three outcomes are indistinguishable to a reader")
+
+
+class TestRunTypeIdentity:
+    """PR-ADS-160-F1 — the cadence a concrete run type reports into.
+
+    Monitoring reports on three CADENCES; production emits concrete RUN TYPES,
+    and they are not spelled the same. The incremental sync writes
+    `daily_incremental_sync` (`scheduler.incremental_sync.RUN_TYPE`), which is
+    the durable value in the `runs` table.
+
+    Grouping used to match the cadence names literally, so every real
+    incremental row was discarded before any of the partial/failed logic ran.
+    The failure was silent and inverted: the daily bucket warned "No daily run
+    found in history" — a complaint about ABSENCE — while daily runs were
+    happening and their outcomes were invisible.
+    """
+
+    def test_the_real_production_run_type_maps_to_the_daily_cadence(self):
+        """The defect, stated as the mapping it needed."""
+        from scheduler.incremental_sync import RUN_TYPE
+
+        # Imported, not retyped: if the scheduler ever renames its run type this
+        # fails here rather than going quietly unmonitored in production.
+        assert RUN_TYPE == "daily_incremental_sync"
+        assert _monitoring_cadence(RUN_TYPE) == "daily"
+
+    @pytest.mark.parametrize("status,expected_severity", [
+        ("success", "green"),
+        ("partial", "yellow"),
+        ("failed", "yellow"),      # one failure is yellow; red needs the streak
+    ])
+    def test_a_real_incremental_run_reaches_the_daily_bucket(
+            self, status, expected_severity):
+        """All three outcomes, under the REAL run type, on the daily cadence."""
+        runs = [
+            _run("daily_incremental_sync", status, 0.1),
+            _run("weekly",  "success", 0.5),
+            _run("monthly", "success", 0.5),
+        ]
+        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
+        daily = result["latest_runs"]["daily"]
+
+        assert daily["last_status"] == status, (
+            "the real incremental run never reached the daily bucket")
+        assert daily["latest_partial"] is (status == "partial")
+        assert result["severity"] == expected_severity
+        # And it is NOT the "nothing found" complaint the defect produced.
+        assert not any("No daily run found" in w for w in result["warnings"]), \
+            result["warnings"]
+
+    def test_two_failed_incremental_runs_still_go_red(self):
+        """Failure semantics survive the mapping — the streak still reaches red."""
+        runs = [
+            _run("daily_incremental_sync", "failed", 0.1),
+            _run("daily_incremental_sync", "failed", 1.0),
+            _run("weekly",  "success", 0.5),
+            _run("monthly", "success", 0.5),
+        ]
+        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
+
+        assert result["latest_runs"]["daily"]["consecutive_failures"] == 2
+        assert result["severity"] == "red"
+
+    def test_a_partial_incremental_run_does_not_advance_the_success_clock(self):
+        """The §4 contract, now reachable by the run type that needed it."""
+        runs = [
+            _run("daily_incremental_sync", "partial", 0.1),
+            _run("weekly",  "success", 0.5),
+            _run("monthly", "success", 0.5),
+        ]
+        daily = _compute_monitoring_status(
+            runs, _STALE_DAYS, _CONSEC_WARNING)["latest_runs"]["daily"]
+
+        assert daily["last_success_at"] is None
+        assert daily["last_completed_at"] is not None
+
+    def test_weekly_and_monthly_are_untouched(self):
+        """The mapping must not disturb the cadences that already worked."""
+        runs = [
+            _run("weekly",  "failed",  0.5),
+            _run("monthly", "partial", 0.5),
+        ]
+        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
+
+        assert result["latest_runs"]["weekly"]["last_status"] == "failed"
+        assert result["latest_runs"]["monthly"]["last_status"] == "partial"
+        assert result["latest_runs"]["monthly"]["latest_partial"] is True
+        assert _monitoring_cadence("weekly") == "weekly"
+        assert _monitoring_cadence("monthly") == "monthly"
+
+    def test_an_unknown_run_type_never_silently_becomes_daily(self):
+        """Unknown is not daily, the same way unknown is not zero.
+
+        Folding an unrecognised run type into `daily` would let a new scheduler
+        start voting on — and reddening — the daily cadence's health without
+        anyone deciding its health belongs there.
+        """
+        assert _monitoring_cadence("backfill") is None
+        assert _monitoring_cadence("some_future_sync") is None
+        assert _monitoring_cadence("") is None
+        assert _monitoring_cadence(None) is None
+
+        runs = [
+            _run("backfill", "failed", 0.1),
+            _run("weekly",  "success", 0.5),
+            _run("monthly", "success", 0.5),
+        ]
+        result = _compute_monitoring_status(runs, _STALE_DAYS, _CONSEC_WARNING)
+
+        # It did not join the daily bucket, and it did not red the run.
+        assert result["latest_runs"]["daily"]["last_status"] is None
+        assert result["latest_runs"]["daily"]["consecutive_failures"] == 0
+        assert result["severity"] != "red"
+
+    def test_the_mapping_is_one_table_rather_than_scattered_comparisons(self):
+        """Every monitored cadence is reachable, and the table is the contract."""
+        from api.monitoring import MONITORING_CADENCES, RUN_TYPE_CADENCE
+
+        assert set(RUN_TYPE_CADENCE.values()) <= set(MONITORING_CADENCES)
+        assert set(MONITORING_CADENCES) == set(RUN_TYPE_CADENCE.values()), (
+            "a monitored cadence no concrete run type maps to would report "
+            "'no run found' forever")
+        for cadence in MONITORING_CADENCES:
+            assert _monitoring_cadence(cadence) == cadence, (
+                "the cadence names must remain valid run types in their own "
+                "right — historical rows are spelled that way")

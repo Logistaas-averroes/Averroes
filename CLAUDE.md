@@ -1,131 +1,199 @@
-# CLAUDE.md — Averroes / Logistaas Ads Intelligence System
+# CLAUDE.md — Logistaas Ads Intelligence System
 
-> Routing and governance only. This file deliberately contains **no**
-> architecture detail, no phase narrative and no data dictionary. It tells you
-> where truth lives. It is not itself a source of truth about the system.
+Averroes is a **read-only ads intelligence platform**: it joins Google Ads spend
+to HubSpot lifecycle and revenue to expose the gap between what Ads reports and
+what the business actually earns. It advises; it does not execute. Its
+characteristic failure is not a crash but a surface stating a number the
+evidence does not support.
 
----
-
-## What this is
-
-A doctrine-driven Google Ads advisory engine for Logistaas (B2B TMS software
-for freight forwarders, 80+ countries, 3–12 month sales cycle). It joins
-Google Ads spend to HubSpot pipeline outcomes to expose the gap between what
-Google Ads reports and what the business actually earns.
-
-It is an analytics platform whose only product is **truth**. A wrong number
-shipped confidently is worse than a missing one.
+This file covers **how to build, test and ship here**, and routes to the
+authoritative documents. It does not restate the product or the architecture.
 
 ---
 
-## Governance: advisor-only, read-only
+## Reading order
 
-Phase 1 is advisor-only for six months of production use. The system analyses
-and recommends; the human executes every change manually, outside the system.
+| Document | What it is | Trust its status claims? |
+| --- | --- | --- |
+| `docs/09_REPO_STATE.md` | living per-PR state log, appended by every PR | **Newest sections yes; its header no.** It still opens "Last updated: PR-ADS-153E-B (August 2026)" while the repo has merged through PR-ADS-160-F1 |
+| `docs/DOCTRINE.md` | the governing advisory rules | Yes |
+| `docs/03_ARCHITECTURE.md` | layer rules and data flow | Yes |
+| `docs/05_DATA_REFERENCE.md` | confirmed HubSpot/Ads field names and IDs | Yes |
+| `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` | the read-only governance policy | Yes |
+| `docs/GITHUB_PR_WORKFLOW.md` | PR rules: roadmap ID, dependencies, repo-state update | Yes |
+| `docs/NN_*.md` | one doctrine doc per major PR (e.g. `41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`) | Yes |
+| `CLAUDE_CODE_BRIEFING.md` | original strategy→build handoff | **No — stale.** Its "what needs to be built" list is years out of date (it lists `api/server.py` and the dashboard as unbuilt; both exist) |
+| `docs/07_AGENT_BRIEFING.md` | architecture + layer rules | Architecture yes; its status narrative is explicitly marked stale |
 
-Hard constraints on every PR:
-
-* No Google Ads writes. No HubSpot writes. No external platform mutation.
-* No push/apply/execute control in UI, API or advisor output.
-* No `POST`/`PUT`/`PATCH`/`DELETE` route for N-Gram or negative candidates.
-* Field names must not imply execution (`to_apply`, `push_ready`,
-  `auto_negative`, `apply_negative`, `execute`, `pushed`, `synced`).
-
-Full policy: `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md`.
-Doctrine: `docs/DOCTRINE.md`.
-
----
-
-## Truth rules (non-negotiable)
-
-* **Never infer data.** Unknown != zero. Unavailable != empty. Partial !=
-  success. A subset != a total.
-* A creation date is not a lifecycle transition date. A label is not a proven
-  canonical identity. A Google Ads conversion is not a qualified business
-  outcome.
-* Never compare two totals across different populations, attribution scopes,
-  grains, date bases, dedup rules or availability semantics.
-* When canonical coverage is incomplete, complete totals and CPQL stay
-  **withheld** — see `docs/40_LIFECYCLE_SQL_EVIDENCE_COVERAGE.md` and
-  `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`.
-* `success`, `partial` and `failed` are three distinct states and must stay
-  distinct all the way to the screen.
-* **Never weaken a test to satisfy an implementation.** If a test fails, the
-  implementation is the suspect until proven otherwise. Never delete an
-  assertion, loosen a comparison, rename a production identifier inside a
-  fixture, or convert an unavailable value to an empty one to get green.
+The repo is at **PR-ADS-160+**. Any doc describing "Phase 1" as current is
+historical.
 
 ---
 
-## Which documents are authoritative
+## Environment
 
-| Question | Authority |
-|---|---|
-| What is actually built right now | `docs/09_REPO_STATE.md` + `git log` |
-| Doctrine / advisor-only rules | `docs/DOCTRINE.md`, `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` |
-| Module boundaries | `docs/03_ARCHITECTURE.md` |
-| API surface | `docs/API_CONTRACT.md` |
-| PR rules and required checks | `docs/GITHUB_PR_WORKFLOW.md`, `docs/GITHUB_AGENT_BRIEFING.md` |
-| A specific subsystem's contract | its numbered canonical doc in `docs/` (`33_`–`41_`) or `docs/audits/` |
+Python 3.11. The container's site-packages are not guaranteed to survive a
+session restart — if imports fail, reinstall:
 
-**Historical, not authoritative:** `CLAUDE_CODE_BRIEFING.md`,
-`docs/01_PROJECT_MASTER.md`, `docs/04_PHASE_ROADMAP.md`,
-`docs/07_AGENT_BRIEFING.md`. These retain useful architectural content but
-their phase/status narratives predate the current code.
-
-**Read status claims skeptically even in the authoritative files.**
-`docs/07_AGENT_BRIEFING.md` and `docs/09_REPO_STATE.md` both open with an
-"Authoritative status" block dated PR-ADS-153E-B (August 2026) while the
-repository has merged through PR-ADS-160. A header is a claim; `git log` and
-the code are evidence.
-
----
-
-## Architecture boundaries
-
-```
-connectors/   external reads (Google Ads, HubSpot, Windsor) — read-only
-db/           schema, repositories, writers — the only layer that touches SQL
-services/     canonical contracts and business truth (canonical_*.py)
-analysis/     pure analysis, no I/O
-api/          Flask surface (server.py, monitoring.py, scheduler.py, auth.py)
-scheduler/    job orchestration
-static/       single-page UI (app.js, index.html, styles.css) — plain JS
-scripts/      read-only CLIs, audits, backfills
-tests/        pytest, PostgreSQL-backed
+```bash
+pip install -r requirements.txt
+pip install pytest
 ```
 
-Canonical reads go through the shared service contract, not ad-hoc SQL.
-Revenue reads go through `services/canonical_revenue_service.py` at an explicit
-attribution scope
-(`all_source ≥ google_ads_source ≥ campaign_attributable ≥ gclid_attributable`).
+Always invoke pytest as `python -m pytest` (a bare `pytest` may resolve to a
+different interpreter than the one holding the dependencies).
 
 ---
 
-## PR workflow
+## Tests
 
-Every PR: a roadmap ID (`PR-ADS-XXX`), a statement of what it depends on and
-what it unblocks, the doctrine-compliance checklist from
-`docs/GITHUB_PR_WORKFLOW.md`, and `docs/09_REPO_STATE.md` updated as its final
-commit. Run the unsafe-language greps in that document before merge.
+### Reproducing CI locally
+
+CI is one workflow, `.github/workflows/pr-ads-153d-checks.yml`, with a blocking
+job of three pytest steps plus static checks. Run them in this order:
+
+```bash
+# static
+python -m compileall -q analysis api connectors db scheduler services scripts tests
+node --check static/app.js
+git diff --check origin/main...HEAD          # whitespace in the diff only
+
+# 1. PostgreSQL integration (21 named modules — see the workflow for the list)
+# 2. targeted contract suites (23 named modules)
+# 3. full suite, with the two baseline deselects below
+python -m pytest -q \
+  --deselect "tests/test_search_terms_followup_fixes.py::test_daily_empty_search_terms_marks_success_not_success_empty" \
+  --deselect "tests/test_search_terms_followup_fixes.py::test_weekly_empty_search_terms_marks_success_not_success_empty"
+```
+
+**Those two deselects are a documented baseline.** They fail identically on
+`main` with `OSError: Missing required Google Ads env vars`, and CI routes them
+to a separate non-blocking job. Anything failing beyond them is yours.
+
+### PostgreSQL tests
+
+PG-backed tests spin up a throwaway cluster. They **skip** unless all of:
+postgres server binaries present, an unprivileged `postgres` user exists, and
+`sudo -n` works non-interactively (`_have_postgres()` in
+`tests/test_pr_ads_153e_a_pg_integration.py`).
+
+A skipped PG suite is **not** merge evidence. CI's did-run assertion fails the
+job on any skipped module or any module contributing zero cases — do not
+"fix" a red PG step by making it skip.
+
+### There is no JavaScript test harness
+
+No `package.json`, no `node_modules`, no jsdom. CI's only JS step is
+`node --check static/app.js`. Do not add a frontend framework for a small
+change. Where behaviour in `static/app.js` needs proving, either assert
+structurally against the source or extract the literal and evaluate the real
+expression with the `node` binary CI already has (see
+`test_106` in `tests/test_pr_ads_160_sql_coverage_boundary.py`).
 
 ---
 
-## Use the truth auditor on high-risk changes
+## Conventions
+
+- **Work is numbered `PR-ADS-NNN`.** One branch, one PR, patched in place across
+  review rounds — do not open a second PR for the same change.
+- **Each significant PR adds `docs/NN_<TOPIC>.md`** and appends a section to
+  `docs/09_REPO_STATE.md`.
+- **Tests live in `tests/test_pr_ads_NNN_<topic>.py`** with numbered,
+  sentence-style names (`test_42_a_snapshot_contact_stays_historical...`).
+- **Audit/gate scripts are the enforcement layer.** `scripts/audit_*.py` and
+  `scripts/audit_*_gate.py` are read-only and exit `0` holds / `1` violation /
+  `2` unavailable. Several are wired into CI. Prefer extending one over adding
+  a check that lives only in a test.
+
+### Truth doctrine (the thing this codebase is actually about)
+
+Most review cycles here are about a surface reporting something the evidence
+does not support. The recurring rules:
+
+- **Unknown is not zero.** A read that failed returns `None`, never `0`.
+- **Fail closed.** An unrecognised status is not evidence of success.
+- **`false` and `null` are different claims** — one about the pipeline, one
+  about us. Both may block; the explanation must tell them apart.
+- **Never substitute a proxy for a measurement**, and never present a bound,
+  an upper limit or a partial as the thing itself.
+- **A guard whose absence changes nothing is not a guard.** New checks should
+  be shown failing against the pre-fix code.
+- **Never infer a value the data does not carry.** No proxy, no interpolation,
+  no derived date standing in for an event that was never recorded.
+- **Never weaken a test to satisfy an implementation.** If a test fails because
+  production emits something the code does not handle, the code is wrong. Do
+  not relabel, normalize or filter production identifiers inside a fixture to
+  make an assertion pass — that is the exact defect PR-ADS-160-F1 was opened
+  for. Tests are never skipped, disabled or quarantined to reach green.
+
+### High-risk review — use the truth auditor
 
 `.claude/agents/averroes-truth-auditor.md` is an independent, read-only
-reviewer. Its job is the defect class where **a test is green and production
-semantics are still wrong** — the PR-ADS-160 case, where an end-to-end test
-read the real `run_type = "daily_incremental_sync"` and substituted `"daily"`
-before passing it to monitoring.
+reviewer. Delegate to it **before merge or production validation** when a change
+touches lifecycle/SQL/revenue/freshness/monitoring semantics, canonical dataset
+keys, attribution scope, run-status semantics or certification gates — and when
+an implementation has survived several review rounds and confidence is running
+high. Do not invoke it for copy edits, CSS, renames or mechanical work.
 
-Delegate to it for: significant PR review; truth-contract hardening; changes to
-lifecycle/SQL/revenue/freshness/monitoring semantics; canonical dataset keys;
-attribution scope; run-status semantics; certification gates; preparation for
-production validation; and any implementation that has survived several review
-rounds and is starting to feel safe.
+### Read-only governance — ACTIVE
 
-Do not invoke it for copy edits, CSS, one-line renames or mechanical low-risk
-work. It is an independent reviewer, not ceremony.
+**No writes to Google Ads or HubSpot.** See
+`docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md`. HubSpot property history is read;
+nothing is written back. Offline conversion uploads (OCT) are not authorized.
 
-Invoke with: **"Use the averroes-truth-auditor agent to review <target>."**
+---
+
+## Landmines
+
+- **Run status has three outcomes: `success` / `partial` / `failed`.** A
+  truncated sync is `partial` on every surface — returned status, sync batches,
+  the durable `runs` row, `/api/runs`, canonical dataset freshness and the UI
+  strips — and advances no coverage watermark. Do not collapse it into either
+  neighbour.
+
+- **A monitoring *cadence* is not a *run type*.** `api/monitoring.py` reports on
+  `daily` / `weekly` / `monthly`, but schedulers persist concrete run types —
+  the incremental sync writes `daily_incremental_sync`
+  (`scheduler/incremental_sync.py:274`). The translation lives in **one** table,
+  `RUN_TYPE_CADENCE`, via `monitoring_cadence()`. A new scheduler writing to
+  `runs` must be added there or it goes silently unmonitored; an unrecognised
+  run type maps to `None` and is deliberately **not** folded into `daily`.
+
+  This was an open defect through PR-ADS-160 — incremental rows were dropped
+  before severity was computed — and the test missed it by rewriting `run_type`
+  to `"daily"` before calling monitoring. Fixed in **PR-ADS-160-F1**. If you
+  write a test over run health, pass the persisted `run_type` through; never
+  relabel it to make an assertion pass.
+
+- **A new canonical freshness status must be registered in five places** or it
+  degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,
+  `SEVERITY_MAP`, `canonical_status_display_label()`, and — as appropriate —
+  `HAS_DATA_STATES` / `BLOCKING_STATES`. Then four more in `static/app.js`:
+  `_csLabels`, `_csClasses`, `_shortLabels`, `SEVERITY_ORDER`, plus the
+  warning/error tallies and the empty-state chain. `_shortLabels` has a
+  `|| "Unknown"` fallback that renders a correct summary beside a wrong label.
+
+- **`now()` is transaction-start time.** For an instant stamped *after* a read
+  inside the same transaction, use `clock_timestamp()`.
+
+- **One transaction is not one snapshot.** Under the default READ COMMITTED
+  isolation PostgreSQL takes a fresh snapshot per *statement*. Reads that must
+  agree need `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` before the
+  transaction's first query.
+
+- **`ON CONFLICT DO UPDATE SET col = EXCLUDED.col` under a staleness guard is
+  not a sparsity guard.** A later payload omitting a property will blank stored
+  evidence and report success. Use `COALESCE(EXCLUDED.col, table.col)` for
+  columns that carry evidence.
+
+- **`len(requested)` is not `persisted`.** Report what the database wrote.
+
+- **HubSpot's batch history endpoint refuses more than 50 contacts** rather
+  than truncating; chunk before calling it.
+
+---
+
+## Git
+
+Work on a feature branch, commit with a descriptive body explaining *why*, and
+push with `git push -u origin <branch>`. Never push to `main`.
