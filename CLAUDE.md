@@ -15,7 +15,7 @@ authoritative documents. It does not restate the product or the architecture.
 
 | Document | What it is | Trust its status claims? |
 | --- | --- | --- |
-| `docs/09_REPO_STATE.md` | living per-PR state log, appended by every PR | **Yes** — read the newest sections first |
+| `docs/09_REPO_STATE.md` | living per-PR state log, appended by every PR | **Newest sections yes; its header no.** It still opens "Last updated: PR-ADS-153E-B (August 2026)" while the repo has merged through PR-ADS-160-F1 |
 | `docs/DOCTRINE.md` | the governing advisory rules | Yes |
 | `docs/03_ARCHITECTURE.md` | layer rules and data flow | Yes |
 | `docs/05_DATA_REFERENCE.md` | confirmed HubSpot/Ads field names and IDs | Yes |

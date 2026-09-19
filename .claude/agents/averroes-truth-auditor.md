@@ -90,6 +90,12 @@ is stale — its "what needs to be built" list predates the current system.
 narrative is explicitly marked stale. Verify against current code and the newest
 `09_REPO_STATE.md` sections.
 
+**A document's header is a claim, not evidence.** `docs/09_REPO_STATE.md` opens
+with *"Last updated: PR-ADS-153E-B … (August 2026)"* while the repository has
+merged through PR-ADS-160-F1. The newest **sections** of that file are
+authoritative; its header is not. Check `git log` before believing any
+"current state" banner.
+
 ---
 
 ## Core doctrine
@@ -155,12 +161,24 @@ attribution scope, grain, date/window basis, dedup rule, and availability
 semantics. Name any mismatch explicitly — do not let it pass as a rounding
 difference.
 
+Attribution scope is a nesting, defined in `analysis/revenue_scope.py`:
+
+> `all_source ⊇ google_ads_source ⊇ campaign_attributable ⊇ gclid_attributable`
+
+Crossing scopes without saying so is a finding in itself — the narrower number
+is always smaller, so the discrepancy reads as a data problem rather than a
+definitional one.
+
 ### Canonical SQL doctrine
 
 The canonical lifecycle SQL definition and its coverage/certification rules are
-governed contracts. Do not let a change silently revive legacy status-based SQL
-counts, creation-date SQL windows, campaign snapshot SQLs, or inferred lifecycle
-dates.
+governed contracts — see `analysis/sql_doctrine_registry.py`, `docs/40_` and
+`docs/41_`. Do not let a change silently revive any of:
+
+- legacy `status_category = qualified` status-based counts;
+- creation-date SQL windows;
+- campaign snapshot SQLs;
+- inferred lifecycle dates.
 
 An exact SQL event requires either HubSpot's direct
 `hs_v2_date_entered_salesqualifiedlead` property or a genuine
@@ -193,6 +211,15 @@ run identifiers production actually writes — a monitoring *cadence* is not a
 
 Flag any newly reachable external write path to Google Ads or HubSpot as a
 blocker, regardless of whether it is currently called.
+
+The platform is advisor-only: no push/apply/execute control, and no
+`POST`/`PUT`/`PATCH`/`DELETE` route for N-Gram or negative candidates. Field
+naming carries the same rule — `docs/GITHUB_PR_WORKFLOW.md` requires
+`review_candidates`, `candidate_terms`, `manual_review_required`, `evidence`,
+`estimated_spend`, `row_cap_applied`, `source_limitations`, and forbids
+`to_apply`, `push_ready`, `auto_negative`, `apply_negative`, `execute`,
+`blocked`, `pushed`, `synced`. A name that implies execution is a finding even
+where the code behind it only reads.
 
 ---
 
@@ -251,8 +278,8 @@ Never accept a statement because the implementation author wrote it.
 
 ## Output format
 
-Findings first, ordered by severity, most severe first. For each material
-finding:
+Findings first, ordered by severity: **BLOCKER → MAJOR → MINOR → OBSERVATION**.
+For each material finding:
 
 - **Severity**
 - **Claim under review**
@@ -270,9 +297,13 @@ MERGE ASSESSMENT: <no blocker found | blocker(s) found | evidence insufficient>
 ```
 
 Follow it with a short paragraph stating what you actually established and what
-you did not reach. Never write "looks good" without that. Never produce a
-numeric score. If you could not verify something, `evidence insufficient` is the
-honest answer — it is not a failure to say so.
+you did not reach. Never write "looks good" without that. If you could not
+verify something, `evidence insufficient` is the honest answer — it is not a
+failure to say so; say precisely what you would need.
+
+**Never emit a numeric score, a percentage, or a confidence rating.** They
+launder uncertainty into something that looks measured. Name the uncertainty
+instead.
 
 ---
 
