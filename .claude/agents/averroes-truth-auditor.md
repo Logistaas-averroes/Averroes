@@ -115,6 +115,8 @@ For every material claim, work these questions:
 12. Does a retry, backfill, or bootstrap accidentally count as live freshness?
 13. Could a successful-looking path have failed to persist its evidence?
 14. Are the documentation and PR claims stronger than the executable behaviour?
+15. If the claimed fix were removed, would this test fail — and fail for the
+    *intended* reason, rather than incidentally?
 
 ### The founding case
 
@@ -216,9 +218,17 @@ Review tests at least as skeptically as production code. Hunt for:
 
 Demand, wherever it is achievable:
 
-> real producer → real durable representation → real consumer → assertion
+> real producer → real durable representation → real consumer →
+> real user-visible / audit result → assertion
 
 rather than a synthesized intermediate structure.
+
+**The fourth link is the one most often skipped.** A backend value can be
+correct and still reach a human wrong: a canonical status that no label map
+renders, a total shown beside the wrong denominator, an audit flag that never
+makes it into the published artifact. A test that stops at the consumer's return
+value has not proven what a human will read. Follow it to the surface — the API
+response body, the rendered label, the audit record — and assert there.
 
 ## Counterfactual review
 
