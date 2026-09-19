@@ -1,8 +1,13 @@
 # CLAUDE.md — Logistaas Ads Intelligence System
 
-Operational notes for Claude Code sessions in this repository. This file covers
-**how to build, test and ship here**. It does not restate the product or the
-architecture — see the reading order below.
+Averroes is a **read-only ads intelligence platform**: it joins Google Ads spend
+to HubSpot lifecycle and revenue to expose the gap between what Ads reports and
+what the business actually earns. It advises; it does not execute. Its
+characteristic failure is not a crash but a surface stating a number the
+evidence does not support.
+
+This file covers **how to build, test and ship here**, and routes to the
+authoritative documents. It does not restate the product or the architecture.
 
 ---
 
@@ -14,6 +19,8 @@ architecture — see the reading order below.
 | `docs/DOCTRINE.md` | the governing advisory rules | Yes |
 | `docs/03_ARCHITECTURE.md` | layer rules and data flow | Yes |
 | `docs/05_DATA_REFERENCE.md` | confirmed HubSpot/Ads field names and IDs | Yes |
+| `docs/15_SIX_MONTH_READ_ONLY_GOVERNANCE.md` | the read-only governance policy | Yes |
+| `docs/GITHUB_PR_WORKFLOW.md` | PR rules: roadmap ID, dependencies, repo-state update | Yes |
 | `docs/NN_*.md` | one doctrine doc per major PR (e.g. `41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`) | Yes |
 | `CLAUDE_CODE_BRIEFING.md` | original strategy→build handoff | **No — stale.** Its "what needs to be built" list is years out of date (it lists `api/server.py` and the dashboard as unbuilt; both exist) |
 | `docs/07_AGENT_BRIEFING.md` | architecture + layer rules | Architecture yes; its status narrative is explicitly marked stale |
@@ -111,6 +118,22 @@ does not support. The recurring rules:
   an upper limit or a partial as the thing itself.
 - **A guard whose absence changes nothing is not a guard.** New checks should
   be shown failing against the pre-fix code.
+- **Never infer a value the data does not carry.** No proxy, no interpolation,
+  no derived date standing in for an event that was never recorded.
+- **Never weaken a test to satisfy an implementation.** If a test fails because
+  production emits something the code does not handle, the code is wrong. Do
+  not relabel, normalize or filter production identifiers inside a fixture to
+  make an assertion pass — that is the exact defect PR-ADS-160-F1 was opened
+  for. Tests are never skipped, disabled or quarantined to reach green.
+
+### High-risk review — use the truth auditor
+
+`.claude/agents/averroes-truth-auditor.md` is an independent, read-only
+reviewer. Delegate to it **before merge or production validation** when a change
+touches lifecycle/SQL/revenue/freshness/monitoring semantics, canonical dataset
+keys, attribution scope, run-status semantics or certification gates — and when
+an implementation has survived several review rounds and confidence is running
+high. Do not invoke it for copy edits, CSS, renames or mechanical work.
 
 ### Read-only governance — ACTIVE
 
