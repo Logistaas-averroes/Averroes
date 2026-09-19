@@ -56,6 +56,50 @@ STALE_DAYS_DEFAULT: dict[str, int] = {
 CONSECUTIVE_FAILURE_WARNING_DEFAULT = 2
 
 
+# ── Run type → monitoring cadence (PR-ADS-160-F1) ───────────────────────────
+#
+# Monitoring reports on three CADENCES. Production emits concrete RUN TYPES,
+# and they are not always spelled like the cadence they belong to: the
+# incremental sync writes ``daily_incremental_sync``
+# (``scheduler.incremental_sync.RUN_TYPE``), which is the durable value in the
+# `runs` table.
+#
+# Before this mapping existed, grouping matched the cadence names literally, so
+# every `daily_incremental_sync` row was DISCARDED before any of the logic below
+# ran. The result was silent and the wrong way round: the daily bucket reported
+# "No daily run found in history" — a warning about absence — while real daily
+# runs were happening and their partial/failed outcomes were invisible.
+#
+# The durable run type is NOT renamed to suit this module. This is the one place
+# the translation happens, so a reader can see the whole mapping at once instead
+# of discovering it as a string comparison somewhere downstream.
+MONITORING_CADENCES: tuple[str, ...] = ("daily", "weekly", "monthly")
+
+#: Concrete run type → cadence. Add a row here when a new scheduler starts
+#: writing to `runs`; that is a deliberate decision about whose health it
+#: reports, which is exactly why it is not inferred from the name.
+RUN_TYPE_CADENCE: dict[str, str] = {
+    "daily":                 "daily",
+    "daily_incremental_sync": "daily",
+    "weekly":                "weekly",
+    "monthly":               "monthly",
+}
+
+
+def monitoring_cadence(run_type: str | None) -> str | None:
+    """The monitoring cadence a concrete run type belongs to, or ``None``.
+
+    ``None`` means "not monitored" and the run is skipped. An unknown run type
+    is deliberately NOT folded into ``daily``: a new scheduler would then start
+    voting on the daily cadence's severity — and could turn it red — without
+    anyone having decided that its health belongs there. Unknown is not daily,
+    the same way unknown is not zero anywhere else in this codebase.
+    """
+    if not run_type:
+        return None
+    return RUN_TYPE_CADENCE.get(str(run_type).strip().lower())
+
+
 def compute_monitoring_status(
     runs: list[dict],
     stale_after_days: dict[str, int],
@@ -90,12 +134,14 @@ def compute_monitoring_status(
     """
     now = datetime.now(timezone.utc)
 
-    # Group runs by run_type, preserving DESC order (newest first per type).
-    by_type: dict[str, list[dict]] = {"daily": [], "weekly": [], "monthly": []}
+    # Group runs by CADENCE, preserving DESC order (newest first per cadence).
+    # `monitoring_cadence` is the only translation from the durable run type;
+    # a run type it does not recognise is skipped rather than assumed daily.
+    by_type: dict[str, list[dict]] = {c: [] for c in MONITORING_CADENCES}
     for r in runs:
-        rt = r.get("run_type")
-        if rt in by_type:
-            by_type[rt].append(r)
+        cadence = monitoring_cadence(r.get("run_type"))
+        if cadence is not None:
+            by_type[cadence].append(r)
 
     latest_runs: dict[str, Any] = {}
     warnings: list[str] = []

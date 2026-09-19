@@ -120,6 +120,16 @@ SEVERITY_MAP: dict[str, str] = {
 }
 
 
+# ── Direct vs inherited evidence ────────────────────────────────────────────
+#: PR-ADS-160-F1 §4 — sync outcomes that are DIRECT adverse evidence about a
+#: dataset, as opposed to a state inherited from an upstream one. A dataset
+#: carrying one of these reports its own verdict even when its dependency is
+#: blocked; see the precedence note in :func:`compute_canonical_freshness`.
+#: `running` is absent on purpose (in progress, not broken), and so is the
+#: no-evidence case, where the inherited state IS the most specific answer.
+_DIRECT_ADVERSE_SYNC_STATES = frozenset({"failed", "partial"})
+
+
 # ── Has-data states ─────────────────────────────────────────────────────────
 # States where usable rows exist in the selected window. Used to refine
 # downstream derived states (e.g. NOT_RUN_BUT_DERIVABLE).
@@ -394,10 +404,47 @@ def compute_canonical_freshness(
 
     downstream_not_run = sync_status is None and latest_batch_status is None
 
+    # PR-ADS-160-F1 §4 — direct evidence about THIS dataset outranks inherited
+    # evidence about another one.
+    #
+    # The dependency check below runs FIRST, so a dataset whose OWN sync failed
+    # or stopped short had that fact replaced by `blocked_by_dependency`. Both
+    # statements are true, but only one of them directs the right action: fixing
+    # the upstream does not fix a dataset whose own sync is broken, so the
+    # operator repairs the dependency, re-checks, and finds this dataset still
+    # broken for a reason nothing told them.
+    #
+    # Reproduced before changing anything (contact_funnel `partial_no_data`
+    # blocking lifecycle_events, which had its own partial sync and zero rows):
+    # lifecycle_events reported `blocked_by_dependency` and its own partial
+    # state was lost.
+    #
+    # So an inherited blocking state wins ONLY where this dataset has no adverse
+    # evidence of its own. Where it has both, its own state is reported and the
+    # dependency is named in the reason rather than dropped — nothing is hidden
+    # in either direction.
+    #
+    # `not_run` is deliberately NOT adverse evidence: `downstream_not_run` means
+    # no direct evidence exists at all, which is precisely when the inherited
+    # state is the most specific thing available (and what
+    # NOT_RUN_NO_UPSTREAM_DATA is for). `running` is not adverse either — it is
+    # in progress, not broken.
+    direct_adverse = (
+        (sync_status or "").strip().lower() in _DIRECT_ADVERSE_SYNC_STATES
+        or (latest_batch_status or "").strip().lower() in _DIRECT_ADVERSE_SYNC_STATES
+    )
+    dependency_note = ""
+    if dependency_status and dependency_status in BLOCKING_STATES and direct_adverse:
+        dependency_note = (
+            f" Its upstream dependency is also "
+            f"{dependency_status.replace('_', ' ')}; fixing that alone will not "
+            f"resolve this dataset.")
+
     # 1. Dependency blocked (PR-ADS-095: emit BLOCKED_BY_DEPENDENCY for actively
     #    broken upstream; emit NOT_RUN_NO_UPSTREAM_DATA when both upstream and
     #    downstream haven't run yet).
-    if dependency_status and dependency_status in BLOCKING_STATES:
+    #    PR-ADS-160-F1: skipped when this dataset has direct adverse evidence.
+    if dependency_status and dependency_status in BLOCKING_STATES and not direct_adverse:
         dep_cfg = DATASET_FRESHNESS_CONFIG.get(dataset, {})
         deps = dep_cfg.get("depends_on", [])
         dep_names = ", ".join(d.replace("_", " ").title() for d in deps) if deps else "upstream dataset"
@@ -455,12 +502,14 @@ def compute_canonical_freshness(
         if rows_in_window is not None and rows_in_window > 0:
             return _result(
                 CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_FAILED,
-                reason="Latest sync failed, but usable rows exist in the selected window.",
+                reason=("Latest sync failed, but usable rows exist in the selected "
+                        f"window.{dependency_note}"),
                 next_action="Review latest sync error, but page can still render using existing data.",
             )
         return _result(
             CanonicalFreshnessStatus.FAILED_NO_DATA,
-            reason="Latest sync failed and no usable rows are available.",
+            reason=("Latest sync failed and no usable rows are "
+                    f"available.{dependency_note}"),
             next_action="Check sync logs and retry source sync.",
         )
 
@@ -511,7 +560,8 @@ def compute_canonical_freshness(
                 CanonicalFreshnessStatus.DATA_AVAILABLE_LATEST_SYNC_PARTIAL,
                 reason=(f"Latest sync completed PARTIALLY — it did not reach "
                         f"the end of its result set — so rows exist but the "
-                        f"population may be incomplete.{batch_hint}"),
+                        f"population may be incomplete.{batch_hint}"
+                        f"{dependency_note}"),
                 next_action=("Re-run the sync to completion before relying on "
                              "counts from this dataset."),
             )
@@ -520,7 +570,7 @@ def compute_canonical_freshness(
             reason=(f"Latest sync completed PARTIALLY and no rows are "
                     f"available in this window. The window is NOT proven "
                     f"empty: the pages that would have carried rows may never "
-                    f"have been read.{batch_hint}"),
+                    f"have been read.{batch_hint}{dependency_note}"),
             next_action="Re-run the sync to completion, then re-check.",
         )
 

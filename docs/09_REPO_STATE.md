@@ -528,4 +528,24 @@ arrived and the window is **not proven empty** — error, blocking). An unmeasur
 row count stays unmeasured, with the partial fact carried into the reason rather
 than an emptiness nobody looked for.
 
+**PR-ADS-160-F1 — Incremental Monitoring Identity & Partial-State Truth.** A
+post-merge defect in PR-ADS-160: the monitoring severity path never saw the runs
+it was written for. `compute_monitoring_status` grouped by matching the cadence
+names (`daily`/`weekly`/`monthly`) against `runs.run_type`, while the scheduler
+persists `daily_incremental_sync` — so every real incremental row was discarded
+before any partial-run logic ran, and the daily bucket reported "No daily run
+found in history" while daily runs were happening. The PR-ADS-160 test missed it
+by rewriting `run_type` to `"daily"` before calling monitoring.
+
+`api/monitoring.py` now carries one explicit `RUN_TYPE_CADENCE` table and a
+`monitoring_cadence()` helper; the durable run type is unchanged and unknown run
+types are not monitored rather than silently daily. The test passes the
+persisted value through, with a control replaying the pre-fix grouping.
+
+The same patch settled a precedence question PR-ADS-160 left open: a dataset
+with its OWN failed or partial sync had that replaced by
+`blocked_by_dependency` inherited from an upstream one. Direct evidence now
+outranks inherited evidence — the dependency is named in the reason rather than
+dropped — applied uniformly across all three configured dependency pairs.
+
 Full doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`.
