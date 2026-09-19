@@ -33,3 +33,7 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code — local-only (the agent definition and project memory ARE committed)
+.claude/settings.local.json
+.claude/agent-memory-local/
