@@ -40,6 +40,7 @@ lifecycle date, or the current lifecycle stage as an SQL timestamp —
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -3376,12 +3377,37 @@ def test_96_pg_the_api_serves_partial_rather_than_a_rounded_status(
 
 
 @_needs_pg
+def _runs_rows_verbatim(connection):
+    """Every finished run row, with its run_type EXACTLY as persisted.
+
+    PR-ADS-160-F1 §2. The earlier version of this helper read `run_type` from
+    PostgreSQL and then substituted the literal `"daily"` before handing the
+    rows to monitoring. That rewrote the one field the production path gets
+    wrong, so the test passed while real `daily_incremental_sync` rows were
+    being discarded by `compute_monitoring_status` — a test adapting production
+    data to its assertion instead of the other way round.
+
+    Nothing is reshaped here beyond serialising the timestamps.
+    """
+    with connection.get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT run_type, status, started_at, finished_at FROM runs "
+                    " ORDER BY started_at DESC")
+        return [{"run_type": r[0], "status": r[1],
+                 "started_at": r[2].isoformat(), "finished_at": r[3].isoformat()}
+                for r in cur.fetchall() if r[3] is not None]
+
+
+@_needs_pg
 def test_97_pg_a_partial_run_does_not_make_monitoring_green(truncated_funnel):
     """The monitoring severity over a REAL partial run, end to end.
 
-    `api/monitoring.py` used to count partial as a successful run for both of
-    its measurements, so a pipeline producing nothing but partial runs reported
-    itself perfectly healthy.
+    Two defects meet here. `api/monitoring.py` counted partial as a successful
+    run for both of its measurements, so a pipeline producing nothing but
+    partial runs reported itself healthy. And it grouped by the cadence NAMES,
+    so the real run type — `daily_incremental_sync` — never reached that logic
+    at all.
+
+    The row flows in with the run type the scheduler actually persisted.
     """
     import scheduler.incremental_sync as sync
     from api.monitoring import compute_monitoring_status
@@ -3389,28 +3415,74 @@ def test_97_pg_a_partial_run_does_not_make_monitoring_green(truncated_funnel):
     result = sync.run_daily_incremental_sync(run_reason="test_monitoring_partial")
     assert result["status"] == "partial"
 
-    with truncated_funnel.connection.get_conn() as c, c.cursor() as cur:
-        cur.execute("SELECT run_type, status, started_at, finished_at FROM runs "
-                    " ORDER BY started_at DESC")
-        rows = [{"run_type": "daily", "status": r[1],
-                 "started_at": r[2].isoformat(), "finished_at": r[3].isoformat()}
-                for r in cur.fetchall() if r[3] is not None]
+    rows = _runs_rows_verbatim(truncated_funnel.connection)
 
     assert rows and rows[0]["status"] == "partial"
+    assert rows[0]["run_type"] == sync.RUN_TYPE == "daily_incremental_sync", (
+        "this test is only meaningful over the run type production writes")
 
     verdict = compute_monitoring_status(
         rows, {"daily": 2, "weekly": 8, "monthly": 35}, 2)
     daily = verdict["latest_runs"]["daily"]
 
-    assert daily["last_status"] == "partial"
+    assert daily["last_status"] == "partial", (
+        "the real run type never reached the daily monitoring bucket")
     assert daily["latest_partial"] is True
     assert verdict["severity"] != "green", (
         "a partial run reset the system to healthy")
     assert verdict["severity"] == "yellow", "and it is not an outage either"
-    assert any("partially" in w for w in verdict["warnings"]), verdict["warnings"]
+    assert any("partially" in w or "incomplete" in w for w in verdict["warnings"]), \
+        verdict["warnings"]
+    # ...and not the "nothing ran" complaint the grouping defect produced.
+    assert not any("No daily run found" in w for w in verdict["warnings"]), \
+        verdict["warnings"]
     # The proven-complete coverage claim was NOT advanced by this run.
     assert daily["last_success_at"] is None
     assert daily["last_completed_at"] is not None
+
+
+@_needs_pg
+def test_97b_pg_the_pre_fix_grouping_would_have_discarded_this_run(
+        truncated_funnel):
+    """The negative control for the grouping defect.
+
+    `test_97` above can only prove the mapping works; it cannot show that the
+    mapping is what makes it work. This replays the SAME persisted rows through
+    the PRE-FIX grouping — match the cadence names literally — and asserts the
+    run disappears.
+
+    A guard whose absence changes nothing is not a guard.
+    """
+    import scheduler.incremental_sync as sync
+    from api.monitoring import compute_monitoring_status
+
+    result = sync.run_daily_incremental_sync(run_reason="test_monitoring_control")
+    assert result["status"] == "partial"
+
+    rows = _runs_rows_verbatim(truncated_funnel.connection)
+    assert rows[0]["run_type"] == "daily_incremental_sync"
+
+    # The pre-fix behaviour, reproduced exactly: only rows whose run_type IS a
+    # cadence name were grouped.
+    pre_fix_rows = [r for r in rows if r["run_type"] in ("daily", "weekly", "monthly")]
+    assert pre_fix_rows == [], (
+        "the real run type would have survived the old grouping, so this "
+        "control proves nothing")
+
+    before = compute_monitoring_status(
+        pre_fix_rows, {"daily": 2, "weekly": 8, "monthly": 35}, 2)
+    after = compute_monitoring_status(
+        rows, {"daily": 2, "weekly": 8, "monthly": 35}, 2)
+
+    # Pre-fix: the partial run is invisible, and the daily bucket complains
+    # about ABSENCE while a real daily run had just finished partial.
+    assert before["latest_runs"]["daily"]["last_status"] is None
+    assert before["latest_runs"]["daily"]["latest_partial"] is False
+    assert any("No daily run found" in w for w in before["warnings"])
+
+    # Post-fix: the same rows, the same function, the run is seen.
+    assert after["latest_runs"]["daily"]["last_status"] == "partial"
+    assert after["latest_runs"]["daily"]["latest_partial"] is True
 
 
 def test_98_the_presentation_layer_never_calls_a_partial_run_fresh():
@@ -3712,6 +3784,56 @@ def test_105_the_dataset_freshness_ui_never_labels_a_partial_sync_fresh():
     assert '_shortLabels[statuses[i]] || "Unknown"' in source
 
 
+def _js_object_literal(source: str, name: str) -> str:
+    """Extract one `const <name> = { ... };` object literal, brace-balanced.
+
+    PR-ADS-160-F1 §7. The first version sliced from the next `{` to the next
+    `};`, which is only correct while the literal stays flat and contains no
+    `};` inside a string. Either would truncate it silently, and the test would
+    then evaluate a PARTIAL map and still pass — the failure mode a structural
+    test exists to avoid.
+
+    This walks the braces instead, skipping string literals and comments, so the
+    slice is the whole object or the helper raises.
+    """
+    decl = re.search(rf"\bconst\s+{re.escape(name)}\s*=\s*{{", source)
+    assert decl, f"{name} is not declared as a const object literal"
+
+    i = decl.end() - 1                      # the opening brace
+    depth, in_str, quote, esc, in_line, in_block = 0, False, "", False, False, False
+    for j in range(i, len(source)):
+        ch, nxt = source[j], source[j + 1:j + 2]
+        if in_line:
+            if ch == "\n":
+                in_line = False
+            continue
+        if in_block:
+            if ch == "*" and nxt == "/":
+                in_block = False
+            continue
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == quote:
+                in_str = False
+            continue
+        if ch in "\"'`":
+            in_str, quote = True, ch
+        elif ch == "/" and nxt == "/":
+            in_line = True
+        elif ch == "/" and nxt == "*":
+            in_block = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[i:j + 1]
+    raise AssertionError(f"unbalanced braces while extracting {name}")
+
+
 def test_106_the_multi_dataset_label_lookup_is_evaluated_not_just_matched():
     """The real lookup expression, run in `node`, over the real map.
 
@@ -3737,8 +3859,7 @@ def test_106_the_multi_dataset_label_lookup_is_evaluated_not_just_matched():
         pytest.skip("node is unavailable; the structural checks still apply")
 
     source = (_ROOT / "static" / "app.js").read_text(encoding="utf-8")
-    start = source.index("const _shortLabels")
-    literal = source[source.index("{", start):source.index("};", start) + 1]
+    literal = _js_object_literal(source, "_shortLabels")
 
     # Exactly the statuses the BACKEND emits, taken from the service itself —
     # not retyped here, so a rename on either side fails this test rather than
@@ -3776,3 +3897,160 @@ def test_106_the_multi_dataset_label_lookup_is_evaluated_not_just_matched():
     # before, so this proves a gap was filled rather than the map rewritten.
     assert rendered["fresh"] == "Fresh"
     assert rendered["failed_with_data"] == "Degraded"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR-ADS-160-F1 §4 — direct evidence outranks inherited evidence
+#
+# `compute_canonical_freshness` checks the DEPENDENCY first, so a dataset whose
+# OWN sync failed or stopped short had that fact replaced by
+# `blocked_by_dependency`. Both statements are true; only one directs the right
+# action. Fixing the upstream does not fix a dataset whose own sync is broken,
+# so the operator repairs the dependency, re-checks, and finds this dataset
+# still broken for a reason nothing told them.
+#
+# The real composition this reproduces: `lifecycle_events` depends on
+# `contact_funnel` (services/freshness_service.py DATASET_FRESHNESS_CONFIG), and
+# ONE truncated contact-funnel run finishes BOTH datasets' batches partial —
+# see `_fail_batches` / the dual `finish_sync_batch` calls in
+# `hubspot_contact_funnel_sync_service`. So "upstream blocked AND this dataset
+# partial" is not a contrived pairing; it is what a single truncated sync
+# produces.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _dependency_status_for(upstream_verdict):
+    """How `api/server.py` composes `dependency_status` — blocking states win."""
+    return (upstream_verdict["canonical_status"]
+            if upstream_verdict["canonical_status"] in freshness_svc.BLOCKING_STATES
+            else None)
+
+
+def test_107_a_datasets_own_partial_state_survives_a_blocked_dependency():
+    """The cascade, reproduced through the real pair and the real composition."""
+    status = freshness_svc.CanonicalFreshnessStatus
+
+    upstream = _freshness(dataset="contact_funnel", sync_status="partial",
+                          latest_batch_status="partial", rows_in_window=0,
+                          latest_batch_row_count=0)
+    assert upstream["canonical_status"] == status.PARTIAL_NO_DATA
+    assert upstream["canonical_status"] in freshness_svc.BLOCKING_STATES, (
+        "control: the upstream must actually block, or there is no cascade")
+
+    downstream = _freshness(dataset="lifecycle_events", sync_status="partial",
+                            latest_batch_status="partial", rows_in_window=0,
+                            latest_batch_row_count=0,
+                            dependency_status=_dependency_status_for(upstream))
+
+    assert downstream["canonical_status"] == status.PARTIAL_NO_DATA, (
+        "the dataset's own partial state was replaced by the inherited one; "
+        "the operator is sent upstream to fix something that will not fix this")
+    assert downstream["canonical_status"] != status.BLOCKED_BY_DEPENDENCY
+
+    # The dependency is NAMED rather than dropped — nothing is hidden either way.
+    assert "upstream dependency" in downstream["reason"]
+    assert "will not resolve this dataset" in downstream["reason"]
+
+
+def test_108_an_inherited_state_still_wins_where_there_is_no_direct_evidence():
+    """The other half of the precedence, and the reason it is not a reorder.
+
+    `blocked_by_dependency` is exactly right when this dataset has nothing
+    adverse of its own to say. Only DIRECT adverse evidence displaces it.
+    """
+    status = freshness_svc.CanonicalFreshnessStatus
+    blocked = status.PARTIAL_NO_DATA
+
+    # No evidence at all — the dependency IS the most specific thing known.
+    never_ran = _freshness(dataset="lifecycle_events", sync_status=None,
+                           latest_batch_status=None, rows_in_window=0,
+                           dependency_status=blocked)
+    assert never_ran["canonical_status"] == status.BLOCKED_BY_DEPENDENCY
+
+    # Its own sync is FINE; only the upstream is broken.
+    healthy = _freshness(dataset="lifecycle_events", sync_status="success",
+                         latest_batch_status="success", rows_in_window=5,
+                         dependency_status=blocked)
+    assert healthy["canonical_status"] == status.BLOCKED_BY_DEPENDENCY
+
+    # In progress is not adverse either.
+    running = _freshness(dataset="lifecycle_events", sync_status="running",
+                         latest_batch_status="running", rows_in_window=0,
+                         dependency_status=blocked)
+    assert running["canonical_status"] == status.BLOCKED_BY_DEPENDENCY
+
+
+def test_109_the_precedence_is_the_same_for_failed_and_is_not_dataset_specific():
+    """Deliberate, not accidental, and applied uniformly.
+
+    The same rule governs the pre-existing `failed` states and the other real
+    derived pairs. It is stated here so a future reader sees that
+    `partial` was not given a private exemption.
+    """
+    status = freshness_svc.CanonicalFreshnessStatus
+
+    own_failed = _freshness(dataset="lifecycle_events", sync_status="failed",
+                            latest_batch_status="failed", rows_in_window=0,
+                            dependency_status=status.FAILED_NO_DATA)
+    assert own_failed["canonical_status"] == status.FAILED_NO_DATA
+    assert "upstream dependency" in own_failed["reason"]
+
+    # The other two configured dependency pairs behave identically.
+    for dataset, upstream in (("canonical_geo", "canonical_spend"),
+                              ("waste_terms", "search_terms")):
+        deps = freshness_svc.DATASET_FRESHNESS_CONFIG[dataset]["depends_on"]
+        assert deps == [upstream], f"{dataset} dependency config changed: {deps}"
+
+        own = _freshness(dataset=dataset, sync_status="failed",
+                         latest_batch_status="failed", rows_in_window=0,
+                         dependency_status=status.FAILED_NO_DATA)
+        assert own["canonical_status"] == status.FAILED_NO_DATA, dataset
+
+        inherited = _freshness(dataset=dataset, sync_status=None,
+                               latest_batch_status=None, rows_in_window=0,
+                               dependency_status=status.FAILED_NO_DATA)
+        assert inherited["canonical_status"] in (
+            status.BLOCKED_BY_DEPENDENCY, status.NOT_RUN_NO_UPSTREAM_DATA), dataset
+
+
+def test_110_the_label_extractor_is_brace_balanced_not_index_based():
+    """The extractor's own negative control (PR-ADS-160-F1 §7).
+
+    The previous slice ran from the next `{` to the next `};` — string- and
+    comment-blind. It returns a TRUNCATED literal, losing every entry after the
+    cut. Where the cut lands decides whether `test_106` then dies with a `node`
+    syntax error or quietly evaluates a partial map; neither is acceptable, and
+    only the second is detectable by reading the test's output.
+    """
+    # Nesting alone does NOT defeat the old slice — an inner `}` is followed by
+    # a comma or newline, never `};` — so it is asserted here only as something
+    # the new extractor must still get right, not as a case it rescues.
+    nested = (
+        'const _shortLabels = {\n'
+        '  fresh_with_data: "Fresh",\n'
+        '  meta: { note: "a nested object" },\n'
+        '  partial_no_data: "Partial, no data",\n'
+        '};\n'
+    )
+    got = _js_object_literal(nested, "_shortLabels")
+    assert got.count("{") == got.count("}") == 2
+    assert got.endswith("}")
+    assert "partial_no_data" in got
+
+    # A `};` inside a STRING is what actually breaks the old slice.
+    awkward = (
+        'const _shortLabels = {\n'
+        '  quirk: "literally };",\n'
+        '  partial_no_data: "Partial, no data",\n'
+        '};\n'
+    )
+    got = _js_object_literal(awkward, "_shortLabels")
+    assert "partial_no_data" in got
+
+    start = awkward.index("const _shortLabels")
+    naive = awkward[awkward.index("{", start):awkward.index("};", start) + 1]
+    assert "partial_no_data" not in naive, (
+        "the old slice survives this input, so this control proves nothing")
+
+    # And it refuses rather than guessing when the literal is malformed.
+    with pytest.raises(AssertionError):
+        _js_object_literal("const somethingElse = {};", "_shortLabels")

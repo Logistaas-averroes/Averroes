@@ -587,7 +587,7 @@ fails closed rather than passing through.
 | --- | --- | --- | --- |
 | `runs.status` | success | **partial** | failed |
 | `/api/runs` | success | **partial** | failed |
-| monitoring severity | green | **yellow** | yellow → red on repeat |
+| monitoring severity (daily cadence) | green | **yellow** | yellow → red on repeat |
 | monitoring `last_success_at` | advanced | **not advanced** | not advanced |
 | monitoring `consecutive_failures` | reset | **reset** (not a failure) | incremented |
 | freshness banner | OK | **warning** | error |
@@ -615,6 +615,43 @@ different remedies. `data_available_latest_sync_partial` is in `HAS_DATA_STATES`
 and not in `BLOCKING_STATES` — rows exist, so a dependant is degraded rather
 than blocked — while `partial_no_data` blocks, exactly as `failed_no_data` does.
 
+##### Direct evidence outranks inherited evidence (PR-ADS-160-F1)
+
+`partial_no_data` blocking raised a question PR-ADS-160 did not answer: what
+happens to a **dependant** that is itself partial?
+
+`lifecycle_events` depends on `contact_funnel`, and **one** truncated
+contact-funnel run finishes *both* datasets' batches partial — the sync service
+writes them together. So "upstream blocked **and** this dataset partial" is not
+a contrived pairing; it is what a single truncated sync produces. Reproduced
+through the real pair before anything was changed, `lifecycle_events` reported
+`blocked_by_dependency` and its own `partial_no_data` was lost.
+
+Both statements were true. Only one directs the right action: fixing the
+upstream does not fix a dataset whose own sync is broken, so the operator
+repairs the dependency, re-checks, and finds this dataset still broken for a
+reason nothing told them.
+
+The precedence is now explicit:
+
+> An inherited blocking state wins **only** where the dataset has no adverse
+> evidence of its own. Where it has both, its own state is reported and the
+> dependency is **named in the reason** rather than dropped.
+
+"Adverse evidence" is a sync outcome of `failed` or `partial`
+(`_DIRECT_ADVERSE_SYNC_STATES`). Deliberately excluded:
+
+* **no evidence at all** — `blocked_by_dependency` / `not_run_no_upstream_data`
+  are then the most specific thing known, and still apply;
+* **`running`** — in progress is not broken;
+* **`success`** — a healthy dataset behind a broken upstream is exactly what
+  `blocked_by_dependency` is for.
+
+The rule is uniform, not a private exemption for `partial`: it governs the
+pre-existing `failed` states and all three configured dependency pairs
+(`lifecycle_events ← contact_funnel`, `canonical_geo ← canonical_spend`,
+`waste_terms ← search_terms`), which `test_109` pins.
+
 In `api/monitoring.py` the distinction lives in two places, answering two
 different questions. `consecutive_failures` does **not** count a partial — real
 work landed, the pipeline is not down, and letting it accumulate toward the red
@@ -629,6 +666,37 @@ success.
 
 Partial is deliberately **not red** either. Yellow is the only honest answer:
 something needs looking at, nothing is on fire.
+
+##### Correction — PR-ADS-160-F1: the monitoring row above was not true when it
+##### was written
+
+The table claimed a partial run reached monitoring severity. For weekly and
+monthly runs it did. For the run this PR is actually about, it did not.
+
+`compute_monitoring_status` grouped runs by matching the **cadence names**
+(`daily`, `weekly`, `monthly`) against `runs.run_type`. The incremental sync
+persists `daily_incremental_sync` (`scheduler.incremental_sync.RUN_TYPE`), so
+every real incremental row was discarded before any partial-run logic executed.
+The symptom was inverted and easy to miss: the daily bucket warned *"No daily
+run found in history"* — a complaint about **absence** — while daily runs were
+happening and their outcomes were invisible.
+
+The PR-ADS-160 test that should have caught it did not, because it read
+`run_type` from PostgreSQL and replaced it with `"daily"` before calling
+monitoring. A test that adapts production data to its assertion proves the
+assertion, not the system.
+
+**What changed.** `api/monitoring.py` gained one explicit table,
+`RUN_TYPE_CADENCE`, and one helper, `monitoring_cadence()`. The durable run type
+is unchanged and the scheduler was not renamed; the translation happens in a
+single place, and a run type the table does not know maps to `None` and is not
+monitored — never silently folded into daily, which would let a new scheduler
+redden a cadence nobody assigned it to. `test_97` now passes the persisted
+`run_type` through untouched, and `test_97b` replays the same rows through the
+pre-fix grouping to show the run vanishing.
+
+So the row above is true **as of PR-ADS-160-F1**, for the daily cadence, over
+the real `daily_incremental_sync` run type.
 
 `scripts/audit_lifecycle_sql_coverage.py` adds the global half: all 44
 window/scope reader combinations must reconcile, and the audit must have been
