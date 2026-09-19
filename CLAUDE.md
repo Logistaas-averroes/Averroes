@@ -128,13 +128,19 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   strips — and advances no coverage watermark. Do not collapse it into either
   neighbour.
 
-- **`api/monitoring.py` only groups `run_type` in `{daily, weekly, monthly}`,
-  but the incremental sync writes `run_type = "daily_incremental_sync"`**
-  (`scheduler/incremental_sync.py:274`). Those rows are dropped before severity
-  is computed, so monitoring severity does **not** currently reflect incremental
-  sync runs. *Known open gap as of PR-ADS-160 — the docs and PR text overclaim
-  here.* If you touch monitoring, fix the grouping and make the test pass the
-  real `run_type` through rather than relabelling it.
+- **A monitoring *cadence* is not a *run type*.** `api/monitoring.py` reports on
+  `daily` / `weekly` / `monthly`, but schedulers persist concrete run types —
+  the incremental sync writes `daily_incremental_sync`
+  (`scheduler/incremental_sync.py:274`). The translation lives in **one** table,
+  `RUN_TYPE_CADENCE`, via `monitoring_cadence()`. A new scheduler writing to
+  `runs` must be added there or it goes silently unmonitored; an unrecognised
+  run type maps to `None` and is deliberately **not** folded into `daily`.
+
+  This was an open defect through PR-ADS-160 — incremental rows were dropped
+  before severity was computed — and the test missed it by rewriting `run_type`
+  to `"daily"` before calling monitoring. Fixed in **PR-ADS-160-F1**. If you
+  write a test over run health, pass the persisted `run_type` through; never
+  relabel it to make an assertion pass.
 
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,
