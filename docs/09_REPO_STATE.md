@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-153E-B — Canonical Revenue Consumer Cutover (August 2026)
+**Last updated:** PR-ADS-160-F2 — Monitoring Cadence Identity and Partial-State Truth (September 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -9,7 +9,16 @@
 
 ---
 
-> ### ⚠️ Authoritative status (PR-ADS-153E-B, August 2026)
+> ### ⚠️ Read the newest sections, not this header's successor below
+>
+> The block that follows was written at PR-ADS-153E-B and was never updated as
+> the repository moved on. It is kept because its architectural content is
+> still accurate and because several documents cite it — but its **status**
+> claims stop at August 2026. The repository has since merged through
+> **PR-ADS-160-F2**; read the dated sections at the end of this file, and
+> `git log`, for what is actually true now.
+
+> ### ⚠️ Historical status snapshot (PR-ADS-153E-B, August 2026)
 >
 > This document's phase/status narrative below predates the PR-ADS-153A–D
 > sequence and is retained for its architectural content, not its status claims.
@@ -549,3 +558,67 @@ outranks inherited evidence — the dependency is named in the reason rather tha
 dropped — applied uniformly across all three configured dependency pairs.
 
 Full doctrine: `docs/41_PROSPECTIVE_SQL_COVERAGE_BOUNDARY.md`.
+
+
+## PR-ADS-160-F2 — Monitoring cadence identity and partial-state truth (September 2026)
+
+Found by an independent readiness audit before production validation, not by
+CI. Every fix here was shown failing against the pre-fix code.
+
+**A cadence was a name two pipelines shared, and the healthier one won the
+verdict.** PR-ADS-160-F1 correctly stopped `compute_monitoring_status`
+discarding real `daily_incremental_sync` rows — then routed them into the same
+cadence as the legacy 06:00 pulse. Monitoring computes one failure streak, one
+`last_success_at` and one severity per cadence, so the 06:00 pulse broke the
+09:00 incremental sync's failure streak every morning (red needs 2 consecutive;
+it could never exceed 1) and advanced the clock its staleness is measured
+against. Measured on the real function: five days of incremental-sync failures
+behind a healthy pulse reported `severity: green, warnings: []`, and
+`static/app.js` renders nothing on green. No test had ever placed a `daily` row
+and a `daily_incremental_sync` row in the same list — the population production
+emits was untested. A cadence is now one pipeline; `daily_incremental_sync` has
+its own bucket, its own threshold in `config/thresholds.yaml`, and its own
+verdict. `api/server.py:_load_monitoring_thresholds` iterates
+`MONITORING_CADENCES` rather than a literal triple, and the unchosen 2-day
+fallback is gone: a cadence with no configured threshold is warned about by
+name instead of being measured against a number nobody picked.
+
+**Direct evidence reported LESS than the inherited state it displaced.** The
+PR-ADS-160-F1 §4 precedence rule promised the dependency would be named in the
+reason rather than dropped. One of five returns in
+`services/freshness_service.py` — partial sync with an unmeasured row count —
+omitted `dependency_note` entirely and fell from `blocked_by_dependency` /
+`error` to `unknown_row_count` / `neutral`, which is not in `BLOCKING_STATES`,
+so the cascade was lost too. Reachable whenever the row-count `SELECT` raises,
+which is exactly when a blocking error matters most. Both returns now carry the
+dependency, and `_result` takes a severity override that floors the verdict at
+`error` when it displaces a blocking one.
+
+**`partial` was collapsed into `failed` on two canonical sync batches.**
+`scheduler/incremental_sync.py` did this for the deal ledger and canonical geo
+under a comment asserting `sync_batches` accepts success|failed only — a
+premise PR-ADS-160 itself had made false by adding `partial` to
+`VALID_SYNC_STATUSES` and to `finish_sync_batch`. `sync_state.status` is what
+`compute_canonical_freshness` reads, so a truncated deal-ledger sync rendered
+as "Latest sync failed" on the canonical **revenue** population: retry, when
+the remedy is resume. Both sites pass the exact status through; the writer
+already withholds `last_source_date` for anything but success.
+
+**A daily pulse that failed during its pulls wrote no `runs` row at all.**
+`scheduler/daily.py` inserted the record after both pulls, so the failure path
+called `update_run(None, ...)`, which returns immediately. This is the likely
+origin of the "No daily run found in history" symptom F1 diagnosed, and the
+reason the masking above was dormant rather than active — it would have
+switched on the day the pulse started succeeding. The insert now happens
+immediately after `start_run`, before any connector import.
+
+Not fixed here, and recorded so they are not lost: `last_completed_at` has no
+UI reader (nor does any other `latest_runs` field — the banner renders
+`warnings` only); `/api/monitoring/status` still falls back to
+`runtime_logs/run_history.jsonl`, which never contains `daily_incremental_sync`,
+when a reachable database returns zero runs in 90 days; and
+`analysis/lifecycle_sql_coverage.py` still returns `cpql_publishable`
+pre-certification, retracted only by the CLI audit — a landmine for
+PR-ADS-161's consumer migration, though no product surface imports it today.
+
+Full doctrine: `docs/42_MONITORING_CADENCE_AND_PARTIAL_TRUTH.md`.
