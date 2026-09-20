@@ -15,7 +15,7 @@ authoritative documents. It does not restate the product or the architecture.
 
 | Document | What it is | Trust its status claims? |
 | --- | --- | --- |
-| `docs/09_REPO_STATE.md` | living per-PR state log, appended by every PR | **Newest sections yes; its header no.** It still opens "Last updated: PR-ADS-153E-B (August 2026)" while the repo has merged through PR-ADS-160-F1 |
+| `docs/09_REPO_STATE.md` | living per-PR state log, appended by every PR | **Newest sections yes.** Its header is current as of PR-ADS-160-F2; the "Historical status snapshot" block below it is explicitly labelled and stops at August 2026 |
 | `docs/DOCTRINE.md` | the governing advisory rules | Yes |
 | `docs/03_ARCHITECTURE.md` | layer rules and data flow | Yes |
 | `docs/05_DATA_REFERENCE.md` | confirmed HubSpot/Ads field names and IDs | Yes |
@@ -25,7 +25,7 @@ authoritative documents. It does not restate the product or the architecture.
 | `CLAUDE_CODE_BRIEFING.md` | original strategy→build handoff | **No — stale.** Its "what needs to be built" list is years out of date (it lists `api/server.py` and the dashboard as unbuilt; both exist) |
 | `docs/07_AGENT_BRIEFING.md` | architecture + layer rules | Architecture yes; its status narrative is explicitly marked stale |
 
-The repo is at **PR-ADS-160+**. Any doc describing "Phase 1" as current is
+The repo is at **PR-ADS-160-F2**. Any doc describing "Phase 1" as current is
 historical.
 
 ---
@@ -151,19 +151,35 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   strips — and advances no coverage watermark. Do not collapse it into either
   neighbour.
 
-- **A monitoring *cadence* is not a *run type*.** `api/monitoring.py` reports on
-  `daily` / `weekly` / `monthly`, but schedulers persist concrete run types —
-  the incremental sync writes `daily_incremental_sync`
-  (`scheduler/incremental_sync.py:274`). The translation lives in **one** table,
-  `RUN_TYPE_CADENCE`, via `monitoring_cadence()`. A new scheduler writing to
-  `runs` must be added there or it goes silently unmonitored; an unrecognised
-  run type maps to `None` and is deliberately **not** folded into `daily`.
+  `finish_sync_batch` has accepted `partial` since PR-ADS-160. Two call sites
+  in `scheduler/incremental_sync.py` went on collapsing it to `failed` anyway,
+  on a comment asserting the opposite, until **PR-ADS-160-F2**. If you find a
+  `"success" if status == "success" else "failed"` anywhere, it is that bug.
+
+- **A monitoring *cadence* is not a *run type*, and a cadence is ONE
+  pipeline.** Schedulers persist concrete run types — the incremental sync
+  writes `daily_incremental_sync` (`scheduler/incremental_sync.py:274`). The
+  translation lives in **one** table, `RUN_TYPE_CADENCE`, via
+  `monitoring_cadence()`. A new scheduler writing to `runs` must be added there
+  or it goes silently unmonitored; an unrecognised run type maps to `None` and
+  is deliberately **not** folded into `daily`.
 
   This was an open defect through PR-ADS-160 — incremental rows were dropped
   before severity was computed — and the test missed it by rewriting `run_type`
-  to `"daily"` before calling monitoring. Fixed in **PR-ADS-160-F1**. If you
-  write a test over run health, pass the persisted `run_type` through; never
-  relabel it to make an assertion pass.
+  to `"daily"` before calling monitoring. If you write a test over run health,
+  pass the persisted `run_type` through; never relabel it to make an assertion
+  pass.
+
+  **PR-ADS-160-F1's fix was itself wrong.** It mapped `daily_incremental_sync`
+  onto the `daily` cadence, and `compute_monitoring_status` computes one
+  failure streak, one `last_success_at` and one severity PER CADENCE. The 06:00
+  pulse then broke the 09:00 incremental sync's failure streak every morning
+  and advanced its freshness clock: five days of incremental failures reported
+  `green` with no warnings. **Do not map two independent pipelines onto one
+  cadence** — they receive one indivisible verdict, and the healthier wins it.
+  Corrected in **PR-ADS-160-F2**; see `docs/42_*`. A fixture that carries only
+  some of the four registered jobs is not production, and monitoring now says
+  so.
 
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,

@@ -1682,7 +1682,14 @@ def test_f5_4_the_scheduler_fails_its_sync_batch_on_a_downgraded_run():
     """
     body = _SCHED_SRC[_SCHED_SRC.index("def _sync_canonical_geo"):]
     body = body[:body.index("\ndef ", 1)]
-    assert '"success" if status == "success" else "failed"' in body
+    # "Not green" is the contract. Spelling every non-success `failed` was the
+    # old implementation of it, correct only while `sync_batches` had two
+    # statuses; PR-ADS-160 gave it three and PR-ADS-160-F2 stopped collapsing.
+    assert '"success" if status == "success" else "failed"' not in body, (
+        "the geo sync is collapsing partial into failed again")
+    assert "_batch(\n        status," in body, (
+        "the producer's exact status must reach the batch")
+    # The watermark rule is untouched: only a success advances it.
     assert 'last_source_date=(date_to if status == "success" else None)' in body
 
 
@@ -1732,13 +1739,25 @@ def test_f3_2_an_unreachable_lease_store_fails_the_scheduler_step(monkeypatch):
     assert batches[0]["error_message"] == "lease_store_unavailable"
 
 
-def test_f3_3_a_downgraded_run_fails_the_scheduler_batch(monkeypatch):
-    """`partial` from an incomplete final ledger is recorded as a failed batch."""
+def test_f3_3_a_downgraded_run_is_recorded_as_partial_not_as_failed(monkeypatch):
+    """`partial` from an incomplete final ledger reaches the batch as `partial`.
+
+    This asserted `== "failed"` until PR-ADS-160-F2. That was right when the
+    column held two states; PR-ADS-160 gave it three, and `sync_state.status`
+    is what `compute_canonical_freshness` reads — so the collapse was telling
+    an operator "Latest sync failed" about a run that wrote everything it read.
+    Retry and resume are different remedies.
+
+    Everything the old assertion actually guarded is still guarded below: the
+    batch is not green, and the watermark does not move.
+    """
     out, errors, batches = _run_geo_step(monkeypatch, {
         "status": "partial", "reason": "final_coverage_incomplete",
         "summary": {"chunks_failed": 0, "rows_written": 12},
         "errors": ["final geo coverage is incomplete"], "coverage_complete": False})
     assert out["status"] == "partial"
     assert errors and "canonical_geo" in errors[0]
-    assert batches[0]["status"] == "failed"
-    assert batches[0]["last_source_date"] is None
+    assert batches[0]["status"] == "partial"
+    assert batches[0]["status"] != "success", "a truncated run finished green"
+    assert batches[0]["last_source_date"] is None, (
+        "a truncated run advanced the proven-coverage watermark")

@@ -121,6 +121,7 @@ from api.monitoring import (
     compute_monitoring_status as _compute_monitoring_status,
     STALE_DAYS_DEFAULT as _MONITORING_STALE_DAYS_DEFAULT,
     CONSECUTIVE_FAILURE_WARNING_DEFAULT as _MONITORING_CONSECUTIVE_FAILURE_WARNING_DEFAULT,
+    MONITORING_CADENCES as _MONITORING_CADENCES,
 )
 
 log = logging.getLogger(__name__)
@@ -5854,7 +5855,10 @@ def _load_monitoring_thresholds() -> tuple[dict[str, int], int]:
             raw = yaml.safe_load(fh) or {}
         mon = (raw.get("ui", {}) or {}).get("monitoring", {}) or {}
         sad = mon.get("stale_after_days", {}) or {}
-        for run_type in ("daily", "weekly", "monthly"):
+        # Iterate the cadence table, not a literal: a cadence added to
+        # `MONITORING_CADENCES` without a line here would silently ignore its
+        # configured threshold and fall back to the module default.
+        for run_type in _MONITORING_CADENCES:
             raw_val = sad.get(run_type)
             try:
                 v = int(raw_val)
