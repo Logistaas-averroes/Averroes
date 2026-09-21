@@ -4211,3 +4211,67 @@ def update_contact_funnel_sync_state(scope: str = "contacts", **fields) -> bool:
     except Exception as exc:  # noqa: BLE001
         log.error("update_contact_funnel_sync_state failed: %s", exc)
         return False
+
+
+def record_reader_reconciliation(*, observed_at, reconciliation_complete: bool,
+                                 combinations_expected=None,
+                                 combinations_compared=None,
+                                 combinations_mismatched=None,
+                                 combinations_unavailable=None,
+                                 all_combinations_compared=None,
+                                 effective_date_basis=None, run_id=None,
+                                 detail=None) -> bool:
+    """Record one canonical-reader reconciliation run as durable evidence.
+
+    PR-ADS-161A-1. The 44-way comparison reads the entire funnel table, so it
+    cannot run on a dashboard request. Its outcome is written here and the
+    production publication contract reads the newest row, treating anything
+    older than its max age as no proof at all.
+
+    Append-only on purpose: each row is an observation with an instant, not a
+    setting to be overwritten. A later run never erases what an earlier one
+    found, so a regression is visible in the history rather than replaced by
+    it. `observed_at` must be when the comparison RAN, not when it was written.
+
+    Returns False rather than raising when the database is unavailable — the
+    reader already fails closed on a missing row, so a lost write withholds
+    publication instead of granting it.
+    """
+    if observed_at is None:
+        log.warning("record_reader_reconciliation: observed_at is required")
+        return False
+    if reconciliation_complete is None:
+        # An unproven run is not evidence. Recording it as False would claim
+        # the readers were compared and disagreed, which is a different fact.
+        log.warning("record_reader_reconciliation: refusing to record an "
+                    "unproven reconciliation outcome")
+        return False
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO sql_reader_reconciliation (
+                        observed_at, reconciliation_complete,
+                        combinations_expected, combinations_compared,
+                        combinations_mismatched, combinations_unavailable,
+                        all_combinations_compared, effective_date_basis,
+                        run_id, detail
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (observed_at, bool(reconciliation_complete),
+                     combinations_expected, combinations_compared,
+                     combinations_mismatched, combinations_unavailable,
+                     all_combinations_compared, effective_date_basis, run_id,
+                     json.dumps(detail) if detail is not None else None),
+                )
+        log.info("record_reader_reconciliation — observed_at=%s complete=%s "
+                 "compared=%s/%s mismatched=%s",
+                 observed_at, reconciliation_complete, combinations_compared,
+                 combinations_expected, combinations_mismatched)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("record_reader_reconciliation failed: %s", exc)
+        return False

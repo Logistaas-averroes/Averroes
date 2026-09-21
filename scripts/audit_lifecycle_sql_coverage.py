@@ -343,10 +343,26 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
     Certification is a claim that a published number is trustworthy, so every
     input to it must be proven, not merely un-contradicted.
     """
+    from analysis import lifecycle_sql_coverage as coverage
+    from analysis import sql_publication as pub
+
     reconciled = bool(reconciliation.get("reconciliation_complete"))
     boundary_readable = bool(boundary.get("available"))
     incidents_readable = bool(boundary.get("post_boundary_incidents_available"))
     source_fresh = (freshness or {}).get("fresh") is True
+
+    # PR-ADS-161A-1. The decision itself now lives in `analysis.sql_publication`,
+    # which production imports. It used to live only here, so the sole
+    # publication flag a product surface could reach was the PRE-certification
+    # one from `window_coverage` — true for windows this gate refuses. One
+    # decision, two callers: if they could drift, the audit would stop
+    # describing what production publishes.
+    #
+    # Reconciliation was computed live immediately above, so it is available
+    # and not stale by construction; the staleness arm of the gate exists for
+    # the production reader, which consults a recorded verdict.
+    recon_state = {"available": True, "stale": False,
+                   "reconciliation_complete": reconciled}
 
     def _withhold(win, label, reason):
         """A blocked window publishes NO complete total and NO CPQL.
@@ -369,22 +385,28 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
     certified, blocked = [], []
     for win in windows or []:
         label = f"{win.get('window_type')}/{win.get('window')}"
-        locally_eligible = bool(win.get("certification_eligible"))
-        if not locally_eligible:
-            _withhold(win, label, win.get("certification_status"))
+        verdict = pub.publication_verdict(
+            coverage=win, reconciliation=recon_state,
+            boundary_readable=boundary_readable,
+            incidents_readable=incidents_readable,
+            window=win.get("window"), window_type=win.get("window_type"))
+
+        if verdict["publishable"]:
+            certified.append(label)
+            win["certified"] = True
             continue
-        if not (reconciled and boundary_readable and incidents_readable
-                and source_fresh):
-            if not source_fresh:
-                reason = (freshness or {}).get("reason") or "source_not_fresh"
-            elif not reconciled:
-                reason = "canonical_readers_did_not_reconcile"
-            else:
-                reason = "certification_inputs_unreadable"
-            _withhold(win, label, reason)
-            continue
-        certified.append(label)
-        win["certified"] = True
+
+        reason = verdict["withheld_reason"]
+        # One deliberate difference from the shared gate's own wording: where
+        # the source is not fresh, the audit has always reported the FRESHNESS
+        # reason (`source_stale`, `source_last_incremental_failed`, …) rather
+        # than the window's `not_certifiable_source_not_fresh`, because the
+        # operator's next step is the pipeline, not the window. The refusal is
+        # identical; only the label an operator reads is more specific.
+        if (win.get("certification_status") == coverage.CERT_STALE_SOURCE
+                and not source_fresh):
+            reason = (freshness or {}).get("reason") or "source_not_fresh"
+        _withhold(win, label, reason)
 
     if certified:
         f.passed("window_certification",

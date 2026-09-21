@@ -492,6 +492,7 @@ def fetch_unresolved_sql_created_at_bounds() -> dict:
 BOUNDARY_TABLE = "sql_coverage_boundary"
 BOUNDARY_CONTACT_TABLE = "sql_coverage_boundary_contact"
 INCIDENT_TABLE = "sql_post_boundary_incident"
+RECONCILIATION_TABLE = "sql_reader_reconciliation"
 
 #: A boundary is usable only when its application COMPLETED. A pending or
 #: failed row proves nothing and must never bound anything.
@@ -535,6 +536,90 @@ def fetch_contact_funnel_sync_state(*, scope: str = "contacts") -> dict:
     except Exception as exc:  # noqa: BLE001
         log.error("fetch_contact_funnel_sync_state failed: %s", exc)
         return _unavailable(row=None)
+
+
+DEFAULT_RECONCILIATION_MAX_AGE_HOURS = 36
+
+
+def fetch_reader_reconciliation(
+        *, max_age_hours: int = DEFAULT_RECONCILIATION_MAX_AGE_HOURS,
+        now=None) -> dict:
+    """The most recent recorded proof that the canonical readers agree.
+
+    PR-ADS-161A-1. Three refusals are kept apart, because the remedy differs:
+
+      * ``available=False``            — the store could not be READ. Unknown,
+                                         not "no proof"; fails closed either
+                                         way, but says which.
+      * no row                         — the comparison has never been
+                                         recorded. Absence of a check is not
+                                         evidence of agreement.
+      * ``stale=True``                 — it ran, but long enough ago that the
+                                         population it compared has moved on.
+
+    Only a row that is present, fresh and ``reconciliation_complete`` permits
+    publication, and only ``analysis.sql_publication`` may decide that.
+    """
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+
+    now = now or datetime.now(timezone.utc)
+    try:
+        with get_conn() as conn:
+            if conn is None:
+                return {"available": False, "stale": None,
+                        "reconciliation_complete": None, "observed_at": None,
+                        "age_hours": None, "max_age_hours": max_age_hours,
+                        "detail": "database unavailable"}
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT observed_at, reconciliation_complete,
+                           combinations_expected, combinations_compared,
+                           combinations_mismatched, all_combinations_compared,
+                           effective_date_basis, run_id
+                    FROM {RECONCILIATION_TABLE}
+                    ORDER BY observed_at DESC, id DESC
+                    LIMIT 1
+                    """)
+                rows = _rows_as_dicts(cur)
+    except Exception as exc:  # noqa: BLE001
+        log.error("fetch_reader_reconciliation failed: %s", exc)
+        return {"available": False, "stale": None,
+                "reconciliation_complete": None, "observed_at": None,
+                "age_hours": None, "max_age_hours": max_age_hours,
+                "detail": "reconciliation store unreadable"}
+
+    if not rows:
+        # Readable, and empty. That is a PROVEN absence of proof — a different
+        # claim from "could not look", and it still refuses to publish.
+        return {"available": True, "stale": None,
+                "reconciliation_complete": None, "observed_at": None,
+                "age_hours": None, "max_age_hours": max_age_hours,
+                "detail": "no canonical reader reconciliation has been recorded"}
+
+    row = rows[0]
+    observed = row.get("observed_at")
+    age_hours = None
+    stale = None
+    if observed is not None:
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        age_hours = (now - observed).total_seconds() / 3600.0
+        stale = age_hours > max_age_hours
+
+    return {"available": True,
+            "stale": stale,
+            "reconciliation_complete": row.get("reconciliation_complete"),
+            "observed_at": observed,
+            "age_hours": age_hours,
+            "max_age_hours": max_age_hours,
+            "combinations_expected": row.get("combinations_expected"),
+            "combinations_compared": row.get("combinations_compared"),
+            "combinations_mismatched": row.get("combinations_mismatched"),
+            "all_combinations_compared": row.get("all_combinations_compared"),
+            "effective_date_basis": row.get("effective_date_basis"),
+            "run_id": row.get("run_id"),
+            "detail": None}
 
 
 def fetch_active_sql_coverage_boundary() -> dict:

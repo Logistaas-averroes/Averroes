@@ -689,6 +689,8 @@ _SYNC = "HubSpot contact funnel sync (canonical ingestion)"
 _RECOVERY = "Lifecycle stage-history recovery (CLI)"
 _SQL_COVERAGE = "PR-ADS-159 lifecycle SQL coverage audit"
 _SQL_BOUNDARY = "PR-ADS-160 prospective SQL coverage boundary"
+_SQL_PUBLICATION = ("PR-ADS-161A-1 canonical SQL publication contract "
+                    "(the only production-facing publication verdict)")
 _LEADREC = "Lead reconciliation (legacy business-date backfill)"
 _LEGACY_ENGINE = "Legacy contact-outcome contract (canonical_contact_outcome_service)"
 _FUNNEL_ENGINE = "Canonical CRM funnel contract (canonical_crm_funnel_service)"
@@ -912,6 +914,38 @@ RULES: list[dict] = [
        # PR-ADS-160 §6: incident membership reads contact creation as a LOWER
        # bound, the same one-directional use PR-ADS-159 made of it. Never a date.
        ["confirmed_sqls_ref", "cpql_ref", "contact_created_at_ref"]),
+    # ── PR-ADS-161A-1 — the publication contract ────────────────────────────
+    #
+    # CANONICAL, not diagnostic: unlike the CLI audits, this is the layer a
+    # product surface imports. It publishes a complete SQL total only when the
+    # lifecycle window is certified, and withholds — never zeroes — otherwise.
+    # It defines no SQL of its own; every number it passes through came from
+    # `hubspot_contact_funnel.date_entered_sql` via the canonical population.
+    _m("sqlpublication.module", "analysis/sql_publication.py", CLS_CANONICAL,
+       _SQL_PUBLICATION, ["cpql_ref"]),
+    _r("sqlpublication", "analysis/sql_publication.py", CLS_CANONICAL,
+       _SQL_PUBLICATION,
+       symbol=["publication_verdict", "reconciliation_gate",
+               "_common", "_refused"]),
+    _m("sqlpublication.service.module",
+       "services/canonical_sql_publication_service.py", CLS_CANONICAL,
+       _SQL_PUBLICATION,
+       ["lifecycle_sql_stage_ref", "lifecycle_funnel_service_ref",
+        "lifecycle_sql_column_ref", "lifecycle_sql_property_ref"]),
+    _r("sqlpublication.service", "services/canonical_sql_publication_service.py",
+       CLS_CANONICAL, _SQL_PUBLICATION,
+       symbol=["publication_inputs", "publication_for",
+               "withheld_payload", "_utcnow"]),
+    # The recorder runs the audit's own 44-way comparison and writes the
+    # outcome. It publishes nothing and defines no SQL — it is evidence
+    # collection for the gate above.
+    _r("sqlpublication.recorder", "scripts/record_sql_reader_reconciliation.py",
+       CLS_DIAGNOSTIC, _SQL_PUBLICATION, symbol=["run", "main"]),
+    _r("sqlpublication.repo", "db/crm_funnel_repository.py", CLS_CANONICAL,
+       _SQL_PUBLICATION, symbol=["fetch_reader_reconciliation"]),
+    _r("sqlpublication.writer", "db/writers.py", CLS_DIAGNOSTIC,
+       _SQL_PUBLICATION, symbol=["record_reader_reconciliation"]),
+
     _r("sqlcoverage", "analysis/lifecycle_sql_coverage.py", CLS_DIAGNOSTIC, _SQL_COVERAGE,
        symbol=["window_coverage", "window_membership", "membership_verdict",
                "_explain", "_window_end_exclusive", "_as_datetime",

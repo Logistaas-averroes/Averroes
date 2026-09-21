@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-160-F2 — Monitoring Cadence Identity and Partial-State Truth (September 2026)
+**Last updated:** PR-ADS-161A-1 — Canonical SQL Publication Contract (September 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -15,7 +15,7 @@
 > the repository moved on. It is kept because its architectural content is
 > still accurate and because several documents cite it — but its **status**
 > claims stop at August 2026. The repository has since merged through
-> **PR-ADS-160-F2**; read the dated sections at the end of this file, and
+> **PR-ADS-161A-1**; read the dated sections at the end of this file, and
 > `git log`, for what is actually true now.
 
 > ### ⚠️ Historical status snapshot (PR-ADS-153E-B, August 2026)
@@ -622,3 +622,66 @@ pre-certification, retracted only by the CLI audit — a landmine for
 PR-ADS-161's consumer migration, though no product surface imports it today.
 
 Full doctrine: `docs/42_MONITORING_CADENCE_AND_PARTIAL_TRUTH.md`.
+
+
+## PR-ADS-161A-1 — Canonical SQL publication contract (September 2026)
+
+**The structural prerequisite to the PR-ADS-161 consumer cutover. No consumer
+is migrated here.**
+
+`analysis/lifecycle_sql_coverage.py::window_coverage` answers a NECESSARY
+question — could a complete total exist for this window — and sets
+`cpql_publishable` and `complete_sql_total` from that alone. The final gate
+(canonical reader reconciliation, boundary readable, incident store readable,
+source proven fresh) lived only in `scripts/audit_lifecycle_sql_coverage.py`,
+coupled to a CLI `Findings` object and unreachable from production. So the only
+publication flag a product surface could import was the intermediate one, which
+is TRUE for windows the audit refuses to certify. Nothing read it yet; the first
+executive consumer to reach for `window_coverage()` would have published a
+total the audit withholds.
+
+`analysis/sql_publication.py` is now the single decision. It takes every gate
+at once and fails closed on each — `None` withholds exactly as `False` does,
+because an outage must never certify a window. Three outcomes stay distinct to
+the caller: `published`, `withheld` (we looked and the evidence does not
+support a total) and `unavailable` (we could not look).
+`complete_sql_total` is `None` in the latter two, never `0`.
+`confirmed_sql_subset` is always present under a name that cannot be mistaken
+for a total. `scripts/audit_lifecycle_sql_coverage.py::audit_certification`
+now DELEGATES to it rather than carrying a second copy — all 141 cases in the
+PR-ADS-160 suite pass unchanged, including the PostgreSQL-backed ones, which is
+the evidence the refactor changed no behaviour.
+
+**Reader reconciliation is recorded, not recomputed per request.** Proving it
+reads the entire funnel table across 44 window/scope combinations —
+unaffordable on a dashboard request. `scripts/record_sql_reader_reconciliation.py
+--apply` runs the audit's own comparison function and writes the outcome to the
+new append-only `sql_reader_reconciliation` table; the contract reads the newest
+row with a 36-hour maximum age. No row, a stale row, or a recorded disagreement
+all withhold, and they are reported as three different reasons because the
+remedy differs. The recorder is a separate command because the coverage audit
+is read-only by contract and is run under a session-level `SET TRANSACTION READ
+ONLY` guard during production validation.
+
+**Nothing visible changes today.** No consumer reads the contract, and the
+boundary is `2026-09-21 04:34:37`, so every product window currently straddles
+or precedes it and would be withheld on the window-local gate alone. The 7d
+window becomes fully post-boundary on 2026-09-28, which is when the recorded
+reconciliation starts deciding anything — the recorder needs a scheduled home
+before then, and this PR does not give it one.
+
+Guarded by `tests/test_pr_ads_161a1_sql_publication_contract.py` (34 cases):
+every gate refusing in isolation with a positive control that proves the gate
+can publish; the named regression driven through the real `window_coverage`
+where membership is complete, certification is false and publication stays
+withheld, with its negative control; and an AST guard — not a substring search
+— asserting no module under `services/`, `api/`, `db/`, `scheduler/`,
+`connectors/` or `analysis/` imports `lifecycle_sql_coverage` or names
+`cpql_publishable`, with its own negative control proving the detector sees a
+deliberate violation.
+
+Doctrine inventory is unchanged and says so: 25 legacy / 6 mixed / 4 canonical,
+`READY_FOR_ROADMAP`, `audit_complete: true`, 0 unclassified occurrences, 0
+registry problems. A migration claim the scanner does not support is not made.
+
+Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.

@@ -1,0 +1,253 @@
+"""
+analysis/sql_publication.py
+
+PR-ADS-161A-1 — the ONE production-facing SQL publication verdict.
+
+Why this module exists
+----------------------
+`analysis.lifecycle_sql_coverage.window_coverage` answers a NECESSARY question:
+could a complete total exist for this window, given the undated population and
+the boundary? It sets `cpql_publishable` from that answer alone, and its own
+docstring says so: "The final word belongs to `audit_certification`."
+
+That final word lived in `scripts/audit_lifecycle_sql_coverage.py`, coupled to
+a CLI `Findings` object. Nothing a product surface could import. So the only
+publication flag reachable from production code was the intermediate one — true
+for a window the audit would refuse to certify.
+
+No consumer read it yet. PR-ADS-161 migrates executive surfaces onto canonical
+lifecycle truth, and the first of them to reach for `window_coverage()` would
+have published a total the audit withholds. This module closes that door before
+any consumer is migrated.
+
+The contract
+------------
+`publication_verdict` is the ONLY function permitted to decide that a complete
+SQL total or a CPQL may be shown. It takes every gate at once:
+
+    window-local   membership resolved (historical AND prospective)
+                   window lies at or after the boundary
+                   no open post-boundary gap can belong to it
+                   the contact-funnel source is proven fresh
+    global         every canonical reader reconciles
+                   the boundary store was readable
+                   the post-boundary incident store was readable
+
+All of them, or `publishable` is False and `complete_sql_total` is None.
+
+Each gate fails CLOSED. `None` — could not be read — withholds exactly as a
+`False` does: an outage must never certify a window. This is the same rule the
+rest of the codebase states as "unknown is not zero", applied to publication.
+
+What a consumer gets
+--------------------
+`confirmed_sql_subset` is ALWAYS present and always truthfully named: the count
+of contacts with a PROVEN SQL-entry date in the window. It is never the total,
+and a surface may show it while the total is withheld as long as it says which
+one it is showing.
+
+`complete_sql_total` is present ONLY when publishable, and is `None` otherwise
+— never 0. A withheld total is not a measurement of zero.
+
+This module is pure: no I/O, no database, no clock. `services.
+canonical_sql_publication_service` reads the evidence and calls it.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+# ── Publication statuses ────────────────────────────────────────────────────
+PUBLISHED = "published"
+#: Every gate passed. `complete_sql_total` is a complete, certified total.
+
+WITHHELD = "withheld"
+#: A gate refused. Evidence may exist — `confirmed_sql_subset` still carries
+#: what is proven — but no complete total may be claimed.
+
+UNAVAILABLE = "unavailable"
+#: A gate could not be READ. Distinct from `withheld`: one is a verdict about
+#: the data, the other is a verdict about us. Both refuse to publish, and the
+#: explanation must tell them apart.
+
+#: Why publication was refused. Window-local reasons pass through from
+#: `lifecycle_sql_coverage` unchanged; these are the ones this layer adds.
+WITHHELD_READERS_NOT_RECONCILED = "canonical_readers_did_not_reconcile"
+WITHHELD_RECONCILIATION_NOT_PROVEN = "reader_reconciliation_not_proven"
+WITHHELD_RECONCILIATION_STALE = "reader_reconciliation_stale"
+WITHHELD_INPUTS_UNREADABLE = "certification_inputs_unreadable"
+WITHHELD_COVERAGE_ABSENT = "coverage_verdict_absent"
+
+GLOBAL_WITHHELD_REASONS = (
+    WITHHELD_READERS_NOT_RECONCILED,
+    WITHHELD_RECONCILIATION_NOT_PROVEN,
+    WITHHELD_RECONCILIATION_STALE,
+    WITHHELD_INPUTS_UNREADABLE,
+    WITHHELD_COVERAGE_ABSENT,
+)
+
+#: Reasons that mean "could not look", as opposed to "looked and refused".
+_UNAVAILABLE_REASONS = (
+    WITHHELD_RECONCILIATION_NOT_PROVEN,
+    WITHHELD_INPUTS_UNREADABLE,
+    WITHHELD_COVERAGE_ABSENT,
+)
+
+
+def reconciliation_gate(reconciliation: dict | None) -> tuple[bool, str | None]:
+    """The global reader-reconciliation gate, and why it refused.
+
+    Three distinct refusals, kept apart because they need different remedies:
+
+      * no record at all       — nobody has proven the readers agree
+      * the record is stale    — they agreed, but too long ago to rely on
+      * they did not reconcile — they were checked and they disagreed
+
+    A missing record is NOT "probably fine". Publication requires proof that
+    the canonical readers agree, and the absence of a check is the absence of
+    proof.
+    """
+    if not reconciliation:
+        return False, WITHHELD_RECONCILIATION_NOT_PROVEN
+    if reconciliation.get("available") is not True:
+        return False, WITHHELD_RECONCILIATION_NOT_PROVEN
+    if reconciliation.get("stale") is True:
+        return False, WITHHELD_RECONCILIATION_STALE
+    if reconciliation.get("reconciliation_complete") is not True:
+        # `False` and `None` alike: checked-and-disagreed, and never-answered,
+        # both refuse. Only an explicit True reconciles.
+        if reconciliation.get("reconciliation_complete") is False:
+            return False, WITHHELD_READERS_NOT_RECONCILED
+        return False, WITHHELD_RECONCILIATION_NOT_PROVEN
+    return True, None
+
+
+def publication_verdict(*, coverage: dict | None,
+                        reconciliation: dict | None,
+                        boundary_readable: bool | None,
+                        incidents_readable: bool | None,
+                        window: str | None = None,
+                        window_type: str | None = None,
+                        scope: str | None = None,
+                        event_date_basis: str | None = None) -> dict[str, Any]:
+    """The single publication verdict for one window/scope. Fails closed.
+
+    `coverage` is a `lifecycle_sql_coverage.window_coverage()` result. Its
+    `cpql_publishable` is deliberately NOT propagated: this function recomputes
+    publication from `certification_eligible` plus the global gates, so a caller
+    cannot reach the intermediate value through the returned dict.
+    """
+    if not coverage:
+        return _refused(UNAVAILABLE, WITHHELD_COVERAGE_ABSENT,
+                        "no coverage verdict was produced for this window, so "
+                        "its completeness is unknown — not complete, not zero",
+                        coverage={}, window=window, window_type=window_type,
+                        scope=scope, event_date_basis=event_date_basis,
+                        readers_reconciled=None)
+
+    reconciled, recon_reason = reconciliation_gate(reconciliation)
+
+    # Window-local half. `certification_eligible` already encodes: boundary
+    # exists, window opens at or after it, no open gap belongs to it,
+    # membership resolved, source proven fresh.
+    locally_eligible = coverage.get("certification_eligible") is True
+
+    stores_readable = boundary_readable is True and incidents_readable is True
+
+    if not locally_eligible:
+        reason = coverage.get("certification_status") or WITHHELD_COVERAGE_ABSENT
+        status = (UNAVAILABLE
+                  if coverage.get("certification_eligible") is None
+                  or reason == "certification_unavailable"
+                  else WITHHELD)
+        return _refused(status, reason,
+                        coverage.get("certification_explanation")
+                        or coverage.get("explanation") or "",
+                        coverage=coverage, window=window,
+                        window_type=window_type, scope=scope,
+                        event_date_basis=event_date_basis,
+                        readers_reconciled=reconciled)
+
+    if not stores_readable:
+        return _refused(UNAVAILABLE, WITHHELD_INPUTS_UNREADABLE,
+                        "the boundary or post-boundary incident store could "
+                        "not be read, so certification is unknown — unknown "
+                        "inputs must block",
+                        coverage=coverage, window=window,
+                        window_type=window_type, scope=scope,
+                        event_date_basis=event_date_basis,
+                        readers_reconciled=reconciled)
+
+    if not reconciled:
+        status = (UNAVAILABLE if recon_reason in _UNAVAILABLE_REASONS
+                  else WITHHELD)
+        return _refused(status, recon_reason,
+                        _RECON_EXPLANATIONS[recon_reason],
+                        coverage=coverage, window=window,
+                        window_type=window_type, scope=scope,
+                        event_date_basis=event_date_basis,
+                        readers_reconciled=False)
+
+    # Every gate passed. This is the ONLY return that publishes a total.
+    return {
+        **_common(coverage, window, window_type, scope, event_date_basis),
+        "status": PUBLISHED,
+        "publishable": True,
+        "complete_sql_total": coverage.get("confirmed_sqls"),
+        "cpql_publishable": True,
+        "withheld_reason": None,
+        "explanation": coverage.get("certification_explanation") or "",
+        "certified": True,
+        "readers_reconciled": True,
+    }
+
+
+_RECON_EXPLANATIONS = {
+    WITHHELD_RECONCILIATION_NOT_PROVEN: (
+        "no proven canonical reader reconciliation is on record, so it is "
+        "unknown whether the headline, detail and operational reads of this "
+        "population agree — an unproven agreement is not an agreement"),
+    WITHHELD_RECONCILIATION_STALE: (
+        "the canonical readers last reconciled too long ago to be relied on; "
+        "the population has moved since they were compared"),
+    WITHHELD_READERS_NOT_RECONCILED: (
+        "the canonical readers of this population do not agree, so no single "
+        "number can be published for it"),
+}
+
+
+def _common(coverage, window, window_type, scope, event_date_basis) -> dict:
+    """Fields every verdict carries, published or not."""
+    return {
+        "window": window if window is not None else coverage.get("window"),
+        "window_type": window_type,
+        "scope": scope,
+        "event_date_basis": event_date_basis,
+        # ALWAYS present, always a subset, never renamed to look like a total.
+        "confirmed_sql_subset": coverage.get("confirmed_sql_subset",
+                                             coverage.get("confirmed_sqls")),
+        "recovered_in_subset": coverage.get("window_membership_recovered"),
+        "coverage_complete": coverage.get("window_total_complete"),
+        "coverage_reason": coverage.get("reason"),
+        "certification_status": coverage.get("certification_status"),
+        "source_fresh": coverage.get("source_fresh"),
+        "window_after_boundary": coverage.get("window_after_boundary"),
+        "open_post_boundary_gaps": coverage.get("open_post_boundary_gaps"),
+    }
+
+
+def _refused(status, reason, explanation, *, coverage, window, window_type,
+             scope, event_date_basis, readers_reconciled) -> dict:
+    """A refusal. No complete total, no CPQL, and `None` rather than `0`."""
+    return {
+        **_common(coverage, window, window_type, scope, event_date_basis),
+        "status": status,
+        "publishable": False,
+        # Not zero. A withheld total is not a measurement.
+        "complete_sql_total": None,
+        "cpql_publishable": False,
+        "withheld_reason": reason,
+        "explanation": explanation,
+        "certified": False,
+        "readers_reconciled": readers_reconciled,
+    }
