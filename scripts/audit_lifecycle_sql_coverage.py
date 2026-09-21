@@ -336,7 +336,10 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
     applied here:
 
       * every canonical reader must reconcile (all 44 combinations);
-      * the canonical contact-funnel source must be proven FRESH;
+      * the canonical contact-funnel source must be proven FRESH — checked
+        here explicitly as well as inside the window verdict, so this
+        function does not depend on the caller having passed the same
+        freshness object to both;
       * the audit itself must have been able to look.
 
     A window that is locally eligible is NOT certified while either fails.
@@ -362,7 +365,9 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
     # and not stale by construction; the staleness arm of the gate exists for
     # the production reader, which consults a recorded verdict.
     recon_state = {"available": True, "stale": False,
-                   "reconciliation_complete": reconciled}
+                   "reconciliation_complete": reconciled,
+                   "all_combinations_compared":
+                       reconciliation.get("all_combinations_compared")}
 
     def _withhold(win, label, reason):
         """A blocked window publishes NO complete total and NO CPQL.
@@ -389,7 +394,23 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
             coverage=win, reconciliation=recon_state,
             boundary_readable=boundary_readable,
             incidents_readable=incidents_readable,
-            window=win.get("window"), window_type=win.get("window_type"))
+            window=win.get("window"), window_type=win.get("window_type"),
+            # The audit keeps its documented semantics: a pair that failed
+            # closed by contract is not comparable and has never blocked its
+            # certification. Production requires full scope coverage; this is
+            # the one explicit, named difference between the two callers.
+            require_full_scope_coverage=False)
+
+        # Freshness stays an INDEPENDENT gate here, not merely inherited from
+        # `certification_eligible`. Today `run()` hands the same freshness
+        # object to `audit_windows` and to this function, so the two can only
+        # agree — but relying on that made this an unasserted coupling rather
+        # than a gate, and a caller passing a window built with different
+        # freshness would have certified a stale source.
+        if verdict["publishable"] and not source_fresh:
+            _withhold(win, label,
+                      (freshness or {}).get("reason") or "source_not_fresh")
+            continue
 
         if verdict["publishable"]:
             certified.append(label)
@@ -397,12 +418,15 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
             continue
 
         reason = verdict["withheld_reason"]
-        # One deliberate difference from the shared gate's own wording: where
-        # the source is not fresh, the audit has always reported the FRESHNESS
-        # reason (`source_stale`, `source_last_incremental_failed`, …) rather
-        # than the window's `not_certifiable_source_not_fresh`, because the
-        # operator's next step is the pipeline, not the window. The refusal is
-        # identical; only the label an operator reads is more specific.
+        # CHANGED BEHAVIOUR, stated as such. Before PR-ADS-161A-1 this branch
+        # was unreachable from `run()` — a window is only `locally_eligible`
+        # when its freshness says fresh, and `run()` passes ONE freshness
+        # object to both call sites — so a stale source was reported as the
+        # window's `not_certifiable_source_not_fresh`. It is now reported as
+        # the FRESHNESS reason (`source_stale`,
+        # `source_last_incremental_failed`, …), because the operator's next
+        # step is the pipeline, not the window. The refusal is identical in
+        # both; only the label an operator reads is more specific.
         if (win.get("certification_status") == coverage.CERT_STALE_SOURCE
                 and not source_fresh):
             reason = (freshness or {}).get("reason") or "source_not_fresh"

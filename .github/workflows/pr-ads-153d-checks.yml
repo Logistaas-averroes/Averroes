@@ -93,6 +93,7 @@ jobs:
             tests/test_pr_ads_157_f1_population_reconciliation.py \
             tests/test_pr_ads_159_lifecycle_sql_coverage.py \
             tests/test_pr_ads_160_sql_coverage_boundary.py \
+            tests/test_pr_ads_161a1_sql_publication_contract.py \
             tests/test_pr_ads_144_pg_integration.py -q \
             --junitxml=pg-results.xml
 
@@ -142,6 +143,12 @@ jobs:
                            "tests.test_pr_ads_157_f1_population_reconciliation",
                            "tests.test_pr_ads_159_lifecycle_sql_coverage",
                            "tests.test_pr_ads_160_sql_coverage_boundary",
+                           # PR-ADS-161A-1. Named here because its two most
+                           # load-bearing cases are AST scans, whose failure
+                           # mode is SILENT under-detection: a guard that
+                           # stops running looks exactly like a guard that
+                           # finds nothing.
+                           "tests.test_pr_ads_161a1_sql_publication_contract",
                            "tests.test_pr_ads_144_pg_integration"):
               if not any(cn == required or cn.startswith(required + ".")
                          for cn in classnames):

@@ -605,7 +605,11 @@ def fetch_reader_reconciliation(
         if observed.tzinfo is None:
             observed = observed.replace(tzinfo=timezone.utc)
         age_hours = (now - observed).total_seconds() / 3600.0
-        stale = age_hours > max_age_hours
+        # A NEGATIVE age is a row stamped in the future — clock skew, a
+        # timezone mistake on the recorder host, or a hand-inserted row. Read
+        # as "not older than the limit" it would grant publication forever, so
+        # it is treated as unproven staleness, which withholds.
+        stale = not (0 <= age_hours <= max_age_hours)
 
     return {"available": True,
             "stale": stale,

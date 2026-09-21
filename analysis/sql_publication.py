@@ -75,6 +75,7 @@ UNAVAILABLE = "unavailable"
 WITHHELD_READERS_NOT_RECONCILED = "canonical_readers_did_not_reconcile"
 WITHHELD_RECONCILIATION_NOT_PROVEN = "reader_reconciliation_not_proven"
 WITHHELD_RECONCILIATION_STALE = "reader_reconciliation_stale"
+WITHHELD_RECONCILIATION_PARTIAL = "reader_reconciliation_incomplete_coverage"
 WITHHELD_INPUTS_UNREADABLE = "certification_inputs_unreadable"
 WITHHELD_COVERAGE_ABSENT = "coverage_verdict_absent"
 
@@ -82,6 +83,7 @@ GLOBAL_WITHHELD_REASONS = (
     WITHHELD_READERS_NOT_RECONCILED,
     WITHHELD_RECONCILIATION_NOT_PROVEN,
     WITHHELD_RECONCILIATION_STALE,
+    WITHHELD_RECONCILIATION_PARTIAL,
     WITHHELD_INPUTS_UNREADABLE,
     WITHHELD_COVERAGE_ABSENT,
 )
@@ -89,12 +91,15 @@ GLOBAL_WITHHELD_REASONS = (
 #: Reasons that mean "could not look", as opposed to "looked and refused".
 _UNAVAILABLE_REASONS = (
     WITHHELD_RECONCILIATION_NOT_PROVEN,
+    WITHHELD_RECONCILIATION_PARTIAL,
     WITHHELD_INPUTS_UNREADABLE,
     WITHHELD_COVERAGE_ABSENT,
 )
 
 
-def reconciliation_gate(reconciliation: dict | None) -> tuple[bool, str | None]:
+def reconciliation_gate(reconciliation: dict | None, *,
+                        require_full_scope_coverage: bool = True
+                        ) -> tuple[bool, str | None]:
     """The global reader-reconciliation gate, and why it refused.
 
     Three distinct refusals, kept apart because they need different remedies:
@@ -111,14 +116,43 @@ def reconciliation_gate(reconciliation: dict | None) -> tuple[bool, str | None]:
         return False, WITHHELD_RECONCILIATION_NOT_PROVEN
     if reconciliation.get("available") is not True:
         return False, WITHHELD_RECONCILIATION_NOT_PROVEN
-    if reconciliation.get("stale") is True:
-        return False, WITHHELD_RECONCILIATION_STALE
-    if reconciliation.get("reconciliation_complete") is not True:
-        # `False` and `None` alike: checked-and-disagreed, and never-answered,
-        # both refuse. Only an explicit True reconciles.
-        if reconciliation.get("reconciliation_complete") is False:
-            return False, WITHHELD_READERS_NOT_RECONCILED
+    # Order matters: report the MOST specific true thing. A record that was
+    # never written is "not proven", not "stale" — staleness is a property of
+    # a record that exists.
+    complete = reconciliation.get("reconciliation_complete")
+    if complete is False:
+        return False, WITHHELD_READERS_NOT_RECONCILED
+    if complete is not True:
         return False, WITHHELD_RECONCILIATION_NOT_PROVEN
+    if reconciliation.get("stale") is not False:
+        # `is not False`, not `is True`: unknown staleness withholds exactly
+        # as stale does. This module's own contract says `None` refuses like
+        # `False`, and an asymmetry here would be the one gate that fails open.
+        return False, WITHHELD_RECONCILIATION_STALE
+    if (require_full_scope_coverage
+            and reconciliation.get("all_combinations_compared") is not True):
+        # PUBLICATION claims "every canonical reader reconciles". A record in
+        # which some combinations were never comparable does not support that.
+        # The ones that drop out are the identity-dependent scopes
+        # (campaign_attributable, keyword_attributable) when the Google Ads
+        # campaign-identity contract is unavailable — so a narrower scope
+        # would be published as proven on evidence gathered for a wider one,
+        # silently crossing the attribution nesting.
+        #
+        # The AUDIT passes False here, and that is a real difference rather
+        # than a hidden one. Its `reconciliation_complete` is documented to
+        # mean "every combination reached a proven outcome and every
+        # COMPARABLE one agreed"; a pair that failed closed by contract is not
+        # comparable and has never blocked its certification. Requiring it
+        # there would mean the audit could not certify anything while campaign
+        # identity is unavailable, which is a different decision from this
+        # one and is not PR-ADS-161A-1's to make.
+        #
+        # Blocking every scope when any scope is uncomparable is conservative:
+        # it withholds `all_source` too, which was comparable. The precise fix
+        # is to record per-scope outcomes and require the REQUESTED scope, and
+        # that belongs with the consumers that will request them.
+        return False, WITHHELD_RECONCILIATION_PARTIAL
     return True, None
 
 
@@ -129,7 +163,9 @@ def publication_verdict(*, coverage: dict | None,
                         window: str | None = None,
                         window_type: str | None = None,
                         scope: str | None = None,
-                        event_date_basis: str | None = None) -> dict[str, Any]:
+                        event_date_basis: str | None = None,
+                        require_full_scope_coverage: bool = True
+                        ) -> dict[str, Any]:
     """The single publication verdict for one window/scope. Fails closed.
 
     `coverage` is a `lifecycle_sql_coverage.window_coverage()` result. Its
@@ -137,7 +173,7 @@ def publication_verdict(*, coverage: dict | None,
     publication from `certification_eligible` plus the global gates, so a caller
     cannot reach the intermediate value through the returned dict.
     """
-    if not coverage:
+    if not isinstance(coverage, dict) or not coverage:
         return _refused(UNAVAILABLE, WITHHELD_COVERAGE_ABSENT,
                         "no coverage verdict was produced for this window, so "
                         "its completeness is unknown — not complete, not zero",
@@ -145,7 +181,9 @@ def publication_verdict(*, coverage: dict | None,
                         scope=scope, event_date_basis=event_date_basis,
                         readers_reconciled=None)
 
-    reconciled, recon_reason = reconciliation_gate(reconciliation)
+    reconciled, recon_reason = reconciliation_gate(
+        reconciliation,
+        require_full_scope_coverage=require_full_scope_coverage)
 
     # Window-local half. `certification_eligible` already encodes: boundary
     # exists, window opens at or after it, no open gap belongs to it,
@@ -188,6 +226,19 @@ def publication_verdict(*, coverage: dict | None,
                         event_date_basis=event_date_basis,
                         readers_reconciled=False)
 
+    # A gate cannot certify a number that is not there. `publication_for`
+    # takes `coverage` from its CALLER, so an absent count is reachable even
+    # though `window_coverage` always sets one — and `available: true` beside
+    # `value: null` is exactly the shape a consumer renders as a blank total.
+    if coverage.get("confirmed_sqls") is None:
+        return _refused(UNAVAILABLE, WITHHELD_COVERAGE_ABSENT,
+                        "every gate passed but the window carries no counted "
+                        "population, so there is no total to publish",
+                        coverage=coverage, window=window,
+                        window_type=window_type, scope=scope,
+                        event_date_basis=event_date_basis,
+                        readers_reconciled=True)
+
     # Every gate passed. This is the ONLY return that publishes a total.
     return {
         **_common(coverage, window, window_type, scope, event_date_basis),
@@ -210,6 +261,10 @@ _RECON_EXPLANATIONS = {
     WITHHELD_RECONCILIATION_STALE: (
         "the canonical readers last reconciled too long ago to be relied on; "
         "the population has moved since they were compared"),
+    WITHHELD_RECONCILIATION_PARTIAL: (
+        "the recorded reconciliation did not compare every window and scope, "
+        "so the requested scope may never have been checked — a narrower "
+        "number must not be published on evidence gathered for a wider one"),
     WITHHELD_READERS_NOT_RECONCILED: (
         "the canonical readers of this population do not agree, so no single "
         "number can be published for it"),

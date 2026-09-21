@@ -184,13 +184,22 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
 - **Never read a SQL total from `analysis/lifecycle_sql_coverage.py`.** Its
   `window_coverage()` answers only "could a complete total exist for this
   window" and sets `cpql_publishable` from that alone — TRUE for windows the
-  certification gate refuses. The ONLY production-facing publication verdict is
+  certification gate refuses. For the **lifecycle-SQL window contract**, the
+  only production-facing publication verdict is
   `services/canonical_sql_publication_service.publication_for()`, which applies
   every gate (membership, boundary, post-boundary gaps, source freshness,
   recorded reader reconciliation) and fails closed on each. A withheld total is
   `None`, never `0`. An AST guard in
   `tests/test_pr_ads_161a1_sql_publication_contract.py` enforces this; see
   `docs/43_*`.
+
+  This does **not** cover every SQL publication rule in the product.
+  `static/app.js::campaignSqlPublication` is a separate, live rule governing
+  the Campaigns page and its drawers, and it publishes on
+  `reconciliation_status === "reconciled"` alone — no boundary gate, no
+  post-boundary gap gate, no freshness gate. Pre-existing, unchanged by
+  PR-ADS-161A-1, and already recorded by the doctrine inventory as
+  `gate.backend_never_enforces_reconciliation`.
 
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,
