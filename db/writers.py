@@ -4240,6 +4240,14 @@ def record_reader_reconciliation(*, observed_at, reconciliation_complete: bool,
     if observed_at is None:
         log.warning("record_reader_reconciliation: observed_at is required")
         return False
+    if getattr(observed_at, "tzinfo", None) is None:
+        # Refused, not normalised. A naive value is interpreted in the SESSION
+        # timezone on the way into a TIMESTAMPTZ column, so normalising it on
+        # the read side is too late — the instant has already been chosen by
+        # whatever zone the writer's connection happened to use.
+        log.warning("record_reader_reconciliation: observed_at must be "
+                    "timezone-aware; refusing to record an ambiguous instant")
+        return False
     if reconciliation_complete is None:
         # An unproven run is not evidence. Recording it as False would claim
         # the readers were compared and disagreed, which is a different fact.

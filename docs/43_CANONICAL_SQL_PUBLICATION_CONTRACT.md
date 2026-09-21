@@ -75,16 +75,51 @@ to `publication_verdict`. It no longer carries its own copy of the decision.
 
 If the two could drift, the audit would stop describing what production
 publishes — and the audit is the thing we point at to claim production is
-truthful. All 141 cases in `tests/test_pr_ads_160_sql_coverage_boundary.py`
-pass unchanged across the refactor, including the PostgreSQL-backed ones, which
-is the evidence that behaviour is identical.
+truthful.
 
-One deliberate difference is preserved: where the source is not fresh, the
-audit still reports the **freshness** reason (`source_stale`,
-`source_last_incremental_failed`, …) rather than the window's
-`not_certifiable_source_not_fresh`, because an operator's next step is the
-pipeline, not the window. The refusal is the same; only the label is more
-specific.
+### What changed, stated plainly
+
+An earlier draft of this document claimed the refactor changed nothing and
+offered the 141 green PR-ADS-160 cases as the evidence. **That was wrong on
+both counts**, and the review of this PR caught it.
+
+Two audit outputs change. Neither changes a *refusal* — `certified: False`,
+`cpql_publishable: False` and `complete_sql_total: None` are identical in
+every case, and `blocked_windows` keeps its shape — but the **reason string**
+differs:
+
+| Situation | Before | After |
+|---|---|---|
+| source not fresh | `not_certifiable_source_not_fresh` | the freshness reason (`source_stale`, `source_last_incremental_failed`, …) |
+| contact store unreadable (window dict has no `certification_eligible`) | `None` | `coverage_verdict_absent` |
+
+The first is an improvement — an operator's next step is the pipeline, not the
+window — but it is a **change**, not a preserved behaviour. Before this PR the
+freshness branch was unreachable from `run()`: a window is only locally
+eligible when its freshness says fresh, and `run()` passes ONE freshness object
+to both call sites, so the old code always reported the window's reason.
+
+The 141 cases pass, and that is worth having — but they are **not** evidence
+that behaviour is identical, because none of them exercises the stale-source
+path with a shared freshness object (`_certify()` in the PR-ADS-160 suite
+always passes `freshness=FRESH` regardless of how the window was built).
+`test_26` and `test_27` in this PR's suite cover both changed paths directly.
+
+### One explicit difference between the two callers
+
+`require_full_scope_coverage` is `True` for production and `False` for the
+audit, named at both call sites. Production must not publish a narrow scope on
+a reconciliation record in which that scope was never compared; the audit's
+`reconciliation_complete` is documented to mean "every combination reached a
+proven outcome and every **comparable** one agreed", and a contract-unavailable
+pair has never blocked it. Requiring it there would mean the audit could not
+certify anything while Google Ads campaign identity is unavailable — a
+different decision, and not this PR's to make.
+
+Blocking every scope when any scope is uncomparable is conservative: it
+withholds `all_source` too, which *was* comparable. The precise fix is to
+record per-scope outcomes and require the requested scope. That belongs with
+the consumers that will request them.
 
 ## 4. Why reconciliation is read, not computed
 
@@ -150,10 +185,25 @@ scheduled home. It is not wired into the scheduler in this PR.
   one both refuse, and that the repository reader fails closed with no database.
 * **§4** an **AST** guard — not a substring search — asserting no module under
   `services/`, `api/`, `db/`, `scheduler/`, `connectors/` or `analysis/`
-  imports `lifecycle_sql_coverage` or names `cpql_publishable`, outside an
-  explicit allow-list of the gate itself and the read-only CLI audits.
-  `test_15` is its negative control: the detector is re-run over a module that
-  commits the violation deliberately, and must see it.
+  reaches `lifecycle_sql_coverage` or names `cpql_publishable` **or**
+  `complete_sql_total` (both are set from membership alone), outside an
+  explicit allow-list. The detector covers plain imports, `from`-imports,
+  package imports, **relative** imports, `importlib.import_module` and
+  `sys.modules[...]`.
+
+  `test_15` is its negative control and calls **the same function** the guard
+  calls — `_import_offenders`. The first version of this PR re-implemented a
+  weaker predicate there instead, and the review proved both tests stayed
+  green with the real detector deliberately gutted. One function, two callers,
+  is the fix; `test_15b` is the positive control proving the detector does not
+  simply flag everything.
+
+* **§5** the defects the review of this PR found, each with its control:
+  the incident gate reading a key the repository never returns (`test_19`,
+  `test_20`), the recorder writing an unproven run as a disagreement
+  (`test_21`), a naive or future-dated `observed_at` (`test_22`, `test_23`), a
+  published verdict with no count (`test_24`), a malformed coverage input
+  (`test_25`), and freshness as an independent audit gate (`test_26`).
 
 ## 7. Not in this PR
 

@@ -81,6 +81,19 @@ def run(*, apply: bool = False, now: datetime | None = None) -> tuple[int, dict]
                              "and publication stays withheld")
         return EXIT_UNAVAILABLE, payload
 
+    if result.get("combinations_execution_unavailable"):
+        # `reconciliation_complete` is False whenever a comparison FAILED TO
+        # RUN, which is not the same fact as "they were compared and they
+        # disagreed" — and that second, stronger claim is what a recorded
+        # `false` says to every later reader. An unproven run is not evidence;
+        # nothing is written, and publication stays withheld for the honest
+        # reason (no proof) rather than a fabricated one (disagreement).
+        payload["detail"] = (
+            f"{result['combinations_execution_unavailable']} combination(s) "
+            f"could not be executed, so the outcome is UNKNOWN rather than a "
+            f"proven disagreement — nothing is recorded")
+        return EXIT_UNAVAILABLE, payload
+
     if not apply:
         payload["detail"] = "dry run — pass --apply to record this outcome"
         return (EXIT_OK if payload["reconciliation_complete"]
