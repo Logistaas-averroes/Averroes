@@ -46,8 +46,45 @@ gate at once:
 | global | every canonical reader reconciles (44 combinations) | recorded evidence |
 | global | boundary store was readable | `crm_funnel_repository` |
 | global | post-boundary incident store was readable | `crm_funnel_repository` |
+| global | contact-funnel source proven fresh **as the service read it** | `publication_inputs` |
 
 All of them, or `publishable` is `False` and `complete_sql_total` is `None`.
+
+Freshness appears twice on purpose. The window-local row is the caller's copy,
+carried inside the `coverage` dict it hands in. The global row is the read
+`publication_inputs` performs itself. Round 3 of the audit found the second one
+being *stamped on the verdict as a label* and never gated: a caller whose
+coverage said fresh, over a service that had just read stale, published a
+certified 42 while `audit_certification` refused the identical inputs. Both
+signals must now say fresh.
+
+### The order refusals are reported in
+
+A verdict names one reason, so which gate fires first is part of the contract:
+
+1. **window-local** — could this window ever be certified (boundary, membership,
+   gaps)? A window that precedes the boundary is refused for that, permanently,
+   whatever else is wrong today.
+2. **stores readable** — could we look at all? `unavailable`, not `withheld`.
+3. **reader reconciliation** — do the canonical readers agree, and do we have
+   proof? An unproven or unreadable record is `unavailable`.
+4. **source freshness** — we looked, everything was readable and agreed, and
+   the source has stopped arriving. `withheld`.
+5. **counted population present** — every gate passed but the window carries no
+   count. `unavailable`.
+
+Freshness sits *after* the readability and reconciliation gates because those
+answer "could we look", and a `withheld` verdict must not displace an
+`unavailable` one. Round 3 caught the first version placing it first, so "we
+could not read the boundary store" was reported as "the source is stale" —
+which sends an operator to fix a pipeline that is not the problem.
+
+For the same reason a freshness refusal never borrows the window's own
+`certification_status`: on the only shape `window_coverage` emits with
+`certification_eligible: True`, that status is literally `"eligible"`. The
+reason is taken from the window only when the window's own status is itself
+about freshness — the membership test is `sql_publication.FRESHNESS_REFUSALS`,
+the single table the gate, the service and the audit all consult.
 
 **Every gate fails closed.** `None` — could not be read — withholds exactly as
 `False` does. An outage must never certify a window. This is "unknown is not
@@ -87,6 +124,12 @@ Two audit outputs change. Neither changes a *refusal* — `certified: False`,
 `cpql_publishable: False` and `complete_sql_total: None` are identical in
 every case, and `blocked_windows` keeps its shape — but the **reason string**
 differs:
+
+Scoped to what `run()` can actually produce. A differential over 1,152
+caller-built inputs finds eight reason-string deltas in all and **zero**
+`windows_certified` deltas — the decision is preserved everywhere. Six of the
+eight require a caller that pairs `certification_eligible: True` with a
+non-fresh or unreadable input, which `run()` never builds.
 
 | Situation | Before | After |
 |---|---|---|
@@ -171,7 +214,7 @@ scheduled home. It is not wired into the scheduler in this PR.
 
 ## 6. Guards
 
-`tests/test_pr_ads_161a1_sql_publication_contract.py` — 34 cases.
+`tests/test_pr_ads_161a1_sql_publication_contract.py` — 78 cases.
 
 * **§1** every gate refuses in isolation, each with the full set of other
   inputs satisfied, plus `test_01` as the positive control proving the gate can
@@ -204,6 +247,22 @@ scheduled home. It is not wired into the scheduler in this PR.
   (`test_21`), a naive or future-dated `observed_at` (`test_22`, `test_23`), a
   published verdict with no count (`test_24`), a malformed coverage input
   (`test_25`), and freshness as an independent audit gate (`test_26`).
+
+* **§6** what round 3 found, each with the control that proves the guard can
+  fail: the service reading freshness and only labelling it (`test_31`, with
+  `test_32` over every non-`True` shape), a freshness refusal reported under
+  the reason `"eligible"` (`test_33`), the freshness gate placed ahead of the
+  "could we look at all" gates (`test_34`), the audit's relabel keyed on
+  `source_fresh` alone so that a pre-boundary window reported `source_stale`
+  (`test_35`), the recorder coercing an unproven `None` to a recorded
+  disagreement (`test_36`), the same relabel defect repeated one layer up in
+  the service (`test_37`), and the shared `FRESHNESS_REFUSALS` table drifting
+  away from the coverage constant it spells out (`test_38`).
+
+  Every one of these was run as a **counterfactual**: the pre-fix code was
+  restored, the module re-run, and the named test confirmed failing. A guard
+  whose absence changes nothing is not a guard, and §6 exists because round 3
+  found two that were not.
 
 ## 7. Not in this PR
 

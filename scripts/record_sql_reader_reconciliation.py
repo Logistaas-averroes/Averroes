@@ -102,7 +102,11 @@ def run(*, apply: bool = False, now: datetime | None = None) -> tuple[int, dict]
     from db import writers as db_writers
     ok = db_writers.record_reader_reconciliation(
         observed_at=now,
-        reconciliation_complete=bool(payload["reconciliation_complete"]),
+        # NOT `bool(...)`: that coercion turned an unproven `None` into a
+        # recorded `False`, defeating the writer's own `is None` refusal —
+        # round 1's finding, whose fix added a different guard and left this
+        # re-entry point open.
+        reconciliation_complete=payload["reconciliation_complete"],
         combinations_expected=payload["combinations_expected"],
         combinations_compared=payload["combinations_compared"],
         combinations_mismatched=payload["combinations_mismatched"],

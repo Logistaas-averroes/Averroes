@@ -78,6 +78,17 @@ WITHHELD_RECONCILIATION_STALE = "reader_reconciliation_stale"
 WITHHELD_RECONCILIATION_PARTIAL = "reader_reconciliation_incomplete_coverage"
 WITHHELD_INPUTS_UNREADABLE = "certification_inputs_unreadable"
 WITHHELD_COVERAGE_ABSENT = "coverage_verdict_absent"
+WITHHELD_COUNT_ABSENT = "coverage_carries_no_counted_population"
+WITHHELD_SOURCE_NOT_FRESH = "source_not_proven_fresh"
+
+#: The refusals that are THEMSELVES about freshness — the ONE table every
+#: layer consults. Only a reason in here may be replaced by, or replace, a
+#: freshness reason; anything else keeps its own, because the operator's next
+#: step differs. `analysis.lifecycle_sql_coverage.CERT_STALE_SOURCE` is the
+#: window-local member, spelled out rather than imported to keep this module
+#: free of the coverage layer (the AST guard forbids the reverse direction).
+FRESHNESS_REFUSALS = ("not_certifiable_source_not_fresh",
+                      WITHHELD_SOURCE_NOT_FRESH)
 
 GLOBAL_WITHHELD_REASONS = (
     WITHHELD_READERS_NOT_RECONCILED,
@@ -86,6 +97,8 @@ GLOBAL_WITHHELD_REASONS = (
     WITHHELD_RECONCILIATION_PARTIAL,
     WITHHELD_INPUTS_UNREADABLE,
     WITHHELD_COVERAGE_ABSENT,
+    WITHHELD_COUNT_ABSENT,
+    WITHHELD_SOURCE_NOT_FRESH,
 )
 
 #: Reasons that mean "could not look", as opposed to "looked and refused".
@@ -94,6 +107,7 @@ _UNAVAILABLE_REASONS = (
     WITHHELD_RECONCILIATION_PARTIAL,
     WITHHELD_INPUTS_UNREADABLE,
     WITHHELD_COVERAGE_ABSENT,
+    WITHHELD_COUNT_ABSENT,
 )
 
 
@@ -226,12 +240,41 @@ def publication_verdict(*, coverage: dict | None,
                         event_date_basis=event_date_basis,
                         readers_reconciled=False)
 
+    # Freshness is a gate HERE, not only inside `certification_eligible`.
+    # F1 added an independent freshness check to the audit and not to
+    # production, so the audit became the better-defended caller — and the
+    # audit is what we point at to describe what production publishes.
+    #
+    # Placed AFTER the readability and reconciliation gates on purpose: those
+    # answer "could we look at all", and a `withheld` verdict must not
+    # displace an `unavailable` one. Round 3 caught the first version doing
+    # exactly that.
+    if coverage.get("source_fresh") is not True:
+        # NOT the window's `certification_status`: on the only shape
+        # `window_coverage` can emit with `certification_eligible: True`,
+        # that status is literally `"eligible"` — so the refusal would be
+        # served to a consumer under a reason meaning "every prerequisite is
+        # met". Use the window's own reason only when it is itself about
+        # freshness.
+        window_status = coverage.get("certification_status")
+        reason = (window_status
+                  if window_status in FRESHNESS_REFUSALS
+                  else WITHHELD_SOURCE_NOT_FRESH)
+        return _refused(WITHHELD, reason,
+                        "the canonical contact-funnel source is not proven "
+                        "fresh, so this window's completeness describes data "
+                        "that may have stopped arriving",
+                        coverage=coverage, window=window,
+                        window_type=window_type, scope=scope,
+                        event_date_basis=event_date_basis,
+                        readers_reconciled=True)
+
     # A gate cannot certify a number that is not there. `publication_for`
     # takes `coverage` from its CALLER, so an absent count is reachable even
     # though `window_coverage` always sets one — and `available: true` beside
     # `value: null` is exactly the shape a consumer renders as a blank total.
     if coverage.get("confirmed_sqls") is None:
-        return _refused(UNAVAILABLE, WITHHELD_COVERAGE_ABSENT,
+        return _refused(UNAVAILABLE, WITHHELD_COUNT_ABSENT,
                         "every gate passed but the window carries no counted "
                         "population, so there is no total to publish",
                         coverage=coverage, window=window,

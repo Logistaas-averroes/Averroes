@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-161A-1 — Canonical SQL Publication Contract (September 2026)
+**Last updated:** PR-ADS-161A-1-F3 — the freshness gate that was still a label (September 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -698,5 +698,117 @@ over seven spellings including relative imports, `importlib` and `sys.modules`.
 Doctrine inventory is unchanged and says so: 25 legacy / 6 mixed / 4 canonical,
 `READY_FOR_ROADMAP`, `audit_complete: true`, 0 unclassified occurrences, 0
 registry problems. A migration claim the scanner does not support is not made.
+
+Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.
+
+
+## PR-ADS-161A-1-F2 — the production freshness gate, and controls that can fail (September 2026)
+
+Round 2 of the truth audit on PR-ADS-161A-1-F1. One blocker and three majors,
+all of them in the half of the work whose job is to prove the other half safe.
+
+**Production published a certified total from a source that is not fresh.**
+F1 added an independent freshness gate to `audit_certification` and not to
+`publication_verdict`, so the audit became the better-defended caller — and the
+audit is what we point at to describe what production publishes. Measured: a
+coverage dict with `certification_eligible: True` and `source_fresh: False`
+published a total of 42 in production while the audit refused the identical
+dict. Reachable for the same reason the missing-count case is — `publication_for`
+takes `coverage` from its CALLER. `publication_verdict` now gates on
+`source_fresh` directly, and `test_29` asserts audit/production parity over the
+same dict rather than testing each side alone.
+
+**`test_23` asserted an expression against itself.** The fix for the
+future-dated reconciliation row (a negative age read as "not older than the
+limit" grants publication forever) was guarded by a test that computed
+`not (0 <= age <= max_age)` in its own body and compared it to itself. It never
+called `fetch_reader_reconciliation`. Reverting the production line left all
+4,596 tests green. This is round 1's `test_15` defect committed a second time,
+one round after it was found. The test now drives the real reader over a real
+row shape across five ages and carries the verdict through to a refusal.
+
+**`test_22` could not distinguish the naive-timestamp guard from its absence.**
+It asserted only a return value, with no database — so `get_conn()` yielded
+`None` and the writer returned False whether or not the guard existed. It now
+intercepts the cursor and asserts no statement was executed, with a positive
+control that a tz-aware instant IS written.
+
+**`test_20` did not guard the incident key it was credited with.** It called
+`window_coverage` directly and never touched `publication_inputs`. `test_19`
+now spans repository shape → service → coverage → verdict in one case, so
+reverting the key fails there too.
+
+Also: `coverage_verdict_absent` and "no counted population" had one reason
+constant between them despite needing different remedies; the `bool()`
+coercion round 1 flagged in the recorder was still present, F1 having added a
+different guard beside it; docs/43 said 34 cases for a 64-case suite and
+described its reason-delta table as exhaustive when a 1,152-case differential
+finds eight deltas, six unreachable from `run()`.
+
+Every fix is shown failing against the pre-fix line by mutation, not by
+reading: reverting the future-date fix, the naive-tz guard, the incident key
+or the production freshness gate each turns exactly the intended test red.
+
+Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.
+
+## PR-ADS-161A-1-F3 — the freshness gate that was still a label (September 2026)
+
+Round 3 of the truth audit on PR-ADS-161A-1-F2. One blocker and four majors.
+Every one of them is in the freshness gate F2 added — the fix landed at the
+wrong layer, under the wrong reason, in the wrong order.
+
+**The service read freshness from the database and never gated on it.**
+`publication_inputs()` performs a real read of the contact-funnel sync state
+and assesses it. `publication_for()` stamped the result onto the verdict as a
+label and delegated to a gate that reads `coverage["source_fresh"]` — a value
+the CALLER copied in. So a caller whose coverage said fresh, over a service
+that had just read stale, published:
+
+```
+value: 42, available: True, certified: True,
+explanation: "...and the contact-funnel source is fresh"
+source_freshness_reason: "source_stale"        <- the same object
+```
+
+while `audit_certification` refused the identical inputs. That is F2's own
+blocker with one level of indirection, and it made the database read a guard
+whose absence changed nothing. `withheld_payload()` then dropped the field, so
+the contradiction was not even visible at the API boundary. Both signals must
+now say fresh, and the payload carries the fact it was judged on.
+
+**A freshness refusal was served under the reason `"eligible"`.** The gate
+reported `coverage["certification_status"]` as its reason. On the only shape
+`window_coverage` can emit with `certification_eligible: True`, that status is
+literally `not_certifiable_*`'s opposite — `"eligible"`. A consumer received a
+withheld total under a reason meaning "every prerequisite is met". The window's
+own status is now used only when it is itself about freshness.
+
+**"We could not look" was reported as "the source is stale".** The gate sat
+ahead of the store-readability and reader-reconciliation gates, so an
+`unavailable` verdict was displaced by a `withheld` one whenever the source
+also happened to be stale — sending an operator to fix a pipeline when the
+boundary store was unreadable or the readers had never been compared.
+Refusal order is now documented and tested: window-local, then readability,
+then reconciliation, then freshness, then the counted population.
+
+**The audit's relabel rewrote every other refusal.** Keyed on `source_fresh`
+alone, a pre-boundary window, an unreadable store and a reader disagreement all
+reported `source_stale`. Reachable from `run()` on ordinary windows. Only a
+refusal that IS about freshness may be relabelled, and the membership test is
+now one shared table — `sql_publication.FRESHNESS_REFUSALS` — that the gate,
+the service and the audit all consult, with `test_38` guarding it against
+drifting away from `CERT_STALE_SOURCE`.
+
+**The first fix for the blocker repeated the relabel defect one layer up.**
+Short-circuiting in the service and overriding `certification_status` meant a
+pre-boundary window was reported as a stale source. The audit had a test for
+exactly this (`test_35`) and the service did not. The freshness signal is now
+folded into the coverage the gate reads rather than short-circuited ahead of
+it, so the pure layer keeps deciding the order; `test_37` is the guard.
+
+Suite: 78 cases, up from 64. Eight counterfactuals were run — each pre-fix line
+restored, the module re-run, the named test confirmed failing. The three that
+matter most: the service fold, the gate ordering and the service relabel were
+all invisible to the 76 cases that existed before them.
 
 Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.

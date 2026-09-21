@@ -427,8 +427,18 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
         # `source_last_incremental_failed`, …), because the operator's next
         # step is the pipeline, not the window. The refusal is identical in
         # both; only the label an operator reads is more specific.
-        if (win.get("certification_status") == coverage.CERT_STALE_SOURCE
-                and not source_fresh):
+        if not source_fresh and reason in pub.FRESHNESS_REFUSALS:
+            # Relabel ONLY when freshness is genuinely what blocked this
+            # window. Keying on `source_fresh` alone — as F2 first did —
+            # rewrote every other refusal whenever the source also happened
+            # to be stale: a pre-boundary window, an unreadable store and a
+            # reader disagreement all reported `source_stale`. Reachable from
+            # `run()` on ordinary windows, and it sends an operator to fix the
+            # pipeline when the real blocker is that the window precedes the
+            # boundary or that the readers do not agree.
+            #
+            # Refusals are kept apart because the remedy differs — the same
+            # rule `test_30` states for the publication layer.
             reason = (freshness or {}).get("reason") or "source_not_fresh"
         _withhold(win, label, reason)
 

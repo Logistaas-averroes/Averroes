@@ -15,7 +15,7 @@ authoritative documents. It does not restate the product or the architecture.
 
 | Document | What it is | Trust its status claims? |
 | --- | --- | --- |
-| `docs/09_REPO_STATE.md` | living per-PR state log, appended by every PR | **Newest sections yes.** Its header is current as of PR-ADS-160-F2; the "Historical status snapshot" block below it is explicitly labelled and stops at August 2026 |
+| `docs/09_REPO_STATE.md` | living per-PR state log, appended by every PR | **Newest sections yes.** Its header is current as of PR-ADS-161A-1; the "Historical status snapshot" block below it is explicitly labelled and stops at August 2026 |
 | `docs/DOCTRINE.md` | the governing advisory rules | Yes |
 | `docs/03_ARCHITECTURE.md` | layer rules and data flow | Yes |
 | `docs/05_DATA_REFERENCE.md` | confirmed HubSpot/Ads field names and IDs | Yes |

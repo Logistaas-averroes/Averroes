@@ -39,6 +39,7 @@ import services.canonical_sql_publication_service as svc  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parents[1]
 _NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
+_BOUNDARY = datetime(2026, 9, 21, 4, 34, 37, tzinfo=timezone.utc)
 
 
 def _recon(complete=True, *, available=True, stale=False,
@@ -554,7 +555,8 @@ def test_19_publication_inputs_reads_the_incident_rows_the_repository_returns(
 
     incident = {"contact_id": "77001", "boundary_id": "b1",
                 "reason": "post_boundary_no_direct_sql_date",
-                "contact_created_at": datetime(2026, 9, 25, tzinfo=timezone.utc)}
+                "contact_created_at": datetime(2026, 9, 23, tzinfo=timezone.utc),
+                "detected_at": datetime(2026, 9, 23, 6, tzinfo=timezone.utc)}
     monkeypatch.setattr(repo, "fetch_post_boundary_incidents",
                         lambda **k: {"available": True, "rows": [incident],
                                      "open_count": 1})
@@ -573,6 +575,26 @@ def test_19_publication_inputs_reads_the_incident_rows_the_repository_returns(
     assert inputs["open_incidents"] == [incident], (
         "the incident gate is reading a key the repository does not return")
 
+    # …and the same value carried one step further, so this spans repository
+    # shape → service → coverage → verdict rather than stopping at an echoed
+    # dict. Reverting the key to `incidents` must fail HERE too, not only on
+    # the assertion above.
+    boundary = inputs["boundary_observed_at"]
+    cov = coverage.window_coverage(
+        window="7d", window_start=boundary + timedelta(days=1),
+        window_end=boundary + timedelta(days=8),
+        confirmed_sqls=42, recovered_sqls=0, unresolved_rows=[],
+        boundary_observed_at=boundary,
+        open_post_boundary_incidents=inputs["open_incidents"],
+        freshness={"fresh": True, "reason": "source_fresh"})
+    v = svc.publication_for(window="7d", window_type="evidence",
+                            scope="all_source", coverage=cov, inputs=inputs)
+
+    assert v["publishable"] is False
+    assert v["withheld_reason"] == coverage.CERT_POST_BOUNDARY_GAPS, (
+        "the real open gap did not reach the verdict; with the wrong key this "
+        "reports an unreadable store, and with `or []` it certifies a zero")
+
 
 def test_20_a_real_open_gap_withholds_rather_than_certifying_a_zero(monkeypatch):
     """The consequence of test_19's defect, asserted on the REASON.
@@ -584,7 +606,8 @@ def test_20_a_real_open_gap_withholds_rather_than_certifying_a_zero(monkeypatch)
     """
     boundary = datetime(2026, 9, 21, 4, 34, tzinfo=timezone.utc)
     incident = {"contact_id": "77001",
-                "contact_created_at": boundary + timedelta(days=3)}
+                "contact_created_at": boundary + timedelta(days=3),
+                "detected_at": boundary + timedelta(days=3, hours=6)}
 
     cov = coverage.window_coverage(
         window="7d", window_start=boundary + timedelta(days=1),
@@ -653,27 +676,129 @@ def test_21_the_recorder_refuses_to_write_an_unproven_run_as_a_disagreement():
     writer.assert_called_once()
 
 
-def test_22_the_writer_refuses_a_naive_observed_at():
-    """A naive instant is interpreted in the session zone on the way in."""
+def test_22_the_writer_refuses_a_naive_observed_at(monkeypatch):
+    """A naive instant is interpreted in the SESSION zone on the way in.
+
+    The first version asserted only the return value, with no database — so
+    `get_conn()` yielded `None` and the function returned False whether or not
+    the guard existed. This intercepts the cursor: the refusal must happen
+    before any statement is executed.
+    """
     from db import writers
+
+    cm, cursor = _fake_conn([])
+    monkeypatch.setattr(writers, "get_conn", cm)
 
     assert writers.record_reader_reconciliation(
         observed_at=datetime(2026, 9, 21, 12, 0),      # no tzinfo
         reconciliation_complete=True) is False
+    assert cursor.executed == [], (
+        "a naive instant reached the database; normalising it on read is too "
+        "late, the session zone has already chosen the instant")
+
     assert writers.record_reader_reconciliation(
         observed_at=None, reconciliation_complete=True) is False
+    assert cursor.executed == []
+
+    # An unproven outcome is refused too — the `bool()` coercion in the
+    # recorder used to defeat this.
+    assert writers.record_reader_reconciliation(
+        observed_at=_NOW, reconciliation_complete=None) is False
+    assert cursor.executed == []
+
+    # The positive control: a tz-aware instant with a proven outcome IS
+    # written, so the three refusals above are not passing on a writer that
+    # refuses everything.
+    assert writers.record_reader_reconciliation(
+        observed_at=_NOW, reconciliation_complete=True) is True
+    assert len(cursor.executed) == 1
+    assert "INSERT INTO sql_reader_reconciliation" in cursor.executed[0][0]
 
 
-def test_23_a_future_dated_record_is_not_fresh_forever():
-    """Negative age read as "not older than the limit" grants publication
-    indefinitely — clock skew must withhold, not certify."""
+class _FakeCursor:
+    """Enough of a psycopg2 cursor for the reconciliation read, and a record
+    of every statement it was asked to run."""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.executed: list = []
+        self.description = [
+            ("observed_at",), ("reconciliation_complete",),
+            ("combinations_expected",), ("combinations_compared",),
+            ("combinations_mismatched",), ("all_combinations_compared",),
+            ("effective_date_basis",), ("run_id",)]
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+
+    def fetchall(self):
+        return self._rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _fake_conn(rows):
+    """A `get_conn`-shaped context manager yielding a connection over `rows`."""
+    import contextlib
+
+    cursor = _FakeCursor(rows)
+
+    class _Conn:
+        def cursor(self):
+            return cursor
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    @contextlib.contextmanager
+    def _cm():
+        yield _Conn()
+
+    return _cm, cursor
+
+
+@pytest.mark.parametrize("age_hours,expect_stale", [
+    (-9600.0, True),    # stamped 400 days in the future — clock skew
+    (-0.5, True),       # slightly future
+    (1.0, False),       # fresh
+    (35.0, False),      # inside the 36h limit
+    (40.0, True),       # beyond it
+])
+def test_23_the_reader_decides_staleness_including_future_dated_rows(
+        monkeypatch, age_hours, expect_stale):
+    """Driven through `fetch_reader_reconciliation`, not a copy of its maths.
+
+    The first version of this test computed `not (0 <= age <= max_age)` in
+    the test body and asserted it against itself. It never called the
+    production reader, so reverting the fix left every test in the repository
+    green — round 1's `test_15` defect, committed a second time. This calls
+    the real function over a real row shape.
+    """
     from db import crm_funnel_repository as repo
 
-    max_age = repo.DEFAULT_RECONCILIATION_MAX_AGE_HOURS
-    for age_hours, expect_stale in ((-9600.0, True), (1.0, False),
-                                    (max_age + 1, True)):
-        stale = not (0 <= age_hours <= max_age)
-        assert stale is expect_stale, age_hours
+    observed = _NOW - timedelta(hours=age_hours)
+    row = (observed, True, 44, 44, 0, True, "date_entered_sql", "run1")
+    cm, _cursor = _fake_conn([row])
+    monkeypatch.setattr(repo, "get_conn", cm)
+
+    state = repo.fetch_reader_reconciliation(now=_NOW)
+
+    assert state["available"] is True
+    assert state["stale"] is expect_stale, (age_hours, state["age_hours"])
+
+    # And the verdict the gate reaches, so this is a refusal rather than a
+    # boolean: a future-dated row must not publish.
+    ok, reason = pub.reconciliation_gate(state)
+    assert ok is (not expect_stale)
+    if expect_stale:
+        assert reason == pub.WITHHELD_RECONCILIATION_STALE
 
 
 def test_24_a_published_verdict_never_carries_a_missing_count():
@@ -714,6 +839,7 @@ def test_26_the_audit_still_gates_on_freshness_independently():
     win = {"window": "7d", "window_type": "evidence",
            "certification_eligible": True,
            "certification_status": coverage.CERT_ELIGIBLE,
+           "source_fresh": True,
            "confirmed_sqls": 5, "confirmed_sql_subset": 5,
            "cpql_publishable": True, "complete_sql_total": 5}
 
@@ -775,7 +901,7 @@ def test_27_the_changed_audit_reason_strings_are_asserted_not_assumed():
     ok_win = {"window": "7d", "window_type": "evidence",
               "certification_eligible": True,
               "certification_status": coverage.CERT_ELIGIBLE,
-              "confirmed_sqls": 3}
+              "source_fresh": True, "confirmed_sqls": 3}
     out3 = audit_certification(Findings(), [ok_win], good_stores, good_recon,
                                {"fresh": True, "reason": "source_fresh"})
     assert out3["windows_certified"] == 1
@@ -807,3 +933,332 @@ def test_28_production_and_the_audit_differ_on_exactly_one_named_flag():
                / "canonical_sql_publication_service.py").read_text(encoding="utf-8")
     assert "require_full_scope_coverage" not in svc_src, (
         "production must not be able to opt out of full scope coverage")
+
+
+def test_29_production_refuses_a_stale_source_exactly_as_the_audit_does():
+    """Round 2: the audit gained an independent freshness gate and production
+    did not, so the audit stopped describing what production publishes — on
+    the one axis the previous round added defence to.
+
+    Measured before the fix: this coverage dict published a total of 42 here
+    while `audit_certification` refused the identical dict.
+    """
+    stale_cov = _eligible_coverage(
+        source_fresh=False,
+        certification_status=coverage.CERT_STALE_SOURCE)
+
+    v = pub.publication_verdict(coverage=stale_cov, reconciliation=_recon(True),
+                                boundary_readable=True, incidents_readable=True)
+    assert v["publishable"] is False
+    assert v["complete_sql_total"] is None
+    assert v["withheld_reason"] == coverage.CERT_STALE_SOURCE
+
+    # Parity with the audit over the SAME dict — the property that makes the
+    # shared implementation worth having.
+    from scripts.audit_lifecycle_sql_coverage import Findings, audit_certification
+    out = audit_certification(
+        Findings(), [{**stale_cov, "window": "7d", "window_type": "evidence"}],
+        {"available": True, "post_boundary_incidents_available": True},
+        {"reconciliation_complete": True, "all_combinations_compared": True},
+        {"fresh": False, "reason": "source_stale"})
+    assert out["windows_certified"] == 0
+    assert (out["windows_certified"] == 1) is v["publishable"], (
+        "the audit and production disagree about the same coverage dict")
+
+    # Control: fresh source, both publish.
+    fresh_cov = _eligible_coverage(source_fresh=True)
+    assert pub.publication_verdict(
+        coverage=fresh_cov, reconciliation=_recon(True),
+        boundary_readable=True, incidents_readable=True)["publishable"] is True
+
+
+def test_30_a_countless_window_and_an_absent_verdict_have_different_reasons():
+    """Refusals are kept apart because the remedy differs — including these
+    two, which shared one constant until round 2."""
+    absent = pub.publication_verdict(
+        coverage=None, reconciliation=_recon(True),
+        boundary_readable=True, incidents_readable=True)
+    countless = pub.publication_verdict(
+        coverage=_eligible_coverage(confirmed_sqls=None, confirmed_sql_subset=None),
+        reconciliation=_recon(True),
+        boundary_readable=True, incidents_readable=True)
+
+    assert absent["withheld_reason"] == pub.WITHHELD_COVERAGE_ABSENT
+    assert countless["withheld_reason"] == pub.WITHHELD_COUNT_ABSENT
+    assert absent["withheld_reason"] != countless["withheld_reason"]
+    assert all(v["complete_sql_total"] is None for v in (absent, countless))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §6 — round 3: the freshness the SERVICE read, and refusals that keep apart
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _service_inputs(**over) -> dict:
+    """Everything `publication_inputs` returns, all gates satisfied."""
+    base = {
+        "boundary_readable": True, "incidents_readable": True,
+        "boundary_observed_at": _BOUNDARY, "boundary_id": "b1",
+        "open_incidents": [], "reconciliation": _recon(True),
+        "freshness": {"fresh": True, "reason": "source_fresh"},
+    }
+    base.update(over)
+    return base
+
+
+def _real_eligible_coverage():
+    """A window `window_coverage` can actually emit as eligible."""
+    return coverage.window_coverage(
+        window="7d", window_start=_BOUNDARY + timedelta(days=1),
+        window_end=_BOUNDARY + timedelta(days=8),
+        confirmed_sqls=42, recovered_sqls=0, unresolved_rows=[],
+        boundary_observed_at=_BOUNDARY, open_post_boundary_incidents=[],
+        freshness={"fresh": True, "reason": "source_fresh"})
+
+
+def test_31_the_service_gates_on_the_freshness_it_read_not_the_callers_copy():
+    """Round 3's blocker: the freshness read was a label, not a gate.
+
+    `publication_inputs` performs a real database read for contact-funnel
+    freshness. `publication_for` stamped the result on the verdict and
+    delegated to a gate that reads `coverage["source_fresh"]` — a value the
+    CALLER copied in. A caller whose coverage says fresh, over a service that
+    has just read stale, published:
+
+        value: 42, available: True, certified: True,
+        explanation: "...and the contact-funnel source is fresh"
+        source_freshness_reason: "source_stale"      <- the same object
+
+    while `audit_certification` refused the identical inputs.
+    """
+    cov = _real_eligible_coverage()
+    assert cov["certification_eligible"] is True, "fixture premise"
+    assert cov["source_fresh"] is True, (
+        "the caller's copy must say fresh, or this proves nothing")
+
+    v = svc.publication_for(
+        window="7d", window_type="evidence", scope="all_source", coverage=cov,
+        inputs=_service_inputs(freshness={"fresh": False,
+                                          "reason": "source_stale"}))
+
+    assert v["publishable"] is False
+    assert v["complete_sql_total"] is None
+    assert "fresh" in (v["withheld_reason"] or "")
+
+    payload = svc.withheld_payload(v)
+    assert payload["value"] is None, "a stale-source total reached the API"
+    assert payload["available"] is False
+    assert payload["source_freshness_reason"] == "source_stale", (
+        "the payload must carry the fact it was judged on")
+
+    # The control: the identical call with the service reading fresh.
+    ok = svc.publication_for(window="7d", window_type="evidence",
+                             scope="all_source", coverage=cov,
+                             inputs=_service_inputs())
+    assert ok["publishable"] is True
+    assert svc.withheld_payload(ok)["value"] == 42
+
+
+@pytest.mark.parametrize("fresh_value", [False, None, "yes", 0])
+def test_32_an_unproven_service_freshness_withholds_whatever_its_shape(
+        fresh_value):
+    """Only an explicit `True` is fresh — every other value refuses."""
+    v = svc.publication_for(
+        window="7d", window_type="evidence", scope="all_source",
+        coverage=_real_eligible_coverage(),
+        inputs=_service_inputs(freshness={"fresh": fresh_value}))
+    assert v["publishable"] is False
+    assert v["complete_sql_total"] is None
+
+
+def test_33_the_freshness_refusal_is_not_labelled_eligible():
+    """Round 3: the gate reported its own refusal under the window's status.
+
+    On the only shape `window_coverage` emits with `certification_eligible:
+    True`, that status is literally `"eligible"` — so a withheld total was
+    served to a consumer under a reason meaning "every prerequisite is met".
+    """
+    cov = {**_real_eligible_coverage(), "source_fresh": False}
+    assert cov["certification_status"] == coverage.CERT_ELIGIBLE, (
+        "fixture premise: this is the near-production shape")
+
+    v = pub.publication_verdict(coverage=cov, reconciliation=_recon(True),
+                                boundary_readable=True, incidents_readable=True)
+
+    assert v["publishable"] is False
+    assert v["withheld_reason"] == pub.WITHHELD_SOURCE_NOT_FRESH
+    assert v["withheld_reason"] != coverage.CERT_ELIGIBLE
+    assert svc.withheld_payload(v)["reason"] == pub.WITHHELD_SOURCE_NOT_FRESH
+
+    # A window whose status IS about freshness keeps its own, more specific one.
+    stale = {**cov, "certification_status": coverage.CERT_STALE_SOURCE}
+    assert pub.publication_verdict(
+        coverage=stale, reconciliation=_recon(True), boundary_readable=True,
+        incidents_readable=True)["withheld_reason"] == coverage.CERT_STALE_SOURCE
+
+
+def test_34_could_not_look_outranks_not_fresh():
+    """`unavailable` and `withheld` are different claims; ordering decides.
+
+    The first version placed the freshness gate ahead of the readability and
+    reconciliation gates, so "we could not look" was reported as "we looked
+    and the source is stale".
+    """
+    cov = {**_real_eligible_coverage(), "source_fresh": False}
+
+    unreadable = pub.publication_verdict(
+        coverage=cov, reconciliation=_recon(True),
+        boundary_readable=False, incidents_readable=True)
+    assert unreadable["status"] == pub.UNAVAILABLE
+    assert unreadable["withheld_reason"] == pub.WITHHELD_INPUTS_UNREADABLE
+
+    unproven = pub.publication_verdict(
+        coverage=cov, reconciliation=None,
+        boundary_readable=True, incidents_readable=True)
+    assert unproven["withheld_reason"] == pub.WITHHELD_RECONCILIATION_NOT_PROVEN
+
+    # With everything readable and reconciled, freshness is the blocker.
+    assert pub.publication_verdict(
+        coverage=cov, reconciliation=_recon(True), boundary_readable=True,
+        incidents_readable=True)["withheld_reason"] == pub.WITHHELD_SOURCE_NOT_FRESH
+
+
+@pytest.mark.parametrize("status,expected", [
+    ("not_certifiable_window_precedes_boundary",
+     "not_certifiable_window_precedes_boundary"),
+    ("not_certifiable_open_post_boundary_gaps",
+     "not_certifiable_open_post_boundary_gaps"),
+    ("certification_unavailable", "certification_unavailable"),
+    ("not_certifiable_source_not_fresh", "source_stale"),
+])
+def test_35_a_stale_source_does_not_relabel_every_other_audit_refusal(
+        status, expected):
+    """Round 3: keying the relabel on `source_fresh` alone rewrote everything.
+
+    A pre-boundary window, an unreadable store and a reader disagreement all
+    reported `source_stale` whenever the source also happened to be stale —
+    reachable from `run()` on ordinary windows, and it sends an operator to
+    fix the pipeline when the real blocker is something else. Only a refusal
+    that IS about freshness may be relabelled.
+    """
+    from scripts.audit_lifecycle_sql_coverage import Findings, audit_certification
+
+    win = {"window": "7d", "window_type": "evidence",
+           "certification_eligible": False, "certification_status": status}
+    out = audit_certification(
+        Findings(), [win],
+        {"available": True, "post_boundary_incidents_available": True},
+        {"reconciliation_complete": True, "all_combinations_compared": True},
+        {"fresh": False, "reason": "source_stale"})
+
+    assert out["blocked_windows"][0]["reason"] == expected
+    assert out["windows_certified"] == 0
+
+
+def test_36_the_recorder_refuses_an_unproven_outcome_without_coercing_it():
+    """The `bool()` that turned an unproven None into a recorded False.
+
+    Unreachable from today's only producer, which always returns a bool — so
+    this drives the shape directly rather than claiming the hole is live.
+    """
+    import unittest.mock as mock
+
+    import scripts.record_sql_reader_reconciliation as rec
+
+    unproven = {"available": True, "reconciliation_complete": None,
+                "combinations_expected": 44, "combinations_compared": 44,
+                "combinations_execution_unavailable": 0, "unavailable": 0,
+                "all_combinations_compared": True, "results": []}
+
+    with mock.patch("scripts.audit_lifecycle_sql_coverage."
+                    "audit_read_reconciliation", return_value=unproven), \
+         mock.patch("db.writers.record_reader_reconciliation",
+                    return_value=False) as writer:
+        rec.run(apply=True, now=_NOW)
+
+    assert writer.call_args is not None, "the writer was never reached"
+    assert writer.call_args.kwargs["reconciliation_complete"] is None, (
+        "an unproven outcome was coerced to False on the way to the writer, "
+        "which records a disagreement nobody observed")
+
+
+def test_37_the_services_freshness_fold_does_not_relabel_other_refusals():
+    """The service repeated test_35's defect one layer up, and nothing caught it.
+
+    The first round-3 fix short-circuited ahead of the gate and overrode the
+    window's `certification_status` with the freshness reason. So a window
+    that precedes the boundary — a permanent, structural refusal an operator
+    resolves by waiting, not by fixing a pipeline — was reported as a stale
+    source whenever the source also happened to be stale. Same defect as
+    test_35 pins in the audit; the audit had a test and the service did not.
+
+    Folding `source_fresh` into the coverage the gate reads, instead of
+    short-circuiting, leaves the ORDER of refusals with the pure layer.
+    """
+    stale = _service_inputs(freshness={"fresh": False, "reason": "source_stale"})
+
+    # A window-local refusal outranks freshness and keeps its own reason.
+    pre_boundary = coverage.window_coverage(
+        window="30d", window_start=_BOUNDARY - timedelta(days=30),
+        window_end=_BOUNDARY - timedelta(days=1),
+        confirmed_sqls=42, recovered_sqls=0, unresolved_rows=[],
+        boundary_observed_at=_BOUNDARY, open_post_boundary_incidents=[],
+        freshness={"fresh": True, "reason": "source_fresh"})
+    assert pre_boundary["certification_status"] == coverage.CERT_PRE_BOUNDARY, (
+        "fixture premise")
+
+    v = svc.publication_for(window="30d", window_type="evidence",
+                            scope="all_source", coverage=pre_boundary,
+                            inputs=stale)
+    assert v["publishable"] is False
+    assert v["withheld_reason"] == coverage.CERT_PRE_BOUNDARY, (
+        "a structural refusal was relabelled as a pipeline failure")
+    assert "not proven fresh" not in (v["explanation"] or ""), (
+        "the freshness explanation was stamped over another refusal's reason")
+
+    # "Could not look" still outranks "we looked and it is stale".
+    unreadable = svc.publication_for(
+        window="7d", window_type="evidence", scope="all_source",
+        coverage=_real_eligible_coverage(),
+        inputs=_service_inputs(freshness={"fresh": False, "reason": "source_stale"},
+                               boundary_readable=False))
+    assert unreadable["status"] == pub.UNAVAILABLE
+    assert unreadable["withheld_reason"] == pub.WITHHELD_INPUTS_UNREADABLE
+
+    # …and an unproven reconciliation likewise.
+    unproven = svc.publication_for(
+        window="7d", window_type="evidence", scope="all_source",
+        coverage=_real_eligible_coverage(),
+        inputs=_service_inputs(freshness={"fresh": False, "reason": "source_stale"},
+                               reconciliation=None))
+    assert unproven["withheld_reason"] == pub.WITHHELD_RECONCILIATION_NOT_PROVEN
+
+    # The control: with freshness the ONLY blocker, the service does refuse
+    # on it and does name what it measured.
+    only_stale = svc.publication_for(
+        window="7d", window_type="evidence", scope="all_source",
+        coverage=_real_eligible_coverage(), inputs=stale)
+    assert only_stale["withheld_reason"] == pub.WITHHELD_SOURCE_NOT_FRESH
+    assert "source_stale" in (only_stale["explanation"] or "")
+
+
+def test_38_the_freshness_refusal_table_still_covers_the_coverage_constant():
+    """One table, and it must not drift away from the layer it describes.
+
+    `sql_publication.FRESHNESS_REFUSALS` spells the window-local member as a
+    literal rather than importing it, so that the pure layer stays free of the
+    coverage layer. That choice is only safe while the literal still matches.
+    If `CERT_STALE_SOURCE` is ever renamed, the relabel in the audit and the
+    gate's own reason lookup both silently stop recognising it — a genuinely
+    stale window would then be refused under a reason meaning something else.
+    """
+    assert coverage.CERT_STALE_SOURCE in pub.FRESHNESS_REFUSALS, (
+        "the coverage layer's stale-source status is no longer in the shared "
+        "freshness table; the relabel and the gate's reason lookup are now "
+        "blind to it")
+    assert pub.WITHHELD_SOURCE_NOT_FRESH in pub.FRESHNESS_REFUSALS
+
+    # And the audit reads THAT table rather than keeping its own copy.
+    src = (_ROOT / "scripts" / "audit_lifecycle_sql_coverage.py").read_text(
+        encoding="utf-8")
+    assert "pub.FRESHNESS_REFUSALS" in src, (
+        "the audit has grown a second freshness table; they will diverge")
