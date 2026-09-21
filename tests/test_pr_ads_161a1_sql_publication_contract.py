@@ -25,6 +25,7 @@ treat absence as refusal.
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -836,10 +837,15 @@ def test_26_the_audit_still_gates_on_freshness_independently():
     """
     from scripts.audit_lifecycle_sql_coverage import Findings, audit_certification
 
+    # `window_total_complete: True` because `audit_windows` builds every row
+    # through `window_coverage`, which always emits the key and always emits
+    # it True on an eligible window. Omitting it made this fixture a shape
+    # production cannot produce, and round 4 added a gate that (correctly)
+    # refuses an "eligible" window whose membership is unresolved.
     win = {"window": "7d", "window_type": "evidence",
            "certification_eligible": True,
            "certification_status": coverage.CERT_ELIGIBLE,
-           "source_fresh": True,
+           "source_fresh": True, "window_total_complete": True,
            "confirmed_sqls": 5, "confirmed_sql_subset": 5,
            "cpql_publishable": True, "complete_sql_total": 5}
 
@@ -901,7 +907,8 @@ def test_27_the_changed_audit_reason_strings_are_asserted_not_assumed():
     ok_win = {"window": "7d", "window_type": "evidence",
               "certification_eligible": True,
               "certification_status": coverage.CERT_ELIGIBLE,
-              "source_fresh": True, "confirmed_sqls": 3}
+              "source_fresh": True, "window_total_complete": True,
+              "confirmed_sqls": 3}
     out3 = audit_certification(Findings(), [ok_win], good_stores, good_recon,
                                {"fresh": True, "reason": "source_fresh"})
     assert out3["windows_certified"] == 1
@@ -1262,3 +1269,351 @@ def test_38_the_freshness_refusal_table_still_covers_the_coverage_constant():
         encoding="utf-8")
     assert "pub.FRESHNESS_REFUSALS" in src, (
         "the audit has grown a second freshness table; they will diverge")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# §7 — round 4: the gates that were unreachable on production-shaped inputs
+#
+# Round 4's finding was not a fabricated control. Every §6 guard goes red under
+# a targeted mutation. The defect was subtler: several of them prove their
+# property only on input tuples `publication_inputs()` and `window_coverage()`
+# CANNOT JOINTLY PRODUCE, and on the tuples production does produce the
+# property was false. Every test below therefore builds its coverage from the
+# real `publication_inputs()` output, exactly as a consumer must.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _coverage_from_inputs(inputs, *, window_start=None, window_end=None,
+                          confirmed=42, unresolved=None):
+    """Build coverage the ONLY way a consumer can: out of `publication_inputs`.
+
+    A fixture that sets `boundary_observed_at` while `boundary_readable` is
+    False, or `source_fresh: True` while the service read stale, is describing
+    a state the service cannot hand a caller. Round 4 found three guards
+    resting on exactly that.
+    """
+    boundary = inputs["boundary_observed_at"]
+    anchor = boundary or _BOUNDARY
+    return coverage.window_coverage(
+        window="7d",
+        window_start=window_start or anchor + timedelta(days=1),
+        window_end=window_end or anchor + timedelta(days=8),
+        confirmed_sqls=confirmed, recovered_sqls=0,
+        unresolved_rows=unresolved or [],
+        boundary_observed_at=boundary,
+        open_post_boundary_incidents=inputs["open_incidents"],
+        freshness=inputs["freshness"])
+
+
+def _inputs(**over):
+    """`publication_inputs()`'s real output shape, all gates satisfied.
+
+    Unlike `_service_inputs`, this enforces the coupling the real function
+    enforces: an unreadable boundary store CANNOT carry a boundary instant.
+    """
+    base = {"boundary_readable": True, "incidents_readable": True,
+            "boundary_observed_at": _BOUNDARY, "boundary_id": "b1",
+            "open_incidents": [], "reconciliation": _recon(True),
+            "freshness": {"fresh": True, "reason": "source_fresh"}}
+    base.update(over)
+    if base["boundary_readable"] is not True:
+        # What `publication_inputs` actually does:
+        #   boundary = (state.get("boundary") or {}) if boundary_readable else {}
+        base["boundary_observed_at"] = None
+        base["boundary_id"] = None
+    return base
+
+
+def test_39_the_copied_coverage_status_literals_still_match_their_constants():
+    """Three `CERT_*` values are spelled as literals in the pure layer.
+
+    They are copies, kept so that `analysis.sql_publication` need not import
+    `analysis.lifecycle_sql_coverage` (the AST guard in §4 forbids it). A
+    rename on either side silently un-matches them, and each one decides a
+    gate: `NO_BOUNDARY` decides whether an unread store is reported as
+    `unavailable`, `UNAVAILABLE` decides a status, `STALE_SOURCE` decides the
+    freshness deferral. This is the only thing that makes copying safe.
+    """
+    assert pub.COVERAGE_STATUS_NO_BOUNDARY == coverage.CERT_NO_BOUNDARY
+    assert pub.COVERAGE_STATUS_UNAVAILABLE == coverage.CERT_UNAVAILABLE
+    assert pub.COVERAGE_STATUS_STALE_SOURCE == coverage.CERT_STALE_SOURCE
+    assert coverage.CERT_STALE_SOURCE in pub.FRESHNESS_REFUSALS
+
+    # And no coverage-layer status VALUE appears in this module that the
+    # table above does not cover. What this catches is a NEW copied status —
+    # a gate added tomorrow that compares against, say, the pre-boundary
+    # literal — entering without a drift guard. What it does NOT catch is an
+    # existing tabled value being written inline instead of via its constant;
+    # that is a style point, and a rename is caught by the assertions above
+    # either way. Stated so the guard is not credited with more than it does.
+    #
+    # Read with AST rather than a substring scan, so that a literal inside a
+    # comment or a docstring cannot satisfy it — that weakness is exactly what
+    # round 4 found in `test_38`'s structural arm.
+    src = (_ROOT / "analysis" / "sql_publication.py").read_text(encoding="utf-8")
+    # Names of DICT KEYS the module legitimately reads off a coverage dict.
+    # They are keys, not status values, so they carry no drift risk.
+    keys = {"certification_status", "certification_eligible",
+            "certification_explanation"}
+    found = {n.value for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Constant) and isinstance(n.value, str)
+             and re.fullmatch(r"not_certifiable_\w+|certification_\w+", n.value)
+             and n.value not in keys}
+    tabled = {pub.COVERAGE_STATUS_NO_BOUNDARY, pub.COVERAGE_STATUS_UNAVAILABLE,
+              pub.COVERAGE_STATUS_STALE_SOURCE, pub.WITHHELD_INPUTS_UNREADABLE}
+    assert found <= tabled, (
+        f"un-tabled coverage-layer literal(s) in sql_publication.py: "
+        f"{sorted(found - tabled)} — add them to the table test_39 guards")
+
+
+def test_40_an_unread_boundary_store_is_not_the_claim_that_none_exists():
+    """ROUND 4 BLOCKER: two different claims, byte-identical at every surface.
+
+    `publication_inputs` sets `boundary_observed_at = None` when the store is
+    unreadable, so a caller building coverage from it gets `CERT_NO_BOUNDARY`
+    — which fired before the readability gate. During an outage every SQL
+    surface stated a permanent, benign "no boundary has been established yet"
+    and an operator would wait it out.
+
+    `false` and `null` are different claims. This is the repository's own
+    named landmine.
+    """
+    unreadable = _inputs(boundary_readable=False)
+    # The coupling, asserted rather than assumed — this is what made the
+    # earlier fixtures unreal.
+    assert unreadable["boundary_observed_at"] is None, (
+        "an unreadable store cannot also hand back a boundary instant")
+
+    v = svc.publication_for(window="7d", window_type="evidence",
+                            scope="all_source",
+                            coverage=_coverage_from_inputs(unreadable),
+                            inputs=unreadable)
+
+    assert v["status"] == pub.UNAVAILABLE, (
+        "we could not look, reported as a thing we looked at")
+    assert v["withheld_reason"] == pub.WITHHELD_INPUTS_UNREADABLE
+    assert v["complete_sql_total"] is None
+
+    # The other claim: the store read fine and there is genuinely no boundary.
+    none_yet = _inputs(boundary_observed_at=None, boundary_id=None)
+    w = svc.publication_for(window="7d", window_type="evidence",
+                            scope="all_source",
+                            coverage=_coverage_from_inputs(none_yet),
+                            inputs=none_yet)
+    assert w["status"] == pub.WITHHELD
+    assert w["withheld_reason"] == coverage.CERT_NO_BOUNDARY
+
+    # They must be distinguishable at the API boundary, not only internally —
+    # `withheld_payload` drops `boundary_id`, so this is where it was lost.
+    assert svc.withheld_payload(v) != svc.withheld_payload(w)
+    assert (svc.withheld_payload(v)["status"]
+            != svc.withheld_payload(w)["status"])
+
+    # The control: a readable store WITH a boundary still publishes.
+    ok = _inputs()
+    good = svc.publication_for(window="7d", window_type="evidence",
+                               scope="all_source",
+                               coverage=_coverage_from_inputs(ok), inputs=ok)
+    assert good["publishable"] is True and good["complete_sql_total"] == 42
+
+
+@pytest.mark.parametrize("blocker,expected_reason,expected_status", [
+    ({"reconciliation": None},
+     pub.WITHHELD_RECONCILIATION_NOT_PROVEN, pub.UNAVAILABLE),
+    ({"reconciliation": _recon(True, available=False)},
+     pub.WITHHELD_RECONCILIATION_NOT_PROVEN, pub.UNAVAILABLE),
+    ({"reconciliation": _recon(False)},
+     pub.WITHHELD_READERS_NOT_RECONCILED, pub.WITHHELD),
+    ({"reconciliation": _recon(True, stale=True)},
+     pub.WITHHELD_RECONCILIATION_STALE, pub.WITHHELD),
+    ({"boundary_readable": False},
+     pub.WITHHELD_INPUTS_UNREADABLE, pub.UNAVAILABLE),
+])
+def test_41_a_stale_source_no_longer_displaces_the_global_refusals(
+        blocker, expected_reason, expected_status):
+    """ROUND 4 BLOCKER: the round-3 reordering was inert on real inputs.
+
+    Freshness is gated in TWO places. `_certification` refuses an
+    otherwise-perfect window with `CERT_STALE_SOURCE`, and that is the
+    window-local gate — step 1, ahead of everything the reordering put in
+    front of the step-4 gate. So on every coherent production input a stale
+    source still won. Measured before the fix, all four reporting
+    `not_certifiable_source_not_fresh`:
+
+        stale + reconciliation record absent
+        stale + readers disagreed
+        stale + boundary store unreadable
+        stale + incident store unreadable
+
+    Today NO reconciliation record exists — the recorder has no scheduled
+    home — so a stale sync would have sent an operator to the pipeline while
+    the refusal actually blocking every window went unreported.
+
+    Every case here is built through the real `window_coverage`, with the
+    caller's freshness copy taken from `inputs` as a consumer must.
+    """
+    ins = _inputs(freshness={"fresh": False, "reason": "source_stale"},
+                  **blocker)
+    cov = _coverage_from_inputs(ins)
+    # The premise: this is genuinely the window-local stale refusal, not a
+    # hand-built dict. (An unreadable store outranks it even window-locally.)
+    if ins["boundary_readable"] is True:
+        assert cov["certification_status"] == coverage.CERT_STALE_SOURCE, (
+            "fixture premise: production emits the window-local stale refusal")
+
+    v = svc.publication_for(window="7d", window_type="evidence",
+                            scope="all_source", coverage=cov, inputs=ins)
+
+    assert v["withheld_reason"] == expected_reason, (
+        "a stale source displaced the refusal an operator must act on")
+    assert v["status"] == expected_status
+    assert v["complete_sql_total"] is None
+
+
+def test_42_with_every_global_gate_satisfied_freshness_is_still_the_blocker():
+    """The control for test_41: the deferral must not swallow the refusal.
+
+    Deferring the window-local freshness reason past the global gates would
+    be a fail-open if nothing caught it afterwards. With every global gate
+    satisfied it must still refuse, and under its own specific reason rather
+    than the generic one.
+    """
+    ins = _inputs(freshness={"fresh": False, "reason": "source_stale"})
+    cov = _coverage_from_inputs(ins)
+    assert cov["certification_status"] == coverage.CERT_STALE_SOURCE
+
+    v = svc.publication_for(window="7d", window_type="evidence",
+                            scope="all_source", coverage=cov, inputs=ins)
+
+    assert v["publishable"] is False
+    assert v["complete_sql_total"] is None
+    assert v["withheld_reason"] == coverage.CERT_STALE_SOURCE, (
+        "the window's own, more specific freshness reason was lost in the "
+        "deferral")
+    assert "source_stale" in (v["explanation"] or "")
+
+    # A window that is stale AND structurally refused keeps the structural
+    # reason: the deferral must not promote freshness over a permanent
+    # refusal either.
+    pre = _coverage_from_inputs(
+        ins, window_start=_BOUNDARY - timedelta(days=30),
+        window_end=_BOUNDARY - timedelta(days=1))
+    assert svc.publication_for(
+        window="30d", window_type="evidence", scope="all_source",
+        coverage=pre, inputs=ins)["withheld_reason"] == coverage.CERT_PRE_BOUNDARY
+
+    # The fail-open the deferral's second condition exists to prevent, named
+    # rather than left to be caught incidentally. Deferring on the REASON
+    # alone would let an incoherent dict — a stale status beside a fresh
+    # source — fall past the step-1 refusal and out through the publishing
+    # branch, because the step-4 gate that is supposed to catch it reads
+    # `source_fresh`. Such a dict keeps its immediate refusal.
+    incoherent = {**_eligible_coverage(),
+                  "certification_eligible": False,
+                  "certification_status": coverage.CERT_STALE_SOURCE,
+                  "source_fresh": True}
+    bad = pub.publication_verdict(
+        coverage=incoherent, reconciliation=_recon(True),
+        boundary_readable=True, incidents_readable=True)
+    assert bad["publishable"] is False, (
+        "a coverage dict claiming both a stale status and a fresh source fell "
+        "through the deferral and published")
+    assert bad["withheld_reason"] == coverage.CERT_STALE_SOURCE
+
+
+def test_43_an_eligible_window_with_unresolved_membership_publishes_nothing():
+    """ROUND 4 MAJOR: the subset was published as a certified COMPLETE total.
+
+        value: 42, available: True, certified: True, coverage_complete: False
+
+    PR-ADS-160 §2's defect verbatim, in one object. `window_coverage` cannot
+    emit that pair — `_certification` requires `complete` before returning
+    `CERT_ELIGIBLE` — so it arises only from a caller-built dict, which is
+    exactly the seam `publication_for` exposes and the reason `test_24`
+    exists for the sibling missing-count case. The PR guarded "eligible with
+    no count" (a blank) and left "eligible with unresolved membership" (a
+    WRONG NUMBER) open.
+    """
+    contradictory = {"confirmed_sqls": 42, "confirmed_sql_subset": 42,
+                     "window_total_complete": False, "complete_sql_total": None,
+                     "certification_eligible": True,
+                     "certification_status": coverage.CERT_ELIGIBLE,
+                     "source_fresh": True}
+
+    v = pub.publication_verdict(coverage=contradictory, reconciliation=_recon(True),
+                                boundary_readable=True, incidents_readable=True)
+
+    assert v["publishable"] is False
+    assert v["complete_sql_total"] is None
+    assert v["withheld_reason"] == pub.WITHHELD_COVERAGE_SELF_CONTRADICTORY
+    assert v["status"] == pub.UNAVAILABLE
+    payload = svc.withheld_payload(v)
+    assert payload["value"] is None and payload["available"] is False
+
+    # An absent key is not a resolved membership either — unknown is not yes.
+    missing = {k: val for k, val in contradictory.items()
+               if k != "window_total_complete"}
+    assert pub.publication_verdict(
+        coverage=missing, reconciliation=_recon(True), boundary_readable=True,
+        incidents_readable=True)["publishable"] is False
+
+    # The control: resolve the membership and the same window publishes.
+    resolved = {**contradictory, "window_total_complete": True}
+    ok = pub.publication_verdict(coverage=resolved, reconciliation=_recon(True),
+                                 boundary_readable=True, incidents_readable=True)
+    assert ok["publishable"] is True and ok["complete_sql_total"] == 42
+
+
+def test_44_an_unreadable_sync_state_is_not_the_claim_that_it_is_stale():
+    """ROUND 4 MAJOR: the F3 fold wrote `False` for `None`.
+
+    `sql_coverage_freshness.assess` is explicit: `fresh` is `None`, never
+    `False`, when the state could not be read — False is a claim about the
+    pipeline, None is a statement about us, and the caller must be able to
+    tell them apart. The service's own fold was the first thing in the chain
+    to erase that, recording `source_fresh: False` for a read that failed.
+    """
+    unreadable = _inputs(freshness={"fresh": None,
+                                    "reason": "source_freshness_unreadable"})
+    stale = _inputs(freshness={"fresh": False, "reason": "source_stale"})
+
+    a = svc.publication_for(window="7d", window_type="evidence",
+                            scope="all_source",
+                            coverage=_coverage_from_inputs(unreadable),
+                            inputs=unreadable)
+    b = svc.publication_for(window="7d", window_type="evidence",
+                            scope="all_source",
+                            coverage=_coverage_from_inputs(stale), inputs=stale)
+
+    assert a["source_fresh"] is None, (
+        "'we could not read the sync state' was recorded as 'the pipeline is "
+        "stale' — a claim nobody made")
+    assert b["source_fresh"] is False
+
+    # Both still block, and both still say which one they are.
+    assert a["publishable"] is False and b["publishable"] is False
+    assert svc.withheld_payload(a)["source_freshness_reason"] == (
+        "source_freshness_unreadable")
+    assert svc.withheld_payload(b)["source_freshness_reason"] == "source_stale"
+
+
+@pytest.mark.parametrize("malformed", [[1, 2], "not a dict", 42, 0, "", [], None])
+def test_45_a_malformed_coverage_survives_the_service_not_only_the_gate(
+        malformed):
+    """ROUND 4 MINOR: an F3 regression `test_25` structurally could not see.
+
+    `test_25` proves the PURE gate returns `unavailable` on a malformed
+    coverage. F3 added `{**(coverage or {}), ...}` to the SERVICE, which
+    raises `TypeError` on a truthy non-mapping — measured against the F2
+    service, which returned `unavailable / coverage_verdict_absent`. Because
+    `test_25` routes nothing through `publication_for`, the regression was
+    invisible to it. Same inputs, both layers, from now on.
+    """
+    ins = _inputs(freshness={"fresh": False, "reason": "source_stale"})
+
+    v = svc.publication_for(window="7d", window_type="evidence",
+                            scope="all_source", coverage=malformed, inputs=ins)
+
+    assert v["status"] == pub.UNAVAILABLE
+    assert v["publishable"] is False
+    assert v["complete_sql_total"] is None
+    assert svc.withheld_payload(v)["value"] is None

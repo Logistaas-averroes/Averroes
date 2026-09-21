@@ -166,10 +166,29 @@ def publication_for(*, window: str, window_type: str, scope: str,
     # `source_fresh` is overridden — overriding `certification_status` too
     # would have relabelled a pre-boundary window as a freshness failure,
     # which is the same defect test_35 pins in the audit.
+    #
+    # ROUND 4, MAJOR — the first version of this fold wrote `False`, turning
+    # "we could not read the sync state" into the claim "the pipeline is
+    # stale". `sql_coverage_freshness.assess` is explicit that `fresh` is
+    # `None`, never `False`, when the state could not be read: False is a
+    # claim about the pipeline, None is a statement about us. Both block; the
+    # explanation must tell them apart. The service's own fold was the first
+    # thing in the chain to erase that. It now propagates the value verbatim
+    # — every downstream test is `is not True`, so refusal behaviour is
+    # unchanged and only the recorded claim becomes truthful.
+    #
+    # ROUND 4, MINOR — `{**coverage}` over a truthy non-mapping raised
+    # `TypeError` where the pre-F3 service returned `unavailable /
+    # coverage_verdict_absent`. `test_25` proves the PURE gate survives a
+    # malformed coverage; it routes nothing through the service, so this
+    # regression was invisible to it. The gate handles a non-mapping on its
+    # own, so the fold simply steps aside.
     service_freshness = inputs.get("freshness") or {}
     service_fresh = service_freshness.get("fresh") is True
-    if not service_fresh:
-        coverage = {**(coverage or {}), "source_fresh": False}
+    if not service_fresh and isinstance(coverage, dict):
+        coverage = {**coverage, "source_fresh": service_freshness.get("fresh")}
+    elif not service_fresh and coverage is None:
+        coverage = {"source_fresh": service_freshness.get("fresh")}
 
     verdict = pub.publication_verdict(
         coverage=coverage,

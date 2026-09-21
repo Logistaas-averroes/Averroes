@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-161A-1-F3 — the freshness gate that was still a label (September 2026)
+**Last updated:** PR-ADS-161A-1-F4 — the gates that were unreachable on real inputs (September 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -809,6 +809,72 @@ it, so the pure layer keeps deciding the order; `test_37` is the guard.
 Suite: 78 cases, up from 64. Eight counterfactuals were run — each pre-fix line
 restored, the module re-run, the named test confirmed failing. The three that
 matter most: the service fold, the gate ordering and the service relabel were
-all invisible to the 76 cases that existed before them.
+all invisible to the 64 cases that existed before them.
+
+Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.
+
+## PR-ADS-161A-1-F4 — the gates that were unreachable on real inputs (September 2026)
+
+Round 4 of the truth audit, run against the F3 commit. Two blockers and three
+further findings. **Round 4's finding was not another fabricated control** —
+every F3 guard does go red under a targeted mutation. The defect was subtler
+and worse: several of them prove their property only on input tuples
+`publication_inputs()` and `window_coverage()` cannot jointly produce, and on
+the tuples production *does* produce the property was false.
+
+**An unread boundary store was published as the claim "no coverage boundary
+exists".** `publication_inputs` sets `boundary_observed_at = None` whenever
+the store is unreadable, so a caller building coverage from it — the only
+caller shape the service supports — gets the window-local `CERT_NO_BOUNDARY`
+back, and that fired before the readability gate was ever evaluated.
+`withheld_payload` drops `boundary_id` and `boundary_observed_at`, so the two
+states were byte-identical at every surface. During an outage every SQL
+surface would state a permanent, benign, nothing-to-do condition and an
+operator would wait it out. `boundary_readable` was a parameter that changed
+nothing on any input the service can actually produce.
+
+**F3's reordering was inert on every coherent production input.** Freshness is
+gated in *two* places and only the second moved. `_certification` refuses an
+otherwise-perfect window with `CERT_STALE_SOURCE`, which arrives as a
+window-local reason at step 1 — ahead of everything F3 put in front of the
+step-4 gate. Measured with the source stale: a missing reconciliation record,
+a reader disagreement and an unreadable boundary store all still reported
+`not_certifiable_source_not_fresh`. Because the recorder still has no
+scheduled home, no reconciliation record exists, so a stale sync would have
+sent an operator to the pipeline while the refusal blocking every window went
+unreported. Step 1 now defers a freshness reason to the global gates instead
+of returning — conditional on `source_fresh is not True`, so the deferral
+cannot itself become a fail-open.
+
+**An eligible window with unresolved membership published the subset as a
+certified complete total** — `value: 42, available: True, certified: True,
+coverage_complete: False` in one object, PR-ADS-160 §2's defect verbatim. Not
+emittable by `window_coverage`; reachable only from a caller-built dict, which
+is the seam `publication_for` exposes and the reason `test_24` exists for the
+sibling missing-count case. F3 guarded "eligible with no count" (a blank) and
+left "eligible with unresolved membership" (a wrong number) open.
+
+**F3's own fold coerced `fresh: None` to `source_fresh: False`** — turning "we
+could not read the sync state" into the claim "the pipeline is stale", the
+exact distinction `sql_coverage_freshness.assess` documents. And it raised
+`TypeError` on a truthy non-mapping coverage where the F2 service returned
+`unavailable`; `test_25` proves the pure gate survives that input but routes
+nothing through the service, so the regression was invisible to it.
+
+Also: `docs/43`'s reason-delta claim gave a count without defining its input
+space, so it was not reproducible — the space is now stated (1,152 cells) and
+the measured result is 307 reason deltas in 6 classes with **0**
+`windows_certified` deltas; the F3 repo-state section said "76 cases existed
+before" when 64 did.
+
+Suite: 95 cases, up from 78. Eight counterfactuals run for the new guards,
+each confirmed failing against the pre-fix line. Every §7 test builds its
+coverage from the real `publication_inputs()` output, and the `_inputs()`
+helper enforces the coupling the real function enforces — an unreadable store
+cannot also hand back a boundary instant.
+
+**The recurring lesson, recorded because it has now cost four rounds:** a
+fixture that cannot arise from the producing code proves nothing about the
+consuming code.
 
 Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.
