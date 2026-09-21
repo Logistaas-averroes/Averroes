@@ -427,8 +427,12 @@ def audit_certification(f: Findings, windows: list, boundary: dict,
         # `source_last_incremental_failed`, …), because the operator's next
         # step is the pipeline, not the window. The refusal is identical in
         # both; only the label an operator reads is more specific.
-        if (win.get("certification_status") == coverage.CERT_STALE_SOURCE
-                and not source_fresh):
+        if not source_fresh:
+            # Whatever the window's own status says, an unfresh source is
+            # reported as the FRESHNESS reason: the operator's next step is
+            # the pipeline. Keyed on `source_fresh` alone rather than on the
+            # window's status, because the shared gate now refuses on
+            # freshness too and hands back the window's status verbatim.
             reason = (freshness or {}).get("reason") or "source_not_fresh"
         _withhold(win, label, reason)
 

@@ -554,7 +554,8 @@ def test_19_publication_inputs_reads_the_incident_rows_the_repository_returns(
 
     incident = {"contact_id": "77001", "boundary_id": "b1",
                 "reason": "post_boundary_no_direct_sql_date",
-                "contact_created_at": datetime(2026, 9, 25, tzinfo=timezone.utc)}
+                "contact_created_at": datetime(2026, 9, 23, tzinfo=timezone.utc),
+                "detected_at": datetime(2026, 9, 23, 6, tzinfo=timezone.utc)}
     monkeypatch.setattr(repo, "fetch_post_boundary_incidents",
                         lambda **k: {"available": True, "rows": [incident],
                                      "open_count": 1})
@@ -573,6 +574,26 @@ def test_19_publication_inputs_reads_the_incident_rows_the_repository_returns(
     assert inputs["open_incidents"] == [incident], (
         "the incident gate is reading a key the repository does not return")
 
+    # …and the same value carried one step further, so this spans repository
+    # shape → service → coverage → verdict rather than stopping at an echoed
+    # dict. Reverting the key to `incidents` must fail HERE too, not only on
+    # the assertion above.
+    boundary = inputs["boundary_observed_at"]
+    cov = coverage.window_coverage(
+        window="7d", window_start=boundary + timedelta(days=1),
+        window_end=boundary + timedelta(days=8),
+        confirmed_sqls=42, recovered_sqls=0, unresolved_rows=[],
+        boundary_observed_at=boundary,
+        open_post_boundary_incidents=inputs["open_incidents"],
+        freshness={"fresh": True, "reason": "source_fresh"})
+    v = svc.publication_for(window="7d", window_type="evidence",
+                            scope="all_source", coverage=cov, inputs=inputs)
+
+    assert v["publishable"] is False
+    assert v["withheld_reason"] == coverage.CERT_POST_BOUNDARY_GAPS, (
+        "the real open gap did not reach the verdict; with the wrong key this "
+        "reports an unreadable store, and with `or []` it certifies a zero")
+
 
 def test_20_a_real_open_gap_withholds_rather_than_certifying_a_zero(monkeypatch):
     """The consequence of test_19's defect, asserted on the REASON.
@@ -584,7 +605,8 @@ def test_20_a_real_open_gap_withholds_rather_than_certifying_a_zero(monkeypatch)
     """
     boundary = datetime(2026, 9, 21, 4, 34, tzinfo=timezone.utc)
     incident = {"contact_id": "77001",
-                "contact_created_at": boundary + timedelta(days=3)}
+                "contact_created_at": boundary + timedelta(days=3),
+                "detected_at": boundary + timedelta(days=3, hours=6)}
 
     cov = coverage.window_coverage(
         window="7d", window_start=boundary + timedelta(days=1),
@@ -653,27 +675,129 @@ def test_21_the_recorder_refuses_to_write_an_unproven_run_as_a_disagreement():
     writer.assert_called_once()
 
 
-def test_22_the_writer_refuses_a_naive_observed_at():
-    """A naive instant is interpreted in the session zone on the way in."""
+def test_22_the_writer_refuses_a_naive_observed_at(monkeypatch):
+    """A naive instant is interpreted in the SESSION zone on the way in.
+
+    The first version asserted only the return value, with no database — so
+    `get_conn()` yielded `None` and the function returned False whether or not
+    the guard existed. This intercepts the cursor: the refusal must happen
+    before any statement is executed.
+    """
     from db import writers
+
+    cm, cursor = _fake_conn([])
+    monkeypatch.setattr(writers, "get_conn", cm)
 
     assert writers.record_reader_reconciliation(
         observed_at=datetime(2026, 9, 21, 12, 0),      # no tzinfo
         reconciliation_complete=True) is False
+    assert cursor.executed == [], (
+        "a naive instant reached the database; normalising it on read is too "
+        "late, the session zone has already chosen the instant")
+
     assert writers.record_reader_reconciliation(
         observed_at=None, reconciliation_complete=True) is False
+    assert cursor.executed == []
+
+    # An unproven outcome is refused too — the `bool()` coercion in the
+    # recorder used to defeat this.
+    assert writers.record_reader_reconciliation(
+        observed_at=_NOW, reconciliation_complete=None) is False
+    assert cursor.executed == []
+
+    # The positive control: a tz-aware instant with a proven outcome IS
+    # written, so the three refusals above are not passing on a writer that
+    # refuses everything.
+    assert writers.record_reader_reconciliation(
+        observed_at=_NOW, reconciliation_complete=True) is True
+    assert len(cursor.executed) == 1
+    assert "INSERT INTO sql_reader_reconciliation" in cursor.executed[0][0]
 
 
-def test_23_a_future_dated_record_is_not_fresh_forever():
-    """Negative age read as "not older than the limit" grants publication
-    indefinitely — clock skew must withhold, not certify."""
+class _FakeCursor:
+    """Enough of a psycopg2 cursor for the reconciliation read, and a record
+    of every statement it was asked to run."""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.executed: list = []
+        self.description = [
+            ("observed_at",), ("reconciliation_complete",),
+            ("combinations_expected",), ("combinations_compared",),
+            ("combinations_mismatched",), ("all_combinations_compared",),
+            ("effective_date_basis",), ("run_id",)]
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+
+    def fetchall(self):
+        return self._rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _fake_conn(rows):
+    """A `get_conn`-shaped context manager yielding a connection over `rows`."""
+    import contextlib
+
+    cursor = _FakeCursor(rows)
+
+    class _Conn:
+        def cursor(self):
+            return cursor
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    @contextlib.contextmanager
+    def _cm():
+        yield _Conn()
+
+    return _cm, cursor
+
+
+@pytest.mark.parametrize("age_hours,expect_stale", [
+    (-9600.0, True),    # stamped 400 days in the future — clock skew
+    (-0.5, True),       # slightly future
+    (1.0, False),       # fresh
+    (35.0, False),      # inside the 36h limit
+    (40.0, True),       # beyond it
+])
+def test_23_the_reader_decides_staleness_including_future_dated_rows(
+        monkeypatch, age_hours, expect_stale):
+    """Driven through `fetch_reader_reconciliation`, not a copy of its maths.
+
+    The first version of this test computed `not (0 <= age <= max_age)` in
+    the test body and asserted it against itself. It never called the
+    production reader, so reverting the fix left every test in the repository
+    green — round 1's `test_15` defect, committed a second time. This calls
+    the real function over a real row shape.
+    """
     from db import crm_funnel_repository as repo
 
-    max_age = repo.DEFAULT_RECONCILIATION_MAX_AGE_HOURS
-    for age_hours, expect_stale in ((-9600.0, True), (1.0, False),
-                                    (max_age + 1, True)):
-        stale = not (0 <= age_hours <= max_age)
-        assert stale is expect_stale, age_hours
+    observed = _NOW - timedelta(hours=age_hours)
+    row = (observed, True, 44, 44, 0, True, "date_entered_sql", "run1")
+    cm, _cursor = _fake_conn([row])
+    monkeypatch.setattr(repo, "get_conn", cm)
+
+    state = repo.fetch_reader_reconciliation(now=_NOW)
+
+    assert state["available"] is True
+    assert state["stale"] is expect_stale, (age_hours, state["age_hours"])
+
+    # And the verdict the gate reaches, so this is a refusal rather than a
+    # boolean: a future-dated row must not publish.
+    ok, reason = pub.reconciliation_gate(state)
+    assert ok is (not expect_stale)
+    if expect_stale:
+        assert reason == pub.WITHHELD_RECONCILIATION_STALE
 
 
 def test_24_a_published_verdict_never_carries_a_missing_count():
@@ -714,6 +838,7 @@ def test_26_the_audit_still_gates_on_freshness_independently():
     win = {"window": "7d", "window_type": "evidence",
            "certification_eligible": True,
            "certification_status": coverage.CERT_ELIGIBLE,
+           "source_fresh": True,
            "confirmed_sqls": 5, "confirmed_sql_subset": 5,
            "cpql_publishable": True, "complete_sql_total": 5}
 
@@ -775,7 +900,7 @@ def test_27_the_changed_audit_reason_strings_are_asserted_not_assumed():
     ok_win = {"window": "7d", "window_type": "evidence",
               "certification_eligible": True,
               "certification_status": coverage.CERT_ELIGIBLE,
-              "confirmed_sqls": 3}
+              "source_fresh": True, "confirmed_sqls": 3}
     out3 = audit_certification(Findings(), [ok_win], good_stores, good_recon,
                                {"fresh": True, "reason": "source_fresh"})
     assert out3["windows_certified"] == 1
@@ -807,3 +932,57 @@ def test_28_production_and_the_audit_differ_on_exactly_one_named_flag():
                / "canonical_sql_publication_service.py").read_text(encoding="utf-8")
     assert "require_full_scope_coverage" not in svc_src, (
         "production must not be able to opt out of full scope coverage")
+
+
+def test_29_production_refuses_a_stale_source_exactly_as_the_audit_does():
+    """Round 2: the audit gained an independent freshness gate and production
+    did not, so the audit stopped describing what production publishes — on
+    the one axis the previous round added defence to.
+
+    Measured before the fix: this coverage dict published a total of 42 here
+    while `audit_certification` refused the identical dict.
+    """
+    stale_cov = _eligible_coverage(
+        source_fresh=False,
+        certification_status=coverage.CERT_STALE_SOURCE)
+
+    v = pub.publication_verdict(coverage=stale_cov, reconciliation=_recon(True),
+                                boundary_readable=True, incidents_readable=True)
+    assert v["publishable"] is False
+    assert v["complete_sql_total"] is None
+    assert v["withheld_reason"] == coverage.CERT_STALE_SOURCE
+
+    # Parity with the audit over the SAME dict — the property that makes the
+    # shared implementation worth having.
+    from scripts.audit_lifecycle_sql_coverage import Findings, audit_certification
+    out = audit_certification(
+        Findings(), [{**stale_cov, "window": "7d", "window_type": "evidence"}],
+        {"available": True, "post_boundary_incidents_available": True},
+        {"reconciliation_complete": True, "all_combinations_compared": True},
+        {"fresh": False, "reason": "source_stale"})
+    assert out["windows_certified"] == 0
+    assert (out["windows_certified"] == 1) is v["publishable"], (
+        "the audit and production disagree about the same coverage dict")
+
+    # Control: fresh source, both publish.
+    fresh_cov = _eligible_coverage(source_fresh=True)
+    assert pub.publication_verdict(
+        coverage=fresh_cov, reconciliation=_recon(True),
+        boundary_readable=True, incidents_readable=True)["publishable"] is True
+
+
+def test_30_a_countless_window_and_an_absent_verdict_have_different_reasons():
+    """Refusals are kept apart because the remedy differs — including these
+    two, which shared one constant until round 2."""
+    absent = pub.publication_verdict(
+        coverage=None, reconciliation=_recon(True),
+        boundary_readable=True, incidents_readable=True)
+    countless = pub.publication_verdict(
+        coverage=_eligible_coverage(confirmed_sqls=None, confirmed_sql_subset=None),
+        reconciliation=_recon(True),
+        boundary_readable=True, incidents_readable=True)
+
+    assert absent["withheld_reason"] == pub.WITHHELD_COVERAGE_ABSENT
+    assert countless["withheld_reason"] == pub.WITHHELD_COUNT_ABSENT
+    assert absent["withheld_reason"] != countless["withheld_reason"]
+    assert all(v["complete_sql_total"] is None for v in (absent, countless))

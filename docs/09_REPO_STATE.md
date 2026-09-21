@@ -1,7 +1,7 @@
 ## Repository State — Single Source of Truth
 ## Logistaas Ads Intelligence System
 
-**Last updated:** PR-ADS-161A-1 — Canonical SQL Publication Contract (September 2026)
+**Last updated:** PR-ADS-161A-1-F2 — production freshness gate and real controls (September 2026)
 
 > This document reflects the **actual state of the repository** — not what was planned or intended.
 > Update this file in every PR that changes the state of any module listed below.
@@ -698,5 +698,55 @@ over seven spellings including relative imports, `importlib` and `sys.modules`.
 Doctrine inventory is unchanged and says so: 25 legacy / 6 mixed / 4 canonical,
 `READY_FOR_ROADMAP`, `audit_complete: true`, 0 unclassified occurrences, 0
 registry problems. A migration claim the scanner does not support is not made.
+
+Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.
+
+
+## PR-ADS-161A-1-F2 — the production freshness gate, and controls that can fail (September 2026)
+
+Round 2 of the truth audit on PR-ADS-161A-1-F1. One blocker and three majors,
+all of them in the half of the work whose job is to prove the other half safe.
+
+**Production published a certified total from a source that is not fresh.**
+F1 added an independent freshness gate to `audit_certification` and not to
+`publication_verdict`, so the audit became the better-defended caller — and the
+audit is what we point at to describe what production publishes. Measured: a
+coverage dict with `certification_eligible: True` and `source_fresh: False`
+published a total of 42 in production while the audit refused the identical
+dict. Reachable for the same reason the missing-count case is — `publication_for`
+takes `coverage` from its CALLER. `publication_verdict` now gates on
+`source_fresh` directly, and `test_29` asserts audit/production parity over the
+same dict rather than testing each side alone.
+
+**`test_23` asserted an expression against itself.** The fix for the
+future-dated reconciliation row (a negative age read as "not older than the
+limit" grants publication forever) was guarded by a test that computed
+`not (0 <= age <= max_age)` in its own body and compared it to itself. It never
+called `fetch_reader_reconciliation`. Reverting the production line left all
+4,596 tests green. This is round 1's `test_15` defect committed a second time,
+one round after it was found. The test now drives the real reader over a real
+row shape across five ages and carries the verdict through to a refusal.
+
+**`test_22` could not distinguish the naive-timestamp guard from its absence.**
+It asserted only a return value, with no database — so `get_conn()` yielded
+`None` and the writer returned False whether or not the guard existed. It now
+intercepts the cursor and asserts no statement was executed, with a positive
+control that a tz-aware instant IS written.
+
+**`test_20` did not guard the incident key it was credited with.** It called
+`window_coverage` directly and never touched `publication_inputs`. `test_19`
+now spans repository shape → service → coverage → verdict in one case, so
+reverting the key fails there too.
+
+Also: `coverage_verdict_absent` and "no counted population" had one reason
+constant between them despite needing different remedies; the `bool()`
+coercion round 1 flagged in the recorder was still present, F1 having added a
+different guard beside it; docs/43 said 34 cases for a 64-case suite and
+described its reason-delta table as exhaustive when a 1,152-case differential
+finds eight deltas, six unreachable from `run()`.
+
+Every fix is shown failing against the pre-fix line by mutation, not by
+reading: reverting the future-date fix, the naive-tz guard, the incident key
+or the production freshness gate each turns exactly the intended test red.
 
 Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.

@@ -88,6 +88,12 @@ Two audit outputs change. Neither changes a *refusal* — `certified: False`,
 every case, and `blocked_windows` keeps its shape — but the **reason string**
 differs:
 
+Scoped to what `run()` can actually produce. A differential over 1,152
+caller-built inputs finds eight reason-string deltas in all and **zero**
+`windows_certified` deltas — the decision is preserved everywhere. Six of the
+eight require a caller that pairs `certification_eligible: True` with a
+non-fresh or unreadable input, which `run()` never builds.
+
 | Situation | Before | After |
 |---|---|---|
 | source not fresh | `not_certifiable_source_not_fresh` | the freshness reason (`source_stale`, `source_last_incremental_failed`, …) |
@@ -171,7 +177,7 @@ scheduled home. It is not wired into the scheduler in this PR.
 
 ## 6. Guards
 
-`tests/test_pr_ads_161a1_sql_publication_contract.py` — 34 cases.
+`tests/test_pr_ads_161a1_sql_publication_contract.py` — 64 cases.
 
 * **§1** every gate refuses in isolation, each with the full set of other
   inputs satisfied, plus `test_01` as the positive control proving the gate can

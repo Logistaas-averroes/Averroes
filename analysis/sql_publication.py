@@ -78,6 +78,8 @@ WITHHELD_RECONCILIATION_STALE = "reader_reconciliation_stale"
 WITHHELD_RECONCILIATION_PARTIAL = "reader_reconciliation_incomplete_coverage"
 WITHHELD_INPUTS_UNREADABLE = "certification_inputs_unreadable"
 WITHHELD_COVERAGE_ABSENT = "coverage_verdict_absent"
+WITHHELD_COUNT_ABSENT = "coverage_carries_no_counted_population"
+WITHHELD_SOURCE_NOT_FRESH = "source_not_proven_fresh"
 
 GLOBAL_WITHHELD_REASONS = (
     WITHHELD_READERS_NOT_RECONCILED,
@@ -86,6 +88,8 @@ GLOBAL_WITHHELD_REASONS = (
     WITHHELD_RECONCILIATION_PARTIAL,
     WITHHELD_INPUTS_UNREADABLE,
     WITHHELD_COVERAGE_ABSENT,
+    WITHHELD_COUNT_ABSENT,
+    WITHHELD_SOURCE_NOT_FRESH,
 )
 
 #: Reasons that mean "could not look", as opposed to "looked and refused".
@@ -94,6 +98,7 @@ _UNAVAILABLE_REASONS = (
     WITHHELD_RECONCILIATION_PARTIAL,
     WITHHELD_INPUTS_UNREADABLE,
     WITHHELD_COVERAGE_ABSENT,
+    WITHHELD_COUNT_ABSENT,
 )
 
 
@@ -206,6 +211,29 @@ def publication_verdict(*, coverage: dict | None,
                         event_date_basis=event_date_basis,
                         readers_reconciled=reconciled)
 
+    # Freshness is a gate HERE, not only inside `certification_eligible`.
+    # PR-ADS-161A-1-F1 added an independent freshness check to the audit and
+    # not to production, so the audit became the better-defended caller — and
+    # the audit is what we point at to describe what production publishes.
+    # Round 2 measured the gap: a coverage dict with `certification_eligible:
+    # True` and `source_fresh: False` published a total of 42 here while the
+    # audit refused the identical dict.
+    #
+    # Reachable for the same reason `test_24`'s missing-count case is:
+    # `publication_for` takes `coverage` from its CALLER. `window_coverage`
+    # would never build that pair, but nothing makes the caller use it.
+    if coverage.get("source_fresh") is not True:
+        return _refused(WITHHELD,
+                        coverage.get("certification_status")
+                        or WITHHELD_SOURCE_NOT_FRESH,
+                        "the canonical contact-funnel source is not proven "
+                        "fresh, so this window's completeness describes data "
+                        "that may have stopped arriving",
+                        coverage=coverage, window=window,
+                        window_type=window_type, scope=scope,
+                        event_date_basis=event_date_basis,
+                        readers_reconciled=reconciled)
+
     if not stores_readable:
         return _refused(UNAVAILABLE, WITHHELD_INPUTS_UNREADABLE,
                         "the boundary or post-boundary incident store could "
@@ -231,7 +259,7 @@ def publication_verdict(*, coverage: dict | None,
     # though `window_coverage` always sets one — and `available: true` beside
     # `value: null` is exactly the shape a consumer renders as a blank total.
     if coverage.get("confirmed_sqls") is None:
-        return _refused(UNAVAILABLE, WITHHELD_COVERAGE_ABSENT,
+        return _refused(UNAVAILABLE, WITHHELD_COUNT_ABSENT,
                         "every gate passed but the window carries no counted "
                         "population, so there is no total to publish",
                         coverage=coverage, window=window,
