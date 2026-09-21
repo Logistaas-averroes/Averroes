@@ -209,11 +209,12 @@ suite: it re-merges the cadences at runtime and asserts the masking returns.
   when a reachable database returns zero runs in 90 days
   (`api/server.py:5977`). That file is only written by the three legacy
   schedulers and never contains `daily_incremental_sync`. Pre-existing.
-* **`analysis/lifecycle_sql_coverage.py:346` returns `cpql_publishable`
-  pre-certification**, retracted only by the CLI audit's `_withhold`. Nothing
-  in `api/` or `static/` imports the module today, so no product surface can
-  read the un-retracted flag — but PR-ADS-161's consumer migration must not
-  call `window_coverage()` directly and trust that field.
+* ~~**`analysis/lifecycle_sql_coverage.py:346` returns `cpql_publishable`
+  pre-certification**, retracted only by the CLI audit's `_withhold`.~~
+  **Closed by PR-ADS-161A-1**: the certification gate moved into
+  `analysis/sql_publication.py`, which both the audit and production call, and
+  an AST guard now forbids any product module from importing the
+  pre-certification layer. See `docs/43_*`.
 * **No structural guard** prevents the run-type-relabelling pattern recurring.
   `test_35` in the PR-ADS-160 suite shows the repo already knows how to write
   an AST self-audit; the same technique over run-type and dataset-key literals

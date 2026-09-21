@@ -25,7 +25,7 @@ authoritative documents. It does not restate the product or the architecture.
 | `CLAUDE_CODE_BRIEFING.md` | original strategy→build handoff | **No — stale.** Its "what needs to be built" list is years out of date (it lists `api/server.py` and the dashboard as unbuilt; both exist) |
 | `docs/07_AGENT_BRIEFING.md` | architecture + layer rules | Architecture yes; its status narrative is explicitly marked stale |
 
-The repo is at **PR-ADS-160-F2**. Any doc describing "Phase 1" as current is
+The repo is at **PR-ADS-161A-1**. Any doc describing "Phase 1" as current is
 historical.
 
 ---
@@ -180,6 +180,17 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   Corrected in **PR-ADS-160-F2**; see `docs/42_*`. A fixture that carries only
   some of the four registered jobs is not production, and monitoring now says
   so.
+
+- **Never read a SQL total from `analysis/lifecycle_sql_coverage.py`.** Its
+  `window_coverage()` answers only "could a complete total exist for this
+  window" and sets `cpql_publishable` from that alone — TRUE for windows the
+  certification gate refuses. The ONLY production-facing publication verdict is
+  `services/canonical_sql_publication_service.publication_for()`, which applies
+  every gate (membership, boundary, post-boundary gaps, source freshness,
+  recorded reader reconciliation) and fails closed on each. A withheld total is
+  `None`, never `0`. An AST guard in
+  `tests/test_pr_ads_161a1_sql_publication_contract.py` enforces this; see
+  `docs/43_*`.
 
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,
