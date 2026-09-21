@@ -142,6 +142,35 @@ def publication_for(*, window: str, window_type: str, scope: str,
     """
     inputs = inputs if inputs is not None else publication_inputs(now=now)
 
+    # Gate on the freshness THIS SERVICE read, not only the caller's copy.
+    #
+    # Round 3 of the audit: `publication_inputs` performs a real database read
+    # for contact-funnel freshness, and this function only stamped the result
+    # onto the verdict as a label — `withheld_payload` then dropped it. The
+    # gate in `analysis.sql_publication` reads `coverage["source_fresh"]`, a
+    # value the CALLER copied in. So a caller whose coverage said fresh, over
+    # a service that had just read stale, published:
+    #
+    #     value: 42, available: True, certified: True,
+    #     explanation: "...and the contact-funnel source is fresh"
+    #     source_freshness_reason: "source_stale"     <- the same object
+    #
+    # while `audit_certification` refused the identical inputs. That is the
+    # F1 blocker with one more level of indirection, and it made the freshness
+    # read a guard whose absence changed nothing.
+    #
+    # Folded into the coverage the gate reads rather than short-circuited
+    # ahead of it, so the pure layer keeps deciding the ORDER of refusals: a
+    # window that could not be looked at, or whose readers are unreconciled,
+    # must not be reported as stale merely because the source also is. Only
+    # `source_fresh` is overridden — overriding `certification_status` too
+    # would have relabelled a pre-boundary window as a freshness failure,
+    # which is the same defect test_35 pins in the audit.
+    service_freshness = inputs.get("freshness") or {}
+    service_fresh = service_freshness.get("fresh") is True
+    if not service_fresh:
+        coverage = {**(coverage or {}), "source_fresh": False}
+
     verdict = pub.publication_verdict(
         coverage=coverage,
         reconciliation=inputs.get("reconciliation"),
@@ -150,9 +179,22 @@ def publication_for(*, window: str, window_type: str, scope: str,
         window=window, window_type=window_type, scope=scope,
         event_date_basis=EVENT_DATE_BASIS)
 
-    # Provenance a reviewer can follow back to the evidence, on every verdict
-    # including the refusals — a withheld number still has to say what it was
-    # judged against.
+    # Name what WE measured, but only on the refusal that is actually about
+    # freshness — never over a refusal that outranked it.
+    if not service_fresh and verdict.get("withheld_reason") in pub.FRESHNESS_REFUSALS:
+        verdict["explanation"] = (
+            f"the canonical contact-funnel source is not proven fresh "
+            f"({service_freshness.get('reason') or 'freshness unknown'}), so "
+            f"no window's completeness can be published over it")
+
+    return _with_provenance(verdict, inputs)
+
+
+def _with_provenance(verdict: dict, inputs: dict) -> dict[str, Any]:
+    """Evidence a reviewer can follow back, on every verdict including refusals.
+
+    A withheld number still has to say what it was judged against.
+    """
     verdict["boundary_id"] = inputs.get("boundary_id")
     verdict["boundary_observed_at"] = inputs.get("boundary_observed_at")
     verdict["source_freshness_reason"] = (inputs.get("freshness") or {}).get("reason")
@@ -184,4 +226,8 @@ def withheld_payload(verdict: dict) -> dict[str, Any]:
         "window_type": verdict.get("window_type"),
         "scope": verdict.get("scope"),
         "event_date_basis": verdict.get("event_date_basis"),
+        # Carried, not dropped: a consumer deciding what to render needs to
+        # know the source was stale, and round 3 found this field missing
+        # while the verdict beside it said `published`.
+        "source_freshness_reason": verdict.get("source_freshness_reason"),
     }
