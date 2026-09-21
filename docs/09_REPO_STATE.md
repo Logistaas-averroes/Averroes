@@ -670,15 +670,30 @@ window becomes fully post-boundary on 2026-09-28, which is when the recorded
 reconciliation starts deciding anything — the recorder needs a scheduled home
 before then, and this PR does not give it one.
 
-Guarded by `tests/test_pr_ads_161a1_sql_publication_contract.py` (34 cases):
+**Corrected after review.** The first cut of this PR carried four defects that
+its own truth audit found, recorded here because three of them were defects in
+the GUARDS rather than the code: `publication_inputs` read `incidents` from a
+repository that returns `rows`, so the post-boundary gap gate was dead on
+arrival and one natural migration spelling would have turned a real open gap
+into a certified zero; `test_15` re-implemented a weaker predicate instead of
+calling the detector `test_14` uses, and both stayed green with that detector
+deliberately gutted; the recorder's `bool()` coercion defeated the writer's
+own guard and could write an unproven run as a recorded disagreement; and the
+claim that the refactor changed no audit behaviour was false — two reason
+strings change (stale source now reports the freshness reason, an unreadable
+contact store now reports `coverage_verdict_absent`), and the 141 green
+PR-ADS-160 cases were never evidence either way because none exercises those
+paths. All four are fixed, each with the control that proves it.
+
+Guarded by `tests/test_pr_ads_161a1_sql_publication_contract.py` (58 cases):
 every gate refusing in isolation with a positive control that proves the gate
 can publish; the named regression driven through the real `window_coverage`
 where membership is complete, certification is false and publication stays
 withheld, with its negative control; and an AST guard — not a substring search
 — asserting no module under `services/`, `api/`, `db/`, `scheduler/`,
 `connectors/` or `analysis/` imports `lifecycle_sql_coverage` or names
-`cpql_publishable`, with its own negative control proving the detector sees a
-deliberate violation.
+`cpql_publishable`, whose negative control calls THE SAME detector the guard calls,
+over seven spellings including relative imports, `importlib` and `sys.modules`.
 
 Doctrine inventory is unchanged and says so: 25 legacy / 6 mixed / 4 canonical,
 `READY_FOR_ROADMAP`, `audit_complete: true`, 0 unclassified occurrences, 0

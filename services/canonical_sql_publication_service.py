@@ -115,7 +115,14 @@ def publication_inputs(*, now: datetime | None = None) -> dict[str, Any]:
         "boundary_observed_at": boundary.get("observed_at"),
         "boundary_id": boundary.get("boundary_id"),
         "incidents_readable": incidents_readable,
-        "open_incidents": (incidents.get("incidents")
+        # `rows`, not `incidents`: PR-ADS-161A-1 review found this reading a
+        # key `fetch_post_boundary_incidents` never returns, so the gate was
+        # dead on arrival — always None. A consumer passing that into
+        # `window_coverage` got CERT_UNAVAILABLE ("the store could not be
+        # read") for a store that read fine, and one writing the natural
+        # `or []` would have turned a real open gap into a certified zero.
+        # Every other caller in the repository reads `rows`.
+        "open_incidents": (incidents.get("rows")
                            if incidents_readable else None),
         "freshness": freshness,
         "reconciliation": reconciliation,
