@@ -70,14 +70,59 @@ A verdict names one reason, so which gate fires first is part of the contract:
    proof? An unproven or unreadable record is `unavailable`.
 4. **source freshness** — we looked, everything was readable and agreed, and
    the source has stopped arriving. `withheld`.
-5. **counted population present** — every gate passed but the window carries no
+5. **coverage internally consistent** — the window is marked certifiable while
+   its undated membership is unresolved. The two cannot both be true, so it
+   fails closed rather than being resolved in either direction. `unavailable`.
+6. **counted population present** — every gate passed but the window carries no
    count. `unavailable`.
+
+Step 1 has one exception in the other direction. `publication_inputs` sets
+`boundary_observed_at = None` whenever the boundary store is unreadable, so a
+caller building coverage from it gets the window-local `CERT_NO_BOUNDARY` —
+and round 4 found that published as the affirmative claim *"no coverage
+boundary exists"*, identical at every surface to a store that read fine and
+genuinely holds no boundary. During an outage every SQL surface stated a
+permanent, benign, nothing-to-do condition. `boundary_readable` was a
+parameter that changed nothing on any input `publication_inputs` can produce.
+An unreadable boundary store now yields `unavailable /
+certification_inputs_unreadable`, and `test_40` asserts the two payloads
+differ.
 
 Freshness sits *after* the readability and reconciliation gates because those
 answer "could we look", and a `withheld` verdict must not displace an
 `unavailable` one. Round 3 caught the first version placing it first, so "we
 could not read the boundary store" was reported as "the source is stale" —
 which sends an operator to fix a pipeline that is not the problem.
+
+**Round 3's reordering alone did not achieve that, and this document claimed
+it did.** Freshness is gated in *two* places, and only the step-4 one moved.
+`lifecycle_sql_coverage._certification` refuses an otherwise-perfect window
+with `CERT_STALE_SOURCE`, which arrives here as a *window-local* reason — step
+1. On every coherent production input a stale source therefore still won:
+
+```
+BEFORE the round-4 fix, source stale in every case:
+  stale + reconciliation record absent  ->  not_certifiable_source_not_fresh
+  stale + readers disagreed             ->  not_certifiable_source_not_fresh
+  stale + boundary store unreadable     ->  not_certifiable_source_not_fresh
+```
+
+The step-4 gate fired only when the caller's copy and the service's read
+disagreed — the one case fix #1 exists to catch, and nothing else. Because no
+reconciliation record exists yet (§5), a stale sync would have sent an
+operator to the pipeline while the refusal actually blocking every window went
+unreported.
+
+Step 1 now **defers** a reason in `FRESHNESS_REFUSALS` to the global gates
+instead of returning, so the window's own specific reason survives but no
+longer outranks them. The deferral is conditional on `source_fresh is not
+True`, so a dict claiming a stale status beside a fresh source cannot fall
+through to the publishing branch — that fail-open is `test_42`'s last
+assertion.
+
+`_certification` evaluates freshness **last** of its own eight branches, so a
+window that is both stale and structurally refused still reports the
+structural reason. The deferral does not change that.
 
 For the same reason a freshness refusal never borrows the window's own
 `certification_status`: on the only shape `window_coverage` emits with
@@ -125,11 +170,39 @@ Two audit outputs change. Neither changes a *refusal* — `certified: False`,
 every case, and `blocked_windows` keeps its shape — but the **reason string**
 differs:
 
-Scoped to what `run()` can actually produce. A differential over 1,152
-caller-built inputs finds eight reason-string deltas in all and **zero**
-`windows_certified` deltas — the decision is preserved everywhere. Six of the
-eight require a caller that pairs `certification_eligible: True` with a
-non-fresh or unreadable input, which `run()` never builds.
+Round 4 found the previous version of this paragraph unreproducible: it gave
+a delta count without defining the input space it was counted over. The space
+is now stated, so the number can be checked.
+
+**Space (1,152 cells).** Every window built through the real `window_coverage`:
+window position (after / straddles / before / open-start) × boundary (present
+/ absent) × incident store (empty / one open gap / unreadable) × membership
+(resolved / unresolved) × freshness (fresh / stale / unreadable) ×
+`boundary.available` (T/F) × `post_boundary_incidents_available` (T/F) ×
+`reconciliation_complete` (T/F) = 4·2·3·2·3·2·2·2.
+
+**Measured, pre-PR-ADS-161A-1 `audit_certification` vs current:**
+
+| | Count |
+|---|---|
+| `windows_certified` deltas | **0** — the decision is preserved in every cell |
+| reason-string deltas | 307, in 6 classes |
+
+```
+x288  not_certifiable_no_boundary_established -> certification_inputs_unreadable
+ x12  not_certifiable_source_not_fresh        -> certification_inputs_unreadable
+  x3  canonical_readers_did_not_reconcile     -> certification_inputs_unreadable
+  x2  not_certifiable_source_not_fresh        -> canonical_readers_did_not_reconcile
+  x1  not_certifiable_source_not_fresh        -> source_stale
+  x1  not_certifiable_source_not_fresh        -> source_freshness_unreadable
+```
+
+The reason deltas are large **on purpose**: the 288 is the round-4 boundary
+fix (an unread store stops claiming no boundary exists), the 12 and 3 are the
+same fix reached through other paths, and the 2 is the freshness deferral
+letting the reconciliation refusal through. Each moves a reason toward the
+action an operator must actually take. No cell changes whether a window
+certifies.
 
 | Situation | Before | After |
 |---|---|---|
@@ -214,7 +287,7 @@ scheduled home. It is not wired into the scheduler in this PR.
 
 ## 6. Guards
 
-`tests/test_pr_ads_161a1_sql_publication_contract.py` — 78 cases.
+`tests/test_pr_ads_161a1_sql_publication_contract.py` — 95 cases.
 
 * **§1** every gate refuses in isolation, each with the full set of other
   inputs satisfied, plus `test_01` as the positive control proving the gate can
@@ -264,6 +337,63 @@ scheduled home. It is not wired into the scheduler in this PR.
   whose absence changes nothing is not a guard, and §6 exists because round 3
   found two that were not.
 
+* **§7** what round 4 found. Round 4's finding was *not* a fabricated control —
+  every §6 guard does go red under a targeted mutation. The defect was subtler
+  and worse: several of them prove their property only on input tuples
+  `publication_inputs()` and `window_coverage()` **cannot jointly produce**
+  (`boundary_readable: False` beside a `boundary_observed_at`;
+  `certification_eligible: True` beside `source_fresh: False`), and on the
+  tuples production *does* produce the property was false.
+
+  Every §7 test whose subject is a *production* input therefore builds its
+  coverage by driving the real `window_coverage()` (`_coverage_from_inputs`)
+  from an inputs dict that `_inputs()` shapes to `publication_inputs()`'s
+  output. `_inputs()` enforces both couplings the real function enforces: an
+  unreadable boundary store cannot also hand back a boundary instant, and an
+  unreadable incident store yields `None`, never `[]` — the unknown, not the
+  affirmative claim "no open gaps". It is a **mirror** of
+  `publication_inputs()`, not a call to it; only `test_12` and `test_19` drive
+  the real function.
+
+  `test_39`, `test_43`, `test_45` and `test_42`'s closing assertion
+  deliberately bypass that path, because their subject is a state production
+  cannot produce: a scan of the module's own source, the incoherent dicts the
+  `publication_for` **caller seam** exposes, and malformed non-mappings. A
+  fixture must be production-shaped when it stands in for production; those
+  stand in for a buggy caller, which is the thing they exist to catch.
+
+  `test_39` guards the three copied
+  `CERT_*` literals, `test_40` the unread boundary store, `test_41`/`test_42`
+  the freshness deferral and its fail-open, `test_43` the eligible-but-
+  incomplete contradiction, `test_44` `None`-vs-`False` freshness, `test_45`
+  the malformed-coverage regression the service had and the gate did not.
+
+  **Round 5 correction.** Round 5 measured `test_41`'s own docstring against
+  the pre-fix gate and found one of its four listed cases was never true:
+  `stale + incident store unreadable` reported `unavailable /
+  certification_unavailable` before the fix and reports it now, because an
+  unreadable incident store makes `publication_inputs` emit
+  `open_incidents = None`, which `_certification` turns into
+  `CERT_UNAVAILABLE` several branches before the stale-source branch is
+  reached. It was also the one case `_inputs()` could not shape honestly, so
+  no §7 test exercised it at all. The docstring now states the measured
+  value, `_inputs()` enforces the `None` coupling, and the case is carried as
+  `test_41`'s sixth arm — a negative control proving the deferral leaves that
+  refusal exactly where it was. Both additions were shown load-bearing:
+  removing the coupling, or widening `FRESHNESS_REFUSALS` to swallow
+  `certification_unavailable`, each turns `test_41` red.
+
+  Round 5 also removed the last impossible tuple round 4 had named but left
+  standing: §6's `_service_inputs` built its own dict, so
+  `_service_inputs(boundary_readable=False)` handed back a boundary instant.
+  It now delegates to `_inputs`, and every §6 assertion holds unchanged on the
+  corrected shape — they were true, they were simply not being proven on
+  anything production emits.
+
+  **The lesson, recorded because it recurred four rounds running:** a fixture
+  that cannot arise from the producing code proves nothing about the consuming
+  code. Prefer driving the real producer over hand-building its output.
+
 ## 7. Not in this PR
 
 * **No consumer migrated.** Doctrine inventory counts are unchanged:
@@ -277,3 +407,51 @@ scheduled home. It is not wired into the scheduler in this PR.
   consumer will serialise; no endpoint emits it yet.
 * **No external writes.** The only write introduced is one append-only row in
   our own database, and only from the explicit `--apply` recorder.
+
+### Inherited by PR-ADS-161A-2 — four defects round 5 measured and did not fix
+
+All four are **pre-existing in `main`** and byte-identical under PR #185, so
+none of them is a regression of this work. All four are latent only because
+nothing renders the contract yet — 161A-2 is the PR that supplies the human
+to mislead, so all four should close before a consumer is migrated.
+
+1. **An unread boundary store still publishes `coverage_complete: true` on the
+   API shape, beside a real open gap.** `lifecycle_sql_coverage.py:298` reads
+   a null boundary instant as "no prospective period", and the service
+   overloads `boundary_observed_at = None` to mean both "no boundary" and
+   "boundary unknown". Measured: `status: unavailable`,
+   `withheld_reason: certification_inputs_unreadable`, `coverage_complete:
+   True`, `open_post_boundary_gaps: 1` — in one object. This is BLOCKER 1's
+   collapse, fixed at the status axis and left intact one level down.
+   *Smallest fix:* give `window_coverage` a `boundary_readable` argument
+   (default `True`) and make the vacuity exception conditional on it; or set
+   `coverage_complete: None` on the `WITHHELD_INPUTS_UNREADABLE` return.
+2. **The step-5 self-consistency guard checks one field of four.** With
+   `certification_eligible: True` and a coherent count, a caller-built dict
+   whose `certification_status` refuses, or whose `window_after_boundary` is
+   `False`, or which carries open gaps, still yields `publishable=True
+   total=42 certified=True`. `test_43`'s own justification — "`window_coverage`
+   cannot emit that pair, so it arises only from a caller-built dict, which is
+   exactly the seam `publication_for` exposes" — is equally true of the other
+   three. *Smallest fix:* extend the guard at `sql_publication.py:360` to
+   `certification_status`, `window_after_boundary` and
+   `open_post_boundary_gaps`, adding `"eligible"` to the tabled literals.
+3. **`reconciliation_gate` raises `AttributeError` on a truthy non-mapping.**
+   `sql_publication.py:140-142` does `if not reconciliation:` then
+   `.get(...)`. F4 hardened `coverage` against exactly this shape and not
+   `reconciliation` or `inputs`. A crash, not a false claim — but the module's
+   contract is that every gate fails closed.
+4. **A withheld payload carries a blank `explanation`** when `coverage is
+   None` and the service's source is not fresh:
+   `canonical_sql_publication_service.py:190-191` manufactures a non-empty
+   `{"source_fresh": …}`, so the pure gate's absent-coverage branch — the one
+   carrying the real explanation — never fires.
+
+Round 5 also recorded three non-defects worth knowing: `incidents_readable`
+is inert on every production-shaped input (harmlessly — the resulting claim
+is truthful, but its reason code is the generic `certification_unavailable`,
+which a consumer cannot tell apart from an unreadable contact population);
+the freshness deferral can downgrade `unavailable` to `withheld` on tuples
+requiring `certification_eligible: None`, which no producer emits; and
+`source_freshness_unreadable` is a reason code this service invents outside
+`sql_coverage_freshness.FRESHNESS_REASONS` and outside `docs/41`'s table.

@@ -80,14 +80,24 @@ WITHHELD_INPUTS_UNREADABLE = "certification_inputs_unreadable"
 WITHHELD_COVERAGE_ABSENT = "coverage_verdict_absent"
 WITHHELD_COUNT_ABSENT = "coverage_carries_no_counted_population"
 WITHHELD_SOURCE_NOT_FRESH = "source_not_proven_fresh"
+WITHHELD_COVERAGE_SELF_CONTRADICTORY = "coverage_verdict_self_contradictory"
+
+#: Window-local statuses this module must recognise BY NAME, spelled as
+#: literals to keep the pure layer free of `analysis.lifecycle_sql_coverage`
+#: (the AST guard in the contract suite forbids that import). Every one of
+#: them is a copy of a `CERT_*` constant, so every one can silently drift
+#: away from the layer it describes — `test_39` asserts the whole table
+#: against the real constants, which is the only thing making the copies
+#: safe. Add a literal here, never inline in a comparison.
+COVERAGE_STATUS_NO_BOUNDARY = "not_certifiable_no_boundary_established"
+COVERAGE_STATUS_UNAVAILABLE = "certification_unavailable"
+COVERAGE_STATUS_STALE_SOURCE = "not_certifiable_source_not_fresh"
 
 #: The refusals that are THEMSELVES about freshness — the ONE table every
 #: layer consults. Only a reason in here may be replaced by, or replace, a
 #: freshness reason; anything else keeps its own, because the operator's next
-#: step differs. `analysis.lifecycle_sql_coverage.CERT_STALE_SOURCE` is the
-#: window-local member, spelled out rather than imported to keep this module
-#: free of the coverage layer (the AST guard forbids the reverse direction).
-FRESHNESS_REFUSALS = ("not_certifiable_source_not_fresh",
+#: step differs.
+FRESHNESS_REFUSALS = (COVERAGE_STATUS_STALE_SOURCE,
                       WITHHELD_SOURCE_NOT_FRESH)
 
 GLOBAL_WITHHELD_REASONS = (
@@ -99,6 +109,7 @@ GLOBAL_WITHHELD_REASONS = (
     WITHHELD_COVERAGE_ABSENT,
     WITHHELD_COUNT_ABSENT,
     WITHHELD_SOURCE_NOT_FRESH,
+    WITHHELD_COVERAGE_SELF_CONTRADICTORY,
 )
 
 #: Reasons that mean "could not look", as opposed to "looked and refused".
@@ -208,17 +219,77 @@ def publication_verdict(*, coverage: dict | None,
 
     if not locally_eligible:
         reason = coverage.get("certification_status") or WITHHELD_COVERAGE_ABSENT
-        status = (UNAVAILABLE
-                  if coverage.get("certification_eligible") is None
-                  or reason == "certification_unavailable"
-                  else WITHHELD)
-        return _refused(status, reason,
-                        coverage.get("certification_explanation")
-                        or coverage.get("explanation") or "",
-                        coverage=coverage, window=window,
-                        window_type=window_type, scope=scope,
-                        event_date_basis=event_date_basis,
-                        readers_reconciled=reconciled)
+
+        # ROUND 4, BLOCKER — an unread boundary store was published as the
+        # affirmative claim "no coverage boundary exists".
+        #
+        # `publication_inputs` sets `boundary_observed_at = None` whenever the
+        # store is unreadable, so a caller building its coverage from those
+        # inputs — the only caller shape the service supports — hands
+        # `window_coverage` a missing boundary and gets `CERT_NO_BOUNDARY`
+        # back. That fired HERE, before the readability gate below was ever
+        # evaluated, and `withheld_payload` drops `boundary_id` and
+        # `boundary_observed_at`, so the two states were byte-identical at
+        # every surface:
+        #
+        #     store unreadable   -> withheld  not_certifiable_no_boundary_established
+        #     no boundary yet    -> withheld  not_certifiable_no_boundary_established
+        #
+        # During a boundary-store outage every SQL surface stated a permanent,
+        # benign, nothing-to-do condition and an operator would wait it out.
+        # `false` and `null` are different claims; this collapsed them, and
+        # it made `boundary_readable` a parameter that changed nothing on any
+        # input `publication_inputs` can actually produce.
+        if reason == COVERAGE_STATUS_NO_BOUNDARY and boundary_readable is not True:
+            return _refused(UNAVAILABLE, WITHHELD_INPUTS_UNREADABLE,
+                            "the coverage boundary store could not be read, so "
+                            "it is unknown whether a boundary exists — that is "
+                            "not the same claim as no boundary having been "
+                            "established yet",
+                            coverage=coverage, window=window,
+                            window_type=window_type, scope=scope,
+                            event_date_basis=event_date_basis,
+                            readers_reconciled=reconciled)
+
+        # ROUND 4, BLOCKER — freshness is gated in TWO places, and the
+        # window-local one made the reordering below inert.
+        #
+        # `_certification` refuses an otherwise-perfect window with
+        # `CERT_STALE_SOURCE`, so on every coherent production input a stale
+        # source was reported HERE, at step 1 — ahead of the readability and
+        # reconciliation gates that the round-3 reordering was written to put
+        # in front of it. Measured before this fix, with the source stale:
+        #
+        #     stale + reconciliation record absent -> not_certifiable_source_not_fresh
+        #     stale + readers disagreed            -> not_certifiable_source_not_fresh
+        #     stale + boundary store unreadable    -> not_certifiable_source_not_fresh
+        #
+        # Today no reconciliation record exists at all (the recorder has no
+        # scheduled home), so a stale sync would have sent an operator to fix
+        # the pipeline while the refusal that actually blocks every window
+        # went unreported.
+        #
+        # Deferred rather than returned: fall through to the global gates and
+        # let the freshness gate below catch it, which preserves this window's
+        # own, more specific reason. Guarded on `source_fresh is not True` so
+        # the fall-through cannot reach the publishing branch — an incoherent
+        # dict claiming both a stale status and a fresh source keeps the
+        # immediate refusal.
+        defer_to_global_gates = (reason in FRESHNESS_REFUSALS
+                                 and coverage.get("source_fresh") is not True)
+
+        if not defer_to_global_gates:
+            status = (UNAVAILABLE
+                      if coverage.get("certification_eligible") is None
+                      or reason == COVERAGE_STATUS_UNAVAILABLE
+                      else WITHHELD)
+            return _refused(status, reason,
+                            coverage.get("certification_explanation")
+                            or coverage.get("explanation") or "",
+                            coverage=coverage, window=window,
+                            window_type=window_type, scope=scope,
+                            event_date_basis=event_date_basis,
+                            readers_reconciled=reconciled)
 
     if not stores_readable:
         return _refused(UNAVAILABLE, WITHHELD_INPUTS_UNREADABLE,
@@ -264,6 +335,33 @@ def publication_verdict(*, coverage: dict | None,
                         "the canonical contact-funnel source is not proven "
                         "fresh, so this window's completeness describes data "
                         "that may have stopped arriving",
+                        coverage=coverage, window=window,
+                        window_type=window_type, scope=scope,
+                        event_date_basis=event_date_basis,
+                        readers_reconciled=True)
+
+    # ROUND 4, MAJOR — `certification_eligible: True` beside
+    # `window_total_complete: False` published the confirmed subset as a
+    # certified COMPLETE total:
+    #
+    #     value: 42, available: True, certified: True, coverage_complete: False
+    #
+    # That pair is PR-ADS-160 §2's defect verbatim, in one object. It cannot
+    # come out of `window_coverage` — `_certification` requires `complete`
+    # before it returns `CERT_ELIGIBLE` — so it only arises from a
+    # caller-built dict, which is exactly the seam `publication_for` exposes
+    # and the reason `test_24` exists for the sibling missing-count case. The
+    # PR guarded "eligible with no count" (a blank) and left "eligible with
+    # unresolved membership" (a WRONG NUMBER) open.
+    #
+    # An internally contradictory coverage dict is evidence of a caller bug,
+    # so it fails closed under its own reason rather than being silently
+    # resolved in either direction.
+    if coverage.get("window_total_complete") is not True:
+        return _refused(UNAVAILABLE, WITHHELD_COVERAGE_SELF_CONTRADICTORY,
+                        "this window is marked certifiable while its undated "
+                        "membership is not resolved — the two cannot both be "
+                        "true, so no total is published",
                         coverage=coverage, window=window,
                         window_type=window_type, scope=scope,
                         event_date_basis=event_date_basis,
