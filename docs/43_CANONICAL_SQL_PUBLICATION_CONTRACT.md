@@ -345,14 +345,50 @@ scheduled home. It is not wired into the scheduler in this PR.
   `certification_eligible: True` beside `source_fresh: False`), and on the
   tuples production *does* produce the property was false.
 
-  Every §7 test therefore builds its coverage from the real
-  `publication_inputs()` output via `_coverage_from_inputs`, and `_inputs()`
-  enforces the coupling the real function enforces — an unreadable store
-  cannot also hand back a boundary instant. `test_39` guards the three copied
+  Every §7 test whose subject is a *production* input therefore builds its
+  coverage by driving the real `window_coverage()` (`_coverage_from_inputs`)
+  from an inputs dict that `_inputs()` shapes to `publication_inputs()`'s
+  output. `_inputs()` enforces both couplings the real function enforces: an
+  unreadable boundary store cannot also hand back a boundary instant, and an
+  unreadable incident store yields `None`, never `[]` — the unknown, not the
+  affirmative claim "no open gaps". It is a **mirror** of
+  `publication_inputs()`, not a call to it; only `test_12` and `test_19` drive
+  the real function.
+
+  `test_39`, `test_43`, `test_45` and `test_42`'s closing assertion
+  deliberately bypass that path, because their subject is a state production
+  cannot produce: a scan of the module's own source, the incoherent dicts the
+  `publication_for` **caller seam** exposes, and malformed non-mappings. A
+  fixture must be production-shaped when it stands in for production; those
+  stand in for a buggy caller, which is the thing they exist to catch.
+
+  `test_39` guards the three copied
   `CERT_*` literals, `test_40` the unread boundary store, `test_41`/`test_42`
   the freshness deferral and its fail-open, `test_43` the eligible-but-
   incomplete contradiction, `test_44` `None`-vs-`False` freshness, `test_45`
   the malformed-coverage regression the service had and the gate did not.
+
+  **Round 5 correction.** Round 5 measured `test_41`'s own docstring against
+  the pre-fix gate and found one of its four listed cases was never true:
+  `stale + incident store unreadable` reported `unavailable /
+  certification_unavailable` before the fix and reports it now, because an
+  unreadable incident store makes `publication_inputs` emit
+  `open_incidents = None`, which `_certification` turns into
+  `CERT_UNAVAILABLE` several branches before the stale-source branch is
+  reached. It was also the one case `_inputs()` could not shape honestly, so
+  no §7 test exercised it at all. The docstring now states the measured
+  value, `_inputs()` enforces the `None` coupling, and the case is carried as
+  `test_41`'s sixth arm — a negative control proving the deferral leaves that
+  refusal exactly where it was. Both additions were shown load-bearing:
+  removing the coupling, or widening `FRESHNESS_REFUSALS` to swallow
+  `certification_unavailable`, each turns `test_41` red.
+
+  Round 5 also removed the last impossible tuple round 4 had named but left
+  standing: §6's `_service_inputs` built its own dict, so
+  `_service_inputs(boundary_readable=False)` handed back a boundary instant.
+  It now delegates to `_inputs`, and every §6 assertion holds unchanged on the
+  corrected shape — they were true, they were simply not being proven on
+  anything production emits.
 
   **The lesson, recorded because it recurred four rounds running:** a fixture
   that cannot arise from the producing code proves nothing about the consuming
@@ -371,3 +407,51 @@ scheduled home. It is not wired into the scheduler in this PR.
   consumer will serialise; no endpoint emits it yet.
 * **No external writes.** The only write introduced is one append-only row in
   our own database, and only from the explicit `--apply` recorder.
+
+### Inherited by PR-ADS-161A-2 — four defects round 5 measured and did not fix
+
+All four are **pre-existing in `main`** and byte-identical under PR #185, so
+none of them is a regression of this work. All four are latent only because
+nothing renders the contract yet — 161A-2 is the PR that supplies the human
+to mislead, so all four should close before a consumer is migrated.
+
+1. **An unread boundary store still publishes `coverage_complete: true` on the
+   API shape, beside a real open gap.** `lifecycle_sql_coverage.py:298` reads
+   a null boundary instant as "no prospective period", and the service
+   overloads `boundary_observed_at = None` to mean both "no boundary" and
+   "boundary unknown". Measured: `status: unavailable`,
+   `withheld_reason: certification_inputs_unreadable`, `coverage_complete:
+   True`, `open_post_boundary_gaps: 1` — in one object. This is BLOCKER 1's
+   collapse, fixed at the status axis and left intact one level down.
+   *Smallest fix:* give `window_coverage` a `boundary_readable` argument
+   (default `True`) and make the vacuity exception conditional on it; or set
+   `coverage_complete: None` on the `WITHHELD_INPUTS_UNREADABLE` return.
+2. **The step-5 self-consistency guard checks one field of four.** With
+   `certification_eligible: True` and a coherent count, a caller-built dict
+   whose `certification_status` refuses, or whose `window_after_boundary` is
+   `False`, or which carries open gaps, still yields `publishable=True
+   total=42 certified=True`. `test_43`'s own justification — "`window_coverage`
+   cannot emit that pair, so it arises only from a caller-built dict, which is
+   exactly the seam `publication_for` exposes" — is equally true of the other
+   three. *Smallest fix:* extend the guard at `sql_publication.py:360` to
+   `certification_status`, `window_after_boundary` and
+   `open_post_boundary_gaps`, adding `"eligible"` to the tabled literals.
+3. **`reconciliation_gate` raises `AttributeError` on a truthy non-mapping.**
+   `sql_publication.py:140-142` does `if not reconciliation:` then
+   `.get(...)`. F4 hardened `coverage` against exactly this shape and not
+   `reconciliation` or `inputs`. A crash, not a false claim — but the module's
+   contract is that every gate fails closed.
+4. **A withheld payload carries a blank `explanation`** when `coverage is
+   None` and the service's source is not fresh:
+   `canonical_sql_publication_service.py:190-191` manufactures a non-empty
+   `{"source_fresh": …}`, so the pure gate's absent-coverage branch — the one
+   carrying the real explanation — never fires.
+
+Round 5 also recorded three non-defects worth knowing: `incidents_readable`
+is inert on every production-shaped input (harmlessly — the resulting claim
+is truthful, but its reason code is the generic `certification_unavailable`,
+which a consumer cannot tell apart from an unreadable contact population);
+the freshness deferral can downgrade `unavailable` to `withheld` on tuples
+requiring `certification_eligible: None`, which no producer emits; and
+`source_freshness_unreadable` is a reason code this service invents outside
+`sql_coverage_freshness.FRESHNESS_REASONS` and outside `docs/41`'s table.

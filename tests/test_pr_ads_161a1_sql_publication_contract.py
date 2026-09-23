@@ -1001,15 +1001,16 @@ def test_30_a_countless_window_and_an_absent_verdict_have_different_reasons():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _service_inputs(**over) -> dict:
-    """Everything `publication_inputs` returns, all gates satisfied."""
-    base = {
-        "boundary_readable": True, "incidents_readable": True,
-        "boundary_observed_at": _BOUNDARY, "boundary_id": "b1",
-        "open_incidents": [], "reconciliation": _recon(True),
-        "freshness": {"fresh": True, "reason": "source_fresh"},
-    }
-    base.update(over)
-    return base
+    """Everything `publication_inputs` returns, all gates satisfied.
+
+    Delegates to §7's `_inputs` so the couplings the real function enforces
+    hold here too. It used to build its own dict, which let
+    `_service_inputs(boundary_readable=False)` hand back a boundary instant —
+    a tuple production cannot produce, and round 4's whole finding. Every §6
+    assertion below holds unchanged on the corrected shape; they were true,
+    they were simply not being proven on anything production emits.
+    """
+    return _inputs(**over)
 
 
 def _real_eligible_coverage():
@@ -1307,8 +1308,9 @@ def _coverage_from_inputs(inputs, *, window_start=None, window_end=None,
 def _inputs(**over):
     """`publication_inputs()`'s real output shape, all gates satisfied.
 
-    Unlike `_service_inputs`, this enforces the coupling the real function
-    enforces: an unreadable boundary store CANNOT carry a boundary instant.
+    Unlike `_service_inputs`, this enforces both couplings the real function
+    enforces: an unreadable boundary store CANNOT carry a boundary instant,
+    and an unreadable incident store yields `None`, never `[]`.
     """
     base = {"boundary_readable": True, "incidents_readable": True,
             "boundary_observed_at": _BOUNDARY, "boundary_id": "b1",
@@ -1320,6 +1322,10 @@ def _inputs(**over):
         #   boundary = (state.get("boundary") or {}) if boundary_readable else {}
         base["boundary_observed_at"] = None
         base["boundary_id"] = None
+    if base["incidents_readable"] is not True:
+        # And for the incident store: an unreadable read yields None — the
+        # unknown — never `[]`, which is the affirmative claim "no open gaps".
+        base["open_incidents"] = None
     return base
 
 
@@ -1427,6 +1433,8 @@ def test_40_an_unread_boundary_store_is_not_the_claim_that_none_exists():
      pub.WITHHELD_RECONCILIATION_STALE, pub.WITHHELD),
     ({"boundary_readable": False},
      pub.WITHHELD_INPUTS_UNREADABLE, pub.UNAVAILABLE),
+    ({"incidents_readable": False},
+     pub.COVERAGE_STATUS_UNAVAILABLE, pub.UNAVAILABLE),
 ])
 def test_41_a_stale_source_no_longer_displaces_the_global_refusals(
         blocker, expected_reason, expected_status):
@@ -1436,13 +1444,21 @@ def test_41_a_stale_source_no_longer_displaces_the_global_refusals(
     otherwise-perfect window with `CERT_STALE_SOURCE`, and that is the
     window-local gate — step 1, ahead of everything the reordering put in
     front of the step-4 gate. So on every coherent production input a stale
-    source still won. Measured before the fix, all four reporting
+    source still won. Measured before the fix, these three reporting
     `not_certifiable_source_not_fresh`:
 
         stale + reconciliation record absent
         stale + readers disagreed
         stale + boundary store unreadable
-        stale + incident store unreadable
+
+    The fourth arm, `stale + incident store unreadable`, is NOT one of them
+    and never was: `publication_inputs` emits `open_incidents = None` for an
+    unreadable incident store, which `_certification` turns into
+    `CERT_UNAVAILABLE` several branches before it ever reaches the
+    stale-source branch. Measured under the pre-fix gate it reported
+    `unavailable / certification_unavailable`, identically to today. It is
+    carried here as the negative control: a refusal the reordering must
+    leave exactly where it was.
 
     Today NO reconciliation record exists — the recorder has no scheduled
     home — so a stale sync would have sent an operator to the pipeline while
@@ -1455,8 +1471,16 @@ def test_41_a_stale_source_no_longer_displaces_the_global_refusals(
                   **blocker)
     cov = _coverage_from_inputs(ins)
     # The premise: this is genuinely the window-local stale refusal, not a
-    # hand-built dict. (An unreadable store outranks it even window-locally.)
-    if ins["boundary_readable"] is True:
+    # hand-built dict. (Either unreadable store outranks it even
+    # window-locally — the boundary as CERT_NO_BOUNDARY, the incident store
+    # as CERT_UNAVAILABLE — so those two arms assert that instead.)
+    if ins["boundary_readable"] is not True:
+        assert cov["certification_status"] == coverage.CERT_NO_BOUNDARY, (
+            "fixture premise: a null boundary instant outranks staleness")
+    elif ins["incidents_readable"] is not True:
+        assert cov["certification_status"] == coverage.CERT_UNAVAILABLE, (
+            "fixture premise: unknown open gaps outrank staleness")
+    else:
         assert cov["certification_status"] == coverage.CERT_STALE_SOURCE, (
             "fixture premise: production emits the window-local stale refusal")
 

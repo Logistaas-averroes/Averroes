@@ -867,14 +867,46 @@ the measured result is 307 reason deltas in 6 classes with **0**
 `windows_certified` deltas; the F3 repo-state section said "76 cases existed
 before" when 64 did.
 
-Suite: 95 cases, up from 78. Eight counterfactuals run for the new guards,
-each confirmed failing against the pre-fix line. Every §7 test builds its
-coverage from the real `publication_inputs()` output, and the `_inputs()`
-helper enforces the coupling the real function enforces — an unreadable store
-cannot also hand back a boundary instant.
+Suite: 96 cases, up from 78. Eight counterfactuals run for the new guards,
+each confirmed failing against the pre-fix line. Every §7 test whose subject
+is a production input builds its coverage by driving the real
+`window_coverage()` from an `_inputs()` dict that mirrors
+`publication_inputs()`'s output and enforces both of its couplings — an
+unreadable boundary store cannot also hand back a boundary instant, and an
+unreadable incident store yields `None`, never `[]`. `_inputs()` mirrors that
+function rather than calling it (only `test_12` and `test_19` drive the real
+one), and `test_39`, `test_43`, `test_45` and `test_42`'s closing assertion
+deliberately bypass it, because a source scan, the caller seam's incoherent
+dicts and malformed non-mappings are states production cannot produce.
 
 **The recurring lesson, recorded because it has now cost four rounds:** a
 fixture that cannot arise from the producing code proves nothing about the
 consuming code.
+
+**Round 5 (final audit, `11605ef0`): `MERGE ASSESSMENT: no blocker found`.**
+Zero cells in 19,008 where F4 publishes something F3/`main` withheld —
+1,512-cell production-shaped space and 17,496-cell caller-seam space, both
+loading the pre-merge modules side by side; exactly one of the 1,512
+production cells publishes at all. Every load-bearing guard red under an
+independent 14-mutation sweep. The four defects it did find are all
+pre-existing in `main` and byte-identical under PR #185, so they gate
+PR-ADS-161A-2 rather than this PR: an unread boundary store still publishes
+`coverage_complete: true` on the API shape beside a real open gap
+(`lifecycle_sql_coverage.py:298` reads a null boundary instant as "no
+prospective period"); the step-5 self-consistency guard checks
+`window_total_complete` only, so a caller-built dict contradicting
+`certification_status`, `window_after_boundary` or `open_post_boundary_gaps`
+still publishes a certified total; `reconciliation_gate` raises
+`AttributeError` on a truthy non-mapping, which F4 hardened for `coverage`
+and not for `reconciliation`/`inputs`; and a withheld payload carries a blank
+`explanation` when `coverage is None` and the source is not fresh. Two claims
+were corrected in place here rather than left standing: `test_41`'s docstring
+asserted a pre-fix measurement that was never true, and "every §7 test builds
+its coverage from the real `publication_inputs()` output" overstated both the
+scope and the mechanism. `_inputs()` now enforces the incident-store coupling
+as well as the boundary one (an unreadable read is `None`, never `[]`), the
+case is carried as `test_41`'s sixth arm with its true measured value, and
+§6's `_service_inputs` — the last impossible tuple round 4 named — delegates
+to `_inputs` instead of building its own. Suite 96. See §7 of the doctrine.
 
 Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.
