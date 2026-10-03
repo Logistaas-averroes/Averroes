@@ -139,60 +139,84 @@ a contradiction, fix the entry and note the correction rather than deleting it.
   contract is structurally untouched by F1 (not independently re-run/proved
   green in this session — see caveat above).
 
-## PR-ADS-161B — acquisition cohort (reviewed 2026-10-03, HEAD a14c4d3)
+## PR-ADS-161B — acquisition cohort (reviews 2026-10-03: a14c4d3, then 9b2d420)
 
+> Merged from two overlapping sections written by the first review. The
+> re-review could not edit this file (the Edit tool refused it as a sensitive
+> path in -p mode), so the main agent merged it from the re-review's reported,
+> executed findings. Status is labelled per item. Re-verify anything here
+> against current code before relying on it.
+
+Durable facts (verified by execution at a14c4d3):
 - Two metric families, never interchangeable: `acquisition_cohort_outcomes`
   (window = `contact_created_at`, services/marketing_outcome_cohort_service.py)
   vs `lifecycle_stage_events` (window = `date_entered_sql`, gated by
   analysis/sql_publication). 161B left the event gate files untouched (empty
   diff on sql_publication, audit_sql_coverage_gate, 161A-1 guard).
-- Verified by execution: window edges = Europe/London midnight (same days as
-  spend); reached-SQL = direct OR recovered OR stage in
-  `stages_implying_event(EVENT_SQL)`; buckets reconcile on duplicates, blank
-  contact_id (fallback `funnel_row:<id>`), not_google_ads labels, conflicts.
-- Recurring pattern: `sql_status` is "published" whenever freshness.fresh is
-  not None. `assess()` returns fresh=False for `source_sync_state_missing` and
-  `source_bootstrap_incomplete` — a knowingly partial population — and the
-  cohort SQL count still publishes (as_of None → "an unknown data watermark").
-  Only CPQL withholds. Tests only exercise a hand-built generic stale.
-- Junk / Junk rate / legacy lead-quality split still come from the `leads`
-  table (different dedup, window tz, qualified definition) beside cohort
-  "Leads acquired"; Junk-heavy status (risk-first) is computed from that
-  legacy rate. Labelled by tooltip only.
-- The audit's "independent" SQL reuses the service's `window_instants`, the
-  repo's `_recovery_join` and the shared resolver — it independently checks
-  counts/proof, not window bounds or bucket placement.
+- Window edges = Europe/London midnight (same days as spend). Reached-SQL =
+  direct OR recovered OR stage in `stages_implying_event(EVENT_SQL)` =
+  {salesqualifiedlead, opportunity, customer, evangelist}. No SQL-entry date
+  produced.
+- `hubspot_contact_funnel.contact_id` is UNIQUE NOT NULL, so the duplicate and
+  merge branches are defensive and unreachable in production. Blank-string
+  ids are still possible.
+- `analysis.sql_coverage_freshness.assess` returns `fresh=False` (NOT None)
+  for sync-state-missing, bootstrap-incomplete, provenance-missing,
+  last-incremental-failed and no-successful-incremental. Only
+  sync-state-unavailable is `None`. Any gate written as `fresh is None` alone
+  publishes a partial population.
+- `fetch_canonical_campaign_spend` returns `total_spend_usd = 0.0` (not None)
+  for a window with no spend rows.
+- Deals are placed via ledger `primary_contact_id`. For multi-contact deals
+  with identical evidence, that is the LOWEST contact id, a display identity
+  only (`analysis/deal_truth.py` rule 2). Deal Google attribution
+  (`is_google_ads_attributed`: GCLID OR agreed group) differs from contact
+  Google attribution (`classify_source == paid search`).
 
-## PR-ADS-161B review (2026-10-03, HEAD a14c4d3 vs main 944af0c) — acquisition cohort
+Defects found at a14c4d3, and their status:
+- MAJOR: cohort SQLs published on fresh=False verdicts, `coverage_status`
+  claimed complete, CPQL reason said "stale". FIXED in 9b2d420
+  (`sql_publication()`: only source_fresh/source_stale publish; CPQL inherits
+  status and reason). Re-review VERIFIED by execution over all eight real
+  `assess` reasons; test_11j is a true counterfactual.
+- MAJOR: `cpql_decision` had no zero-spend guard, so a $0.00 CPQL could
+  publish. FIXED in 9b2d420 (`zero_window_spend` → not_applicable). VERIFIED
+  (test_11k, page and row).
+- MAJOR: Junk / Junk Rate (legacy `leads` table, verdicted-lead denominator)
+  sat beside cohort "Leads acquired" with no visible basis. Partly fixed in
+  9b2d420 (KPI, `<th>`, drawer KPIs). The re-review found mobile `data-label`
+  and the drawer split `<th>` still bare. Fixed in the follow-up commit by
+  the main agent; NOT yet re-verified by an auditor. "Junk-heavy" still reads
+  the legacy rate (documented).
+- MINORs FIXED in 9b2d420 and VERIFIED: the unclassified-source reason
+  (`original_source_unclassified`), disclosure of display-contact deal
+  placement, the deal-vs-contact attribution-basis note, the all-time label on
+  the lifecycle block, and the docs overclaims (docs/44 §4, docs/09).
+- The audit's independence was narrow at a14c4d3 (membership + SQL proof
+  only). 9b2d420 added `google_ads_split`, a Paid Search count in the audit's
+  own SQL. The re-review found its whitespace normalisation disagreed with
+  `normalize_source` on tab / newline / NBSP edges (a false alarm, failing
+  closed). Fixed in the follow-up commit (Python `isspace` set as a PG regex
+  class; test_25 / 25b on PG). NOT yet re-verified by an auditor. Campaign and
+  deal placement are still checked only against the payload's own numbers.
+- Gate regression caught by CI's PG step, not by the first review: the audit
+  script spelled `known_reached_sql_by`, a new reader for
+  `audit_sql_coverage_gate.bound_is_not_a_date`. FIXED in 9b2d420 by
+  importing the gate's `BOUND_COLUMN`; the allow-list is unchanged. The
+  re-review judged it honest, with a residual weakness: the gate scans text,
+  so a module can now read the bound through an imported name unseen. That is
+  a pre-existing gate weakness, and this is now a precedent.
+- Open OBSERVATION: when SQL is withheld, rows still carry raw `cohort_sqls` in
+  the API. Only the UI gates on `sql_status`.
 
-Verified facts (re-verify before relying):
-- Cohort = `services/marketing_outcome_cohort_service.py`; read =
-  `crm_funnel_repository.fetch_acquisition_cohort_contacts` (window on
-  `created_at` TIMESTAMPTZ, tz-aware London-day instants from `window_instants`;
-  no SQL-entry date produced). SQL proof = direct OR recovered OR stage in
-  `stages_implying_event(EVENT_SQL)` = {salesqualifiedlead, opportunity,
-  customer, evangelist}. `hubspot_contact_funnel.contact_id` is UNIQUE NOT NULL,
-  so the duplicate / merge branches are defensive and unreachable in production
-  (blank-string ids are still possible).
-- `freshness_mod.assess` returns `fresh=False` for sync-state-missing AND
-  bootstrap-incomplete AND sync-failed; `_cohort_block` only withholds SQL on
-  `fresh is None`. So the page PUBLISHES cohort SQLs (even 0) on a never-ingested
-  or still-bootstrapping funnel, `coverage_status` reads "cohort_complete…",
-  and CPQL says "source_not_fresh"/"stale" (wrong reason). Executed.
-- `cpql_decision` has no zero-spend guard: spend_usd=0.0 with SQLs>0 publishes
-  CPQL $0.00 (executed). Zero-row windows return total_spend_usd 0.0 (not None).
-  Legacy overall_cpql had the same gap; do not treat as new in kind.
-- Deals are placed through ledger `primary_contact_id`, which for multi-contact
-  identical-evidence deals is the LOWEST contact id "display identity only"
-  (`analysis/deal_truth.py`). Using it for time placement is arbitrary. Deal
-  Google-attribution (`is_google_ads_attributed`: GCLID OR agreed group) differs
-  from contact Google-attribution (`classify_source == paid search` only).
-- The 161B audit's "independent" recount (`independent_counts`) re-queries the
-  same repo SQL fragments and window helpers; it independently checks all-source
-  membership + SQL proof only. Attribution split, deal placement and bucket
-  identities are checked against the payload's own numbers (tautological).
-- Junk / Junk Rate / outcome "Junk-heavy" still come from legacy `leads`
-  (`_junk_rate` denominator = verdicted, not leads acquired); only the "Junk"
-  header has a hover title, "Junk Rate" none.
-- Pattern: a retargeted gate can keep every string-pin and still drop the
-  guarantee (here: runtime reconciliation against the canonical population).
+Recurring patterns (durable):
+- A retargeted gate can keep every string pin and still drop the guarantee.
+  Here, runtime reconciliation against an independent population became an
+  internal bucket identity that fires only on a construction bug.
+- Tests that hand-build a freshness verdict miss the shapes the real
+  assessor emits. Demand the real `assess` over a real-shaped sync row.
+- An "independent" SQL restatement of a Python rule must be tested against
+  the Python rule on edge inputs. PG `\s` and `btrim` are not Python's
+  `split()` / `strip()`.
+- My first review did not finish a full suite run and missed a PG-caught
+  regression. Run the workflow's PG step, or say plainly that it was not run.

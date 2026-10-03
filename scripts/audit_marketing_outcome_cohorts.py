@@ -70,6 +70,11 @@ FORBIDDEN_DATE_SOURCES = (
     "updated_at", "recorded_at", "last_incremental_at",
 )
 
+#: A run of Python whitespace (``str.isspace``) as a PostgreSQL ARE, so the
+#: audit's SQL normalises a source exactly as ``normalize_source`` does.
+PY_WHITESPACE_RUN = "[" + "".join(
+    f"\\u{cp:04x}" for cp in range(0x3001) if chr(cp).isspace()) + "]+"
+
 #: Anything that could reach an external system or write to our own database.
 FORBIDDEN_WRITE_MARKERS = (
     "connectors.", "hubspot", "googleads", "google_ads_api", "requests.post",
@@ -428,9 +433,13 @@ def independent_counts(start_at, end_before) -> dict | None:
     stage_only = (f"({direct} IS NULL AND {recovered} IS NULL "
                   f"AND lower(btrim(f.lifecycle_stage)) = ANY(%s))")
     # analysis.source_classification's Paid Search rule, re-stated in SQL rather
-    # than imported: lowercase, underscores as spaces, whitespace collapsed.
-    paid = ("regexp_replace(btrim(lower(replace(coalesce(f.hs_analytics_source, ''), "
-            "'_', ' '))), '\\s+', ' ', 'g') = 'paid search'")
+    # than imported: underscores as spaces, every whitespace run collapsed to
+    # one space THEN trimmed, lowercased. "Whitespace" is Python's own
+    # str.isspace() set — what normalize_source's strip()/split() use — since
+    # PostgreSQL's \s misses NBSP and btrim() strips only spaces (PR-ADS-161B
+    # re-review: tab / newline / NBSP edges disagreed with classify_source).
+    paid = ("btrim(regexp_replace(lower(replace(coalesce(f.hs_analytics_source, ''), "
+            "'_', ' ')), %s, ' ', 'g'), ' ') = 'paid search'")
     try:
         with get_conn() as conn:
             if conn is None:
@@ -450,7 +459,8 @@ def independent_counts(start_at, end_before) -> dict | None:
                       AND (%s::timestamptz IS NULL OR f.created_at >= %s)
                       AND f.created_at < %s
                     """,
-                    (stages, stages, stages, stages, start_at, start_at, end_before),
+                    (stages, stages, stages, stages, PY_WHITESPACE_RUN,
+                     start_at, start_at, end_before),
                 )
                 row = cur.fetchone()
                 conn.rollback()

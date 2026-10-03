@@ -474,6 +474,17 @@ def test_clean_table_headers():
     assert 'CAMPAIGN_LEGACY_JUNK_LABEL = "Junk (lead status)"' in APP_JS
     assert 'CAMPAIGN_LEGACY_JUNK_RATE_LABEL = "Junk Rate (lead status)"' in APP_JS
     assert ">Junk<" not in region and ">Junk Rate<" not in region
+    # The narrow-screen label is `attr(data-label)` (styles.css), so the row
+    # cells must name the basis too — not only the desktop <th>.
+    row = _region(APP_JS, "function renderCampaignEvidenceRow", "\n}\n")
+    assert 'data-label="${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}"' in row
+    assert 'data-label="${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}"' in row
+    assert 'data-label="Junk"' not in row and 'data-label="Junk Rate"' not in row
+    # And the drawer's Lead Quality / Country split tables.
+    drawer = _region(APP_JS, "function _appendDrawerEvidenceSections", "\n}\n")
+    assert "<th>Junk</th>" not in drawer and "<th>Junk Rate</th>" not in drawer
+    assert drawer.count("${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</th>") == 2
+    assert drawer.count("${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</th>") == 2
     # PR-ADS-157 §2 renamed the bare ">SQLs<" header. "SQLs" named no
     # population. PR-ADS-161B names the population the page now publishes:
     # acquisition-cohort SQLs. Still emitted from a constant so the label

@@ -1291,3 +1291,68 @@ def test_12_pg_the_coverage_gate_still_reports_open_post_boundary_incidents(seed
     p = build_campaign_evidence("30d")
     assert p["cohort"]["sql_status"] == "published"
     assert p["cohort"]["lifecycle_event_coverage"]["open_post_boundary_incidents"] == 1
+
+
+#: Original-source spellings at the edges of `normalize_source`, each paired
+#: with what `classify_source` makes of it. The tab / newline / NBSP cases are
+#: the ones the audit's first SQL normalisation disagreed on (re-review MINOR 1).
+_SOURCE_EDGES = [
+    "\tPaid Search", "Paid Search\n", "\nPAID_SEARCH\n", " Paid Search",
+    "Paid Search", "Paid Search ", "Paid Search", "  paid   SEARCH ",
+    "PAID_SEARCH", "paid-search", "", None, "Paid Searches",
+]
+
+
+@_needs_pg
+def test_25_pg_the_audits_paid_search_rule_agrees_with_classify_source(seeded):
+    """The `google_ads_split` check is only independent if its SQL restates the
+    Python rule EXACTLY. Every edge spelling goes through the production writer
+    into PostgreSQL; the audit's count must equal classify_source's."""
+    from analysis.source_classification import GROUP_GOOGLE_ADS, classify_source
+    from db import writers
+
+    inside = seeded["inside"]
+    writers.upsert_hubspot_contact_funnel([
+        {"contact_id": f"edge{i}", "lifecycle_stage": "customer",
+         "created_at": inside, "last_modified_at": inside,
+         "hs_analytics_source": src}
+        for i, src in enumerate(_SOURCE_EDGES)])
+    expected_edge = sum(1 for src in _SOURCE_EDGES
+                        if classify_source(src, None) == GROUP_GOOGLE_ADS)
+    assert expected_edge == 9          # the fixture really exercises both sides
+
+    _, end_before = svc.window_instants(None, datetime.now(timezone.utc).date())
+    independent = audit.independent_counts(None, end_before)
+    # The seeded funnel's own Paid Search SQLs: dated, undated, recovered,
+    # unmapped, old_entered_recently.
+    assert independent["paid_search_sourced_sqls"] == 5 + expected_edge
+
+    # And the full audit agrees with the page on every window.
+    a, _ = audit.run()
+    assert not any("google_ads_split" in v for v in a.violations), a.violations
+    assert not any("google_ads_split" in u for u in a.unavailable), a.unavailable
+
+
+@_needs_pg
+def test_25b_pg_counterfactual_the_first_sql_normalisation_disagreed(seeded, monkeypatch):
+    """The pre-fix expression (btrim before collapsing, PostgreSQL \\s) run over
+    the same rows: it must miss the tab / newline / NBSP spellings, or test_25
+    proves nothing about them."""
+    from db.connection import get_conn
+    from db import writers
+
+    inside = seeded["inside"]
+    writers.upsert_hubspot_contact_funnel([
+        {"contact_id": f"edge{i}", "lifecycle_stage": "customer",
+         "created_at": inside, "last_modified_at": inside,
+         "hs_analytics_source": src}
+        for i, src in enumerate(_SOURCE_EDGES)])
+    pre_fix = ("regexp_replace(btrim(lower(replace(coalesce(hs_analytics_source, ''), "
+               "'_', ' '))), '\\s+', ' ', 'g') = 'paid search'")
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FILTER (WHERE {pre_fix}) "
+                        f"FROM hubspot_contact_funnel WHERE contact_id LIKE 'edge%%'")
+            pre_fix_count = cur.fetchone()[0]
+        conn.rollback()
+    assert pre_fix_count < 9, "the pre-fix SQL already agreed; the edges test nothing"

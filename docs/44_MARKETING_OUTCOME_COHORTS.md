@@ -327,6 +327,11 @@ required cases plus a counterfactual for every guard:
   an SQL moved from Google Ads to excluded (`test_14i`; `test_14j` is the
   sanctioned-mapping positive control), and a CPQL published over a withheld
   count or zero spend (`test_14k`). Lifecycle gaps alone do **not** fail it.
+  The split check restates `normalize_source` in SQL using Python's own
+  `str.isspace()` set (PostgreSQL's `\s` misses NBSP). `test_25` writes tab,
+  newline, NBSP and EM-space spellings through the production writer and
+  requires the audit's count to equal `classify_source`'s. `test_25b` shows
+  the first SQL normalisation missing them.
 * **The boundary bound** (`test_10e`/`10f`): this PR adds no reader of
   `known_reached_sql_by`. The audit takes the name from
   `audit_sql_coverage_gate.BOUND_COLUMN` rather than spelling it, so it stays

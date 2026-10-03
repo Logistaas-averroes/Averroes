@@ -1007,7 +1007,12 @@ imports the gate's own `BOUND_COLUMN`; the gate's allow-list is unchanged.
 `mixed` — the drawer's Lead Quality / Country splits and Recent Leads, and the
 legacy payload fields, still read `leads.status_category`.
 
-Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (103), including
-6 PostgreSQL end-to-end cases, added to CI's PostgreSQL step and did-run list.
+A second auditor pass over the fixes found no blocker and two MINORs, both
+fixed. The audit's SQL Paid Search normalisation missed tab / newline / NBSP
+spellings `classify_source` accepts (a false alarm, failing closed), and the
+mobile `data-label`s and drawer split headers still read a bare "Junk".
+
+Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (105), including
+8 PostgreSQL end-to-end cases, added to CI's PostgreSQL step and did-run list.
 
 Full doctrine: `docs/44_MARKETING_OUTCOME_COHORTS.md`.

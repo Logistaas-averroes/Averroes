@@ -7025,8 +7025,8 @@ function renderCampaignEvidenceRow(c) {
       <td class="td--num" data-label="Spend">${campaignSpendCell(c)}</td>
       <td class="td--num" data-label="Leads acquired">${leads}</td>
       <td class="td--num" data-label="${escapeHtml(CAMPAIGN_SQL_SCOPE_SHORT)}">${sqls}</td>
-      <td class="td--num" data-label="Junk">${junk}</td>
-      <td class="td--num ${junkCls}" data-label="Junk Rate">${junkRateStr}</td>
+      <td class="td--num" data-label="${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}">${junk}</td>
+      <td class="td--num ${junkCls}" data-label="${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}">${junkRateStr}</td>
       <td class="td--num ${cpql === "N/A" ? "td--na" : ""}" data-label="CPQL">${cpql}</td>
       <td class="td--num" data-label="Closed-won">${won}</td>
       <td class="td--action" data-label="">
@@ -14598,7 +14598,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
         <table class="drawer-table">
           <thead>
             <tr>
-              <th title="${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_LABEL)}</th><th>In Progress</th><th>Junk</th><th>Wrong Fit</th><th>Unknown</th><th>Junk Rate</th>
+              <th title="${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_LABEL)}</th><th>In Progress</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</th><th>Wrong Fit</th><th>Unknown</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</th>
             </tr>
           </thead>
           <tbody>
@@ -14651,7 +14651,7 @@ function _appendDrawerEvidenceSections(container, data, lq) {
         <div class="drawer-section__title">Country Breakdown</div>
         <table class="drawer-table">
           <thead>
-            <tr><th>Country</th><th>Leads</th><th title="${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_LABEL)}</th><th>In Progress</th><th>Junk</th><th>Wrong Fit</th><th>Unknown</th><th>Junk Rate</th></tr>
+            <tr><th>Country</th><th>Leads</th><th title="${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_QUALIFIED_LABEL)}</th><th>In Progress</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</th><th>Wrong Fit</th><th>Unknown</th><th title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}">${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</th></tr>
           </thead>
           <tbody>${rows}</tbody>
         </table>
