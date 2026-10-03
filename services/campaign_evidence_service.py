@@ -29,6 +29,24 @@ recommendations calibrated per fixed run-period. So this page presents a factual
 window-safe ``outcome_status`` computed from the selected-window totals only —
 never a recomputed or snapshot verdict.
 
+PR-ADS-161B — SQL outcomes are ACQUISITION-COHORT outcomes
+----------------------------------------------------------
+The SQLs this page publishes, its CPQL and its closed-won deals come from
+``services.marketing_outcome_cohort_service``: contacts CREATED in the window,
+outcome read from canonical lifecycle evidence as of the data watermark. A
+proven SQL is counted whether or not its exact SQL-entry timestamp is known, and
+a Google Ads SQL with no campaign mapping is counted as unattributed rather than
+dropped. Placement uses ``_assign_lead`` below — the same resolver the spend
+side uses — so a cohort SQL lands on the row its campaign's spend lands on.
+
+The legacy ``leads.status_category`` fields (``confirmed_sqls``,
+``confirmed_sqls_total``, ``cpql_usd``, ``overall_cpql_usd``,
+``mapping_coverage``, ``sql_reconciliation``) are still returned, unchanged and
+declared as legacy in ``legacy_sql``, because other readers and audits consume
+them; this page no longer publishes them. Confirmed junk and junk rate remain
+the lead-quality classification — the canonical lifecycle taxonomy has no junk
+category, and one is not invented here.
+
 Read-only. No writes to Google Ads or HubSpot.
 """
 
@@ -255,6 +273,11 @@ def _outcome_status(*, native_spend, confirmed_sqls, confirmed_junk, total_leads
     if (junk_rate is not None and junk_rate >= junk_heavy_pct
             and (verdicted or 0) >= small_sample):
         return STATUS_JUNK_HEAVY
+    # 2b. PR-ADS-161B — the SQL count is UNKNOWN, not zero. Without this, the
+    # `or 0` above turned an unreadable SQL source into "Spend without SQL
+    # proof": an accusation drawn from an absence of data.
+    if confirmed_sqls is None and has_spend:
+        return STATUS_DATA_UNAVAILABLE
     # 3. Confirmed SQL production.
     if sqls > 0:
         return STATUS_SQL_PRODUCER
@@ -325,16 +348,6 @@ def build_campaign_evidence(window: str, now: datetime | None = None,
         "lead_semantics": "selected_window_deduplicated_event_date",
     }
 
-    if not spend_available and not lead_available:
-        return {
-            **base, "db_unavailable": True, "campaigns": [],
-            "summary": _empty_summary(),
-            "audit": _audit_block(base, spend_result, lead_result,
-                                  spend_native_sum=None, spend_usd_sum=None,
-                                  sql_sum=None, junk_sum=None,
-                                  spend_available=False, lead_available=False),
-        }
-
     fx_complete = bool(spend_result.get("fx_complete"))
     spend_by_id, norm_to_ids = _spend_by_campaign_id(spend_result)
 
@@ -342,6 +355,30 @@ def build_campaign_evidence(window: str, now: datetime | None = None,
     customer_id = spend_result.get("customer_id")
     identity_result = repo.fetch_campaign_identity(customer_id)
     identity_by_label, aliases_by_id = _identity_index(identity_result)
+    identity_available = bool(identity_result.get("available"))
+
+    # PR-ADS-161B — the acquisition cohort, placed through the SAME resolver as
+    # the legacy lead rows below and the spend rows above.
+    from services import marketing_outcome_cohort_service as cohort_svc  # noqa: PLC0415
+
+    def _resolve_label(label):
+        return _assign_lead(label, identity_by_label, norm_to_ids)
+
+    outcomes = cohort_svc.build_window_outcomes(
+        start, end, resolve_label=_resolve_label, now=now)
+
+    if not spend_available and not lead_available and not outcomes["available"]:
+        return {
+            **base, "db_unavailable": True, "campaigns": [],
+            "summary": _empty_summary(),
+            "cohort": _cohort_block(cohort_svc, outcomes, summary=_empty_summary(),
+                                    identity_available=identity_available),
+            "legacy_sql": _legacy_sql_block(),
+            "audit": _audit_block(base, spend_result, lead_result,
+                                  spend_native_sum=None, spend_usd_sum=None,
+                                  sql_sum=None, junk_sum=None,
+                                  spend_available=False, lead_available=False),
+        }
 
     # ── Assign each deduped paid-search lead to a canonical campaign or bucket ──
     google_by_id: dict = {}
@@ -358,9 +395,27 @@ def build_campaign_evidence(window: str, now: datetime | None = None,
         else:  # unmatched → Mapping Review (keep a representative display label)
             _add_lead(unmatched.setdefault(key, _new_outcomes(label)), cat)
 
+    cohort = outcomes["cohort"]
+    deals = outcomes["deals"]
+    cohort_campaign_ids = set(cohort["by_campaign"]) if cohort else set()
+    deal_campaign_ids = set(deals["by_campaign"]) if deals else set()
+    cohort_label_rows = (cohort["unattributed"]["by_label"] if cohort else {})
+
+    def _cohort_fields(key, kind, sp):
+        # CPQL is computed from the spend the row PUBLISHES (rounded), so the
+        # published CPQL reproduces exactly from the published numbers.
+        return _cohort_row_fields(
+            cohort_svc, outcomes, campaign_key=key, kind=kind,
+            spend_usd=_round2((sp or {}).get("usd")), has_spend_row=sp is not None,
+            spend_available=spend_available, identity_available=identity_available)
+
     campaigns: list[dict] = []
-    # Google Ads campaigns — keyed by campaign_id (stable identity).
-    for cid in sorted(set(spend_by_id) | set(google_by_id)):
+    # Google Ads campaigns — keyed by campaign_id (stable identity). The
+    # universe is every campaign ANY source places evidence on: spend, legacy
+    # leads, cohort SQLs or closed-won deals. A campaign is never dropped
+    # because only one side knows about it.
+    for cid in sorted(set(spend_by_id) | set(google_by_id)
+                      | cohort_campaign_ids | deal_campaign_ids):
         sp = spend_by_id.get(cid)
         lq = google_by_id.get(cid)
         display = ((sp or {}).get("campaign_name")
@@ -368,27 +423,42 @@ def build_campaign_evidence(window: str, now: datetime | None = None,
         campaigns.append(_row(
             base, cid, display, sp, lq, lead_available, spend_available, thresholds,
             aliases=sorted(aliases_by_id.get(cid, set())), mapping_status="mapped",
-            is_mapping_review=False))
+            is_mapping_review=False, cohort_fields=_cohort_fields(cid, "mapped", sp)))
 
-    # Mapping Review — unmatched lead labels (no canonical spend id).
-    for norm, agg in sorted(unmatched.items()):
+    # Mapping Review — unmatched labels from the legacy leads OR the cohort (no
+    # canonical spend id). Same `unmatched:<norm>` key in both, from the same
+    # resolver, so one label is one row.
+    review_norms = set(unmatched) | {k.split(":", 1)[1] for k in cohort_label_rows}
+    for norm in sorted(review_norms):
+        agg = unmatched.get(norm)
+        key = f"unmatched:{norm}"
+        display = ((agg or {}).get("display_name")
+                   or (cohort_label_rows.get(key) or {}).get("display_name") or norm)
         campaigns.append(_row(
-            base, f"unmatched:{norm}", agg["display_name"], None, agg,
+            base, key, display, None, agg,
             lead_available, spend_available, thresholds, aliases=[],
-            mapping_status="unmatched", is_mapping_review=True))
+            mapping_status="unmatched", is_mapping_review=True,
+            cohort_fields=_cohort_fields(key, "unmatched", None)))
 
     campaigns.sort(key=lambda c: (
         c["spend_native"] is None, -(c["spend_native"] or 0.0),
-        -(c["confirmed_sqls"] or 0), c["campaign_name"] or ""))
+        -(c["cohort_sqls"] or 0), c["campaign_name"] or ""))
 
     summary, sums = _build_summary(
         campaigns, spend_result, lead_result, spend_available, lead_available,
         fx_complete, unmatched=unmatched, excluded=excluded)
+    summary.update(_cohort_summary_fields(
+        cohort_svc, outcomes, spend_available=spend_available,
+        usd_total=summary.get("spend_usd")))
 
     return {
         **base,
+        "metric_family": cohort_svc.METRIC_FAMILY_COHORT,
         "campaigns": campaigns,
         "summary": summary,
+        "cohort": _cohort_block(cohort_svc, outcomes, summary=summary,
+                                identity_available=identity_available),
+        "legacy_sql": _legacy_sql_block(),
         # PR-ADS-152 §6: explicit canonical SQL-scope reconciliation. Campaign
         # Evidence counts campaign-attributable SQLs (mapped Google Ads campaign
         # identity), disclosed against the one canonical population.
@@ -417,8 +487,15 @@ def _canonical_sql_reconciliation(window, consumer_count, now) -> dict:
 
 
 def _row(base, campaign_key, display, sp, lq, lead_available, spend_available,
-         thresholds, *, aliases, mapping_status, is_mapping_review) -> dict:
-    """Build one campaign evidence row (Google Ads campaign or Mapping Review)."""
+         thresholds, *, aliases, mapping_status, is_mapping_review,
+         cohort_fields: dict | None = None) -> dict:
+    """Build one campaign evidence row (Google Ads campaign or Mapping Review).
+
+    ``cohort_fields`` (PR-ADS-161B) carries the acquisition-cohort outcomes for
+    this row. When supplied, the row's factual ``outcome_status`` is computed
+    from the cohort SQLs — the number the page publishes — so a status can
+    never describe a different SQL population from the one beside it.
+    """
     native_spend = sp.get("native") if sp else None
     usd_spend = sp.get("usd") if sp else None
     row_fx_complete = sp.get("fx_complete") if sp else False
@@ -447,6 +524,10 @@ def _row(base, campaign_key, display, sp, lq, lead_available, spend_available,
     if usd_spend is not None and (confirmed_sqls or 0) > 0:
         cpql_usd = round(float(usd_spend) / confirmed_sqls, 2)
 
+    status_sqls = confirmed_sqls
+    if cohort_fields is not None:
+        status_sqls = cohort_fields.get("cohort_sqls")
+
     return {
         "campaign_key": campaign_key,
         "campaign_id": (sp or {}).get("campaign_id"),
@@ -466,14 +547,229 @@ def _row(base, campaign_key, display, sp, lq, lead_available, spend_available,
         "verdicted_leads": verdicted if (lq is not None or lead_available) else None,
         "cpql_usd": cpql_usd,
         "mapping_status": mapping_status,
+        **(cohort_fields or {}),
         "outcome_status": _outcome_status(
-            native_spend=native_spend, confirmed_sqls=confirmed_sqls,
+            native_spend=native_spend, confirmed_sqls=status_sqls,
             confirmed_junk=confirmed_junk, total_leads=total_leads,
             junk_rate=junk_rate, verdicted=verdicted,
             lead_available=lead_available, spend_available=spend_available,
             junk_heavy_pct=thresholds["junk_heavy_pct"],
             small_sample=thresholds["small_sample"],
             is_mapping_review=is_mapping_review),
+    }
+
+
+# ── PR-ADS-161B — acquisition-cohort fields ──────────────────────────────────
+#: Row-level CPQL reasons that only exist at row grain (the cohort service owns
+#: the shared vocabulary).
+CPQL_REASON_NO_SPEND_ROW = "no_canonical_spend_row_in_window"
+CPQL_REASON_UNMAPPED_ROW = "unmapped_label_has_no_campaign_spend"
+
+#: The legacy SQL fields still returned for other readers and audits.
+LEGACY_SQL_FIELDS = (
+    "campaigns[].confirmed_sqls", "campaigns[].cpql_usd",
+    "summary.confirmed_sqls_total", "summary.overall_cpql_usd",
+    "summary.overall_cpql_scope", "summary.mapping_coverage", "sql_reconciliation",
+)
+
+
+def _cohort_row_fields(cohort_svc, outcomes, *, campaign_key, kind, spend_usd,
+                       has_spend_row, spend_available, identity_available) -> dict:
+    """One row's acquisition-cohort outcomes, CPQL and closed-won deals.
+
+    ``kind`` is ``mapped`` (a Google Ads campaign id) or ``unmatched`` (a label
+    with no campaign mapping, ``unmatched:<norm>``). Every count is ``None`` —
+    never 0 — when its source could not be read.
+    """
+    cohort = outcomes["cohort"]
+    deals = outcomes["deals"]
+    if cohort is None:
+        slot = None
+    elif kind == "mapped":
+        slot = cohort["by_campaign"].get(campaign_key)
+    else:
+        slot = cohort["unattributed"]["by_label"].get(campaign_key)
+    if cohort is not None and slot is None:
+        slot = {"contacts_acquired": 0, "sqls": 0, "sqls_missing_event_timestamp": 0}
+
+    sqls = slot["sqls"] if slot else None
+    if kind == "unmatched":
+        cpql_status, cpql_reason, cpql_value = (
+            cohort_svc.STATUS_UNAVAILABLE, CPQL_REASON_UNMAPPED_ROW, None)
+    elif spend_available and not has_spend_row:
+        cpql_status, cpql_reason, cpql_value = (
+            cohort_svc.STATUS_UNAVAILABLE, CPQL_REASON_NO_SPEND_ROW, None)
+    elif not identity_available:
+        # Without the approved identity mappings a row's SQLs are whatever the
+        # exact-name fallback could place, so its denominator is not the
+        # campaign's. The page-level CPQL is unaffected and stays published.
+        cpql_status, cpql_reason, cpql_value = (
+            cohort_svc.STATUS_WITHHELD,
+            cohort_svc.CPQL_REASON_ATTRIBUTION_UNAVAILABLE, None)
+    else:
+        cpql_status, cpql_reason, cpql_value = cohort_svc.cpql_decision(
+            cohort_available=cohort is not None, spend_available=spend_available,
+            spend_usd=spend_usd, cohort_sqls=sqls,
+            source_fresh=outcomes["freshness"].get("fresh"))
+
+    closed_won = None
+    if deals is not None and kind == "mapped":
+        closed_won = (deals["by_campaign"].get(campaign_key) or {}).get("deals", 0)
+
+    return {
+        "cohort_contacts_acquired": slot["contacts_acquired"] if slot else None,
+        "cohort_sqls": sqls,
+        "cohort_sqls_missing_event_timestamp": (
+            slot["sqls_missing_event_timestamp"] if slot else None),
+        "cohort_cpql_usd": cpql_value,
+        "cohort_cpql_status": cpql_status,
+        "cohort_cpql_reason": cpql_reason,
+        # Deals for an UNMAPPED label are counted in the page's Unattributed
+        # total, not on the label row — so the row says None, not 0.
+        "closed_won_deals": closed_won,
+    }
+
+
+def _cohort_summary_fields(cohort_svc, outcomes, *, spend_available, usd_total) -> dict:
+    """Page-level cohort totals. Every one reconciles in ``cohort.reconciliation``."""
+    cohort = outcomes["cohort"]
+    deals = outcomes["deals"]
+
+    def _c(path):
+        if cohort is None:
+            return None
+        node = cohort
+        for part in path:
+            node = node[part]
+        return node
+
+    mapped = (None if cohort is None
+              else sum(s["sqls"] for s in cohort["by_campaign"].values()))
+    google_ads_sqls = _c(("google_ads", "sqls"))
+    status, reason, value = cohort_svc.cpql_decision(
+        cohort_available=cohort is not None, spend_available=spend_available,
+        spend_usd=usd_total, cohort_sqls=google_ads_sqls,
+        source_fresh=outcomes["freshness"].get("fresh"))
+
+    def _d(bucket):
+        return None if deals is None else deals["buckets"][bucket]["deals"]
+
+    return {
+        "cohort_contacts_acquired_google_ads": _c(("google_ads", "contacts_acquired")),
+        "cohort_sqls_google_ads": google_ads_sqls,
+        "cohort_sqls_mapped": mapped,
+        "cohort_sqls_unattributed": _c(("unattributed", "sqls")),
+        "cohort_sqls_excluded_non_google": _c(("excluded_non_google", "sqls")),
+        "cohort_sqls_all_sources": _c(("all_sources", "sqls")),
+        "cohort_sqls_missing_event_timestamp": _c(("google_ads", "sqls_missing_event_timestamp")),
+        # CPQL = ALL window Google Ads spend ÷ ALL Google Ads cohort SQLs. The
+        # unattributed SQLs are Google Ads SQLs too, so the denominator matches
+        # the numerator's scope — unlike the legacy "mapped_only" CPQL, which
+        # divided all spend by a subset of the SQLs it bought.
+        "cohort_cpql_usd": value,
+        "cohort_cpql_status": status,
+        "cohort_cpql_reason": reason,
+        "closed_won_deals_google_ads": None if deals is None else deals["google_ads"]["deals"],
+        "closed_won_deals_mapped": _d(cohort_svc.BUCKET_CAMPAIGN),
+        "closed_won_deals_unattributed": _d(cohort_svc.BUCKET_UNATTRIBUTED),
+        "closed_won_deals_ambiguous": _d(cohort_svc.BUCKET_AMBIGUOUS),
+        "closed_won_deals_excluded_non_google": _d(cohort_svc.BUCKET_EXCLUDED),
+        "closed_won_deals_unplaceable": None if deals is None else deals["unplaceable_total"],
+    }
+
+
+def _cohort_block(cohort_svc, outcomes, *, summary, identity_available) -> dict:
+    """The cohort's publication decision, metadata, reconciliation and disclosures."""
+    cohort = outcomes["cohort"]
+    deals = outcomes["deals"]
+    freshness = outcomes["freshness"] or {}
+    problems = outcomes.get("reconciliation_problems") or []
+
+    if cohort is None:
+        sql_status, sql_reason = cohort_svc.STATUS_UNAVAILABLE, "canonical_funnel_unreadable"
+    elif problems:
+        sql_status, sql_reason = cohort_svc.STATUS_WITHHELD, "cohort_reconciliation_failed"
+    elif freshness.get("fresh") is None:
+        # Counts exist, but "as of when" cannot be stated — and the published
+        # label is "measured as of <watermark>".
+        sql_status, sql_reason = cohort_svc.STATUS_WITHHELD, "data_watermark_unknown"
+    else:
+        # Stale is published WITH its watermark (the label says as-of when);
+        # it is CPQL that a stale source withholds.
+        sql_status, sql_reason = cohort_svc.STATUS_PUBLISHED, None
+
+    if not identity_available:
+        attribution = "unavailable"
+    elif cohort is None:
+        attribution = "unknown"
+    else:
+        attribution = "partial" if cohort["unattributed"]["sqls"] else "complete"
+
+    recon = {
+        "status": ("unavailable" if cohort is None
+                   else ("reconciled" if not problems else "failed")),
+        "problems": problems,
+        "identities": [
+            "google_ads_sqls = sum(campaign_sqls) + unattributed_google_ads_sqls",
+            "all_source_sqls = google_ads_sqls + excluded_non_google_sqls",
+        ],
+        "google_ads_sqls": summary.get("cohort_sqls_google_ads"),
+        "sum_campaign_sqls": summary.get("cohort_sqls_mapped"),
+        "unattributed_google_ads_sqls": summary.get("cohort_sqls_unattributed"),
+        "excluded_non_google_sqls": summary.get("cohort_sqls_excluded_non_google"),
+        "all_source_sqls": summary.get("cohort_sqls_all_sources"),
+    }
+
+    breakdown = None
+    if cohort is not None:
+        breakdown = {k: v for k, v in cohort_svc._jsonable_cohort(cohort).items()
+                     if k != "by_campaign"}
+
+    return {
+        "sql_status": sql_status,
+        "sql_reason": sql_reason,
+        "cpql_status": summary.get("cohort_cpql_status"),
+        "cpql_reason": summary.get("cohort_cpql_reason"),
+        "metadata": cohort_svc.sql_metric_metadata(
+            cohort=cohort, freshness=freshness, attribution_status=attribution,
+            missing_created_at=outcomes.get("missing_created_at")),
+        "deal_metadata": cohort_svc.deal_metric_metadata(
+            deals=deals, freshness=freshness, attribution_status=attribution),
+        "reconciliation": recon,
+        "breakdown": breakdown,
+        "deals": (None if deals is None
+                  else {k: v for k, v in deals.items() if k != "by_campaign"}),
+        "window_instants": {"start_at": outcomes.get("start_at"),
+                            "end_before": outcomes.get("end_before"),
+                            "timezone": ACCOUNT_TZ},
+        "lifecycle_event_coverage": _safe_lifecycle_disclosure(cohort_svc),
+    }
+
+
+def _safe_lifecycle_disclosure(cohort_svc) -> dict:
+    """The event-time disclosure must never take the page down with it."""
+    try:
+        return cohort_svc.lifecycle_event_disclosure()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[campaigns] lifecycle disclosure failed: %s", exc)
+        return {"metric_family": cohort_svc.METRIC_FAMILY_LIFECYCLE_EVENTS,
+                "window_basis": cohort_svc.WINDOW_BASIS_LIFECYCLE_EVENTS,
+                "published_on_this_page": False, "available": False,
+                "explanation": "lifecycle-event coverage could not be read"}
+
+
+def _legacy_sql_block() -> dict:
+    """Declares the legacy SQL fields still in this payload, so none is mistaken
+    for the cohort number this page publishes."""
+    return {
+        "metric_family": "legacy_lead_status_category",
+        "definition": "latest leads.status_category = 'qualified' (paid_search, "
+                      "pseudo/email campaigns excluded)",
+        "window_basis": "leads.contact_created_at",
+        "fields": list(LEGACY_SQL_FIELDS),
+        "published_on_this_page": False,
+        "retained_because": "consumed by other readers and audits; their "
+                            "removal is a separate migration",
     }
 
 
@@ -501,6 +797,11 @@ def unavailable_response(window: str, now: datetime | None = None) -> dict[str, 
     }
     return {
         **base, "db_unavailable": True, "campaigns": [], "summary": _empty_summary(),
+        "metric_family": "acquisition_cohort_outcomes",
+        "cohort": {"sql_status": "unavailable", "sql_reason": "request_failed",
+                   "cpql_status": "unavailable", "cpql_reason": "request_failed",
+                   "metadata": None, "reconciliation": {"status": "unavailable"}},
+        "legacy_sql": _legacy_sql_block(),
         "audit": {
             "spend_source": "google_ads_campaign_daily_spend (canonical)",
             "lead_source": "leads (durable · contact_created_at · deduped · paid_search)",
@@ -657,6 +958,16 @@ def _empty_summary() -> dict:
             "excluded_not_google_sqls": None, "total_paid_search_sqls": None,
             "status": "unavailable",
         },
+        # PR-ADS-161B — the same keys a live response carries, all unknown.
+        "cohort_contacts_acquired_google_ads": None, "cohort_sqls_google_ads": None,
+        "cohort_sqls_mapped": None, "cohort_sqls_unattributed": None,
+        "cohort_sqls_excluded_non_google": None, "cohort_sqls_all_sources": None,
+        "cohort_sqls_missing_event_timestamp": None,
+        "cohort_cpql_usd": None, "cohort_cpql_status": "unavailable",
+        "cohort_cpql_reason": "cohort_unavailable",
+        "closed_won_deals_google_ads": None, "closed_won_deals_mapped": None,
+        "closed_won_deals_unattributed": None, "closed_won_deals_ambiguous": None,
+        "closed_won_deals_excluded_non_google": None, "closed_won_deals_unplaceable": None,
     }
 
 

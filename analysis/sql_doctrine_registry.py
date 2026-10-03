@@ -52,6 +52,18 @@ LIFECYCLE_DATE = "date_entered_sql"
 LIFECYCLE_DEDUP = "contact_id"
 LIFECYCLE_TABLE = "hubspot_contact_funnel"
 
+# PR-ADS-161B — the acquisition-cohort definition. Same canonical table and
+# dedup key as LIFECYCLE_*, but the window is creation, not stage entry, and
+# a stage implying SQL is proof enough (no entry date required).
+COHORT_DEF = ("reached SQL as of the data watermark: direct hs_v2_date_entered_"
+              "salesqualifiedlead, OR a recovered SQL lifecycle transition, OR "
+              "current stage in stages_implying_event(EVENT_SQL)")
+COHORT_DATE = "contact_created_at (hubspot_contact_funnel.created_at, account-local days)"
+COHORT_DEDUP = "contact_id"
+#: Defined here, not with the other consumer labels below, because the
+#: CONSUMERS list (which precedes them) names it.
+_COHORT = "PR-ADS-161B canonical marketing outcome cohorts (acquisition cohort)"
+
 SNAPSHOT_DEF = "campaigns.confirmed_sqls (count of mql_status in {CLOSED - Sales Qualified, CLOSED - Deal Created} from data/crm_contacts.json)"
 SNAPSHOT_DATE = "run_date (scheduler snapshot date)"
 SNAPSHOT_TABLE = "campaigns (scheduler snapshot)"
@@ -167,39 +179,78 @@ CONSUMERS: list[dict] = [
 
     # ── Platform Evidence ───────────────────────────────────────────────────
     _c("Campaign Evidence table + KPI strip",
-       "Per-campaign confirmed_sqls, confirmed_sqls_total, mapping coverage, CPQL, outcome status.",
+       "PR-ADS-161B: publishes ACQUISITION-COHORT SQLs, cohort CPQL and closed-won "
+       "deals per campaign, with an unattributed bucket. Still COMPUTES and returns "
+       "the legacy confirmed_sqls / confirmed_sqls_total / overall_cpql_usd / "
+       "mapping_coverage / sql_reconciliation fields (declared in `legacy_sql`, "
+       "not rendered). Junk and junk rate remain the lead-quality classification.",
        endpoint="GET /api/campaigns",
-       service_function="services.campaign_evidence_service.build_campaign_evidence / _row / _build_summary",
-       repository_source="db.revenue_repository.fetch_lead_quality",
-       source_table=LEGACY_TABLE,
-       sql_definition="status_category = 'qualified' (lq[_QUALIFIED]) on paid_search, "
-                      "pseudo/email campaigns excluded, lead_truth_exclusions applied",
-       date_field=LEGACY_DATE, dedup_key=LEGACY_DEDUP, windows=EVIDENCE + ["days=1..365"],
-       scope="campaign_attributable (mapped) | unmatched | excluded_not_google | total_paid_search",
-       classification=CLS_LEGACY,
+       service_function="services.campaign_evidence_service.build_campaign_evidence / "
+                        "_row / _cohort_row_fields / _cohort_summary_fields / _build_summary",
+       repository_source="db.crm_funnel_repository.fetch_acquisition_cohort_contacts "
+                         "(published SQLs); db.revenue_repository.fetch_lead_quality "
+                         "(legacy fields, junk)",
+       source_table=f"{LIFECYCLE_TABLE} (published) + {LEGACY_TABLE} (legacy fields)",
+       sql_definition=COHORT_DEF,
+       date_field=COHORT_DATE, dedup_key=COHORT_DEDUP, windows=EVIDENCE + ["days=1..365"],
+       scope="google_ads cohort = campaign (mapped) + unattributed_google_ads; "
+             "excluded_non_google disclosed",
+       classification=CLS_MIXED,
        code_location="services/campaign_evidence_service.py:build_campaign_evidence",
-       migration_notes="Attaches sql_reconciliation(SCOPE_CAMPAIGN_ATTRIBUTABLE, "
-                       "consumer_count=mapped_sqls). Backend never withholds; the "
-                       "frontend gate campaignSqlPublication() does. Production 30d: "
-                       "legacy 6 vs lifecycle campaign-attributable 8.",
-       truth_status="counts None when leads unavailable; aggregate/CPQL/filters/sorts gated in frontend on reconciled",
+       migration_notes="PR-ADS-161B migrated the PUBLISHED SQL, CPQL and outcome "
+                       "status to the canonical cohort; the frontend gate reads "
+                       "`cohort.sql_status`. MIXED only because the legacy fields "
+                       "are still computed and returned for other readers and "
+                       "audits (scripts/audit_campaign_evidence_certification.py). "
+                       "Removing them completes the migration.",
+       truth_status="cohort counts None when the funnel is unreadable; SQL withheld "
+                    "when the watermark is unknown or buckets fail to reconcile; CPQL "
+                    "withheld on a stale/unknown source, unavailable without spend/FX",
        headline=True, row=True, cpql=True, filters=True, sorting=True, drawer=True,
        decision=True, executive=True, operational=True),
     _c("Campaign drawer (headline, lead quality, countries, recent leads)",
-       "Per-campaign drawer evidence on the same legacy population.",
+       "PR-ADS-161B: the headline KPIs are the cohort row (Leads acquired, Cohort "
+       "SQLs, CPQL, Closed-won). The Lead Quality and Country splits and Recent "
+       "Leads still read the legacy population, labelled 'Qualified (lead status)'.",
        endpoint="GET /api/campaign-detail, GET /api/campaigns/{campaign_name}/detail",
        service_function="services.campaign_evidence_service.build_campaign_drawer_evidence; api.server._build_campaign_detail",
-       repository_source="db.revenue_repository.fetch_campaign_lead_detail",
-       source_table=LEGACY_TABLE, sql_definition="status_category == _QUALIFIED",
-       date_field=LEGACY_DATE, dedup_key=LEGACY_DEDUP, windows=EVIDENCE,
-       scope="campaign_attributable (one campaign)", classification=CLS_LEGACY,
+       repository_source="db.revenue_repository.fetch_campaign_lead_detail (splits); "
+                         "build_campaign_evidence_row (headline)",
+       source_table=f"{LIFECYCLE_TABLE} (headline) + {LEGACY_TABLE} (splits)",
+       sql_definition=f"headline: {COHORT_DEF}; splits: status_category == _QUALIFIED",
+       date_field=f"headline: {COHORT_DATE}; splits: {LEGACY_DATE}",
+       dedup_key=f"headline: {COHORT_DEDUP}; splits: {LEGACY_DEDUP}", windows=EVIDENCE,
+       scope="campaign_attributable (one campaign)", classification=CLS_MIXED,
        code_location="services/campaign_evidence_service.py:build_campaign_drawer_evidence",
        migration_notes="Embeds keyword preview (attributed_sqls via platform attribution) "
-                       "and flagged-term preview. Frontend defect: static/app.js "
-                       "renderCampaignDrawer reads drawerSqlPub before its const "
-                       "declaration (temporal dead zone).",
+                       "and flagged-term preview. The temporal-dead-zone defect "
+                       "(renderCampaignDrawer read drawerSqlPub before its const "
+                       "declaration) is FIXED in PR-ADS-161B. Remaining legacy: "
+                       "fetch_campaign_lead_detail splits.",
        truth_status="db_unavailable on envelope; drawer KPIs withheld via campaignSqlPublication()",
        row=True, cpql=True, drawer=True, decision=True, operational=True),
+    _c(_COHORT,
+       "The acquisition-cohort contract: contacts created in a window, their SQL "
+       "outcome as of the data watermark, their closed-won deals, bucketed into "
+       "campaign / unattributed / excluded with reconciliation.",
+       endpoint="(service; consumed by GET /api/campaigns)",
+       service_function="services.marketing_outcome_cohort_service.build_window_outcomes "
+                        "/ build_cohort / build_deal_outcomes / cpql_decision",
+       repository_source="db.crm_funnel_repository.fetch_acquisition_cohort_contacts; "
+                         "db.deal_ledger_repository.fetch_won_deals",
+       source_table=f"{LIFECYCLE_TABLE} + hubspot_lifecycle_stage_history + hubspot_deal_ledger",
+       sql_definition=COHORT_DEF, date_field=COHORT_DATE, dedup_key=COHORT_DEDUP,
+       windows=EVIDENCE,
+       scope="all_sources ⊇ google_ads (= campaign + unattributed); excluded_non_google",
+       classification=CLS_CANONICAL,
+       code_location="services/marketing_outcome_cohort_service.py:build_window_outcomes",
+       migration_notes="Not the lifecycle-EVENT metric: it never needs an SQL-entry "
+                       "date and never produces one. Event-time totals stay with "
+                       "analysis.sql_publication.",
+       truth_status="unavailable (None) when the funnel is unreadable; per-window "
+                    "reconciliation re-proved by scripts/audit_marketing_outcome_cohorts.py",
+       headline=True, row=True, cpql=True, decision=True, executive=True,
+       operational=True),
     _c("Keyword Evidence table / drawer / CSV export",
        "attributed_sqls per keyword criterion; sql_state filter; attributed_sqls sort.",
        endpoint="GET /api/keyword-evidence, /api/keyword-evidence/detail, /api/keyword-evidence/export",
@@ -804,8 +855,20 @@ RULES: list[dict] = [
                "build_campaign_evidence_row"]),
     _r("ce.service", "services/campaign_evidence_service.py", CLS_LEGACY, _CE,
        symbol=["_add_lead", "_audit_block", "_build_summary", "_canonical_sql_reconciliation",
-               "_new_outcomes", "_outcome_status", "_row", "build_campaign_evidence",
-               "unavailable_response", "_junk_rate", "_empty_summary"]),
+               "_new_outcomes", "_outcome_status",
+               "unavailable_response", "_junk_rate", "_empty_summary",
+               # PR-ADS-161B: declares the legacy fields as legacy.
+               "_legacy_sql_block"]),
+    # PR-ADS-161B — the builder and the row now assemble BOTH families: the
+    # published cohort fields and the retained legacy ones.
+    _r("ce.service.mixed", "services/campaign_evidence_service.py", CLS_MIXED, _CE,
+       symbol=["build_campaign_evidence", "_row"]),
+    _r("ce.cohort", "services/campaign_evidence_service.py", CLS_CANONICAL, _CE,
+       symbol=["_cohort_row_fields", "_cohort_summary_fields", "_cohort_block",
+               "_safe_lifecycle_disclosure"]),
+    # The module docstring and LEGACY_SQL_FIELDS describe both families.
+    _m("ce.module.161b", "services/campaign_evidence_service.py", CLS_MIXED, _CE,
+       ["confirmed_sqls_ref", "cpql_ref", "sql_reconciliation_ref"]),
     _m("kw.module", "services/keyword_evidence_service.py", CLS_LEGACY, _KW, ["sql_verdict_ref"]),
     _r("kw.service", "services/keyword_evidence_service.py", CLS_LEGACY, _KW,
        symbol=["_canonical_keyword_reconciliation", "_filter_sql_state", "_keyword_drawer_sql_block",
@@ -943,6 +1006,34 @@ RULES: list[dict] = [
        CLS_DIAGNOSTIC, _SQL_PUBLICATION, symbol=["run", "main"]),
     _r("sqlpublication.repo", "db/crm_funnel_repository.py", CLS_CANONICAL,
        _SQL_PUBLICATION, symbol=["fetch_reader_reconciliation"]),
+
+    # ── PR-ADS-161B — marketing outcome cohorts ─────────────────────────────
+    #
+    # CANONICAL. It names the lifecycle column, property and stages in order
+    # to READ SQL evidence — never to produce a date. Its one import from the
+    # legacy outcome service is `campaign_disqualifier`, a campaign-LABEL safety
+    # predicate (missing / pseudo / email), not that service's SQL definition.
+    # It names CPQL because it decides cohort-CPQL publication.
+    _m("cohort.module", "services/marketing_outcome_cohort_service.py", CLS_CANONICAL,
+       _COHORT, ["contact_created_at_ref", "cpql_ref", "legacy_outcome_service_ref",
+                 "lifecycle_funnel_service_ref"] + _LIFECYCLE_MARKERS),
+    _r("cohort.service", "services/marketing_outcome_cohort_service.py", CLS_CANONICAL,
+       _COHORT,
+       symbol=["window_instants", "_as_instant", "in_window", "sql_proof",
+               "contact_identity", "contact_bucket", "_new_slot", "_bump",
+               "_merge_duplicates", "build_cohort", "reconcile_cohort",
+               "deal_bucket", "_new_deal_slot", "_bump_deal", "build_deal_outcomes",
+               "cpql_decision", "coverage_status", "coverage_notes",
+               "sql_metric_metadata", "deal_metric_metadata", "_jsonable_cohort",
+               "read_freshness", "build_window_outcomes",
+               "lifecycle_event_disclosure"]),
+    # The read-only audit of the above. Diagnostic: it publishes nothing.
+    _r("cohort.audit", "scripts/audit_marketing_outcome_cohorts.py", CLS_DIAGNOSTIC,
+       _COHORT,
+       symbol=["check_no_date_contamination", "check_no_write_paths",
+               "_code_without_docstrings", "_function_sources", "audit_window",
+               "independent_counts", "global_population_split", "run",
+               "_render", "main"]),
     _r("sqlpublication.writer", "db/writers.py", CLS_DIAGNOSTIC,
        _SQL_PUBLICATION, symbol=["record_reader_reconciliation"]),
 
@@ -1114,14 +1205,23 @@ RULES: list[dict] = [
        symbol=["collect", "main"]),
 
     # ── frontend: static/app.js by top-level function ───────────────────────
-    _r("ui.campaign", "static/app.js", CLS_LEGACY, _CE,
-       symbol=["campaignSqlPublication", "campaignSqlWithheld", "loadCampaignEvidence",
+    # PR-ADS-161B — the page publishes acquisition-cohort SQLs through one gate
+    # that reads `cohort.sql_status`; these render only cohort SQL fields.
+    _r("ui.campaign", "static/app.js", CLS_CANONICAL, _CE,
+       symbol=["campaignSqlPublication", "campaignSqlWithheld", "campaignCpqlNotPublished",
+               "campaignCohortAsOf", "campaignCohortReason", "loadCampaignEvidence",
                "renderCampaignEvidenceKPIs", "renderCampaignSqlReconciliation",
                "renderCampaignEvidenceFilters", "filterCampaignEvidence", "sortCampaignEvidence",
-               "renderCampaignEvidenceRow", "wireCampaignEvidenceControls", "applyEvidenceChrome",
-               "renderCampaignMappingCard", "renderCampaignDecisionTable"]),
-    _r("ui.campaign.drawer", "static/app.js", CLS_LEGACY, _CD,
-       symbol=["renderCampaignDrawer", "_appendDrawerEvidenceSections", "openCampaignDrawer"]),
+               "renderCampaignEvidenceRow", "renderCampaignDecisionTable"]),
+    # No SQL semantics of their own; unchanged by PR-ADS-161B.
+    _r("ui.campaign.chrome", "static/app.js", CLS_LEGACY, _CE,
+       symbol=["wireCampaignEvidenceControls", "applyEvidenceChrome",
+               "renderCampaignMappingCard"]),
+    # Headline = cohort row; the splits below it still read the legacy population.
+    _r("ui.campaign.drawer", "static/app.js", CLS_MIXED, _CD,
+       symbol=["renderCampaignDrawer"]),
+    _r("ui.campaign.drawer.legacy", "static/app.js", CLS_LEGACY, _CD,
+       symbol=["_appendDrawerEvidenceSections", "openCampaignDrawer"]),
     _r("ui.geo", "static/app.js", CLS_LEGACY, _GEO, symbol=["loadGeo", "renderGeoMap", "renderGeoTable"]),
     _r("ui.overview", "static/app.js", CLS_MIXED, _OVW, symbol=["renderDashKpiRow", "dashSignalBody"]),
     _r("ui.channels", "static/app.js", CLS_MIXED, _CHAN,
@@ -1180,7 +1280,33 @@ CPQL_CONSUMERS: list[dict] = [
         "numerator_denominator_same_window": True,
         "unmatched_sqls_excluded": True,
         "denominator_incomplete_when_stage_dates_missing": "n/a (legacy denominator does not use stage dates); lifecycle 30d shows 40 SQL-stage contacts without entry date",
-        "publication": "published per row; withheld in UI unless reconciliation_status == reconciled",
+        "publication": "PR-ADS-161B: still returned in the payload (legacy_sql); no longer rendered — superseded by cohort_cpql_usd",
+    },
+    {
+        "consumer": "Campaign Evidence row cohort_cpql_usd",
+        "code_location": "services/campaign_evidence_service.py:_cohort_row_fields",
+        "spend_numerator_source": "google_ads_campaign_daily_spend (canonical) per campaign_id, selected window, as published (rounded)",
+        "currency_fx_contract": "native GBP → USD via fx_rates per spend_date; unavailable when any date lacks FX",
+        "sql_denominator_definition": COHORT_DEF,
+        "sql_denominator_scope": "this campaign's acquisition-cohort SQLs",
+        "sql_denominator_date_field": COHORT_DATE,
+        "numerator_denominator_same_window": True,
+        "unmatched_sqls_excluded": True,
+        "denominator_incomplete_when_stage_dates_missing": "no — stage-proven SQLs without an entry date are counted; the gap is disclosed",
+        "publication": "published only when the cohort SQL count is published, the source is fresh, identity mappings are readable and SQLs > 0; N/A at zero; withheld/unavailable otherwise",
+    },
+    {
+        "consumer": "Campaign Evidence summary cohort_cpql_usd",
+        "code_location": "services/campaign_evidence_service.py:_cohort_summary_fields",
+        "spend_numerator_source": "account-wide canonical USD spend total (all Google Ads campaigns), selected window",
+        "currency_fx_contract": "total_spend_usd None unless fx_complete → unavailable",
+        "sql_denominator_definition": COHORT_DEF,
+        "sql_denominator_scope": "ALL Google Ads cohort SQLs = campaign + unattributed (same scope as the numerator)",
+        "sql_denominator_date_field": COHORT_DATE,
+        "numerator_denominator_same_window": True,
+        "unmatched_sqls_excluded": False,
+        "denominator_incomplete_when_stage_dates_missing": "no — see row entry",
+        "publication": "published when the cohort is published and the source fresh; withheld on a stale (False) or unknown (None) source; not_applicable at zero SQLs",
     },
     {
         "consumer": "Campaign Evidence overall_cpql_usd",
@@ -1193,7 +1319,7 @@ CPQL_CONSUMERS: list[dict] = [
         "numerator_denominator_same_window": True,
         "unmatched_sqls_excluded": True,
         "denominator_incomplete_when_stage_dates_missing": "n/a (legacy); overall_cpql_scope = complete|mapped_only discloses unmatched/excluded SQLs",
-        "publication": "labelled confirmed-subset (overall_cpql_scope); withheld in UI unless reconciled",
+        "publication": "PR-ADS-161B: still returned in the payload (legacy_sql); no longer rendered — superseded by summary.cohort_cpql_usd",
     },
     {
         "consumer": "/api/summary avg_cpql_usd",
@@ -1254,19 +1380,27 @@ CPQL_CONSUMERS: list[dict] = [
 # DECISION SURFACES (§8)
 # ═════════════════════════════════════════════════════════════════════════════
 DECISION_SURFACES: list[dict] = [
+    # PR-ADS-161B — all three now decide on the acquisition-cohort SQLs the
+    # page publishes, and refuse when the cohort is not published. An unknown
+    # SQL count yields 'Data unavailable', never 'Spend without SQL proof'.
     {"surface": "Campaign Evidence outcome_status 'SQL producer' / 'Spend without SQL proof'",
      "code_location": "services/campaign_evidence_service.py:_outcome_status",
-     "sql_definition": LEGACY_DEF, "scope": "campaign_attributable", "date_field": LEGACY_DATE,
-     "kind": "verdict", "gated": "frontend campaignSqlPublication() only",
+     "sql_definition": COHORT_DEF, "scope": "campaign (acquisition cohort)",
+     "date_field": COHORT_DATE,
+     "kind": "verdict", "gated": "frontend campaignSqlPublication() (cohort.sql_status)",
      "evidence_kind": "row evidence"},
     {"surface": "Campaign Evidence has_sql / no_sql outcome filter",
      "code_location": "static/app.js:filterCampaignEvidence",
-     "sql_definition": LEGACY_DEF, "scope": "campaign_attributable", "date_field": LEGACY_DATE,
-     "kind": "filter", "gated": "disabled unless reconciled", "evidence_kind": "row evidence"},
+     "sql_definition": COHORT_DEF, "scope": "campaign (acquisition cohort)",
+     "date_field": COHORT_DATE,
+     "kind": "filter", "gated": "disabled unless the cohort is published",
+     "evidence_kind": "row evidence"},
     {"surface": "Campaign Evidence sqls / cpql sort",
      "code_location": "static/app.js:sortCampaignEvidence",
-     "sql_definition": LEGACY_DEF, "scope": "campaign_attributable", "date_field": LEGACY_DATE,
-     "kind": "sort", "gated": "disabled unless reconciled", "evidence_kind": "row evidence"},
+     "sql_definition": COHORT_DEF, "scope": "campaign (acquisition cohort)",
+     "date_field": COHORT_DATE,
+     "kind": "sort", "gated": "disabled unless the cohort is published",
+     "evidence_kind": "row evidence"},
     {"surface": "Keyword Evidence sql_state filter and attributed_sqls sort",
      "code_location": "services/keyword_evidence_service.py:_filter_sql_state",
      "sql_definition": LEGACY_DEF, "scope": "keyword_attributable", "date_field": LEGACY_DATE,
@@ -1388,9 +1522,13 @@ KNOWN_CONTRACT_CONFLICTS: list[dict] = [
                 "status_category = qualified population.",
      "code_location": "scripts/audit_search_term_waste_truth.py:main"},
     {"id": "gate.backend_never_enforces_reconciliation",
-     "summary": "No backend withholds an SQL aggregate on a non-reconciled status; every "
-                "publication rule lives in static/app.js and applies only to Campaign Evidence.",
-     "code_location": "static/app.js:campaignSqlPublication"},
+     "summary": "Narrowed by PR-ADS-161B. Campaign Evidence's backend now DECIDES "
+                "publication (cohort.sql_status / cpql_status) and returns CPQL as None "
+                "unless published — but it still returns the cohort SQL COUNTS beside a "
+                "withheld status, and static/app.js:campaignSqlPublication withholds their "
+                "display. Every other page: no backend withholding, unchanged.",
+     "code_location": "services/campaign_evidence_service.py:_cohort_block; "
+                      "static/app.js:campaignSqlPublication"},
 ]
 
 __all__ = ["CONSUMERS", "RULES", "CPQL_CONSUMERS", "DECISION_SURFACES",

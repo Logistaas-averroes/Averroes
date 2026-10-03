@@ -250,12 +250,60 @@ def test_audit_block_has_all_required_fields(monkeypatch):
 # ════════════════ 4. Outcome status (Path B — window-safe, factual) ════════════
 
 
+def _patch_cohort(monkeypatch, spec):
+    """PR-ADS-161B — install a canonical acquisition cohort.
+
+    ``spec``: ``{campaign_label: {"sql": n, "lead": m}}``. Each SQL contact is
+    proven by a direct SQL-entry timestamp; each lead contact has no SQL
+    evidence. All are Google Ads sourced and created inside a 30d window.
+
+    The outcome status now derives from the cohort SQLs the page publishes, so
+    a test asserting a status has to supply them in the source the page reads.
+    The legacy `leads` fixture alone no longer makes a campaign an SQL producer
+    — that is the definition this PR changes, not a weakened assertion.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    import db.crm_funnel_repository as funnel_repo
+    import db.deal_ledger_repository as ledger_repo
+    import services.marketing_outcome_cohort_service as cohort_svc
+
+    created = datetime.now(timezone.utc) - timedelta(days=1)
+    rows, n = [], 0
+    for label, kinds in spec.items():
+        for kind, count in kinds.items():
+            for _ in range(count):
+                n += 1
+                rows.append({
+                    "funnel_row_id": n, "contact_id": f"c{n}", "created_at": created,
+                    "lifecycle_stage": "salesqualifiedlead" if kind == "sql" else "lead",
+                    "sql_entered_direct": created if kind == "sql" else None,
+                    "sql_entered_recovered": None,
+                    "hs_analytics_source": "PAID_SEARCH",
+                    "hs_analytics_source_data_1": label, "gclid": None})
+    monkeypatch.setattr(funnel_repo, "fetch_acquisition_cohort_contacts",
+                        lambda s, e: {"available": True, "rows": rows,
+                                      "missing_created_at": 0})
+    monkeypatch.setattr(funnel_repo, "fetch_contacts_created_at",
+                        lambda ids: {"available": True, "created_at": {}})
+    monkeypatch.setattr(ledger_repo, "fetch_won_deals",
+                        lambda s=None, e=None: {"available": True, "rows": []})
+    monkeypatch.setattr(cohort_svc, "read_freshness", lambda now=None: {
+        "fresh": True, "reason": "source_fresh",
+        "last_successful_incremental_at": created.isoformat()})
+    monkeypatch.setattr(cohort_svc, "lifecycle_event_disclosure",
+                        lambda: {"published_on_this_page": False})
+
+
 def _status_for(monkeypatch, spend_rows, lead_spec, *, name, total_native=0.0,
-                total_usd=0.0, fx_complete=True, lead_available=True):
+                total_usd=0.0, fx_complete=True, lead_available=True,
+                cohort_spec=None):
     spend = _spend(spend_rows, total_native=total_native, total_usd=total_usd,
                    fx_complete=fx_complete)
     leads = _leads(_lead_rows(lead_spec), available=lead_available)
     _patch(monkeypatch, spend, leads)
+    if cohort_spec is not None:
+        _patch_cohort(monkeypatch, cohort_spec)
     out = _build("30d")
     for c in out["campaigns"]:
         if c["campaign_name"] == name or c["campaign_name"] == name.lower():
@@ -266,7 +314,8 @@ def _status_for(monkeypatch, spend_rows, lead_spec, *, name, total_native=0.0,
 def test_status_sql_producer(monkeypatch):
     c = _status_for(monkeypatch, [_spend_row("A", 100.0, 120.0)],
                     {"a": {"qualified": 3, "junk": 1}}, name="A",
-                    total_native=100.0, total_usd=120.0)
+                    total_native=100.0, total_usd=120.0,
+                    cohort_spec={"A": {"sql": 3, "lead": 1}})
     assert c["outcome_status"] == "SQL producer"
 
 
@@ -280,8 +329,29 @@ def test_status_junk_heavy(monkeypatch):
 def test_status_spend_without_sql(monkeypatch):
     c = _status_for(monkeypatch, [_spend_row("C", 100.0, 120.0)],
                     {"c": {"unknown": 2}}, name="C",
-                    total_native=100.0, total_usd=120.0)
+                    total_native=100.0, total_usd=120.0,
+                    cohort_spec={"C": {"lead": 2}})
     assert c["outcome_status"] == "Spend without SQL proof"
+
+
+def test_status_never_accuses_from_an_unreadable_sql_source(monkeypatch):
+    """PR-ADS-161B — unknown is not zero.
+
+    With the cohort unreadable (no fixture installed, no database), a campaign
+    with spend has an UNKNOWN SQL count. Before this PR, `confirmed_sqls or 0`
+    turned that into "Spend without SQL proof" — an accusation drawn from an
+    absence of data. It must say the data is unavailable instead.
+    """
+    import db.crm_funnel_repository as funnel_repo
+    monkeypatch.setattr(funnel_repo, "fetch_acquisition_cohort_contacts",
+                        lambda s, e: {"available": False, "rows": [],
+                                      "missing_created_at": None})
+    c = _status_for(monkeypatch, [_spend_row("D", 100.0, 120.0)],
+                    {"d": {"unknown": 2}}, name="D",
+                    total_native=100.0, total_usd=120.0)
+    assert c["cohort_sqls"] is None
+    assert c["outcome_status"] == "Data unavailable"
+    assert c["outcome_status"] != "Spend without SQL proof"
 
 
 def test_status_mapping_review_leads_without_spend(monkeypatch):
@@ -389,16 +459,18 @@ def test_no_snapshot_language_on_campaign_page():
 def test_clean_table_headers():
     region = _region(APP_JS, "function renderCampaignDecisionTable",
                      "function campaignSpendCell")
-    for h in (">Campaign<", ">Status<", ">Spend<", ">Leads<",
-              ">Junk<", ">Junk Rate<", ">CPQL<"):
+    # PR-ADS-161B: "Leads" became "Leads acquired" — the acquisition cohort, the
+    # same population as the row's SQLs — and a Closed-won column was added.
+    for h in (">Campaign<", ">Status<", ">Spend<", ">Leads acquired<",
+              ">Junk<", ">Junk Rate<", ">CPQL<", ">Closed-won<"):
         assert h in region, f"missing clean header {h}"
     # PR-ADS-157 §2 renamed the bare ">SQLs<" header. "SQLs" named no
-    # population: this page counts CAMPAIGN-ATTRIBUTABLE SQLs, which is a
-    # strict subset of Google Ads-source SQLs, which is itself a subset of
-    # all-source SQLs — and none of those are Google Ads platform conversions.
-    # The header is now emitted from a constant so the label cannot drift.
+    # population. PR-ADS-161B names the population the page now publishes:
+    # acquisition-cohort SQLs. Still emitted from a constant so the label
+    # cannot drift, and still never a bare "SQLs".
     assert "CAMPAIGN_SQL_SCOPE_SHORT" in region
-    assert 'CAMPAIGN_SQL_SCOPE_SHORT = "Attributed SQLs"' in APP_JS
+    assert 'CAMPAIGN_SQL_SCOPE_SHORT = "Cohort SQLs"' in APP_JS
+    assert ">SQLs<" not in region
     assert "— Latest Snapshot" not in region
     # "No repeated source in headers" is about the VISIBLE header text, not
     # about tooltips. PR-ADS-157 §2 requires the SQL header to disclose that
@@ -446,15 +518,17 @@ def test_no_duplicate_source_strip_inline():
 def test_kpi_cards_are_genuine_window_kpis():
     region = _region(APP_JS, "function renderCampaignEvidenceKPIs",
                      "function renderCampaignEvidenceFilters")
-    for label in (">Campaigns<", ">Spend<", ">Confirmed Junk<",
-                  ">Overall CPQL<"):
+    # PR-ADS-161B: the brief's seven cards — CPQL is the cohort CPQL (the
+    # "Overall" qualifier described the legacy mapped-only scope), and the
+    # unattributed SQLs and closed-won deals get cards of their own.
+    for label in (">Campaigns<", ">Spend<", ">Confirmed Junk<", ">CPQL<",
+                  ">Unattributed Google Ads SQLs<", ">Closed-won deals<"):
         assert label in region
-    # PR-ADS-157 §2: ">Confirmed SQLs<" is now the scoped label, emitted from a
-    # constant. "Confirmed" described a HubSpot verdict; it said nothing about
-    # WHICH SQL population the number covered, which is the thing an operator
-    # comparing this page to HubSpot actually needs to know.
+    # PR-ADS-157 §2: ">Confirmed SQLs<" is a scoped label, emitted from a
+    # constant. PR-ADS-161B keeps the constant and names the cohort population.
     assert "CAMPAIGN_SQL_SCOPE_LABEL" in region
-    assert 'CAMPAIGN_SQL_SCOPE_LABEL = "Campaign-attributable SQLs"' in APP_JS
+    assert 'CAMPAIGN_SQL_SCOPE_LABEL = "Cohort SQLs"' in APP_JS
+    assert ">Confirmed SQLs<" not in region
     assert "Latest Snapshot" not in region and "Spend Evidence" not in region
 
 

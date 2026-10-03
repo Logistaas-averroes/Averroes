@@ -58,8 +58,8 @@ python -m compileall -q analysis api connectors db scheduler services scripts te
 node --check static/app.js
 git diff --check origin/main...HEAD          # whitespace in the diff only
 
-# 1. PostgreSQL integration (21 named modules — see the workflow for the list)
-# 2. targeted contract suites (23 named modules)
+# 1. PostgreSQL integration (named modules — see the workflow for the list)
+# 2. targeted contract suites (named modules — see the workflow)
 # 3. full suite, with the two baseline deselects below
 python -m pytest -q \
   --deselect "tests/test_search_terms_followup_fixes.py::test_daily_empty_search_terms_marks_success_not_success_empty" \
@@ -193,13 +193,23 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   `tests/test_pr_ads_161a1_sql_publication_contract.py` enforces this; see
   `docs/43_*`.
 
-  This does **not** cover every SQL publication rule in the product.
-  `static/app.js::campaignSqlPublication` is a separate, live rule governing
-  the Campaigns page and its drawers, and it publishes on
-  `reconciliation_status === "reconciled"` alone — no boundary gate, no
-  post-boundary gap gate, no freshness gate. Pre-existing, unchanged by
-  PR-ADS-161A-1, and already recorded by the doctrine inventory as
-  `gate.backend_never_enforces_reconciliation`.
+  This does **not** cover every SQL publication rule in the product — and it
+  does not cover Campaign Evidence, which (PR-ADS-161B) publishes a
+  *different metric family*. See the next landmine.
+
+- **"SQLs in this period" is two different metrics.** An **acquisition
+  cohort** (`acquisition_cohort_outcomes`, windowed on `contact_created_at`) asks
+  how many contacts *acquired* in the period have reached SQL as of now; it
+  needs no SQL-entry date, so a stage-proven contact with no timestamp is
+  counted. A **lifecycle event** (`lifecycle_stage_events`, windowed on
+  `date_entered_sql`) asks how many *entered* SQL in the period; it needs an
+  exact timestamp for every contact and stays under the gate above. Campaign
+  Evidence and its CPQL use the cohort (`services/marketing_outcome_cohort_service.py`,
+  `docs/44_*`); `static/app.js::campaignSqlPublication` reads
+  `cohort.sql_status`. Never relabel one as the other, never fill a missing
+  SQL-entry date from creation, a boundary or a sync time to move a contact
+  between them, and keep the per-response `metric_family` / `window_basis`
+  metadata on anything that publishes either.
 
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,

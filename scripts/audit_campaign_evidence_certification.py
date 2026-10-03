@@ -438,22 +438,36 @@ def check_frontend_gates(f: Findings) -> None:
         f.passed("frontend_gates",
                  f"all {len(required_callers)} SQL-dependent surfaces consult the gate")
 
-    if "_campaignSqlReconciliation = data.sql_reconciliation" not in js:
+    # PR-ADS-161B — the page publishes ACQUISITION-COHORT SQLs, and its gate
+    # reads the cohort block. The three checks below keep their PR-ADS-157
+    # guarantees — the block the gate depends on reaches page state AND is read
+    # by the gate; withheld evidence has a visible label; the population is
+    # named — retargeted at the contract the page now publishes. The legacy
+    # `sql_reconciliation` block is still served and is certified per window by
+    # `_audit_window`; the page simply no longer gates on it.
+    gate_region = js[js.find("function campaignSqlPublication"):]
+    gate_region = gate_region[:gate_region.find("\nfunction ", 40)]
+    if "_campaignCohort = data.cohort" not in js:
         f.violation("frontend_gates",
-                    "sql_reconciliation is not carried from /api/campaigns into state")
+                    "the cohort block is not carried from /api/campaigns into state")
+    elif "_campaignCohort" not in gate_region:
+        f.violation("frontend_gates",
+                    "campaignSqlPublication does not read the cohort block it gates on")
     else:
-        f.passed("frontend_reconciliation_state",
-                 "sql_reconciliation is stored in Campaign page state")
+        f.passed("frontend_cohort_state",
+                 "the cohort block is stored in Campaign page state and read by the gate")
 
-    if "Reconciliation required" not in js:
+    withheld_region = js[js.find("function campaignSqlWithheld"):]
+    withheld_region = withheld_region[:withheld_region.find("\nfunction ", 40)]
+    if '"Unavailable" : "Withheld"' not in withheld_region:
         f.violation("frontend_gates",
-                    "no 'Reconciliation required' rendering exists")
+                    "withheld SQL evidence has no Withheld / Unavailable rendering")
     else:
         f.passed("frontend_withheld_label", "withheld SQL evidence has a label")
 
-    if "Campaign-attributable SQLs" not in js:
+    if 'CAMPAIGN_SQL_SCOPE_LABEL = "Cohort SQLs"' not in js:
         f.violation("frontend_scope_label",
-                    "the SQL population is not named 'Campaign-attributable SQLs'")
+                    "the published SQL population is not named 'Cohort SQLs'")
     else:
         f.passed("frontend_scope_label", "SQL population is explicitly scoped")
 

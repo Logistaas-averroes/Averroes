@@ -910,3 +910,80 @@ case is carried as `test_41`'s sixth arm with its true measured value, and
 to `_inputs` instead of building its own. Suite 96. See §7 of the doctrine.
 
 Full doctrine: `docs/43_CANONICAL_SQL_PUBLICATION_CONTRACT.md`.
+
+---
+
+## PR-ADS-161B — Canonical marketing outcome cohorts and the Campaign Evidence migration (October 2026)
+
+Campaign Evidence now publishes **acquisition-cohort** outcomes: contacts
+**created** in the window, with their SQL outcome read from canonical lifecycle
+evidence as of the data watermark. The page label is *"SQLs from contacts
+created during this period, measured as of [watermark]"*.
+
+**Why.** On 2026-10-03, 668 of the 1,531 contacts whose lifecycle stage proves
+SQL had no exact SQL-entry timestamp. The page withheld SQL and CPQL entirely
+— gated on PR-ADS-152's legacy `leads.status_category` reconciliation — so
+those proven SQLs disappeared from every campaign decision. A cohort's window
+is creation, which is known, so they are counted once, in the period they were
+acquired, and disclosed as lifecycle-event gaps. **No SQL-entry date is
+produced or substituted** — the cohort never asks for one.
+
+**Built.**
+
+* `services/marketing_outcome_cohort_service.py` — the cohort contract. SQL is
+  proven by a direct SQL-entry date, a recovered lifecycle transition, or a
+  current stage in `stages_implying_event(EVENT_SQL)` (the repository's one
+  rule). Contacts deduplicated on `contact_id`. Every SQL lands in exactly one
+  of `campaign` / `unattributed_google_ads` / `excluded_non_google`, placed by
+  Campaign Evidence's own `_assign_lead`. Closed-won deals from the canonical
+  ledger, deduplicated by `deal_id`, placed in a cohort through their
+  `primary_contact_id`, bucketed by the revenue scope lattice — and labelled
+  as deals, never as unique customers.
+* `db/crm_funnel_repository.py` — `fetch_acquisition_cohort_contacts`,
+  `fetch_contacts_created_at`. Both SQL-entry precedence levels are selected
+  separately from the same definitions `effective_date_sql` is built from.
+* `services/campaign_evidence_service.py` — rows, KPIs, CPQL and outcome status
+  from the cohort; `cohort` block with publication status, the API metric
+  contract (`metric_family`, `window_basis`, `outcome_basis`, `dedup_key`,
+  `as_of`, `source_freshness`, `attribution_status`, `mapped_count`,
+  `unattributed_count`, `excluded_non_google_count`, `coverage_status`,
+  `coverage_notes`), reconciliation and the lifecycle-event disclosure. Legacy
+  SQL fields are still returned and declared in `legacy_sql`.
+* `static/app.js` — the one publication gate reads `cohort.sql_status`; seven
+  KPI cards (incl. Unattributed Google Ads SQLs and Closed-won deals); Leads
+  acquired / Cohort SQLs / Closed-won columns; an evidence disclosure that
+  always shows the lifecycle-event coverage the page does not publish.
+* `scripts/audit_marketing_outcome_cohorts.py` — read-only audit over all six
+  supported windows, re-deriving membership and SQL proof **in its own SQL**
+  and checking the page against it. Exit 0 / 1 / 2. Incomplete event
+  timestamps, correctly disclosed, are not a violation.
+
+**CPQL** = window Google Ads spend ÷ **all** Google Ads cohort SQLs (campaign +
+unattributed) from the same window, on account-local days for both halves.
+Never blocked by a missing SQL date; withheld on a stale or unknown source;
+`N/A` at zero.
+
+**Not changed.** `audit_sql_coverage_gate`, the boundary, the 103 open
+post-boundary incidents, canonical revenue, junk (still the lead-quality
+classification), and every other page.
+
+**Found and fixed on the way.** `_outcome_status` turned an unavailable SQL
+count into *"Spend without SQL proof"*; it now says *"Data unavailable"*. The
+Campaign drawer threw a temporal-dead-zone `ReferenceError` on open
+(`drawerSqlPub` read before its `const`); declared before use.
+
+**Retargeted, not weakened.** Three PR-ADS-157 certification checks
+(`check_frontend_gates`) pinned the legacy gate's strings; they now pin the
+cohort contract with the same guarantees, and `test_16` shows each red under a
+mutation of `app.js`. PR-ADS-143/157 tests that pinned the old labels assert
+the new ones; every principle assertion around them is kept.
+
+**Doctrine inventory**: 23 legacy / 8 mixed / 5 canonical (was 25 / 6 / 4);
+0 unclassified, 0 registry problems. Campaign Evidence and its drawer are
+`mixed` — the drawer's Lead Quality / Country splits and Recent Leads, and the
+legacy payload fields, still read `leads.status_category`.
+
+Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (85), including 6
+PostgreSQL end-to-end cases, added to CI's PostgreSQL step and did-run list.
+
+Full doctrine: `docs/44_MARKETING_OUTCOME_COHORTS.md`.
