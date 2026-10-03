@@ -920,8 +920,9 @@ Campaign Evidence now publishes **acquisition-cohort** outcomes: contacts
 evidence as of the data watermark. The page label is *"SQLs from contacts
 created during this period, measured as of [watermark]"*.
 
-**Why.** On 2026-10-03, 668 of the 1,531 contacts whose lifecycle stage proves
-SQL had no exact SQL-entry timestamp. The page withheld SQL and CPQL entirely
+**Why.** Production evidence supplied with the brief (against `main` `944af0c`;
+not re-read here): 668 of the 1,531 contacts whose lifecycle stage proves SQL
+had no exact SQL-entry timestamp. The page withheld SQL and CPQL entirely
 — gated on PR-ADS-152's legacy `leads.status_category` reconciliation — so
 those proven SQLs disappeared from every campaign decision. A cohort's window
 is creation, which is known, so they are counted once, in the period they were
@@ -972,18 +973,41 @@ count into *"Spend without SQL proof"*; it now says *"Data unavailable"*. The
 Campaign drawer threw a temporal-dead-zone `ReferenceError` on open
 (`drawerSqlPub` read before its `const`); declared before use.
 
-**Retargeted, not weakened.** Three PR-ADS-157 certification checks
-(`check_frontend_gates`) pinned the legacy gate's strings; they now pin the
-cohort contract with the same guarantees, and `test_16` shows each red under a
+**Retargeted — and what that loses.** Three PR-ADS-157 certification checks
+(`check_frontend_gates`) pinned the legacy gate's strings. They now pin the
+cohort contract at equal string strength, and `test_16` shows each red under a
 mutation of `app.js`. PR-ADS-143/157 tests that pinned the old labels assert
-the new ones; every principle assertion around them is kept.
+the new ones, and every principle assertion around them is kept. What is
+**not** equivalent: the legacy gate withheld at request time when the page
+disagreed with an *independent* lifecycle population. The cohort's
+`cohort_reconciliation_failed` compares buckets built in one pass, so it fires
+only on a construction bug. The independent cross-check now lives in
+`scripts/audit_marketing_outcome_cohorts.py`, which runs on demand, not per
+request.
+
+**Review round (truth auditor, three MAJORs, all fixed).**
+(1) `assess` returns `fresh=False`, not `None`, for a missing sync state, an
+incomplete bootstrap or a failed incremental. The first commit withheld only
+on `None`, so it published cohort counts over a partial population, and the
+CPQL said "stale". There is now one verdict, `sql_publication()`: only
+`source_fresh` / `source_stale` publish, and CPQL inherits the verdict and its
+reason. (2) Zero window spend published a `$0.00` CPQL; it is now `N/A`
+(`zero_window_spend`). (3) Junk and Junk Rate sat unlabelled beside the cohort's
+Leads acquired; every junk label now names its lead-status basis. Also from
+that round: a blank original source is excluded under its own reason; the
+audit re-derives the Paid Search split independently; deals placed by a
+display-only primary contact, and the deal/contact attribution-basis
+difference, are disclosed per response; the all-time lifecycle figures are
+labelled all-time. Separately, CI's PostgreSQL step caught the audit spelling
+`known_reached_sql_by` (a new reader to `audit_sql_coverage_gate`). It now
+imports the gate's own `BOUND_COLUMN`; the gate's allow-list is unchanged.
 
 **Doctrine inventory**: 23 legacy / 8 mixed / 5 canonical (was 25 / 6 / 4);
 0 unclassified, 0 registry problems. Campaign Evidence and its drawer are
 `mixed` — the drawer's Lead Quality / Country splits and Recent Leads, and the
 legacy payload fields, still read `leads.status_category`.
 
-Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (85), including 6
-PostgreSQL end-to-end cases, added to CI's PostgreSQL step and did-run list.
+Suite: `tests/test_pr_ads_161b_marketing_outcome_cohorts.py` (103), including
+6 PostgreSQL end-to-end cases, added to CI's PostgreSQL step and did-run list.
 
 Full doctrine: `docs/44_MARKETING_OUTCOME_COHORTS.md`.

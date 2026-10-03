@@ -46,9 +46,10 @@ acquisition cohort and **June's** lifecycle events.
 
 ## 2. Why the cohort can count what the event metric cannot
 
-Production on 2026-10-03: 1,531 contacts whose lifecycle stage proves they
-reached SQL; 863 with a direct SQL-entry timestamp, 0 recovered, **668 with
-none**.
+Production evidence supplied with this PR's brief (read against `main`
+`944af0c`; not re-read by this PR, which has no production access): 1,531
+contacts whose lifecycle stage proves they reached SQL; 863 with a direct
+SQL-entry timestamp, 0 recovered, **668 with none**.
 
 The 668 are not zero SQLs. Their stage proves the transition; only its *date*
 is unknown. The event metric must withhold — it cannot place them in any
@@ -108,6 +109,12 @@ canonical contact read uses. A campaign label never decides it.
 
 Unattributed carries its reason: `unmapped_campaign_label`, `missing_campaign`,
 `pseudo_campaign`, `email_campaign`, or `conflicting_attribution_across_rows`.
+
+Excluded carries its reason too, and "not proven Google Ads" is kept apart
+from "proven another channel": `non_google_source` (the original source is
+another channel), `original_source_unclassified` (blank or unrecognised —
+excluded because nothing proves Google Ads bought it, not because anything
+proves otherwise), or `label_mapped_not_google_ads`.
 An unmapped label gets its own Mapping Review row keyed `unmatched:<label>` —
 the same key the legacy lead rows use, from the same resolver, so one label is
 one row.
@@ -117,8 +124,16 @@ google_ads_sqls  = Σ campaign_sqls + unattributed_google_ads_sqls
 all_source_sqls  = google_ads_sqls + excluded_non_google_sqls
 ```
 
-Both hold by construction, are re-checked on every build
-(`reconcile_cohort`), and are re-proved from raw rows by the audit.
+Both hold by construction and are re-checked on every build
+(`reconcile_cohort`). That check catches a bucket that is built wrong, not one
+that is *classified* wrong: an SQL moved from Google Ads to excluded still adds
+up. So the audit re-derives, in its own SQL, three things from raw rows:
+all-source membership, SQL proof, and the **Paid Search split**. That last
+check is that every Paid Search-sourced SQL is either a Google Ads SQL or
+excluded by an approved not-Google-Ads mapping (`google_ads_split`; `test_14i`
+shows it red where the bucket identity stays green). The audit does **not**
+independently recompute campaign placement or deal placement. It checks those
+against the page's own published numbers.
 
 ## 5. Closed-won deals
 
@@ -138,6 +153,22 @@ associated with three contacts and counts it once). Placing deals by
 A deal that cannot be placed in time — no primary contact, a contact not in the
 canonical funnel, or a contact with no `created_at` — is **unplaceable**, by
 reason, in no window, and not counted as zero.
+
+**Limitation — disclosed, not solved.** When several contacts share a deal with
+identical evidence, the ledger's `primary_contact_id` is the lowest contact id,
+a *display* identity (`analysis/deal_truth.py`, rule 2), not the first contact
+acquired. Those contacts may have been created in different windows, so the
+deal's window is the display contact's. Every response counts these deals
+(`placed_by_display_contact`) and says so in `deal_metadata.coverage_notes`.
+
+**Deals and SQL contacts are attributed on different evidence.** A deal is
+Google Ads by the revenue scope lattice: an agreed source **or a GCLID**. A
+cohort SQL is Google Ads by the contact's own original source. A deal with a
+GCLID whose contact's original source is not Paid Search therefore counts as a
+Google Ads deal, while that contact is excluded from Google Ads SQLs. So a
+campaign can show closed-won deals with no matching cohort SQL. Each rule is
+canonical for its own entity, so this is by design, and it is stated on every
+response (`deal_metadata.attribution_basis`).
 
 Contradictory evidence is not attribution: contacts disagreeing on source, or a
 GCLID beside a label mapped `not_google_ads`, is `ambiguous`.
@@ -162,10 +193,15 @@ CPQL = window Google Ads spend (USD) ÷ Google Ads cohort SQLs from the SAME win
 
 | outcome | when |
 |---|---|
-| `published` | cohort published, spend + FX available, source fresh, SQLs > 0 |
-| `not_applicable` (`N/A`) | zero cohort SQLs — never 0, never ∞ |
-| `withheld` | source stale (`source_not_fresh`) or freshness unknown (`source_freshness_unknown`) — spend is current, a stale funnel's outcomes are not |
-| `unavailable` | no spend, FX incomplete, no cohort |
+| `published` | SQL count published, spend + FX available, source fresh, spend > 0, SQLs > 0 |
+| *inherits the SQL verdict* | the SQL count is not published (§7): CPQL takes **its status and its reason** — an incomplete bootstrap is never explained as "stale" |
+| `not_applicable` (`N/A`) | zero cohort SQLs (`zero_cohort_sqls`), or zero window spend (`zero_window_spend`) — never $0, never ∞ |
+| `withheld` | the SQL count is published but its source is stale (`source_not_fresh`) — spend is current, a stale funnel's outcomes are not |
+| `unavailable` | no spend read, FX incomplete |
+
+`fetch_canonical_campaign_spend` reports `0.0` for a window with no spend
+rows, so zero spend is a reachable state. A `$0.00` CPQL would read as free
+SQLs, so zero spend is never divided.
 
 Row CPQL additionally withholds when the identity mappings are unreadable
 (`campaign_attribution_unavailable`) — its denominator would be whatever the
@@ -175,11 +211,23 @@ row publishes, so it reproduces exactly from the published numbers.
 
 ## 7. Publication of the SQL count
 
+One verdict, `sql_publication()`. The SQL count, every CPQL, and both metadata
+blocks' `coverage_status` all derive from it.
+
 | `sql_status` | when |
 |---|---|
-| `published` | funnel read, buckets reconcile, watermark known — **stale included**, published as of its watermark |
-| `withheld` | `cohort_reconciliation_failed`, or `data_watermark_unknown` |
+| `published` | funnel read, buckets reconcile, and the freshness verdict is `source_fresh` or `source_stale` **with** a watermark. Stale is published as of its watermark |
+| `withheld` | `cohort_reconciliation_failed`; `data_watermark_unknown` (freshness could not be read, `fresh is None`); or **any other freshness verdict, passed through as the reason**: `source_sync_state_missing`, `source_bootstrap_incomplete`, `source_incremental_provenance_missing`, `source_last_incremental_failed`, `source_no_successful_incremental` |
 | `unavailable` | `canonical_funnel_unreadable` |
+
+The withheld freshness verdicts are `fresh=False`, not `None`, in
+`analysis/sql_coverage_freshness.assess`. Each means the contact population
+itself is not proven complete, so a count over it is partial, not a total.
+The first commit of this PR withheld on `None` only, and so published every
+one of them (`test_11h`, driven through the real `assess`). While the
+population is unproven, `coverage_status` is `cohort_population_not_proven`,
+never `cohort_complete`. Leads acquired and closed-won deals are counted over
+the same population, so the page shows them marked **partial**.
 
 The page label is literally *"SQLs from contacts created during this period,
 measured as of [data watermark]"* — never *"contacts that entered SQL during
@@ -215,7 +263,12 @@ stage, direct, recovered, missing, open post-boundary incidents, boundary).
   not touched.
 * **Junk.** Confirmed junk and junk rate remain the lead-quality
   classification from the `leads` table. The canonical lifecycle taxonomy has
-  no junk category, and inventing a mapping onto it is out of scope.
+  no junk category, and inventing a mapping onto it is out of scope. Junk and
+  Leads acquired are **different populations**, and Junk Rate's denominator
+  is verdicted leads in that table, not Leads acquired. Every junk label on
+  the page (KPI, table headers, drawer, drawer total) therefore names its
+  lead-status basis. The "Junk-heavy" outcome status still reads the legacy
+  junk rate.
 * **No writes.** Not to HubSpot, not to Google Ads, not to our database. The
   audit runs its own reads under `SET TRANSACTION READ ONLY`.
 
@@ -258,14 +311,28 @@ required cases plus a counterfactual for every guard:
   stage below SQL is not an SQL, or `test_03` would pass for a rule that
   called everyone one).
 * **§4** CPQL: zero SQLs → `N/A`; stale and unknown freshness withhold with
-  different reasons; never blocked by a missing SQL date.
+  different reasons; never blocked by a missing SQL date; zero spend is never
+  a $0 CPQL (`test_11k`, page and row).
+* **Publication** (`test_11h`–`11j`): every not-proven freshness verdict, from
+  the **real** `assess` over a real-shaped sync row, withholds SQLs, CPQL and
+  `cohort_complete` with its own reason. Positive control: only fresh and
+  stale publish. Counterfactual: the pre-fix `None`-only rule would have
+  published a running bootstrap.
 * **§5** no invented date, and the contamination check shown failing on a
   mutated `sql_proof` and refusing to be emptied by a rename.
 * **§6–7** through the real `build_campaign_evidence`: row/summary
   reconciliation, metadata contract, unavailable is `None`.
 * **§8** the audit: passes a coherent page, goes red on a dropped SQL, a
-  disagreement with SQL, undisclosed gaps and a CPQL not drawn from cohort
-  SQLs; lifecycle gaps alone do **not** fail it.
+  disagreement with SQL, undisclosed gaps, a CPQL not drawn from cohort SQLs,
+  an SQL moved from Google Ads to excluded (`test_14i`; `test_14j` is the
+  sanctioned-mapping positive control), and a CPQL published over a withheld
+  count or zero spend (`test_14k`). Lifecycle gaps alone do **not** fail it.
+* **The boundary bound** (`test_10e`/`10f`): this PR adds no reader of
+  `known_reached_sql_by`. The audit takes the name from
+  `audit_sql_coverage_gate.BOUND_COLUMN` rather than spelling it, so it stays
+  out of that gate's allow-list. The first commit spelled it and was caught by
+  CI's PostgreSQL step (PR-ADS-160 `test_29`). `test_10e` runs the same file
+  scan without a database and shows the pre-fix spelling red.
 * **§9** the frontend gate executed in `node` over every status, including one
   it has never seen; the three retargeted PR-ADS-157 checks each shown red
   under a mutation of `app.js`.

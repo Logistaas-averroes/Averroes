@@ -82,7 +82,7 @@ from typing import Any, Callable
 from analysis.account_time import ACCOUNT_TZ
 from analysis.crm_lifecycle import EVENT_SQL, normalize_lifecycle_stage, stages_implying_event
 from analysis.revenue_scope import has_campaign, is_google_ads_attributed
-from analysis.source_classification import GROUP_GOOGLE_ADS, classify_source
+from analysis.source_classification import GROUP_GOOGLE_ADS, GROUP_UNCLASSIFIED, classify_source
 from services.canonical_contact_outcome_service import campaign_disqualifier
 
 logger = logging.getLogger(__name__)
@@ -130,6 +130,9 @@ DEAL_BUCKETS = CONTACT_BUCKETS + (BUCKET_AMBIGUOUS,)
 REASON_UNMAPPED_LABEL = "unmapped_campaign_label"
 REASON_CONFLICTING_ROWS = "conflicting_attribution_across_rows"
 REASON_NON_GOOGLE_SOURCE = "non_google_source"
+#: Blank or unrecognised original source: excluded because nothing proves Google
+#: Ads bought it, NOT because another channel is proven.
+REASON_SOURCE_UNCLASSIFIED = "original_source_unclassified"
 REASON_LABEL_NOT_GOOGLE_ADS = "label_mapped_not_google_ads"
 REASON_DEAL_WITHOUT_CAMPAIGN = "deal_without_campaign"
 REASON_DEAL_SOURCE_AMBIGUOUS = "deal_contacts_disagree_on_source"
@@ -152,11 +155,32 @@ CPQL_REASON_COHORT_UNAVAILABLE = "cohort_unavailable"
 CPQL_REASON_SOURCE_NOT_FRESH = "source_not_fresh"
 CPQL_REASON_SOURCE_FRESHNESS_UNKNOWN = "source_freshness_unknown"
 CPQL_REASON_ZERO_SQLS = "zero_cohort_sqls"
+CPQL_REASON_ZERO_SPEND = "zero_window_spend"
 CPQL_REASON_ATTRIBUTION_UNAVAILABLE = "campaign_attribution_unavailable"
+
+# Why the cohort SQL count itself is not published. The freshness reasons that
+# withhold it are passed through verbatim from analysis.sql_coverage_freshness
+# (e.g. ``source_bootstrap_incomplete``), never collapsed into one "stale".
+SQL_REASON_FUNNEL_UNREADABLE = "canonical_funnel_unreadable"
+SQL_REASON_RECONCILIATION_FAILED = "cohort_reconciliation_failed"
+SQL_REASON_WATERMARK_UNKNOWN = "data_watermark_unknown"
+
+#: The only freshness verdicts under which the cohort's population is PROVEN
+#: complete as of a known watermark. ``source_fresh``: current.
+#: ``source_stale``: complete as of an older watermark, published WITH that
+#: watermark. Every other verdict — no sync state, a bootstrap still arriving,
+#: a failed or never-run incremental, a record without provenance — means the
+#: population itself is not proven, so a count over it is partial, and partial
+#: is not success. Listed, not derived: a new freshness reason is withheld until
+#: someone decides otherwise.
+PUBLISHABLE_FRESHNESS_REASONS = frozenset({"source_fresh", "source_stale"})
 
 COVERAGE_COMPLETE = "cohort_complete"
 COVERAGE_EVENT_GAPS = "cohort_complete_event_timestamps_incomplete"
 COVERAGE_UNAVAILABLE = "unavailable"
+#: Rows were read, but the population is not proven complete (see
+#: ``sql_publication``) — a count exists and is not a total.
+COVERAGE_NOT_PROVEN = "cohort_population_not_proven"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -245,8 +269,15 @@ def contact_bucket(row: dict, resolve_label: LabelResolver) -> tuple[str, str | 
     which production binds to Campaign Evidence's ``_assign_lead`` so a cohort
     SQL lands on exactly the row the page's spend lands on.
     """
-    if classify_source(row.get("hs_analytics_source"), None) != GROUP_GOOGLE_ADS:
-        return BUCKET_EXCLUDED, None, REASON_NON_GOOGLE_SOURCE
+    group = classify_source(row.get("hs_analytics_source"), None)
+    if group != GROUP_GOOGLE_ADS:
+        # "Not proven Google Ads" is not "proven non-Google". A contact whose
+        # original source is blank or unrecognised is excluded all the same —
+        # nothing proves it was bought — but under its own reason, so the
+        # exclusion is not read as evidence of another channel.
+        return BUCKET_EXCLUDED, None, (REASON_SOURCE_UNCLASSIFIED
+                                       if group == GROUP_UNCLASSIFIED
+                                       else REASON_NON_GOOGLE_SOURCE)
     label = row.get("hs_analytics_source_data_1")
     disqualified = campaign_disqualifier(label)
     if disqualified is not None:
@@ -474,8 +505,16 @@ def build_deal_outcomes(deals: list[dict], *, created_at_by_contact: dict,
 
     A deal that cannot be placed in time is reported as unplaceable, by
     reason. It is never assigned a window from any other date.
+
+    Limitation, disclosed rather than hidden: when several contacts share one
+    deal with identical evidence, the ledger's ``primary_contact_id`` is the
+    lowest contact id — a DISPLAY identity (``analysis.deal_truth`` rule 2),
+    not the first contact acquired. Those contacts may have been created in
+    different windows, so such a deal's window is the display contact's.
+    ``placed_by_display_contact`` counts them.
     """
     seen: set[str] = set()
+    placed_by_display_contact = 0
     duplicate_rows = 0
     unplaceable: dict[str, int] = {}
     buckets = {b: _new_deal_slot() for b in DEAL_BUCKETS}
@@ -509,6 +548,8 @@ def build_deal_outcomes(deals: list[dict], *, created_at_by_contact: dict,
 
         bucket, key, reason = deal_bucket(deal, resolve_label)
         _bump_deal(buckets[bucket], deal)
+        if (deal.get("association_count") or 0) > 1:
+            placed_by_display_contact += 1
         if bucket == BUCKET_CAMPAIGN:
             _bump_deal(by_campaign.setdefault(key, _new_deal_slot()), deal)
         if reason is not None:
@@ -528,6 +569,7 @@ def build_deal_outcomes(deals: list[dict], *, created_at_by_contact: dict,
         "reasons": reasons,
         "unplaceable": unplaceable,
         "unplaceable_total": sum(unplaceable.values()),
+        "placed_by_display_contact": placed_by_display_contact,
         "dedup": {"key": DEAL_DEDUP_KEY, "duplicate_rows": duplicate_rows,
                   "distinct_deals_examined": len(seen)},
     }
@@ -536,7 +578,39 @@ def build_deal_outcomes(deals: list[dict], *, created_at_by_contact: dict,
 # ═════════════════════════════════════════════════════════════════════════════
 # Publication + metadata (pure)
 # ═════════════════════════════════════════════════════════════════════════════
-def cpql_decision(*, cohort_available: bool, spend_available: bool,
+def sql_publication(*, cohort_available: bool, reconciliation_problems,
+                    freshness: dict | None) -> tuple[str, str | None]:
+    """``(status, reason)`` — may the cohort SQL count be published?
+
+    The ONE verdict. The page's SQL count and every cohort CPQL derive from it,
+    so a CPQL can never be published over a count that is not.
+
+    * ``unavailable`` — the canonical funnel could not be read.
+    * ``withheld`` — buckets do not reconcile; or freshness could not be read
+      (``fresh is None``: we cannot say "as of when"); or the freshness verdict
+      does not prove the population complete as of a known watermark — the
+      freshness reason is passed through as the reason.
+    * ``published`` — fresh, or stale WITH its watermark (the label says
+      "measured as of"). Stale still withholds CPQL; see ``cpql_decision``.
+    """
+    if not cohort_available:
+        return STATUS_UNAVAILABLE, SQL_REASON_FUNNEL_UNREADABLE
+    if reconciliation_problems:
+        return STATUS_WITHHELD, SQL_REASON_RECONCILIATION_FAILED
+    freshness = freshness or {}
+    if freshness.get("fresh") is None:
+        return STATUS_WITHHELD, SQL_REASON_WATERMARK_UNKNOWN
+    reason = freshness.get("reason")
+    if reason not in PUBLISHABLE_FRESHNESS_REASONS:
+        return STATUS_WITHHELD, reason or SQL_REASON_WATERMARK_UNKNOWN
+    if not freshness.get("last_successful_incremental_at"):
+        # Fresh/stale without the instant they are measured from cannot occur
+        # from the real assessor; fail closed if it ever does.
+        return STATUS_WITHHELD, SQL_REASON_WATERMARK_UNKNOWN
+    return STATUS_PUBLISHED, None
+
+
+def cpql_decision(*, publication: tuple[str, str | None], spend_available: bool,
                   spend_usd, cohort_sqls, source_fresh) -> tuple[str, str | None, float | None]:
     """``(status, reason, value)`` for a cohort CPQL.
 
@@ -544,17 +618,20 @@ def cpql_decision(*, cohort_available: bool, spend_available: bool,
     SAME window. A missing SQL-entry date never blocks it — the cohort does not
     use one. What does block it:
 
+    * the SQL count itself not being published (``publication``, from
+      ``sql_publication``) — the CPQL inherits that status AND its reason, so
+      an incomplete bootstrap is never explained as "stale";
     * no spend, or no USD spend because FX is incomplete;
-    * no cohort;
-    * a source not proven fresh. Spend is current; a stale funnel's outcomes
-      are not, so the ratio would divide today's money by yesterday's results.
-      ``False`` (the pipeline is stale) and ``None`` (we could not tell) are
-      reported apart, and both block.
+    * zero window spend — "no cost recorded" is not "free SQLs", so it is never
+      a $0 CPQL;
+    * a stale source. Spend is current; a stale funnel's outcomes are not, so
+      the ratio would divide today's money by yesterday's results.
 
     Zero SQLs is ``not_applicable`` with a ``None`` value — never 0, never ∞.
     """
-    if not cohort_available:
-        return STATUS_UNAVAILABLE, CPQL_REASON_COHORT_UNAVAILABLE, None
+    pub_status, pub_reason = publication
+    if pub_status != STATUS_PUBLISHED:
+        return pub_status, pub_reason, None
     if not spend_available:
         return STATUS_UNAVAILABLE, CPQL_REASON_SPEND_UNAVAILABLE, None
     if spend_usd is None:
@@ -563,24 +640,35 @@ def cpql_decision(*, cohort_available: bool, spend_available: bool,
         reason = (CPQL_REASON_SOURCE_FRESHNESS_UNKNOWN if source_fresh is None
                   else CPQL_REASON_SOURCE_NOT_FRESH)
         return STATUS_WITHHELD, reason, None
+    if not float(spend_usd) > 0:
+        return STATUS_NOT_APPLICABLE, CPQL_REASON_ZERO_SPEND, None
     if not cohort_sqls:
         return STATUS_NOT_APPLICABLE, CPQL_REASON_ZERO_SQLS, None
     return STATUS_PUBLISHED, None, round(float(spend_usd) / int(cohort_sqls), 2)
 
 
-def coverage_status(cohort: dict | None) -> str:
+def coverage_status(cohort: dict | None, *, publication: tuple[str, str | None]) -> str:
+    """Never ``cohort_complete`` over a population that is not proven complete."""
     if cohort is None:
         return COVERAGE_UNAVAILABLE
+    if publication[0] != STATUS_PUBLISHED:
+        return COVERAGE_NOT_PROVEN
     if cohort["all_sources"]["sqls_missing_event_timestamp"] > 0:
         return COVERAGE_EVENT_GAPS
     return COVERAGE_COMPLETE
 
 
-def coverage_notes(cohort: dict | None, *, missing_created_at) -> list[str]:
+def coverage_notes(cohort: dict | None, *, missing_created_at,
+                   publication: tuple[str, str | None]) -> list[str]:
     if cohort is None:
         return ["the canonical contact funnel could not be read; no cohort "
                 "outcome is published"]
     notes = []
+    if publication[0] != STATUS_PUBLISHED:
+        notes.append(
+            f"the cohort SQL count is withheld ({publication[1]}): the canonical "
+            f"contact population is not proven complete as of a known data "
+            f"watermark, so any count read from it is partial, not a total.")
     gap = cohort["all_sources"]["sqls_missing_event_timestamp"]
     if gap:
         notes.append(
@@ -611,7 +699,7 @@ def coverage_notes(cohort: dict | None, *, missing_created_at) -> list[str]:
 
 
 def sql_metric_metadata(*, cohort: dict | None, freshness: dict, attribution_status: str,
-                        missing_created_at) -> dict:
+                        missing_created_at, publication: tuple[str, str | None]) -> dict:
     """The machine-readable contract every cohort-SQL response carries."""
     return {
         "metric_family": METRIC_FAMILY_COHORT,
@@ -631,18 +719,44 @@ def sql_metric_metadata(*, cohort: dict | None, freshness: dict, attribution_sta
         "unattributed_count": None if cohort is None else cohort["unattributed"]["sqls"],
         "excluded_non_google_count": (None if cohort is None
                                       else cohort["excluded_non_google"]["sqls"]),
-        "coverage_status": coverage_status(cohort),
-        "coverage_notes": coverage_notes(cohort, missing_created_at=missing_created_at),
+        "coverage_status": coverage_status(cohort, publication=publication),
+        "coverage_notes": coverage_notes(cohort, missing_created_at=missing_created_at,
+                                         publication=publication),
         "basis_label": COHORT_BASIS_LABEL,
     }
 
 
-def deal_metric_metadata(*, deals: dict | None, freshness: dict, attribution_status: str) -> dict:
+#: Deals and SQL contacts are attributed on DIFFERENT evidence, by design — each
+#: by the canonical rule for its own entity. Stated on every response so a
+#: campaign with closed-won deals and no cohort SQLs is not read as a defect.
+DEAL_ATTRIBUTION_BASIS = (
+    "closed-won deals are attributed by the revenue scope lattice "
+    "(analysis.revenue_scope: agreed Google Ads source OR a GCLID on the deal's "
+    "evidence); cohort SQLs by the contact's own original source "
+    "(hs_analytics_source). A deal "
+    "with a GCLID whose contact's original source is not Paid Search counts as a "
+    "Google Ads deal while that contact is excluded from Google Ads SQLs, so a "
+    "campaign can show closed-won deals without a matching cohort SQL.")
+
+
+def deal_metric_metadata(*, deals: dict | None, freshness: dict, attribution_status: str,
+                         publication: tuple[str, str | None]) -> dict:
     """The same contract for closed-won deals, with their own bases named."""
     notes = []
     if deals is None:
         notes.append("the canonical deal ledger could not be read")
     else:
+        if publication[0] != STATUS_PUBLISHED:
+            notes.append(
+                f"deals are placed in a window through their contact's created "
+                f"date, and the contact population is not proven complete "
+                f"({publication[1]}); these counts are partial.")
+        if deals.get("placed_by_display_contact"):
+            notes.append(
+                f"{deals['placed_by_display_contact']} counted deal(s) have more "
+                f"than one associated contact and are placed by the ledger's "
+                f"primary contact — the lowest contact id, a display identity — "
+                f"not by the first contact acquired.")
         if deals["unplaceable_total"]:
             notes.append(
                 f"{deals['unplaceable_total']} closed-won deal(s) could not be "
@@ -672,8 +786,12 @@ def deal_metric_metadata(*, deals: dict | None, freshness: dict, attribution_sta
         "ambiguous_count": None if deals is None else deals["buckets"][BUCKET_AMBIGUOUS]["deals"],
         "excluded_non_google_count": (None if deals is None
                                       else deals["buckets"][BUCKET_EXCLUDED]["deals"]),
-        "coverage_status": STATUS_UNAVAILABLE if deals is None else (
-            "complete" if not deals["unplaceable_total"] else "partial_unplaceable_disclosed"),
+        "coverage_status": (
+            STATUS_UNAVAILABLE if deals is None
+            else COVERAGE_NOT_PROVEN if publication[0] != STATUS_PUBLISHED
+            else "complete" if not deals["unplaceable_total"]
+            else "partial_unplaceable_disclosed"),
+        "attribution_basis": DEAL_ATTRIBUTION_BASIS,
         "coverage_notes": notes,
         "label": "Closed-won deals (deduplicated by deal_id) — not unique customers",
     }
@@ -706,7 +824,8 @@ def build_window_outcomes(start: date | None, end: date, *, resolve_label: Label
     """Read and classify one window's acquisition cohort and its closed-won deals.
 
     Returns ``{"available", "cohort", "deals", "missing_created_at",
-    "reconciliation_problems", "freshness", "start_at", "end_before"}``.
+    "reconciliation_problems", "freshness", "sql_publication", "start_at",
+    "end_before"}``.
     ``cohort`` / ``deals`` are None — never empty — when their source could
     not be read.
     """
@@ -742,6 +861,11 @@ def build_window_outcomes(start: date | None, end: date, *, resolve_label: Label
         "missing_created_at": contacts.get("missing_created_at"),
         "reconciliation_problems": problems,
         "freshness": freshness,
+        # The one publication verdict; the SQL count, every CPQL and both
+        # metadata blocks read it from here.
+        "sql_publication": sql_publication(
+            cohort_available=cohort is not None,
+            reconciliation_problems=problems, freshness=freshness),
         "start_at": start_at.isoformat() if start_at else None,
         "end_before": end_before.isoformat(),
     }

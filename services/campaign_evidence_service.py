@@ -608,9 +608,10 @@ def _cohort_row_fields(cohort_svc, outcomes, *, campaign_key, kind, spend_usd,
             cohort_svc.CPQL_REASON_ATTRIBUTION_UNAVAILABLE, None)
     else:
         cpql_status, cpql_reason, cpql_value = cohort_svc.cpql_decision(
-            cohort_available=cohort is not None, spend_available=spend_available,
+            publication=_publication(cohort_svc, outcomes),
+            spend_available=spend_available,
             spend_usd=spend_usd, cohort_sqls=sqls,
-            source_fresh=outcomes["freshness"].get("fresh"))
+            source_fresh=(outcomes["freshness"] or {}).get("fresh"))
 
     closed_won = None
     if deals is not None and kind == "mapped":
@@ -630,6 +631,18 @@ def _cohort_row_fields(cohort_svc, outcomes, *, campaign_key, kind, spend_usd,
     }
 
 
+def _publication(cohort_svc, outcomes) -> tuple[str, str | None]:
+    """The cohort's one publication verdict. Recomputed from the same inputs
+    when an older caller's outcomes lack it, so no path can skip it."""
+    pub = outcomes.get("sql_publication")
+    if pub is None:
+        pub = cohort_svc.sql_publication(
+            cohort_available=outcomes.get("cohort") is not None,
+            reconciliation_problems=outcomes.get("reconciliation_problems") or [],
+            freshness=outcomes.get("freshness"))
+    return tuple(pub)
+
+
 def _cohort_summary_fields(cohort_svc, outcomes, *, spend_available, usd_total) -> dict:
     """Page-level cohort totals. Every one reconciles in ``cohort.reconciliation``."""
     cohort = outcomes["cohort"]
@@ -647,9 +660,10 @@ def _cohort_summary_fields(cohort_svc, outcomes, *, spend_available, usd_total) 
               else sum(s["sqls"] for s in cohort["by_campaign"].values()))
     google_ads_sqls = _c(("google_ads", "sqls"))
     status, reason, value = cohort_svc.cpql_decision(
-        cohort_available=cohort is not None, spend_available=spend_available,
+        publication=_publication(cohort_svc, outcomes),
+        spend_available=spend_available,
         spend_usd=usd_total, cohort_sqls=google_ads_sqls,
-        source_fresh=outcomes["freshness"].get("fresh"))
+        source_fresh=(outcomes["freshness"] or {}).get("fresh"))
 
     def _d(bucket):
         return None if deals is None else deals["buckets"][bucket]["deals"]
@@ -685,18 +699,13 @@ def _cohort_block(cohort_svc, outcomes, *, summary, identity_available) -> dict:
     freshness = outcomes["freshness"] or {}
     problems = outcomes.get("reconciliation_problems") or []
 
-    if cohort is None:
-        sql_status, sql_reason = cohort_svc.STATUS_UNAVAILABLE, "canonical_funnel_unreadable"
-    elif problems:
-        sql_status, sql_reason = cohort_svc.STATUS_WITHHELD, "cohort_reconciliation_failed"
-    elif freshness.get("fresh") is None:
-        # Counts exist, but "as of when" cannot be stated — and the published
-        # label is "measured as of <watermark>".
-        sql_status, sql_reason = cohort_svc.STATUS_WITHHELD, "data_watermark_unknown"
-    else:
-        # Stale is published WITH its watermark (the label says as-of when);
-        # it is CPQL that a stale source withholds.
-        sql_status, sql_reason = cohort_svc.STATUS_PUBLISHED, None
+    # One verdict (cohort_svc.sql_publication): unreadable funnel → unavailable;
+    # failed reconciliation, unknown freshness, or a population not proven
+    # complete as of a known watermark → withheld, with the freshness reason
+    # passed through. Stale is published WITH its watermark; it is CPQL that a
+    # stale source withholds.
+    publication = _publication(cohort_svc, outcomes)
+    sql_status, sql_reason = publication
 
     if not identity_available:
         attribution = "unavailable"
@@ -732,9 +741,11 @@ def _cohort_block(cohort_svc, outcomes, *, summary, identity_available) -> dict:
         "cpql_reason": summary.get("cohort_cpql_reason"),
         "metadata": cohort_svc.sql_metric_metadata(
             cohort=cohort, freshness=freshness, attribution_status=attribution,
-            missing_created_at=outcomes.get("missing_created_at")),
+            missing_created_at=outcomes.get("missing_created_at"),
+            publication=publication),
         "deal_metadata": cohort_svc.deal_metric_metadata(
-            deals=deals, freshness=freshness, attribution_status=attribution),
+            deals=deals, freshness=freshness, attribution_status=attribution,
+            publication=publication),
         "reconciliation": recon,
         "breakdown": breakdown,
         "deals": (None if deals is None

@@ -211,6 +211,13 @@ nothing is written back. Offline conversion uploads (OCT) are not authorized.
   between them, and keep the per-response `metric_family` / `window_basis`
   metadata on anything that publishes either.
 
+  The cohort publishes only when `analysis/sql_coverage_freshness.assess`
+  returns `source_fresh` or `source_stale`. That function returns `fresh=False`,
+  **not** `None`, for a missing sync state, an incomplete bootstrap or a failed
+  incremental. So a gate on `fresh is None` alone publishes a partial
+  population. Drive freshness tests through the real `assess`, never a
+  hand-built verdict.
+
 - **A new canonical freshness status must be registered in five places** or it
   degrades silently to a neutral "unknown": `CanonicalFreshnessStatus.ALL`,
   `SEVERITY_MAP`, `canonical_status_display_label()`, and — as appropriate —

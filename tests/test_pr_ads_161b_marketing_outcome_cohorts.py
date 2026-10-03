@@ -49,6 +49,29 @@ SQL_DATE = datetime(2026, 9, 25, 9, 0, tzinfo=timezone.utc)
 _ids = itertools.count(1)
 
 
+def _sync_row(**overrides):
+    """A contact-funnel sync-state row in the shape
+    `fetch_contact_funnel_sync_state` returns — healthy unless overridden."""
+    row = {"bootstrap_status": "complete", "last_sync_mode": "incremental",
+           "last_incremental_status": "success",
+           "last_successful_incremental_at": NOW - timedelta(hours=2),
+           "last_incremental_at": NOW - timedelta(hours=2)}
+    row.update(overrides)
+    return row
+
+
+def _assess(row=None, *, available=True):
+    """Freshness from the REAL assessor — never a hand-built verdict, whose
+    shape the real one may not share (PR-ADS-161B review, MAJOR 1)."""
+    from analysis import sql_coverage_freshness as freshness_mod
+    state = {"available": available, "row": row if row is not None else _sync_row()}
+    return freshness_mod.assess(state, now=NOW)
+
+
+_FRESH = _assess()
+_PUBLISHED = (svc.STATUS_PUBLISHED, None)
+
+
 def _contact(cid, *, created=INSIDE, stage="lead", direct=None, recovered=None,
              source="PAID_SEARCH", label="Brand - UK", gclid=None, row_id=None):
     """One row in the shape `fetch_acquisition_cohort_contacts` returns."""
@@ -106,8 +129,8 @@ def test_02_an_undated_salesqualifiedlead_is_counted_once_and_disclosed_without_
     # No timestamp invented: the classified contact carries no date of any kind.
     record = c["sql_identities"]["c1"]
     assert set(record) == {"proof", "bucket", "campaign_key", "reason"}
-    assert svc.coverage_status(c) == svc.COVERAGE_EVENT_GAPS
-    notes = svc.coverage_notes(c, missing_created_at=0)
+    assert svc.coverage_status(c, publication=_PUBLISHED) == svc.COVERAGE_EVENT_GAPS
+    notes = svc.coverage_notes(c, missing_created_at=0, publication=_PUBLISHED)
     assert any("no exact SQL-entry timestamp" in n for n in notes)
 
 
@@ -167,7 +190,7 @@ def test_04c_a_contact_with_no_created_at_is_in_no_window_all_time_included():
                          resolve_label=_resolver(), start_at=None,
                          end_before=all_time_end)
     assert c["all_sources"]["contacts_acquired"] == 0
-    notes = svc.coverage_notes(c, missing_created_at=1)
+    notes = svc.coverage_notes(c, missing_created_at=1, publication=_PUBLISHED)
     assert any("no created date" in n for n in notes)
 
 
@@ -221,6 +244,15 @@ def test_06b_an_approved_not_google_ads_label_is_excluded_with_its_own_reason():
                 resolver=_resolver(mappings=mappings))
     assert c["google_ads"]["sqls"] == 0
     assert c["excluded_non_google"]["by_reason"] == {svc.REASON_LABEL_NOT_GOOGLE_ADS: 1}
+
+
+@pytest.mark.parametrize("source", [None, "", "   ", "SOMETHING_NEW"])
+def test_06d_a_blank_or_unrecognised_source_is_excluded_as_unproven_not_as_another_channel(source):
+    """PR-ADS-161B review: "not proven Google Ads" is not "proven non-Google".
+    Still excluded — nothing proves Google Ads bought it — under its own reason."""
+    c = _cohort([_contact("c1", stage="customer", source=source)])
+    assert c["google_ads"]["sqls"] == 0
+    assert c["excluded_non_google"]["by_reason"] == {svc.REASON_SOURCE_UNCLASSIFIED: 1}
 
 
 def test_06c_a_gclid_on_a_non_google_source_is_disclosed_not_hidden():
@@ -317,7 +349,8 @@ def test_08d_a_deal_whose_contact_was_acquired_outside_the_window_is_not_in_it()
 
 def test_08e_closed_won_deals_are_never_labelled_unique_customers():
     meta = svc.deal_metric_metadata(deals=_deals([_deal("A")]), freshness={},
-                                    attribution_status="complete")
+                                    attribution_status="complete",
+                                    publication=_PUBLISHED)
     assert meta["dedup_key"] == "deal_id"
     assert "not unique customers" in meta["label"]
     js = _APP_JS.read_text(encoding="utf-8")
@@ -335,7 +368,7 @@ def test_08f_missing_usd_revenue_is_a_known_subset_not_zero():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _cpql(**kw):
-    base = dict(cohort_available=True, spend_available=True, spend_usd=1200.0,
+    base = dict(publication=_PUBLISHED, spend_available=True, spend_usd=1200.0,
                 cohort_sqls=4, source_fresh=True)
     base.update(kw)
     return svc.cpql_decision(**base)
@@ -373,8 +406,11 @@ def test_09e_no_spend_or_incomplete_fx_makes_cpql_unavailable():
                                                 svc.CPQL_REASON_SPEND_UNAVAILABLE)
     assert _cpql(spend_usd=None)[:2] == (svc.STATUS_UNAVAILABLE,
                                          svc.CPQL_REASON_FX_INCOMPLETE)
-    assert _cpql(cohort_available=False)[:2] == (svc.STATUS_UNAVAILABLE,
-                                                 svc.CPQL_REASON_COHORT_UNAVAILABLE)
+    # An unreadable funnel: CPQL inherits the SQL verdict and its reason.
+    unreadable = svc.sql_publication(cohort_available=False,
+                                     reconciliation_problems=[], freshness=_FRESH)
+    assert _cpql(publication=unreadable)[:2] == (
+        svc.STATUS_UNAVAILABLE, svc.SQL_REASON_FUNNEL_UNREADABLE)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -428,12 +464,63 @@ def test_10d_the_disclosure_may_report_the_boundary_because_it_is_not_classifica
         _ROOT / "services" / "marketing_outcome_cohort_service.py").read_text()
 
 
+def test_10e_this_pr_is_not_a_new_reader_of_the_boundary_bound(tmp_path, monkeypatch):
+    """`audit_sql_coverage_gate` fails on ANY module outside its allow-list
+    that names the bound — it does not, and should not, tell a reader from a
+    module that forbids it. This PR's audit forbids it, so it takes the name
+    from the gate rather than joining the allow-list.
+
+    Found by CI's PostgreSQL step (PR-ADS-160 test_29) after the first commit
+    spelled the column in FORBIDDEN_DATE_SOURCES. This case runs the same
+    file scan without a database, so it cannot hide behind a PG skip."""
+    from scripts import audit_sql_coverage_gate as gate_mod
+
+    # The repository as committed: no new reader, no blending.
+    g = gate_mod.Gate()
+    result = gate_mod.check_bound_is_not_a_date(g)
+    assert result["offenders"] == [], result
+    assert result["blenders"] == [], result
+    assert g.violations == []
+    # The allow-list was not widened to get there.
+    assert not any("marketing_outcome" in p or "campaign_evidence" in p
+                   for p in gate_mod._BOUND_READERS)
+
+    # Counterfactual: the pre-fix spelling of this file IS a new reader.
+    pre_fix = (_ROOT / "scripts" / "audit_marketing_outcome_cohorts.py").read_text(
+        encoding="utf-8").replace("    BOUND_COLUMN, ", '    "known_reached_sql_by", ', 1)
+    assert '"known_reached_sql_by"' in pre_fix, "mutation did not apply"
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "audit_marketing_outcome_cohorts.py").write_text(
+        pre_fix, encoding="utf-8")
+    monkeypatch.setattr(gate_mod, "_ROOT", tmp_path)
+    g2 = gate_mod.Gate()
+    red = gate_mod.check_bound_is_not_a_date(g2)
+    assert red["offenders"] == ["scripts/audit_marketing_outcome_cohorts.py"]
+    assert g2.exit_code == gate_mod.EXIT_VIOLATION
+
+
+def test_10f_the_contamination_check_still_forbids_the_bound():
+    """Sourcing the name from the gate must not drop it from the list: the
+    bound stays forbidden in every classification function (test_10b shows a
+    function reading it going red)."""
+    from scripts import audit_sql_coverage_gate as gate_mod
+
+    assert gate_mod.BOUND_COLUMN == "known_reached_sql_by"
+    assert gate_mod.BOUND_COLUMN in audit.FORBIDDEN_DATE_SOURCES
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # §6 — reconciliation through the real page builder (required case 11)
 # ═════════════════════════════════════════════════════════════════════════════
 
+#: Stale from the real assessor: complete bootstrap, last success 48h ago.
+_STALE = _assess(_sync_row(last_successful_incremental_at=NOW - timedelta(hours=48),
+                           last_incremental_at=NOW - timedelta(hours=48)))
+
+
 def _patch_page(monkeypatch, *, contacts, deals=(), deal_created=None,
-                fresh=True, spend_rows=None, mappings=(), lead_rows=()):
+                fresh=True, freshness=None, spend_rows=None, mappings=(),
+                lead_rows=()):
     import db.crm_funnel_repository as funnel_repo
     import db.deal_ledger_repository as ledger_repo
     import db.revenue_repository as rev_repo
@@ -461,10 +548,8 @@ def _patch_page(monkeypatch, *, contacts, deals=(), deal_created=None,
         "available": True, "created_at": dict(deal_created or {})})
     monkeypatch.setattr(ledger_repo, "fetch_won_deals", lambda s=None, e=None: {
         "available": True, "rows": list(deals)})
-    monkeypatch.setattr(svc, "read_freshness", lambda now=None: {
-        "fresh": fresh, "reason": "source_fresh" if fresh else "source_stale",
-        "last_successful_incremental_at": "2026-10-03T06:00:00+00:00",
-        "age_hours": 6.0, "detail": ""})
+    verdict = freshness if freshness is not None else (_FRESH if fresh else _STALE)
+    monkeypatch.setattr(svc, "read_freshness", lambda now=None: verdict)
     monkeypatch.setattr(svc, "lifecycle_event_disclosure", lambda: {
         "metric_family": svc.METRIC_FAMILY_LIFECYCLE_EVENTS,
         "window_basis": svc.WINDOW_BASIS_LIFECYCLE_EVENTS,
@@ -540,9 +625,105 @@ def test_11d_a_reconciliation_failure_withholds_the_page(monkeypatch):
 def test_11e_a_stale_source_publishes_sqls_as_of_its_watermark_but_withholds_cpql(monkeypatch):
     p = _page(monkeypatch, contacts=_MIXED, fresh=False)
     assert p["cohort"]["sql_status"] == svc.STATUS_PUBLISHED
-    assert p["cohort"]["metadata"]["as_of"] == "2026-10-03T06:00:00+00:00"
+    assert p["cohort"]["metadata"]["as_of"] == (NOW - timedelta(hours=48)).isoformat()
     assert p["summary"]["cohort_cpql_status"] == svc.STATUS_WITHHELD
+    assert p["summary"]["cohort_cpql_reason"] == svc.CPQL_REASON_SOURCE_NOT_FRESH
     assert p["summary"]["cohort_cpql_usd"] is None
+
+
+#: Every freshness verdict the REAL assessor emits that does not prove the
+#: population complete as of a known watermark — each with the sync state that
+#: produces it.
+#: ``None`` = the sync-state table was read and holds no row.
+_NOT_PROVEN = [
+    ("source_sync_state_missing", None),
+    ("source_bootstrap_incomplete", _sync_row(bootstrap_status="running")),
+    ("source_incremental_provenance_missing", _sync_row(
+        last_sync_mode=None, last_incremental_status=None,
+        last_successful_incremental_at=None)),
+    ("source_last_incremental_failed", _sync_row(last_incremental_status="partial")),
+    ("source_no_successful_incremental", _sync_row(last_successful_incremental_at=None)),
+]
+
+
+def _assess_state(row):
+    from analysis import sql_coverage_freshness as freshness_mod
+    return freshness_mod.assess({"available": True, "row": row}, now=NOW)
+
+
+@pytest.mark.parametrize("reason,row", _NOT_PROVEN, ids=[r for r, _ in _NOT_PROVEN])
+def test_11h_a_population_not_proven_complete_withholds_sqls_and_cpql_with_its_own_reason(
+        monkeypatch, reason, row):
+    """PR-ADS-161B review, MAJOR 1. The assessor returns fresh=False — not None
+    — for a funnel never ingested, a bootstrap still arriving, a failed
+    incremental. The first commit withheld only on None, so all of these
+    PUBLISHED a cohort count over a partial population, and the CPQL beside it
+    blamed staleness. Driven by the real `assess`; the reason is passed through."""
+    verdict = _assess_state(row)
+    assert verdict["reason"] == reason, verdict
+    assert verdict["fresh"] is False            # a claim about the pipeline, not None
+    p = _page(monkeypatch, contacts=_MIXED, freshness=verdict)
+    c = p["cohort"]
+    assert c["sql_status"] == svc.STATUS_WITHHELD
+    assert c["sql_reason"] == reason
+    # CPQL inherits the verdict AND its reason — never "stale" for a bootstrap.
+    assert p["summary"]["cohort_cpql_status"] == svc.STATUS_WITHHELD
+    assert p["summary"]["cohort_cpql_reason"] == reason
+    assert p["summary"]["cohort_cpql_usd"] is None
+    for r in p["campaigns"]:
+        assert r["cohort_cpql_usd"] is None
+        assert r["cohort_cpql_status"] != svc.STATUS_PUBLISHED
+    # Never "complete" over an unproven population; the note says partial.
+    assert c["metadata"]["coverage_status"] == svc.COVERAGE_NOT_PROVEN
+    assert any("partial, not a total" in n for n in c["metadata"]["coverage_notes"])
+    assert c["deal_metadata"]["coverage_status"] == svc.COVERAGE_NOT_PROVEN
+
+
+def test_11i_positive_control_fresh_and_stale_are_the_only_publishing_verdicts():
+    """Without this, test_11h would pass for a gate that withheld everything."""
+    for verdict in (_FRESH, _STALE):
+        assert svc.sql_publication(cohort_available=True, reconciliation_problems=[],
+                                   freshness=verdict) == _PUBLISHED, verdict["reason"]
+    from analysis import sql_coverage_freshness as freshness_mod
+    published = {r for r in freshness_mod.FRESHNESS_REASONS
+                  if r in svc.PUBLISHABLE_FRESHNESS_REASONS}
+    assert published == {freshness_mod.FRESH, freshness_mod.STALE}
+    # Unknown (could not read) is withheld under its own, different reason.
+    unknown = _assess(available=False)
+    assert unknown["fresh"] is None
+    assert svc.sql_publication(cohort_available=True, reconciliation_problems=[],
+                               freshness=unknown) == (svc.STATUS_WITHHELD,
+                                                      svc.SQL_REASON_WATERMARK_UNKNOWN)
+
+
+def test_11j_counterfactual_the_first_commits_none_only_gate_would_have_published(monkeypatch):
+    """The pre-fix rule, executed: it would have published a running bootstrap."""
+    verdict = _assess(_sync_row(bootstrap_status="running"))
+    pre_fix_withholds = verdict.get("fresh") is None
+    assert not pre_fix_withholds, "pre-fix rule would already withhold; test proves nothing"
+    assert svc.sql_publication(cohort_available=True, reconciliation_problems=[],
+                               freshness=verdict)[0] == svc.STATUS_WITHHELD
+
+
+@pytest.mark.parametrize("spend_usd", [0.0, 0])
+def test_11k_zero_window_spend_is_never_a_zero_dollar_cpql(monkeypatch, spend_usd):
+    """PR-ADS-161B review, MAJOR 2. `fetch_canonical_campaign_spend` reports
+    0.0 for a window with no spend rows; 0 / N would have published $0.00 — a
+    free SQL. Page level AND row level."""
+    assert _cpql(spend_usd=spend_usd) == (svc.STATUS_NOT_APPLICABLE,
+                                          svc.CPQL_REASON_ZERO_SPEND, None)
+    p = _page(monkeypatch, contacts=_MIXED, spend_rows=[
+        {"campaign_id": "1", "campaign_name": "Brand - UK", "spend": 0.0,
+         "spend_usd": 0.0, "fx_complete": True}])
+    assert p["cohort"]["sql_status"] == svc.STATUS_PUBLISHED      # SQLs still publish
+    assert p["summary"]["cohort_sqls_google_ads"] == 5
+    assert p["summary"]["cohort_cpql_usd"] is None
+    assert p["summary"]["cohort_cpql_status"] == svc.STATUS_NOT_APPLICABLE
+    assert p["summary"]["cohort_cpql_reason"] == svc.CPQL_REASON_ZERO_SPEND
+    brand = next(r for r in p["campaigns"] if r["campaign_id"] == "1")
+    assert brand["cohort_sqls"] == 2
+    assert brand["cohort_cpql_usd"] is None
+    assert brand["cohort_cpql_reason"] == svc.CPQL_REASON_ZERO_SPEND
 
 
 def test_11f_an_unreadable_funnel_is_unavailable_never_zero(monkeypatch):
@@ -635,9 +816,15 @@ def _independent_for(contacts):
         return (c["sql_entered_direct"] is None and c["sql_entered_recovered"] is None
                 and (c["lifecycle_stage"] or "").strip().lower() in stages)
 
+    def paid_search(c):
+        # Re-stated, not imported — the audit's own SQL restates it too.
+        return " ".join(str(c["hs_analytics_source"] or "").replace("_", " ")
+                        .lower().split()) == "paid search"
+
     return {"contacts_acquired": len(inside), "sqls": sum(map(proven, inside)),
             "stage_only_sqls": sum(map(stage_only, inside)),
-            "distinct_sql_contact_ids": len({c["contact_id"] for c in inside if proven(c)})}
+            "distinct_sql_contact_ids": len({c["contact_id"] for c in inside if proven(c)}),
+            "paid_search_sourced_sqls": sum(1 for c in inside if proven(c) and paid_search(c))}
 
 
 def test_14_the_audit_passes_a_coherent_page(monkeypatch):
@@ -647,6 +834,57 @@ def test_14_the_audit_passes_a_coherent_page(monkeypatch):
                              independent=_independent_for(_MIXED), won_deal_ids=[])
     assert a.violations == [], a.violations
     assert out["cohort"]["google_ads_sqls"] == 5
+
+
+def test_14i_counterfactual_an_sql_moved_from_google_ads_to_excluded_is_caught(monkeypatch):
+    """PR-ADS-161B review: check 4 proves only that the buckets add up to each
+    other — a Google Ads SQL relabelled as excluded still adds up. The
+    independent Paid Search count is what catches it."""
+    p = _page(monkeypatch, contacts=_MIXED)
+    s, br = p["summary"], p["cohort"]["breakdown"]
+    s["cohort_sqls_google_ads"] -= 1
+    s["cohort_sqls_unattributed"] -= 1
+    s["cohort_sqls_excluded_non_google"] += 1
+    br["excluded_non_google"]["by_reason"]["non_google_source"] += 1
+    br["unattributed"]["without_label_row"]["sqls"] -= 1
+    a = audit.Audit()
+    audit.audit_window(a, window="30d", payload=p,
+                       independent=_independent_for(_MIXED), won_deal_ids=[])
+    assert not any("bucket_reconciliation" in v for v in a.violations), a.violations
+    assert any("google_ads_split" in v for v in a.violations), a.violations
+
+
+def test_14j_an_approved_not_google_ads_mapping_is_the_one_sanctioned_move(monkeypatch):
+    """Positive control for 14i: a Paid Search SQL excluded by an approved
+    mapping is NOT a split violation."""
+    contacts = _MIXED + [_contact("m1", stage="customer", label="Bing Brand")]
+    p = _page(monkeypatch, contacts=contacts, mappings=[
+        {"external_campaign_label": "bing brand", "campaign_id": None,
+         "match_method": "not_google_ads"}])
+    by_reason = p["cohort"]["breakdown"]["excluded_non_google"]["by_reason"]
+    assert by_reason[svc.REASON_LABEL_NOT_GOOGLE_ADS] == 1     # the move happened
+    a = audit.Audit()
+    audit.audit_window(a, window="30d", payload=p,
+                       independent=_independent_for(contacts), won_deal_ids=[])
+    assert not any("google_ads_split" in v for v in a.violations), a.violations
+
+
+def test_14k_counterfactual_a_cpql_published_over_a_withheld_count_or_zero_spend_is_caught(
+        monkeypatch):
+    p = _page(monkeypatch, contacts=_MIXED)
+    p["cohort"]["sql_status"] = "withheld"
+    a = audit.Audit()
+    audit.audit_window(a, window="30d", payload=p,
+                       independent=_independent_for(_MIXED), won_deal_ids=[])
+    assert any("while the SQL count is 'withheld'" in v for v in a.violations), a.violations
+
+    p = _page(monkeypatch, contacts=_MIXED)
+    brand = next(r for r in p["campaigns"] if r["campaign_id"] == "1")
+    brand["spend_usd"] = 0.0
+    a = audit.Audit()
+    audit.audit_window(a, window="30d", payload=p,
+                       independent=_independent_for(_MIXED), won_deal_ids=[])
+    assert any("over zero spend" in v for v in a.violations), a.violations
 
 
 def test_14b_counterfactual_the_audit_fails_when_the_page_drops_an_unattributed_sql(monkeypatch):

@@ -462,8 +462,18 @@ def test_clean_table_headers():
     # PR-ADS-161B: "Leads" became "Leads acquired" — the acquisition cohort, the
     # same population as the row's SQLs — and a Closed-won column was added.
     for h in (">Campaign<", ">Status<", ">Spend<", ">Leads acquired<",
-              ">Junk<", ">Junk Rate<", ">CPQL<", ">Closed-won<"):
+              ">CPQL<", ">Closed-won<"):
         assert h in region, f"missing clean header {h}"
+    # PR-ADS-161B review: Junk / Junk Rate are the legacy leads-table population
+    # beside the cohort's "Leads acquired", so their headers name that basis —
+    # emitted from constants (as the SQL header is), each with the explaining
+    # title, and never a bare ">Junk<" / ">Junk Rate<".
+    assert "${escapeHtml(CAMPAIGN_LEGACY_JUNK_LABEL)}</th>" in region
+    assert "${escapeHtml(CAMPAIGN_LEGACY_JUNK_RATE_LABEL)}</th>" in region
+    assert region.count('title="${escapeHtml(CAMPAIGN_LEGACY_JUNK_TITLE)}"') == 2
+    assert 'CAMPAIGN_LEGACY_JUNK_LABEL = "Junk (lead status)"' in APP_JS
+    assert 'CAMPAIGN_LEGACY_JUNK_RATE_LABEL = "Junk Rate (lead status)"' in APP_JS
+    assert ">Junk<" not in region and ">Junk Rate<" not in region
     # PR-ADS-157 §2 renamed the bare ">SQLs<" header. "SQLs" named no
     # population. PR-ADS-161B names the population the page now publishes:
     # acquisition-cohort SQLs. Still emitted from a constant so the label

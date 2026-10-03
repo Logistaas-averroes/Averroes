@@ -46,6 +46,8 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+from scripts.audit_sql_coverage_gate import BOUND_COLUMN  # noqa: E402
+
 EXIT_OK = 0
 EXIT_VIOLATION = 1
 EXIT_UNAVAILABLE = 2
@@ -55,8 +57,15 @@ _CAMPAIGN_SERVICE = _ROOT / "services" / "campaign_evidence_service.py"
 
 #: Timestamps the cohort must never use as a date. A boundary is an upper bound;
 #: sync and ingestion stamps describe our pipeline, not the contact.
+#:
+#: The boundary column's name is taken from ``audit_sql_coverage_gate``, not
+#: spelled here. That gate fails on any module outside its allow-list that names
+#: the bound at all — it cannot tell a reader from a module that forbids it, and
+#: should not have to. This audit never reads the bound; it only forbids it, so
+#: it is not added to that allow-list. Importing the gate's own definition also
+#: means a rename there renames what this check forbids.
 FORBIDDEN_DATE_SOURCES = (
-    "known_reached_sql_by", "boundary_observed_at", "observed_at",
+    BOUND_COLUMN, "boundary_observed_at", "observed_at",
     "last_ingested_at", "first_ingested_at", "last_modified_at",
     "updated_at", "recorded_at", "last_incremental_at",
 )
@@ -185,7 +194,8 @@ def audit_window(a: Audit, *, window: str, payload: dict, independent: dict,
     """Every per-window guarantee, against one page payload.
 
     ``independent``: ``{"contacts_acquired", "sqls", "stage_only_sqls",
-    "distinct_sql_contact_ids"}`` computed in SQL by this audit.
+    "distinct_sql_contact_ids", "paid_search_sourced_sqls"}`` computed in SQL
+    by this audit.
     """
     w = f"[{window}]"
     cohort = payload.get("cohort") or {}
@@ -251,6 +261,28 @@ def audit_window(a: Audit, *, window: str, payload: dict, independent: dict,
                 f"google {ga} = campaigns {mapped} + unattributed {un}; "
                 f"all {al} = google {ga} + excluded {ex}")
 
+    # 4b. the Google Ads / excluded SPLIT, against an independent source rule.
+    # Check 4 only proves the buckets add up to each other; an SQL moved from
+    # Google Ads to excluded would still add up. This re-derives "original
+    # source is Paid Search" in this audit's own SQL. Every Paid Search SQL is
+    # either a Google Ads SQL or excluded ONLY because an approved mapping says
+    # its label is not Google Ads — nothing else may move it.
+    ex_reasons = (breakdown.get("excluded_non_google") or {}).get("by_reason") or {}
+    by_mapping = ex_reasons.get("label_mapped_not_google_ads", 0)
+    paid = independent.get("paid_search_sourced_sqls")
+    if paid is None or ga is None:
+        a.cannot_check(f"{w} google_ads_split", "the independent Paid Search count "
+                       "or the Google Ads total is unavailable")
+    elif ga + by_mapping != paid:
+        a.broken(f"{w} google_ads_split",
+                 f"{paid} SQLs have a Paid Search original source, but the page "
+                 f"has {ga} Google Ads SQLs + {by_mapping} excluded by an approved "
+                 f"not-Google-Ads mapping")
+    else:
+        a.holds(f"{w} google_ads_split",
+                f"{paid} Paid Search-sourced SQLs = {ga} Google Ads + {by_mapping} "
+                f"excluded by approved mapping")
+
     # 5. campaign rows reconcile to the summary
     mapped_rows = [r for r in rows if r.get("mapping_status") == "mapped"]
     review_rows = [r for r in rows if r.get("mapping_status") == "unmatched"]
@@ -277,10 +309,25 @@ def audit_window(a: Audit, *, window: str, payload: dict, independent: dict,
     elif summary.get("cohort_cpql_usd") is not None:
         cpql_problems.append("a CPQL value is present while its status is "
                              f"{summary.get('cohort_cpql_status')!r}")
-    if summary.get("cohort_cpql_status") == "not_applicable" and ga:
+    if (summary.get("cohort_cpql_status") == "not_applicable" and ga
+            and summary.get("cohort_cpql_reason") != "zero_window_spend"):
         cpql_problems.append("CPQL marked not_applicable over a non-zero SQL count")
+    # A CPQL can never be published over an SQL count that is not, nor over
+    # zero spend (a $0 CPQL reads as free SQLs).
+    if cohort.get("sql_status") != "published":
+        if summary.get("cohort_cpql_status") == "published" or any(
+                r.get("cohort_cpql_status") == "published" for r in rows):
+            cpql_problems.append(f"a CPQL is published while the SQL count is "
+                                 f"{cohort.get('sql_status')!r}")
+    if summary.get("cohort_cpql_status") == "published" and not (
+            summary.get("spend_usd") or 0) > 0:
+        cpql_problems.append("summary CPQL published over zero spend")
     for r in rows:
         if r.get("cohort_cpql_status") == "published":
+            if not (r.get("spend_usd") or 0) > 0:
+                cpql_problems.append(f"row {r.get('campaign_key')}: CPQL published "
+                                     f"over zero spend")
+                continue
             expect = round(float(r["spend_usd"]) / r["cohort_sqls"], 2)
             if r.get("cohort_cpql_usd") != expect:
                 cpql_problems.append(f"row {r.get('campaign_key')}: CPQL "
@@ -380,6 +427,10 @@ def independent_counts(start_at, end_before) -> dict | None:
               f"OR lower(btrim(f.lifecycle_stage)) = ANY(%s))")
     stage_only = (f"({direct} IS NULL AND {recovered} IS NULL "
                   f"AND lower(btrim(f.lifecycle_stage)) = ANY(%s))")
+    # analysis.source_classification's Paid Search rule, re-stated in SQL rather
+    # than imported: lowercase, underscores as spaces, whitespace collapsed.
+    paid = ("regexp_replace(btrim(lower(replace(coalesce(f.hs_analytics_source, ''), "
+            "'_', ' '))), '\\s+', ' ', 'g') = 'paid search'")
     try:
         with get_conn() as conn:
             if conn is None:
@@ -391,21 +442,23 @@ def independent_counts(start_at, end_before) -> dict | None:
                     SELECT COUNT(*),
                            COUNT(*) FILTER (WHERE {proven}),
                            COUNT(*) FILTER (WHERE {stage_only}),
-                           COUNT(DISTINCT f.contact_id) FILTER (WHERE {proven})
+                           COUNT(DISTINCT f.contact_id) FILTER (WHERE {proven}),
+                           COUNT(*) FILTER (WHERE {proven} AND {paid})
                     FROM {repo.FUNNEL_TABLE} f
                     {repo._recovery_join()}
                     WHERE f.created_at IS NOT NULL
                       AND (%s::timestamptz IS NULL OR f.created_at >= %s)
                       AND f.created_at < %s
                     """,
-                    (stages, stages, stages, start_at, start_at, end_before),
+                    (stages, stages, stages, stages, start_at, start_at, end_before),
                 )
                 row = cur.fetchone()
                 conn.rollback()
     except Exception:  # noqa: BLE001
         return None
     return {"contacts_acquired": row[0], "sqls": row[1],
-            "stage_only_sqls": row[2], "distinct_sql_contact_ids": row[3]}
+            "stage_only_sqls": row[2], "distinct_sql_contact_ids": row[3],
+            "paid_search_sourced_sqls": row[4]}
 
 
 def global_population_split() -> dict | None:
